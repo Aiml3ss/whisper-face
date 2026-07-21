@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="icon.svg" width="128" alt="Parrot icon"/>
+  <img src="parrot.svg" width="128" alt="Parrot icon"/>
 </p>
 
 <h1 align="center">Parrot</h1>
