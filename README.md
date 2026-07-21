@@ -59,8 +59,8 @@ dictations paste in **~0.2–0.5s**.
 ## Install
 
 ```sh
-git clone https://github.com/Aiml3ss/parrot-dictation.git
-cd parrot-dictation
+git clone https://github.com/Aiml3ss/whispering-parrot.git
+cd whispering-parrot
 ./setup.sh
 ```
 
