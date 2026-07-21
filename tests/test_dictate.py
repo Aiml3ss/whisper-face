@@ -884,6 +884,81 @@ class LearningTests(unittest.TestCase):
 
 
 class InsertionAdapterTests(unittest.TestCase):
+    def test_release_retries_a_transient_unreadable_ax_target(self):
+        original_element = object()
+        current_element = object()
+        original = SimpleNamespace(
+            element=original_element, text="Draft", selection=(5, 0),
+            window_title="Composer")
+        recovered = SimpleNamespace(
+            element=current_element, text="Draft", selection=(5, 0),
+            window_title="Composer")
+        lease = InsertionLease.capture(
+            "utterance-1", "com.openai.codex:original", (5, 0), "Draft")
+        rec = SimpleNamespace(
+            insertion_lease=lease,
+            focus_at_press=original,
+            bundle_at_press="com.openai.codex",
+        )
+        snapshots = iter((None, recovered))
+        now = [0.0]
+
+        def sleep(delay):
+            now[0] += delay
+
+        ns = load_definitions(
+            "bounded_focus_text", "focus_destination_matches",
+            "resolve_insertion_target",
+            extra={
+                "FocusSnapshot": object,
+                "_ax_elements_equal": lambda left, right:
+                    (left is original_element and right is current_element),
+                "focused_snapshot": lambda: next(snapshots),
+                "frontmost_bundle": lambda: "com.openai.codex",
+                "time": SimpleNamespace(
+                    monotonic=lambda: now[0], sleep=sleep),
+            },
+        )
+
+        result = ns["resolve_insertion_target"](rec)
+
+        self.assertIs(result, recovered)
+        self.assertGreater(now[0], 0.0)
+
+    def test_release_does_not_retry_past_a_real_focus_change(self):
+        original_element = object()
+        changed_element = object()
+        original = SimpleNamespace(
+            element=original_element, text="Draft", selection=(5, 0),
+            window_title="Composer")
+        changed = SimpleNamespace(
+            element=changed_element, text="Other", selection=(5, 0),
+            window_title="Other field")
+        lease = InsertionLease.capture(
+            "utterance-1", "com.openai.codex:original", (5, 0), "Draft")
+        rec = SimpleNamespace(
+            insertion_lease=lease,
+            focus_at_press=original,
+            bundle_at_press="com.openai.codex",
+        )
+        calls = []
+        ns = load_definitions(
+            "bounded_focus_text", "focus_destination_matches",
+            "resolve_insertion_target",
+            extra={
+                "FocusSnapshot": object,
+                "_ax_elements_equal": lambda _left, _right: False,
+                "focused_snapshot": lambda: calls.append(True) or changed,
+                "frontmost_bundle": lambda: "com.openai.codex",
+                "time": time,
+            },
+        )
+
+        result = ns["resolve_insertion_target"](rec)
+
+        self.assertIs(result, changed)
+        self.assertEqual(len(calls), 1)
+
     def test_fresh_ax_wrapper_for_same_field_keeps_the_destination_lease(self):
         original_element = object()
         current_element = object()

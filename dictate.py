@@ -3755,6 +3755,37 @@ def destination_observation(snapshot: FocusSnapshot | None,
     )
 
 
+def resolve_insertion_target(rec, timeout: float = 0.12, reader=None,
+                             bundle_reader=None, clock=None, sleeper=None) \
+        -> FocusSnapshot | None:
+    """Retry transient AX read gaps without accepting a different target."""
+    reader = reader or focused_snapshot
+    bundle_reader = bundle_reader or frontmost_bundle
+    clock = clock or time.monotonic
+    sleeper = sleeper or time.sleep
+    lease = getattr(rec, "insertion_lease", None)
+    original = getattr(rec, "focus_at_press", None)
+    original_bundle = getattr(rec, "bundle_at_press", "")
+    deadline = clock() + max(0.0, timeout)
+    latest = None
+    while True:
+        latest = reader()
+        current_bundle = bundle_reader()
+        if latest is not None:
+            if original is not None and not focus_destination_matches(
+                    original, latest, original_bundle, current_bundle):
+                # A readable different field is real drift, not an AX hiccup.
+                return latest
+            if (lease is None or lease.opaque
+                    or (latest.selection is not None
+                        and bounded_focus_text(latest) is not None)):
+                return latest
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return latest
+        sleeper(min(0.02, remaining))
+
+
 def insertion_readback(snapshot: FocusSnapshot, inserted: str,
                        timeout: float = 0.02, reader=None,
                        clock=None, sleeper=None) -> ReadbackResult:
@@ -4945,8 +4976,10 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 text = " " + text                       # joining needs a space
 
         learn_correction = not verbatim and rec.mode != "edit"
-        insertion_target = focused_snapshot() \
-            if (learn_correction or rec.insertion_lease is not None) else None
+        if rec.insertion_lease is not None:
+            insertion_target = resolve_insertion_target(rec)
+        else:
+            insertion_target = focused_snapshot() if learn_correction else None
         event_id = rec.utterance_id or f"{time.time_ns():x}-{id(rec):x}"
         receipt = make_paste_receipt(
             insertion_target, text, bundle, rec.mode, event_id) \
