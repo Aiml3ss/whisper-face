@@ -27,8 +27,9 @@ TOKEN_RE = re.compile(r"(?<![\w])([A-Za-z][A-Za-z0-9_+.-]{2,})(?![\w])")
 SIMPLE_FILLER_RE = re.compile(
     r"(?:,\s*)?\b(?:um+|uh+|erm|hmm)\b(?:\s*,)?", re.I)
 DISCOURSE_FILLER_RE = re.compile(
-    r"(?:,\s*)?\b(?:you know|I mean|basically|kind of|sort of)\b(?:\s*,)?",
-    re.I,
+    r"^[ \t]*(?:you know|I mean|basically|kind of|sort of)\b\s*,|"
+    r",\s*(?:you know|I mean|basically|kind of|sort of)\b\s*,",
+    re.I | re.M,
 )
 STRUCTURE_RE = re.compile(r"\bnew (line|paragraph)\b", re.I)
 CORRECTION_RE = re.compile(
@@ -156,6 +157,16 @@ def compile_cleanup(raw: str) -> CleanupPlan:
     text = raw.strip()
     edits: list[CleanupEdit] = []
 
+    # Expand spoken line boundaries first so discourse fillers at the start of
+    # a newly dictated line can be distinguished from meaningful prose.
+    if STRUCTURE_RE.search(text):
+        before = text
+        text = STRUCTURE_RE.sub(
+            lambda match: "\n" if match.group(1).lower() == "line" else "\n\n",
+            text,
+        )
+        edits.append(CleanupEdit("spoken_structure", before, text))
+
     for regex, kind in (
         (SIMPLE_FILLER_RE, "remove_filler"),
         (DISCOURSE_FILLER_RE, "remove_discourse_filler"),
@@ -165,14 +176,6 @@ def compile_cleanup(raw: str) -> CleanupPlan:
             before = text
             text = regex.sub(" ", text)
             edits.append(CleanupEdit(kind, before, text))
-
-    if STRUCTURE_RE.search(text):
-        before = text
-        text = STRUCTURE_RE.sub(
-            lambda match: "\n" if match.group(1).lower() == "line" else "\n\n",
-            text,
-        )
-        edits.append(CleanupEdit("spoken_structure", before, text))
 
     while True:
         match = CORRECTION_RE.search(text)
@@ -199,7 +202,8 @@ def compile_cleanup(raw: str) -> CleanupPlan:
     text = re.sub(r"\s+([,.;:!?])", r"\1", text).strip()
     needs_semantic = bool(re.search(
         r"\b(?:first|second|third|lastly)\b|"
-        r"\b(?:two|three|four|five) (?:things|points|items|ideas)\b",
+        r"\b(?:two|three|four|five) (?:things|points|items|ideas)\b|"
+        r"\b(?:you know|I mean)\b",
         text,
         re.I,
     ))

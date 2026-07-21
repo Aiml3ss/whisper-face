@@ -46,12 +46,12 @@ class ContextTests(unittest.TestCase):
 class CleanupCompilerTests(unittest.TestCase):
     def test_compiles_fillers_structure_and_correction(self):
         plan = compile_cleanup(
-            "um Tuesday actually Wednesday new paragraph I mean ship it")
+            "um Tuesday actually Wednesday new paragraph I mean, ship it")
         self.assertEqual(plan.text, "Wednesday\n\nship it")
         self.assertEqual(
             plan.edit_kinds,
-            ["remove_filler", "remove_discourse_filler",
-             "spoken_structure", "self_correction"],
+            ["spoken_structure", "remove_filler",
+             "remove_discourse_filler", "self_correction"],
         )
 
     def test_scratch_that_removes_only_the_latest_clause(self):

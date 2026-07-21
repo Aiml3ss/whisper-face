@@ -209,7 +209,7 @@ class CleanupGuardTests(unittest.TestCase):
         )
         self.assertFalse(ns["needs_llm_cleanup"](
             "um this is ready", None, False))
-        self.assertFalse(ns["needs_llm_cleanup"](
+        self.assertTrue(ns["needs_llm_cleanup"](
             "you know this is ready", None, False))
         self.assertFalse(ns["needs_llm_cleanup"](
             "Tuesday actually Wednesday", None, False))
@@ -330,6 +330,70 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertEqual(
             ns["assemble_raw"]([], None, audio).text, "remainder")
         self.assertEqual(pool.submissions, 1)
+
+    def test_tiny_first_cascade_skips_large_when_confident(self):
+        class ImmediatePool:
+            def __init__(self):
+                self.calls = []
+
+            def submit(self, function, *args):
+                self.calls.append(args[-1])
+                return SimpleNamespace(result=lambda: function(*args))
+
+        pool = ImmediatePool()
+
+        def detailed(audio, prompt, verify, model):
+            confidence = 0.9 if model == "tiny" else 1.0
+            return Recognition(model, confidence)
+
+        ns = load_definitions(
+            "_speculative_frames",
+            extra={
+                "np": np,
+                "Recognition": Recognition,
+                "ASR_POOL": pool,
+                "transcribe_detailed": detailed,
+                "FAST_WHISPER_REPO": "tiny",
+                "WHISPER_REPO": "large",
+                "FAST_ACCEPT_CONFIDENCE": 0.82,
+            },
+        )
+        result = ns["_speculative_frames"](
+            [np.ones((100, 1), dtype=np.float32)], still_valid=lambda: True)
+        self.assertEqual(result.text, "tiny")
+        self.assertEqual(pool.calls, ["tiny"])
+
+    def test_tiny_first_cascade_escalates_low_confidence(self):
+        class ImmediatePool:
+            def __init__(self):
+                self.calls = []
+
+            def submit(self, function, *args):
+                self.calls.append(args[-1])
+                return SimpleNamespace(result=lambda: function(*args))
+
+        pool = ImmediatePool()
+
+        def detailed(audio, prompt, verify, model):
+            return Recognition(model, 0.5 if model == "tiny" else 0.9)
+
+        ns = load_definitions(
+            "_speculative_frames",
+            extra={
+                "np": np,
+                "Recognition": Recognition,
+                "ASR_POOL": pool,
+                "transcribe_detailed": detailed,
+                "FAST_WHISPER_REPO": "tiny",
+                "WHISPER_REPO": "large",
+                "FAST_ACCEPT_CONFIDENCE": 0.82,
+            },
+        )
+        result = ns["_speculative_frames"](
+            [np.ones((100, 1), dtype=np.float32)], still_valid=lambda: True)
+        self.assertEqual(result.text, "large")
+        self.assertEqual(result.alternative, "tiny")
+        self.assertEqual(pool.calls, ["tiny", "large"])
 
 
 if __name__ == "__main__":
