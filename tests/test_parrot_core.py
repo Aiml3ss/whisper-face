@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT))
 
 from parrot_core import (  # noqa: E402
     compile_cleanup,
+    compile_code_dictation,
     confidence_from_segments,
     correction_similarity,
     infer_revised_insertion,
@@ -63,6 +64,12 @@ class CleanupCompilerTests(unittest.TestCase):
             "three things first speed second trust third privacy"
         ).needs_semantic_cleanup)
 
+    def test_code_mode_compiles_spoken_tokens(self):
+        plan = compile_code_dictation(
+            "result equals parse open paren payload close paren semicolon")
+        self.assertEqual(plan.text, "result = parse(payload);")
+        self.assertIn("spoken_code_token", plan.edit_kinds)
+
 
 class CorrectionTests(unittest.TestCase):
     def test_isolates_revision_inside_exact_inserted_range(self):
@@ -100,8 +107,7 @@ class RecognitionTests(unittest.TestCase):
         self.assertEqual(mode_from_modifiers(False, True, False), "edit")
         self.assertEqual(mode_from_modifiers(False, False, True), "reply")
         self.assertEqual(mode_from_modifiers(False, True, True), "command")
-        self.assertEqual(
-            mode_from_modifiers(False, False, False, code_app=True), "code")
+        self.assertEqual(mode_from_modifiers(True, False, True), "code")
 
     def test_speculation_starts_on_a_real_pause_and_is_invalidated_by_growth(self):
         self.assertTrue(should_start_speculation(

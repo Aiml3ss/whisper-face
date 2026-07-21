@@ -133,14 +133,14 @@ def guard_reject(raw: str, out: str, done: str) -> str | None:
 
 
 def run_model(model: str, replays: list[str]):
-    chat(model, "hi", 8)                                  # load & warm
+    chat(model, "hi", 64)                                 # load & warm
     results, walls, rates = [], [], []
 
     for raw, need, forbid in ADVERSARIAL:
         t0 = time.time()
         try:
             out, done, d = chat(model, raw,
-                                max(96, int(len(raw.split()) * 2.5) + 32))
+                                max(160, int(len(raw.split()) * 4) + 64))
         except Exception as e:
             results.append(("LEAK", raw, f"<error: {e}>"))
             continue
@@ -176,7 +176,7 @@ def run_model(model: str, replays: list[str]):
         t0 = time.time()
         try:
             out, done, _ = chat(model, raw,
-                                max(96, int(len(raw.split()) * 2.5) + 32))
+                                max(160, int(len(raw.split()) * 4) + 64))
         except Exception as e:
             out, done = f"<error: {e}>", "stop"
         rej = guard_reject(raw, out, done)

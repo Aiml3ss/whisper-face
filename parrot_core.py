@@ -207,6 +207,44 @@ def compile_cleanup(raw: str) -> CleanupPlan:
                        needs_semantic_cleanup=needs_semantic)
 
 
+CODE_PHRASES = (
+    (r"\bopen paren(?:thesis)?\b", "("),
+    (r"\bclose paren(?:thesis)?\b", ")"),
+    (r"\bopen bracket\b", "["),
+    (r"\bclose bracket\b", "]"),
+    (r"\bopen brace\b", "{"),
+    (r"\bclose brace\b", "}"),
+    (r"\bdouble quote\b", '"'),
+    (r"\bsingle quote\b", "'"),
+    (r"\bsemicolon\b", ";"),
+    (r"\bcolon\b", ":"),
+    (r"\barrow\b", "->"),
+    (r"\bequals\b", "="),
+    (r"\bunderscore\b", "_"),
+)
+
+
+def compile_code_dictation(raw: str) -> CleanupPlan:
+    """Compile spoken code punctuation while preserving ordinary identifiers."""
+    plan = compile_cleanup(raw)
+    text = plan.text
+    edits = list(plan.edits)
+    for pattern, token in CODE_PHRASES:
+        if re.search(pattern, text, re.I):
+            before = text
+            text = re.sub(pattern, token, text, flags=re.I)
+            edits.append(CleanupEdit("spoken_code_token", before, text))
+    text = re.sub(r"\s+([)\]}:,;])", r"\1", text)
+    text = re.sub(r"\s+([(\[{])", r"\1", text)
+    text = re.sub(r"([(\[{])\s+", r"\1", text)
+    text = re.sub(r"\s*=\s*", " = ", text)
+    text = re.sub(r"\s*->\s*", " -> ", text)
+    return CleanupPlan(
+        text=text.strip(), edits=edits,
+        needs_semantic_cleanup=plan.needs_semantic_cleanup,
+    )
+
+
 def infer_revised_insertion(before: str, selection: tuple[int, int],
                             pasted: str, current: str) -> str | None:
     """Isolate edits to the exact range replaced by a paste.
@@ -266,19 +304,18 @@ def confidence_from_segments(segments: Iterable[dict]) -> float:
     return max(0.0, min(1.0, math.exp(mean_logprob)))
 
 
-def mode_from_modifiers(shift: bool, command: bool, control: bool,
-                        code_app: bool = False) -> str:
+def mode_from_modifiers(shift: bool, command: bool, control: bool) -> str:
     """Map explicit modifier contracts to one discoverable voice mode."""
     if command and control:
         return "command"
+    if shift and control:
+        return "code"
     if command:
         return "edit"
     if control:
         return "reply"
     if shift:
         return "compose"
-    if code_app:
-        return "code"
     return "capture"
 
 

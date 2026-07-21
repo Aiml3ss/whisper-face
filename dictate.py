@@ -189,7 +189,6 @@ from AppKit import (
     NSForegroundColorAttributeName,
     NSGradient,
     NSImage,
-    NSKernAttributeName,
     NSMenu,
     NSMenuItem,
     NSMutableParagraphStyle,
@@ -219,6 +218,7 @@ from parrot_core import (
     CleanupEdit,
     Recognition,
     compile_cleanup,
+    compile_code_dictation,
     confidence_from_segments,
     correction_similarity,
     infer_revised_insertion,
@@ -234,6 +234,7 @@ from parrot_core import (
 HOTKEY = keyboard.Key.alt_r
 SAMPLE_RATE = 16_000
 WHISPER_REPO = "mlx-community/whisper-large-v3-turbo"
+FAST_WHISPER_REPO = "mlx-community/whisper-tiny"
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_MODEL = "qwen3.5:4b"
 
@@ -249,6 +250,7 @@ SILENCE_RMS = 0.008          # tail quieter than this = you had finished talking
 GATE_PEAK_RMS = 0.002        # just above mic noise floor: whispers pass,
                              # a silent held key still doesn't
 LOW_CONFIDENCE = 0.52        # verify only uncertain Whisper output
+FAST_ACCEPT_CONFIDENCE = 0.82
 QUICK_PATH_MAX_WORDS = 40    # clean speech (no fillers/commands/enums) can
                              # skip the LLM up to here; markers force cleanup
                              # at any length
@@ -305,15 +307,15 @@ KEEPWARM_MIN_IDLE = 60       # skip the beat if dictating right now
 
 LOCK_FILE = HERE / ".dictate.lock"
 
-# HUD: the "Voice Listening" stage from the design handoff, rendered at
-# half scale so it stays an overlay, not a takeover. All geometry is still
-# the spec's (stage 360, parrot 256 viewBox @ 300) times HUD_SCALE.
-HUD_SCALE = 0.5
-HUD_W, HUD_H = 240.0, 236.0
+# HUD: the "Voice Listening" stage from the design handoff — no panel, no
+# background: the bird, bars, ring, and caption float transparently over
+# the screen. Geometry is the spec's times HUD_SCALE.
+HUD_SCALE = 0.38
+HUD_W, HUD_H = 224.0, 182.0
 HUD_BOTTOM_MARGIN = 80.0
 HUD_RADIUS = 20.0
 STAGE = 360.0 * HUD_SCALE    # square stage, centered horizontally
-STAGE_TOP = 14.0             # design y-down coords
+STAGE_TOP = 10.0             # design y-down coords
 PARROT_SCALE = 300.0 / 256.0
 RADIAL_BARS = 60
 BAR_INNER_R = 134.0
@@ -664,20 +666,6 @@ class WaveView(NSView):
         W = self.bounds().size.width
         H = self.bounds().size.height
 
-        # background: rounded panel, radial gradient from top center
-        bg = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            NSMakeRect(0, 0, W, H), HUD_RADIUS, HUD_RADIUS)
-        NSGradient.alloc().initWithColors_([
-            _color(0.063, 0.141, 0.122),         # #10241f
-            _color(0.027, 0.075, 0.063),         # #071310
-            _color(0.016, 0.063, 0.051),         # #04100d
-        ]).drawInBezierPath_relativeCenterPosition_(bg, (0.0, -1.0))
-        _rgb(*MINT, 0.08)
-        edge = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            NSMakeRect(0.5, 0.5, W - 1, H - 1), HUD_RADIUS, HUD_RADIUS)
-        edge.setLineWidth_(1.0)
-        edge.stroke()
-
         # per-frame state
         S = HUD_SCALE
         self.t += 1.0 / FPS
@@ -729,10 +717,10 @@ class WaveView(NSView):
         self.drawParrot_(lv)
         ctx.restoreGraphicsState()
 
-        # caption (live transcript; tail-trimmed so recent words win)
+        # caption (live transcript on a slim chip so it reads over anything)
         text = CAPTION["text"].strip()
-        if len(text) > 72:
-            text = "…" + text[-70:]
+        if len(text) > 64:
+            text = "…" + text[-62:]
         if text:
             para = NSMutableParagraphStyle.alloc().init()
             para.setAlignment_(1)                # NSTextAlignmentCenter
@@ -740,13 +728,21 @@ class WaveView(NSView):
             cap = NSAttributedString.alloc().initWithString_attributes_(
                 text, {
                     NSFontAttributeName:
-                        NSFont.systemFontOfSize_weight_(12.0, 0.23),
+                        NSFont.systemFontOfSize_weight_(11.5, 0.23),
                     NSForegroundColorAttributeName:
                         _color(*CAPTION_COL, dim),
                     NSParagraphStyleAttributeName: para,
                 })
-            cap.drawInRect_(
-                NSMakeRect(14, STAGE_TOP + STAGE + 4, W - 28, 34))
+            size = cap.size()
+            cw = min(W - 16, size.width + 22)
+            ch = size.height + 8
+            chip_y = STAGE_TOP + STAGE + 6
+            _rgb(0.016, 0.063, 0.051, 0.82)      # #04100d chip
+            NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                NSMakeRect((W - cw) / 2.0, chip_y, cw, ch),
+                ch / 2.0, ch / 2.0).fill()
+            cap.drawInRect_(NSMakeRect((W - cw) / 2.0 + 4, chip_y + 4,
+                                       cw - 8, size.height))
 
     def drawParrot_(self, lv):
         # tail
@@ -851,7 +847,7 @@ class HUD(NSObject):
         panel.setLevel_(NSStatusWindowLevel)
         panel.setOpaque_(False)
         panel.setBackgroundColor_(NSColor.clearColor())
-        panel.setHasShadow_(True)
+        panel.setHasShadow_(False)   # pure overlay, no panel shadow
         panel.setIgnoresMouseEvents_(True)
         panel.setHidesOnDeactivate_(False)
         panel.setCollectionBehavior_(
@@ -1011,6 +1007,7 @@ class StatusBar(NSObject):
                 "Right Option — Capture / Code",
                 "Shift + Right Option — Compose",
                 "Control + Right Option — Reply",
+                "Shift + Control + Right Option — Code",
                 "Command + Right Option — Edit Selection",
                 "Control + Command + Right Option — Command"):
             mode_item = mk(title, None)
@@ -1521,6 +1518,30 @@ def _transcribe_frames(frames, prompt=None) -> Recognition:
     return ASR_POOL.submit(transcribe_detailed, segment, prompt).result()
 
 
+def _speculative_frames(frames, prompt=None, still_valid=None) -> Recognition:
+    """Tiny-first cascade; pay for large Whisper only when confidence demands."""
+    if not frames:
+        return Recognition("")
+    segment = np.concatenate(frames).flatten()
+    fast = ASR_POOL.submit(
+        transcribe_detailed,
+        segment,
+        prompt,
+        False,
+        FAST_WHISPER_REPO,
+    ).result()
+    if still_valid is not None and not still_valid():
+        return fast
+    if fast.text and fast.confidence >= FAST_ACCEPT_CONFIDENCE:
+        return fast
+    accurate = ASR_POOL.submit(
+        transcribe_detailed, segment, prompt, True, WHISPER_REPO).result()
+    if fast.text and fast.text != accurate.text:
+        accurate.alternative = fast.text
+        accurate.verified = True
+    return accurate
+
+
 class Recorder:
     def __init__(self):
         self.frames = []
@@ -1632,7 +1653,11 @@ class Recorder:
             self.speculative_start = self.cut_samples
             self.speculative_invalid = False
             self.speculative_future = CHUNK_PREP_POOL.submit(
-                _transcribe_frames, frames_for_speculation, self.prompt)
+                _speculative_frames,
+                frames_for_speculation,
+                self.prompt,
+                lambda: not self.speculative_invalid,
+            )
         if (self.voiced_since_cut
                 and segment_samples >= CHUNK_MIN_SECONDS * SAMPLE_RATE
                 and self.silent_samples >= CHUNK_CUT_SILENCE * SAMPLE_RATE):
@@ -1976,6 +2001,13 @@ def keepwarm_loop():
             ASR_POOL.submit(
                 transcribe,
                 np.zeros(int(SAMPLE_RATE * 0.3), dtype=np.float32)).result()
+            ASR_POOL.submit(
+                transcribe_detailed,
+                np.zeros(int(SAMPLE_RATE * 0.3), dtype=np.float32),
+                None,
+                False,
+                FAST_WHISPER_REPO,
+            ).result()
             ollama_chat(None, "hi", num_predict=1)
         except Exception:
             pass                            # heartbeat is best-effort
@@ -2085,7 +2117,8 @@ import mlx_whisper  # noqa: E402
 
 
 def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
-                        verify: bool = True) -> Recognition:
+                        verify: bool = True,
+                        model_repo: str = WHISPER_REPO) -> Recognition:
     # Whispered/quiet speech: lift the level into the range Whisper decodes
     # confidently. Gain is capped so the noise floor of true near-silence
     # (which the energy gate already rejects) isn't blown up to fake speech.
@@ -2099,7 +2132,7 @@ def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
     def decode(temperature):
         result = mlx_whisper.transcribe(
             audio,
-            path_or_hf_repo=WHISPER_REPO,
+            path_or_hf_repo=model_repo,
             language="en",
             initial_prompt=prompt,
             temperature=temperature,
@@ -2595,7 +2628,7 @@ def llm_clean_with_edits(text: str, tone: str, mode: str = "capture",
     try:
         reply, done = ollama_chat(
             system, user, few_shot=few_shot,
-            num_predict=max(128, int(words * 3.0) + 48),
+            num_predict=max(160, int(words * 4.0) + 64),
             timeout=(2, 15),
             json_mode=True,
         )
@@ -2997,7 +3030,8 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             return
 
         raw, tone_override = extract_tone_override(raw)
-        plan = compile_cleanup(raw)
+        plan = compile_code_dictation(raw) \
+            if rec.mode == "code" else compile_cleanup(raw)
         compiled = plan.text
         verbatim = ((is_verbatim_app(bundle) or tone_override == "verbatim")
                     and rec.mode in {"capture", "code"})
@@ -3045,6 +3079,8 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         if needs_llm:
             text, semantic_edits = llm_clean_with_edits(
                 compiled, tone_txt, rec.mode, mode_context)
+        elif rec.mode == "code":
+            text = compiled
         else:
             text = quick_clean(
                 compiled, verbatim=verbatim, continuing=continuing)
@@ -3054,6 +3090,17 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         t_clean = time.perf_counter() - clean_started_at
         if tone_key == "casual" and not verbatim:
             text = strip_casual_period(text)   # belt for both paths
+        if PIPELINE_STATE["last_alternatives"]:
+            cleaned_alternatives = []
+            for alternative in PIPELINE_STATE["last_alternatives"]:
+                candidate = apply_learned_fixes(alternative, bundle)
+                candidate = quick_clean(candidate, verbatim=verbatim)
+                if tone_key == "casual" and not verbatim:
+                    candidate = strip_casual_period(candidate)
+                if candidate and candidate != text:
+                    cleaned_alternatives.append(candidate)
+            PIPELINE_STATE["last_alternatives"] = list(
+                dict.fromkeys(cleaned_alternatives))[:3]
         if continuing and text:
             tail40 = stripped_ctx[-40:].lower()
             if tail40 and text.lower().startswith(tail40):
@@ -3061,12 +3108,14 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             if not ctx[-1].isspace() and text[:1] not in ",.;:!?…":
                 text = " " + text                       # joining needs a space
 
-        correction_target = focused_snapshot() if not verbatim else None
+        learn_correction = not verbatim and rec.mode != "edit"
+        correction_target = focused_snapshot() if learn_correction else None
         receipt = make_paste_receipt(
-            correction_target, text, bundle, rec.mode) if not verbatim else None
+            correction_target, text, bundle, rec.mode) \
+            if learn_correction else None
         paste(text)
         play("Pop")
-        if not verbatim:
+        if learn_correction:
             threading.Thread(
                 target=learn_from_corrections,
                 args=(receipt,),
@@ -3113,8 +3162,15 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
 
 
 def warmup():
-    print("Warming up — first run downloads Whisper large-v3-turbo (~1.6 GB)...")
+    print("Warming up Whisper Tiny + large-v3-turbo cascade...")
     # Through the pool, so a dictation fired mid-warmup can't race model load.
+    ASR_POOL.submit(
+        transcribe_detailed,
+        np.zeros(SAMPLE_RATE // 2, dtype=np.float32),
+        None,
+        False,
+        FAST_WHISPER_REPO,
+    ).result()
     ASR_POOL.submit(transcribe, np.zeros(SAMPLE_RATE // 2,
                                          dtype=np.float32)).result()
     try:
@@ -3202,7 +3258,6 @@ def main():
                         shift="shift" in modifiers,
                         command="command" in modifiers,
                         control="control" in modifiers,
-                        code_app=rec.bundle_at_press in CODE_APPS,
                     )
                     set_status("rec")
                     AppHelper.callAfter(hud.showMode_, "recording")
