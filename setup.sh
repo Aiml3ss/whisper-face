@@ -21,7 +21,7 @@ case "$kernel" in
             exec powershell.exe -NoProfile -ExecutionPolicy Bypass \
                 -File "$windows_script" "$@"
         fi
-        echo "!! Whispering Parrot supports macOS and Windows; Linux is not supported." >&2
+        echo "!! Whisper Face supports macOS and Windows; Linux is not supported." >&2
         exit 1
         ;;
     Darwin) ;;
@@ -101,13 +101,19 @@ render_plist() {
 
 required=(
     dictate.py dictate.py.lock parrot_core.py voice_compiler.py
+    insertion_integrity.py personal_regression.py whisper_face_gui.py
     native/ParrotASRHelper/Package.swift
     native/ParrotASRHelper/Package.resolved
     native/ParrotASRHelper/Sources/parrot-asr-helper/main.swift
     setup.ps1 Install.command Install.cmd
     com.berg.dictate.plist.template com.berg.ollama.plist.template
     snippets.template.json tones.template.json preferences.template.json
-    dictionary.template.txt icons/glyph.svg
+    dictionary.template.txt
+    icons/faces/parrot-idle.svg icons/faces/parrot-talk.svg
+    icons/faces/fox-idle.svg icons/faces/fox-talk.svg
+    icons/faces/owl-idle.svg icons/faces/owl-talk.svg
+    icons/faces/cat-idle.svg icons/faces/cat-talk.svg
+    icons/faces/bear-idle.svg icons/faces/bear-talk.svg
 )
 for file in "${required[@]}"; do
     [ -f "$DIR/$file" ] || fail "repository is incomplete: missing $file"
@@ -143,6 +149,12 @@ verify_install() {
     plutil -lint "$dictate_plist" "$ollama_plist" >/dev/null
     "$uv_bin" lock --check --script "$DIR/dictate.py" >/dev/null
     "$uv_bin" sync --locked --script "$DIR/dictate.py" --check >/dev/null
+    "$uv_bin" run --locked --script "$DIR/dictate.py" \
+        --verify-parakeet-model >/dev/null \
+        || fail "Parakeet Unified model revision verification failed"
+    "$uv_bin" run --locked --script "$DIR/dictate.py" \
+        --verify-ollama-model >/dev/null \
+        || fail "Qwen model manifest verification failed"
     "$ollama_bin" show qwen3.5:4b >/dev/null 2>&1 \
         || fail "qwen3.5:4b is not installed"
     agent_is_running com.berg.ollama || fail "Ollama LaunchAgent is not running"
@@ -158,7 +170,7 @@ if [ "$VERIFY_ONLY" -eq 1 ]; then
     exit 0
 fi
 
-step "Whispering Parrot setup in $DIR (mode: $MODE)"
+step "Whisper Face setup in $DIR (mode: $MODE)"
 
 # Keep enough headroom for Ollama, both Whisper models, Python wheels, caches,
 # and model expansion. Existing cached files make reruns much cheaper.
@@ -193,8 +205,11 @@ OLLAMA="$(command -v ollama)"
 mkdir -p "$launch_dir"
 
 # --- Native Parakeet helper ------------------------------------------------
-# FluidAudio is pinned by Package.resolved. The warm helper receives Float32
-# audio over a pipe, so the RAM-only application contract remains intact.
+# Both FluidAudio and its Core ML model are pinned. The warm helper receives
+# Float32 audio over a pipe, so the RAM-only application contract remains intact.
+step "downloading the pinned Parakeet Unified model (~565 MB, first run only)"
+"$UV" run --locked --script "$DIR/dictate.py" --preload-parakeet-model
+
 step "building the native Parakeet Unified helper"
 command -v swift >/dev/null 2>&1 \
     || fail "Swift is unavailable; install the Xcode Command Line Tools"
@@ -205,7 +220,7 @@ swift build -c release \
 install -m 755 \
     "$DIR/.models/swift-build/release/parrot-asr-helper" \
     "$parakeet_helper"
-step "downloading and compiling Parakeet Unified (~565 MB, first run only)"
+step "verifying the pinned Parakeet Unified model and helper"
 "$parakeet_helper" --preload
 
 # --- Ollama service and cleanup model --------------------------------------
@@ -243,6 +258,7 @@ fi
 # --- Reproducible Python environment and Whisper model cache ---------------
 step "installing the locked Python environment"
 "$UV" sync --locked --script "$DIR/dictate.py"
+"$UV" run --locked --script "$DIR/dictate.py" --verify-ollama-model
 step "downloading both Whisper models (~1.7 GB total)"
 "$UV" run --locked --script "$DIR/dictate.py" --preload-models
 
@@ -321,7 +337,7 @@ echo "== installation complete"
 if [ "$MODE" = "full" ]; then
     echo "== Hold Right Option, speak, and release to paste."
     echo "== Flight Recorder defaults off on a fresh install; an existing"
-    echo "== preference is preserved. Toggle it from the parrot menu."
+    echo "== preference is preserved. Toggle it from the Whisper Face menu."
 else
     echo "== server-only installation is ready."
 fi

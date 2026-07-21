@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Platform-independent golden cases for the Whispering Parrot Voice Compiler.",
+  "description": "Platform-independent golden cases for the Whisper Face Voice Compiler.",
   "cases": [
     {
       "id": "rare-term-visible-context",

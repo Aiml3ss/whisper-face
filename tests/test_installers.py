@@ -34,6 +34,9 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_benchmark_voice_compiler.py",
             "uv run tests/test_benchmark_asr.py",
             "uv run tests/test_dictate.py",
+            "uv run tests/test_insertion_integrity.py",
+            "uv run tests/test_personal_regression.py",
+            "uv run tests/test_whisper_face_gui.py",
             "uv run tests/test_installers.py",
             "setup.sh --verify",
             "setup.ps1 --verify",
@@ -66,9 +69,13 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn("dictate.py", installer)
                 self.assertIn("parrot_core.py", installer)
                 self.assertIn("voice_compiler.py", installer)
+                self.assertIn("insertion_integrity.py", installer)
+                self.assertIn("personal_regression.py", installer)
+                self.assertIn("whisper_face_gui.py", installer)
                 self.assertIn("dictate.py.lock", installer)
                 self.assertIn("--preload-models", installer)
                 self.assertIn("--verify", installer)
+                self.assertIn("--verify-ollama-model", installer)
 
     def test_shell_dispatches_windows_before_mac_only_work(self):
         dispatch = self.shell.index("MINGW*|MSYS*|CYGWIN*")
@@ -85,16 +92,49 @@ class InstallerContractTests(unittest.TestCase):
             "parrot-asr-helper",
             '"$parakeet_helper" --preload',
             '"$parakeet_helper" --verify',
+            "--preload-parakeet-model",
+            "--verify-parakeet-model",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.shell)
         self.assertIn("PARAKEET_HELPER", self.script)
         self.assertIn("PARROT_ASR_BACKEND", self.script)
+        self.assertIn(
+            "4252711f6f060f9a2f91e5f081a806d7f45eebd8", self.script)
+        self.assertIn(
+            "2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd",
+            self.script,
+        )
 
     def test_windows_keeps_independent_whisper_fallback(self):
         self.assertIn("Tiny -> Turbo", self.powershell)
         self.assertNotIn("swift build", self.powershell)
         self.assertNotIn("parrot-asr-helper", self.powershell)
+
+    def test_whisper_face_assets_and_preference_ship_on_both_platforms(self):
+        template = (ROOT / "preferences.template.json").read_text(
+            encoding="utf-8")
+        self.assertIn('"face": "parrot"', template)
+        for face in ("parrot", "fox", "owl", "cat", "bear"):
+            for frame in ("idle", "talk"):
+                relative = f"icons/faces/{face}-{frame}.svg"
+                with self.subTest(relative=relative):
+                    self.assertTrue((ROOT / relative).exists())
+                    self.assertIn(relative, self.shell)
+                    self.assertIn(relative.replace("/", "\\"), self.powershell)
+        for expected in (
+            'APP_NAME = "Whisper Face"',
+            'FACE_CHOICES = ("parrot", "fox", "owl", "cat", "bear")',
+            "setMouthLevel_",
+            "_draw_companion",
+            "drawOwl_",
+        ):
+            self.assertIn(expected, self.script)
+
+    def test_windows_installer_migrates_the_legacy_task_name(self):
+        self.assertIn('$TaskName = "Whisper Face"', self.powershell)
+        self.assertIn('$LegacyTaskName = "Whispering Parrot"', self.powershell)
+        self.assertIn("Unregister-ScheduledTask", self.powershell)
 
     def test_each_platform_has_a_clickable_entrypoint(self):
         self.assertTrue((ROOT / "Install.command").exists())

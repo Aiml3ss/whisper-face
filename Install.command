@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 status=$?
 echo
 if [ "$status" -eq 0 ]; then
-    echo "Whispering Parrot installation finished."
+    echo "Whisper Face installation finished."
 else
     echo "Installation failed with exit code $status."
 fi

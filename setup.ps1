@@ -1,4 +1,4 @@
-# One-click, repeatable Windows installer for Whispering Parrot.
+# One-click, repeatable Windows installer for Whisper Face.
 # Windows deliberately retains the faster-whisper Tiny -> Turbo cascade;
 # FluidAudio/Parakeet is an Apple Core ML optimization and is Mac-only.
 # Safe to rerun: the login task is replaced and private user files survive.
@@ -69,9 +69,14 @@ function Test-Endpoint([string]$Uri) {
 
 $Required = @(
     "dictate.py", "dictate.py.lock", "parrot_core.py", "voice_compiler.py",
+    "insertion_integrity.py", "personal_regression.py", "whisper_face_gui.py",
     "snippets.template.json", "tones.template.json",
     "preferences.template.json", "dictionary.template.txt",
-    "icons\glyph.svg"
+    "icons\faces\parrot-idle.svg", "icons\faces\parrot-talk.svg",
+    "icons\faces\fox-idle.svg", "icons\faces\fox-talk.svg",
+    "icons\faces\owl-idle.svg", "icons\faces\owl-talk.svg",
+    "icons\faces\cat-idle.svg", "icons\faces\cat-talk.svg",
+    "icons\faces\bear-idle.svg", "icons\faces\bear-talk.svg"
 )
 foreach ($Relative in $Required) {
     if (-not (Test-Path (Join-Path $Repo $Relative))) {
@@ -91,7 +96,8 @@ if ($Architecture -notin @("AMD64", "x86_64")) {
     throw "Windows x64 is currently required by the faster-Whisper runtime (detected $Architecture)."
 }
 
-$TaskName = "Whispering Parrot"
+$TaskName = "Whisper Face"
+$LegacyTaskName = "Whispering Parrot"
 $LauncherDir = Join-Path $Repo ".windows"
 $Launcher = Join-Path $LauncherDir "launch.ps1"
 $Log = Join-Path $Repo "dictate.log"
@@ -125,6 +131,9 @@ function Confirm-Installation {
     if ($LASTEXITCODE -ne 0) { throw "dictate.py.lock does not match dictate.py" }
     & $Uv sync --locked --script (Join-Path $Repo "dictate.py") --check | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "locked Python environment is incomplete" }
+    & $Uv run --locked --script (Join-Path $Repo "dictate.py") `
+        --verify-ollama-model | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Qwen model manifest verification failed" }
     & $Ollama show "qwen3.5:4b" *> $null
     if ($LASTEXITCODE -ne 0) { throw "qwen3.5:4b is not installed" }
     $ModelFiles = @(Get-ChildItem (Join-Path $Repo ".models") `
@@ -143,7 +152,7 @@ if ($VerifyOnly) {
     exit 0
 }
 
-Write-Step "Whispering Parrot setup in $Repo (Windows, mode: $Mode)"
+Write-Step "Whisper Face setup in $Repo (Windows, mode: $Mode)"
 $Drive = [IO.DriveInfo]::new((Get-Item $Repo).PSDrive.Root)
 if ($Drive.AvailableFreeSpace -lt (8 * 1024 * 1024 * 1024)) {
     throw "At least 8 GB of free disk space is required"
@@ -202,6 +211,9 @@ if ($LASTEXITCODE -ne 0) {
 Write-Step "installing the locked Windows Python environment"
 & $Uv sync --locked --script (Join-Path $Repo "dictate.py")
 if ($LASTEXITCODE -ne 0) { throw "uv could not install the locked environment" }
+& $Uv run --locked --script (Join-Path $Repo "dictate.py") `
+    --verify-ollama-model
+if ($LASTEXITCODE -ne 0) { throw "Qwen model manifest verification failed" }
 Write-Step "downloading Whisper Tiny and large-v3-turbo"
 & $Uv run --locked --script (Join-Path $Repo "dictate.py") --preload-models
 if ($LASTEXITCODE -ne 0) { throw "Whisper model preload failed" }
@@ -234,9 +246,12 @@ Set-Location '$($Repo.Replace("'", "''"))'
 "@
 Set-Content -Path $Launcher -Value $LauncherBody -Encoding UTF8
 
-$ExistingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-if ($null -ne $ExistingTask) {
-    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+foreach ($ExistingName in @($TaskName, $LegacyTaskName)) {
+    $ExistingTask = Get-ScheduledTask -TaskName $ExistingName -ErrorAction SilentlyContinue
+    if ($null -ne $ExistingTask) {
+        Stop-ScheduledTask -TaskName $ExistingName -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $ExistingName -Confirm:$false
+    }
 }
 $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument `
     "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Launcher`""
@@ -244,7 +259,7 @@ $Trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $Settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) `
     -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
 Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger `
-    -Settings $Settings -Description "Local Whispering Parrot dictation" `
+    -Settings $Settings -Description "Local Whisper Face dictation" `
     -User $env:USERNAME -RunLevel Limited -Force | Out-Null
 Start-ScheduledTask -TaskName $TaskName
 
@@ -266,7 +281,7 @@ Write-Host ""
 Write-Host "== installation complete"
 if ($Mode -eq "full") {
     Write-Host "== Hold Right Alt, speak, and release to paste."
-    Write-Host "== The tray parrot controls pause, Flight Recorder, logs, and quit."
+    Write-Host "== The Whisper Face tray menu controls character, pause, Flight Recorder, logs, and quit."
 } else {
     Write-Host "== server-only installation is ready."
 }
