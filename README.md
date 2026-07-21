@@ -68,7 +68,8 @@ recognized in the background before you release the key.
   in terminals. Pick a tone per app from the menu-bar **App Tones** picker,
   or force one per-dictation: *"Formal tone, …"*, *"casual, …"*.
 - **Spoken structure** — "new line" / "new paragraph" / "scratch that" work;
-  enumerations ("two things: …") become tidy dash lists.
+  explicit list lead-ins ("two things", "here's a list", "here are some
+  feedback items") become tidy dash lists when you state multiple items.
 - **Reversible personalization** — vocabulary is mined from your usage, while
   corrections are learned only when the exact pasted range is changed. A
   correction activates after two confirmations in the same app or three
@@ -199,7 +200,7 @@ learning loop. Then in the Diction app on iOS: *Self-Hosted* →
 | Command + Control + Right Option | run an allowlisted Mac command |
 | "…um so basically…" | fillers gone |
 | "Tuesday — actually Wednesday" | just Wednesday, in place |
-| "two things: … and second …" | a dash list |
+| "two things: … and second …" / "here's a list of ideas …" | a dash list |
 | "new paragraph" | a real paragraph break |
 | "scratch that" | previous sentence dropped |
 | "Formal tone, …" / "casual, …" / "verbatim: …" | that style, this once |

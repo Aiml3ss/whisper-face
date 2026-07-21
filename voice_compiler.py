@@ -64,7 +64,8 @@ ENUMERATION_COUNTS = {
     "two", "three", "four", "five", "six", "seven", "eight", "nine",
     "ten", "2", "3", "4", "5", "6", "7", "8", "9", "10",
 }
-ENUMERATION_NOUNS = {"items", "points", "things"}
+ENUMERATION_NOUNS = {"ideas", "items", "points", "things"}
+LIST_INTENT_NOUNS = ENUMERATION_NOUNS
 ENUMERATION_ORDINALS = {
     "first", "second", "third", "fourth", "fifth", "sixth", "seventh",
     "eighth", "ninth", "tenth",
@@ -415,6 +416,120 @@ def _enumeration_payload(words: Sequence[str]) -> list[str] | None:
     return output if markers >= 2 else None
 
 
+def _explicit_list_variants(words: Sequence[str]) -> tuple[list[str], ...]:
+    """Bound header compression while preserving every spoken item token."""
+    words = list(words)
+    variants: list[list[str]] = []
+
+    def add(noun_index: int, payload_index: int,
+            extra_headers: Sequence[Sequence[str]] = ()):
+        if payload_index >= len(words):
+            return
+        noun = words[noun_index]
+        header = (["feedback", noun]
+                  if noun_index and words[noun_index - 1] == "feedback"
+                  else [noun])
+        for candidate in (header, *extra_headers):
+            variants.append([*candidate, *words[payload_index:]])
+
+    # "Here's a list of ideas that I have ..." may become the shorter
+    # written header "Here's a list of ideas:". Only that fixed header grammar
+    # can disappear; the item payload remains byte-for-token identical.
+    if len(words) >= 6 and words[0] in {"heres", "here's", "here’s"} \
+            and words[1:4] == ["a", "list", "of"] \
+            and words[4] in LIST_INTENT_NOUNS:
+        payload = 5
+        if words[payload:payload + 3] == ["that", "i", "have"]:
+            payload += 3
+        add(4, payload, (words[:5], words[1:5]))
+    elif len(words) >= 7 and words[:5] == ["here", "is", "a", "list", "of"] \
+            and words[5] in LIST_INTENT_NOUNS:
+        payload = 6
+        if words[payload:payload + 3] == ["that", "i", "have"]:
+            payload += 3
+        add(5, payload, (words[:6], words[2:6]))
+
+    def noun_between(start: int, stop: int) -> int | None:
+        for index in range(start, min(stop, len(words))):
+            if words[index] in LIST_INTENT_NOUNS:
+                return index
+        return None
+
+    if words[:2] in (["here", "are"], ["here", "is"]):
+        noun_index = noun_between(2, 8)
+        if noun_index is not None and all(word in {
+                "a", "some", "the", "my", "few", "several", "feedback",
+        } for word in words[2:noun_index]):
+            add(noun_index, noun_index + 1)
+
+    have_end = 0
+    if words[:2] == ["i", "have"]:
+        have_end = 2
+    elif words[:3] == ["i", "have", "got"]:
+        have_end = 3
+    if have_end:
+        noun_index = noun_between(have_end, have_end + 7)
+        if noun_index is not None and all(word in {
+                "a", "some", "the", "my", "few", "several", "feedback",
+        } for word in words[have_end:noun_index]):
+            add(noun_index, noun_index + 1,
+                (words[have_end:noun_index + 1],))
+
+    list_prefix = None
+    for prefix in (
+            ["let", "me", "list"], ["let", "me", "list", "out"],
+            ["i", "want", "to", "list"],
+            ["i", "would", "like", "to", "list"],
+            ["id", "like", "to", "list"],
+            ["i'd", "like", "to", "list"],
+            ["i’d", "like", "to", "list"]):
+        if words[:len(prefix)] == prefix:
+            list_prefix = len(prefix)
+            break
+    if list_prefix is not None:
+        if list_prefix < len(words) and words[list_prefix] == "out":
+            list_prefix += 1
+        noun_index = noun_between(list_prefix, list_prefix + 7)
+        if noun_index is not None and all(word in {
+                "a", "some", "the", "my", "few", "several",
+        } for word in words[list_prefix:noun_index]):
+            add(noun_index, noun_index + 1)
+
+    noun_index = noun_between(1, 4) if words[:1] == ["my"] else None
+    if noun_index is not None and noun_index + 1 < len(words) \
+            and all(word == "feedback" for word in words[1:noun_index]) \
+            and words[noun_index + 1] == "are":
+        add(noun_index, noun_index + 2)
+
+    return tuple(variants)
+
+
+def _formatted_list_word_variants(text: str) -> tuple[list[str], ...]:
+    """Restore an optional spoken "and" at proven dash-item boundaries."""
+    lines = text.splitlines()
+    first_item = next(
+        (index for index, line in enumerate(lines)
+         if re.match(r"^\s*-\s+\S", line)),
+        None,
+    )
+    if first_item is None:
+        return ()
+    item_lines = [line for line in lines[first_item:]
+                  if re.match(r"^\s*-\s+\S", line)]
+    if len(item_lines) < 2 or len(item_lines) > 8:
+        return ()
+    variants = [_proof_words("\n".join(lines[:first_item]))]
+    for index, line in enumerate(item_lines):
+        item_words = _proof_words(re.sub(r"^\s*-\s+", "", line))
+        if not item_words:
+            return ()
+        expanded = [words + item_words for words in variants]
+        if index and item_words[0] != "and":
+            expanded.extend(words + ["and", *item_words] for words in variants)
+        variants = expanded
+    return tuple(variants)
+
+
 def protected_anchors(text: str,
                       context: Iterable[ContextCandidate] = ()) -> tuple[str, ...]:
     anchors = [match.group(0).strip() for match in ANCHOR_RE.finditer(text)
@@ -551,6 +666,11 @@ class VoiceCompiler:
             return "accepted"
         enumeration_payload = _enumeration_payload(before_words)
         if enumeration_payload is not None and enumeration_payload == after_words:
+            return "accepted"
+        explicit_list_variants = _explicit_list_variants(before_words)
+        if after_words in explicit_list_variants or any(
+                variant in explicit_list_variants
+                for variant in _formatted_list_word_variants(proposal.after)):
             return "accepted"
         if proposal.before == source and len(source.split()) > 12:
             return "whole-message rewrite is not a bounded edit"

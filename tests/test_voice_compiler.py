@@ -188,6 +188,43 @@ class VoiceCompilerTests(unittest.TestCase):
         self.assertTrue(result.edits[0].accepted)
         self.assertEqual(result.text, after)
 
+    def test_counted_ideas_can_be_proved_as_a_list(self):
+        source = "Two ideas first improve speed and second preserve privacy"
+        after = "Two ideas:\n- Improve speed\n- Preserve privacy."
+        result = self.compiler.verify_edits(
+            source, (EditProposal("spoken_enumeration", source, after),))
+        self.assertTrue(result.edits[0].accepted)
+        self.assertEqual(result.text, after)
+
+    def test_explicit_list_intent_can_add_bullets_without_dropping_words(self):
+        source = ("Here are some feedback items make lists easy to scan and "
+                  "also keep every spoken detail")
+        after = ("Here are some feedback items:\n- Make lists easy to scan."
+                 "\n- And also keep every spoken detail.")
+        result = self.compiler.verify_edits(
+            source, (EditProposal("spoken_enumeration", source, after),))
+        self.assertTrue(result.edits[0].accepted)
+        self.assertEqual(result.text, after)
+
+    def test_explicit_list_header_can_be_compressed_without_dropping_items(self):
+        source = ("Here's a list of ideas that I have improve detection add a "
+                  "keyboard shortcut and make settings easier to find")
+        after = ("Here's a list of ideas:\n- Improve detection\n- Add a "
+                 "keyboard shortcut\n- Make settings easier to find.")
+        result = self.compiler.verify_edits(
+            source, (EditProposal("spoken_enumeration", source, after),))
+        self.assertTrue(result.edits[0].accepted)
+        self.assertEqual(result.text, after)
+
+    def test_explicit_list_formatting_cannot_drop_an_item(self):
+        source = ("Here's a list of ideas that I have improve detection add a "
+                  "keyboard shortcut and make settings easier to find")
+        after = ("Here's a list of ideas:\n- Improve detection\n- And make "
+                 "settings easier to find.")
+        result = self.compiler.verify_edits(
+            source, (EditProposal("spoken_enumeration", source, after),))
+        self.assertFalse(result.edits[0].accepted)
+
     def test_punctuation_proof_preserves_ordered_lexical_content(self):
         result = self.compiler.verify_edits(
             "ship API v2 tomorrow",
