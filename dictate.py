@@ -256,7 +256,7 @@ NUM_BARS = 16
 BAR_W = 3.0
 BARS_X0 = 64.0               # bars start right of the bird
 BARS_PAD_R = 20.0
-BEAK_MAX_DEG = 26.0
+BEAK_MAX_DEG = 40.0
 FPS = 30.0
 
 FILLER_RE = re.compile(r"\b(um+|uh+|erm|hmm)\b|\byou know\b|\bi mean\b", re.I)
@@ -485,10 +485,18 @@ class WaveView(NSView):
         NSBezierPath.bezierPathWithOvalInRect_(
             NSMakeRect(36, cy + 3, 4.5, 4.5)).fill()
 
-        # hinged beak: opens with the live level, closed while processing
-        target = 0.0 if self.mode == "processing" else \
-            min(1.0, max(self.levels[-3:] or [0.0])) * BEAK_MAX_DEG
-        self.beak += (target - self.beak) * 0.5
+        # hinged beak: opens with the live level, closed while processing.
+        # Squaring undoes the bars' sqrt display curve, so the beak dips
+        # shut between syllables instead of hovering half-open; the flutter
+        # keeps it chattering through sustained sounds.
+        if self.mode == "processing":
+            target = 0.0
+        else:
+            raw = self.levels[-1] if self.levels else 0.0
+            openness = min(1.0, (raw ** 2) * 1.8)
+            flutter = 4.0 * openness * math.sin(self.phase * 2.4)
+            target = openness * BEAK_MAX_DEG + flutter
+        self.beak = max(0.0, self.beak + (target - self.beak) * 0.6)
         pivot = (44.0, cy)
         upper = [(44, cy + 3.5), (58, cy + 0.5), (44, cy - 1.5)]
         lower = [(44, cy + 0.5), (56, cy - 2.0), (45, cy - 5.0)]
