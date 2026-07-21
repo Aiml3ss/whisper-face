@@ -9,6 +9,8 @@
     <array>
         <string>__UV__</string>
         <string>run</string>
+        <string>--locked</string>
+        <string>--script</string>
         <string>dictate.py</string>
         __EXTRA_ARGS__
     </array>

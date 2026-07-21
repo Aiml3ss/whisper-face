@@ -77,8 +77,8 @@ the background before you release the key.
 ## Requirements
 
 - Apple Silicon Mac (MLX requires it)
-- [Homebrew](https://brew.sh)
-- ~6 GB disk for models (Whisper large-v3-turbo + Qwen3.5-4B)
+- ~7 GB free disk space for the locked Python environment and models
+  (Whisper Tiny + large-v3-turbo + Qwen3.5-4B)
 
 ## Install
 
@@ -88,14 +88,43 @@ cd whispering-parrot
 ./setup.sh
 ```
 
-That's it. The script installs `uv`, `ffmpeg`, and `ollama`, pulls the
-models, and installs two launch agents (`com.berg.ollama`, tuned with flash
-attention, and `com.berg.dictate`). First launch downloads Whisper (~1.6 GB).
+That's it. On a fresh Apple Silicon Mac, the script:
+
+1. Installs Homebrew when needed, then installs `uv`, `ffmpeg`, and `ollama`.
+2. Reproduces the locked Python dependency environment from
+   `dictate.py.lock`.
+3. Downloads Qwen3.5-4B and both Whisper models before launching the app.
+4. Creates private configuration files without overwriting existing ones.
+5. Installs and validates the tuned Ollama and dictation login services.
+
+Homebrew's official installer may pause once to explain its changes and ask
+for your macOS password. Model downloads are several gigabytes, so the first
+run can take a while. Subsequent runs are idempotent and reuse the caches.
 
 macOS will prompt for permissions — enable **"uv"** under System Settings →
 Privacy & Security → **Input Monitoring**, **Accessibility**, and
 **Microphone**. The app waits and restarts itself automatically once granted.
 Allow the firewall prompt if you want the iPhone endpoint.
+
+After granting permissions, verify the complete installation at any time:
+
+```sh
+./setup.sh --verify
+```
+
+This checks the dependency lock, generated launch-agent files, Qwen model,
+both running services, and the process health endpoint without changing the
+installation.
+
+### Matching another Mac
+
+The installer reproduces the application, models, performance settings, and
+default behavior. Personal state is intentionally gitignored. To carry your
+MacBook vocabulary and preferences to a Mac mini, securely copy any desired
+`dictionary.txt`, `snippets.json`, `tones.json`, `preferences.json`, and
+`learned.json` files into the cloned folder **before** running `./setup.sh`.
+Existing copies are preserved and locked to user-only permissions. You do not
+need `transcripts.jsonl` unless you also want the old transcript history.
 
 **Headless / server Mac** (e.g. a Mac mini serving only your iPhone):
 

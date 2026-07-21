@@ -3222,6 +3222,21 @@ def warmup():
           "Ready. Hold RIGHT OPTION and speak; release to paste. Ctrl-C quits.")
 
 
+def preload_model_files():
+    """Download both MLX model snapshots without touching the mic or TCC.
+
+    setup.sh uses this before installing the LaunchAgent so a successful
+    installer guarantees that first-use recognition is not still waiting on
+    a multi-gigabyte background download.
+    """
+    from huggingface_hub import snapshot_download
+
+    for repo in (FAST_WHISPER_REPO, WHISPER_REPO):
+        print(f"Caching {repo}...")
+        snapshot_download(repo_id=repo)
+    print("Whisper model cache ready.")
+
+
 def main():
     lock_fd = ensure_single_instance()      # noqa: F841 — held for lifetime
     load_app_tones()
@@ -3401,4 +3416,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "--preload-models" in sys.argv:
+        preload_model_files()
+    else:
+        main()

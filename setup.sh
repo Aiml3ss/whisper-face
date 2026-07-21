@@ -1,104 +1,279 @@
 #!/bin/bash
-# One-command setup for the local dictation stack (dictate.py).
-# Idempotent: safe to re-run any time, on a fresh Mac or this one.
+# One-command, repeatable installer for the complete local Mac stack.
+# Safe to rerun: generated services are replaced; private user files survive.
 set -euo pipefail
+
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
 
-# --server-only: phone endpoint + models only — no hotkey/HUD/mic and no
-# permission prompts. The right mode for a headless always-on Mac.
 MODE="full"
-[ "${1:-}" = "--server-only" ] && MODE="server-only"
+VERIFY_ONLY=0
+for arg in "$@"; do
+    case "$arg" in
+        --server-only) MODE="server-only" ;;
+        --verify) VERIFY_ONLY=1 ;;
+        -h|--help)
+            echo "Usage: ./setup.sh [--server-only] [--verify]"
+            echo "  --server-only  install the headless endpoint without Mac UI/mic"
+            echo "  --verify       check an existing installation without changing it"
+            exit 0
+            ;;
+        *) echo "Unknown option: $arg" >&2; exit 2 ;;
+    esac
+done
 
-echo "== dictation setup in $DIR (mode: $MODE)"
-
-if [ "$(uname -m)" != "arm64" ]; then
-    echo "This stack needs Apple Silicon (MLX). Intel Macs won't work."
+fail() {
+    echo "!! $*" >&2
     exit 1
-fi
-
-reload_agent() {   # $1 = label, $2 = plist path; waits out the bootout race
-    launchctl bootout "gui/$(id -u)/$1" 2>/dev/null || true
-    for _ in $(seq 1 10); do
-        launchctl print "gui/$(id -u)/$1" >/dev/null 2>&1 || break
-        sleep 1
-    done
-    launchctl bootstrap "gui/$(id -u)" "$2"
 }
 
-# --- Homebrew ---------------------------------------------------------------
-if ! command -v brew >/dev/null; then
-    echo "Homebrew is required. Install it first:"
-    echo '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
-    exit 1
-fi
+step() {
+    echo
+    echo "== $*"
+}
 
-# --- dependencies -----------------------------------------------------------
-for pkg in uv ffmpeg ollama; do
-    if ! command -v "$pkg" >/dev/null; then
-        echo "== installing $pkg"
-        brew install "$pkg"
+escape_sed_replacement() {
+    printf '%s' "$1" | sed 's/[&|\\]/\\&/g'
+}
+
+agent_is_running() {
+    launchctl print "gui/$(id -u)/$1" 2>/dev/null \
+        | grep -q 'state = running'
+}
+
+reload_agent() {
+    # $1 = label, $2 = plist. Wait out launchd's asynchronous bootout.
+    local label="$1"
+    local plist="$2"
+    launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+    for _ in $(seq 1 15); do
+        launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 || break
+        sleep 1
+    done
+    launchctl bootstrap "gui/$(id -u)" "$plist"
+    launchctl kickstart "gui/$(id -u)/$label" >/dev/null
+}
+
+render_plist() {
+    # $1 = template, $2 = destination, $3... = sed expressions
+    local template="$1"
+    local destination="$2"
+    shift 2
+    local temporary
+    temporary="$(mktemp "${destination}.XXXXXX")"
+    sed "$@" "$template" > "$temporary"
+    if grep -q '__[A-Z_][A-Z_]*__' "$temporary"; then
+        rm -f "$temporary"
+        fail "unresolved placeholder while rendering $template"
     fi
+    if ! plutil -lint "$temporary" >/dev/null; then
+        rm -f "$temporary"
+        fail "invalid generated plist from $template"
+    fi
+    chmod 600 "$temporary"
+    mv -f "$temporary" "$destination"
+}
+
+required=(
+    dictate.py dictate.py.lock parrot_core.py
+    com.berg.dictate.plist.template com.berg.ollama.plist.template
+    snippets.template.json tones.template.json preferences.template.json
+    dictionary.template.txt icons/glyph.svg
+)
+for file in "${required[@]}"; do
+    [ -f "$DIR/$file" ] || fail "repository is incomplete: missing $file"
 done
 
-# --- ollama service + model -------------------------------------------------
-# Our own agent instead of brew services: bakes in the tuned env
-# (flash attention measured +36% generation speed).
-brew services stop ollama >/dev/null 2>&1 || true
-mkdir -p "$HOME/Library/LaunchAgents"
-OLLAMA="$(command -v ollama)"
-sed -e "s|__OLLAMA__|$OLLAMA|g" -e "s|__DIR__|$DIR|g" \
-    com.berg.ollama.plist.template \
-    > "$HOME/Library/LaunchAgents/com.berg.ollama.plist"
-reload_agent com.berg.ollama "$HOME/Library/LaunchAgents/com.berg.ollama.plist"
-echo -n "== waiting for ollama"
-for _ in $(seq 1 30); do
-    curl -s -m 1 localhost:11434/api/tags >/dev/null && break
-    echo -n "."; sleep 1
-done
-echo
-if ! ollama list 2>/dev/null | grep -q "^qwen3.5:4b"; then
-    echo "== pulling qwen3.5:4b (~3.4 GB)"
-    ollama pull qwen3.5:4b
+[ "$(uname -s)" = "Darwin" ] || fail "this installer requires macOS"
+[ "$(uname -m)" = "arm64" ] \
+    || fail "this stack requires an Apple Silicon Mac (MLX)"
+
+macos_major="$(sw_vers -productVersion | cut -d. -f1)"
+if [ "$macos_major" -lt 14 ]; then
+    echo "!! macOS 14 or newer is recommended and supported by Homebrew."
 fi
 
-# --- per-machine files ------------------------------------------------------
-[ -f snippets.json ] || cp snippets.template.json snippets.json
-[ -f tones.json ] || cp tones.template.json tones.json
-[ -f preferences.json ] || cp preferences.template.json preferences.json
-[ -f dictionary.txt ] || cp dictionary.template.txt dictionary.txt
-chmod 600 snippets.json tones.json preferences.json dictionary.txt
-for private_file in transcripts.jsonl learned.json dictate.log ollama.log .dictate.lock; do
-    [ ! -e "$private_file" ] || chmod 600 "$private_file"
-done
+launch_dir="$HOME/Library/LaunchAgents"
+dictate_plist="$launch_dir/com.berg.dictate.plist"
+ollama_plist="$launch_dir/com.berg.ollama.plist"
 
-# --- LaunchAgent ------------------------------------------------------------
+verify_install() {
+    step "verifying installation"
+    local uv_bin ollama_bin
+    uv_bin="$(command -v uv 2>/dev/null || true)"
+    ollama_bin="$(command -v ollama 2>/dev/null || true)"
+    [ -n "$uv_bin" ] || fail "uv is not installed"
+    command -v ffmpeg >/dev/null 2>&1 || fail "ffmpeg is not installed"
+    [ -n "$ollama_bin" ] || fail "ollama is not installed"
+    [ -f "$dictate_plist" ] || fail "dictation LaunchAgent is missing"
+    [ -f "$ollama_plist" ] || fail "Ollama LaunchAgent is missing"
+    plutil -lint "$dictate_plist" "$ollama_plist" >/dev/null
+    "$uv_bin" lock --check --script "$DIR/dictate.py" >/dev/null
+    "$uv_bin" sync --locked --script "$DIR/dictate.py" --check >/dev/null
+    "$ollama_bin" show qwen3.5:4b >/dev/null 2>&1 \
+        || fail "qwen3.5:4b is not installed"
+    agent_is_running com.berg.ollama || fail "Ollama LaunchAgent is not running"
+    agent_is_running com.berg.dictate \
+        || fail "dictation LaunchAgent is not running"
+    curl -fsS --max-time 3 http://127.0.0.1:8787/health >/dev/null \
+        || fail "dictation process is not ready; inspect $DIR/dictate.log"
+    echo "== verified: locked Python environment, models, services, and health"
+}
+
+if [ "$VERIFY_ONLY" -eq 1 ]; then
+    verify_install
+    exit 0
+fi
+
+step "Whispering Parrot setup in $DIR (mode: $MODE)"
+
+# Keep enough headroom for Ollama, both Whisper models, Python wheels, caches,
+# and model expansion. Existing cached files make reruns much cheaper.
+available_kb="$(df -Pk "$DIR" | awk 'NR == 2 {print $4}')"
+if [ "${available_kb:-0}" -lt 7340032 ]; then
+    fail "at least 7 GB of free disk space is required"
+fi
+
+# --- Homebrew and native dependencies --------------------------------------
+if ! command -v brew >/dev/null 2>&1; then
+    step "installing Homebrew (its official installer may request a password)"
+    /bin/bash -c "$(curl -fsSL \
+        https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    [ -x /opt/homebrew/bin/brew ] \
+        || fail "Homebrew installed but /opt/homebrew/bin/brew was not found"
+    eval "$(/opt/homebrew/bin/brew shellenv)"
+fi
+
+BREW="$(command -v brew)"
+missing_packages=()
+for package in uv ffmpeg ollama; do
+    "$BREW" list --versions "$package" >/dev/null 2>&1 \
+        || missing_packages+=("$package")
+done
+if [ "${#missing_packages[@]}" -gt 0 ]; then
+    step "installing ${missing_packages[*]}"
+    "$BREW" install "${missing_packages[@]}"
+fi
+
 UV="$(command -v uv)"
-mkdir -p "$HOME/Library/LaunchAgents"
-if [ "$MODE" = "server-only" ]; then
-    EXTRA_SED="s|__EXTRA_ARGS__|<string>--server-only</string>|"
+OLLAMA="$(command -v ollama)"
+mkdir -p "$launch_dir"
+
+# --- Ollama service and cleanup model --------------------------------------
+step "configuring the tuned local Ollama service"
+"$BREW" services stop ollama >/dev/null 2>&1 || true
+escaped_ollama="$(escape_sed_replacement "$OLLAMA")"
+escaped_dir="$(escape_sed_replacement "$DIR")"
+render_plist com.berg.ollama.plist.template "$ollama_plist" \
+    -e "s|__OLLAMA__|$escaped_ollama|g" \
+    -e "s|__DIR__|$escaped_dir|g"
+reload_agent com.berg.ollama "$ollama_plist"
+
+echo -n "== waiting for Ollama"
+ollama_ready=0
+for _ in $(seq 1 60); do
+    if curl -fsS --max-time 1 http://127.0.0.1:11434/api/tags \
+            >/dev/null 2>&1; then
+        ollama_ready=1
+        break
+    fi
+    echo -n "."
+    sleep 1
+done
+echo
+[ "$ollama_ready" -eq 1 ] \
+    || fail "Ollama did not become ready; inspect $DIR/ollama.log"
+
+if ! "$OLLAMA" show qwen3.5:4b >/dev/null 2>&1; then
+    step "downloading qwen3.5:4b (~3.4 GB)"
+    "$OLLAMA" pull qwen3.5:4b
 else
-    EXTRA_SED="/__EXTRA_ARGS__/d"
+    echo "== qwen3.5:4b already present"
 fi
-sed -e "s|__UV__|$UV|g" -e "s|__DIR__|$DIR|g" -e "$EXTRA_SED" \
-    com.berg.dictate.plist.template \
-    > "$HOME/Library/LaunchAgents/com.berg.dictate.plist"
-reload_agent com.berg.dictate \
-    "$HOME/Library/LaunchAgents/com.berg.dictate.plist"
+
+# --- Reproducible Python environment and Whisper model cache ---------------
+step "installing the locked Python environment"
+"$UV" sync --locked --script "$DIR/dictate.py"
+step "downloading both Whisper models (~1.7 GB total)"
+"$UV" run --locked --script "$DIR/dictate.py" --preload-models
+
+# --- Private, per-machine state --------------------------------------------
+step "creating private per-machine files (existing files are preserved)"
+for name in snippets tones preferences dictionary; do
+    destination="$DIR/$name.json"
+    template="$DIR/$name.template.json"
+    if [ "$name" = "dictionary" ]; then
+        destination="$DIR/dictionary.txt"
+        template="$DIR/dictionary.template.txt"
+    fi
+    [ -f "$destination" ] || install -m 600 "$template" "$destination"
+    chmod 600 "$destination"
+done
+for private_file in transcripts.jsonl learned.json dictate.log ollama.log \
+        .dictate.lock; do
+    [ ! -e "$DIR/$private_file" ] || chmod 600 "$DIR/$private_file"
+done
+
+# --- Dictation LaunchAgent --------------------------------------------------
+step "installing the login LaunchAgent"
+escaped_uv="$(escape_sed_replacement "$UV")"
+if [ "$MODE" = "server-only" ]; then
+    extra_sed="s|__EXTRA_ARGS__|<string>--server-only</string>|"
+else
+    extra_sed="/__EXTRA_ARGS__/d"
+fi
+render_plist com.berg.dictate.plist.template "$dictate_plist" \
+    -e "s|__UV__|$escaped_uv|g" \
+    -e "s|__DIR__|$escaped_dir|g" \
+    -e "$extra_sed"
+
+log_start=1
+if [ -f "$DIR/dictate.log" ]; then
+    log_start=$(( $(wc -l < "$DIR/dictate.log") + 1 ))
+fi
+reload_agent com.berg.dictate "$dictate_plist"
+
+echo -n "== waiting for dictation service"
+ready=0
+permissions_needed=0
+for _ in $(seq 1 120); do
+    fresh_log="$(tail -n "+$log_start" "$DIR/dictate.log" 2>/dev/null || true)"
+    if printf '%s\n' "$fresh_log" | grep -q '^Ready'; then
+        ready=1
+        break
+    fi
+    if printf '%s\n' "$fresh_log" | grep -q '^Waiting for permissions:'; then
+        permissions_needed=1
+        break
+    fi
+    if ! launchctl print "gui/$(id -u)/com.berg.dictate" >/dev/null 2>&1; then
+        fail "dictation LaunchAgent exited; inspect $DIR/dictate.log"
+    fi
+    echo -n "."
+    sleep 1
+done
+echo
+
+if [ "$ready" -eq 1 ]; then
+    curl -fsS --max-time 3 http://127.0.0.1:8787/health >/dev/null \
+        || fail "dictation process launched but its health check failed"
+    verify_install
+elif [ "$permissions_needed" -eq 1 ] && [ "$MODE" = "full" ]; then
+    echo "== software and models are installed; macOS permissions remain:"
+    echo "== System Settings -> Privacy & Security -> enable uv/Python under"
+    echo "==   Input Monitoring, Accessibility, and Microphone."
+    echo "== The LaunchAgent rechecks automatically; then run ./setup.sh --verify"
+else
+    fail "dictation service did not become ready; inspect $DIR/dictate.log"
+fi
 
 echo
-echo "== done. First launch downloads Whisper models (~1.7 GB total) and resolves Python deps."
+echo "== installation complete"
 if [ "$MODE" = "full" ]; then
-    echo "== macOS will ask for permissions — enable 'uv' under System Settings ->"
-    echo "==   Privacy & Security -> Input Monitoring, Accessibility, Microphone."
-    echo "==   (The app waits and restarts itself automatically once granted.)"
-    echo "== Flight Recorder is off by default; enable its RAM-only buffer"
-    echo "==   explicitly from the parrot menu when you want tap-after-talk."
+    echo "== Hold Right Option, speak, and release to paste."
+    echo "== Flight Recorder defaults off on a fresh install; an existing"
+    echo "== preference is preserved. Toggle it from the parrot menu."
 else
-    echo "== server-only mode: no permission prompts needed."
+    echo "== server-only installation is ready."
 fi
-echo "== If the firewall asks about incoming connections for Python: Allow"
-echo "==   (that's the iPhone endpoint on port 8787)."
-echo "== Phone URL for the Diction app's Self-Hosted tab:"
-echo "==   http://$(ipconfig getifaddr en0 2>/dev/null || echo '<this-mac-ip>'):8787/v1/audio/transcriptions"
-echo "== Watch progress:  tail -f $DIR/dictate.log"
+echo "== Logs: $DIR/dictate.log"
