@@ -470,6 +470,102 @@ class ConfigurationTests(unittest.TestCase):
             self.assertIsNone(ns["match_snippet"]("insert email"))
 
 class LearningTests(unittest.TestCase):
+    def test_snippet_edit_is_persisted_and_exposed_as_learning(self):
+        ns = load_definitions(
+            "load_learned", "save_learned", "save_snippet_edit",
+            extra={
+                "Path": Path,
+                "atomic_write_text": lambda path, value: path.write_text(value),
+                "time": SimpleNamespace(time=lambda: 123.0),
+            },
+        )
+        with tempfile.TemporaryDirectory() as td:
+            snippets = Path(td) / "snippets.json"
+            learned = Path(td) / "learned.json"
+            snippets.write_text(json.dumps({
+                "address": "EDIT ME: your street address",
+            }))
+            ns.update({
+                "SNIPPETS_FILE": snippets,
+                "LEARNED_FILE": learned,
+                "SNIPPETS_LOCK": threading.Lock(),
+                "LEARN_LOCK": threading.Lock(),
+            })
+
+            changed = ns["save_snippet_edit"](
+                "address",
+                "EDIT ME: your street address",
+                "7623 Opal Ridge Lane, Bainbridge Island, 98110 WA",
+                "com.openai.codex",
+            )
+
+            self.assertTrue(changed)
+            self.assertEqual(
+                json.loads(snippets.read_text())["address"],
+                "7623 Opal Ridge Lane, Bainbridge Island, 98110 WA",
+            )
+            state = json.loads(learned.read_text())
+        self.assertEqual(
+            state["snippet_edits"]["address"]["to"],
+            "7623 Opal Ridge Lane, Bainbridge Island, 98110 WA",
+        )
+        self.assertEqual(state["snippet_edits"]["address"]["n"], 1)
+        self.assertEqual(state["history"][-1]["kind"], "snippet_edit")
+
+    def test_snippet_snapshot_is_taken_before_paste_and_observed(self):
+        events = []
+        receipt = SimpleNamespace(pasted="EDIT ME: your street address")
+        ns = load_definitions(
+            "paste_snippet_and_watch",
+            extra={
+                "threading": threading,
+                "focused_snapshot": lambda: events.append("snapshot") or
+                    "focus",
+                "make_paste_receipt": lambda snapshot, pasted, bundle, mode:
+                    receipt if snapshot == "focus" else None,
+                "paste": lambda text: events.append(("paste", text)),
+                "learn_snippet_edit": lambda name, value:
+                    events.append(("learn", name, value)),
+            },
+        )
+
+        returned = ns["paste_snippet_and_watch"](
+            "address", "EDIT ME: your street address",
+            "com.openai.codex", "capture",
+            starter=lambda target, args: events.append(("start", target, args)),
+        )
+
+        self.assertIs(returned, receipt)
+        self.assertEqual(events[0], "snapshot")
+        self.assertEqual(events[1], ("paste", "EDIT ME: your street address"))
+        self.assertEqual(events[2][0], "start")
+        self.assertEqual(events[2][2], ("address", receipt))
+
+    def test_snippet_observer_saves_the_revised_insertion(self):
+        saved = []
+        ns = load_definitions(
+            "learn_snippet_edit",
+            extra={
+                "observe_paste_outcome": lambda _receipt:
+                    "7623 Opal Ridge Lane, Bainbridge Island, 98110 WA",
+                "save_snippet_edit": lambda name, old, new, bundle:
+                    saved.append((name, old, new, bundle)) or True,
+            },
+        )
+        receipt = SimpleNamespace(
+            pasted="EDIT ME: your street address",
+            bundle="com.openai.codex",
+        )
+
+        ns["learn_snippet_edit"]("address", receipt)
+
+        self.assertEqual(saved, [(
+            "address",
+            "EDIT ME: your street address",
+            "7623 Opal Ridge Lane, Bainbridge Island, 98110 WA",
+            "com.openai.codex",
+        )])
+
     def test_early_correction_reaches_learned_state(self):
         elapsed = [0.0]
         observed = []
@@ -590,7 +686,7 @@ class LearningTests(unittest.TestCase):
             self.assertEqual(
                 ns["load_learned"](),
                 {"counts": {}, "processed": 0, "fixes": {},
-                 "confusions": {}, "history": []},
+                 "confusions": {}, "snippet_edits": {}, "history": []},
             )
 
     def test_merge_preserves_corrections_written_during_mining(self):

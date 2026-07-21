@@ -74,7 +74,9 @@ recognized in the background before you release the key.
   correction activates after two confirmations in the same app or three
   globally, and every learned mapping can be inspected or forgotten from the
   menu.
-- **Snippets** — say "insert my email" and your saved text pastes instead.
+- **Self-editing snippets (Mac)** — say "insert my email" and your saved text
+  pastes instead. Edit that exact insertion within ten seconds and the revised
+  value is saved for next time and listed under **Learned Corrections**.
 - **Whispering works** — quiet speech is gain-normalized before recognition.
 - **Menu-bar/tray presence** — the parrot perches in your menu bar or Windows
   notification area (🔴 while recording, 🟠 processing, ⏸ paused). The Mac
@@ -203,9 +205,11 @@ learning loop. Then in the Diction app on iOS: *Self-Hosted* →
 | "Formal tone, …" / "casual, …" / "verbatim: …" | that style, this once |
 | "insert my email" | your snippet from `snippets.json` |
 
-The bundled `EDIT ME` snippet values are setup placeholders. Configure them in
-`snippets.json`; snippets are explicit saved text and do not appear under
-**Learned Corrections**.
+The bundled `EDIT ME` values are setup placeholders. On Mac, insert one and
+replace the pasted placeholder in place within ten seconds; Parrot saves that
+exact replacement to `snippets.json`. You can also edit the private JSON file
+directly. Learned snippet edits appear by name under **Learned Corrections**;
+forgetting one restores its previous value when the file has not since changed.
 
 On Windows, use **Right Alt** wherever the table says Right Option and the
 **Windows key** wherever it says Command. Shift and Control are unchanged.

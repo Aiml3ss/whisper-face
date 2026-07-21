@@ -144,6 +144,8 @@ New in v5.0 (voice input, not just transcription):
     reserved for semantic cleanup and explicit compose/reply/edit modes.
   * Corrections are learned only from the exact pasted range, scoped by app,
     activated conservatively, exposed in the menu, and individually forgettable.
+  * On Mac, editing an inserted snippet in that same observed range updates the
+    saved snippet for next time and exposes the reversible edit in the menu.
   * Modifier modes turn the same hotkey into Capture, Compose, Reply, Edit,
     Code, or an allowlisted reversible Command. Recognition confidence,
     alternatives, and cleanup edit kinds remain available in the menu.
@@ -618,6 +620,9 @@ LAST_USE = {"t": 0.0}
 # Serializes learned.json read-modify-write between the mining thread and
 # the correction-observer threads.
 LEARN_LOCK = threading.Lock()
+
+# Serializes snippet edits learned by overlapping correction observers.
+SNIPPETS_LOCK = threading.Lock()
 
 # The active pynput listener, replaceable by the watchdog if it dies.
 LISTENER = {"l": None, "make": None}
@@ -1290,7 +1295,11 @@ class StatusBar(NSObject):
             state.get("confusions", {}).items(),
             key=lambda item: -int(item[1].get("n", 0)),
         )[:12]
-        if not rows:
+        snippet_rows = sorted(
+            state.get("snippet_edits", {}).items(),
+            key=lambda item: -int(item[1].get("n", 0)),
+        )[:12]
+        if not rows and not snippet_rows:
             empty = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                 "No learned corrections", None, "")
             empty.setEnabled_(False)
@@ -1303,6 +1312,15 @@ class StatusBar(NSObject):
                 title, "forgetCorrection:", "")
             item.setTarget_(self)
             item.setRepresentedObject_(key)
+            self.learning_menu.addItem_(item)
+        if rows and snippet_rows:
+            self.learning_menu.addItem_(NSMenuItem.separatorItem())
+        for name, info in snippet_rows:
+            title = f"Snippet: {name} · {info.get('n', 0)}×"
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                title, "forgetSnippetEdit:", "")
+            item.setTarget_(self)
+            item.setRepresentedObject_(name)
             self.learning_menu.addItem_(item)
 
     def forgetCorrection_(self, sender):
@@ -1327,6 +1345,10 @@ class StatusBar(NSObject):
         print(f"[learn] forgot correction: {removed.get('from')} -> "
               f"{removed.get('to')}")
         self.rebuild_learning()
+
+    def forgetSnippetEdit_(self, sender):
+        if forget_snippet_edit(str(sender.representedObject())):
+            self.rebuild_learning()
 
     def rebuild_recognition(self):
         self.recognition_menu.removeAllItems()
@@ -2014,7 +2036,7 @@ def parse_dictionary():
 def load_learned() -> dict:
     state = {
         "counts": {}, "processed": 0, "fixes": {},
-        "confusions": {}, "history": [],
+        "confusions": {}, "snippet_edits": {}, "history": [],
     }
     if LEARNED_FILE.exists():
         try:
@@ -2023,6 +2045,7 @@ def load_learned() -> dict:
                 counts = loaded.get("counts")
                 fixes = loaded.get("fixes")
                 confusions = loaded.get("confusions")
+                snippet_edits = loaded.get("snippet_edits")
                 history = loaded.get("history")
                 processed = loaded.get("processed")
                 if isinstance(counts, dict):
@@ -2031,6 +2054,8 @@ def load_learned() -> dict:
                     state["fixes"] = fixes
                 if isinstance(confusions, dict):
                     state["confusions"] = confusions
+                if isinstance(snippet_edits, dict):
+                    state["snippet_edits"] = snippet_edits
                 if isinstance(history, list):
                     state["history"] = history[-100:]
                 if isinstance(processed, int) and processed >= 0:
@@ -2056,6 +2081,7 @@ def merge_learned_state(base: dict, mined: dict, latest: dict) -> dict:
         "processed": mined.get("processed", latest.get("processed", 0)),
         "fixes": dict(latest.get("fixes", {})),
         "confusions": dict(latest.get("confusions", {})),
+        "snippet_edits": dict(latest.get("snippet_edits", {})),
         "history": list(latest.get("history", []))[-100:],
     }
     base_counts = base.get("counts", {})
@@ -2810,6 +2836,71 @@ def match_snippet(raw: str) -> tuple[str, str] | None:
     return None
 
 
+def save_snippet_edit(name: str, old: str, new: str, bundle: str) -> bool:
+    """Persist one focus-safe snippet replacement and its inspectable record."""
+    if not new or new == old or len(new) > 4000:
+        return False
+    with SNIPPETS_LOCK:
+        try:
+            snippets = json.loads(SNIPPETS_FILE.read_text())
+        except Exception as e:
+            print(f"! snippets.json unreadable while saving {name!r}: {e}")
+            return False
+        if not isinstance(snippets, dict) or snippets.get(name) != old:
+            print(f"! snippet {name!r} changed before its edit could be saved")
+            return False
+        snippets[name] = new
+        atomic_write_text(SNIPPETS_FILE, json.dumps(snippets, indent=2) + "\n")
+
+        with LEARN_LOCK:
+            state = load_learned()
+            prior = state["snippet_edits"].get(name, {})
+            state["snippet_edits"][name] = {
+                "from": old,
+                "to": new,
+                "n": int(prior.get("n", 0)) + 1,
+                "app": bundle,
+            }
+            state["history"].append({
+                "ts": time.time(),
+                "kind": "snippet_edit",
+                "name": name,
+                "from": old,
+                "to": new,
+                "app": bundle,
+            })
+            state["history"] = state["history"][-100:]
+            save_learned(state)
+    print(f"[learn] snippet updated: {name!r}")
+    return True
+
+
+def forget_snippet_edit(name: str) -> bool:
+    """Forget one learned snippet edit, restoring it only if still current."""
+    with SNIPPETS_LOCK:
+        with LEARN_LOCK:
+            state = load_learned()
+            info = state.get("snippet_edits", {}).pop(name, None)
+            if not isinstance(info, dict):
+                return False
+            try:
+                snippets = json.loads(SNIPPETS_FILE.read_text())
+            except Exception:
+                snippets = None
+            if isinstance(snippets, dict) \
+                    and snippets.get(name) == info.get("to"):
+                snippets[name] = str(info.get("from", ""))
+                atomic_write_text(
+                    SNIPPETS_FILE, json.dumps(snippets, indent=2) + "\n")
+            state["history"].append({
+                "ts": time.time(), "kind": "forgotten_snippet", "name": name,
+            })
+            state["history"] = state["history"][-100:]
+            save_learned(state)
+    print(f"[learn] forgot snippet edit: {name!r}")
+    return True
+
+
 def _ax_attribute(element, attribute):
     try:
         from ApplicationServices import AXUIElementCopyAttributeValue
@@ -3092,6 +3183,34 @@ def observe_paste_outcome(receipt: PasteReceipt, timeout=None,
         if remaining <= 0:
             return receipt.pasted if current == expected else None
         sleeper(min(poll_interval, remaining))
+
+
+def learn_snippet_edit(name: str, receipt: PasteReceipt):
+    """Turn a user's in-place edit of a pasted snippet into its saved value."""
+    revised = observe_paste_outcome(receipt)
+    if revised is None or revised == receipt.pasted:
+        return
+    save_snippet_edit(name, receipt.pasted, revised, receipt.bundle)
+
+
+def paste_snippet_and_watch(name: str, snippet: str, bundle: str, mode: str,
+                            starter=None) -> PasteReceipt | None:
+    """Paste a snippet after capturing the field needed to learn its edit."""
+    snapshot = focused_snapshot()
+    receipt = make_paste_receipt(snapshot, snippet, bundle, mode)
+    paste(snippet)
+    if receipt is None:
+        print(f"! [snippet] cannot observe edits to {name!r} in this field")
+        return None
+    if starter is None:
+        threading.Thread(
+            target=learn_snippet_edit,
+            args=(name, receipt),
+            daemon=True,
+        ).start()
+    else:
+        starter(learn_snippet_edit, (name, receipt))
+    return receipt
 
 
 def learn_from_corrections(receipt: PasteReceipt | None):
@@ -3814,7 +3933,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         hit = match_snippet(raw)
         if hit is not None:
             name, snippet = hit
-            paste(snippet)
+            paste_snippet_and_watch(name, snippet, bundle, rec.mode)
             play("Pop")
             release_total = time.perf_counter() - released_at
             print(f"[release {release_total:.2f}s | snippet:{name} | "
