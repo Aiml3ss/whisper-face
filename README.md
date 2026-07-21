@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="parrot.svg" width="128" alt="Parrot icon"/>
+  <img src="whispering-parrot.svg" width="128" alt="Whispering Parrot icon"/>
 </p>
 
-<h1 align="center">Parrot</h1>
+<h1 align="center">Whispering Parrot</h1>
 
 <p align="center"><b>Free, fully local hold-to-talk dictation for macOS.</b><br/>
 Hold a key, speak, release — polished text appears wherever your cursor is.<br/>
@@ -10,7 +10,7 @@ No subscription, no cloud, no audio ever leaving your machine.</p>
 
 ---
 
-Parrot is a single-file dictation stack built to match (and in places beat) the
+Whispering Parrot is a single-file dictation stack built to match (and in places beat) the
 commercial tools: [mlx-whisper](https://github.com/ml-explore/mlx-examples)
 for on-device speech recognition and a local LLM via
 [Ollama](https://ollama.com) for cleanup. On an M-series Mac, routine

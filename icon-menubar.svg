@@ -14,13 +14,19 @@
           fill="url(#body)"/>
     <path d="M142 52 C164 42 184 47 194 62 C184 82 167 89 150 84
              C155 72 152 59 142 52 Z" fill="#fbbf24"/>
-    <circle cx="140" cy="82" r="19" fill="#f8fafc"/>
-    <circle cx="144" cy="85" r="9" fill="#0f172a"/>
+    <!-- happy closed eye -->
+    <path d="M124 72 Q140 85 156 72" stroke="#0f172a" stroke-width="9"
+          stroke-linecap="round" fill="none"/>
+    <!-- slim wing raised to the beak: shhh -->
+    <path d="M104 176 C90 140 106 102 149 90
+             C155 96 155 105 148 111
+             C130 122 121 146 121 172 Z" fill="#047857"/>
   </g>
 
-  <!-- sound waves -->
-  <g stroke="#2dd4bf" stroke-width="13" stroke-linecap="round" fill="none">
-    <path d="M200 96 a24 24 0 0 1 0 38" opacity="0.95"/>
-    <path d="M214 84 a40 40 0 0 1 0 60" opacity="0.65"/>
+  <!-- soft whisper puffs -->
+  <g stroke="#2dd4bf" stroke-linecap="round" fill="none">
+    <path d="M206 86 L222 77" stroke-width="13" opacity="0.95"/>
+    <path d="M215 103 L235 99" stroke-width="13" opacity="0.6"/>
+    <circle cx="233" cy="64" r="8" fill="#2dd4bf" stroke="none" opacity="0.5"/>
   </g>
 </svg>
