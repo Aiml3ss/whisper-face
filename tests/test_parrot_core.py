@@ -19,6 +19,8 @@ from parrot_core import (  # noqa: E402
     phonetic_key,
     rank_context_terms,
     recognition_prompt,
+    should_start_speculation,
+    can_reuse_speculation,
 )
 
 
@@ -37,7 +39,7 @@ class ContextTests(unittest.TestCase):
     def test_prompt_deduplicates_global_and_ephemeral_terms(self):
         prompt = recognition_prompt(
             ["Qwen", "Whisper"], ["qwen", "Sipario"], max_terms=3)
-        self.assertEqual(prompt, "Common terms: Qwen, Whisper, Sipario.")
+        self.assertEqual(prompt, "Common terms: Qwen, Sipario, Whisper.")
 
 
 class CleanupCompilerTests(unittest.TestCase):
@@ -100,6 +102,15 @@ class RecognitionTests(unittest.TestCase):
         self.assertEqual(mode_from_modifiers(False, True, True), "command")
         self.assertEqual(
             mode_from_modifiers(False, False, False, code_app=True), "code")
+
+    def test_speculation_starts_on_a_real_pause_and_is_invalidated_by_growth(self):
+        self.assertTrue(should_start_speculation(
+            True, 16_000, 4_000, 16_000, False))
+        self.assertFalse(should_start_speculation(
+            True, 16_000, 2_000, 16_000, False))
+        self.assertTrue(can_reuse_speculation(True, False, 8_000, 8_000))
+        self.assertFalse(can_reuse_speculation(True, True, 8_000, 8_000))
+        self.assertFalse(can_reuse_speculation(True, False, 8_000, 9_000))
 
 
 if __name__ == "__main__":

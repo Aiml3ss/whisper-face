@@ -12,6 +12,7 @@ logic can run in under a second without loading either model.
 import ast
 import json
 import re
+import sys
 import tempfile
 import threading
 import unittest
@@ -20,10 +21,12 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from parrot_core import Recognition, compile_cleanup
-
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from parrot_core import Recognition, compile_cleanup  # noqa: E402
+
 TREE = ast.parse((ROOT / "dictate.py").read_text())
 
 

@@ -225,6 +225,8 @@ from parrot_core import (
     mode_from_modifiers,
     rank_context_terms,
     recognition_prompt,
+    should_start_speculation,
+    can_reuse_speculation,
 )
 
 # ------------------------- config -------------------------
@@ -256,6 +258,8 @@ QUICK_PATH_MAX_WORDS = 40    # clean speech (no fillers/commands/enums) can
 # seconds no matter how long the dictation ran.
 CHUNK_MIN_SECONDS = 4.0      # never cut a segment shorter than this
 CHUNK_CUT_SILENCE = 0.6      # a pause this long marks a safe cut point
+SPECULATIVE_MIN_SECONDS = 0.8
+SPECULATIVE_SILENCE = 0.25   # likely end pause: decode before key release
 
 SNIPPETS_FILE = HERE / "snippets.json"
 SNIPPET_RE = re.compile(
@@ -301,14 +305,15 @@ KEEPWARM_MIN_IDLE = 60       # skip the beat if dictating right now
 
 LOCK_FILE = HERE / ".dictate.lock"
 
-# HUD: the "Voice Listening" stage from the design handoff — radial
-# waveform ringing the parrot, pulse ring, audio-reactive beak, live
-# caption. Geometry per spec (stage 360, parrot 256 viewBox @ 300).
-HUD_W, HUD_H = 420.0, 460.0
+# HUD: the "Voice Listening" stage from the design handoff, rendered at
+# half scale so it stays an overlay, not a takeover. All geometry is still
+# the spec's (stage 360, parrot 256 viewBox @ 300) times HUD_SCALE.
+HUD_SCALE = 0.5
+HUD_W, HUD_H = 240.0, 236.0
 HUD_BOTTOM_MARGIN = 80.0
-HUD_RADIUS = 28.0
-STAGE = 360.0                # square stage, centered horizontally
-STAGE_TOP = 40.0             # below the brand row (design y-down coords)
+HUD_RADIUS = 20.0
+STAGE = 360.0 * HUD_SCALE    # square stage, centered horizontally
+STAGE_TOP = 14.0             # design y-down coords
 PARROT_SCALE = 300.0 / 256.0
 RADIAL_BARS = 60
 BAR_INNER_R = 134.0
@@ -674,6 +679,7 @@ class WaveView(NSView):
         edge.stroke()
 
         # per-frame state
+        S = HUD_SCALE
         self.t += 1.0 / FPS
         self.frame_n += 1
         target = 0.0 if self.mode == "processing" else self.raw
@@ -688,10 +694,10 @@ class WaveView(NSView):
                 ang = (i / RADIAL_BARS) * 2.0 * math.pi - math.pi / 2.0
                 v = max(0.03, lv * (0.4 + 0.6 * abs(
                     math.sin(i * 0.7 + self.frame_n * 0.16))))
-                r0 = BAR_INNER_R
-                r1 = BAR_INNER_R + 6.0 + v * 66.0
+                r0 = BAR_INNER_R * S
+                r1 = (BAR_INNER_R + 6.0 + v * 66.0) * S
                 bar = NSBezierPath.bezierPath()
-                bar.setLineWidth_(3.2)
+                bar.setLineWidth_(max(1.6, 3.2 * S))
                 bar.setLineCapStyle_(1)
                 bar.moveToPoint_((cx + r0 * math.cos(ang),
                                   cy + r0 * math.sin(ang)))
@@ -701,58 +707,46 @@ class WaveView(NSView):
                 bar.stroke()
 
         # pulse ring (300px, scale 1 + lv*0.16, opacity 0.12 + lv*0.5)
-        rr = 150.0 * (1.0 + lv * 0.16)
+        rr = 150.0 * S * (1.0 + lv * 0.16)
         ring = NSBezierPath.bezierPathWithOvalInRect_(
             NSMakeRect(cx - rr, cy - rr, rr * 2, rr * 2))
-        ring.setLineWidth_(2.0)
+        ring.setLineWidth_(1.5)
         if self.mode == "processing":
             _rgb(*AMBER, 0.12 + 0.18 * abs(math.sin(self.t * 2.2)))
         else:
             _rgb(*ACCENT, 0.12 + lv * 0.5)
         ring.stroke()
 
-        # the parrot (256 viewBox at 300, centered; bobs while listening)
+        # the parrot (256 viewBox at 300*S, centered; bobs while listening)
         bob = 0.0 if self.mode == "processing" else \
-            -3.0 * (1.0 - math.cos(2.0 * math.pi * self.t / 3.2))
+            -3.0 * S * (1.0 - math.cos(2.0 * math.pi * self.t / 3.2))
         ctx = NSGraphicsContext.currentContext()
         ctx.saveGraphicsState()
         tr = NSAffineTransform.transform()
-        tr.translateXBy_yBy_(cx - 150.0, STAGE_TOP + 30.0 + bob)
-        tr.scaleBy_(PARROT_SCALE)
+        tr.translateXBy_yBy_(cx - 150.0 * S, STAGE_TOP + 30.0 * S + bob)
+        tr.scaleBy_(PARROT_SCALE * S)
         tr.concat()
         self.drawParrot_(lv)
         ctx.restoreGraphicsState()
 
-        # brand row
-        para = NSMutableParagraphStyle.alloc().init()
-        para.setAlignment_(1)                    # NSTextAlignmentCenter
-        brand = NSAttributedString.alloc().initWithString_attributes_(
-            "WHISPERING PARROT", {
-                NSFontAttributeName:
-                    NSFont.systemFontOfSize_weight_(10.0, 0.3),
-                NSForegroundColorAttributeName:
-                    NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.5),
-                NSKernAttributeName: 3.0,
-                NSParagraphStyleAttributeName: para,
-            })
-        brand.drawInRect_(NSMakeRect(0, 14, W, 16))
-
         # caption (live transcript; tail-trimmed so recent words win)
         text = CAPTION["text"].strip()
-        if len(text) > 110:
-            text = "…" + text[-108:]
+        if len(text) > 72:
+            text = "…" + text[-70:]
         if text:
+            para = NSMutableParagraphStyle.alloc().init()
+            para.setAlignment_(1)                # NSTextAlignmentCenter
             dim = 0.75 if self.mode == "processing" else 1.0
             cap = NSAttributedString.alloc().initWithString_attributes_(
                 text, {
                     NSFontAttributeName:
-                        NSFont.systemFontOfSize_weight_(15.0, 0.23),
+                        NSFont.systemFontOfSize_weight_(12.0, 0.23),
                     NSForegroundColorAttributeName:
                         _color(*CAPTION_COL, dim),
                     NSParagraphStyleAttributeName: para,
                 })
             cap.drawInRect_(
-                NSMakeRect(24, STAGE_TOP + STAGE + 2, W - 48, 46))
+                NSMakeRect(14, STAGE_TOP + STAGE + 4, W - 28, 34))
 
     def drawParrot_(self, lv):
         # tail
@@ -1010,6 +1004,18 @@ class StatusBar(NSObject):
         self.recognition_root = mk("Last Recognition", None)
         self.recognition_menu = NSMenu.alloc().init()
         self.recognition_root.setSubmenu_(self.recognition_menu)
+        self.modes_root = mk("Voice Modes", None)
+        self.modes_menu = NSMenu.alloc().init()
+        self.modes_root.setSubmenu_(self.modes_menu)
+        for title in (
+                "Right Option — Capture / Code",
+                "Shift + Right Option — Compose",
+                "Control + Right Option — Reply",
+                "Command + Right Option — Edit Selection",
+                "Control + Command + Right Option — Command"):
+            mode_item = mk(title, None)
+            mode_item.setEnabled_(False)
+            self.modes_menu.addItem_(mode_item)
         self.flight_item = mk("Flight Recorder", "toggleFlight:")
         self.pause_item = mk("Pause Dictation", "togglePause:")
         menu.addItem_(self.stat1)
@@ -1018,6 +1024,7 @@ class StatusBar(NSObject):
         menu.addItem_(self.tones_root)
         menu.addItem_(self.learning_root)
         menu.addItem_(self.recognition_root)
+        menu.addItem_(self.modes_root)
         menu.addItem_(self.flight_item)
         menu.addItem_(self.pause_item)
         menu.addItem_(mk("Open Log", "openLog:"))
@@ -1538,6 +1545,9 @@ class Recorder:
         self.silent_samples = 0
         self.voiced_since_cut = False
         self._cut_frame_idx = 0
+        self.speculative_future = None
+        self.speculative_start = 0
+        self.speculative_invalid = False
 
     def start(self, press_at=None):
         self.frames = []
@@ -1547,6 +1557,9 @@ class Recorder:
         self.silent_samples = 0
         self.voiced_since_cut = False
         self._cut_frame_idx = 0
+        self.speculative_future = None
+        self.speculative_start = 0
+        self.speculative_invalid = False
         self.audio_status = []
         self.captured_via_flight = False
         self.source = "hold"
@@ -1571,6 +1584,9 @@ class Recorder:
         self.silent_samples = 0
         self.voiced_since_cut = False
         self._cut_frame_idx = 0
+        self.speculative_future = None
+        self.speculative_start = 0
+        self.speculative_invalid = False
         self.recording = False
         self.source = "flight"
 
@@ -1580,6 +1596,10 @@ class Recorder:
         if status and len(self.audio_status) < 3:
             self.audio_status.append(str(status))
         self.frames.append(indata.copy())
+        if (self.speculative_invalid and self.speculative_future is not None
+                and self.speculative_future.done()):
+            self.speculative_future = None
+            self.speculative_invalid = False
         n = len(indata)
         self.total_samples += n
         rms = float(np.sqrt(np.mean(indata ** 2)))
@@ -1592,15 +1612,44 @@ class Recorder:
         else:
             self.silent_samples = 0
             self.voiced_since_cut = True
+            if self.speculative_future is not None:
+                if self.speculative_future.cancel():
+                    self.speculative_future = None
+                    self.speculative_invalid = False
+                else:
+                    self.speculative_invalid = True
+        segment_samples = self.total_samples - self.cut_samples
+        if should_start_speculation(
+                self.voiced_since_cut,
+                segment_samples,
+                self.silent_samples,
+                SAMPLE_RATE,
+                self.speculative_future is not None,
+                SPECULATIVE_MIN_SECONDS,
+                SPECULATIVE_SILENCE):
+            frames_for_speculation = tuple(
+                self.frames[self._cut_frame_idx:])
+            self.speculative_start = self.cut_samples
+            self.speculative_invalid = False
+            self.speculative_future = CHUNK_PREP_POOL.submit(
+                _transcribe_frames, frames_for_speculation, self.prompt)
         if (self.voiced_since_cut
-                and self.total_samples - self.cut_samples
-                    >= CHUNK_MIN_SECONDS * SAMPLE_RATE
+                and segment_samples >= CHUNK_MIN_SECONDS * SAMPLE_RATE
                 and self.silent_samples >= CHUNK_CUT_SILENCE * SAMPLE_RATE):
-            frames_for_chunk = tuple(self.frames[self._cut_frame_idx:])
-            fut = CHUNK_PREP_POOL.submit(
-                _transcribe_frames, frames_for_chunk, self.prompt)
+            if can_reuse_speculation(
+                    self.speculative_future is not None,
+                    self.speculative_invalid,
+                    self.speculative_start,
+                    self.cut_samples):
+                fut = self.speculative_future
+            else:
+                frames_for_chunk = tuple(self.frames[self._cut_frame_idx:])
+                fut = CHUNK_PREP_POOL.submit(
+                    _transcribe_frames, frames_for_chunk, self.prompt)
             fut.add_done_callback(_caption_add)   # live caption in the HUD
             self.chunks.append(fut)
+            self.speculative_future = None
+            self.speculative_invalid = False
             self._cut_frame_idx = len(self.frames)
             self.cut_samples = self.total_samples
             self.voiced_since_cut = False
@@ -1751,7 +1800,7 @@ def refresh_glossary():
         # deterministic post-ASR replacements.
         GLOSS["fixes"] = {old: info["to"]
                           for old, info in state["fixes"].items()
-                          if info.get("n", 0) >= PROMOTE_MIN_COUNT}
+                          if info.get("n", 0) >= 3}
         GLOSS["confusions"] = dict(state.get("confusions", {}))
 
     write_auto_section(promoted)
@@ -2405,7 +2454,7 @@ def learn_from_corrections(receipt: PasteReceipt | None):
                 "mode": receipt.mode,
             })
             state["history"] = state["history"][-100:]
-            if fix["n"] == PROMOTE_MIN_COUNT:
+            if fix["n"] == 3:
                 print(f"[learn] fix rule active: {old!r} -> {term!r}")
         if changed:
             save_learned(state)
@@ -2507,6 +2556,16 @@ def _guard_cleaned_output(text: str, out: str, done: str,
     if (mode in {"capture", "code"} and len(out.split()) < 0.5 * words
             and "scratch that" not in text.lower()):
         return "over-deletion"
+    if mode in {"compose", "reply"}:
+        anchors = re.findall(
+            r"\b(?:\d[\w:./-]*|[A-Z]{2,}[\w-]*|"
+            r"[A-Za-z]+[A-Z][A-Za-z0-9_-]*)\b",
+            text,
+        )
+        missing = [anchor for anchor in anchors
+                   if anchor.casefold() not in out.casefold()]
+        if missing:
+            return "missing factual anchors"
     return None
 
 
@@ -2845,16 +2904,30 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             full_audio = rec.stop()
             cut = rec.cut_samples
             chunk_futs = list(rec.chunks)
+            if can_reuse_speculation(
+                    rec.speculative_future is not None,
+                    rec.speculative_invalid,
+                    rec.speculative_start,
+                    cut):
+                pre_future = rec.speculative_future
         else:
             # Speech already ended: start ASR immediately and close the mic.
             main_audio = rec.snapshot()
             cut = rec.cut_samples
             chunk_futs = list(rec.chunks)
             rem = main_audio[cut:]
-            pre_future = ASR_POOL.submit(transcribe_detailed, rem, rec.prompt) \
-                if (len(rem) / SAMPLE_RATE >= (
-                        MIN_SECONDS if not chunk_futs else 0.25)
-                    and peak_rms(rem) >= GATE_PEAK_RMS) else None
+            if can_reuse_speculation(
+                    rec.speculative_future is not None,
+                    rec.speculative_invalid,
+                    rec.speculative_start,
+                    cut):
+                pre_future = rec.speculative_future
+            else:
+                pre_future = ASR_POOL.submit(
+                    transcribe_detailed, rem, rec.prompt) \
+                    if (len(rem) / SAMPLE_RATE >= (
+                            MIN_SECONDS if not chunk_futs else 0.25)
+                        and peak_rms(rem) >= GATE_PEAK_RMS) else None
             full_audio = rec.stop()
         capture_done_at = time.perf_counter()
 

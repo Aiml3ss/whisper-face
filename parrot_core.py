@@ -104,10 +104,16 @@ def rank_context_terms(
 def recognition_prompt(global_terms: Iterable[str], context_terms: Iterable[str],
                        max_terms: int = 60, max_chars: int = 700) -> str | None:
     """Merge stable and ephemeral vocabulary into one closed Whisper prompt."""
+    stable = [str(term).strip() for term in global_terms if str(term).strip()]
+    stable_casing = {term.casefold(): term for term in stable}
+    ephemeral = [stable_casing.get(str(term).strip().casefold(), str(term).strip())
+                 for term in context_terms if str(term).strip()]
     out: list[str] = []
     seen: set[str] = set()
     chars = 0
-    for term in [*global_terms, *context_terms]:
+    # Current visible context outranks the long-term glossary. Canonical casing
+    # still comes from the glossary when both contain the same term.
+    for term in [*ephemeral, *stable]:
         clean = str(term).strip()
         key = clean.casefold()
         if not clean or key in seen:
@@ -274,3 +280,23 @@ def mode_from_modifiers(shift: bool, command: bool, control: bool,
     if code_app:
         return "code"
     return "capture"
+
+
+def should_start_speculation(voiced: bool, segment_samples: int,
+                             silent_samples: int, sample_rate: int,
+                             has_future: bool, minimum_seconds: float = 0.8,
+                             silence_seconds: float = 0.25) -> bool:
+    """Decide whether a pause is strong enough to pre-decode before release."""
+    return bool(
+        voiced
+        and not has_future
+        and segment_samples >= minimum_seconds * sample_rate
+        and silent_samples >= silence_seconds * sample_rate
+    )
+
+
+def can_reuse_speculation(has_future: bool, invalid: bool,
+                          speculative_start: int, current_cut: int) -> bool:
+    """A speculative result is valid only for the unchanged current segment."""
+    return bool(
+        has_future and not invalid and speculative_start == current_cut)

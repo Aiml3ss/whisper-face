@@ -41,7 +41,15 @@ import time
 
 import requests
 
-from dictate import BASE_PROMPT, FEW_SHOT, REFUSAL_RE, TONE, TRANSCRIPTS_FILE
+from dictate import (
+    BASE_PROMPT,
+    FEW_SHOT,
+    MODE_INSTRUCTIONS,
+    REFUSAL_RE,
+    STRUCTURED_OUTPUT,
+    TONE,
+    TRANSCRIPTS_FILE,
+)
 
 OLLAMA = "http://localhost:11434"
 DEFAULT_CANDIDATES = ["qwen3.5:4b", "qwen3.5:2b", "qwen3:1.7b", "llama3.2:3b"]
@@ -74,14 +82,27 @@ ADVERSARIAL = [
 
 
 def chat(model: str, user: str, num_predict: int) -> tuple[str, str, dict]:
+    few_shot = []
+    for message in FEW_SHOT:
+        if message["role"] == "assistant":
+            few_shot.append({
+                "role": "assistant",
+                "content": json.dumps(
+                    {"text": message["content"], "edits": []}),
+            })
+        else:
+            few_shot.append(message)
     payload = {
         "model": model,
         "messages": ([{"role": "system",
-                       "content": BASE_PROMPT + "\n" + TONE["default"]}]
-                     + FEW_SHOT
+                       "content": BASE_PROMPT + "\n" + TONE["default"]
+                       + "\n" + MODE_INSTRUCTIONS["capture"]
+                       + "\n" + STRUCTURED_OUTPUT}]
+                     + few_shot
                      + [{"role": "user", "content": user}]),
         "stream": False,
         "think": False,
+        "format": "json",
         "keep_alive": "10m",
         "options": {"temperature": 0, "repeat_penalty": 1.0,
                     "num_predict": num_predict},
@@ -92,8 +113,10 @@ def chat(model: str, user: str, num_predict: int) -> tuple[str, str, dict]:
         r = requests.post(f"{OLLAMA}/api/chat", json=payload, timeout=(5, 120))
     r.raise_for_status()
     d = r.json()
-    out = re.sub(r"<think>.*?</think>", "", d["message"]["content"],
-                 flags=re.S).strip().strip('"').strip()
+    raw = re.sub(r"<think>.*?</think>", "", d["message"]["content"],
+                 flags=re.S).strip()
+    parsed = json.loads(raw)
+    out = str(parsed.get("text", "")).strip().strip('"').strip()
     return out, d.get("done_reason", "stop"), d
 
 
