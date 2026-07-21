@@ -1,0 +1,27 @@
+name: Windows smoke test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  windows-runtime:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Validate locked Windows environment
+        run: uv sync --locked --script dictate.py
+      - name: Import Windows runtime
+        run: uv run --locked --script dictate.py --platform-smoke-test
+      - name: Run platform-independent tests
+        shell: pwsh
+        run: |
+          uv run tests/test_parrot_core.py
+          uv run tests/test_dictate.py
+          uv run tests/test_installers.py
+      - name: Parse PowerShell installer
+        shell: pwsh
+        run: |
+          $Source = Get-Content -Raw .\setup.ps1
+          [void][scriptblock]::Create($Source)

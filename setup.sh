@@ -1,10 +1,35 @@
 #!/bin/bash
-# One-command, repeatable installer for the complete local Mac stack.
+# One-command, repeatable installer. macOS stays native here; Windows shells
+# are handed to setup.ps1 before any Unix-specific installation work begins.
 # Safe to rerun: generated services are replaced; private user files survive.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
+
+kernel="$(uname -s)"
+case "$kernel" in
+    MINGW*|MSYS*|CYGWIN*)
+        windows_script="$(cygpath -w "$DIR/setup.ps1")"
+        exec powershell.exe -NoProfile -ExecutionPolicy Bypass \
+            -File "$windows_script" "$@"
+        ;;
+    Linux)
+        if grep -qi microsoft /proc/version 2>/dev/null \
+                && command -v powershell.exe >/dev/null 2>&1; then
+            windows_script="$(wslpath -w "$DIR/setup.ps1")"
+            exec powershell.exe -NoProfile -ExecutionPolicy Bypass \
+                -File "$windows_script" "$@"
+        fi
+        echo "!! Whispering Parrot supports macOS and Windows; Linux is not supported." >&2
+        exit 1
+        ;;
+    Darwin) ;;
+    *)
+        echo "!! unsupported operating system: $kernel" >&2
+        exit 1
+        ;;
+esac
 
 MODE="full"
 VERIFY_ONLY=0
@@ -14,7 +39,7 @@ for arg in "$@"; do
         --verify) VERIFY_ONLY=1 ;;
         -h|--help)
             echo "Usage: ./setup.sh [--server-only] [--verify]"
-            echo "  --server-only  install the headless endpoint without Mac UI/mic"
+            echo "  --server-only  install the headless endpoint without UI/mic"
             echo "  --verify       check an existing installation without changing it"
             exit 0
             ;;
@@ -76,6 +101,7 @@ render_plist() {
 
 required=(
     dictate.py dictate.py.lock parrot_core.py
+    setup.ps1 Install.command Install.cmd
     com.berg.dictate.plist.template com.berg.ollama.plist.template
     snippets.template.json tones.template.json preferences.template.json
     dictionary.template.txt icons/glyph.svg
@@ -84,7 +110,6 @@ for file in "${required[@]}"; do
     [ -f "$DIR/$file" ] || fail "repository is incomplete: missing $file"
 done
 
-[ "$(uname -s)" = "Darwin" ] || fail "this installer requires macOS"
 [ "$(uname -m)" = "arm64" ] \
     || fail "this stack requires an Apple Silicon Mac (MLX)"
 

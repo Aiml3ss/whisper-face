@@ -1,12 +1,17 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#   "mlx-whisper",
+#   "mlx-whisper; sys_platform == 'darwin'",
 #   "sounddevice",
 #   "pynput",
-#   "pyobjc-framework-Cocoa",
-#   "pyobjc-framework-Quartz",
-#   "pyobjc-framework-ApplicationServices",
+#   "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
+#   "pyobjc-framework-Quartz; sys_platform == 'darwin'",
+#   "pyobjc-framework-ApplicationServices; sys_platform == 'darwin'",
+#   "faster-whisper; sys_platform == 'win32'",
+#   "pyperclip; sys_platform == 'win32'",
+#   "pywin32; sys_platform == 'win32'",
+#   "pystray; sys_platform == 'win32'",
+#   "pillow; sys_platform == 'win32'",
 #   "numpy",
 #   "requests",
 # ]
@@ -170,7 +175,6 @@ Run with:  uv run dictate.py   (or via the com.berg.dictate LaunchAgent)
 import difflib
 import email
 import email.policy
-import fcntl
 import json
 import math
 import os
@@ -190,47 +194,96 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
-import objc
 import requests
 import sounddevice as sd
-from AppKit import (
-    NSAffineTransform,
-    NSApplication,
-    NSApplicationActivationPolicyAccessory,
-    NSBackingStoreBuffered,
-    NSBezierPath,
-    NSColor,
-    NSFont,
-    NSGraphicsContext,
-    NSFontAttributeName,
-    NSForegroundColorAttributeName,
-    NSImage,
-    NSMenu,
-    NSMenuItem,
-    NSMutableParagraphStyle,
-    NSParagraphStyleAttributeName,
-    NSPanel,
-    NSPasteboard,
-    NSPasteboardItem,
-    NSPasteboardTypeString,
-    NSScreen,
-    NSStatusBar,
-    NSStatusWindowLevel,
-    NSVariableStatusItemLength,
-    NSView,
-    NSWindowCollectionBehaviorCanJoinAllSpaces,
-    NSWindowCollectionBehaviorFullScreenAuxiliary,
-    NSWindowCollectionBehaviorStationary,
-    NSWindowStyleMaskBorderless,
-    NSWindowStyleMaskNonactivatingPanel,
-    NSWorkspace,
-)
-from Foundation import (NSAttributedString, NSMakeRect, NSMakeSize, NSObject,
-                        NSTimer)
-from PyObjCTools import AppHelper
 from pynput import keyboard
 
-from parrot_core import (
+IS_MACOS = sys.platform == "darwin"
+IS_WINDOWS = sys.platform == "win32"
+if not (IS_MACOS or IS_WINDOWS):
+    raise RuntimeError("Whispering Parrot supports macOS and Windows only")
+
+if IS_MACOS:
+    import fcntl
+    import objc
+    from AppKit import (
+        NSAffineTransform,
+        NSApplication,
+        NSApplicationActivationPolicyAccessory,
+        NSBackingStoreBuffered,
+        NSBezierPath,
+        NSColor,
+        NSFont,
+        NSGraphicsContext,
+        NSFontAttributeName,
+        NSForegroundColorAttributeName,
+        NSImage,
+        NSMenu,
+        NSMenuItem,
+        NSMutableParagraphStyle,
+        NSParagraphStyleAttributeName,
+        NSPanel,
+        NSPasteboard,
+        NSPasteboardItem,
+        NSPasteboardTypeString,
+        NSScreen,
+        NSStatusBar,
+        NSStatusWindowLevel,
+        NSVariableStatusItemLength,
+        NSView,
+        NSWindowCollectionBehaviorCanJoinAllSpaces,
+        NSWindowCollectionBehaviorFullScreenAuxiliary,
+        NSWindowCollectionBehaviorStationary,
+        NSWindowStyleMaskBorderless,
+        NSWindowStyleMaskNonactivatingPanel,
+        NSWorkspace,
+    )
+    from Foundation import (
+        NSAttributedString, NSMakeRect, NSMakeSize, NSObject, NSTimer,
+    )
+    from PyObjCTools import AppHelper
+else:
+    import ctypes
+    import pyperclip
+    import pystray
+    import win32clipboard
+    from PIL import Image, ImageDraw
+
+    class NSObject:
+        """Enough Objective-C allocation shape for shared startup code."""
+
+        @classmethod
+        def alloc(cls):
+            return cls()
+
+        def init(self):
+            return self
+
+    class NSView(NSObject):
+        pass
+
+    class _ObjCCompat:
+        @staticmethod
+        def super(cls, instance):
+            return super(cls, instance)
+
+    class _AppHelperCompat:
+        @staticmethod
+        def callAfter(function, *args):
+            function(*args)
+
+        @staticmethod
+        def runEventLoop(installInterrupt=True):
+            try:
+                while True:
+                    time.sleep(3600)
+            except KeyboardInterrupt:
+                return
+
+    objc = _ObjCCompat()
+    AppHelper = _AppHelperCompat()
+
+from parrot_core import (  # noqa: E402
     CleanupEdit,
     Recognition,
     compile_cleanup,
@@ -249,8 +302,10 @@ from parrot_core import (
 
 HOTKEY = keyboard.Key.alt_r
 SAMPLE_RATE = 16_000
-WHISPER_REPO = "mlx-community/whisper-large-v3-turbo"
-FAST_WHISPER_REPO = "mlx-community/whisper-tiny"
+WHISPER_REPO = (
+    "mlx-community/whisper-large-v3-turbo" if IS_MACOS else "turbo"
+)
+FAST_WHISPER_REPO = "mlx-community/whisper-tiny" if IS_MACOS else "tiny"
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_MODEL = "qwen3.5:4b"
 
@@ -1255,6 +1310,115 @@ class StatusBar(NSObject):
         NSApplication.sharedApplication().terminate_(None)
 
 
+if IS_WINDOWS:
+    class WindowsHUD(NSObject):
+        """The Windows tray shows state; the capture path stays UI-thread free."""
+
+        def init(self):
+            return self
+
+        def showMode_(self, mode):
+            return None
+
+        def dismiss(self):
+            return None
+
+    class WindowsStatusBar(NSObject):
+        """Native Windows notification-area controls and live state color."""
+
+        COLORS = {
+            "idle": (55, 170, 92, 255),
+            "rec": (224, 62, 62, 255),
+            "proc": (241, 146, 44, 255),
+            "off": (135, 135, 145, 255),
+        }
+
+        def _icon_image(self, state):
+            image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(image)
+            draw.ellipse((7, 7, 57, 57), fill=self.COLORS.get(
+                state, self.COLORS["idle"]))
+            draw.ellipse((22, 18, 42, 38), fill=(252, 252, 245, 255))
+            draw.polygon(((39, 27), (56, 33), (39, 38)),
+                         fill=(244, 154, 46, 255))
+            draw.ellipse((34, 23, 38, 27), fill=(20, 25, 30, 255))
+            return image
+
+        def init(self):
+            self.state = "idle"
+            menu = pystray.Menu(
+                pystray.MenuItem(
+                    "Flight Recorder (RAM only)", self._toggle_flight,
+                    checked=lambda _item: bool(
+                        PREFERENCES.get("flight_recorder", False)),
+                ),
+                pystray.MenuItem(
+                    "Pause Dictation", self._toggle_pause,
+                    checked=lambda _item: bool(PAUSED["on"]),
+                ),
+                pystray.MenuItem("Open Log", self._open_log),
+                pystray.MenuItem("Quit Dictation", self._quit),
+            )
+            self.icon = pystray.Icon(
+                "WhisperingParrot", self._icon_image("idle"),
+                "Whispering Parrot", menu,
+            )
+            self.icon.run_detached()
+            return self
+
+        def setState_(self, state):
+            self.state = state
+            self.icon.icon = self._icon_image(state)
+            labels = {
+                "idle": "Whispering Parrot",
+                "rec": "Whispering Parrot — recording",
+                "proc": "Whispering Parrot — processing",
+                "off": "Whispering Parrot — paused",
+            }
+            self.icon.title = labels.get(state, "Whispering Parrot")
+
+        def _toggle_flight(self, icon, item):
+            desired = not bool(PREFERENCES.get("flight_recorder", False))
+            PREFERENCES["flight_recorder"] = desired
+            save_preferences()
+            if not desired:
+                FLIGHT.disable()
+            elif not PAUSED["on"]:
+                try:
+                    FLIGHT.enable()
+                except Exception as error:
+                    PREFERENCES["flight_recorder"] = False
+                    save_preferences()
+                    print(f"! Flight Recorder could not start: {error}")
+            icon.update_menu()
+
+        def _toggle_pause(self, icon, item):
+            PAUSED["on"] = not PAUSED["on"]
+            if PAUSED["on"]:
+                FLIGHT.disable()
+            elif PREFERENCES.get("flight_recorder", False):
+                try:
+                    FLIGHT.enable()
+                except Exception as error:
+                    print(f"! Flight Recorder could not resume: {error}")
+            self.setState_("off" if PAUSED["on"] else "idle")
+            icon.update_menu()
+
+        def _open_log(self, icon, item):
+            os.startfile(str(HERE / "dictate.log"))
+
+        def _quit(self, icon, item):
+            try:
+                FLIGHT.disable()
+                AUDIO_POOL.close()
+            finally:
+                icon.stop()
+                os._exit(0)
+
+    HUD = WindowsHUD
+    StatusBar = WindowsStatusBar
+
+
 # ------------------------- audio -------------------------
 
 
@@ -2038,6 +2202,11 @@ def keepwarm_loop():
 
 
 def play(sound: str):
+    if IS_WINDOWS:
+        import winsound
+        alias = "SystemAsterisk" if sound == "Tink" else "SystemHand"
+        winsound.PlaySound(alias, winsound.SND_ALIAS | winsound.SND_ASYNC)
+        return
     subprocess.Popen(
         ["afplay", f"/System/Library/Sounds/{sound}.aiff"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -2045,8 +2214,25 @@ def play(sound: str):
 
 
 def frontmost_bundle() -> str:
+    if IS_WINDOWS:
+        title = windows_foreground_title()
+        return f"windows:{title}" if title else "windows:unknown"
     app = NSWorkspace.sharedWorkspace().frontmostApplication()
     return app.bundleIdentifier() if app else ""
+
+
+def windows_foreground_title() -> str:
+    if not IS_WINDOWS:
+        return ""
+    try:
+        user32 = ctypes.windll.user32
+        window = user32.GetForegroundWindow()
+        length = user32.GetWindowTextLengthW(window)
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(window, buffer, len(buffer))
+        return buffer.value.strip()
+    except Exception:
+        return ""
 
 
 def tone_for(bundle: str) -> str:
@@ -2095,6 +2281,14 @@ def ensure_single_instance():
     """Two copies mean two hotkey listeners and double pastes. Exit 0 so a
     launchd KeepAlive={SuccessfulExit:false} agent doesn't respawn-loop
     behind a manually started copy."""
+    if IS_WINDOWS:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.CreateMutexW(None, False, "WhisperingParrot.Dictation")
+        if not handle or kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            print("dictate.py is already running elsewhere; exiting.")
+            sys.exit(0)
+        LOCK_FILE.write_text(str(os.getpid()))
+        return handle
     fd = open(LOCK_FILE, "w")
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -2111,6 +2305,8 @@ def ensure_event_permissions():
     Ask for Input Monitoring (hotkey listening) and Accessibility (paste
     keystroke posting) up front; if missing, wait for the user to flip the
     toggles and then re-exec so the listener starts trusted."""
+    if IS_WINDOWS:
+        return
     try:
         from Quartz import (
             CGPreflightListenEventAccess, CGRequestListenEventAccess,
@@ -2134,7 +2330,37 @@ def ensure_event_permissions():
 
 # ------------------------- pipeline -------------------------
 
-import mlx_whisper  # noqa: E402
+if IS_MACOS:
+    import mlx_whisper  # noqa: E402
+else:
+    import ctranslate2  # noqa: E402
+    from faster_whisper import WhisperModel  # noqa: E402
+
+    WINDOWS_ASR_MODELS = {}
+
+
+def windows_whisper_model(model_repo: str):
+    """Load the Windows CTranslate2 model once, preferring an NVIDIA GPU."""
+    if model_repo in WINDOWS_ASR_MODELS:
+        return WINDOWS_ASR_MODELS[model_repo]
+    options = []
+    if ctranslate2.get_cuda_device_count() > 0:
+        options.append(("cuda", "float16"))
+    options.append(("cpu", "int8"))
+    error = None
+    for device, compute_type in options:
+        try:
+            model = WhisperModel(
+                model_repo, device=device, compute_type=compute_type,
+                download_root=str(HERE / ".models"),
+            )
+            WINDOWS_ASR_MODELS[model_repo] = model
+            print(f"[asr] {model_repo} on {device}/{compute_type}")
+            return model
+        except Exception as candidate_error:
+            error = candidate_error
+            print(f"! {model_repo} could not use {device}: {candidate_error}")
+    raise RuntimeError(f"could not load Windows Whisper model: {error}")
 
 
 def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
@@ -2151,14 +2377,35 @@ def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
             prompt = GLOSS["prompt"]
 
     def decode(temperature):
-        result = mlx_whisper.transcribe(
-            audio,
-            path_or_hf_repo=model_repo,
-            language="en",
-            initial_prompt=prompt,
-            temperature=temperature,
-            condition_on_previous_text=False,
-        )
+        if IS_MACOS:
+            result = mlx_whisper.transcribe(
+                audio,
+                path_or_hf_repo=model_repo,
+                language="en",
+                initial_prompt=prompt,
+                temperature=temperature,
+                condition_on_previous_text=False,
+            )
+        else:
+            model = windows_whisper_model(model_repo)
+            windows_temperature = temperature[0] \
+                if isinstance(temperature, tuple) else temperature
+            segments, _info = model.transcribe(
+                audio,
+                language="en",
+                initial_prompt=prompt,
+                temperature=windows_temperature,
+                condition_on_previous_text=False,
+                beam_size=1,
+            )
+            converted = [{
+                "text": segment.text,
+                "avg_logprob": float(segment.avg_logprob),
+            } for segment in segments]
+            result = {
+                "text": "".join(segment["text"] for segment in converted),
+                "segments": converted,
+            }
         return Recognition(
             text=result["text"].strip(),
             confidence=confidence_from_segments(result.get("segments", [])),
@@ -2332,6 +2579,10 @@ class FocusSnapshot:
 
 def focused_snapshot() -> FocusSnapshot | None:
     """Capture the exact focused field, range, selection, and nearby context."""
+    if IS_WINDOWS:
+        # Windows intentionally avoids synthesizing Ctrl+C here: reading the
+        # selection must never mutate the user's clipboard or focused field.
+        return None
     try:
         from ApplicationServices import (
             AXUIElementCopyAttributeValue,
@@ -2375,6 +2626,17 @@ def focused_text() -> str | None:
 
 def capture_recognition_context() -> tuple[FocusSnapshot | None, list[str]]:
     """Build an ephemeral vocabulary from what the user can currently see."""
+    if IS_WINDOWS:
+        clipboard = None
+        try:
+            candidate = pyperclip.paste()
+            clipboard = candidate if len(candidate) <= 800 else None
+        except Exception:
+            pass
+        return None, rank_context_terms([
+            (windows_foreground_title(), 4.0),
+            (clipboard, 1.0),
+        ])
     snapshot = focused_snapshot()
     app = NSWorkspace.sharedWorkspace().frontmostApplication()
     app_name = str(app.localizedName()) if app is not None else None
@@ -2859,7 +3121,68 @@ def restore_pasteboard(pb, items: list):
         pb.writeObjects_(new_items)
 
 
+def snapshot_windows_clipboard() -> list:
+    """Best-effort copy of every Win32 clipboard format."""
+    saved = []
+    try:
+        win32clipboard.OpenClipboard()
+        clipboard_format = 0
+        while True:
+            clipboard_format = win32clipboard.EnumClipboardFormats(
+                clipboard_format)
+            if not clipboard_format:
+                break
+            try:
+                saved.append((
+                    clipboard_format,
+                    win32clipboard.GetClipboardData(clipboard_format),
+                ))
+            except Exception:
+                pass
+    finally:
+        try:
+            win32clipboard.CloseClipboard()
+        except Exception:
+            pass
+    return saved
+
+
+def restore_windows_clipboard(items: list):
+    try:
+        win32clipboard.OpenClipboard()
+        win32clipboard.EmptyClipboard()
+        for clipboard_format, data in items:
+            try:
+                win32clipboard.SetClipboardData(clipboard_format, data)
+            except Exception:
+                pass
+    finally:
+        try:
+            win32clipboard.CloseClipboard()
+        except Exception:
+            pass
+
+
 def paste(text: str):
+    if IS_WINDOWS:
+        try:
+            saved = snapshot_windows_clipboard()
+        except Exception:
+            saved = []
+        pyperclip.copy(text)
+        time.sleep(0.05)
+        with kb.pressed(keyboard.Key.ctrl):
+            kb.press("v")
+            kb.release("v")
+        if saved:
+            def restore():
+                try:
+                    if pyperclip.paste() == text:
+                        restore_windows_clipboard(saved)
+                except Exception:
+                    pass
+            threading.Timer(1.0, restore).start()
+        return
     pb = NSPasteboard.generalPasteboard()
     try:
         saved = snapshot_pasteboard(pb)
@@ -2886,16 +3209,17 @@ def paste(text: str):
 
 
 def execute_voice_command(raw: str) -> bool:
-    """Execute a deliberately small, reversible Mac editing command set."""
+    """Execute a deliberately small, reversible editing command set."""
     command = re.sub(r"[^a-z ]", "", raw.casefold()).strip()
+    primary_modifier = keyboard.Key.cmd if IS_MACOS else keyboard.Key.ctrl
     shortcuts = {
-        "undo": (keyboard.Key.cmd, "z"),
-        "undo last dictation": (keyboard.Key.cmd, "z"),
-        "redo": (keyboard.Key.cmd, keyboard.Key.shift, "z"),
-        "select all": (keyboard.Key.cmd, "a"),
-        "copy": (keyboard.Key.cmd, "c"),
-        "cut": (keyboard.Key.cmd, "x"),
-        "paste": (keyboard.Key.cmd, "v"),
+        "undo": (primary_modifier, "z"),
+        "undo last dictation": (primary_modifier, "z"),
+        "redo": (primary_modifier, keyboard.Key.shift, "z"),
+        "select all": (primary_modifier, "a"),
+        "copy": (primary_modifier, "c"),
+        "cut": (primary_modifier, "x"),
+        "paste": (primary_modifier, "v"),
         "delete selection": (keyboard.Key.backspace,),
         "new line": (keyboard.Key.enter,),
         "escape": (keyboard.Key.esc,),
@@ -3217,24 +3541,45 @@ def warmup():
         ollama_chat(None, "hi", num_predict=1)
     except Exception as e:
         print(f"! Ollama warmup failed: {e}")
-        print("  Is `brew services start ollama` running, and the model pulled?")
+        print("  Is Ollama running, and has qwen3.5:4b been pulled?")
     print("Ready (phone endpoint only)." if SERVER_ONLY else
-          "Ready. Hold RIGHT OPTION and speak; release to paste. Ctrl-C quits.")
+          f"Ready. Hold {'RIGHT OPTION' if IS_MACOS else 'RIGHT ALT'} and "
+          "speak; release to paste. Ctrl-C quits.")
 
 
 def preload_model_files():
-    """Download both MLX model snapshots without touching the mic or TCC.
+    """Download both platform ASR models without touching the mic or UI.
 
     setup.sh uses this before installing the LaunchAgent so a successful
     installer guarantees that first-use recognition is not still waiting on
     a multi-gigabyte background download.
     """
-    from huggingface_hub import snapshot_download
-
-    for repo in (FAST_WHISPER_REPO, WHISPER_REPO):
-        print(f"Caching {repo}...")
-        snapshot_download(repo_id=repo)
+    if IS_WINDOWS:
+        for repo in (FAST_WHISPER_REPO, WHISPER_REPO):
+            print(f"Caching faster-Whisper {repo}...")
+            windows_whisper_model(repo)
+    else:
+        from huggingface_hub import snapshot_download
+        for repo in (FAST_WHISPER_REPO, WHISPER_REPO):
+            print(f"Caching {repo}...")
+            snapshot_download(repo_id=repo)
     print("Whisper model cache ready.")
+
+
+def platform_smoke_test():
+    """Import-only validation used by installers and cross-platform CI."""
+    expected = (
+        ("mlx-community/whisper-tiny", "mlx-community/whisper-large-v3-turbo")
+        if IS_MACOS else ("tiny", "turbo")
+    )
+    if (FAST_WHISPER_REPO, WHISPER_REPO) != expected:
+        raise RuntimeError("platform ASR model routing is inconsistent")
+    if IS_WINDOWS:
+        for module in (ctranslate2, pyperclip, pystray, win32clipboard):
+            if module is None:
+                raise RuntimeError("Windows runtime dependency is unavailable")
+    print(f"platform smoke test passed: {sys.platform}, "
+          f"{FAST_WHISPER_REPO} -> {WHISPER_REPO}")
 
 
 def main():
@@ -3257,8 +3602,9 @@ def main():
 
     ensure_event_permissions()
 
-    app = NSApplication.sharedApplication()
-    app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+    if IS_MACOS:
+        app = NSApplication.sharedApplication()
+        app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
     hud = HUD.alloc().init()
     STATUS["bar"] = StatusBar.alloc().init()
 
@@ -3269,8 +3615,12 @@ def main():
         AUDIO_POOL.warm()
     except Exception as e:
         print(f"! Microphone unavailable: {e}")
-        print("  Enable 'uv' under System Settings -> Privacy & Security"
-              " -> Microphone. A keypress will retry initialization.")
+        if IS_MACOS:
+            print("  Enable 'uv' under System Settings -> Privacy & Security"
+                  " -> Microphone. A keypress will retry initialization.")
+        else:
+            print("  Enable microphone access under Windows Settings -> "
+                  "Privacy & security. A keypress will retry initialization.")
     if PREFERENCES["flight_recorder"]:
         try:
             FLIGHT.enable()
@@ -3416,7 +3766,9 @@ def main():
 
 
 if __name__ == "__main__":
-    if "--preload-models" in sys.argv:
+    if "--platform-smoke-test" in sys.argv:
+        platform_smoke_test()
+    elif "--preload-models" in sys.argv:
         preload_model_files()
     else:
         main()

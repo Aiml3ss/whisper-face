@@ -4,18 +4,18 @@
 
 <h1 align="center">Whispering Parrot</h1>
 
-<p align="center"><b>Free, fully local hold-to-talk dictation for macOS.</b><br/>
+<p align="center"><b>Free, fully local hold-to-talk dictation for macOS and Windows.</b><br/>
 Hold a key, speak, release — polished text appears wherever your cursor is.<br/>
 No subscription, no cloud, no audio ever leaving your machine.</p>
 
 ---
 
 Whispering Parrot is a single-file dictation stack built to match (and in places beat) the
-commercial tools: [mlx-whisper](https://github.com/ml-explore/mlx-examples)
-for on-device speech recognition and a local LLM via
-[Ollama](https://ollama.com) for cleanup. On an M-series Mac, routine
-dictations use a low-latency fast path, while longer speech is recognized in
-the background before you release the key.
+commercial tools. It uses [mlx-whisper](https://github.com/ml-explore/mlx-examples)
+on Apple Silicon and [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
+on Windows, plus a local LLM through [Ollama](https://ollama.com) for cleanup.
+Routine dictations use a low-latency fast path, while longer speech is
+recognized in the background before you release the key.
 
 ## Features
 
@@ -48,7 +48,7 @@ the background before you release the key.
 - **Six explicit voice modes** — modifier keys turn the same Right Option
   gesture into faithful capture, polished composition, context-aware reply,
   selected-text editing, spoken-code compilation, or a small allowlist of
-  reversible Mac commands.
+  reversible editing commands.
 - **Tone awareness** — casual in Slack/Messages (texting style: no trailing
   period), formal prose in Mail, technical in editors and AI chats, verbatim
   in terminals. Pick a tone per app from the menu-bar **App Tones** picker,
@@ -62,10 +62,10 @@ the background before you release the key.
   menu.
 - **Snippets** — say "insert my email" and your saved text pastes instead.
 - **Whispering works** — quiet speech is gain-normalized before recognition.
-- **Menu-bar presence** — the parrot perches in your menu bar (🔴 while
-  recording, 🟠 processing, ⏸ paused), with usage stats, a pause toggle,
-  voice-mode help, recognition confidence and alternatives, learned-correction
-  controls, and quit in its menu.
+- **Menu-bar/tray presence** — the parrot perches in your menu bar or Windows
+  notification area (🔴 while recording, 🟠 processing, ⏸ paused). The Mac
+  menu includes usage, tones, recognition alternatives, and learned-correction
+  controls; the Windows tray provides pause, Flight Recorder, logs, and quit.
 - **iPhone keyboard** — an OpenAI-compatible `/v1/audio/transcriptions`
   endpoint (port 8787) plugs straight into the
   [Diction](https://diction.one) iOS keyboard's Self-Hosted mode, with your
@@ -76,26 +76,41 @@ the background before you release the key.
 
 ## Requirements
 
-- Apple Silicon Mac (MLX requires it)
-- ~7 GB free disk space for the locked Python environment and models
-  (Whisper Tiny + large-v3-turbo + Qwen3.5-4B)
+| Platform | Requirements |
+|---|---|
+| macOS | Apple Silicon, macOS 14 or newer recommended, ~7 GB free |
+| Windows | Windows 10/11 x64, ~8 GB free; NVIDIA GPU preferred, CPU fallback supported |
+
+Both platforms install Whisper Tiny, Whisper large-v3-turbo, and Qwen3.5-4B.
 
 ## Install
 
+Clone or download the repository, then use the one-click launcher for your OS:
+
+- **Mac:** double-click `Install.command`.
+- **Windows:** double-click `Install.cmd`.
+
+From a terminal, the same installers are:
+
 ```sh
-git clone https://github.com/Aiml3ss/whispering-parrot.git
-cd whispering-parrot
+# macOS
 ./setup.sh
+
+# Windows PowerShell
+.\setup.ps1
 ```
 
-That's it. On a fresh Apple Silicon Mac, the script:
+The launcher detects the OS. A Windows Git Bash or WSL invocation of
+`./setup.sh` automatically hands off to `setup.ps1`. On a fresh machine it:
 
-1. Installs Homebrew when needed, then installs `uv`, `ffmpeg`, and `ollama`.
+1. Installs the native package prerequisites (`Homebrew` on Mac or `winget`
+   packages on Windows), then installs `uv`, `ffmpeg`, and Ollama.
 2. Reproduces the locked Python dependency environment from
    `dictate.py.lock`.
 3. Downloads Qwen3.5-4B and both Whisper models before launching the app.
 4. Creates private configuration files without overwriting existing ones.
-5. Installs and validates the tuned Ollama and dictation login services.
+5. Installs and validates the tuned Ollama and dictation login services
+   (`launchd` on Mac, Task Scheduler on Windows).
 
 Homebrew's official installer may pause once to explain its changes and ask
 for your macOS password. Model downloads are several gigabytes, so the first
@@ -106,14 +121,24 @@ Privacy & Security → **Input Monitoring**, **Accessibility**, and
 **Microphone**. The app waits and restarts itself automatically once granted.
 Allow the firewall prompt if you want the iPhone endpoint.
 
+Windows may show standard package-install prompts. Enable **Microphone access**
+under Settings → Privacy & security if it is disabled. The Windows backend
+automatically uses an NVIDIA GPU when its runtime is available and otherwise
+uses optimized int8 CPU inference. Its tray icon exposes pause, Flight
+Recorder, logs, and quit. The core capture, confidence cascade, cleanup,
+snippets, tones, and learning pipeline is shared; macOS additionally provides
+the floating Cocoa HUD and richer Accessibility-based selection/document
+context.
+
 After granting permissions, verify the complete installation at any time:
 
 ```sh
-./setup.sh --verify
+./setup.sh --verify                 # macOS
+.\setup.ps1 --verify               # Windows
 ```
 
-This checks the dependency lock, generated launch-agent files, Qwen model,
-both running services, and the process health endpoint without changing the
+This checks the dependency lock, platform login service, Qwen model, both
+Whisper caches, and the process health endpoint without changing the
 installation.
 
 ### Matching another Mac
@@ -140,7 +165,7 @@ learning loop. Then in the Diction app on iOS: *Self-Hosted* →
 
 | Say | Get |
 |---|---|
-| (hold Right Option, talk, release) | cleaned text at your cursor |
+| (hold Right Option on Mac or Right Alt on Windows, talk, release) | cleaned text at your cursor |
 | (Flight Recorder enabled: talk, then tap Right Option) | your latest utterance |
 | Shift + Right Option | compose polished prose |
 | Control + Right Option | reply using the current selection/context |
@@ -154,6 +179,9 @@ learning loop. Then in the Diction app on iOS: *Self-Hosted* →
 | "scratch that" | previous sentence dropped |
 | "Formal tone, …" / "casual, …" / "verbatim: …" | that style, this once |
 | "insert my email" | your snippet from `snippets.json` |
+
+On Windows, use **Right Alt** wherever the table says Right Option and the
+**Windows key** wherever it says Command. Shift and Control are unchanged.
 
 Everything personal stays in private, gitignored local files: `dictionary.txt`
 (your terms; `-word` bans one), `snippets.json`, `tones.json`, `preferences.json`,
