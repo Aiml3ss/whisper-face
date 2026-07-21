@@ -1,0 +1,106 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+
+import sys
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from parrot_core import (  # noqa: E402
+    compile_cleanup,
+    confidence_from_segments,
+    correction_similarity,
+    infer_revised_insertion,
+    mode_from_modifiers,
+    phonetic_key,
+    rank_context_terms,
+    recognition_prompt,
+)
+
+
+class ContextTests(unittest.TestCase):
+    def test_ranks_identifiers_and_names_from_weighted_context(self):
+        terms = rank_context_terms([
+            ("Editing TranscriptionPipeline in Sipario", 3.0),
+            ("the ordinary words should not dominate TranscriptionPipeline", 1.0),
+            ("selected Qwen3_5 adapter", 4.0),
+        ])
+        self.assertEqual(terms[0], "Qwen3_5")
+        self.assertIn("TranscriptionPipeline", terms[:3])
+        self.assertIn("Sipario", terms)
+        self.assertNotIn("ordinary", terms[:4])
+
+    def test_prompt_deduplicates_global_and_ephemeral_terms(self):
+        prompt = recognition_prompt(
+            ["Qwen", "Whisper"], ["qwen", "Sipario"], max_terms=3)
+        self.assertEqual(prompt, "Common terms: Qwen, Whisper, Sipario.")
+
+
+class CleanupCompilerTests(unittest.TestCase):
+    def test_compiles_fillers_structure_and_correction(self):
+        plan = compile_cleanup(
+            "um Tuesday actually Wednesday new paragraph I mean ship it")
+        self.assertEqual(plan.text, "Wednesday\n\nship it")
+        self.assertEqual(
+            plan.edit_kinds,
+            ["remove_filler", "remove_discourse_filler",
+             "spoken_structure", "self_correction"],
+        )
+
+    def test_scratch_that_removes_only_the_latest_clause(self):
+        plan = compile_cleanup(
+            "Keep this sentence. remove this part scratch that use this instead")
+        self.assertEqual(plan.text, "Keep this sentence. use this instead")
+
+    def test_enumeration_requests_semantic_cleanup(self):
+        self.assertTrue(compile_cleanup(
+            "three things first speed second trust third privacy"
+        ).needs_semantic_cleanup)
+
+
+class CorrectionTests(unittest.TestCase):
+    def test_isolates_revision_inside_exact_inserted_range(self):
+        revised = infer_revised_insertion(
+            "Hello  world", (6, 0), "Gwen is fast", "Hello Qwen is fast world")
+        self.assertEqual(revised, "Qwen is fast")
+
+    def test_ignores_typing_appended_after_an_unchanged_paste(self):
+        revised = infer_revised_insertion(
+            "Draft: ", (7, 0), "ship today", "Draft: ship today and notify me")
+        self.assertIsNone(revised)
+
+    def test_rejects_changes_outside_the_inserted_range(self):
+        revised = infer_revised_insertion(
+            "Hello  world", (6, 0), "Gwen", "Hallo Qwen world")
+        self.assertIsNone(revised)
+
+    def test_phonetic_similarity_catches_common_asr_confusion(self):
+        self.assertTrue(phonetic_key("Qwen"))
+        self.assertGreater(correction_similarity("Gwen", "Qwen"), 0.6)
+
+
+class RecognitionTests(unittest.TestCase):
+    def test_confidence_is_weighted_and_bounded(self):
+        score = confidence_from_segments([
+            {"text": "high confidence words", "avg_logprob": -0.1},
+            {"text": "uncertain", "avg_logprob": -1.5},
+        ])
+        self.assertGreater(score, 0.5)
+        self.assertLessEqual(score, 1.0)
+
+    def test_modifier_contracts_are_unambiguous(self):
+        self.assertEqual(mode_from_modifiers(False, False, False), "capture")
+        self.assertEqual(mode_from_modifiers(True, False, False), "compose")
+        self.assertEqual(mode_from_modifiers(False, True, False), "edit")
+        self.assertEqual(mode_from_modifiers(False, False, True), "reply")
+        self.assertEqual(mode_from_modifiers(False, True, True), "command")
+        self.assertEqual(
+            mode_from_modifiers(False, False, False, code_app=True), "code")
+
+
+if __name__ == "__main__":
+    unittest.main()

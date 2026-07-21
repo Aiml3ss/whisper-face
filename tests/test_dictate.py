@@ -20,6 +20,8 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from parrot_core import Recognition, compile_cleanup
+
 
 ROOT = Path(__file__).resolve().parents[1]
 TREE = ast.parse((ROOT / "dictate.py").read_text())
@@ -195,6 +197,7 @@ class CleanupGuardTests(unittest.TestCase):
                 "SIMPLE_FILLER_RE", "AMBIGUOUS_FILLER_RE", "COMMAND_RE",
                 "ENUM_RE", "QUICK_PATH_MAX_WORDS",
             },
+            extra={"compile_cleanup": compile_cleanup},
         )
         self.assertEqual(ns["quick_clean"]("um this is ready"), "This is ready.")
         self.assertEqual(
@@ -203,9 +206,9 @@ class CleanupGuardTests(unittest.TestCase):
         )
         self.assertFalse(ns["needs_llm_cleanup"](
             "um this is ready", None, False))
-        self.assertTrue(ns["needs_llm_cleanup"](
+        self.assertFalse(ns["needs_llm_cleanup"](
             "you know this is ready", None, False))
-        self.assertTrue(ns["needs_llm_cleanup"](
+        self.assertFalse(ns["needs_llm_cleanup"](
             "Tuesday actually Wednesday", None, False))
 
 
@@ -245,7 +248,8 @@ class LearningTests(unittest.TestCase):
             ns["LEARNED_FILE"] = learned
             self.assertEqual(
                 ns["load_learned"](),
-                {"counts": {}, "processed": 0, "fixes": {}},
+                {"counts": {}, "processed": 0, "fixes": {},
+                 "confusions": {}, "history": []},
             )
 
     def test_merge_preserves_corrections_written_during_mining(self):
@@ -293,9 +297,9 @@ class ReleasePlanTests(unittest.TestCase):
             def __init__(self):
                 self.submissions = 0
 
-            def submit(self, function, audio):
+            def submit(self, function, audio, *args):
                 self.submissions += 1
-                return Future(function(audio))
+                return Future(function(audio, *args))
 
         pool = Pool()
         ns = load_definitions(
@@ -305,20 +309,23 @@ class ReleasePlanTests(unittest.TestCase):
                 "SAMPLE_RATE": 16_000,
                 "GATE_PEAK_RMS": 0.002,
                 "ASR_POOL": pool,
-                "transcribe": lambda audio: "remainder",
+                "transcribe_detailed": lambda audio, prompt=None:
+                    Recognition("remainder"),
                 "peak_rms": lambda audio: 0.1,
                 "is_hallucination": lambda text: False,
+                "Recognition": Recognition,
             },
         )
         audio = [0.1] * 4_000
 
         self.assertEqual(
-            ns["assemble_raw"]([], Future("already queued"), audio),
+            ns["assemble_raw"]([], Future("already queued"), audio).text,
             "already queued",
         )
         self.assertEqual(pool.submissions, 0)
 
-        self.assertEqual(ns["assemble_raw"]([], None, audio), "remainder")
+        self.assertEqual(
+            ns["assemble_raw"]([], None, audio).text, "remainder")
         self.assertEqual(pool.submissions, 1)
 
 

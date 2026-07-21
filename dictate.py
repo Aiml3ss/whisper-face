@@ -166,6 +166,7 @@ import sys
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -176,14 +177,23 @@ import objc
 import requests
 import sounddevice as sd
 from AppKit import (
+    NSAffineTransform,
     NSApplication,
     NSApplicationActivationPolicyAccessory,
     NSBackingStoreBuffered,
     NSBezierPath,
     NSColor,
+    NSFont,
+    NSGraphicsContext,
+    NSFontAttributeName,
+    NSForegroundColorAttributeName,
+    NSGradient,
     NSImage,
+    NSKernAttributeName,
     NSMenu,
     NSMenuItem,
+    NSMutableParagraphStyle,
+    NSParagraphStyleAttributeName,
     NSPanel,
     NSPasteboard,
     NSPasteboardItem,
@@ -193,9 +203,6 @@ from AppKit import (
     NSStatusWindowLevel,
     NSVariableStatusItemLength,
     NSView,
-    NSVisualEffectBlendingModeBehindWindow,
-    NSVisualEffectStateActive,
-    NSVisualEffectView,
     NSWindowCollectionBehaviorCanJoinAllSpaces,
     NSWindowCollectionBehaviorFullScreenAuxiliary,
     NSWindowCollectionBehaviorStationary,
@@ -203,14 +210,22 @@ from AppKit import (
     NSWindowStyleMaskNonactivatingPanel,
     NSWorkspace,
 )
-from Foundation import NSMakeRect, NSMakeSize, NSObject, NSTimer
+from Foundation import (NSAttributedString, NSMakeRect, NSMakeSize, NSObject,
+                        NSTimer)
 from PyObjCTools import AppHelper
 from pynput import keyboard
 
-try:
-    from AppKit import NSVisualEffectMaterialHUDWindow
-except ImportError:
-    NSVisualEffectMaterialHUDWindow = 13
+from parrot_core import (
+    CleanupEdit,
+    Recognition,
+    compile_cleanup,
+    confidence_from_segments,
+    correction_similarity,
+    infer_revised_insertion,
+    mode_from_modifiers,
+    rank_context_terms,
+    recognition_prompt,
+)
 
 # ------------------------- config -------------------------
 
@@ -231,6 +246,7 @@ TAIL_SKIP_SILENCE = 0.12     # already quiet this long -> stop immediately
 SILENCE_RMS = 0.008          # tail quieter than this = you had finished talking
 GATE_PEAK_RMS = 0.002        # just above mic noise floor: whispers pass,
                              # a silent held key still doesn't
+LOW_CONFIDENCE = 0.52        # verify only uncertain Whisper output
 QUICK_PATH_MAX_WORDS = 40    # clean speech (no fillers/commands/enums) can
                              # skip the LLM up to here; markers force cleanup
                              # at any length
@@ -285,15 +301,20 @@ KEEPWARM_MIN_IDLE = 60       # skip the beat if dictating right now
 
 LOCK_FILE = HERE / ".dictate.lock"
 
-# HUD: a frosted pill with the parrot on the left (beak opens with your
-# voice) and level bars on the right.
-HUD_W, HUD_H = 264.0, 56.0
+# HUD: the "Voice Listening" stage from the design handoff — radial
+# waveform ringing the parrot, pulse ring, audio-reactive beak, live
+# caption. Geometry per spec (stage 360, parrot 256 viewBox @ 300).
+HUD_W, HUD_H = 420.0, 460.0
 HUD_BOTTOM_MARGIN = 80.0
-NUM_BARS = 16
-BAR_W = 3.0
-BARS_X0 = 64.0               # bars start right of the bird
-BARS_PAD_R = 20.0
-BEAK_MAX_DEG = 40.0
+HUD_RADIUS = 28.0
+STAGE = 360.0                # square stage, centered horizontally
+STAGE_TOP = 40.0             # below the brand row (design y-down coords)
+PARROT_SCALE = 300.0 / 256.0
+RADIAL_BARS = 60
+BAR_INNER_R = 134.0
+BEAK_MAX_DEG = 26.0          # spec: lower mandible max open
+LEVEL_SMOOTH = 0.35
+NUM_BARS = 16                # LEVELS history buffer length (not the display)
 FPS = 30.0
 
 SIMPLE_FILLER_RE = re.compile(
@@ -393,6 +414,25 @@ TONE = {
     "default": "Style: neutral written prose.",
 }
 
+MODE_INSTRUCTIONS = {
+    "capture": "Contract: faithful dictation. Do not paraphrase.",
+    "code": "Contract: faithful technical dictation. Preserve identifiers, "
+            "paths, commands, and code-shaped tokens exactly.",
+    "compose": "Contract: compose. You may reorganize and tighten the "
+               "speaker's wording into polished prose, but preserve every "
+               "fact and never invent details.",
+    "reply": "Contract: reply. Draft a direct response expressing only the "
+             "speaker's stated intent, using the supplied nearby text only "
+             "as context.",
+    "edit": "Contract: edit. Apply the spoken instruction to the selected "
+            "source text and output the revised source only.",
+}
+
+STRUCTURED_OUTPUT = """Return one strict JSON object with this shape:
+{"text":"final text", "edits":[{"kind":"short label", "before":"...", "after":"..."}]}
+The edits array briefly describes actual transformations. Do not include any
+keys or prose outside that object."""
+
 MINER_PROMPT = """You maintain a custom dictionary for a speech-recognition system.
 Below are recent dictation transcripts from one user. Extract terms worth
 adding to the dictionary: product names, people's names, company names,
@@ -420,7 +460,10 @@ CHUNK_PREP_POOL = ThreadPoolExecutor(max_workers=1)
 
 # Current glossary + active mishearing-fix rules, hot-swapped by the
 # learning loop.
-GLOSS = {"terms": [], "prompt": None, "fixes": {}, "lock": threading.Lock()}
+GLOSS = {
+    "terms": [], "prompt": None, "fixes": {}, "confusions": {},
+    "lock": threading.Lock(),
+}
 
 # Serializes transcript-log writes against the learning loop's trim rewrite.
 TRANSCRIPTS_LOCK = threading.Lock()
@@ -439,6 +482,12 @@ LISTENER = {"l": None, "make": None}
 # Menu-bar state: the status item (main-thread only) and the pause switch.
 STATUS = {"bar": None}
 PAUSED = {"on": False}
+PIPELINE_STATE = {
+    "last_confidence": 1.0,
+    "last_alternatives": [],
+    "last_cleanup_edits": [],
+    "last_mode": "capture",
+}
 
 APP_TONES = {"map": {}, "lock": threading.Lock()}
 PREFERENCES = {"flight_recorder": False}
@@ -552,72 +601,242 @@ def _rgb(r, g, b, a=1.0):
     NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, a).set()
 
 
+def _color(r, g, b, a=1.0):
+    return NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, a)
+
+
+# Design tokens from the Voice Listening handoff
+ACCENT = (0.204, 0.827, 0.600)          # #34d399
+EMERALD = (0.063, 0.725, 0.506)         # #10b981
+DEEP = (0.016, 0.471, 0.341)            # #047857
+BEAK_UP = (0.984, 0.749, 0.141)         # #fbbf24
+BEAK_LO = (0.941, 0.659, 0.118)         # #f0a81e
+DARK_EYE = (0.043, 0.231, 0.196)        # #0b3b32
+MOUTH = (0.024, 0.145, 0.122)           # #06251f
+MINT = (0.369, 0.918, 0.831)            # #5eead4
+CATCH = (0.918, 1.000, 0.965)           # #eafff6
+CAPTION_COL = (0.847, 1.000, 0.941)     # #d8fff0
+AMBER = (0.984, 0.573, 0.235)           # processing accent #fb923c
+
+# Live caption: rolling-ASR chunks land here as they finish, the full raw
+# transcript lands at release, WaveView reads it every frame.
+CAPTION = {"text": ""}
+
+
+def _caption_add(fut):
+    try:
+        result = fut.result()
+        t = result.text.strip() if isinstance(result, Recognition) \
+            else str(result or "").strip()
+    except Exception:
+        return
+    if t and not is_hallucination(t):
+        CAPTION["text"] = (CAPTION["text"] + " " + t).strip()
+
+
 class WaveView(NSView):
+    """The Voice Listening stage: radial bars ring the parrot, a pulse ring
+    breathes with the level, the lower mandible opens with your voice, and
+    the live caption grows underneath. Geometry is the handoff's, verbatim,
+    thanks to flipped (y-down) coordinates."""
+
     def initWithFrame_(self, frame):
         self = objc.super(WaveView, self).initWithFrame_(frame)
         if self is None:
             return None
-        self.levels = [0.0] * NUM_BARS
         self.mode = "recording"
-        self.phase = 0.0
-        self.beak = 0.0
+        self.raw = 0.0               # latest LEVELS entry, set by tick_
+        self.lv = 0.0                # smoothed level (spec: 0.35 lerp)
+        self.beak = 0.0              # smoothed beak degrees
+        self.t = 0.0
+        self.frame_n = 0
         return self
 
+    def isFlipped(self):
+        return True
+
     def drawRect_(self, rect):
-        b = self.bounds()
-        w, h = b.size.width, b.size.height
-        cy = h / 2.0
+        W = self.bounds().size.width
+        H = self.bounds().size.height
 
-        # --- the parrot ---
-        _rgb(0.063, 0.725, 0.506)                        # body #10b981
-        NSBezierPath.bezierPathWithOvalInRect_(
-            NSMakeRect(14, cy - 16, 32, 32)).fill()
-        _rgb(0.204, 0.827, 0.600, 0.75)                  # belly #34d399
-        NSBezierPath.bezierPathWithOvalInRect_(
-            NSMakeRect(17, cy - 13, 15, 15)).fill()
-        _rgb(0.973, 0.980, 0.988)                        # eye
-        NSBezierPath.bezierPathWithOvalInRect_(
-            NSMakeRect(33, cy + 1, 9, 9)).fill()
-        _rgb(0.059, 0.090, 0.165)                        # pupil
-        NSBezierPath.bezierPathWithOvalInRect_(
-            NSMakeRect(36, cy + 3, 4.5, 4.5)).fill()
+        # background: rounded panel, radial gradient from top center
+        bg = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            NSMakeRect(0, 0, W, H), HUD_RADIUS, HUD_RADIUS)
+        NSGradient.alloc().initWithColors_([
+            _color(0.063, 0.141, 0.122),         # #10241f
+            _color(0.027, 0.075, 0.063),         # #071310
+            _color(0.016, 0.063, 0.051),         # #04100d
+        ]).drawInBezierPath_relativeCenterPosition_(bg, (0.0, -1.0))
+        _rgb(*MINT, 0.08)
+        edge = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            NSMakeRect(0.5, 0.5, W - 1, H - 1), HUD_RADIUS, HUD_RADIUS)
+        edge.setLineWidth_(1.0)
+        edge.stroke()
 
-        # hinged beak: opens with the live level, closed while processing.
-        # Squaring undoes the bars' sqrt display curve, so the beak dips
-        # shut between syllables instead of hovering half-open; the flutter
-        # keeps it chattering through sustained sounds.
+        # per-frame state
+        self.t += 1.0 / FPS
+        self.frame_n += 1
+        target = 0.0 if self.mode == "processing" else self.raw
+        self.lv += (target - self.lv) * LEVEL_SMOOTH
+        lv = max(0.0, min(1.0, self.lv))
+        cx = W / 2.0
+        cy = STAGE_TOP + STAGE / 2.0
+
+        # radial waveform (spec: 60 bars, inner r 134, len 6 + v*66)
+        if self.mode != "processing" or lv > 0.01:
+            for i in range(RADIAL_BARS):
+                ang = (i / RADIAL_BARS) * 2.0 * math.pi - math.pi / 2.0
+                v = max(0.03, lv * (0.4 + 0.6 * abs(
+                    math.sin(i * 0.7 + self.frame_n * 0.16))))
+                r0 = BAR_INNER_R
+                r1 = BAR_INNER_R + 6.0 + v * 66.0
+                bar = NSBezierPath.bezierPath()
+                bar.setLineWidth_(3.2)
+                bar.setLineCapStyle_(1)
+                bar.moveToPoint_((cx + r0 * math.cos(ang),
+                                  cy + r0 * math.sin(ang)))
+                bar.lineToPoint_((cx + r1 * math.cos(ang),
+                                  cy + r1 * math.sin(ang)))
+                _rgb(*ACCENT, 0.3 + 0.65 * v)
+                bar.stroke()
+
+        # pulse ring (300px, scale 1 + lv*0.16, opacity 0.12 + lv*0.5)
+        rr = 150.0 * (1.0 + lv * 0.16)
+        ring = NSBezierPath.bezierPathWithOvalInRect_(
+            NSMakeRect(cx - rr, cy - rr, rr * 2, rr * 2))
+        ring.setLineWidth_(2.0)
         if self.mode == "processing":
-            target = 0.0
+            _rgb(*AMBER, 0.12 + 0.18 * abs(math.sin(self.t * 2.2)))
         else:
-            raw = self.levels[-1] if self.levels else 0.0
-            openness = min(1.0, (raw ** 2) * 1.8)
-            flutter = 4.0 * openness * math.sin(self.phase * 2.4)
-            target = openness * BEAK_MAX_DEG + flutter
+            _rgb(*ACCENT, 0.12 + lv * 0.5)
+        ring.stroke()
+
+        # the parrot (256 viewBox at 300, centered; bobs while listening)
+        bob = 0.0 if self.mode == "processing" else \
+            -3.0 * (1.0 - math.cos(2.0 * math.pi * self.t / 3.2))
+        ctx = NSGraphicsContext.currentContext()
+        ctx.saveGraphicsState()
+        tr = NSAffineTransform.transform()
+        tr.translateXBy_yBy_(cx - 150.0, STAGE_TOP + 30.0 + bob)
+        tr.scaleBy_(PARROT_SCALE)
+        tr.concat()
+        self.drawParrot_(lv)
+        ctx.restoreGraphicsState()
+
+        # brand row
+        para = NSMutableParagraphStyle.alloc().init()
+        para.setAlignment_(1)                    # NSTextAlignmentCenter
+        brand = NSAttributedString.alloc().initWithString_attributes_(
+            "WHISPERING PARROT", {
+                NSFontAttributeName:
+                    NSFont.systemFontOfSize_weight_(10.0, 0.3),
+                NSForegroundColorAttributeName:
+                    NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.5),
+                NSKernAttributeName: 3.0,
+                NSParagraphStyleAttributeName: para,
+            })
+        brand.drawInRect_(NSMakeRect(0, 14, W, 16))
+
+        # caption (live transcript; tail-trimmed so recent words win)
+        text = CAPTION["text"].strip()
+        if len(text) > 110:
+            text = "…" + text[-108:]
+        if text:
+            dim = 0.75 if self.mode == "processing" else 1.0
+            cap = NSAttributedString.alloc().initWithString_attributes_(
+                text, {
+                    NSFontAttributeName:
+                        NSFont.systemFontOfSize_weight_(15.0, 0.23),
+                    NSForegroundColorAttributeName:
+                        _color(*CAPTION_COL, dim),
+                    NSParagraphStyleAttributeName: para,
+                })
+            cap.drawInRect_(
+                NSMakeRect(24, STAGE_TOP + STAGE + 2, W - 48, 46))
+
+    def drawParrot_(self, lv):
+        # tail
+        tail = NSBezierPath.bezierPath()
+        tail.moveToPoint_((74, 178))
+        tail.curveToPoint_controlPoint1_controlPoint2_(
+            (28, 232), (56, 206), (44, 222))
+        tail.curveToPoint_controlPoint1_controlPoint2_(
+            (58, 166), (36, 206), (44, 186))
+        tail.closePath()
+        _rgb(*DEEP)
+        tail.fill()
+        # head
+        _rgb(*EMERALD)
+        NSBezierPath.bezierPathWithOvalInRect_(
+            NSMakeRect(18, 46, 172, 172)).fill()
+        # wing swoosh: arc r120 from (120,210) to (158,152)
+        wing = NSBezierPath.bezierPath()
+        wc = (42.9, 118.1)
+        a1 = math.degrees(math.atan2(210 - wc[1], 120 - wc[0]))
+        a2 = math.degrees(math.atan2(152 - wc[1], 158 - wc[0]))
+        wing.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(
+            wc, 120.0, a1, a2, True)
+        wing.setLineWidth_(24.0)
+        wing.setLineCapStyle_(1)
+        _rgb(*DEEP)
+        wing.stroke()
+        # eye + catch-light
+        _rgb(*DARK_EYE)
+        NSBezierPath.bezierPathWithOvalInRect_(
+            NSMakeRect(97, 85, 22, 22)).fill()
+        _rgb(*CATCH)
+        NSBezierPath.bezierPathWithOvalInRect_(
+            NSMakeRect(108.6, 88.6, 6.8, 6.8)).fill()
+        # mouth cavity, revealed as the mandible opens
+        _rgb(*MOUTH)
+        _poly([(156, 114), (214, 121), (156, 132)]).fill()
+        # upper mandible (static)
+        up = NSBezierPath.bezierPath()
+        up.moveToPoint_((154, 96))
+        up.curveToPoint_controlPoint1_controlPoint2_(
+            (228, 118), (192, 88), (226, 102))
+        up.curveToPoint_controlPoint1_controlPoint2_(
+            (156, 116), (206, 116), (178, 114))
+        up.closePath()
+        _rgb(*BEAK_UP)
+        up.fill()
+        # lower mandible: rotates open about (156,116). Squared raw level
+        # keeps the syllable dips; a whisper of flutter keeps it chattering.
+        snap = min(1.0, (self.raw ** 2) * 1.8) if self.mode != "processing" \
+            else 0.0
+        flutter = 3.0 * snap * math.sin(self.frame_n * 0.45)
+        target = snap * BEAK_MAX_DEG + flutter
         self.beak = max(0.0, self.beak + (target - self.beak) * 0.6)
-        pivot = (44.0, cy)
-        upper = [(44, cy + 3.5), (58, cy + 0.5), (44, cy - 1.5)]
-        lower = [(44, cy + 0.5), (56, cy - 2.0), (45, cy - 5.0)]
-        _rgb(0.984, 0.749, 0.141)                        # #fbbf24
-        _poly([_rot(p, pivot, self.beak * 0.35) for p in upper]).fill()
-        _rgb(0.851, 0.467, 0.024)                        # #d97706
-        _poly([_rot(p, pivot, -self.beak * 0.65) for p in lower]).fill()
-
-        # --- the bars ---
-        gap = (w - BARS_X0 - BARS_PAD_R - NUM_BARS * BAR_W) / (NUM_BARS - 1)
-        if self.mode == "processing":
-            _rgb(1.0, 0.64, 0.26)
-        else:
-            NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.92).set()
-        for i in range(NUM_BARS):
-            if self.mode == "processing":
-                lvl = 0.28 + 0.22 * math.sin(self.phase + i * 0.55)
-            else:
-                lvl = self.levels[i]
-            bar_h = max(3.0, min(1.0, lvl) * (h - 16.0))
-            x = BARS_X0 + i * (BAR_W + gap)
-            y = (h - bar_h) / 2.0
-            NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                NSMakeRect(x, y, BAR_W, bar_h), 1.5, 1.5).fill()
+        lo = NSBezierPath.bezierPath()
+        lo.moveToPoint_((156, 118))
+        lo.curveToPoint_controlPoint1_controlPoint2_(
+            (226, 124), (178, 122), (206, 126))
+        lo.curveToPoint_controlPoint1_controlPoint2_(
+            (172, 146), (222, 140), (198, 150))
+        lo.curveToPoint_controlPoint1_controlPoint2_(
+            (156, 118), (162, 140), (158, 130))
+        lo.closePath()
+        rot = NSAffineTransform.transform()
+        rot.translateXBy_yBy_(156, 116)
+        rot.rotateByDegrees_(self.beak)
+        rot.translateXBy_yBy_(-156, -116)
+        lo.transformUsingAffineTransform_(rot)
+        _rgb(*BEAK_LO)
+        lo.fill()
+        # whisper puffs (group opacity 0.35 + lv*0.6)
+        ga = 0.35 + lv * 0.6
+        for (x1, y1, x2, y2, a) in ((212, 62, 232, 52, 1.0),
+                                    (224, 88, 246, 84, 0.6)):
+            puff = NSBezierPath.bezierPath()
+            puff.setLineWidth_(12.0)
+            puff.setLineCapStyle_(1)
+            puff.moveToPoint_((x1, y1))
+            puff.lineToPoint_((x2, y2))
+            _rgb(*MINT, ga * a)
+            puff.stroke()
+        _rgb(*MINT, ga * 0.55)
+        NSBezierPath.bezierPathWithOvalInRect_(
+            NSMakeRect(232, 32, 16, 16)).fill()
 
 
 class HUD(NSObject):
@@ -647,18 +866,10 @@ class HUD(NSObject):
             | NSWindowCollectionBehaviorStationary
         )
 
-        effect = NSVisualEffectView.alloc().initWithFrame_(rect)
-        effect.setMaterial_(NSVisualEffectMaterialHUDWindow)
-        effect.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
-        effect.setState_(NSVisualEffectStateActive)
-        effect.setWantsLayer_(True)
-        effect.layer().setCornerRadius_(HUD_H / 2.0)
-        effect.layer().setMasksToBounds_(True)
-
+        # The stage paints its own gradient panel — no frosted effect view.
         wave = WaveView.alloc().initWithFrame_(rect)
         wave.setAutoresizingMask_(18)
-        effect.addSubview_(wave)
-        panel.setContentView_(effect)
+        panel.setContentView_(wave)
 
         self.panel = panel
         self.wave = wave
@@ -679,12 +890,14 @@ class HUD(NSObject):
     def dismiss(self):
         self.panel.orderOut_(None)
         LEVELS.extend([0.0] * NUM_BARS)
+        CAPTION["text"] = ""
+        self.wave.lv = 0.0
+        self.wave.beak = 0.0
 
     def tick_(self, timer):
         if not self.panel.isVisible():
             return
-        self.wave.phase += 0.28
-        self.wave.levels = list(LEVELS)
+        self.wave.raw = LEVELS[-1] if LEVELS else 0.0
         self.wave.setNeedsDisplay_(True)
 
 
@@ -791,12 +1004,20 @@ class StatusBar(NSObject):
         self.tones_root = mk("App Tones", None)
         self.tones_menu = NSMenu.alloc().init()
         self.tones_root.setSubmenu_(self.tones_menu)
+        self.learning_root = mk("Learned Corrections", None)
+        self.learning_menu = NSMenu.alloc().init()
+        self.learning_root.setSubmenu_(self.learning_menu)
+        self.recognition_root = mk("Last Recognition", None)
+        self.recognition_menu = NSMenu.alloc().init()
+        self.recognition_root.setSubmenu_(self.recognition_menu)
         self.flight_item = mk("Flight Recorder", "toggleFlight:")
         self.pause_item = mk("Pause Dictation", "togglePause:")
         menu.addItem_(self.stat1)
         menu.addItem_(self.stat2)
         menu.addItem_(NSMenuItem.separatorItem())
         menu.addItem_(self.tones_root)
+        menu.addItem_(self.learning_root)
+        menu.addItem_(self.recognition_root)
         menu.addItem_(self.flight_item)
         menu.addItem_(self.pause_item)
         menu.addItem_(mk("Open Log", "openLog:"))
@@ -824,6 +1045,8 @@ class StatusBar(NSObject):
             self.stat1.setTitle_(s1)
             self.stat2.setTitle_(s2)
             self.rebuild_tones()
+            self.rebuild_learning()
+            self.rebuild_recognition()
             self.refresh_flight_item()
         except Exception as e:
             print(f"! menu refresh failed: {e}")   # menu still opens
@@ -906,6 +1129,81 @@ class StatusBar(NSObject):
     def setAppTone_(self, sender):
         d = sender.representedObject()
         set_app_tone(str(d["bundle"]), str(d["tone"]) or None)
+
+    def rebuild_learning(self):
+        self.learning_menu.removeAllItems()
+        state = load_learned()
+        rows = sorted(
+            state.get("confusions", {}).items(),
+            key=lambda item: -int(item[1].get("n", 0)),
+        )[:12]
+        if not rows:
+            empty = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "No learned corrections", None, "")
+            empty.setEnabled_(False)
+            self.learning_menu.addItem_(empty)
+            return
+        for key, info in rows:
+            title = (f"{info.get('from', '?')} → {info.get('to', '?')} · "
+                     f"{info.get('n', 0)}×")
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                title, "forgetCorrection:", "")
+            item.setTarget_(self)
+            item.setRepresentedObject_(key)
+            self.learning_menu.addItem_(item)
+
+    def forgetCorrection_(self, sender):
+        key = str(sender.representedObject())
+        with LEARN_LOCK:
+            state = load_learned()
+            removed = state.get("confusions", {}).pop(key, None)
+            if removed is None:
+                return
+            old = str(removed.get("from", "")).casefold()
+            fix = state.get("fixes", {}).get(old)
+            if fix and str(fix.get("to", "")).casefold() == str(
+                    removed.get("to", "")).casefold():
+                state["fixes"].pop(old, None)
+            state["history"].append({
+                "ts": time.time(), "kind": "forgotten",
+                "from": removed.get("from"), "to": removed.get("to"),
+            })
+            state["history"] = state["history"][-100:]
+            save_learned(state)
+            refresh_glossary()
+        print(f"[learn] forgot correction: {removed.get('from')} -> "
+              f"{removed.get('to')}")
+        self.rebuild_learning()
+
+    def rebuild_recognition(self):
+        self.recognition_menu.removeAllItems()
+        confidence = float(PIPELINE_STATE["last_confidence"])
+        mode = str(PIPELINE_STATE["last_mode"])
+        summary = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            f"Confidence: {confidence:.0%} · {mode}", None, "")
+        summary.setEnabled_(False)
+        self.recognition_menu.addItem_(summary)
+        edits = PIPELINE_STATE["last_cleanup_edits"]
+        if edits:
+            edit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Cleanup: " + ", ".join(dict.fromkeys(edits)), None, "")
+            edit_item.setEnabled_(False)
+            self.recognition_menu.addItem_(edit_item)
+        for alternative in PIPELINE_STATE["last_alternatives"]:
+            title = alternative if len(alternative) <= 70 \
+                else alternative[:67] + "…"
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                f"Copy alternative: {title}", "copyAlternative:", "")
+            item.setTarget_(self)
+            item.setRepresentedObject_(alternative)
+            self.recognition_menu.addItem_(item)
+
+    def copyAlternative_(self, sender):
+        alternative = str(sender.representedObject())
+        pb = NSPasteboard.generalPasteboard()
+        pb.clearContents()
+        pb.setString_forType_(alternative, NSPasteboardTypeString)
+        print("[confidence] copied alternative to clipboard")
 
     def togglePause_(self, sender):
         PAUSED["on"] = not PAUSED["on"]
@@ -1208,12 +1506,12 @@ class AudioPool:
 AUDIO_POOL = AudioPool(size=2)
 
 
-def _transcribe_frames(frames) -> str:
+def _transcribe_frames(frames, prompt=None) -> Recognition:
     """Prepare a rolling chunk off the real-time audio thread."""
     if not frames:
-        return ""
+        return Recognition("")
     segment = np.concatenate(frames).flatten()
-    return ASR_POOL.submit(transcribe, segment).result()
+    return ASR_POOL.submit(transcribe_detailed, segment, prompt).result()
 
 
 class Recorder:
@@ -1227,6 +1525,12 @@ class Recorder:
         self.audio_status = []
         self.captured_via_flight = False
         self.source = "hold"
+        self.focus_at_press = None
+        self.context_terms = []
+        self.prompt = None
+        self.bundle_at_press = ""
+        self.mode = "capture"
+        self.uncertain = False
         # rolling-ASR state: finished segments already sent to the pool
         self.chunks = []             # ASR futures, chronological
         self.cut_samples = 0         # sample index of the last cut
@@ -1246,6 +1550,7 @@ class Recorder:
         self.audio_status = []
         self.captured_via_flight = False
         self.source = "hold"
+        self.uncertain = False
         self.press_at = press_at or time.perf_counter()
         self.recording = True
         try:
@@ -1292,8 +1597,10 @@ class Recorder:
                     >= CHUNK_MIN_SECONDS * SAMPLE_RATE
                 and self.silent_samples >= CHUNK_CUT_SILENCE * SAMPLE_RATE):
             frames_for_chunk = tuple(self.frames[self._cut_frame_idx:])
-            self.chunks.append(
-                CHUNK_PREP_POOL.submit(_transcribe_frames, frames_for_chunk))
+            fut = CHUNK_PREP_POOL.submit(
+                _transcribe_frames, frames_for_chunk, self.prompt)
+            fut.add_done_callback(_caption_add)   # live caption in the HUD
+            self.chunks.append(fut)
             self._cut_frame_idx = len(self.frames)
             self.cut_samples = self.total_samples
             self.voiced_since_cut = False
@@ -1346,18 +1653,27 @@ def parse_dictionary():
 
 
 def load_learned() -> dict:
-    state = {"counts": {}, "processed": 0, "fixes": {}}
+    state = {
+        "counts": {}, "processed": 0, "fixes": {},
+        "confusions": {}, "history": [],
+    }
     if LEARNED_FILE.exists():
         try:
             loaded = json.loads(LEARNED_FILE.read_text())
             if isinstance(loaded, dict):
                 counts = loaded.get("counts")
                 fixes = loaded.get("fixes")
+                confusions = loaded.get("confusions")
+                history = loaded.get("history")
                 processed = loaded.get("processed")
                 if isinstance(counts, dict):
                     state["counts"] = counts
                 if isinstance(fixes, dict):
                     state["fixes"] = fixes
+                if isinstance(confusions, dict):
+                    state["confusions"] = confusions
+                if isinstance(history, list):
+                    state["history"] = history[-100:]
                 if isinstance(processed, int) and processed >= 0:
                     state["processed"] = processed
         except Exception:
@@ -1380,6 +1696,8 @@ def merge_learned_state(base: dict, mined: dict, latest: dict) -> dict:
         "counts": dict(latest.get("counts", {})),
         "processed": mined.get("processed", latest.get("processed", 0)),
         "fixes": dict(latest.get("fixes", {})),
+        "confusions": dict(latest.get("confusions", {})),
+        "history": list(latest.get("history", []))[-100:],
     }
     base_counts = base.get("counts", {})
     for term, count in mined.get("counts", {}).items():
@@ -1434,6 +1752,7 @@ def refresh_glossary():
         GLOSS["fixes"] = {old: info["to"]
                           for old, info in state["fixes"].items()
                           if info.get("n", 0) >= PROMOTE_MIN_COUNT}
+        GLOSS["confusions"] = dict(state.get("confusions", {}))
 
     write_auto_section(promoted)
     return terms
@@ -1455,7 +1774,8 @@ def append_transcript(raw: str, cleaned: str, bundle: str, path: str):
 
 def ollama_chat(system: str | None, user: str, num_predict: int = 512,
                 few_shot: list | None = None,
-                timeout: tuple = (2, 15)) -> tuple[str, str]:
+                timeout: tuple = (2, 15),
+                json_mode: bool = False) -> tuple[str, str]:
     """Returns (text, done_reason). done_reason == "length" means the reply
     was cut off by num_predict."""
     messages = ([{"role": "system", "content": system}] if system else [])
@@ -1470,6 +1790,8 @@ def ollama_chat(system: str | None, user: str, num_predict: int = 512,
         "options": {"temperature": 0, "repeat_penalty": 1.0,
                     "num_predict": num_predict},
     }
+    if json_mode:
+        payload["format"] = "json"
     r = requests.post(OLLAMA_URL, json=payload, timeout=timeout)
     if r.status_code == 400 and "think" in r.text.lower():
         # Model without a thinking mode (e.g. llama3.2) rejects the flag.
@@ -1506,6 +1828,8 @@ def learn_pass():
         "counts": dict(base_state.get("counts", {})),
         "processed": base_state.get("processed", 0),
         "fixes": dict(base_state.get("fixes", {})),
+        "confusions": dict(base_state.get("confusions", {})),
+        "history": list(base_state.get("history", []))[-100:],
     }
     if state["processed"] > len(lines):
         state["processed"] = 0            # log was truncated externally
@@ -1711,35 +2035,87 @@ def ensure_event_permissions():
 import mlx_whisper  # noqa: E402
 
 
-def transcribe(audio: np.ndarray) -> str:
+def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
+                        verify: bool = True) -> Recognition:
     # Whispered/quiet speech: lift the level into the range Whisper decodes
     # confidently. Gain is capped so the noise floor of true near-silence
     # (which the energy gate already rejects) isn't blown up to fake speech.
     peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
     if 0.0 < peak < 0.25:
         audio = audio * min(0.25 / peak, 25.0)
-    with GLOSS["lock"]:
-        prompt = GLOSS["prompt"]
-    result = mlx_whisper.transcribe(
-        audio,
-        path_or_hf_repo=WHISPER_REPO,
-        language="en",
-        initial_prompt=prompt,
-        temperature=(0.0, 0.2),             # one fallback rung: re-decodes
-                                            # only degenerate (looping) segments
-        condition_on_previous_text=False,   # each utterance stands alone
-    )
-    return result["text"].strip()
+    if prompt is None:
+        with GLOSS["lock"]:
+            prompt = GLOSS["prompt"]
+
+    def decode(temperature):
+        result = mlx_whisper.transcribe(
+            audio,
+            path_or_hf_repo=WHISPER_REPO,
+            language="en",
+            initial_prompt=prompt,
+            temperature=temperature,
+            condition_on_previous_text=False,
+        )
+        return Recognition(
+            text=result["text"].strip(),
+            confidence=confidence_from_segments(result.get("segments", [])),
+        )
+
+    primary = decode((0.0, 0.2))
+    if (not verify or primary.confidence >= LOW_CONFIDENCE
+            or len(audio) < int(MIN_SECONDS * SAMPLE_RATE)):
+        return primary
+
+    # Confidence-aware verification: uncertain audio earns one independent
+    # decode. The higher-confidence transcript wins; disagreement is retained
+    # as an inspectable alternative rather than silently discarded.
+    retry = decode(0.4)
+    if retry.text and retry.confidence > primary.confidence:
+        retry.alternative = primary.text if primary.text != retry.text else None
+        retry.verified = True
+        return retry
+    primary.alternative = retry.text if retry.text != primary.text else None
+    primary.verified = True
+    return primary
 
 
-def apply_learned_fixes(text: str) -> str:
+def transcribe(audio: np.ndarray, prompt: str | None = None) -> str:
+    """Compatibility wrapper for warmup, phone, and diagnostics."""
+    return transcribe_detailed(audio, prompt).text
+
+
+def apply_learned_fixes(text: str, bundle: str = "") -> str:
     """Deterministic mishearing repairs (e.g. Gwen -> Qwen), earned by the
     user making the same correction PROMOTE_MIN_COUNT times."""
     with GLOSS["lock"]:
         fixes = dict(GLOSS["fixes"])
+        confusions = dict(GLOSS["confusions"])
     for old, new in fixes.items():
         text = re.sub(rf"\b{re.escape(old)}\b", new, text, flags=re.I)
+    for info in confusions.values():
+        old, new = info.get("from"), info.get("to")
+        app_count = info.get("apps", {}).get(bundle, 0) if bundle else 0
+        if (isinstance(old, str) and isinstance(new, str)
+                and (info.get("n", 0) >= 3 or app_count >= 2)):
+            text = re.sub(rf"\b{re.escape(old)}\b", new, text, flags=re.I)
     return text
+
+
+def learned_alternatives(text: str, bundle: str) -> list[str]:
+    """Unconfirmed personalized alternatives for confidence-aware review."""
+    with GLOSS["lock"]:
+        confusions = dict(GLOSS["confusions"])
+    alternatives = []
+    for info in confusions.values():
+        old, new = info.get("from"), info.get("to")
+        if not isinstance(old, str) or not isinstance(new, str):
+            continue
+        if re.search(rf"\b{re.escape(old)}\b", text, re.I):
+            candidate = re.sub(
+                rf"\b{re.escape(old)}\b", new, text, flags=re.I)
+            if candidate != text:
+                alternatives.append(candidate)
+    return alternatives[:3]
 
 
 def match_snippet(raw: str) -> tuple[str, str] | None:
@@ -1767,56 +2143,199 @@ def match_snippet(raw: str) -> tuple[str, str] | None:
     return None
 
 
-def _ax_text(element) -> str | None:
-    """Read one known Accessibility element without following focus."""
+def _ax_attribute(element, attribute):
     try:
-        from ApplicationServices import (
-            AXUIElementCopyAttributeValue,
-            kAXValueAttribute,
-        )
+        from ApplicationServices import AXUIElementCopyAttributeValue
         err, value = AXUIElementCopyAttributeValue(
-            element, kAXValueAttribute, None)
-        return value if not err and isinstance(value, str) else None
+            element, attribute, None)
+        return value if not err else None
     except Exception:
         return None
 
 
-def focused_snapshot():
-    """Return the focused AX element and its current text, if exposed."""
+def _ax_text(element) -> str | None:
+    """Read one known Accessibility element without following focus."""
+    try:
+        from ApplicationServices import kAXValueAttribute
+        value = _ax_attribute(element, kAXValueAttribute)
+        return value if isinstance(value, str) else None
+    except Exception:
+        return None
+
+
+def _coerce_range(value) -> tuple[int, int] | None:
+    """Accept the CFRange representations PyObjC has used across releases."""
+    if value is None:
+        return None
+    if isinstance(value, (tuple, list)) and len(value) == 2:
+        try:
+            return int(value[0]), int(value[1])
+        except (TypeError, ValueError):
+            return None
+    for location_name, length_name in (
+            ("location", "length"), ("loc", "len")):
+        if hasattr(value, location_name) and hasattr(value, length_name):
+            try:
+                return (int(getattr(value, location_name)),
+                        int(getattr(value, length_name)))
+            except (TypeError, ValueError):
+                return None
+    match = re.search(r"location\D+(\d+).*length\D+(\d+)", str(value), re.I)
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def _ax_selection(element, text: str | None) -> tuple[int, int] | None:
+    try:
+        from ApplicationServices import (
+            AXValueGetType,
+            AXValueGetValue,
+            kAXSelectedTextRangeAttribute,
+            kAXValueCFRangeType,
+        )
+        value = _ax_attribute(element, kAXSelectedTextRangeAttribute)
+        direct = _coerce_range(value)
+        if direct is not None:
+            return direct
+        if value is not None and AXValueGetType(value) == kAXValueCFRangeType:
+            extracted = AXValueGetValue(value, kAXValueCFRangeType, None)
+            if isinstance(extracted, tuple) and len(extracted) == 2 \
+                    and isinstance(extracted[0], bool):
+                extracted = extracted[1] if extracted[0] else None
+            return _coerce_range(extracted)
+    except Exception:
+        pass
+    # When a field exposes only selected text, locate a unique occurrence.
+    try:
+        from ApplicationServices import kAXSelectedTextAttribute
+        selected = _ax_attribute(element, kAXSelectedTextAttribute)
+        if text is not None and isinstance(selected, str) and selected:
+            at = text.find(selected)
+            if at >= 0 and text.find(selected, at + 1) < 0:
+                return at, len(selected)
+    except Exception:
+        pass
+    return (len(text), 0) if text is not None else None
+
+
+@dataclass
+class FocusSnapshot:
+    element: object
+    text: str | None
+    selection: tuple[int, int] | None
+    selected_text: str | None = None
+    window_title: str | None = None
+    document: str | None = None
+
+
+def focused_snapshot() -> FocusSnapshot | None:
+    """Capture the exact focused field, range, selection, and nearby context."""
     try:
         from ApplicationServices import (
             AXUIElementCopyAttributeValue,
+            AXUIElementCreateApplication,
             AXUIElementCreateSystemWide,
+            kAXDocumentAttribute,
             kAXFocusedUIElementAttribute,
+            kAXFocusedWindowAttribute,
+            kAXSelectedTextAttribute,
+            kAXTitleAttribute,
         )
         err, focused = AXUIElementCopyAttributeValue(
             AXUIElementCreateSystemWide(), kAXFocusedUIElementAttribute, None)
         if err or focused is None:
             return None
-        return focused, _ax_text(focused)
+        text = _ax_text(focused)
+        selected = _ax_attribute(focused, kAXSelectedTextAttribute)
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        app_element = AXUIElementCreateApplication(app.processIdentifier()) \
+            if app is not None else None
+        window = _ax_attribute(app_element, kAXFocusedWindowAttribute) \
+            if app_element is not None else None
+        title = _ax_attribute(window, kAXTitleAttribute) if window else None
+        document = _ax_attribute(focused, kAXDocumentAttribute)
+        return FocusSnapshot(
+            element=focused,
+            text=text,
+            selection=_ax_selection(focused, text),
+            selected_text=selected if isinstance(selected, str) else None,
+            window_title=title if isinstance(title, str) else None,
+            document=document if isinstance(document, str) else None,
+        )
     except Exception:
         return None
 
 
 def focused_text() -> str | None:
     snapshot = focused_snapshot()
-    return snapshot[1] if snapshot else None
+    return snapshot.text if snapshot else None
 
 
-def learn_from_corrections(pasted: str, target=None):
-    """Wispr-style correction learning: a while after pasting, re-read the
-    focused field. A word the user swapped for a similar one is a strong
-    dictionary signal — promote the corrected spelling immediately."""
-    # Capture the target before paste; ten seconds later, read that exact AX
-    # element rather than whichever app/field happens to be focused then.
-    if target is None:
-        target = focused_snapshot()
+def capture_recognition_context() -> tuple[FocusSnapshot | None, list[str]]:
+    """Build an ephemeral vocabulary from what the user can currently see."""
+    snapshot = focused_snapshot()
+    app = NSWorkspace.sharedWorkspace().frontmostApplication()
+    app_name = str(app.localizedName()) if app is not None else None
+    clipboard = None
+    try:
+        clipboard = NSPasteboard.generalPasteboard().stringForType_(
+            NSPasteboardTypeString)
+        if clipboard and len(clipboard) > 800:
+            clipboard = None
+    except Exception:
+        pass
+    sources = [
+        (snapshot.selected_text if snapshot else None, 6.0),
+        (snapshot.window_title if snapshot else None, 4.0),
+        (snapshot.document if snapshot else None, 4.0),
+        (snapshot.text if snapshot else None, 2.5),
+        (app_name, 3.0),
+        (clipboard, 1.0),
+    ]
+    return snapshot, rank_context_terms(sources)
+
+
+@dataclass
+class PasteReceipt:
+    element: object
+    before: str
+    selection: tuple[int, int]
+    pasted: str
+    bundle: str
+    mode: str
+
+
+def make_paste_receipt(snapshot: FocusSnapshot | None, pasted: str,
+                       bundle: str, mode: str) -> PasteReceipt | None:
+    if snapshot is None or snapshot.text is None or snapshot.selection is None:
+        return None
+    return PasteReceipt(
+        element=snapshot.element,
+        before=snapshot.text,
+        selection=snapshot.selection,
+        pasted=pasted,
+        bundle=bundle,
+        mode=mode,
+    )
+
+
+def learn_from_corrections(receipt: PasteReceipt | None):
+    """Learn only edits made inside the exact range that received our paste."""
+    if receipt is None:
+        return
     time.sleep(CORRECTION_DELAY)
-    current = _ax_text(target[0]) if target else None
-    if not current or pasted in current:
-        return                              # field gone, app opaque, or unedited
-    p_words, c_words = pasted.split(), current.split()
-    if len(p_words) < 3 or len(c_words) < 3:
+    current = _ax_text(receipt.element)
+    if not current:
+        return
+    revised = infer_revised_insertion(
+        receipt.before,
+        receipt.selection,
+        receipt.pasted,
+        current,
+    )
+    if revised is None:
+        return
+    p_words, c_words = receipt.pasted.split(), revised.split()
+    if not p_words or not c_words:
         return
 
     def strip(word):
@@ -1833,11 +2352,10 @@ def learn_from_corrections(pasted: str, target=None):
             old, new = strip(old), strip(new)
             if not new or old.casefold() == new.casefold():
                 continue
-            ratio = difflib.SequenceMatcher(
-                None, old.casefold(), new.casefold()).ratio()
+            ratio = correction_similarity(old, new)
             clean = new.replace("-", "").replace("'", "")
             # similar-but-different, word-shaped: a respelling, not a rewrite
-            if 0.4 <= ratio < 1.0 and clean.isalnum() and 3 <= len(new) <= 30:
+            if 0.4 <= ratio < 1.0 and clean.isalnum() and 2 <= len(new) <= 30:
                 learned.append((old, new))
 
     if not learned:
@@ -1865,6 +2383,28 @@ def learn_from_corrections(pasted: str, target=None):
                 fix = {"to": term, "n": 1}   # user changed their mind
             state["fixes"][key] = fix
             changed = True
+            confusion_key = f"{key}->{term.casefold()}"
+            confusion = state["confusions"].get(confusion_key, {
+                "from": old,
+                "to": term,
+                "n": 0,
+                "apps": {},
+            })
+            confusion["from"] = old
+            confusion["to"] = term
+            confusion["n"] = int(confusion.get("n", 0)) + 1
+            apps = confusion.setdefault("apps", {})
+            apps[receipt.bundle] = int(apps.get(receipt.bundle, 0)) + 1
+            state["confusions"][confusion_key] = confusion
+            state["history"].append({
+                "ts": time.time(),
+                "kind": "correction",
+                "from": old,
+                "to": term,
+                "app": receipt.bundle,
+                "mode": receipt.mode,
+            })
+            state["history"] = state["history"][-100:]
             if fix["n"] == PROMOTE_MIN_COUNT:
                 print(f"[learn] fix rule active: {old!r} -> {term!r}")
         if changed:
@@ -1920,11 +2460,7 @@ def quick_clean(text: str, verbatim: bool = False,
     t = text.strip()
     if verbatim or not t:
         return t
-    # Isolated hesitation sounds are safe to remove deterministically. More
-    # semantic phrases such as "I mean" still route through the LLM.
-    t = SIMPLE_FILLER_RE.sub(" ", t)
-    t = re.sub(r"\s+", " ", t).strip()
-    t = re.sub(r"\s+([,.;:!?])", r"\1", t)
+    t = compile_cleanup(t).text
     if not t:
         return ""
     if t[0].islower() and not continuing:   # mid-sentence joins stay lower
@@ -1935,14 +2471,16 @@ def quick_clean(text: str, verbatim: bool = False,
 
 
 def needs_llm_cleanup(raw: str, tone_override: str | None,
-                      verbatim: bool) -> bool:
+                      verbatim: bool, mode: str = "capture",
+                      plan=None) -> bool:
     """Route only transformations that are unsafe for deterministic cleanup."""
+    plan = plan or compile_cleanup(raw)
     return bool(not verbatim and (
+        mode in {"compose", "reply", "edit"}
+        or
         tone_override is not None
         or len(raw.split()) > QUICK_PATH_MAX_WORDS
-        or AMBIGUOUS_FILLER_RE.search(raw)
-        or COMMAND_RE.search(raw)
-        or ENUM_RE.search(raw)
+        or plan.needs_semantic_cleanup
     ))
 
 
@@ -1959,35 +2497,78 @@ def cursor_context() -> str | None:
     return txt[-160:]
 
 
-def llm_clean(text: str, tone: str) -> str:
-    system = BASE_PROMPT + "\n" + tone
+def _guard_cleaned_output(text: str, out: str, done: str,
+                          mode: str) -> str | None:
     words = len(text.split())
+    if not out or done == "length":
+        return "empty or truncated"
+    if REFUSAL_RE.match(out) and not REFUSAL_RE.match(text.strip()):
+        return "refusal/answer"
+    if (mode in {"capture", "code"} and len(out.split()) < 0.5 * words
+            and "scratch that" not in text.lower()):
+        return "over-deletion"
+    return None
+
+
+def llm_clean_with_edits(text: str, tone: str, mode: str = "capture",
+                         context: str | None = None) \
+        -> tuple[str, list[CleanupEdit]]:
+    instruction = MODE_INSTRUCTIONS.get(mode, MODE_INSTRUCTIONS["capture"])
+    system = BASE_PROMPT + "\n" + tone + "\n" + instruction \
+        + "\n" + STRUCTURED_OUTPUT
+    user = text
+    if mode == "edit":
+        user = json.dumps({"source": context or "", "instruction": text})
+    elif mode == "reply":
+        user = json.dumps({"nearby_context": context or "", "dictation": text})
+    few_shot = []
+    if mode in {"capture", "code"}:
+        for message in FEW_SHOT:
+            if message["role"] == "assistant":
+                few_shot.append({
+                    "role": "assistant",
+                    "content": json.dumps({"text": message["content"],
+                                           "edits": []}),
+                })
+            else:
+                few_shot.append(message)
+    words = len(text.split()) + len((context or "").split())
     try:
-        out, done = ollama_chat(
-            system, text, few_shot=FEW_SHOT,
-            num_predict=max(96, int(words * 2.5) + 32),   # room, no 512 cliff
-            timeout=(2, 10),                              # HUD never hangs long
+        reply, done = ollama_chat(
+            system, user, few_shot=few_shot,
+            num_predict=max(128, int(words * 3.0) + 48),
+            timeout=(2, 15),
+            json_mode=True,
         )
-        out = out.strip('"').strip()
+        payload = json.loads(reply)
+        out = payload.get("text", "") if isinstance(payload, dict) else ""
+        raw_edits = payload.get("edits", []) if isinstance(payload, dict) else []
+        edits = []
+        if isinstance(raw_edits, list):
+            for edit in raw_edits[:12]:
+                if not isinstance(edit, dict):
+                    continue
+                kind = str(edit.get("kind", "semantic_cleanup"))[:40]
+                before = str(edit.get("before", ""))[:200]
+                after = str(edit.get("after", ""))[:200]
+                edits.append(CleanupEdit(kind, before, after))
+        out = str(out).strip('"').strip()
     except Exception as e:
         print(f"! LLM cleanup failed ({e}); pasting quick-cleaned text")
-        return quick_clean(text)
+        return (context if mode == "edit" and context is not None
+                else quick_clean(text)), []
 
-    # Output guard: anything that isn't a plausible cleanup of the input —
-    # a refusal, an answer, a truncation, or a gutted fragment — is worse
-    # than pasting the lightly-polished raw transcript.
-    reject = None
-    if not out or done == "length":
-        reject = "empty or truncated"
-    elif REFUSAL_RE.match(out) and not REFUSAL_RE.match(text.strip()):
-        reject = "refusal/answer"
-    elif (len(out.split()) < 0.5 * words
-          and "scratch that" not in text.lower()):
-        reject = "over-deletion"
+    reject = _guard_cleaned_output(text, out, done, mode)
     if reject:
         print(f"! LLM output rejected ({reject}); pasting quick-cleaned text")
-        return quick_clean(text)
-    return out
+        return (context if mode == "edit" and context is not None
+                else quick_clean(text)), []
+    return out, edits
+
+
+def llm_clean(text: str, tone: str) -> str:
+    """Compatibility wrapper used by evaluation and the phone path."""
+    return llm_clean_with_edits(text, tone)[0]
 
 
 # ------------------------- phone endpoint -------------------------
@@ -2175,6 +2756,34 @@ def paste(text: str):
     threading.Timer(1.0, restore).start()
 
 
+def execute_voice_command(raw: str) -> bool:
+    """Execute a deliberately small, reversible Mac editing command set."""
+    command = re.sub(r"[^a-z ]", "", raw.casefold()).strip()
+    shortcuts = {
+        "undo": (keyboard.Key.cmd, "z"),
+        "undo last dictation": (keyboard.Key.cmd, "z"),
+        "redo": (keyboard.Key.cmd, keyboard.Key.shift, "z"),
+        "select all": (keyboard.Key.cmd, "a"),
+        "copy": (keyboard.Key.cmd, "c"),
+        "cut": (keyboard.Key.cmd, "x"),
+        "paste": (keyboard.Key.cmd, "v"),
+    }
+    keys = shortcuts.get(command)
+    if keys is None:
+        return False
+    modifiers, final = keys[:-1], keys[-1]
+    for modifier in modifiers:
+        kb.press(modifier)
+    try:
+        kb.press(final)
+        kb.release(final)
+    finally:
+        for modifier in reversed(modifiers):
+            kb.release(modifier)
+    print(f"[command] {command}")
+    return True
+
+
 def release_should_wait_for_tail(rec: Recorder) -> bool:
     """Whether speech was still active at key release."""
     return bool(rec.voiced_since_cut) and (
@@ -2183,27 +2792,43 @@ def release_should_wait_for_tail(rec: Recorder) -> bool:
 
 
 def assemble_raw(chunk_futs: list, pre_future,
-                 rem_full: np.ndarray) -> str:
+                 rem_full: np.ndarray, prompt=None) -> Recognition:
     """Join rolling chunks and exactly one remainder decode."""
-    def harvest(fut, parts):
+    def harvest(fut, parts, confidences, alternatives):
         try:
-            t = fut.result().strip()
+            result = fut.result()
         except Exception as e:
             print(f"! chunk decode failed: {e}")
             return
+        if isinstance(result, str):
+            result = Recognition(result)
+        t = result.text.strip()
         if t and not is_hallucination(t):
             parts.append(t)
+            confidences.append(result.confidence)
+            if result.alternative:
+                alternatives.append(result.alternative)
 
-    parts = []
+    parts, confidences, alternatives = [], [], []
     for f in chunk_futs:
-        harvest(f, parts)
+        harvest(f, parts, confidences, alternatives)
     if pre_future is not None:
-        harvest(pre_future, parts)
+        harvest(pre_future, parts, confidences, alternatives)
     elif (len(rem_full) / SAMPLE_RATE >= 0.25
           and peak_rms(rem_full) >= GATE_PEAK_RMS):
         # Speech was active at release, so no pre-tail decode was queued.
-        harvest(ASR_POOL.submit(transcribe, rem_full), parts)
-    return " ".join(parts).strip()
+        harvest(
+            ASR_POOL.submit(transcribe_detailed, rem_full, prompt),
+            parts,
+            confidences,
+            alternatives,
+        )
+    return Recognition(
+        text=" ".join(parts).strip(),
+        confidence=min(confidences) if confidences else 0.0,
+        alternative=" ".join(alternatives).strip() or None,
+        verified=bool(alternatives),
+    )
 
 
 def finish_and_process(rec: Recorder, hud: HUD, active: dict):
@@ -2226,7 +2851,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             cut = rec.cut_samples
             chunk_futs = list(rec.chunks)
             rem = main_audio[cut:]
-            pre_future = ASR_POOL.submit(transcribe, rem) \
+            pre_future = ASR_POOL.submit(transcribe_detailed, rem, rec.prompt) \
                 if (len(rem) / SAMPLE_RATE >= (
                         MIN_SECONDS if not chunk_futs else 0.25)
                     and peak_rms(rem) >= GATE_PEAK_RMS) else None
@@ -2245,7 +2870,9 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                   f"gate {GATE_PEAK_RMS}, {duration:.1f}s)")
             return
         asr_started_at = time.perf_counter()
-        raw = assemble_raw(chunk_futs, pre_future, full_audio[cut:])
+        recognition = assemble_raw(
+            chunk_futs, pre_future, full_audio[cut:], rec.prompt)
+        raw = recognition.text
         t_asr = time.perf_counter() - asr_started_at
         if not raw or is_hallucination(raw):
             print(f"[dropped] ASR gave "
@@ -2258,7 +2885,34 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             print(f"[dropped] ASR echoed the glossary prompt: {raw[:60]!r}")
             return
 
-        raw = apply_learned_fixes(raw)
+        bundle = rec.bundle_at_press or frontmost_bundle()
+        alternatives = []
+        if recognition.alternative:
+            alternatives.append(recognition.alternative)
+        alternatives.extend(learned_alternatives(raw, bundle))
+        raw = apply_learned_fixes(raw, bundle)
+        PIPELINE_STATE["last_confidence"] = recognition.confidence
+        PIPELINE_STATE["last_alternatives"] = list(
+            dict.fromkeys(a for a in alternatives if a and a != raw))[:3]
+        PIPELINE_STATE["last_mode"] = rec.mode
+        rec.uncertain = bool(
+            PIPELINE_STATE["last_alternatives"]
+            and recognition.confidence < 0.65)
+        if rec.uncertain:
+            CAPTION["text"] = (
+                f"Uncertain ({recognition.confidence:.0%}): {raw} · Alt: "
+                f"{PIPELINE_STATE['last_alternatives'][0]}")
+        else:
+            CAPTION["text"] = raw        # full transcript during processing
+
+        if rec.mode == "command":
+            if execute_voice_command(raw):
+                play("Pop")
+            else:
+                print(f"[command] unsupported: {raw[:80]!r}")
+                play("Funk")
+            return
+
         hit = match_snippet(raw)
         if hit is not None:
             name, snippet = hit
@@ -2270,17 +2924,42 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             return
 
         raw, tone_override = extract_tone_override(raw)
-        bundle = frontmost_bundle()
-        verbatim = is_verbatim_app(bundle) or tone_override == "verbatim"
-        needs_llm = needs_llm_cleanup(raw, tone_override, verbatim)
+        plan = compile_cleanup(raw)
+        compiled = plan.text
+        verbatim = ((is_verbatim_app(bundle) or tone_override == "verbatim")
+                    and rec.mode in {"capture", "code"})
+        needs_llm = needs_llm_cleanup(
+            compiled, tone_override, verbatim, rec.mode, plan)
+
+        mode_context = None
+        press_focus = rec.focus_at_press
+        if rec.mode == "edit":
+            if press_focus is not None:
+                mode_context = press_focus.selected_text
+                if (not mode_context and press_focus.text is not None
+                        and press_focus.selection is not None):
+                    start, length = press_focus.selection
+                    mode_context = press_focus.text[start:start + length]
+            if not mode_context:
+                print("[edit] no selected source text; nothing changed")
+                CAPTION["text"] = "Edit mode needs selected text"
+                play("Funk")
+                return
+        elif rec.mode == "reply" and press_focus is not None:
+            mode_context = press_focus.selected_text or press_focus.text
+            if mode_context:
+                mode_context = mode_context[-2000:]
 
         # Continuation awareness: dictating into a field that ends
         # mid-sentence should join it, not start a fresh sentence.
-        ctx = cursor_context() if not verbatim else None
+        ctx = cursor_context() \
+            if not verbatim and rec.mode in {"capture", "code"} else None
         stripped_ctx = ctx.rstrip() if ctx else ""
         continuing = bool(stripped_ctx) and stripped_ctx[-1] not in CONT_END
 
         tone_key = tone_override if tone_override in TONE else tone_for(bundle)
+        if rec.mode == "code":
+            tone_key = "code"
         tone_txt = TONE[tone_key]
         if continuing:
             tone_txt += (
@@ -2289,8 +2968,16 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 "sentence naturally: no initial capital unless a new "
                 "sentence truly starts, and never repeat the existing text.")
         clean_started_at = time.perf_counter()
-        text = llm_clean(raw, tone_txt) if needs_llm \
-            else quick_clean(raw, verbatim=verbatim, continuing=continuing)
+        semantic_edits = []
+        if needs_llm:
+            text, semantic_edits = llm_clean_with_edits(
+                compiled, tone_txt, rec.mode, mode_context)
+        else:
+            text = quick_clean(
+                compiled, verbatim=verbatim, continuing=continuing)
+        cleanup_edits = plan.edits + semantic_edits
+        PIPELINE_STATE["last_cleanup_edits"] = [
+            edit.kind for edit in cleanup_edits]
         t_clean = time.perf_counter() - clean_started_at
         if tone_key == "casual" and not verbatim:
             text = strip_casual_period(text)   # belt for both paths
@@ -2302,17 +2989,21 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 text = " " + text                       # joining needs a space
 
         correction_target = focused_snapshot() if not verbatim else None
+        receipt = make_paste_receipt(
+            correction_target, text, bundle, rec.mode) if not verbatim else None
         paste(text)
         play("Pop")
         if not verbatim:
             threading.Thread(
                 target=learn_from_corrections,
-                args=(text, correction_target),
+                args=(receipt,),
                 daemon=True,
             ).start()
         mark = "*" if tone_override else ""
         path = f"llm/{tone_key}{mark}" if needs_llm \
             else f"fast/verbatim{mark}" if verbatim else "fast"
+        if rec.mode != "capture":
+            path = f"{rec.mode}/{path}"
         if rec.source == "flight":
             path = f"flight/{path}"
         now = time.perf_counter()
@@ -2338,7 +3029,11 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 hud.dismiss()
                 STATUS["bar"] and STATUS["bar"].setState_(
                     "off" if PAUSED["on"] else "idle")
-        AppHelper.callAfter(dismiss_if_idle)
+        if rec.uncertain:
+            threading.Timer(
+                3.0, lambda: AppHelper.callAfter(dismiss_if_idle)).start()
+        else:
+            AppHelper.callAfter(dismiss_if_idle)
 
 
 # ------------------------- warmup & main -------------------------
@@ -2420,17 +3115,35 @@ def main():
 
     def hotkey_worker():
         while True:
-            ev, event_at = events.get()
+            ev, event_at, modifiers = events.get()
             try:
                 if (ev == "press" and active["rec"] is None
                         and not PAUSED["on"]):
                     LAST_USE["t"] = time.time()
+                    CAPTION["text"] = ""
                     rec = Recorder()
                     active["rec"] = rec
                     rec.start(event_at)
+                    rec.bundle_at_press = frontmost_bundle()
+                    rec.mode = mode_from_modifiers(
+                        shift="shift" in modifiers,
+                        command="command" in modifiers,
+                        control="control" in modifiers,
+                        code_app=rec.bundle_at_press in CODE_APPS,
+                    )
                     set_status("rec")
                     AppHelper.callAfter(hud.showMode_, "recording")
                     play("Tink")              # the cue now means capture-ready
+                    rec.focus_at_press, rec.context_terms = \
+                        capture_recognition_context()
+                    with GLOSS["lock"]:
+                        stable_terms = list(GLOSS["terms"])
+                    rec.prompt = recognition_prompt(
+                        stable_terms, rec.context_terms,
+                        GLOSSARY_MAX_TERMS, GLOSSARY_MAX_CHARS)
+                    if rec.mode != "capture" or rec.context_terms:
+                        print(f"[context] mode={rec.mode} | "
+                              f"{len(rec.context_terms)} ephemeral terms")
                     ready = rec.capture_ready_at - event_at
                     if ready >= 0.1:
                         print(f"[audio] capture ready in {ready:.2f}s")
@@ -2478,16 +3191,32 @@ def main():
     threading.Thread(target=hotkey_worker, daemon=True).start()
 
     key_down = {"on": False}
+    modifiers = set()
+    shift_keys = {keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r}
+    command_keys = {keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r}
+    control_keys = {keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r}
 
     def on_press(key):
+        if key in shift_keys:
+            modifiers.add("shift")
+        elif key in command_keys:
+            modifiers.add("command")
+        elif key in control_keys:
+            modifiers.add("control")
         if key == HOTKEY and not key_down["on"]:
             key_down["on"] = True
-            events.put(("press", time.perf_counter()))
+            events.put(("press", time.perf_counter(), frozenset(modifiers)))
 
     def on_release(key):
         if key == HOTKEY and key_down["on"]:
             key_down["on"] = False
-            events.put(("release", time.perf_counter()))
+            events.put(("release", time.perf_counter(), frozenset(modifiers)))
+        if key in shift_keys:
+            modifiers.discard("shift")
+        elif key in command_keys:
+            modifiers.discard("command")
+        elif key in control_keys:
+            modifiers.discard("control")
 
     def make_listener():
         lst = keyboard.Listener(on_press=on_press, on_release=on_release)
