@@ -13,24 +13,23 @@
   <!-- rounded app tile -->
   <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)"/>
 
-  <!-- parrot: head + body swoosh -->
-  <path d="M96 178 C70 160 62 124 78 96 C92 71 122 60 148 68
-           C170 75 184 94 184 116 C184 152 158 180 122 186
-           C132 196 146 202 160 202 C138 214 108 208 96 178 Z"
-        fill="url(#body)"/>
-  <!-- belly highlight -->
-  <path d="M100 160 C88 142 88 118 102 102 C96 126 100 148 112 166 Z"
-        fill="#a7f3d0" opacity="0.55"/>
-  <!-- beak -->
-  <path d="M148 68 C166 60 182 64 190 76 C182 92 168 98 154 94
-           C158 84 156 74 148 68 Z" fill="#fbbf24"/>
-  <!-- eye -->
-  <circle cx="146" cy="92" r="15" fill="#f8fafc"/>
-  <circle cx="149" cy="94" r="7" fill="#0f172a"/>
+  <!-- parrot, rotated upright so the beak points ahead -->
+  <g transform="rotate(24 128 128)">
+    <path d="M96 178 C70 160 62 124 78 96 C92 71 122 60 148 68
+             C170 75 184 94 184 116 C184 152 158 180 122 186
+             C132 196 146 202 160 202 C138 214 108 208 96 178 Z"
+          fill="url(#body)"/>
+    <path d="M100 160 C88 142 88 118 102 102 C96 126 100 148 112 166 Z"
+          fill="#a7f3d0" opacity="0.55"/>
+    <path d="M148 68 C166 60 182 64 190 76 C182 92 168 98 154 94
+             C158 84 156 74 148 68 Z" fill="#fbbf24"/>
+    <circle cx="146" cy="92" r="15" fill="#f8fafc"/>
+    <circle cx="149" cy="94" r="7" fill="#0f172a"/>
+  </g>
 
   <!-- sound waves it "repeats back" -->
   <g stroke="#5eead4" stroke-width="9" stroke-linecap="round" fill="none">
-    <path d="M196 128 a26 26 0 0 1 0 40" opacity="0.9"/>
-    <path d="M212 116 a44 44 0 0 1 0 64" opacity="0.6"/>
+    <path d="M204 100 a26 26 0 0 1 0 40" opacity="0.9"/>
+    <path d="M220 88 a44 44 0 0 1 0 64" opacity="0.6"/>
   </g>
 </svg>

@@ -2,7 +2,7 @@
   <img src="icon.svg" width="128" alt="Parrot icon"/>
 </p>
 
-<h1 align="center">🦜 Parrot</h1>
+<h1 align="center">Parrot</h1>
 
 <p align="center"><b>Free, fully local hold-to-talk dictation for macOS.</b><br/>
 Hold a key, speak, release — polished text appears wherever your cursor is.<br/>
@@ -38,8 +38,9 @@ dictations paste in **~0.2–0.5s**.
   learned instantly, and a fix made twice becomes a guaranteed replacement.
 - **Snippets** — say "insert my email" and your saved text pastes instead.
 - **Whispering works** — quiet speech is gain-normalized before recognition.
-- **Menu-bar presence** — 🦜 idle, 🔴 recording, 🟠 processing, ⏸ paused;
-  usage stats, pause toggle, and quit in the menu.
+- **Menu-bar presence** — the parrot perches in your menu bar (🔴 while
+  recording, 🟠 processing, ⏸ paused), with usage stats, a pause toggle,
+  and quit in its menu.
 - **iPhone keyboard** — an OpenAI-compatible `/v1/audio/transcriptions`
   endpoint (port 8787) plugs straight into the
   [Diction](https://diction.one) iOS keyboard's Self-Hosted mode, with your

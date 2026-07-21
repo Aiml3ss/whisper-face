@@ -141,6 +141,7 @@ from AppKit import (
     NSBackingStoreBuffered,
     NSBezierPath,
     NSColor,
+    NSImage,
     NSMenu,
     NSMenuItem,
     NSPanel,
@@ -162,7 +163,7 @@ from AppKit import (
     NSWindowStyleMaskNonactivatingPanel,
     NSWorkspace,
 )
-from Foundation import NSMakeRect, NSObject, NSTimer
+from Foundation import NSMakeRect, NSMakeSize, NSObject, NSTimer
 from PyObjCTools import AppHelper
 from pynput import keyboard
 
@@ -516,7 +517,13 @@ class StatusBar(NSObject):
             return None
         self.item = NSStatusBar.systemStatusBar().statusItemWithLength_(
             NSVariableStatusItemLength)
-        self.item.button().setTitle_("🦜")
+        # The colorful parrot from icon-menubar.svg; emoji fallback if the
+        # file is missing (macOS renders SVG into NSImage natively).
+        self.icon = NSImage.alloc().initWithContentsOfFile_(
+            str(HERE / "icon-menubar.svg"))
+        if self.icon is not None:
+            self.icon.setSize_(NSMakeSize(18, 18))
+        self.setState_("idle")
 
         def mk(title, action):
             it = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -541,8 +548,14 @@ class StatusBar(NSObject):
         return self
 
     def setState_(self, state):
+        btn = self.item.button()
+        if state == "idle" and self.icon is not None:
+            btn.setTitle_("")
+            btn.setImage_(self.icon)
+            return
+        btn.setImage_(None)
         icons = {"idle": "🦜", "rec": "🔴", "proc": "🟠", "off": "⏸"}
-        self.item.button().setTitle_(icons.get(state, "🦜"))
+        btn.setTitle_(icons.get(state, "🦜"))
 
     def menuWillOpen_(self, menu):
         s1, s2 = usage_stats()
