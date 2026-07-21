@@ -98,8 +98,8 @@ New in v3.5 (long dictations):
     (>= 0.6s, segment >= 4s) is transcribed in the background while you keep
     talking. Release only decodes the last few seconds, so long dictations
     paste as fast as short ones.
-  * Clean speech up to 40 words takes the instant path; fillers, commands,
-    tone overrides, and enumerations still force LLM cleanup at any length.
+  * Clean speech takes the instant path regardless of length; semantic
+    fillers, tone overrides, and enumerations still force LLM cleanup.
 
 New in v3.8:
   * The HUD is now the parrot: it sits in the frosted pill and its beak
@@ -325,9 +325,8 @@ LOW_CONFIDENCE = 0.52        # verify only uncertain Whisper output
 # 0.68-0.73 on clean speech. 0.70 accepts its clearest common-language output
 # while routing uncertain/proper-name-heavy audio through large-v3-turbo.
 FAST_ACCEPT_CONFIDENCE = 0.70
-QUICK_PATH_MAX_WORDS = 40    # clean speech (no fillers/commands/enums) can
-                             # skip the LLM up to here; markers force cleanup
-                             # at any length
+LLM_CLEANUP_TIMEOUT = (1, 4) # localhost connect/read deadline. Capture must
+                             # fall back faithfully instead of blocking paste.
 
 # Rolling ASR: while the key is held, segments ending in a solid pause are
 # transcribed in the background, so release only pays for the last few
@@ -2860,7 +2859,6 @@ def needs_llm_cleanup(raw: str, tone_override: str | None,
         mode in {"compose", "reply", "edit"}
         or
         tone_override is not None
-        or len(raw.split()) > QUICK_PATH_MAX_WORDS
         or plan.needs_semantic_cleanup
     ))
 
@@ -2928,7 +2926,7 @@ def llm_clean_with_edits(text: str, tone: str, mode: str = "capture",
         reply, done = ollama_chat(
             system, user, few_shot=few_shot,
             num_predict=max(160, int(words * 4.0) + 64),
-            timeout=(2, 15),
+            timeout=LLM_CLEANUP_TIMEOUT,
             json_mode=True,
         )
         payload = json.loads(reply)

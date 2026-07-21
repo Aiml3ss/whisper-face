@@ -201,9 +201,9 @@ indicator remain visible while it is active.
 ## Tuning
 
 The knobs live at the top of `dictate.py` — hotkey, ports, the
-quick-path/LLM word threshold, chunking aggressiveness, silence gates, tone
-per app-bundle. The `eval_cleanup.py` harness replays adversarial cases and
-your own transcripts through candidate Ollama models if you want to test a
+LLM cleanup deadline, chunking aggressiveness, silence gates, tone per
+app-bundle. The `eval_cleanup.py` harness replays adversarial cases and your
+own transcripts through candidate Ollama models if you want to test a
 different cleanup model.
 
 ## Verify

@@ -198,7 +198,7 @@ class CleanupGuardTests(unittest.TestCase):
             "quick_clean", "needs_llm_cleanup",
             assignments={
                 "SIMPLE_FILLER_RE", "AMBIGUOUS_FILLER_RE", "COMMAND_RE",
-                "ENUM_RE", "QUICK_PATH_MAX_WORDS",
+                "ENUM_RE",
             },
             extra={"compile_cleanup": compile_cleanup},
         )
@@ -213,6 +213,46 @@ class CleanupGuardTests(unittest.TestCase):
             "you know this is ready", None, False))
         self.assertFalse(ns["needs_llm_cleanup"](
             "Tuesday actually Wednesday", None, False))
+
+    def test_clean_long_dictation_stays_on_the_fast_path(self):
+        ns = load_definitions(
+            "needs_llm_cleanup",
+            extra={"compile_cleanup": compile_cleanup},
+        )
+        raw = (
+            "Regarding our one script setup, make sure it is smart enough "
+            "to detect whether it is running on Windows or Mac, and install "
+            "the appropriate resources for that platform. It should install "
+            "everything needed so it works just as well as it does on this "
+            "MacBook without requiring any manual follow-up steps."
+        )
+        self.assertGreater(len(raw.split()), 40)
+        self.assertFalse(ns["needs_llm_cleanup"](raw, None, False))
+
+    def test_llm_cleanup_has_a_short_read_deadline(self):
+        seen = {}
+
+        def fake_ollama_chat(*_args, **kwargs):
+            seen.update(kwargs)
+            return json.dumps({"text": "Ready.", "edits": []}), "stop"
+
+        ns = load_definitions(
+            "_guard_cleaned_output", "llm_clean_with_edits",
+            assignments={
+                "BASE_PROMPT", "FEW_SHOT", "LLM_CLEANUP_TIMEOUT",
+                "MODE_INSTRUCTIONS", "REFUSAL_RE", "STRUCTURED_OUTPUT",
+            },
+            extra={
+                "CleanupEdit": object,
+                "ollama_chat": fake_ollama_chat,
+                "quick_clean": lambda text: text,
+            },
+        )
+        cleaned, edits = ns["llm_clean_with_edits"](
+            "Ready.", "Keep the tone neutral.")
+        self.assertEqual(cleaned, "Ready.")
+        self.assertEqual(edits, [])
+        self.assertEqual(seen["timeout"], (1, 4))
 
     def test_structured_output_guard_rejects_destructive_results(self):
         ns = load_definitions(
