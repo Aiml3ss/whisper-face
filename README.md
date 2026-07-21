@@ -30,25 +30,42 @@ the background before you release the key.
 - **Rolling recognition** — long dictations are transcribed *while you're
   still talking* (segments cut at natural pauses), so a 60-second ramble
   pastes as fast as a one-liner.
-- **LLM cleanup with a safety net** — fillers and false starts removed,
+- **Context-aware recognition** — the active selection, nearby field text,
+  window title, local document, sibling filenames, app name, and a short
+  clipboard sample temporarily bias recognition toward the words already in
+  front of you. This context is neither logged nor learned.
+- **Two-engine confidence cascade** — a tiny Whisper model speculates during
+  an end pause. Clear speech can paste immediately; uncertain speech is
+  verified by large-v3-turbo, and disagreements remain available under
+  **Last Recognition** instead of being silently discarded.
+- **Structured cleanup with a safety net** — fillers and false starts removed,
   self-corrections applied ("Tuesday, actually Wednesday" → Wednesday),
-  punctuation fixed. An output guard rejects anything that isn't a faithful
-  cleanup (refusals, over-deletions, truncations) and falls back to the
-  lightly polished raw transcript — the model can never eat your words.
+  punctuation fixed. Safe edits are compiled deterministically; the local LLM
+  is used only for semantic cleanup and explicit writing modes. Its strict
+  JSON edit plan is guarded against refusals, over-deletion, and truncation;
+  nearby context is explicitly marked as untrusted, with a faithful local
+  fallback.
+- **Six explicit voice modes** — modifier keys turn the same Right Option
+  gesture into faithful capture, polished composition, context-aware reply,
+  selected-text editing, spoken-code compilation, or a small allowlist of
+  reversible Mac commands.
 - **Tone awareness** — casual in Slack/Messages (texting style: no trailing
   period), formal prose in Mail, technical in editors and AI chats, verbatim
   in terminals. Pick a tone per app from the menu-bar **App Tones** picker,
   or force one per-dictation: *"Formal tone, …"*, *"casual, …"*.
 - **Spoken structure** — "new line" / "new paragraph" / "scratch that" work;
   enumerations ("two things: …") become tidy dash lists.
-- **Self-learning dictionary** — new vocabulary is mined from your usage and
-  promoted automatically; if you *correct* a word after pasting, the fix is
-  learned instantly, and a fix made twice becomes a guaranteed replacement.
+- **Reversible personalization** — vocabulary is mined from your usage, while
+  corrections are learned only when the exact pasted range is changed. A
+  correction activates after two confirmations in the same app or three
+  globally, and every learned mapping can be inspected or forgotten from the
+  menu.
 - **Snippets** — say "insert my email" and your saved text pastes instead.
 - **Whispering works** — quiet speech is gain-normalized before recognition.
 - **Menu-bar presence** — the parrot perches in your menu bar (🔴 while
   recording, 🟠 processing, ⏸ paused), with usage stats, a pause toggle,
-  and quit in its menu.
+  voice-mode help, recognition confidence and alternatives, learned-correction
+  controls, and quit in its menu.
 - **iPhone keyboard** — an OpenAI-compatible `/v1/audio/transcriptions`
   endpoint (port 8787) plugs straight into the
   [Diction](https://diction.one) iOS keyboard's Self-Hosted mode, with your
@@ -96,6 +113,11 @@ learning loop. Then in the Diction app on iOS: *Self-Hosted* →
 |---|---|
 | (hold Right Option, talk, release) | cleaned text at your cursor |
 | (Flight Recorder enabled: talk, then tap Right Option) | your latest utterance |
+| Shift + Right Option | compose polished prose |
+| Control + Right Option | reply using the current selection/context |
+| Command + Right Option | edit the selected text |
+| Shift + Control + Right Option | compile spoken code punctuation |
+| Command + Control + Right Option | run an allowlisted Mac command |
 | "…um so basically…" | fillers gone |
 | "Tuesday — actually Wednesday" | just Wednesday, in place |
 | "two things: … and second …" | a dash list |
@@ -108,6 +130,11 @@ Everything personal stays in private, gitignored local files: `dictionary.txt`
 (your terms; `-word` bans one), `snippets.json`, `tones.json`, `preferences.json`,
 `transcripts.jsonl` (your history, trimmed to recent), and `learned.json`
 (mined vocabulary and fix rules).
+
+Command mode intentionally recognizes only undo, redo, select all, copy, cut,
+paste, delete selection, new line, and escape. It cannot launch arbitrary shell
+commands. Edit mode requires a selection, so ordinary dictation cannot rewrite
+an unseen document by accident.
 
 Flight Recorder is disabled by default and must be enabled from the parrot
 menu. Its audio is never written to disk: the bounded buffer is cleared after
@@ -127,6 +154,7 @@ different cleanup model.
 Run the fast regression suite after changing the pipeline:
 
 ```sh
+uv run tests/test_parrot_core.py
 uv run tests/test_dictate.py
 ```
 

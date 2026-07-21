@@ -214,6 +214,26 @@ class CleanupGuardTests(unittest.TestCase):
         self.assertFalse(ns["needs_llm_cleanup"](
             "Tuesday actually Wednesday", None, False))
 
+    def test_structured_output_guard_rejects_destructive_results(self):
+        ns = load_definitions(
+            "_guard_cleaned_output",
+            assignments={"REFUSAL_RE"},
+        )
+        guard = ns["_guard_cleaned_output"]
+        self.assertEqual(
+            guard("Keep every important word in this sentence",
+                  "Keep words", "stop", "capture"),
+            "over-deletion",
+        )
+        self.assertEqual(
+            guard("Ship API v2 at 15:30", "Ship it later.", "stop", "compose"),
+            "missing factual anchors",
+        )
+        self.assertEqual(
+            guard("A complete source sentence", "", "stop", "edit"),
+            "empty or truncated",
+        )
+
 
 class ConfigurationTests(unittest.TestCase):
     def test_wrong_shaped_tones_file_degrades_to_empty_map(self):
@@ -355,7 +375,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "transcribe_detailed": detailed,
                 "FAST_WHISPER_REPO": "tiny",
                 "WHISPER_REPO": "large",
-                "FAST_ACCEPT_CONFIDENCE": 0.82,
+                "FAST_ACCEPT_CONFIDENCE": 0.70,
             },
         )
         result = ns["_speculative_frames"](
@@ -386,7 +406,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "transcribe_detailed": detailed,
                 "FAST_WHISPER_REPO": "tiny",
                 "WHISPER_REPO": "large",
-                "FAST_ACCEPT_CONFIDENCE": 0.82,
+                "FAST_ACCEPT_CONFIDENCE": 0.70,
             },
         )
         result = ns["_speculative_frames"](

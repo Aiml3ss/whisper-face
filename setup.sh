@@ -87,7 +87,7 @@ reload_agent com.berg.dictate \
     "$HOME/Library/LaunchAgents/com.berg.dictate.plist"
 
 echo
-echo "== done. First launch downloads Whisper (~1.6 GB) and resolves Python deps."
+echo "== done. First launch downloads Whisper models (~1.7 GB total) and resolves Python deps."
 if [ "$MODE" = "full" ]; then
     echo "== macOS will ask for permissions — enable 'uv' under System Settings ->"
     echo "==   Privacy & Security -> Input Monitoring, Accessibility, Microphone."

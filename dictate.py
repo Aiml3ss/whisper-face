@@ -12,7 +12,7 @@
 # ]
 # ///
 """
-dictate.py v3 — local hold-to-talk dictation with HUD + self-learning dictionary.
+dictate.py v5 — context-aware local voice input for macOS.
 
 New in v3:
   * Self-learning vocabulary: every dictation is logged to transcripts.jsonl;
@@ -126,6 +126,22 @@ New in v4.0 (Flight Recorder experiment):
     splits on a deliberate pause, and refuses speech older than 2.5 seconds.
     When Flight Recorder is active, its stream also powers hold-to-talk for
     effectively immediate capture without opening another microphone stream.
+
+New in v5.0 (voice input, not just transcription):
+  * Ephemeral recognition context from the focused app, selection, window,
+    nearby document, sibling filenames, and clipboard biases Whisper toward
+    what the user is working on without persisting that context.
+  * A Tiny-first speculative cascade starts during an end pause. Clear speech
+    returns immediately; uncertain speech escalates to large-v3-turbo, with
+    disagreements retained as inspectable alternatives.
+  * Cleanup is now a structured, guarded edit compiler. Safe fillers, spoken
+    structure, corrections, and code punctuation are deterministic; Qwen is
+    reserved for semantic cleanup and explicit compose/reply/edit modes.
+  * Corrections are learned only from the exact pasted range, scoped by app,
+    activated conservatively, exposed in the menu, and individually forgettable.
+  * Modifier modes turn the same hotkey into Capture, Compose, Reply, Edit,
+    Code, or an allowlisted reversible Command. Recognition confidence,
+    alternatives, and cleanup edit kinds remain available in the menu.
 
 New in v3.7:
   * Casual chats text like texts: no trailing period in casual-tone apps
@@ -250,7 +266,10 @@ SILENCE_RMS = 0.008          # tail quieter than this = you had finished talking
 GATE_PEAK_RMS = 0.002        # just above mic noise floor: whispers pass,
                              # a silent held key still doesn't
 LOW_CONFIDENCE = 0.52        # verify only uncertain Whisper output
-FAST_ACCEPT_CONFIDENCE = 0.82
+# MLX Whisper Tiny's calibrated log-probability confidence clusters around
+# 0.68-0.73 on clean speech. 0.70 accepts its clearest common-language output
+# while routing uncertain/proper-name-heavy audio through large-v3-turbo.
+FAST_ACCEPT_CONFIDENCE = 0.70
 QUICK_PATH_MAX_WORDS = 40    # clean speech (no fillers/commands/enums) can
                              # skip the LLM up to here; markers force cleanup
                              # at any length
@@ -639,7 +658,10 @@ def _caption_add(fut):
     except Exception:
         return
     if t and not is_hallucination(t):
-        CAPTION["text"] = (CAPTION["text"] + " " + t).strip()
+        current = CAPTION["text"]
+        if current == "Listening" or current.endswith(" mode"):
+            current = ""
+        CAPTION["text"] = (current + " " + t).strip()
 
 
 class WaveView(NSView):
@@ -1003,7 +1025,7 @@ class StatusBar(NSObject):
         self.modes_menu = NSMenu.alloc().init()
         self.modes_root.setSubmenu_(self.modes_menu)
         for title in (
-                "Right Option — Capture / Code",
+                "Right Option — Capture",
                 "Shift + Right Option — Compose",
                 "Control + Right Option — Reply",
                 "Shift + Control + Right Option — Code",
@@ -2999,14 +3021,14 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         raw = recognition.text
         t_asr = time.perf_counter() - asr_started_at
         if not raw or is_hallucination(raw):
-            print(f"[dropped] ASR gave "
-                  f"{'nothing' if not raw else f'hallucination {raw[:40]!r}'}")
+            print("[dropped] ASR gave nothing" if not raw
+                  else "[dropped] ASR hallucination detected")
             return
 
         raw, looped = collapse_repeats(raw)
         if looks_like_prompt_echo(raw) and (
                 looped or raw.casefold().startswith(("glossary", "common terms"))):
-            print(f"[dropped] ASR echoed the glossary prompt: {raw[:60]!r}")
+            print("[dropped] ASR echoed the glossary prompt")
             return
 
         bundle = rec.bundle_at_press or frontmost_bundle()
@@ -3033,7 +3055,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             if execute_voice_command(raw):
                 play("Pop")
             else:
-                print(f"[command] unsupported: {raw[:80]!r}")
+                print("[command] unsupported phrase")
                 play("Funk")
             return
 
@@ -3277,6 +3299,9 @@ def main():
                         command="command" in modifiers,
                         control="control" in modifiers,
                     )
+                    CAPTION["text"] = (
+                        "Listening" if rec.mode == "capture"
+                        else f"{rec.mode.title()} mode")
                     set_status("rec")
                     AppHelper.callAfter(hud.showMode_, "recording")
                     play("Tink")              # the cue now means capture-ready
