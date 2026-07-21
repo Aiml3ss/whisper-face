@@ -671,12 +671,13 @@ class StatusBar(NSObject):
             return None
         self.item = NSStatusBar.systemStatusBar().statusItemWithLength_(
             NSVariableStatusItemLength)
-        # The colorful parrot from icon-menubar.svg; emoji fallback if the
-        # file is missing (macOS renders SVG into NSImage natively).
+        # The template glyph from the icon system: macOS recolors it for
+        # light/dark menu bars automatically. Emoji fallback if missing.
         self.icon = NSImage.alloc().initWithContentsOfFile_(
-            str(HERE / "icon-menubar.svg"))
+            str(HERE / "icons" / "glyph.svg"))
         if self.icon is not None:
             self.icon.setSize_(NSMakeSize(18, 18))
+            self.icon.setTemplate_(True)
         self.setState_("idle")
 
         def mk(title, action):
