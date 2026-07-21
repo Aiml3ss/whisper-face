@@ -96,6 +96,15 @@ New in v3.5 (long dictations):
   * Clean speech up to 40 words takes the instant path; fillers, commands,
     tone overrides, and enumerations still force LLM cleanup at any length.
 
+New in v3.7:
+  * Casual chats text like texts: no trailing period in casual-tone apps
+    (Discord, Messages, or anything you mark casual). Internal sentence
+    periods, ?, !, and deliberate ellipses are kept. Enforced in code, not
+    just in the prompt.
+  * App Tones in the menu bar: pick Auto/Casual/Formal/Technical/Verbatim/
+    Neutral per app from the parrot menu; saved to tones.json and it wins
+    over the built-in app sets.
+
 New in v3.6:
   * Tail wait skipped when your speech already ended before key release
     (~0.3s faster on most dictations).
@@ -209,6 +218,10 @@ CORRECTION_MAX_LEARN = 3     # per dictation
 
 PHONE_PORT = 8787            # /v1/audio/transcriptions for the Diction app
 SERVER_ONLY = "--server-only" in sys.argv   # headless: endpoint only
+
+# Per-app tone overrides chosen from the menu bar (App Tones); wins over the
+# built-in *_APPS sets. bundle id -> "casual"|"formal"|"code"|"verbatim"|"default"
+TONES_FILE = HERE / "tones.json"
 
 # Glossary budget: Whisper honors ~224 prompt tokens; keep well under.
 GLOSSARY_MAX_TERMS = 60
@@ -324,7 +337,10 @@ FEW_SHOT = [
 ]
 
 TONE = {
-    "casual": "Style: casual chat message. Contractions fine, keep it light.",
+    "casual": "Style: casual chat message. Contractions fine, keep it light. "
+              "Never end the message with a period — trailing periods read "
+              "cold in chat (question marks and exclamation points are fine, "
+              "and periods between sentences are fine).",
     "formal": "Style: professional email prose. Complete, polished sentences.",
     "code": "Style: technical. Preserve identifiers, commands, and technical "
             "terms exactly as spoken; do not reformat them.",
@@ -373,6 +389,33 @@ LISTENER = {"l": None, "make": None}
 # Menu-bar state: the status item (main-thread only) and the pause switch.
 STATUS = {"bar": None}
 PAUSED = {"on": False}
+
+APP_TONES = {"map": {}, "lock": threading.Lock()}
+
+
+def load_app_tones():
+    try:
+        m = json.loads(TONES_FILE.read_text()) if TONES_FILE.exists() else {}
+    except Exception:
+        m = {}
+    with APP_TONES["lock"]:
+        APP_TONES["map"] = {k: v for k, v in m.items() if isinstance(v, str)}
+
+
+def set_app_tone(bundle: str, tone: str | None):
+    with APP_TONES["lock"]:
+        if tone is None:
+            APP_TONES["map"].pop(bundle, None)
+        else:
+            APP_TONES["map"][bundle] = tone
+        snapshot = dict(APP_TONES["map"])
+    TONES_FILE.write_text(json.dumps(snapshot, indent=2))
+    print(f"[tones] {bundle} -> {tone or 'auto'}")
+
+
+def app_tone_override(bundle: str) -> str | None:
+    with APP_TONES["lock"]:
+        return APP_TONES["map"].get(bundle)
 
 
 def set_status(state: str):
@@ -508,8 +551,56 @@ def usage_stats() -> tuple[str, str]:
             f"Last 7 days: {week} · {week_w} words")
 
 
+def builtin_tone(bundle: str) -> str:
+    if bundle in VERBATIM_APPS:
+        return "verbatim"
+    if bundle in CASUAL_APPS:
+        return "casual"
+    if bundle in FORMAL_APPS:
+        return "formal"
+    if bundle in CODE_APPS:
+        return "code"
+    return "default"
+
+
+def recent_dictation_apps(limit: int = 8) -> list[str]:
+    """Apps worth showing in the tone picker: frontmost first, then the
+    most recently dictated-into, deduped."""
+    try:
+        with TRANSCRIPTS_LOCK:
+            lines = TRANSCRIPTS_FILE.read_text().splitlines()
+    except Exception:
+        lines = []
+    candidates = [frontmost_bundle()]
+    for line in reversed(lines):
+        try:
+            candidates.append(json.loads(line).get("app") or "")
+        except Exception:
+            continue
+    seen, out = set(), []
+    for b in candidates:
+        if b and b != "ios.diction" and b not in seen:
+            seen.add(b)
+            out.append(b)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def app_display_name(bundle: str) -> str:
+    try:
+        url = NSWorkspace.sharedWorkspace() \
+            .URLForApplicationWithBundleIdentifier_(bundle)
+        if url is not None:
+            return str(url.lastPathComponent()).removesuffix(".app")
+    except Exception:
+        pass
+    return bundle
+
+
 class StatusBar(NSObject):
-    """Menu-bar presence: state glyph, usage stats, pause, log, quit."""
+    """Menu-bar presence: state glyph, usage stats, per-app tone picker,
+    pause, log, quit."""
 
     def init(self):
         self = objc.super(StatusBar, self).init()
@@ -536,10 +627,14 @@ class StatusBar(NSObject):
         menu.setDelegate_(self)
         self.stat1 = mk("…", None)
         self.stat2 = mk("…", None)
+        self.tones_root = mk("App Tones", None)
+        self.tones_menu = NSMenu.alloc().init()
+        self.tones_root.setSubmenu_(self.tones_menu)
         self.pause_item = mk("Pause Dictation", "togglePause:")
         menu.addItem_(self.stat1)
         menu.addItem_(self.stat2)
         menu.addItem_(NSMenuItem.separatorItem())
+        menu.addItem_(self.tones_root)
         menu.addItem_(self.pause_item)
         menu.addItem_(mk("Open Log", "openLog:"))
         menu.addItem_(NSMenuItem.separatorItem())
@@ -558,9 +653,44 @@ class StatusBar(NSObject):
         btn.setTitle_(icons.get(state, "🦜"))
 
     def menuWillOpen_(self, menu):
-        s1, s2 = usage_stats()
-        self.stat1.setTitle_(s1)
-        self.stat2.setTitle_(s2)
+        try:
+            s1, s2 = usage_stats()
+            self.stat1.setTitle_(s1)
+            self.stat2.setTitle_(s2)
+            self.rebuild_tones()
+        except Exception as e:
+            print(f"! menu refresh failed: {e}")   # menu still opens
+
+    def rebuild_tones(self):
+        """One submenu per recent app: Auto (built-in guess) or an explicit
+        tone. Checkmark shows what's in effect; choices persist to
+        tones.json."""
+        self.tones_menu.removeAllItems()
+        choices = [("Casual", "casual"), ("Formal", "formal"),
+                   ("Technical", "code"), ("Verbatim", "verbatim"),
+                   ("Neutral", "default")]
+        for bundle in recent_dictation_apps():
+            override = app_tone_override(bundle)
+            app_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                app_display_name(bundle), None, "")
+            sub = NSMenu.alloc().init()
+            entries = [(f"Auto ({builtin_tone(bundle)})", "")] \
+                + [(t, k) for t, k in choices]
+            for title, key in entries:
+                mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                    title, "setAppTone:", "")
+                mi.setTarget_(self)
+                mi.setRepresentedObject_({"bundle": bundle, "tone": key})
+                selected = (override is None and key == "") \
+                    or (override is not None and key == override)
+                mi.setState_(1 if selected else 0)
+                sub.addItem_(mi)
+            app_item.setSubmenu_(sub)
+            self.tones_menu.addItem_(app_item)
+
+    def setAppTone_(self, sender):
+        d = sender.representedObject()
+        set_app_tone(str(d["bundle"]), str(d["tone"]) or None)
 
     def togglePause_(self, sender):
         PAUSED["on"] = not PAUSED["on"]
@@ -908,7 +1038,11 @@ def frontmost_bundle() -> str:
 
 
 def tone_for(bundle: str) -> str:
-    """Tone KEY for the frontmost app; text lives in TONE[key]."""
+    """Tone KEY for the frontmost app: menu-bar override first, then the
+    built-in sets. Text lives in TONE[key]."""
+    override = app_tone_override(bundle)
+    if override in TONE:
+        return override
     if bundle in CASUAL_APPS:
         return "casual"
     if bundle in FORMAL_APPS:
@@ -916,6 +1050,19 @@ def tone_for(bundle: str) -> str:
     if bundle in CODE_APPS:
         return "code"
     return "default"
+
+
+def is_verbatim_app(bundle: str) -> bool:
+    return bundle in VERBATIM_APPS or app_tone_override(bundle) == "verbatim"
+
+
+def strip_casual_period(text: str) -> str:
+    """Texting convention: no trailing period on a chat message. Internal
+    sentence periods stay; ?, !, and deliberate ellipses stay."""
+    t = text.rstrip()
+    if t.endswith(".") and not t.endswith(("..", "…")):
+        return t[:-1]
+    return t
 
 
 def extract_tone_override(raw: str) -> tuple[str, str | None]:
@@ -1493,7 +1640,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
 
         raw, tone_override = extract_tone_override(raw)
         bundle = frontmost_bundle()
-        verbatim = bundle in VERBATIM_APPS or tone_override == "verbatim"
+        verbatim = is_verbatim_app(bundle) or tone_override == "verbatim"
         needs_llm = not verbatim and (
             tone_override is not None       # an explicit ask always cleans
             or len(raw.split()) > QUICK_PATH_MAX_WORDS
@@ -1518,6 +1665,8 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 "sentence truly starts, and never repeat the existing text.")
         text = llm_clean(raw, tone_txt) if needs_llm \
             else quick_clean(raw, verbatim=verbatim, continuing=continuing)
+        if tone_key == "casual" and not verbatim:
+            text = strip_casual_period(text)   # belt for both paths
         if continuing and text:
             tail40 = stripped_ctx[-40:].lower()
             if tail40 and text.lower().startswith(tail40):
@@ -1574,6 +1723,7 @@ def warmup():
 
 def main():
     lock_fd = ensure_single_instance()      # noqa: F841 — held for lifetime
+    load_app_tones()
 
     terms = refresh_glossary()
     print(f"Active glossary: {len(terms)} terms "

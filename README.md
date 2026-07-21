@@ -28,9 +28,10 @@ dictations paste in **~0.2–0.5s**.
   punctuation fixed. An output guard rejects anything that isn't a faithful
   cleanup (refusals, over-deletions, truncations) and falls back to the
   lightly polished raw transcript — the model can never eat your words.
-- **Tone awareness** — casual in Slack/Messages, formal prose in Mail,
-  technical in editors and AI chats, verbatim in terminals. Or force a style
-  per-dictation: *"Formal tone, …"*, *"casual, …"*, *"verbatim: …"*.
+- **Tone awareness** — casual in Slack/Messages (texting style: no trailing
+  period), formal prose in Mail, technical in editors and AI chats, verbatim
+  in terminals. Pick a tone per app from the menu-bar **App Tones** picker,
+  or force one per-dictation: *"Formal tone, …"*, *"casual, …"*.
 - **Spoken structure** — "new line" / "new paragraph" / "scratch that" work;
   enumerations ("two things: …") become tidy dash lists.
 - **Self-learning dictionary** — new vocabulary is mined from your usage and
