@@ -96,6 +96,11 @@ New in v3.5 (long dictations):
   * Clean speech up to 40 words takes the instant path; fillers, commands,
     tone overrides, and enumerations still force LLM cleanup at any length.
 
+New in v3.8:
+  * The HUD is now the parrot: it sits in the frosted pill and its beak
+    opens in sync with your live voice level while you dictate (closed,
+    with the orange pulse, while processing). Level bars stay beside it.
+
 New in v3.7:
   * Casual chats text like texts: no trailing period in casual-tone apps
     (Discord, Messages, or anything you mark casual). Internal sentence
@@ -243,12 +248,15 @@ KEEPWARM_MIN_IDLE = 60       # skip the beat if dictating right now
 
 LOCK_FILE = HERE / ".dictate.lock"
 
-# HUD
-HUD_W, HUD_H = 220.0, 44.0
+# HUD: a frosted pill with the parrot on the left (beak opens with your
+# voice) and level bars on the right.
+HUD_W, HUD_H = 264.0, 56.0
 HUD_BOTTOM_MARGIN = 80.0
-NUM_BARS = 24
+NUM_BARS = 16
 BAR_W = 3.0
-PAD_X = 18.0
+BARS_X0 = 64.0               # bars start right of the bird
+BARS_PAD_R = 20.0
+BEAK_MAX_DEG = 26.0
 FPS = 30.0
 
 FILLER_RE = re.compile(r"\b(um+|uh+|erm|hmm)\b|\byou know\b|\bi mean\b", re.I)
@@ -427,6 +435,26 @@ def set_status(state: str):
 # ------------------------- HUD -------------------------
 
 
+def _rot(p, c, deg):
+    r = math.radians(deg)
+    ca, sa = math.cos(r), math.sin(r)
+    dx, dy = p[0] - c[0], p[1] - c[1]
+    return (c[0] + dx * ca - dy * sa, c[1] + dx * sa + dy * ca)
+
+
+def _poly(points):
+    path = NSBezierPath.bezierPath()
+    path.moveToPoint_(points[0])
+    for pt in points[1:]:
+        path.lineToPoint_(pt)
+    path.closePath()
+    return path
+
+
+def _rgb(r, g, b, a=1.0):
+    NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, a).set()
+
+
 class WaveView(NSView):
     def initWithFrame_(self, frame):
         self = objc.super(WaveView, self).initWithFrame_(frame)
@@ -435,26 +463,53 @@ class WaveView(NSView):
         self.levels = [0.0] * NUM_BARS
         self.mode = "recording"
         self.phase = 0.0
+        self.beak = 0.0
         return self
 
     def drawRect_(self, rect):
         b = self.bounds()
         w, h = b.size.width, b.size.height
-        gap = (w - 2 * PAD_X - NUM_BARS * BAR_W) / (NUM_BARS - 1)
+        cy = h / 2.0
 
+        # --- the parrot ---
+        _rgb(0.063, 0.725, 0.506)                        # body #10b981
+        NSBezierPath.bezierPathWithOvalInRect_(
+            NSMakeRect(14, cy - 16, 32, 32)).fill()
+        _rgb(0.204, 0.827, 0.600, 0.75)                  # belly #34d399
+        NSBezierPath.bezierPathWithOvalInRect_(
+            NSMakeRect(17, cy - 13, 15, 15)).fill()
+        _rgb(0.973, 0.980, 0.988)                        # eye
+        NSBezierPath.bezierPathWithOvalInRect_(
+            NSMakeRect(33, cy + 1, 9, 9)).fill()
+        _rgb(0.059, 0.090, 0.165)                        # pupil
+        NSBezierPath.bezierPathWithOvalInRect_(
+            NSMakeRect(36, cy + 3, 4.5, 4.5)).fill()
+
+        # hinged beak: opens with the live level, closed while processing
+        target = 0.0 if self.mode == "processing" else \
+            min(1.0, max(self.levels[-3:] or [0.0])) * BEAK_MAX_DEG
+        self.beak += (target - self.beak) * 0.5
+        pivot = (44.0, cy)
+        upper = [(44, cy + 3.5), (58, cy + 0.5), (44, cy - 1.5)]
+        lower = [(44, cy + 0.5), (56, cy - 2.0), (45, cy - 5.0)]
+        _rgb(0.984, 0.749, 0.141)                        # #fbbf24
+        _poly([_rot(p, pivot, self.beak * 0.35) for p in upper]).fill()
+        _rgb(0.851, 0.467, 0.024)                        # #d97706
+        _poly([_rot(p, pivot, -self.beak * 0.65) for p in lower]).fill()
+
+        # --- the bars ---
+        gap = (w - BARS_X0 - BARS_PAD_R - NUM_BARS * BAR_W) / (NUM_BARS - 1)
         if self.mode == "processing":
-            NSColor.colorWithCalibratedRed_green_blue_alpha_(
-                1.0, 0.64, 0.26, 1.0).set()
+            _rgb(1.0, 0.64, 0.26)
         else:
             NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.92).set()
-
         for i in range(NUM_BARS):
             if self.mode == "processing":
                 lvl = 0.28 + 0.22 * math.sin(self.phase + i * 0.55)
             else:
                 lvl = self.levels[i]
-            bar_h = max(3.0, min(1.0, lvl) * (h - 12.0))
-            x = PAD_X + i * (BAR_W + gap)
+            bar_h = max(3.0, min(1.0, lvl) * (h - 16.0))
+            x = BARS_X0 + i * (BAR_W + gap)
             y = (h - bar_h) / 2.0
             NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
                 NSMakeRect(x, y, BAR_W, bar_h), 1.5, 1.5).fill()
