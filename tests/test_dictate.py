@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT))
 
 from parrot_core import Recognition, compile_cleanup  # noqa: E402
 
-TREE = ast.parse((ROOT / "dictate.py").read_text())
+TREE = ast.parse((ROOT / "dictate.py").read_text(encoding="utf-8"))
 
 
 def load_definitions(*names, assignments=(), extra=None):

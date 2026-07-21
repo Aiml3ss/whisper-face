@@ -14,10 +14,10 @@ ROOT = Path(__file__).resolve().parents[1]
 class InstallerContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.shell = (ROOT / "setup.sh").read_text()
-        cls.powershell = (ROOT / "setup.ps1").read_text()
-        cls.script = (ROOT / "dictate.py").read_text()
-        cls.lock = (ROOT / "dictate.py.lock").read_text()
+        cls.shell = (ROOT / "setup.sh").read_text(encoding="utf-8")
+        cls.powershell = (ROOT / "setup.ps1").read_text(encoding="utf-8")
+        cls.script = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        cls.lock = (ROOT / "dictate.py.lock").read_text(encoding="utf-8")
 
     def test_shell_dispatches_windows_before_mac_only_work(self):
         dispatch = self.shell.index("MINGW*|MSYS*|CYGWIN*")
@@ -29,8 +29,10 @@ class InstallerContractTests(unittest.TestCase):
     def test_each_platform_has_a_clickable_entrypoint(self):
         self.assertTrue((ROOT / "Install.command").exists())
         self.assertTrue((ROOT / "Install.cmd").exists())
-        self.assertIn("setup.sh", (ROOT / "Install.command").read_text())
-        self.assertIn("setup.ps1", (ROOT / "Install.cmd").read_text())
+        self.assertIn(
+            "setup.sh", (ROOT / "Install.command").read_text(encoding="utf-8"))
+        self.assertIn(
+            "setup.ps1", (ROOT / "Install.cmd").read_text(encoding="utf-8"))
 
     def test_windows_installer_covers_the_complete_stack(self):
         for expected in (
