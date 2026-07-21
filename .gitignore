@@ -2,6 +2,8 @@
 transcripts.jsonl
 learned.json
 snippets.json
+tones.json
+preferences.json
 dictionary.txt
 dictate.log
 ollama.log

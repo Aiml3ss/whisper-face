@@ -19,6 +19,10 @@
     <key>RunAtLoad</key>
     <true/>
 
+    <!-- Raw transcripts, snippets, and logs are private user data. -->
+    <key>Umask</key>
+    <integer>63</integer>
+
     <!-- Restart on crash or kill; a clean exit(0) (e.g. the single-instance
          lock found another copy running) is NOT respawned. -->
     <key>KeepAlive</key>

@@ -189,8 +189,9 @@ def main():
 
     print(f"\n{'model':<16} {'pass':>4} {'fallback':>8} {'LEAK':>5} "
           f"{'median':>7} {'tok/s':>6}")
-    for m, (p, f, l, wall, rate) in summary.items():
-        print(f"{m:<16} {p:>4} {f:>8} {l:>5} {wall:>6.2f}s {rate:>6.0f}")
+    for m, (passed, fallback, leaks, wall, rate) in summary.items():
+        print(f"{m:<16} {passed:>4} {fallback:>8} {leaks:>5} "
+              f"{wall:>6.2f}s {rate:>6.0f}")
 
 
 if __name__ == "__main__":

@@ -64,7 +64,13 @@ fi
 
 # --- per-machine files ------------------------------------------------------
 [ -f snippets.json ] || cp snippets.template.json snippets.json
+[ -f tones.json ] || cp tones.template.json tones.json
+[ -f preferences.json ] || cp preferences.template.json preferences.json
 [ -f dictionary.txt ] || cp dictionary.template.txt dictionary.txt
+chmod 600 snippets.json tones.json preferences.json dictionary.txt
+for private_file in transcripts.jsonl learned.json dictate.log ollama.log .dictate.lock; do
+    [ ! -e "$private_file" ] || chmod 600 "$private_file"
+done
 
 # --- LaunchAgent ------------------------------------------------------------
 UV="$(command -v uv)"
@@ -86,6 +92,8 @@ if [ "$MODE" = "full" ]; then
     echo "== macOS will ask for permissions — enable 'uv' under System Settings ->"
     echo "==   Privacy & Security -> Input Monitoring, Accessibility, Microphone."
     echo "==   (The app waits and restarts itself automatically once granted.)"
+    echo "== Flight Recorder is off by default; enable its RAM-only buffer"
+    echo "==   explicitly from the parrot menu when you want tap-after-talk."
 else
     echo "== server-only mode: no permission prompts needed."
 fi

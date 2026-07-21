@@ -101,6 +101,32 @@ New in v3.8:
     opens in sync with your live voice level while you dictate (closed,
     with the orange pulse, while processing). Level bars stay beside it.
 
+New in v3.9 (Mac reliability + latency):
+  * Two microphone streams are opened and warmed at launch, then reused for
+    every hold. The start cue now plays only after capture is ready, and mic
+    failures no longer kill the hotkey worker.
+  * Release performs exactly one decode of the unfinished audio. Rolling
+    chunk preparation moved off PortAudio's real-time callback, and clean
+    speech containing only simple hesitation sounds stays on the fast path.
+  * Hallucination matching is punctuation-insensitive; app configuration and
+    learned state tolerate malformed JSON; concurrent learning updates merge
+    safely; correction learning follows the field that received the paste.
+  * Private state uses atomic 0600 writes, launch agents get a 0077 umask, and
+    timing logs report capture-ready, tail, ASR wait, cleanup, and total time
+    without echoing dictated text.
+
+New in v4.0 (Flight Recorder experiment):
+  * Opt-in retrospective dictation: enable Flight Recorder in the menu bar,
+    speak naturally, then tap Right Option to transcribe the newest utterance.
+    Holding Right Option remains ordinary push-to-talk.
+  * The rolling 20-second buffer exists only in RAM. It is cleared after use,
+    when pausing, when disabling the feature, and on quit; audio is never
+    serialized. A menu-bar dot and macOS microphone indicator show activity.
+  * Adaptive local VAD finds the last speech island, retains natural padding,
+    splits on a deliberate pause, and refuses speech older than 2.5 seconds.
+    When Flight Recorder is active, its stream also powers hold-to-talk for
+    effectively immediate capture without opening another microphone stream.
+
 New in v3.7:
   * Casual chats text like texts: no trailing period in casual-tone apps
     (Discord, Messages, or anything you mark casual). Internal sentence
@@ -201,6 +227,7 @@ LEARNED_FILE = HERE / "learned.json"            # mined term counts
 
 MIN_SECONDS = 0.4
 TAIL_SECONDS = 0.30          # mic keeps running after release (usually free)
+TAIL_SKIP_SILENCE = 0.12     # already quiet this long -> stop immediately
 SILENCE_RMS = 0.008          # tail quieter than this = you had finished talking
 GATE_PEAK_RMS = 0.002        # just above mic noise floor: whispers pass,
                              # a silent held key still doesn't
@@ -227,6 +254,16 @@ SERVER_ONLY = "--server-only" in sys.argv   # headless: endpoint only
 # Per-app tone overrides chosen from the menu bar (App Tones); wins over the
 # built-in *_APPS sets. bundle id -> "casual"|"formal"|"code"|"verbatim"|"default"
 TONES_FILE = HERE / "tones.json"
+PREFERENCES_FILE = HERE / "preferences.json"
+
+# Flight Recorder: an opt-in, RAM-only rolling buffer. A quick tap of the
+# normal hotkey transcribes the most recent utterance; holding it keeps the
+# existing push-to-talk contract. No buffered audio is ever written to disk.
+FLIGHT_BUFFER_SECONDS = 20.0
+FLIGHT_TAP_MAX = 0.30
+FLIGHT_MAX_LAG = 2.5
+FLIGHT_START_SILENCE = 1.0
+FLIGHT_PAD_SECONDS = 0.15
 
 # Glossary budget: Whisper honors ~224 prompt tokens; keep well under.
 GLOSSARY_MAX_TERMS = 60
@@ -259,7 +296,9 @@ BARS_PAD_R = 20.0
 BEAK_MAX_DEG = 40.0
 FPS = 30.0
 
-FILLER_RE = re.compile(r"\b(um+|uh+|erm|hmm)\b|\byou know\b|\bi mean\b", re.I)
+SIMPLE_FILLER_RE = re.compile(
+    r"(?:,\s*)?\b(?:um+|uh+|erm|hmm)\b(?:\s*,)?", re.I)
+AMBIGUOUS_FILLER_RE = re.compile(r"\byou know\b|\bi mean\b", re.I)
 COMMAND_RE = re.compile(
     r"\bnew (line|paragraph)\b|\bscratch that\b|\bactually\b", re.I
 )
@@ -286,8 +325,7 @@ REFUSAL_RE = re.compile(
     r"as an ai\b|i'?m (?:not able|unable) to\b|i won'?t\b|i will not\b)", re.I
 )
 HALLUCINATIONS = {
-    "thank you.", "thank you", "thanks for watching!", "thanks for watching",
-    "thank you for watching", "you", ".", "bye.",
+    "thank you", "thanks for watching", "thank you for watching", "you", "bye",
 }
 
 CASUAL_APPS = {"com.tinyspeck.slackmacgap", "com.apple.MobileSMS",
@@ -375,6 +413,10 @@ Transcripts:
 
 LEVELS = deque([0.0] * NUM_BARS, maxlen=NUM_BARS)
 ASR_POOL = ThreadPoolExecutor(max_workers=1)
+# Concatenating rolling chunks is CPU/memory work and must not happen inside
+# PortAudio's real-time callback. This pool prepares one chunk at a time, then
+# hands the actual MLX call to the single-threaded ASR pool.
+CHUNK_PREP_POOL = ThreadPoolExecutor(max_workers=1)
 
 # Current glossary + active mishearing-fix rules, hot-swapped by the
 # learning loop.
@@ -399,6 +441,40 @@ STATUS = {"bar": None}
 PAUSED = {"on": False}
 
 APP_TONES = {"map": {}, "lock": threading.Lock()}
+PREFERENCES = {"flight_recorder": False}
+
+
+def atomic_write_text(path: Path, text: str, mode: int = 0o600):
+    """Crash-safe private write for local state files."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w") as f:
+            fd = -1
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+
+
+def is_hallucination(text: str) -> bool:
+    """Reject punctuation-only output and known silent-audio phrases.
+
+    Normalize punctuation rather than enumerating every possible terminal
+    mark ("Thank you.", "Thank you!", and "THANK YOU..." are equivalent).
+    """
+    words = re.findall(r"[a-z0-9]+", text.casefold())
+    if not words:
+        return True
+    return " ".join(words) in HALLUCINATIONS
 
 
 def load_app_tones():
@@ -406,8 +482,13 @@ def load_app_tones():
         m = json.loads(TONES_FILE.read_text()) if TONES_FILE.exists() else {}
     except Exception:
         m = {}
+    if not isinstance(m, dict):
+        m = {}
     with APP_TONES["lock"]:
-        APP_TONES["map"] = {k: v for k, v in m.items() if isinstance(v, str)}
+        APP_TONES["map"] = {
+            k: v for k, v in m.items()
+            if isinstance(k, str) and isinstance(v, str)
+        }
 
 
 def set_app_tone(bundle: str, tone: str | None):
@@ -417,8 +498,24 @@ def set_app_tone(bundle: str, tone: str | None):
         else:
             APP_TONES["map"][bundle] = tone
         snapshot = dict(APP_TONES["map"])
-    TONES_FILE.write_text(json.dumps(snapshot, indent=2))
+    atomic_write_text(TONES_FILE, json.dumps(snapshot, indent=2) + "\n")
     print(f"[tones] {bundle} -> {tone or 'auto'}")
+
+
+def load_preferences():
+    try:
+        loaded = json.loads(PREFERENCES_FILE.read_text()) \
+            if PREFERENCES_FILE.exists() else {}
+    except Exception:
+        loaded = {}
+    PREFERENCES["flight_recorder"] = bool(
+        isinstance(loaded, dict) and loaded.get("flight_recorder") is True)
+
+
+def save_preferences():
+    snapshot = {"flight_recorder": bool(PREFERENCES["flight_recorder"])}
+    atomic_write_text(
+        PREFERENCES_FILE, json.dumps(snapshot, indent=2) + "\n")
 
 
 def app_tone_override(bundle: str) -> str | None:
@@ -663,7 +760,7 @@ def app_display_name(bundle: str) -> str:
 
 class StatusBar(NSObject):
     """Menu-bar presence: state glyph, usage stats, per-app tone picker,
-    pause, log, quit."""
+    Flight Recorder privacy control, pause, log, quit."""
 
     def init(self):
         self = objc.super(StatusBar, self).init()
@@ -694,11 +791,13 @@ class StatusBar(NSObject):
         self.tones_root = mk("App Tones", None)
         self.tones_menu = NSMenu.alloc().init()
         self.tones_root.setSubmenu_(self.tones_menu)
+        self.flight_item = mk("Flight Recorder", "toggleFlight:")
         self.pause_item = mk("Pause Dictation", "togglePause:")
         menu.addItem_(self.stat1)
         menu.addItem_(self.stat2)
         menu.addItem_(NSMenuItem.separatorItem())
         menu.addItem_(self.tones_root)
+        menu.addItem_(self.flight_item)
         menu.addItem_(self.pause_item)
         menu.addItem_(mk("Open Log", "openLog:"))
         menu.addItem_(NSMenuItem.separatorItem())
@@ -709,8 +808,11 @@ class StatusBar(NSObject):
     def setState_(self, state):
         btn = self.item.button()
         if state == "idle" and self.icon is not None:
-            btn.setTitle_("")
+            btn.setTitle_("•" if FLIGHT.is_enabled() else "")
             btn.setImage_(self.icon)
+            btn.setToolTip_(
+                "Flight Recorder active: 20-second RAM-only microphone buffer"
+                if FLIGHT.is_enabled() else "Whispering Parrot")
             return
         btn.setImage_(None)
         icons = {"idle": "🦜", "rec": "🔴", "proc": "🟠", "off": "⏸"}
@@ -722,8 +824,57 @@ class StatusBar(NSObject):
             self.stat1.setTitle_(s1)
             self.stat2.setTitle_(s2)
             self.rebuild_tones()
+            self.refresh_flight_item()
         except Exception as e:
             print(f"! menu refresh failed: {e}")   # menu still opens
+
+    def refresh_flight_item(self):
+        desired = PREFERENCES["flight_recorder"]
+        active = FLIGHT.is_enabled()
+        if PAUSED["on"] and desired:
+            title = "Flight Recorder (paused)"
+        elif active:
+            title = "Flight Recorder — 20s RAM only"
+        else:
+            title = "Enable Flight Recorder (RAM only)"
+        self.flight_item.setTitle_(title)
+        self.flight_item.setState_(1 if desired else 0)
+        self.flight_item.setEnabled_(True)
+
+    def start_flight_async(self):
+        if PAUSED["on"] or FLIGHT.is_enabled():
+            self.refresh_flight_item()
+            return
+        self.flight_item.setTitle_("Starting Flight Recorder…")
+        self.flight_item.setEnabled_(False)
+
+        def start():
+            try:
+                FLIGHT.enable()
+                print("[flight] active: 20s RAM-only buffer; tap Right Option "
+                      "after speaking")
+            except Exception as e:
+                PREFERENCES["flight_recorder"] = False
+                save_preferences()
+                print(f"! Flight Recorder could not start: {e}")
+            AppHelper.callAfter(self.refresh_flight_item)
+            AppHelper.callAfter(self.setState_, "idle")
+
+        threading.Thread(target=start, daemon=True).start()
+
+    def toggleFlight_(self, sender):
+        desired = not PREFERENCES["flight_recorder"]
+        PREFERENCES["flight_recorder"] = desired
+        save_preferences()
+        if not desired:
+            FLIGHT.disable()
+            print("[flight] disabled; RAM audio buffer cleared")
+            self.refresh_flight_item()
+            self.setState_("off" if PAUSED["on"] else "idle")
+        elif PAUSED["on"]:
+            self.refresh_flight_item()
+        else:
+            self.start_flight_async()
 
     def rebuild_tones(self):
         """One submenu per recent app: Auto (built-in guess) or an explicit
@@ -758,8 +909,13 @@ class StatusBar(NSObject):
 
     def togglePause_(self, sender):
         PAUSED["on"] = not PAUSED["on"]
+        if PAUSED["on"]:
+            FLIGHT.disable()
+        elif PREFERENCES["flight_recorder"]:
+            self.start_flight_async()
         self.pause_item.setTitle_(
             "Resume Dictation" if PAUSED["on"] else "Pause Dictation")
+        self.refresh_flight_item()
         self.setState_("off" if PAUSED["on"] else "idle")
 
     def openLog_(self, sender):
@@ -768,17 +924,309 @@ class StatusBar(NSObject):
     def quitApp_(self, sender):
         # Clean exit(0): launchd's SuccessfulExit=false means no respawn
         # until next login — an intentional "off switch".
+        try:
+            FLIGHT.disable()
+            AUDIO_POOL.close()
+        except Exception:
+            pass
         NSApplication.sharedApplication().terminate_(None)
 
 
 # ------------------------- audio -------------------------
 
 
+def extract_recent_utterance(
+        audio: np.ndarray,
+        sample_rate: int = SAMPLE_RATE,
+        max_lag: float = FLIGHT_MAX_LAG,
+        start_silence: float = FLIGHT_START_SILENCE,
+        pad_seconds: float = FLIGHT_PAD_SECONDS) -> np.ndarray:
+    """Return the last speech island from a rolling audio buffer.
+
+    The threshold adapts to the recent noise floor, while retaining the same
+    absolute floor used by hold-to-talk. A substantial silence run marks the
+    beginning and a stale utterance is rejected instead of pasting old speech.
+    """
+    audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+    window = max(1, int(sample_rate * 0.02))       # 20ms VAD windows
+    usable = len(audio) - (len(audio) % window)
+    if usable < int(MIN_SECONDS * sample_rate):
+        return np.zeros(0, dtype=np.float32)
+    framed = audio[:usable].reshape(-1, window)
+    rms = np.sqrt(np.mean(framed ** 2, axis=1))
+    noise_floor = float(np.percentile(rms, 20))
+    threshold = max(GATE_PEAK_RMS, min(noise_floor * 3.0, 0.01))
+    voiced = rms >= threshold
+    voice_indices = np.flatnonzero(voiced)
+    if not len(voice_indices):
+        return np.zeros(0, dtype=np.float32)
+
+    last = int(voice_indices[-1])
+    lag_windows = len(voiced) - 1 - last
+    if lag_windows * window / sample_rate > max_lag:
+        return np.zeros(0, dtype=np.float32)
+
+    gap_needed = max(1, int(start_silence * sample_rate / window))
+    earliest = max(0, last - int(FLIGHT_BUFFER_SECONDS * sample_rate / window))
+    start_window = earliest
+    silent_run = 0
+    for idx in range(last - 1, earliest - 1, -1):
+        if voiced[idx]:
+            silent_run = 0
+        else:
+            silent_run += 1
+            if silent_run >= gap_needed:
+                start_window = idx + silent_run
+                break
+
+    pad = int(pad_seconds * sample_rate)
+    start_sample = max(0, start_window * window - pad)
+    end_sample = min(len(audio), (last + 1) * window + pad)
+    selected = audio[start_sample:end_sample].copy()
+    if (len(selected) < int(MIN_SECONDS * sample_rate)
+            or peak_rms(selected) < GATE_PEAK_RMS):
+        return np.zeros(0, dtype=np.float32)
+    return selected
+
+
+class FlightRecorder:
+    """Opt-in continuous capture with a bounded, RAM-only audio deque."""
+
+    def __init__(self, seconds=FLIGHT_BUFFER_SECONDS, stream_factory=None):
+        self.max_samples = int(seconds * SAMPLE_RATE)
+        self.stream_factory = stream_factory
+        self.frames = deque()
+        self.total_samples = 0
+        self.stream = None
+        self.target = None
+        self.lock = threading.Lock()
+        self.init_lock = threading.Lock()
+
+    def is_enabled(self):
+        with self.lock:
+            return self.stream is not None
+
+    def _callback(self, indata, frames, time_info, status):
+        frame = indata.copy()
+        ended_at = time.perf_counter()
+        with self.lock:
+            if self.stream is None:
+                return
+            self.frames.append((ended_at, frame))
+            self.total_samples += len(frame)
+            while self.frames and self.total_samples > self.max_samples:
+                _, expired = self.frames.popleft()
+                self.total_samples -= len(expired)
+            target = self.target
+        if target is not None:
+            target._callback(indata, frames, time_info, status)
+
+    def enable(self):
+        if self.is_enabled():
+            return
+        with self.init_lock:
+            if self.is_enabled():
+                return
+            factory = self.stream_factory or sd.InputStream
+            stream = factory(
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                dtype="float32",
+                callback=self._callback,
+            )
+            with self.lock:
+                self.frames.clear()
+                self.total_samples = 0
+                self.stream = stream
+            try:
+                stream.start()
+            except Exception:
+                with self.lock:
+                    self.stream = None
+                stream.close()
+                raise
+
+    def disable(self):
+        with self.lock:
+            stream, self.stream = self.stream, None
+            self.target = None
+            self.frames.clear()
+            self.total_samples = 0
+        if stream is not None:
+            try:
+                stream.stop()
+            except Exception as e:
+                print(f"! Flight Recorder stream stop failed: {e}")
+            finally:
+                try:
+                    stream.close()
+                except Exception as e:
+                    print(f"! Flight Recorder stream close failed: {e}")
+
+    def attach(self, recorder) -> bool:
+        with self.lock:
+            if self.stream is None or self.target is not None:
+                return False
+            self.target = recorder
+            return True
+
+    def detach(self, recorder):
+        with self.lock:
+            if self.target is recorder:
+                self.target = None
+
+    def clear(self):
+        with self.lock:
+            self.frames.clear()
+            self.total_samples = 0
+
+    def extract_before(self, before_at: float) -> np.ndarray:
+        with self.lock:
+            frames = [frame for ended_at, frame in self.frames
+                      if ended_at <= before_at]
+        if not frames:
+            return np.zeros(0, dtype=np.float32)
+        return extract_recent_utterance(np.concatenate(frames).reshape(-1))
+
+
+FLIGHT = FlightRecorder()
+
+
+class AudioSlot:
+    """A reusable PortAudio stream whose callback can target a new recorder."""
+
+    def __init__(self, stream_factory=None):
+        factory = stream_factory or sd.InputStream
+        self.recorder = None
+        self.stream = factory(
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype="float32",
+            callback=self._callback,
+        )
+
+    def _callback(self, indata, frames, time_info, status):
+        recorder = self.recorder
+        if recorder is not None:
+            recorder._callback(indata, frames, time_info, status)
+
+    def warm(self):
+        self.stream.start()
+        self.stream.stop()
+
+    def start(self, recorder):
+        self.recorder = recorder
+        try:
+            self.stream.start()
+        except Exception:
+            self.recorder = None
+            raise
+
+    def stop(self):
+        try:
+            self.stream.stop()
+        finally:
+            self.recorder = None
+
+    def close(self):
+        self.recorder = None
+        self.stream.close()
+
+
+class AudioPool:
+    """Two pre-opened streams preserve instant rapid re-dictation.
+
+    A released take may keep its stream for the short tail while the next
+    keypress immediately acquires the second stream. Streams remain open but
+    stopped between takes, avoiding CoreAudio's multi-second cold open path
+    without leaving the microphone actively recording.
+    """
+
+    def __init__(self, size: int = 2, stream_factory=None):
+        self.size = size
+        self.stream_factory = stream_factory
+        self.slots = []
+        self.busy = set()
+        self.lock = threading.Lock()
+        self.init_lock = threading.Lock()
+
+    def warm(self):
+        if self.slots:
+            return
+        with self.init_lock:
+            if self.slots:
+                return
+            slots = [AudioSlot(self.stream_factory) for _ in range(self.size)]
+            try:
+                for slot in slots:
+                    slot.warm()
+            except Exception:
+                for slot in slots:
+                    try:
+                        slot.close()
+                    except Exception:
+                        pass
+                raise
+            self.slots = slots
+
+    def acquire(self, recorder):
+        self.warm()
+        with self.lock:
+            slot = next((s for s in self.slots if s not in self.busy), None)
+            if slot is None:
+                raise RuntimeError("all pre-opened microphone streams are busy")
+            self.busy.add(slot)
+        try:
+            slot.start(recorder)
+            return slot
+        except Exception:
+            with self.lock:
+                self.busy.discard(slot)
+            raise
+
+    def release(self, slot):
+        if slot is None:
+            return
+        try:
+            slot.stop()
+        finally:
+            with self.lock:
+                self.busy.discard(slot)
+
+    def close(self):
+        with self.lock:
+            slots = list(self.slots)
+            self.slots = []
+            self.busy.clear()
+        for slot in slots:
+            try:
+                slot.close()
+            except Exception:
+                pass
+
+
+AUDIO_POOL = AudioPool(size=2)
+
+
+def _transcribe_frames(frames) -> str:
+    """Prepare a rolling chunk off the real-time audio thread."""
+    if not frames:
+        return ""
+    segment = np.concatenate(frames).flatten()
+    return ASR_POOL.submit(transcribe, segment).result()
+
+
 class Recorder:
     def __init__(self):
         self.frames = []
-        self.stream = None
+        self.slot = None
         self.recording = False
+        self.press_at = None
+        self.capture_ready_at = None
+        self.released_at = None
+        self.audio_status = []
+        self.captured_via_flight = False
+        self.source = "hold"
         # rolling-ASR state: finished segments already sent to the pool
         self.chunks = []             # ASR futures, chronological
         self.cut_samples = 0         # sample index of the last cut
@@ -787,18 +1235,45 @@ class Recorder:
         self.voiced_since_cut = False
         self._cut_frame_idx = 0
 
-    def start(self):
+    def start(self, press_at=None):
         self.frames = []
+        self.chunks = []
+        self.cut_samples = 0
+        self.total_samples = 0
+        self.silent_samples = 0
+        self.voiced_since_cut = False
+        self._cut_frame_idx = 0
+        self.audio_status = []
+        self.captured_via_flight = False
+        self.source = "hold"
+        self.press_at = press_at or time.perf_counter()
         self.recording = True
-        self.stream = sd.InputStream(
-            samplerate=SAMPLE_RATE, channels=1, dtype="float32",
-            callback=self._callback,
-        )
-        self.stream.start()
+        try:
+            self.captured_via_flight = FLIGHT.attach(self)
+            if not self.captured_via_flight:
+                self.slot = AUDIO_POOL.acquire(self)
+        except Exception:
+            self.recording = False
+            raise
+        self.capture_ready_at = time.perf_counter()
+
+    def replace_with_buffered_audio(self, audio: np.ndarray):
+        """Turn a quick tap's Recorder into a retrospective captured take."""
+        self.frames = [audio.reshape(-1, 1)]
+        self.chunks = []
+        self.cut_samples = 0
+        self.total_samples = len(audio)
+        self.silent_samples = 0
+        self.voiced_since_cut = False
+        self._cut_frame_idx = 0
+        self.recording = False
+        self.source = "flight"
 
     def _callback(self, indata, frames, time_info, status):
         if not self.recording:
             return
+        if status and len(self.audio_status) < 3:
+            self.audio_status.append(str(status))
         self.frames.append(indata.copy())
         n = len(indata)
         self.total_samples += n
@@ -816,9 +1291,9 @@ class Recorder:
                 and self.total_samples - self.cut_samples
                     >= CHUNK_MIN_SECONDS * SAMPLE_RATE
                 and self.silent_samples >= CHUNK_CUT_SILENCE * SAMPLE_RATE):
-            seg = np.concatenate(
-                self.frames[self._cut_frame_idx:]).flatten()
-            self.chunks.append(ASR_POOL.submit(transcribe, seg))
+            frames_for_chunk = tuple(self.frames[self._cut_frame_idx:])
+            self.chunks.append(
+                CHUNK_PREP_POOL.submit(_transcribe_frames, frames_for_chunk))
             self._cut_frame_idx = len(self.frames)
             self.cut_samples = self.total_samples
             self.voiced_since_cut = False
@@ -832,13 +1307,18 @@ class Recorder:
 
     def stop(self) -> np.ndarray:
         self.recording = False
-        if self.stream:
-            self.stream.stop()
-            self.stream.close()
-            self.stream = None
-        if not self.frames:
-            return np.zeros(0, dtype=np.float32)
-        return np.concatenate(self.frames).flatten()
+        if self.captured_via_flight:
+            FLIGHT.detach(self)
+        if self.slot is not None:
+            slot, self.slot = self.slot, None
+            AUDIO_POOL.release(slot)
+        if self.audio_status:
+            print(f"! audio callback status: {'; '.join(self.audio_status)}")
+        audio = np.concatenate(self.frames).flatten() if self.frames \
+            else np.zeros(0, dtype=np.float32)
+        if self.captured_via_flight and self.source == "hold":
+            FLIGHT.clear()                   # never let a hold paste twice
+        return audio
 
 
 # ------------------------- glossary & learning -------------------------
@@ -869,15 +1349,44 @@ def load_learned() -> dict:
     state = {"counts": {}, "processed": 0, "fixes": {}}
     if LEARNED_FILE.exists():
         try:
-            state.update(json.loads(LEARNED_FILE.read_text()))
+            loaded = json.loads(LEARNED_FILE.read_text())
+            if isinstance(loaded, dict):
+                counts = loaded.get("counts")
+                fixes = loaded.get("fixes")
+                processed = loaded.get("processed")
+                if isinstance(counts, dict):
+                    state["counts"] = counts
+                if isinstance(fixes, dict):
+                    state["fixes"] = fixes
+                if isinstance(processed, int) and processed >= 0:
+                    state["processed"] = processed
         except Exception:
             pass
-    state.setdefault("fixes", {})
     return state
 
 
 def save_learned(state: dict):
-    LEARNED_FILE.write_text(json.dumps(state, indent=2))
+    atomic_write_text(LEARNED_FILE, json.dumps(state, indent=2) + "\n")
+
+
+def merge_learned_state(base: dict, mined: dict, latest: dict) -> dict:
+    """Apply mining deltas to the newest state without erasing corrections.
+
+    Mining releases LEARN_LOCK while Ollama runs. Correction observers may
+    legitimately update counts and fixes during that window, so saving the
+    miner's old snapshot would lose those writes.
+    """
+    merged = {
+        "counts": dict(latest.get("counts", {})),
+        "processed": mined.get("processed", latest.get("processed", 0)),
+        "fixes": dict(latest.get("fixes", {})),
+    }
+    base_counts = base.get("counts", {})
+    for term, count in mined.get("counts", {}).items():
+        delta = count - base_counts.get(term, 0)
+        if delta > 0:
+            merged["counts"][term] = merged["counts"].get(term, 0) + delta
+    return merged
 
 
 def write_auto_section(promoted: list[str]):
@@ -889,7 +1398,7 @@ def write_auto_section(promoted: list[str]):
         manual_part = "# One term per line. Lines starting with - are bans."
     body = manual_part + "\n\n" + AUTO_MARKER + "\n"
     body += "\n".join(promoted) + ("\n" if promoted else "")
-    DICTIONARY_FILE.write_text(body)
+    atomic_write_text(DICTIONARY_FILE, body)
 
 
 def refresh_glossary():
@@ -934,7 +1443,13 @@ def append_transcript(raw: str, cleaned: str, bundle: str, path: str):
     entry = {"ts": time.time(), "app": bundle, "raw": raw,
              "clean": cleaned, "path": path}
     with TRANSCRIPTS_LOCK:
-        with open(TRANSCRIPTS_FILE, "a") as f:
+        fd = os.open(
+            TRANSCRIPTS_FILE,
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            0o600,
+        )
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "a") as f:
             f.write(json.dumps(entry) + "\n")
 
 
@@ -985,7 +1500,13 @@ def learn_pass():
     if not TRANSCRIPTS_FILE.exists():
         return
     lines = TRANSCRIPTS_FILE.read_text().splitlines()
-    state = load_learned()
+    with LEARN_LOCK:
+        base_state = load_learned()
+    state = {
+        "counts": dict(base_state.get("counts", {})),
+        "processed": base_state.get("processed", 0),
+        "fixes": dict(base_state.get("fixes", {})),
+    }
     if state["processed"] > len(lines):
         state["processed"] = 0            # log was truncated externally
     new_lines = lines[state["processed"]:]
@@ -1042,9 +1563,10 @@ def learn_pass():
         unprocessed = max(0, len(fresh) - len(lines))
         if len(fresh) > TRANSCRIPT_KEEP + 100:
             fresh = fresh[-TRANSCRIPT_KEEP:]
-            TRANSCRIPTS_FILE.write_text("\n".join(fresh) + "\n")
+            atomic_write_text(TRANSCRIPTS_FILE, "\n".join(fresh) + "\n")
         state["processed"] = max(0, len(fresh) - unprocessed)
     with LEARN_LOCK:
+        state = merge_learned_state(base_state, state, load_learned())
         save_learned(state)
         terms = refresh_glossary()
     if added:
@@ -1227,12 +1749,17 @@ def match_snippet(raw: str) -> tuple[str, str] | None:
     m = SNIPPET_RE.match(raw.strip())
     if not m or not SNIPPETS_FILE.exists():
         return None
-    norm = lambda s: re.sub(r"[^a-z0-9 ]", "", s.casefold()).strip()
+    def norm(value):
+        return re.sub(r"[^a-z0-9 ]", "", value.casefold()).strip()
+
     key = norm(m.group(1))
     try:
         snippets = json.loads(SNIPPETS_FILE.read_text())
     except Exception as e:
         print(f"! snippets.json unreadable: {e}")
+        return None
+    if not isinstance(snippets, dict):
+        print("! snippets.json must contain a JSON object; ignoring it")
         return None
     for name, text in snippets.items():
         if isinstance(text, str) and key == norm(name):
@@ -1240,40 +1767,61 @@ def match_snippet(raw: str) -> tuple[str, str] | None:
     return None
 
 
-def focused_text() -> str | None:
-    """Text of the focused UI element via Accessibility, or None if the app
-    doesn't expose it."""
+def _ax_text(element) -> str | None:
+    """Read one known Accessibility element without following focus."""
     try:
         from ApplicationServices import (
             AXUIElementCopyAttributeValue,
-            AXUIElementCreateSystemWide,
-            kAXFocusedUIElementAttribute,
             kAXValueAttribute,
         )
-        err, focused = AXUIElementCopyAttributeValue(
-            AXUIElementCreateSystemWide(), kAXFocusedUIElementAttribute, None)
-        if err or focused is None:
-            return None
         err, value = AXUIElementCopyAttributeValue(
-            focused, kAXValueAttribute, None)
+            element, kAXValueAttribute, None)
         return value if not err and isinstance(value, str) else None
     except Exception:
         return None
 
 
-def learn_from_corrections(pasted: str):
+def focused_snapshot():
+    """Return the focused AX element and its current text, if exposed."""
+    try:
+        from ApplicationServices import (
+            AXUIElementCopyAttributeValue,
+            AXUIElementCreateSystemWide,
+            kAXFocusedUIElementAttribute,
+        )
+        err, focused = AXUIElementCopyAttributeValue(
+            AXUIElementCreateSystemWide(), kAXFocusedUIElementAttribute, None)
+        if err or focused is None:
+            return None
+        return focused, _ax_text(focused)
+    except Exception:
+        return None
+
+
+def focused_text() -> str | None:
+    snapshot = focused_snapshot()
+    return snapshot[1] if snapshot else None
+
+
+def learn_from_corrections(pasted: str, target=None):
     """Wispr-style correction learning: a while after pasting, re-read the
     focused field. A word the user swapped for a similar one is a strong
     dictionary signal — promote the corrected spelling immediately."""
+    # Capture the target before paste; ten seconds later, read that exact AX
+    # element rather than whichever app/field happens to be focused then.
+    if target is None:
+        target = focused_snapshot()
     time.sleep(CORRECTION_DELAY)
-    current = focused_text()
+    current = _ax_text(target[0]) if target else None
     if not current or pasted in current:
         return                              # field gone, app opaque, or unedited
     p_words, c_words = pasted.split(), current.split()
     if len(p_words) < 3 or len(c_words) < 3:
         return
 
-    strip = lambda w: w.strip(",.;:!?\"'()[]")
+    def strip(word):
+        return word.strip(",.;:!?\"'()[]")
+
     learned = []
     sm = difflib.SequenceMatcher(None, [w.casefold() for w in p_words],
                                  [w.casefold() for w in c_words],
@@ -1372,11 +1920,30 @@ def quick_clean(text: str, verbatim: bool = False,
     t = text.strip()
     if verbatim or not t:
         return t
+    # Isolated hesitation sounds are safe to remove deterministically. More
+    # semantic phrases such as "I mean" still route through the LLM.
+    t = SIMPLE_FILLER_RE.sub(" ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    t = re.sub(r"\s+([,.;:!?])", r"\1", t)
+    if not t:
+        return ""
     if t[0].islower() and not continuing:   # mid-sentence joins stay lower
         t = t[0].upper() + t[1:]
     if t[-1] not in ".!?…":
         t += "."
     return t
+
+
+def needs_llm_cleanup(raw: str, tone_override: str | None,
+                      verbatim: bool) -> bool:
+    """Route only transformations that are unsafe for deterministic cleanup."""
+    return bool(not verbatim and (
+        tone_override is not None
+        or len(raw.split()) > QUICK_PATH_MAX_WORDS
+        or AMBIGUOUS_FILLER_RE.search(raw)
+        or COMMAND_RE.search(raw)
+        or ENUM_RE.search(raw)
+    ))
 
 
 CONT_END = ".!?…:\n"                        # context ending = sentence done
@@ -1469,7 +2036,7 @@ def phone_clean(raw: str) -> str:
     """The local pipeline, minus app context: snippets, tone override,
     quick/LLM routing, transcript logging."""
     raw, looped = collapse_repeats(raw)
-    if not raw or raw.lower().strip() in HALLUCINATIONS \
+    if not raw or is_hallucination(raw) \
             or (looks_like_prompt_echo(raw) and looped):
         return ""
     raw = apply_learned_fixes(raw)
@@ -1478,13 +2045,7 @@ def phone_clean(raw: str) -> str:
         return hit[1]
     raw, tone_override = extract_tone_override(raw)
     verbatim = tone_override == "verbatim"
-    needs_llm = not verbatim and (
-        tone_override is not None
-        or len(raw.split()) > QUICK_PATH_MAX_WORDS
-        or FILLER_RE.search(raw)
-        or COMMAND_RE.search(raw)
-        or ENUM_RE.search(raw)
-    )
+    needs_llm = needs_llm_cleanup(raw, tone_override, verbatim)
     tone_key = tone_override if tone_override in TONE else "default"
     text = llm_clean(raw, TONE[tone_key]) if needs_llm \
         else quick_clean(raw, verbatim=verbatim)
@@ -1614,30 +2175,33 @@ def paste(text: str):
     threading.Timer(1.0, restore).start()
 
 
-def assemble_raw(chunk_futs: list, pre_future, rem_full: np.ndarray,
-                 tail_rms: float) -> str:
-    """Join rolling-ASR chunk texts with the remainder. If the tail had
-    speech, the remainder (incl. tail) is re-decoded; otherwise the decode
-    that started at key release is used as-is. Per-chunk hallucination
-    filtering keeps a silent segment from injecting 'Thank you.'"""
+def release_should_wait_for_tail(rec: Recorder) -> bool:
+    """Whether speech was still active at key release."""
+    return bool(rec.voiced_since_cut) and (
+        rec.silent_samples < TAIL_SKIP_SILENCE * SAMPLE_RATE
+    )
+
+
+def assemble_raw(chunk_futs: list, pre_future,
+                 rem_full: np.ndarray) -> str:
+    """Join rolling chunks and exactly one remainder decode."""
     def harvest(fut, parts):
         try:
             t = fut.result().strip()
         except Exception as e:
             print(f"! chunk decode failed: {e}")
             return
-        if t and t.lower().strip() not in HALLUCINATIONS:
+        if t and not is_hallucination(t):
             parts.append(t)
 
     parts = []
     for f in chunk_futs:
         harvest(f, parts)
-    if tail_rms < SILENCE_RMS and pre_future is not None:
-        harvest(pre_future, parts)          # tail was silence: free lunch
+    if pre_future is not None:
+        harvest(pre_future, parts)
     elif (len(rem_full) / SAMPLE_RATE >= 0.25
           and peak_rms(rem_full) >= GATE_PEAK_RMS):
-        # Speech ran past release (or into the tail): re-decode the whole
-        # remainder. The single-worker pool serializes it behind the chunks.
+        # Speech was active at release, so no pre-tail decode was queued.
         harvest(ASR_POOL.submit(transcribe, rem_full), parts)
     return " ".join(parts).strip()
 
@@ -1645,22 +2209,29 @@ def assemble_raw(chunk_futs: list, pre_future, rem_full: np.ndarray,
 def finish_and_process(rec: Recorder, hud: HUD, active: dict):
     """Runs at key release: chunks cut during the hold are already decoding;
     kick off the remainder in parallel with the tail capture, then join."""
+    released_at = rec.released_at or time.perf_counter()
     try:
-        main_audio = rec.snapshot()
-        chunk_futs = list(rec.chunks)
-        cut = rec.cut_samples
-        rem = main_audio[cut:]
-        pre_future = ASR_POOL.submit(transcribe, rem) \
-            if (len(rem) / SAMPLE_RATE >= (MIN_SECONDS if not chunk_futs
-                                           else 0.25)
-                and peak_rms(rem) >= GATE_PEAK_RMS) else None
-
-        # If the trailing audio is already silent at release, the speaker
-        # finished before letting go — skip the tail wait and paste sooner.
-        trailing = main_audio[-int(0.35 * SAMPLE_RATE):]
-        if len(trailing) == 0 or peak_rms(trailing) >= SILENCE_RMS:
-            time.sleep(TAIL_SECONDS)        # might still be talking
-        full_audio = rec.stop()
+        wait_for_tail = release_should_wait_for_tail(rec)
+        pre_future = None
+        if wait_for_tail:
+            # Do not start a decode that would be discarded if the tail adds
+            # speech. Capture first, then decode the expanded remainder once.
+            time.sleep(TAIL_SECONDS)
+            full_audio = rec.stop()
+            cut = rec.cut_samples
+            chunk_futs = list(rec.chunks)
+        else:
+            # Speech already ended: start ASR immediately and close the mic.
+            main_audio = rec.snapshot()
+            cut = rec.cut_samples
+            chunk_futs = list(rec.chunks)
+            rem = main_audio[cut:]
+            pre_future = ASR_POOL.submit(transcribe, rem) \
+                if (len(rem) / SAMPLE_RATE >= (
+                        MIN_SECONDS if not chunk_futs else 0.25)
+                    and peak_rms(rem) >= GATE_PEAK_RMS) else None
+            full_audio = rec.stop()
+        capture_done_at = time.perf_counter()
 
         duration = len(full_audio) / SAMPLE_RATE
         if duration < MIN_SECONDS:
@@ -1673,15 +2244,10 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             print(f"[dropped] no speech (peak rms {peak:.6f}, "
                   f"gate {GATE_PEAK_RMS}, {duration:.1f}s)")
             return
-        t0 = time.time()
-
-        tail = full_audio[len(main_audio):]
-        tail_rms = float(np.sqrt(np.mean(tail ** 2))) if len(tail) else 0.0
-
-        raw = assemble_raw(chunk_futs, pre_future, full_audio[cut:], tail_rms)
-
-        t_asr = time.time() - t0
-        if not raw or raw.lower().strip() in HALLUCINATIONS:
+        asr_started_at = time.perf_counter()
+        raw = assemble_raw(chunk_futs, pre_future, full_audio[cut:])
+        t_asr = time.perf_counter() - asr_started_at
+        if not raw or is_hallucination(raw):
             print(f"[dropped] ASR gave "
                   f"{'nothing' if not raw else f'hallucination {raw[:40]!r}'}")
             return
@@ -1698,20 +2264,15 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             name, snippet = hit
             paste(snippet)
             play("Pop")
-            print(f"[{time.time() - t0:.2f}s | snippet:{name} | "
+            release_total = time.perf_counter() - released_at
+            print(f"[release {release_total:.2f}s | snippet:{name} | "
                   f"asr {t_asr:.2f}s]")
             return
 
         raw, tone_override = extract_tone_override(raw)
         bundle = frontmost_bundle()
         verbatim = is_verbatim_app(bundle) or tone_override == "verbatim"
-        needs_llm = not verbatim and (
-            tone_override is not None       # an explicit ask always cleans
-            or len(raw.split()) > QUICK_PATH_MAX_WORDS
-            or FILLER_RE.search(raw)
-            or COMMAND_RE.search(raw)
-            or ENUM_RE.search(raw)
-        )
+        needs_llm = needs_llm_cleanup(raw, tone_override, verbatim)
 
         # Continuation awareness: dictating into a field that ends
         # mid-sentence should join it, not start a fresh sentence.
@@ -1727,8 +2288,10 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 f"existing text: \"...{stripped_ctx[-80:]}\". Continue that "
                 "sentence naturally: no initial capital unless a new "
                 "sentence truly starts, and never repeat the existing text.")
+        clean_started_at = time.perf_counter()
         text = llm_clean(raw, tone_txt) if needs_llm \
             else quick_clean(raw, verbatim=verbatim, continuing=continuing)
+        t_clean = time.perf_counter() - clean_started_at
         if tone_key == "casual" and not verbatim:
             text = strip_casual_period(text)   # belt for both paths
         if continuing and text:
@@ -1738,17 +2301,37 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             if not ctx[-1].isspace() and text[:1] not in ",.;:!?…":
                 text = " " + text                       # joining needs a space
 
+        correction_target = focused_snapshot() if not verbatim else None
         paste(text)
         play("Pop")
         if not verbatim:
-            threading.Thread(target=learn_from_corrections, args=(text,),
-                             daemon=True).start()
+            threading.Thread(
+                target=learn_from_corrections,
+                args=(text, correction_target),
+                daemon=True,
+            ).start()
         mark = "*" if tone_override else ""
         path = f"llm/{tone_key}{mark}" if needs_llm \
             else f"fast/verbatim{mark}" if verbatim else "fast"
-        print(f"[{time.time() - t0:.2f}s | {path} | asr {t_asr:.2f}s] {text[:90]}")
+        if rec.source == "flight":
+            path = f"flight/{path}"
+        now = time.perf_counter()
+        release_total = now - released_at
+        press_total = now - rec.press_at if rec.press_at else release_total
+        audio_ready = (rec.capture_ready_at - rec.press_at) \
+            if rec.capture_ready_at and rec.press_at else 0.0
+        tail_wait = capture_done_at - released_at
+        print(f"[release {release_total:.2f}s | press {press_total:.2f}s | "
+              f"{path} | ready {audio_ready:.2f}s | tail {tail_wait:.2f}s | "
+              f"asr {t_asr:.2f}s | clean {t_clean:.2f}s | "
+              f"{len(text.split())} words]")
         append_transcript(raw, text, bundle, path)
     finally:
+        if rec.recording:
+            try:
+                rec.stop()
+            except Exception as e:
+                print(f"! microphone cleanup failed: {e}")
         LAST_USE["t"] = time.time()
         def dismiss_if_idle():
             if active["rec"] is None:       # don't hide a newer recording's HUD
@@ -1763,16 +2346,6 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
 
 def warmup():
     print("Warming up — first run downloads Whisper large-v3-turbo (~1.6 GB)...")
-    if not SERVER_ONLY:
-        try:
-            # Surfaces the microphone permission prompt at startup instead of
-            # on the first dictation (matters for the launchd Python identity).
-            s = sd.InputStream(samplerate=SAMPLE_RATE, channels=1)
-            s.start(); s.stop(); s.close()
-        except Exception as e:
-            print(f"! Microphone unavailable: {e}")
-            print("  Enable 'uv' under System Settings -> Privacy & Security"
-                  " -> Microphone.")
     # Through the pool, so a dictation fired mid-warmup can't race model load.
     ASR_POOL.submit(transcribe, np.zeros(SAMPLE_RATE // 2,
                                          dtype=np.float32)).result()
@@ -1788,6 +2361,7 @@ def warmup():
 def main():
     lock_fd = ensure_single_instance()      # noqa: F841 — held for lifetime
     load_app_tones()
+    load_preferences()
 
     terms = refresh_glossary()
     print(f"Active glossary: {len(terms)} terms "
@@ -1809,6 +2383,26 @@ def main():
     hud = HUD.alloc().init()
     STATUS["bar"] = StatusBar.alloc().init()
 
+    # Open and exercise both reusable streams before enabling the hotkey. This
+    # deliberately pays CoreAudio's cold-start cost at launch, never after the
+    # user has heard the recording cue and begun speaking.
+    try:
+        AUDIO_POOL.warm()
+    except Exception as e:
+        print(f"! Microphone unavailable: {e}")
+        print("  Enable 'uv' under System Settings -> Privacy & Security"
+              " -> Microphone. A keypress will retry initialization.")
+    if PREFERENCES["flight_recorder"]:
+        try:
+            FLIGHT.enable()
+            print("[flight] active: 20s RAM-only buffer; tap Right Option "
+                  "after speaking")
+            STATUS["bar"].setState_("idle")
+        except Exception as e:
+            PREFERENCES["flight_recorder"] = False
+            save_preferences()
+            print(f"! Flight Recorder could not start: {e}")
+
     # One Recorder per hold. A fresh press during the previous take's 0.3s
     # tail just opens a second short-lived stream instead of being swallowed.
     active = {"rec": None}
@@ -1826,34 +2420,74 @@ def main():
 
     def hotkey_worker():
         while True:
-            ev = events.get()
-            if ev == "press" and active["rec"] is None and not PAUSED["on"]:
-                LAST_USE["t"] = time.time()
-                rec = Recorder()
-                active["rec"] = rec
-                play("Tink")
-                rec.start()
-                set_status("rec")
-                AppHelper.callAfter(hud.showMode_, "recording")
-            elif ev == "release" and active["rec"] is not None:
-                rec = active["rec"]
+            ev, event_at = events.get()
+            try:
+                if (ev == "press" and active["rec"] is None
+                        and not PAUSED["on"]):
+                    LAST_USE["t"] = time.time()
+                    rec = Recorder()
+                    active["rec"] = rec
+                    rec.start(event_at)
+                    set_status("rec")
+                    AppHelper.callAfter(hud.showMode_, "recording")
+                    play("Tink")              # the cue now means capture-ready
+                    ready = rec.capture_ready_at - event_at
+                    if ready >= 0.1:
+                        print(f"[audio] capture ready in {ready:.2f}s")
+                elif ev == "release" and active["rec"] is not None:
+                    rec = active["rec"]
+                    rec.released_at = event_at
+                    active["rec"] = None
+                    held = event_at - rec.press_at
+                    if (held <= FLIGHT_TAP_MAX
+                            and rec.captured_via_flight):
+                        # Preserve the rolling buffer while detaching the tap's
+                        # tiny live take, then select speech ending before the
+                        # key went down so the cue itself cannot be captured.
+                        rec.source = "flight"
+                        rec.stop()
+                        buffered = FLIGHT.extract_before(rec.press_at)
+                        FLIGHT.clear()
+                        if len(buffered) < MIN_SECONDS * SAMPLE_RATE:
+                            print("[flight] no recent utterance found")
+                            play("Funk")
+                            set_status("idle")
+                            AppHelper.callAfter(hud.dismiss)
+                            continue
+                        rec.replace_with_buffered_audio(buffered)
+                        print(f"[flight] captured "
+                              f"{len(buffered) / SAMPLE_RATE:.1f}s from RAM")
+                    set_status("proc")
+                    AppHelper.callAfter(hud.showMode_, "processing")
+                    threading.Thread(
+                        target=finish_and_process, args=(rec, hud, active),
+                        daemon=True,
+                    ).start()
+            except Exception as e:
+                print(f"! hotkey worker recovered from error: {e}")
+                rec = active.get("rec")
                 active["rec"] = None
-                set_status("proc")
-                AppHelper.callAfter(hud.showMode_, "processing")
-                threading.Thread(
-                    target=finish_and_process, args=(rec, hud, active),
-                    daemon=True,
-                ).start()
+                if rec is not None:
+                    try:
+                        rec.stop()
+                    except Exception:
+                        pass
+                set_status("off" if PAUSED["on"] else "idle")
+                AppHelper.callAfter(hud.dismiss)
 
     threading.Thread(target=hotkey_worker, daemon=True).start()
 
+    key_down = {"on": False}
+
     def on_press(key):
-        if key == HOTKEY:
-            events.put("press")
+        if key == HOTKEY and not key_down["on"]:
+            key_down["on"] = True
+            events.put(("press", time.perf_counter()))
 
     def on_release(key):
-        if key == HOTKEY:
-            events.put("release")
+        if key == HOTKEY and key_down["on"]:
+            key_down["on"] = False
+            events.put(("release", time.perf_counter()))
 
     def make_listener():
         lst = keyboard.Listener(on_press=on_press, on_release=on_release)

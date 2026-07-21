@@ -14,12 +14,19 @@ Whispering Parrot is a single-file dictation stack built to match (and in places
 commercial tools: [mlx-whisper](https://github.com/ml-explore/mlx-examples)
 for on-device speech recognition and a local LLM via
 [Ollama](https://ollama.com) for cleanup. On an M-series Mac, routine
-dictations paste in **~0.2–0.5s**.
+dictations use a low-latency fast path, while longer speech is recognized in
+the background before you release the key.
 
 ## Features
 
+- **Flight Recorder (experimental)** — enable its menu-bar toggle, speak
+  naturally, then tap Right Option afterward. Parrot finds and pastes the
+  latest utterance from a 20-second RAM-only buffer. Holding Right Option still
+  performs normal push-to-talk.
 - **Hold-to-talk anywhere** — hold Right Option, speak, release; text pastes
   into whatever app has focus, with a frosted HUD waveform while you talk.
+  The microphone is pre-warmed at login and the start cue sounds only once
+  capture is ready.
 - **Rolling recognition** — long dictations are transcribed *while you're
   still talking* (segments cut at natural pauses), so a 60-second ramble
   pastes as fast as a one-liner.
@@ -88,6 +95,7 @@ learning loop. Then in the Diction app on iOS: *Self-Hosted* →
 | Say | Get |
 |---|---|
 | (hold Right Option, talk, release) | cleaned text at your cursor |
+| (Flight Recorder enabled: talk, then tap Right Option) | your latest utterance |
 | "…um so basically…" | fillers gone |
 | "Tuesday — actually Wednesday" | just Wednesday, in place |
 | "two things: … and second …" | a dash list |
@@ -96,9 +104,15 @@ learning loop. Then in the Diction app on iOS: *Self-Hosted* →
 | "Formal tone, …" / "casual, …" / "verbatim: …" | that style, this once |
 | "insert my email" | your snippet from `snippets.json` |
 
-Everything personal stays in gitignored local files: `dictionary.txt` (your
-terms; `-word` bans one), `snippets.json`, `transcripts.jsonl` (your history,
-trimmed to recent), `learned.json` (mined vocabulary and fix rules).
+Everything personal stays in private, gitignored local files: `dictionary.txt`
+(your terms; `-word` bans one), `snippets.json`, `tones.json`, `preferences.json`,
+`transcripts.jsonl` (your history, trimmed to recent), and `learned.json`
+(mined vocabulary and fix rules).
+
+Flight Recorder is disabled by default and must be enabled from the parrot
+menu. Its audio is never written to disk: the bounded buffer is cleared after
+use, on pause, when disabled, and on quit. The menu-bar dot and macOS microphone
+indicator remain visible while it is active.
 
 ## Tuning
 
@@ -107,6 +121,14 @@ quick-path/LLM word threshold, chunking aggressiveness, silence gates, tone
 per app-bundle. The `eval_cleanup.py` harness replays adversarial cases and
 your own transcripts through candidate Ollama models if you want to test a
 different cleanup model.
+
+## Verify
+
+Run the fast regression suite after changing the pipeline:
+
+```sh
+uv run tests/test_dictate.py
+```
 
 ## License
 
