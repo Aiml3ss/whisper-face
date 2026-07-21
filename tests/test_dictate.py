@@ -935,6 +935,96 @@ class LearningTests(unittest.TestCase):
 
 
 class InsertionAdapterTests(unittest.TestCase):
+    def test_no_ax_element_lease_accepts_the_same_frontmost_window(self):
+        window_destination = "com.openai.codex:62318:48436"
+        ns = load_definitions(
+            "focus_destination_id", "opaque_focus_context",
+            "capture_insertion_lease", "destination_observation",
+            extra={
+                "FocusSnapshot": object,
+                "InsertionLease": InsertionLease,
+                "DestinationObservation": DestinationObservation,
+                "frontmost_window_destination":
+                    lambda _bundle: window_destination,
+            },
+        )
+        lease = ns["capture_insertion_lease"](
+            None, "com.openai.codex", "utterance-1")
+
+        observation = ns["destination_observation"](
+            None, "com.openai.codex", lease, None, "com.openai.codex")
+
+        self.assertTrue(lease.opaque)
+        self.assertEqual(observation.destination_id, lease.destination_id)
+        self.assertEqual(
+            observation.surrounding_fingerprint,
+            lease.surrounding_fingerprint,
+        )
+
+    def test_no_ax_element_runtime_pastes_once_in_the_same_window(self):
+        window_destination = "com.openai.codex:62318:48436"
+        coordinator = InsertionCoordinator()
+        pasted = []
+        pipeline = {}
+        ns = load_definitions(
+            "focus_destination_id", "opaque_focus_context",
+            "capture_insertion_lease", "destination_observation",
+            "commit_insertion",
+            extra={
+                "FocusSnapshot": object,
+                "InsertionLease": InsertionLease,
+                "DestinationObservation": DestinationObservation,
+                "INSERTION_COORDINATOR": coordinator,
+                "ReadbackResult": ReadbackResult,
+                "ReceiptState": ReceiptState,
+                "frontmost_window_destination":
+                    lambda _bundle: window_destination,
+                "frontmost_bundle": lambda: "com.openai.codex",
+                "paste": pasted.append,
+                "PIPELINE_STATE": pipeline,
+            },
+        )
+        lease = ns["capture_insertion_lease"](
+            None, "com.openai.codex", "utterance-1")
+        rec = SimpleNamespace(
+            insertion_lease=lease,
+            insertion_receipt=None,
+            focus_at_press=None,
+            bundle_at_press="com.openai.codex",
+        )
+
+        receipt = ns["commit_insertion"](
+            rec, "Works in ChatGPT", "com.openai.codex", None)
+
+        self.assertEqual(pasted, ["Works in ChatGPT"])
+        self.assertTrue(receipt.paste_attempted)
+        self.assertEqual(receipt.state, ReceiptState.UNVERIFIABLE)
+        self.assertEqual(pipeline["last_insertion_state"], "unverifiable")
+
+    def test_no_ax_element_lease_rejects_a_different_frontmost_window(self):
+        destinations = iter((
+            "com.openai.codex:62318:48436",
+            "com.openai.codex:62318:99999",
+        ))
+        ns = load_definitions(
+            "focus_destination_id", "opaque_focus_context",
+            "capture_insertion_lease", "destination_observation",
+            extra={
+                "FocusSnapshot": object,
+                "InsertionLease": InsertionLease,
+                "DestinationObservation": DestinationObservation,
+                "frontmost_window_destination": lambda _bundle:
+                    next(destinations),
+            },
+        )
+        lease = ns["capture_insertion_lease"](
+            None, "com.openai.codex", "utterance-1")
+
+        observation = ns["destination_observation"](
+            None, "com.openai.codex", lease, None, "com.openai.codex")
+
+        self.assertNotEqual(observation.destination_id, lease.destination_id)
+
     def test_release_retries_a_transient_unreadable_ax_target(self):
         original_element = object()
         current_element = object()
@@ -1144,6 +1234,8 @@ class InsertionAdapterTests(unittest.TestCase):
                 "FocusSnapshot": object,
                 "InsertionLease": InsertionLease,
                 "DestinationObservation": DestinationObservation,
+                "frontmost_window_destination":
+                    lambda bundle: f"{bundle}:window",
             },
         )
         lease = ns["capture_insertion_lease"](
