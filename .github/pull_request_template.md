@@ -2,6 +2,18 @@
 
 <!-- What changed and why? -->
 
+## Grant of Copyright and Patent Rights
+
+Read the [Whisper Face Contributor License Agreement](https://github.com/Aiml3ss/whispering-parrot/blob/main/CLA.md)
+before submitting outside contributions.
+
+- [ ] I own this contribution or have authority to submit it, and I disclosed
+      any third-party material and restrictions.
+- [ ] I have read and agree to the Whisper Face Contributor License Agreement version 1.0.
+
+> I have read and agree to the Whisper Face Contributor License Agreement
+> version 1.0.
+
 ## Installer parity
 
 - [ ] I classified the Mac and Windows installer impact using
@@ -20,6 +32,10 @@
 - [ ] `uv run tests/test_benchmark_voice_compiler.py`
 - [ ] `uv run tests/test_benchmark_asr.py`
 - [ ] `uv run tests/test_dictate.py`
+- [ ] `uv run tests/test_insertion_integrity.py`
+- [ ] `uv run tests/test_personal_regression.py`
+- [ ] `uv run tests/test_whisper_face_gui.py`
 - [ ] `uv run tests/test_installers.py`
+- [ ] `uv run tests/test_repository_governance.py`
 - [ ] Live Mac or Windows installer verification was run, or the unavailable
       platform is explicitly disclosed.

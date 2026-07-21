@@ -1,13 +1,15 @@
 # Installer release process
 
-This is the required distribution process for every Whispering Parrot change.
+This is the required distribution process for every Whisper Face change.
 Its purpose is to keep the one-click setup identical to the working development
 machine without maintaining a second copy of the application.
 
 ## Single source of truth
 
-`dictate.py`, `parrot_core.py`, the PEP 723 dependency block, and
-`dictate.py.lock` are the runtime source of truth. The Mac LaunchAgent and
+`dictate.py`, `parrot_core.py`, `voice_compiler.py`,
+`insertion_integrity.py`, `personal_regression.py`, `whisper_face_gui.py`,
+the PEP 723 dependency block, and `dictate.py.lock` are the runtime source of
+truth. The Mac LaunchAgent and
 Windows scheduled task execute those files from the checkout. Installers may
 provision and verify the runtime, but must never embed a frozen copy of it.
 
@@ -34,7 +36,11 @@ uv run tests/test_voice_compiler.py
 uv run tests/test_benchmark_voice_compiler.py
 uv run tests/test_benchmark_asr.py
 uv run tests/test_dictate.py
+uv run tests/test_insertion_integrity.py
+uv run tests/test_personal_regression.py
+uv run tests/test_whisper_face_gui.py
 uv run tests/test_installers.py
+uv run tests/test_repository_governance.py
 ```
 
 Run the live verification available on the current platform:

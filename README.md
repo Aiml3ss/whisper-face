@@ -1,26 +1,65 @@
 <p align="center">
-  <img src="icons/core.svg" width="128" alt="Whispering Parrot icon"/>
+  <img src="icons/core.svg" width="128" alt="Whisper Face icon"/>
 </p>
 
-<h1 align="center">Whispering Parrot</h1>
+<h1 align="center">Whisper Face</h1>
 
-<p align="center"><b>Free, fully local hold-to-talk dictation for macOS and Windows.</b><br/>
-Hold a key, speak, release — polished text appears wherever your cursor is.<br/>
-No subscription, no cloud, no audio ever leaving your machine.</p>
+<p align="center"><b>The one-click, local-first voice input layer for Mac.</b><br/>
+Hold a key, speak, release — trustworthy text appears wherever your cursor is.<br/>
+No account, no word cap, no cloud dependency, and no audio leaving your machine.</p>
 
 ---
 
-Whispering Parrot is a single-file dictation stack built to match (and in places beat) the
-commercial tools. It uses [mlx-whisper](https://github.com/ml-explore/mlx-examples)
-on Apple Silicon and [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
-on Windows, plus a local LLM through [Ollama](https://ollama.com) for cleanup.
-Routine dictations use a low-latency fast path, while longer speech is
-recognized in the background before you release the key.
+Whisper Face is building a better interface between thought and software—not
+just another transcript box. The goal is commercial-quality dictation that is
+easy enough for anyone to install, fast enough to disappear into the workflow,
+and conservative enough to protect names, numbers, code, commands, and intent.
+
+Mac is the production focus today. Windows shares the core pipeline and keeps
+one-click installer parity; the native iPhone product is a future workstream,
+not a current setup promise.
+
+## Why it is different
+
+| Product promise | What Whisper Face does |
+|---|---|
+| **Setup is part of the product** | `Install.command` provisions the app, locked dependencies, models, native helper, login services, and health checks in one repeatable flow. |
+| **Speech evidence stays authoritative** | Multiple local recognizers produce hypotheses; the Voice Compiler may improve presentation but cannot invent unsupported meaning. |
+| **Fast by architecture** | Models stay warm, long speech is recognized while you talk, model paths are pre-resolved, and routine cleanup has bounded deadlines. |
+| **Insertion is a transaction** | The target is leased and revalidated before one paste attempt; destination drift goes to a recoverable Voice Outbox instead of the wrong field. |
+| **Personal without surveillance** | Corrections become scoped, inspectable local rules and regression cases—not a cloud transcript dossier. |
+| **Failure is recoverable** | Faithful fallbacks, rejected-edit evidence, stable prefixes, exact-once insertion guards, and the outbox prevent silent loss. |
+
+The current local pipeline is:
+
+```text
+microphone → warm ASR cascade → VoiceIR → protected anchors + proof edits
+           → bounded local cleanup → insertion lease → paste/readback or outbox
+           → confirmed correction → personal regression case
+```
+
+The public [product roadmap](https://github.com/Aiml3ss/whispering-parrot/issues/1)
+tracks the Mac trust/performance work, future native iPhone architecture, and a
+sustainable business that never sells speech, transcripts, or behavioral
+profiles.
 
 ## Features
 
+- **A real native Mac app window** — choose **Open Whisper Face…** from the
+  menu-bar face for a focused Overview, Appearance, Privacy, Models, and
+  Diagnostics experience. It exposes live latency and usage, face selection,
+  pause/Flight Recorder controls, local model health, and one-click installer
+  verification without adding a browser runtime.
+- **Transactional insertion + Voice Outbox (Mac)** — readable text fields are
+  leased at key-down and revalidated before the single paste attempt. If focus,
+  selection, or nearby text changed while recognition ran, Whisper Face does
+  not guess or paste into the wrong place; it keeps the result in a bounded,
+  RAM-only recoverable outbox. Apps that hide their text still bind the
+  insertion to the original application/focused element and surface delivery
+  as unverified instead of training from an assumption; if macOS cannot identify any focused
+  element at all, the insertion fails closed into the outbox.
 - **Flight Recorder (experimental)** — enable its menu-bar toggle, speak
-  naturally, then tap Right Option afterward. Parrot finds and pastes the
+  naturally, then tap Right Option afterward. Whisper Face finds and pastes the
   latest utterance from a 20-second RAM-only buffer. Holding Right Option still
   performs normal push-to-talk.
 - **Hold-to-talk anywhere** — hold Right Option, speak, release; text pastes
@@ -75,18 +114,28 @@ recognized in the background before you release the key.
   correction activates after two confirmations in the same app or three
   globally, and every learned mapping can be inspected or forgotten from the
   menu.
+- **Personal Regression Lab** — confirmed correction mappings are evaluated
+  against a private, deterministic suite of the user's exact corrected spans.
+  Conflicting candidates are quarantined instead of silently becoming a bad
+  global rule; no audio or surrounding document text enters the suite.
 - **Self-editing snippets (Mac)** — say "insert my email" and your saved text
   pastes instead. Edit that exact insertion within ten seconds and the revised
   value is saved for next time and listed under **Learned Corrections**.
 - **Whispering works** — quiet speech is gain-normalized before recognition.
-- **Menu-bar/tray presence** — the parrot perches in your menu bar or Windows
-  notification area (🔴 while recording, 🟠 processing, ⏸ paused). The Mac
-  menu includes usage, tones, recognition alternatives, and learned-correction
-  controls; the Windows tray provides pause, Flight Recorder, logs, and quit.
-- **iPhone keyboard** — an OpenAI-compatible `/v1/audio/transcriptions`
-  endpoint (port 8787) plugs straight into the
-  [Diction](https://diction.one) iOS keyboard's Self-Hosted mode, with your
-  same dictionary, snippets, and cleanup.
+- **Choose your Whisper Face** — Parrot, Fox, Owl, Cat, and Bear share the
+  original friendly vector style. Pick one from the menu bar and it persists
+  locally. On Mac, both the floating character and tiny menu-bar face open and
+  close their mouths with your live speech; Windows mirrors the selected face
+  and recording state in its tray icon.
+- **Menu-bar/tray presence** — the selected face remains visible in the menu
+  bar or Windows notification area, with processing and paused states. The Mac
+  menu includes character, usage, tones, recognition alternatives, and learned
+  corrections; Windows adds character, pause, Flight Recorder, logs, and quit.
+- **Experimental phone compatibility endpoint** — an OpenAI-compatible
+  `/v1/audio/transcriptions` endpoint (port 8787) can support self-hosted
+  clients such as [Diction](https://diction.one). Native iPhone work is
+  deliberately deferred while the Mac experience is brought to product
+  quality.
 - **Always on** — installed as launch agents: starts at login, restarts on
   crash, keeps its models warm so the first dictation after a break is never
   slow.
@@ -101,6 +150,10 @@ recognized in the background before you release the key.
 Both platforms install Whisper Tiny, Whisper large-v3-turbo, and Qwen3.5-4B.
 Mac also builds a pinned FluidAudio helper and downloads Parakeet Unified;
 Whisper remains installed for fallback and broader language support.
+Whisper and Parakeet preload immutable audited revisions so a later upstream
+model update cannot silently change a fresh install. Qwen's current Ollama tag
+manifest is recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and
+must be re-audited if it moves.
 
 ## Install
 
@@ -167,6 +220,13 @@ This checks the dependency lock, platform login service, Qwen model, both
 Whisper caches, and the process health endpoint without changing the
 installation.
 
+### Native Mac window
+
+Click the selected animal in the menu bar and choose **Open Whisper Face…**.
+The menu bar remains the fastest everyday control, while the window provides a
+clear home for setup health, privacy controls, model status, character choice,
+and Voice Outbox recovery. Closing the window does not stop dictation.
+
 ### Matching another Mac
 
 The installer reproduces the application, models, performance settings, and
@@ -177,15 +237,14 @@ MacBook vocabulary and preferences to a Mac mini, securely copy any desired
 Existing copies are preserved and locked to user-only permissions. You do not
 need `transcripts.jsonl` unless you also want the old transcript history.
 
-**Headless / server Mac** (e.g. a Mac mini serving only your iPhone):
+**Headless / server Mac** (for experimental self-hosted clients):
 
 ```sh
 ./setup.sh --server-only
 ```
 
-No hotkey, no HUD, no permission prompts — just the endpoint and the
-learning loop. Then in the Diction app on iOS: *Self-Hosted* →
-`http://<that-mac's-ip>:8787/v1/audio/transcriptions`.
+No hotkey, no HUD, no permission prompts—just the compatibility endpoint and
+the learning loop. This is not the planned native iPhone experience.
 
 ## Daily use
 
@@ -207,8 +266,8 @@ learning loop. Then in the Diction app on iOS: *Self-Hosted* →
 | "insert my email" | your snippet from `snippets.json` |
 
 The bundled `EDIT ME` values are setup placeholders. On Mac, insert one and
-replace the pasted placeholder in place within ten seconds; Parrot saves that
-exact replacement to `snippets.json`. You can also edit the private JSON file
+replace the pasted placeholder in place within ten seconds; Whisper Face saves
+that exact replacement to `snippets.json`. You can also edit the private JSON file
 directly. Learned snippet edits appear by name under **Learned Corrections**;
 forgetting one restores its previous value when the file has not since changed.
 
@@ -225,7 +284,7 @@ paste, delete selection, new line, and escape. It cannot launch arbitrary shell
 commands. Edit mode requires a selection, so ordinary dictation cannot rewrite
 an unseen document by accident.
 
-Flight Recorder is disabled by default and must be enabled from the parrot
+Flight Recorder is disabled by default and must be enabled from the menu-bar
 menu. Its audio is never written to disk: the bounded buffer is cleared after
 use, on pause, when disabled, and on quit. The menu-bar dot and macOS microphone
 indicator remain visible while it is active.
@@ -264,8 +323,31 @@ uv run tests/test_voice_compiler.py
 uv run tests/test_benchmark_voice_compiler.py
 uv run tests/test_benchmark_asr.py
 uv run tests/test_dictate.py
+uv run tests/test_insertion_integrity.py
+uv run tests/test_personal_regression.py
+uv run tests/test_whisper_face_gui.py
+uv run tests/test_installers.py
+uv run tests/test_repository_governance.py
 ```
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Current first-party source is available under
+[`AGPL-3.0-only`](LICENSE). [Alternative commercial terms](COMMERCIAL_LICENSE.md)
+may be made available through a separately signed agreement for proprietary
+distribution, OEM use, embedding, or hosted use that needs different terms.
+Outside contributions require the
+[Whisper Face CLA](CLA.md) so both licensing paths remain viable.
+
+Earlier published commits remain MIT-licensed; those grants are not revoked.
+The exact transition boundary and third-party scope are documented in
+[LICENSE_POLICY.md](LICENSE_POLICY.md). This licensing structure keeps the
+complete community edition open while allowing commercial work to fund the
+free local product.
+
+The Mac window exposes offline **License Notices** and the immutable
+**Exact Source** under Diagnostics. Network-facing installs publish the same
+commit-specific source offer at `GET /source` and the shipped notices at
+`GET /license`. Modified deployments should set `WHISPER_FACE_SOURCE_URL` and,
+for packaged builds without Git metadata, `WHISPER_FACE_SOURCE_REVISION` to
+their corresponding source.

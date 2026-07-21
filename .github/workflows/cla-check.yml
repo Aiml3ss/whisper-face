@@ -1,0 +1,66 @@
+name: Contributor license agreement
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance-recorded:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read the protected acceptance ledger from the base revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+      - name: Require a matching CLA ledger entry
+        env:
+          CONTRIBUTOR: ${{ github.event.pull_request.user.login }}
+          CONTRIBUTOR_ID: ${{ github.event.pull_request.user.id }}
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          actor = os.environ["CONTRIBUTOR"].casefold()
+          actor_id = int(os.environ["CONTRIBUTOR_ID"])
+          ledger_path = Path(".github/cla-signatures-v1.json")
+
+          # Bootstrap is limited to the Project Owner while the ledger is first
+          # being introduced. Later PRs always read the immutable base copy.
+          if not ledger_path.exists():
+              if actor != "aiml3ss" or actor_id != 1891520:
+                  raise SystemExit("CLA ledger is not initialized on the base branch")
+              print("Project Owner bootstrap accepted")
+              raise SystemExit(0)
+
+          ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+          digest = hashlib.sha256(Path("CLA.md").read_bytes()).hexdigest()
+          if digest != ledger.get("cla_sha256"):
+              raise SystemExit("CLA checksum does not match the protected ledger")
+          if (actor == str(ledger.get("project_owner", "")).casefold()
+                  and actor_id == ledger.get("project_owner_id")):
+              print("Project Owner contribution")
+              raise SystemExit(0)
+
+          for acceptance in ledger.get("acceptances", []):
+              if str(acceptance.get("github", "")).casefold() != actor:
+                  continue
+              if acceptance.get("github_id") != actor_id:
+                  continue
+              if acceptance.get("cla_version") != ledger.get("cla_version"):
+                  continue
+              if acceptance.get("cla_sha256") != digest:
+                  continue
+              if not acceptance.get("accepted_at") or not acceptance.get("evidence"):
+                  continue
+              print(f"CLA acceptance recorded for {os.environ['CONTRIBUTOR']}")
+              raise SystemExit(0)
+          raise SystemExit(
+              "No protected CLA acceptance record for " + os.environ["CONTRIBUTOR"])
+          PY

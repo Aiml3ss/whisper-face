@@ -1,0 +1,4 @@
+# These files have byte-level integrity checks. Keep their canonical hashes
+# stable even when Git checks the repository out on Windows.
+/LICENSE text eol=lf
+/CLA.md text eol=lf

@@ -1,7 +1,7 @@
 # Issue tracker: GitHub
 
 Issues and PRDs for this repository live in GitHub Issues. Use `gh` from the
-repository so it infers `Aiml3ss/whispering-parrot` from the `origin` remote.
+repository so it infers the current repository from the `origin` remote.
 
 - Create: `gh issue create --title "..." --body "..."`
 - Read: `gh issue view <number> --comments`

@@ -1,6 +1,6 @@
-# Whispering Parrot domain context
+# Whisper Face domain context
 
-Whispering Parrot is a local-first voice-input system. It turns an utterance
+Whisper Face is a local-first voice-input system. It turns an utterance
 into text suitable for the focused application while preserving the speaker's
 meaning, factual anchors, privacy, and control.
 
@@ -51,6 +51,22 @@ cross-hypothesis agreement that later speech cannot invalidate it.
 
 **Semantic Commit** — publishing a Stable Prefix to the HUD or, when explicitly
 enabled and focus-safe, the target application.
+
+**Insertion Lease** — a privacy-safe identity, selection, and bounded-context
+fingerprint captured for the destination at hotkey press. Final text may make
+one paste attempt only if the current destination still matches the lease.
+
+**Insertion Receipt** — the terminal evidence for an insertion: verified,
+unverifiable, conflicting, or unresolved, plus whether a paste was attempted.
+Only verified receipts may train Personal Priors.
+
+**Voice Outbox** — a bounded, RAM-only recovery queue for text that was not
+proven delivered. It distinguishes text that was never pasted from text whose
+paste may have landed, and requires explicit copy-and-dismiss recovery.
+
+**Personal Regression Lab** — the bounded local suite of exact corrected spans
+used to test a candidate Personal Prior before activation and after reload.
+Conflicting or stale candidates are quarantined rather than applied.
 
 **Prosody Event** — a pause, emphasis, pitch movement, or end-of-speech signal
 derived from audio and aligned to Word Evidence.

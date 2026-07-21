@@ -1,4 +1,4 @@
-"""Evidence-driven speech compilation for Whispering Parrot.
+"""Evidence-driven speech compilation for Whisper Face.
 
 The public interface is intentionally small: build ``VoiceIR`` and call
 ``VoiceCompiler.compile``. Recognition fusion, contextual/personal ranking,

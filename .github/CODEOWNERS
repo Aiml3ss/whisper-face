@@ -1,0 +1,16 @@
+# Licensing, contribution-rights, and merge-gate changes require Project Owner review.
+/LICENSE @Aiml3ss
+/LICENSES/ @Aiml3ss
+/LICENSE_POLICY.md @Aiml3ss
+/NOTICE @Aiml3ss
+/CLA.md @Aiml3ss
+/COMMERCIAL_LICENSE.md @Aiml3ss
+/CONTRIBUTING.md @Aiml3ss
+/THIRD_PARTY_NOTICES.md @Aiml3ss
+/.github/CODEOWNERS @Aiml3ss
+/.github/cla-signatures-v1.json @Aiml3ss
+/.github/pull_request_template.md @Aiml3ss
+/.github/workflows/ @Aiml3ss
+/AGENTS.md @Aiml3ss
+/docs/licensing-release-process.md @Aiml3ss
+/tests/test_repository_governance.py @Aiml3ss

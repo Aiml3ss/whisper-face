@@ -17,7 +17,7 @@
 # ]
 # ///
 """
-dictate.py v5 — context-aware local voice input for macOS.
+dictate.py v5.1 — context-aware local voice input for macOS and Windows.
 
 New in v3:
   * Self-learning vocabulary: every dictation is logged to transcripts.jsonl;
@@ -102,9 +102,8 @@ New in v3.5 (long dictations):
     fillers, tone overrides, and enumerations still force LLM cleanup.
 
 New in v3.8:
-  * The HUD is now the parrot: it sits in the frosted pill and its beak
-    opens in sync with your live voice level while you dictate (closed,
-    with the orange pulse, while processing). Level bars stay beside it.
+  * The HUD introduced an audio-reactive parrot whose beak opens in sync with
+    the live voice level while you dictate.
 
 New in v3.9 (Mac reliability + latency):
   * Two microphone streams are opened and warmed at launch, then reused for
@@ -156,7 +155,7 @@ New in v3.7:
     periods, ?, !, and deliberate ellipses are kept. Enforced in code, not
     just in the prompt.
   * App Tones in the menu bar: pick Auto/Casual/Formal/Technical/Verbatim/
-    Neutral per app from the parrot menu; saved to tones.json and it wins
+    Neutral per app from the menu bar; saved to tones.json and it wins
     over the built-in app sets.
 
 New in v3.6:
@@ -171,12 +170,20 @@ New in v3.6:
   * Menu-bar item: state glyph, today/7-day usage stats, pause toggle,
     open-log, quit.
 
+New in v5.1 (Whisper Face):
+  * The app is now Whisper Face. Parrot, Fox, Owl, Cat, and Bear are selectable
+    from the menu bar and persist in the existing private preferences file.
+  * Every Mac character lip-syncs to microphone level in the floating HUD;
+    cached menu-bar frames open and close with speech without extra audio work.
+    Windows receives the same character preference and recording state.
+
 Run with:  uv run dictate.py   (or via the com.berg.dictate LaunchAgent)
 """
 
 import difflib
 import email
 import email.policy
+import hashlib
 import json
 import math
 import os
@@ -204,7 +211,7 @@ from pynput import keyboard
 IS_MACOS = sys.platform == "darwin"
 IS_WINDOWS = sys.platform == "win32"
 if not (IS_MACOS or IS_WINDOWS):
-    raise RuntimeError("Whispering Parrot supports macOS and Windows only")
+    raise RuntimeError("Whisper Face supports macOS and Windows only")
 
 if IS_MACOS:
     import fcntl
@@ -314,6 +321,17 @@ from voice_compiler import (  # noqa: E402
     WordEvidence,
     analyze_prosody,
 )
+from insertion_integrity import (  # noqa: E402
+    DestinationObservation,
+    InsertionCoordinator,
+    InsertionLease,
+    ReadbackResult,
+    ReceiptState,
+)
+from personal_regression import PersonalRegressionLab  # noqa: E402
+
+if IS_MACOS:
+    from whisper_face_gui import GUIActions, create_gui  # noqa: E402
 
 # ------------------------- config -------------------------
 
@@ -323,10 +341,30 @@ WHISPER_REPO = (
     "mlx-community/whisper-large-v3-turbo" if IS_MACOS else "turbo"
 )
 FAST_WHISPER_REPO = "mlx-community/whisper-tiny" if IS_MACOS else "tiny"
+ASR_MODEL_REVISIONS = {
+    "mlx-community/whisper-tiny":
+        "78c52ab98ca87f570bc57ad852e15ef7060f9f76",
+    "mlx-community/whisper-large-v3-turbo":
+        "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb",
+    "tiny": "d90ca5fe260221311c53c58e660288d3deb8d356",
+    "turbo": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
+}
+PARAKEET_MODEL_REPO = "FluidInference/parakeet-unified-en-0.6b-coreml"
+PARAKEET_MODEL_REVISION = "4252711f6f060f9a2f91e5f081a806d7f45eebd8"
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_MODEL = "qwen3.5:4b"
+OLLAMA_MODEL_MANIFEST_SHA256 = (
+    "2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd")
+PROJECT_SOURCE_URL = os.environ.get(
+    "WHISPER_FACE_SOURCE_URL",
+    "https://github.com/Aiml3ss/whispering-parrot",
+).rstrip("/")
 
 HERE = Path(__file__).parent
+PARAKEET_MODEL_DIR = (
+    Path.home() / "Library" / "Application Support" / "FluidAudio" /
+    "Models" / "parakeet-unified-en-0.6b"
+)
 PARAKEET_HELPER = HERE / ".models" / "bin" / "parrot-asr-helper"
 PARAKEET_ENABLED = (
     IS_MACOS and os.environ.get("PARROT_ASR_BACKEND", "parakeet") != "whisper"
@@ -376,6 +414,16 @@ SERVER_ONLY = "--server-only" in sys.argv   # headless: endpoint only
 # built-in *_APPS sets. bundle id -> "casual"|"formal"|"code"|"verbatim"|"default"
 TONES_FILE = HERE / "tones.json"
 PREFERENCES_FILE = HERE / "preferences.json"
+APP_NAME = "Whisper Face"
+FACE_CHOICES = ("parrot", "fox", "owl", "cat", "bear")
+FACE_LABELS = {
+    "parrot": "Parrot",
+    "fox": "Fox",
+    "owl": "Owl",
+    "cat": "Cat",
+    "bear": "Bear",
+}
+DEFAULT_FACE = "parrot"
 
 # Flight Recorder: an opt-in, RAM-only rolling buffer. A quick tap of the
 # normal hotkey transcribes the most recent utterance; holding it keeps the
@@ -397,6 +445,8 @@ LEARN_INTERVAL = 4 * 3600    # then every 4 hours while running
 LEARN_MIN_NEW = 10           # need this many new dictations to bother
 LEARN_IDLE = 180             # only mine after this much dictation inactivity
 PROMOTE_MIN_COUNT = 2        # seen in 2+ dictations -> goes in dictionary
+PERSONAL_APP_MIN_COUNT = 2   # same correction twice in one app
+PERSONAL_GLOBAL_MIN_COUNT = 3  # same correction three times overall
 TRANSCRIPT_KEEP = 500        # trim the log to this many lines after a pass
 
 # Keep-warm heartbeat: touch both models while idle so macOS never swaps
@@ -407,7 +457,7 @@ KEEPWARM_MIN_IDLE = 60       # skip the beat if dictating right now
 LOCK_FILE = HERE / ".dictate.lock"
 
 # HUD: the "Voice Listening" stage from the design handoff — no panel, no
-# background: the bird, bars, ring, and caption float transparently over
+# background: the face, bars, ring, and caption float transparently over
 # the screen. Geometry is the spec's times HUD_SCALE.
 HUD_SCALE = 0.28
 HUD_W, HUD_H = 210.0, 142.0
@@ -629,6 +679,7 @@ ASR_MODEL_PATHS_LOCK = threading.Lock()
 # learning loop.
 GLOSS = {
     "terms": [], "prompt": None, "fixes": {}, "confusions": {},
+    "regression": PersonalRegressionLab(),
     "lock": threading.Lock(),
 }
 
@@ -652,6 +703,7 @@ LISTENER = {"l": None, "make": None}
 # Menu-bar state: the status item (main-thread only) and the pause switch.
 STATUS = {"bar": None}
 PAUSED = {"on": False}
+USAGE_CACHE = {"at": 0.0, "value": (0, 0.0), "lock": threading.Lock()}
 PIPELINE_STATE = {
     "last_confidence": 1.0,
     "last_alternatives": [],
@@ -661,13 +713,19 @@ PIPELINE_STATE = {
     "last_compiler_details": [],
     "last_protected_anchors": 0,
     "last_stable_prefix_words": 0,
+    "last_asr_engine": "",
+    "last_release_s": None,
+    "last_word_count": None,
+    "last_insertion_state": "legacy",
+    "cleanup_status": "Checking",
 }
 
 VOICE_COMPILER = VoiceCompiler()
 CONTEXT_ROUTER = ContextRouter()
+INSERTION_COORDINATOR = InsertionCoordinator()
 
 APP_TONES = {"map": {}, "lock": threading.Lock()}
-PREFERENCES = {"flight_recorder": False}
+PREFERENCES = {"flight_recorder": False, "face": DEFAULT_FACE}
 
 
 def atomic_write_text(path: Path, text: str, mode: int = 0o600):
@@ -728,18 +786,34 @@ def set_app_tone(bundle: str, tone: str | None):
     print(f"[tones] {bundle} -> {tone or 'auto'}")
 
 
+def normalize_face(value) -> str:
+    """Return a supported character key; old preferences stay safe."""
+    value = str(value or "").strip().casefold()
+    return value if value in FACE_CHOICES else DEFAULT_FACE
+
+
+def current_face() -> str:
+    return normalize_face(PREFERENCES.get("face"))
+
+
 def load_preferences():
     try:
         loaded = json.loads(PREFERENCES_FILE.read_text()) \
             if PREFERENCES_FILE.exists() else {}
     except Exception:
         loaded = {}
+    if not isinstance(loaded, dict):
+        loaded = {}
     PREFERENCES["flight_recorder"] = bool(
-        isinstance(loaded, dict) and loaded.get("flight_recorder") is True)
+        loaded.get("flight_recorder") is True)
+    PREFERENCES["face"] = normalize_face(loaded.get("face"))
 
 
 def save_preferences():
-    snapshot = {"flight_recorder": bool(PREFERENCES["flight_recorder"])}
+    snapshot = {
+        "flight_recorder": bool(PREFERENCES["flight_recorder"]),
+        "face": current_face(),
+    }
     atomic_write_text(
         PREFERENCES_FILE, json.dumps(snapshot, indent=2) + "\n")
 
@@ -794,6 +868,23 @@ MINT = (0.369, 0.918, 0.831)            # #5eead4
 CATCH = (0.918, 1.000, 0.965)           # #eafff6
 CAPTION_COL = (0.847, 1.000, 0.941)     # #d8fff0
 AMBER = (0.984, 0.573, 0.235)           # processing accent #fb923c
+COMPANION_STYLES = {
+    "fox": {
+        "head": (0.949, 0.404, 0.188),
+        "deep": (0.706, 0.231, 0.075),
+        "muzzle": (1.000, 0.878, 0.702),
+    },
+    "cat": {
+        "head": (0.365, 0.592, 0.824),
+        "deep": (0.188, 0.349, 0.573),
+        "muzzle": (0.824, 0.914, 1.000),
+    },
+    "bear": {
+        "head": (0.647, 0.424, 0.267),
+        "deep": (0.373, 0.220, 0.133),
+        "muzzle": (0.890, 0.710, 0.514),
+    },
+}
 
 # Live caption: rolling-ASR chunks land here as they finish, the full raw
 # transcript lands at release, WaveView reads it every frame.
@@ -820,10 +911,7 @@ def _caption_add(fut, context_terms=(), bundle="", context_pack=None):
 
 
 class WaveView(NSView):
-    """The Voice Listening stage: radial bars ring the parrot, a pulse ring
-    breathes with the level, the lower mandible opens with your voice, and
-    the live caption grows underneath. Geometry is the handoff's, verbatim,
-    thanks to flipped (y-down) coordinates."""
+    """Voice Listening stage with a selectable, audio-reactive character."""
 
     def initWithFrame_(self, frame):
         self = objc.super(WaveView, self).initWithFrame_(frame)
@@ -881,7 +969,8 @@ class WaveView(NSView):
             _rgb(*ACCENT, 0.12 + lv * 0.5)
         ring.stroke()
 
-        # the parrot (256 viewBox at 300*S, centered; bobs while listening)
+        # Selected Whisper Face (256 viewBox at 300*S, centered). Every face
+        # uses the same measured microphone level for its mouth animation.
         bob = 0.0 if self.mode == "processing" else \
             -3.0 * S * (1.0 - math.cos(2.0 * math.pi * self.t / 3.2))
         ctx = NSGraphicsContext.currentContext()
@@ -890,7 +979,7 @@ class WaveView(NSView):
         tr.translateXBy_yBy_(cx - 150.0 * S, STAGE_TOP + 30.0 * S + bob)
         tr.scaleBy_(PARROT_SCALE * S)
         tr.concat()
-        self.drawParrot_(lv)
+        self.drawFace_(lv)
         ctx.restoreGraphicsState()
 
         # caption (live transcript on a slim chip so it reads over anything)
@@ -919,6 +1008,38 @@ class WaveView(NSView):
                 ch / 2.0, ch / 2.0).fill()
             cap.drawInRect_(NSMakeRect((W - cw) / 2.0 + 4, chip_y + 4,
                                        cw - 8, size.height))
+
+    def drawFace_(self, lv):
+        face = current_face()
+        if face == "parrot":
+            self.drawParrot_(lv)
+        elif face == "owl":
+            self.drawOwl_(lv)
+        else:
+            self._draw_companion(face, lv)
+
+    def _update_mouth(self):
+        snap = min(1.0, (self.raw ** 2) * 1.8) \
+            if self.mode != "processing" else 0.0
+        flutter = 3.0 * snap * math.sin(self.frame_n * 0.45)
+        target = snap * BEAK_MAX_DEG + flutter
+        self.beak = max(0.0, self.beak + (target - self.beak) * 0.6)
+        return min(1.0, self.beak / BEAK_MAX_DEG)
+
+    def _draw_whispers(self, lv):
+        ga = 0.35 + lv * 0.6
+        for (x1, y1, x2, y2, a) in ((212, 62, 232, 52, 1.0),
+                                    (224, 88, 246, 84, 0.6)):
+            puff = NSBezierPath.bezierPath()
+            puff.setLineWidth_(12.0)
+            puff.setLineCapStyle_(1)
+            puff.moveToPoint_((x1, y1))
+            puff.lineToPoint_((x2, y2))
+            _rgb(*MINT, ga * a)
+            puff.stroke()
+        _rgb(*MINT, ga * 0.55)
+        NSBezierPath.bezierPathWithOvalInRect_(
+            NSMakeRect(232, 32, 16, 16)).fill()
 
     def drawParrot_(self, lv):
         # tail
@@ -966,13 +1087,8 @@ class WaveView(NSView):
         up.closePath()
         _rgb(*BEAK_UP)
         up.fill()
-        # lower mandible: rotates open about (156,116). Squared raw level
-        # keeps the syllable dips; a whisper of flutter keeps it chattering.
-        snap = min(1.0, (self.raw ** 2) * 1.8) if self.mode != "processing" \
-            else 0.0
-        flutter = 3.0 * snap * math.sin(self.frame_n * 0.45)
-        target = snap * BEAK_MAX_DEG + flutter
-        self.beak = max(0.0, self.beak + (target - self.beak) * 0.6)
+        # lower mandible rotates about (156,116), driven by microphone level.
+        self._update_mouth()
         lo = NSBezierPath.bezierPath()
         lo.moveToPoint_((156, 118))
         lo.curveToPoint_controlPoint1_controlPoint2_(
@@ -989,20 +1105,123 @@ class WaveView(NSView):
         lo.transformUsingAffineTransform_(rot)
         _rgb(*BEAK_LO)
         lo.fill()
-        # whisper puffs (group opacity 0.35 + lv*0.6)
-        ga = 0.35 + lv * 0.6
-        for (x1, y1, x2, y2, a) in ((212, 62, 232, 52, 1.0),
-                                    (224, 88, 246, 84, 0.6)):
-            puff = NSBezierPath.bezierPath()
-            puff.setLineWidth_(12.0)
-            puff.setLineCapStyle_(1)
-            puff.moveToPoint_((x1, y1))
-            puff.lineToPoint_((x2, y2))
-            _rgb(*MINT, ga * a)
-            puff.stroke()
-        _rgb(*MINT, ga * 0.55)
+        self._draw_whispers(lv)
+
+    def _draw_companion(self, face, lv):
+        style = COMPANION_STYLES.get(face, COMPANION_STYLES["fox"])
+        mouth = self._update_mouth()
+
+        # Ears sit behind the shared rounded head. Fox and cat use expressive
+        # points; Bear keeps the same geometry family with round ears.
+        _rgb(*style["deep"])
+        if face == "bear":
+            NSBezierPath.bezierPathWithOvalInRect_(
+                NSMakeRect(40, 42, 58, 58)).fill()
+            NSBezierPath.bezierPathWithOvalInRect_(
+                NSMakeRect(158, 42, 58, 58)).fill()
+        else:
+            _poly([(42, 96), (55, 28), (105, 78)]).fill()
+            _poly([(151, 78), (201, 28), (214, 96)]).fill()
+            _rgb(*style["muzzle"])
+            _poly([(58, 78), (63, 48), (88, 75)]).fill()
+            _poly([(168, 75), (193, 48), (198, 78)]).fill()
+
+        _rgb(*style["head"])
         NSBezierPath.bezierPathWithOvalInRect_(
-            NSMakeRect(232, 32, 16, 16)).fill()
+            NSMakeRect(34, 55, 188, 172)).fill()
+
+        # Cheeks and muzzle keep the same soft, toy-like visual language as
+        # the original parrot while leaving a clean cavity for lip sync.
+        _rgb(*style["muzzle"])
+        NSBezierPath.bezierPathWithOvalInRect_(
+            NSMakeRect(61, 123, 78, 68)).fill()
+        NSBezierPath.bezierPathWithOvalInRect_(
+            NSMakeRect(117, 123, 78, 68)).fill()
+
+        _rgb(*DARK_EYE)
+        for x in (82, 156):
+            NSBezierPath.bezierPathWithOvalInRect_(
+                NSMakeRect(x, 96, 19, 23)).fill()
+        _rgb(*CATCH)
+        for x in (92, 166):
+            NSBezierPath.bezierPathWithOvalInRect_(
+                NSMakeRect(x, 99, 6, 7)).fill()
+
+        _rgb(*style["deep"])
+        _poly([(116, 137), (140, 137), (128, 150)]).fill()
+        cavity_h = 5.0 + mouth * 28.0
+        _rgb(*MOUTH)
+        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            NSMakeRect(111, 153, 34, cavity_h), 15, 15).fill()
+        if mouth > 0.32:
+            _rgb(0.941, 0.447, 0.525)
+            NSBezierPath.bezierPathWithOvalInRect_(
+                NSMakeRect(119, 160 + mouth * 10, 18, 9)).fill()
+
+        if face == "cat":
+            _rgb(*style["deep"], 0.75)
+            for y, dy in ((149, -5), (158, 0), (167, 5)):
+                left = NSBezierPath.bezierPath()
+                left.setLineWidth_(3)
+                left.moveToPoint_((91, y))
+                left.lineToPoint_((39, y + dy))
+                left.stroke()
+                right = NSBezierPath.bezierPath()
+                right.setLineWidth_(3)
+                right.moveToPoint_((165, y))
+                right.lineToPoint_((217, y + dy))
+                right.stroke()
+
+        self._draw_whispers(lv)
+
+    def drawOwl_(self, lv):
+        mouth = self._update_mouth()
+        purple = (0.455, 0.392, 0.741)
+        deep = (0.255, 0.200, 0.506)
+        cream = (0.890, 0.855, 1.000)
+
+        _rgb(*deep)
+        _poly([(39, 104), (62, 31), (104, 79)]).fill()
+        _poly([(152, 79), (194, 31), (217, 104)]).fill()
+        _rgb(*purple)
+        NSBezierPath.bezierPathWithOvalInRect_(
+            NSMakeRect(32, 52, 192, 180)).fill()
+
+        _rgb(*cream)
+        for x in (57, 129):
+            NSBezierPath.bezierPathWithOvalInRect_(
+                NSMakeRect(x, 88, 70, 70)).fill()
+        _rgb(*DARK_EYE)
+        for x in (82, 154):
+            NSBezierPath.bezierPathWithOvalInRect_(
+                NSMakeRect(x, 108, 24, 28)).fill()
+        _rgb(*CATCH)
+        for x in (94, 166):
+            NSBezierPath.bezierPathWithOvalInRect_(
+                NSMakeRect(x, 111, 7, 8)).fill()
+
+        _rgb(*MOUTH)
+        _poly([(111, 151), (145, 151),
+               (128, 167 + mouth * 16)]).fill()
+        _rgb(*BEAK_UP)
+        _poly([(105, 145), (151, 145), (128, 163)]).fill()
+        _rgb(*BEAK_LO)
+        lower = _poly([(111, 164), (145, 164), (128, 178)])
+        shift = NSAffineTransform.transform()
+        shift.translateXBy_yBy_(0, mouth * 13)
+        lower.transformUsingAffineTransform_(shift)
+        lower.fill()
+
+        # Chest crescent gives the owl the same single-swoosh signature as
+        # the parrot's wing without making the characters visually identical.
+        chest = NSBezierPath.bezierPath()
+        chest.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_(
+            (128, 165), 45, 20, 160)
+        chest.setLineWidth_(13)
+        chest.setLineCapStyle_(1)
+        _rgb(*deep, 0.8)
+        chest.stroke()
+        self._draw_whispers(lv)
 
 
 class HUD(NSObject):
@@ -1064,12 +1283,20 @@ class HUD(NSObject):
         if not self.panel.isVisible():
             return
         self.wave.raw = LEVELS[-1] if LEVELS else 0.0
+        bar = STATUS.get("bar")
+        if bar is not None and hasattr(bar, "setMouthLevel_"):
+            bar.setMouthLevel_(self.wave.raw)
         self.wave.setNeedsDisplay_(True)
 
 
 def usage_stats() -> tuple[str, str]:
     day = week = day_w = week_w = 0
     now = time.time()
+    local = time.localtime(now)
+    today_started = time.mktime((
+        local.tm_year, local.tm_mon, local.tm_mday,
+        0, 0, 0, local.tm_wday, local.tm_yday, local.tm_isdst,
+    ))
     try:
         with TRANSCRIPTS_LOCK:
             lines = TRANSCRIPTS_FILE.read_text().splitlines()
@@ -1080,14 +1307,61 @@ def usage_stats() -> tuple[str, str]:
             e = json.loads(line)
         except Exception:
             continue
-        age = now - e.get("ts", 0)
+        try:
+            timestamp = float(e.get("ts", 0))
+        except (TypeError, ValueError):
+            continue
+        age = now - timestamp
         w = len((e.get("clean") or "").split())
-        if age < 86400:
+        if timestamp >= today_started:
             day, day_w = day + 1, day_w + w
         if age < 7 * 86400:
             week, week_w = week + 1, week_w + w
     return (f"Today: {day} dictations · {day_w} words",
             f"Last 7 days: {week} · {week_w} words")
+
+
+def usage_metrics() -> tuple[int, float]:
+    """Return today's words and a conservative estimated time saving."""
+    now = time.time()
+    with USAGE_CACHE["lock"]:
+        if now - USAGE_CACHE["at"] < 5.0:
+            return USAGE_CACHE["value"]
+    local = time.localtime(now)
+    today_started = time.mktime((
+        local.tm_year, local.tm_mon, local.tm_mday,
+        0, 0, 0, local.tm_wday, local.tm_yday, local.tm_isdst,
+    ))
+    words = 0
+    active_seconds = 0.0
+    try:
+        with TRANSCRIPTS_LOCK:
+            lines = TRANSCRIPTS_FILE.read_text().splitlines()
+    except Exception:
+        lines = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except Exception:
+            continue
+        try:
+            timestamp = float(entry.get("ts", 0))
+        except (TypeError, ValueError):
+            continue
+        if timestamp < today_started:
+            continue
+        words += len((entry.get("clean") or "").split())
+        metrics = entry.get("metrics")
+        if isinstance(metrics, dict):
+            active_seconds += max(0.0, float(metrics.get("press_s", 0)))
+    # 40 WPM is a deliberately modest typing baseline. Subtract actual time
+    # spent speaking so this never presents gross dictation time as savings.
+    saved = max(0.0, words / 40.0 - active_seconds / 60.0)
+    value = (words, saved)
+    with USAGE_CACHE["lock"]:
+        USAGE_CACHE["at"] = now
+        USAGE_CACHE["value"] = value
+    return value
 
 
 def builtin_tone(bundle: str) -> str:
@@ -1138,8 +1412,7 @@ def app_display_name(bundle: str) -> str:
 
 
 class StatusBar(NSObject):
-    """Menu-bar presence: state glyph, usage stats, per-app tone picker,
-    Flight Recorder privacy control, pause, log, quit."""
+    """Menu-bar presence with a persistent, selectable Whisper Face."""
 
     def init(self):
         self = objc.super(StatusBar, self).init()
@@ -1147,13 +1420,23 @@ class StatusBar(NSObject):
             return None
         self.item = NSStatusBar.systemStatusBar().statusItemWithLength_(
             NSVariableStatusItemLength)
-        # The template glyph from the icon system: macOS recolors it for
-        # light/dark menu bars automatically. Emoji fallback if missing.
-        self.icon = NSImage.alloc().initWithContentsOfFile_(
-            str(HERE / "icons" / "glyph.svg"))
-        if self.icon is not None:
-            self.icon.setSize_(NSMakeSize(18, 18))
-            self.icon.setTemplate_(True)
+        # Two cached template frames per character. The open-mouth frame is
+        # selected from the live mic level, so the tiny menu-bar face talks
+        # along with the larger HUD without decoding or storing extra audio.
+        self.face_icons = {}
+        for face in FACE_CHOICES:
+            frames = {}
+            for frame in ("idle", "talk"):
+                icon = NSImage.alloc().initWithContentsOfFile_(str(
+                    HERE / "icons" / "faces" / f"{face}-{frame}.svg"))
+                if icon is not None:
+                    icon.setSize_(NSMakeSize(18, 18))
+                    icon.setTemplate_(True)
+                frames[frame] = icon
+            self.face_icons[face] = frames
+        self.state = "idle"
+        self.mouth_open = False
+        self.gui = None
         self.setState_("idle")
 
         def mk(title, action):
@@ -1167,6 +1450,9 @@ class StatusBar(NSObject):
         menu.setDelegate_(self)
         self.stat1 = mk("…", None)
         self.stat2 = mk("…", None)
+        self.faces_root = mk("Choose Face", None)
+        self.faces_menu = NSMenu.alloc().init()
+        self.faces_root.setSubmenu_(self.faces_menu)
         self.tones_root = mk("App Tones", None)
         self.tones_menu = NSMenu.alloc().init()
         self.tones_root.setSubmenu_(self.tones_menu)
@@ -1191,9 +1477,12 @@ class StatusBar(NSObject):
             self.modes_menu.addItem_(mode_item)
         self.flight_item = mk("Flight Recorder", "toggleFlight:")
         self.pause_item = mk("Pause Dictation", "togglePause:")
+        menu.addItem_(mk("Open Whisper Face…", "openGUI:"))
+        menu.addItem_(NSMenuItem.separatorItem())
         menu.addItem_(self.stat1)
         menu.addItem_(self.stat2)
         menu.addItem_(NSMenuItem.separatorItem())
+        menu.addItem_(self.faces_root)
         menu.addItem_(self.tones_root)
         menu.addItem_(self.learning_root)
         menu.addItem_(self.recognition_root)
@@ -1202,34 +1491,84 @@ class StatusBar(NSObject):
         menu.addItem_(self.pause_item)
         menu.addItem_(mk("Open Log", "openLog:"))
         menu.addItem_(NSMenuItem.separatorItem())
-        menu.addItem_(mk("Quit Dictation", "quitApp:"))
+        menu.addItem_(mk(f"Quit {APP_NAME}", "quitApp:"))
         self.item.setMenu_(menu)
         return self
 
     def setState_(self, state):
+        self.state = state
+        if state != "rec":
+            self.mouth_open = False
+        self._refresh_face_icon()
+
+    def _refresh_face_icon(self):
         btn = self.item.button()
-        if state == "idle" and self.icon is not None:
-            btn.setTitle_("•" if FLIGHT.is_enabled() else "")
-            btn.setImage_(self.icon)
-            btn.setToolTip_(
-                "Flight Recorder active: 20-second RAM-only microphone buffer"
-                if FLIGHT.is_enabled() else "Whispering Parrot")
+        if self.state == "off":
+            btn.setImage_(None)
+            btn.setTitle_("⏸")
+            btn.setToolTip_(f"{APP_NAME} — paused")
             return
-        btn.setImage_(None)
-        icons = {"idle": "🦜", "rec": "🔴", "proc": "🟠", "off": "⏸"}
-        btn.setTitle_(icons.get(state, "🦜"))
+        frame = "talk" if self.state == "rec" and self.mouth_open else "idle"
+        icon = self.face_icons.get(current_face(), {}).get(frame)
+        btn.setImage_(icon)
+        if icon is None:
+            fallback = {"parrot": "🦜", "fox": "🦊", "owl": "🦉",
+                        "cat": "🐱", "bear": "🐻"}
+            btn.setTitle_(fallback.get(current_face(), "◉"))
+        else:
+            suffix = "…" if self.state == "proc" else \
+                ("•" if self.state == "idle" and FLIGHT.is_enabled() else "")
+            btn.setTitle_(suffix)
+        labels = {
+            "idle": APP_NAME,
+            "rec": f"{APP_NAME} — listening",
+            "proc": f"{APP_NAME} — processing",
+        }
+        btn.setToolTip_(labels.get(self.state, APP_NAME))
+
+    def setMouthLevel_(self, level):
+        if self.state != "rec":
+            return
+        mouth_open = float(level) >= 0.045
+        if mouth_open != self.mouth_open:
+            self.mouth_open = mouth_open
+            self._refresh_face_icon()
 
     def menuWillOpen_(self, menu):
         try:
             s1, s2 = usage_stats()
             self.stat1.setTitle_(s1)
             self.stat2.setTitle_(s2)
+            self.rebuild_faces()
             self.rebuild_tones()
             self.rebuild_learning()
             self.rebuild_recognition()
             self.refresh_flight_item()
         except Exception as e:
             print(f"! menu refresh failed: {e}")   # menu still opens
+
+    def rebuild_faces(self):
+        self.faces_menu.removeAllItems()
+        selected = current_face()
+        emoji = {"parrot": "🦜", "fox": "🦊", "owl": "🦉",
+                 "cat": "🐱", "bear": "🐻"}
+        for face in FACE_CHOICES:
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                f"{emoji[face]}  {FACE_LABELS[face]}", "setFace:", "")
+            item.setTarget_(self)
+            item.setRepresentedObject_(face)
+            item.setState_(1 if face == selected else 0)
+            self.faces_menu.addItem_(item)
+
+    def setFace_(self, sender):
+        self.set_face_choice(str(sender.representedObject()))
+
+    def set_face_choice(self, face: str):
+        PREFERENCES["face"] = normalize_face(face)
+        save_preferences()
+        self.mouth_open = False
+        self._refresh_face_icon()
+        print(f"[face] {FACE_LABELS[current_face()]}")
 
     def refresh_flight_item(self):
         desired = PREFERENCES["flight_recorder"]
@@ -1266,7 +1605,10 @@ class StatusBar(NSObject):
         threading.Thread(target=start, daemon=True).start()
 
     def toggleFlight_(self, sender):
-        desired = not PREFERENCES["flight_recorder"]
+        self.set_flight_enabled(not PREFERENCES["flight_recorder"])
+
+    def set_flight_enabled(self, desired: bool):
+        desired = bool(desired)
         PREFERENCES["flight_recorder"] = desired
         save_preferences()
         if not desired:
@@ -1357,6 +1699,11 @@ class StatusBar(NSObject):
             if fix and str(fix.get("to", "")).casefold() == str(
                     removed.get("to", "")).casefold():
                 state["fixes"].pop(old, None)
+            regression = personal_regression_lab(state)
+            regression.forget(old)
+            for app in removed.get("apps", {}):
+                regression.forget(old, app=str(app))
+            state["regression_lab"] = regression.to_dict()
             state["history"].append({
                 "ts": time.time(), "kind": "forgotten",
                 "from": removed.get("from"), "to": removed.get("to"),
@@ -1416,7 +1763,10 @@ class StatusBar(NSObject):
         print("[confidence] copied alternative to clipboard")
 
     def togglePause_(self, sender):
-        PAUSED["on"] = not PAUSED["on"]
+        self.set_paused(not PAUSED["on"])
+
+    def set_paused(self, paused: bool):
+        PAUSED["on"] = bool(paused)
         if PAUSED["on"]:
             FLIGHT.disable()
         elif PREFERENCES["flight_recorder"]:
@@ -1428,6 +1778,10 @@ class StatusBar(NSObject):
 
     def openLog_(self, sender):
         subprocess.Popen(["open", str(HERE / "dictate.log")])
+
+    def openGUI_(self, sender):
+        if self.gui is not None:
+            self.gui.show()
 
     def quitApp_(self, sender):
         # Clean exit(0): launchd's SuccessfulExit=false means no respawn
@@ -1466,17 +1820,73 @@ if IS_WINDOWS:
         def _icon_image(self, state):
             image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
             draw = ImageDraw.Draw(image)
-            draw.ellipse((7, 7, 57, 57), fill=self.COLORS.get(
-                state, self.COLORS["idle"]))
-            draw.ellipse((22, 18, 42, 38), fill=(252, 252, 245, 255))
-            draw.polygon(((39, 27), (56, 33), (39, 38)),
-                         fill=(244, 154, 46, 255))
-            draw.ellipse((34, 23, 38, 27), fill=(20, 25, 30, 255))
+            face = current_face()
+            talking = state == "rec"
+            disabled = state == "off"
+            palettes = {
+                "fox": ((236, 102, 45, 255), (255, 224, 179, 255)),
+                "cat": ((92, 151, 210, 255), (210, 233, 255, 255)),
+                "bear": ((165, 108, 68, 255), (227, 181, 131, 255)),
+                "owl": ((116, 100, 189, 255), (227, 218, 255, 255)),
+            }
+            if face == "parrot":
+                fill = (135, 135, 145, 255) if disabled \
+                    else (55, 170, 92, 255)
+                draw.ellipse((7, 7, 55, 57), fill=fill)
+                draw.ellipse((22, 17, 42, 37), fill=(252, 252, 245, 255))
+                gap = 6 if talking else 1
+                draw.polygon(((39, 27 - gap), (59, 32), (39, 34)),
+                             fill=(244, 174, 46, 255))
+                draw.polygon(((39, 34), (56, 37 + gap), (39, 37)),
+                             fill=(225, 137, 33, 255))
+                draw.ellipse((34, 22, 38, 26), fill=(20, 25, 30, 255))
+                return image
+
+            head, muzzle = palettes.get(face, palettes["fox"])
+            if disabled:
+                head = (135, 135, 145, 255)
+                muzzle = (205, 205, 210, 255)
+            if face in ("fox", "cat", "owl"):
+                draw.polygon(((9, 23), (16, 2), (29, 18)), fill=head)
+                draw.polygon(((35, 18), (48, 2), (55, 23)), fill=head)
+            else:
+                draw.ellipse((7, 5, 25, 23), fill=head)
+                draw.ellipse((39, 5, 57, 23), fill=head)
+            draw.ellipse((7, 10, 57, 60), fill=head)
+            if face == "owl":
+                draw.ellipse((13, 19, 35, 41), fill=muzzle)
+                draw.ellipse((29, 19, 51, 41), fill=muzzle)
+                draw.ellipse((23, 27, 29, 35), fill=(20, 25, 30, 255))
+                draw.ellipse((35, 27, 41, 35), fill=(20, 25, 30, 255))
+                gap = 8 if talking else 2
+                draw.polygon(((26, 38), (38, 38), (32, 45 + gap)),
+                             fill=(244, 174, 46, 255))
+            else:
+                draw.ellipse((15, 34, 37, 54), fill=muzzle)
+                draw.ellipse((27, 34, 49, 54), fill=muzzle)
+                draw.ellipse((20, 25, 26, 32), fill=(20, 25, 30, 255))
+                draw.ellipse((38, 25, 44, 32), fill=(20, 25, 30, 255))
+                draw.polygon(((27, 38), (37, 38), (32, 44)),
+                             fill=(45, 36, 36, 255))
+                mouth_h = 10 if talking else 2
+                draw.ellipse((27, 45, 37, 45 + mouth_h),
+                             fill=(35, 24, 28, 255))
             return image
 
         def init(self):
             self.state = "idle"
+            characters = pystray.Menu(*(
+                pystray.MenuItem(
+                    FACE_LABELS[face],
+                    lambda icon, item, selected=face:
+                        self._choose_face(icon, selected),
+                    checked=lambda item, selected=face:
+                        current_face() == selected,
+                    radio=True,
+                ) for face in FACE_CHOICES
+            ))
             menu = pystray.Menu(
+                pystray.MenuItem("Choose Face", characters),
                 pystray.MenuItem(
                     "Flight Recorder (RAM only)", self._toggle_flight,
                     checked=lambda _item: bool(
@@ -1487,11 +1897,10 @@ if IS_WINDOWS:
                     checked=lambda _item: bool(PAUSED["on"]),
                 ),
                 pystray.MenuItem("Open Log", self._open_log),
-                pystray.MenuItem("Quit Dictation", self._quit),
+                pystray.MenuItem(f"Quit {APP_NAME}", self._quit),
             )
             self.icon = pystray.Icon(
-                "WhisperingParrot", self._icon_image("idle"),
-                "Whispering Parrot", menu,
+                "WhisperFace", self._icon_image("idle"), APP_NAME, menu,
             )
             self.icon.run_detached()
             return self
@@ -1500,12 +1909,18 @@ if IS_WINDOWS:
             self.state = state
             self.icon.icon = self._icon_image(state)
             labels = {
-                "idle": "Whispering Parrot",
-                "rec": "Whispering Parrot — recording",
-                "proc": "Whispering Parrot — processing",
-                "off": "Whispering Parrot — paused",
+                "idle": APP_NAME,
+                "rec": f"{APP_NAME} — listening",
+                "proc": f"{APP_NAME} — processing",
+                "off": f"{APP_NAME} — paused",
             }
-            self.icon.title = labels.get(state, "Whispering Parrot")
+            self.icon.title = labels.get(state, APP_NAME)
+
+        def _choose_face(self, icon, face):
+            PREFERENCES["face"] = normalize_face(face)
+            save_preferences()
+            icon.icon = self._icon_image(self.state)
+            icon.update_menu()
 
         def _toggle_flight(self, icon, item):
             desired = not bool(PREFERENCES.get("flight_recorder", False))
@@ -1877,6 +2292,9 @@ class Recorder:
         self.captured_via_flight = False
         self.source = "hold"
         self.focus_at_press = None
+        self.utterance_id = ""
+        self.insertion_lease = None
+        self.insertion_receipt = None
         self.context_terms = []
         self.context_pack = ContextPack()
         self.prompt = None
@@ -1910,6 +2328,9 @@ class Recorder:
         self.source = "hold"
         self.uncertain = False
         self.press_at = press_at or time.perf_counter()
+        self.utterance_id = f"{time.time_ns():x}-{id(self):x}"
+        self.insertion_lease = None
+        self.insertion_receipt = None
         self.recording = True
         try:
             self.captured_via_flight = FLIGHT.attach(self)
@@ -2058,7 +2479,8 @@ def parse_dictionary():
 def load_learned() -> dict:
     state = {
         "counts": {}, "processed": 0, "fixes": {},
-        "confusions": {}, "snippet_edits": {}, "history": [],
+        "confusions": {}, "snippet_edits": {}, "regression_lab": {},
+        "history": [],
     }
     if LEARNED_FILE.exists():
         try:
@@ -2068,6 +2490,7 @@ def load_learned() -> dict:
                 fixes = loaded.get("fixes")
                 confusions = loaded.get("confusions")
                 snippet_edits = loaded.get("snippet_edits")
+                regression_lab = loaded.get("regression_lab")
                 history = loaded.get("history")
                 processed = loaded.get("processed")
                 if isinstance(counts, dict):
@@ -2078,6 +2501,8 @@ def load_learned() -> dict:
                     state["confusions"] = confusions
                 if isinstance(snippet_edits, dict):
                     state["snippet_edits"] = snippet_edits
+                if isinstance(regression_lab, dict):
+                    state["regression_lab"] = regression_lab
                 if isinstance(history, list):
                     state["history"] = history[-100:]
                 if isinstance(processed, int) and processed >= 0:
@@ -2089,6 +2514,136 @@ def load_learned() -> dict:
 
 def save_learned(state: dict):
     atomic_write_text(LEARNED_FILE, json.dumps(state, indent=2) + "\n")
+
+
+def personal_regression_lab(state: dict | None = None) \
+        -> PersonalRegressionLab:
+    source = state if state is not None else load_learned()
+    try:
+        return PersonalRegressionLab.from_dict(
+            source.get("regression_lab", {}))
+    except Exception:
+        return PersonalRegressionLab()
+
+
+def runtime_status_snapshot() -> dict:
+    """Small, privacy-safe state projection for the native settings window."""
+    bar = STATUS.get("bar")
+    state = getattr(bar, "state", "idle") if bar is not None else "idle"
+    capture = {
+        "idle": "Ready", "rec": "Listening", "proc": "Processing",
+        "off": "Paused",
+    }.get(state, "Ready")
+    words, saved = usage_metrics()
+    learned = load_learned()
+    lab = personal_regression_lab(learned)
+    try:
+        from Quartz import (
+            CGPreflightListenEventAccess, CGPreflightPostEventAccess,
+        )
+        trusted = bool(
+            CGPreflightListenEventAccess() and CGPreflightPostEventAccess())
+        accessibility = "Granted" if trusted else "Needs attention"
+    except Exception:
+        accessibility = "Unknown"
+    helper_ready = PARAKEET_ENABLED and PARAKEET_HELPER.is_file()
+    try:
+        helper_running = bool(
+            helper_ready and PARAKEET.process is not None
+            and PARAKEET.process.poll() is None)
+    except Exception:
+        helper_running = False
+    engine = str(PIPELINE_STATE["last_asr_engine"] or (
+        "Parakeet Unified" if helper_running else "Warming up"))
+    flight_active = FLIGHT.is_enabled()
+    if PAUSED["on"] and PREFERENCES["flight_recorder"]:
+        flight_state = "Paused"
+    elif flight_active:
+        flight_state = "Active · 20s RAM only"
+    elif PREFERENCES["flight_recorder"]:
+        flight_state = "Starting"
+    else:
+        flight_state = "Off"
+    outbox = INSERTION_COORDINATOR.recoverable()
+    outbox_summary = ""
+    if outbox:
+        latest = outbox[-1].receipt
+        outbox_summary = (
+            "Paste may have landed — verify before reusing"
+            if latest.paste_attempted
+            else "Not pasted — destination changed")
+    return {
+        "capture_state": capture,
+        "paused": PAUSED["on"],
+        "face": current_face(),
+        "flight_recorder": flight_active,
+        "flight_state": flight_state,
+        "active_engine": engine,
+        "last_latency_ms": (
+            float(PIPELINE_STATE["last_release_s"]) * 1000
+            if PIPELINE_STATE["last_release_s"] is not None else None),
+        "last_word_count": PIPELINE_STATE["last_word_count"],
+        "words_today": words,
+        "minutes_saved": saved,
+        "outbox_count": len(outbox),
+        "outbox_summary": outbox_summary,
+        "regression_cases": len(lab.cases),
+        "regression_quarantined": len(lab.quarantined),
+        "privacy_summary": "Speech, cleanup, and learning stay on this Mac",
+        "service_status": "Running" if bar is not None else "Starting",
+        "microphone_status": "Ready" if AUDIO_POOL.slots else "Starting",
+        "accessibility_status": accessibility,
+        "version": "Local checkout",
+        "models": [
+            {
+                "name": "Parakeet Unified 0.6B",
+                "role": "Primary recognition",
+                "status": ("Running" if helper_running else
+                           "Installed" if helper_ready else "Unavailable"),
+                "detail": "Native Apple Silicon helper",
+            },
+            {
+                "name": "Whisper large-v3-turbo",
+                "role": "Recognition fallback",
+                "status": "Installed",
+                "detail": "MLX local fallback; health checked by installer",
+            },
+            {
+                "name": OLLAMA_MODEL,
+                "role": "Selective cleanup",
+                "status": PIPELINE_STATE["cleanup_status"],
+                "detail": "Skipped for deterministic fast-path speech",
+            },
+        ],
+    }
+
+
+def verify_mac_installation() -> dict:
+    completed = subprocess.run(
+        [str(HERE / "setup.sh"), "--verify"],
+        cwd=HERE,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    output = (completed.stdout or completed.stderr).strip().splitlines()
+    message = output[-1] if output else "Verification returned no output"
+    return {"passed": completed.returncode == 0, "message": message}
+
+
+def copy_latest_outbox():
+    recoverable = INSERTION_COORDINATOR.recoverable()
+    if not recoverable:
+        raise RuntimeError("Voice Outbox is empty")
+    pb = NSPasteboard.generalPasteboard()
+    pb.clearContents()
+    copied = pb.setString_forType_(
+        recoverable[-1].text, NSPasteboardTypeString)
+    if not copied:
+        raise RuntimeError("macOS clipboard rejected the recovery text")
+    INSERTION_COORDINATOR.acknowledge(
+        recoverable[-1].receipt.utterance_id)
 
 
 def merge_learned_state(base: dict, mined: dict, latest: dict) -> dict:
@@ -2104,6 +2659,7 @@ def merge_learned_state(base: dict, mined: dict, latest: dict) -> dict:
         "fixes": dict(latest.get("fixes", {})),
         "confusions": dict(latest.get("confusions", {})),
         "snippet_edits": dict(latest.get("snippet_edits", {})),
+        "regression_lab": dict(latest.get("regression_lab", {})),
         "history": list(latest.get("history", []))[-100:],
     }
     base_counts = base.get("counts", {})
@@ -2158,8 +2714,9 @@ def refresh_glossary():
         # deterministic post-ASR replacements.
         GLOSS["fixes"] = {old: info["to"]
                           for old, info in state["fixes"].items()
-                          if info.get("n", 0) >= 3}
+                          if info.get("n", 0) >= PERSONAL_GLOBAL_MIN_COUNT}
         GLOSS["confusions"] = dict(state.get("confusions", {}))
+        GLOSS["regression"] = personal_regression_lab(state)
 
     write_auto_section(promoted)
     return terms
@@ -2180,9 +2737,22 @@ def append_transcript(raw: str, cleaned: str, bundle: str, path: str,
             os.O_WRONLY | os.O_CREAT | os.O_APPEND,
             0o600,
         )
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "a") as f:
-            f.write(json.dumps(entry) + "\n")
+        try:
+            # Windows has no os.fchmod. The mode supplied to os.open remains
+            # the creation policy there; POSIX platforms additionally tighten
+            # an existing file before appending private transcript data.
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            stream = os.fdopen(fd, "a")
+            fd = None
+            with stream:
+                stream.write(json.dumps(entry) + "\n")
+        finally:
+            # If permission setup or fdopen fails, do not leak the raw handle.
+            if fd is not None:
+                os.close(fd)
+    with USAGE_CACHE["lock"]:
+        USAGE_CACHE["at"] = 0.0
 
 
 def ollama_chat(system: str | None, user: str, num_predict: int = 512,
@@ -2437,6 +3007,8 @@ def ensure_single_instance():
     behind a manually started copy."""
     if IS_WINDOWS:
         kernel32 = ctypes.windll.kernel32
+        # Retain the legacy mutex identifier across the product rename so an
+        # older running process cannot coexist and double-paste during upgrade.
         handle = kernel32.CreateMutexW(None, False, "WhisperingParrot.Dictation")
         if not handle or kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
             print("dictate.py is already running elsewhere; exiting.")
@@ -2593,7 +3165,10 @@ def resolve_asr_model(model_repo: str, downloader=None) -> str:
         if downloader is None:
             from huggingface_hub import snapshot_download
             downloader = snapshot_download
-        resolved = str(downloader(repo_id=model_repo))
+        resolved = str(downloader(
+            repo_id=model_repo,
+            revision=ASR_MODEL_REVISIONS.get(model_repo),
+        ))
         ASR_MODEL_PATHS[model_repo] = resolved
         return resolved
 
@@ -2602,6 +3177,12 @@ def windows_whisper_model(model_repo: str):
     """Load the Windows CTranslate2 model once, preferring an NVIDIA GPU."""
     if model_repo in WINDOWS_ASR_MODELS:
         return WINDOWS_ASR_MODELS[model_repo]
+    from faster_whisper.utils import download_model
+    resolved_model = download_model(
+        model_repo,
+        cache_dir=str(HERE / ".models"),
+        revision=ASR_MODEL_REVISIONS.get(model_repo),
+    )
     options = []
     if ctranslate2.get_cuda_device_count() > 0:
         options.append(("cuda", "float16"))
@@ -2610,9 +3191,7 @@ def windows_whisper_model(model_repo: str):
     for device, compute_type in options:
         try:
             model = WhisperModel(
-                model_repo, device=device, compute_type=compute_type,
-                download_root=str(HERE / ".models"),
-            )
+                resolved_model, device=device, compute_type=compute_type)
             WINDOWS_ASR_MODELS[model_repo] = model
             print(f"[asr] {model_repo} on {device}/{compute_type}")
             return model
@@ -2727,13 +3306,25 @@ def apply_learned_fixes(text: str, bundle: str = "") -> str:
     with GLOSS["lock"]:
         fixes = dict(GLOSS["fixes"])
         confusions = dict(GLOSS["confusions"])
+        regression = GLOSS["regression"]
+    gated = {
+        item.heard.casefold()
+        for item in (*regression.promoted, *regression.quarantined)
+        if item.app is None or item.app == (bundle or None)
+    }
+    text = regression.apply(text, app=bundle or None)
     for old, new in fixes.items():
+        if old.casefold() in gated:
+            continue
         text = re.sub(rf"\b{re.escape(old)}\b", new, text, flags=re.I)
     for info in confusions.values():
         old, new = info.get("from"), info.get("to")
+        if isinstance(old, str) and old.casefold() in gated:
+            continue
         app_count = info.get("apps", {}).get(bundle, 0) if bundle else 0
         if (isinstance(old, str) and isinstance(new, str)
-                and (info.get("n", 0) >= 3 or app_count >= 2)):
+                and (info.get("n", 0) >= PERSONAL_GLOBAL_MIN_COUNT
+                     or app_count >= PERSONAL_APP_MIN_COUNT)):
             text = re.sub(rf"\b{re.escape(old)}\b", new, text, flags=re.I)
     return text
 
@@ -2760,14 +3351,33 @@ def compiler_personal_priors(bundle: str) -> tuple[PersonalPrior, ...]:
     with GLOSS["lock"]:
         fixes = dict(GLOSS["fixes"])
         confusions = dict(GLOSS["confusions"])
+        regression = GLOSS["regression"]
+    gated = {
+        item.heard.casefold()
+        for item in (*regression.promoted, *regression.quarantined)
+        if item.app is None or item.app == (bundle or None)
+    }
     priors: dict[tuple[str, str], PersonalPrior] = {}
+    for mapping in regression.promoted:
+        if mapping.app and mapping.app != bundle:
+            continue
+        apps = ((mapping.app, 2),) if mapping.app else ()
+        priors[(mapping.heard.casefold(), mapping.preferred.casefold())] = \
+            PersonalPrior(
+                mapping.heard, mapping.preferred,
+                count=1 if mapping.app else 3,
+                apps=apps,
+            )
     for heard, preferred in fixes.items():
-        if isinstance(heard, str) and isinstance(preferred, str):
+        if (isinstance(heard, str) and isinstance(preferred, str)
+                and heard.casefold() not in gated):
             priors[(heard.casefold(), preferred.casefold())] = PersonalPrior(
                 heard, preferred, count=3)
     for info in confusions.values():
         heard, preferred = info.get("from"), info.get("to")
         if not isinstance(heard, str) or not isinstance(preferred, str):
+            continue
+        if heard.casefold() in gated:
             continue
         apps = tuple(
             (str(app), int(count))
@@ -3049,6 +3659,207 @@ def focused_snapshot() -> FocusSnapshot | None:
         return None
 
 
+def bounded_focus_text(snapshot: FocusSnapshot, radius: int = 160) \
+        -> str | None:
+    """Return a bounded cursor neighborhood used only for an immediate hash."""
+    if snapshot.text is None or snapshot.selection is None:
+        return None
+    start, length = snapshot.selection
+    if start < 0 or length < 0 or start + length > len(snapshot.text):
+        return None
+    left = max(0, start - radius)
+    right = min(len(snapshot.text), start + length + radius)
+    return snapshot.text[left:right]
+
+
+def focus_destination_id(snapshot: FocusSnapshot | None,
+                         bundle: str) -> str | None:
+    if snapshot is None:
+        return None
+    try:
+        return f"{bundle}:{hash(snapshot.element)}"
+    except Exception:
+        return None
+
+
+def _ax_elements_equal(left: object, right: object) -> bool:
+    """Compare the represented AX objects, not transient PyObjC wrappers."""
+    if left is None or right is None:
+        return False
+    try:
+        from CoreFoundation import CFEqual
+        return bool(CFEqual(left, right))
+    except Exception:
+        return False
+
+
+def focus_destination_matches(original: FocusSnapshot | None,
+                              current: FocusSnapshot | None,
+                              original_bundle: str,
+                              current_bundle: str) -> bool:
+    """True when two Accessibility snapshots represent the same field."""
+    return bool(
+        original is not None
+        and current is not None
+        and original_bundle == current_bundle
+        and _ax_elements_equal(original.element, current.element)
+    )
+
+
+def opaque_focus_context(snapshot: FocusSnapshot | None) -> str:
+    """Non-content destination signal for fields that hide value/range."""
+    if snapshot is None:
+        return ""
+    return snapshot.window_title or ""
+
+
+def capture_insertion_lease(snapshot: FocusSnapshot | None, bundle: str,
+                            utterance_id: str) -> InsertionLease | None:
+    """Lease readable Mac fields; hidden/terminal fields keep legacy paste."""
+    destination = focus_destination_id(snapshot, bundle)
+    if destination is None:
+        # No focused AX element means there is no safe same-app identity.
+        # Keep a deliberately unmatchable lease so commit fails closed instead
+        # of silently reverting to a blind paste.
+        return InsertionLease.capture_opaque(
+            utterance_id,
+            f"{bundle or 'unknown'}:unavailable:{utterance_id}",
+            "unavailable",
+        )
+    if snapshot is None or snapshot.selection is None:
+        return InsertionLease.capture_opaque(
+            utterance_id, destination, opaque_focus_context(snapshot))
+    surrounding = bounded_focus_text(snapshot)
+    if surrounding is None:
+        return InsertionLease.capture_opaque(
+            utterance_id, destination, opaque_focus_context(snapshot))
+    try:
+        return InsertionLease.capture(
+            utterance_id, destination, snapshot.selection, surrounding)
+    except (TypeError, ValueError):
+        return None
+
+
+def destination_observation(snapshot: FocusSnapshot | None,
+                            bundle: str,
+                            lease: InsertionLease | None = None,
+                            original: FocusSnapshot | None = None,
+                            original_bundle: str = "") \
+        -> DestinationObservation:
+    destination = focus_destination_id(snapshot, bundle)
+    if lease is not None and original is not None:
+        destination = lease.destination_id if focus_destination_matches(
+            original, snapshot, original_bundle, bundle
+        ) else f"{bundle or 'unknown'}:focus-drift"
+    if lease is not None and lease.opaque:
+        return DestinationObservation.capture(
+            destination,
+            (0, 0),
+            opaque_focus_context(snapshot),
+        )
+    if snapshot is None:
+        return DestinationObservation.capture(None, None, None)
+    return DestinationObservation.capture(
+        destination,
+        snapshot.selection,
+        bounded_focus_text(snapshot),
+    )
+
+
+def resolve_insertion_target(rec, timeout: float = 0.12, reader=None,
+                             bundle_reader=None, clock=None, sleeper=None) \
+        -> FocusSnapshot | None:
+    """Retry transient AX read gaps without accepting a different target."""
+    reader = reader or focused_snapshot
+    bundle_reader = bundle_reader or frontmost_bundle
+    clock = clock or time.monotonic
+    sleeper = sleeper or time.sleep
+    lease = getattr(rec, "insertion_lease", None)
+    original = getattr(rec, "focus_at_press", None)
+    original_bundle = getattr(rec, "bundle_at_press", "")
+    deadline = clock() + max(0.0, timeout)
+    latest = None
+    while True:
+        latest = reader()
+        current_bundle = bundle_reader()
+        if latest is not None:
+            if original is not None and not focus_destination_matches(
+                    original, latest, original_bundle, current_bundle):
+                # A readable different field is real drift, not an AX hiccup.
+                return latest
+            if (lease is None or lease.opaque
+                    or (latest.selection is not None
+                        and bounded_focus_text(latest) is not None)):
+                return latest
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return latest
+        sleeper(min(0.02, remaining))
+
+
+def insertion_readback(snapshot: FocusSnapshot, inserted: str,
+                       timeout: float = 0.02, reader=None,
+                       clock=None, sleeper=None) -> ReadbackResult:
+    """Prove the exact field mutation after paste without ever retrying it."""
+    if snapshot.text is None or snapshot.selection is None:
+        return ReadbackResult.unverifiable()
+    start, length = snapshot.selection
+    if start < 0 or length < 0 or start + length > len(snapshot.text):
+        return ReadbackResult.unverifiable()
+    expected = (snapshot.text[:start] + inserted
+                + snapshot.text[start + length:])
+    reader = reader or _ax_text
+    clock = clock or time.monotonic
+    sleeper = sleeper or time.sleep
+    deadline = clock() + max(0.0, timeout)
+    observed_any = False
+    while True:
+        current = reader(snapshot.element)
+        if current == expected:
+            return ReadbackResult.verified()
+        observed_any = observed_any or current is not None
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return (ReadbackResult.conflict() if observed_any
+                    else ReadbackResult.unverifiable())
+        sleeper(min(0.02, remaining))
+
+
+def commit_insertion(rec, text: str, bundle: str,
+                     current: FocusSnapshot | None):
+    """Commit through a lease when possible, otherwise preserve old behavior."""
+    lease = getattr(rec, "insertion_lease", None)
+    if lease is None:
+        paste(text)
+        PIPELINE_STATE["last_insertion_state"] = "legacy"
+        rec.insertion_receipt = None
+        return None
+    try:
+        INSERTION_COORDINATOR.stage(lease, text)
+    except ValueError:
+        rec.insertion_receipt = INSERTION_COORDINATOR.receipt(
+            lease.utterance_id)
+        return rec.insertion_receipt
+    current_bundle = frontmost_bundle()
+    receipt = INSERTION_COORDINATOR.commit(
+        lease.utterance_id,
+        destination_observation(
+            current,
+            current_bundle,
+            lease,
+            getattr(rec, "focus_at_press", None),
+            getattr(rec, "bundle_at_press", bundle),
+        ),
+        paste,
+        (lambda: insertion_readback(current, text)
+         if current is not None and not lease.opaque
+         else ReadbackResult.unverifiable()),
+    )
+    PIPELINE_STATE["last_insertion_state"] = receipt.state.value
+    rec.insertion_receipt = receipt
+    return receipt
+
+
 def focused_text() -> str | None:
     snapshot = focused_snapshot()
     return snapshot.text if snapshot else None
@@ -3216,11 +4027,17 @@ def learn_snippet_edit(name: str, receipt: PasteReceipt):
 
 
 def paste_snippet_and_watch(name: str, snippet: str, bundle: str, mode: str,
-                            starter=None) -> PasteReceipt | None:
+                            starter=None, rec=None) -> PasteReceipt | None:
     """Paste a snippet after capturing the field needed to learn its edit."""
     snapshot = focused_snapshot()
     receipt = make_paste_receipt(snapshot, snippet, bundle, mode)
-    paste(snippet)
+    if rec is None:
+        paste(snippet)
+    else:
+        integrity = commit_insertion(rec, snippet, bundle, snapshot)
+        if (integrity is not None
+                and integrity.state != ReceiptState.VERIFIED):
+            return None
     if receipt is None:
         print(f"! [snippet] cannot observe edits to {name!r} in this field")
         return None
@@ -3275,6 +4092,7 @@ def learn_from_corrections(receipt: PasteReceipt | None):
     known = {t.casefold() for t in manual} | banned
     with LEARN_LOCK:
         state = load_learned()
+        regression = personal_regression_lab(state)
         changed = False
         for old, term in learned[:CORRECTION_MAX_LEARN]:
             # dictionary: the corrected spelling is a strong signal
@@ -3307,6 +4125,21 @@ def learn_from_corrections(receipt: PasteReceipt | None):
             apps = confusion.setdefault("apps", {})
             apps[receipt.bundle] = int(apps.get(receipt.bundle, 0)) + 1
             state["confusions"][confusion_key] = confusion
+            regression.record_correction(
+                old, term, app=receipt.bundle or None)
+            if (receipt.bundle
+                    and apps[receipt.bundle] >= PERSONAL_APP_MIN_COUNT):
+                result = regression.propose(
+                    old, term, app=receipt.bundle)
+                if not result.passed:
+                    print(f"[learn] app prior quarantined: {old!r} -> "
+                          f"{term!r}")
+            if confusion["n"] >= PERSONAL_GLOBAL_MIN_COUNT:
+                result = regression.propose(old, term)
+                if not result.passed:
+                    print(f"[learn] global prior quarantined: {old!r} -> "
+                          f"{term!r}")
+            state["regression_lab"] = regression.to_dict()
             state["history"].append({
                 "ts": time.time(),
                 "kind": "correction",
@@ -3316,7 +4149,7 @@ def learn_from_corrections(receipt: PasteReceipt | None):
                 "mode": receipt.mode,
             })
             state["history"] = state["history"][-100:]
-            if fix["n"] == 3:
+            if fix["n"] == PERSONAL_GLOBAL_MIN_COUNT:
                 print(f"[learn] fix rule active: {old!r} -> {term!r}")
         if changed:
             save_learned(state)
@@ -3547,6 +4380,55 @@ def phone_clean(raw: str) -> str:
     return text
 
 
+def source_metadata() -> dict[str, str]:
+    """Machine-readable AGPL/source offer for network-facing deployments."""
+    revision = source_revision()
+    immutable_source = f"{PROJECT_SOURCE_URL}/tree/{revision}"
+    return {
+        "name": "Whisper Face",
+        "copyright": "Copyright (C) 2026 Andrew Bergstrom",
+        "license": "AGPL-3.0-only",
+        "source_revision": revision,
+        "source": immutable_source,
+        "license_policy": f"{PROJECT_SOURCE_URL}/blob/{revision}/LICENSE_POLICY.md",
+        "local_notices": "/license",
+        "warranty": "This software is provided without warranty.",
+    }
+
+
+def source_revision() -> str:
+    """Return the immutable revision for the running checkout or packaged build."""
+    override = os.environ.get("WHISPER_FACE_SOURCE_REVISION", "").strip()
+    if re.fullmatch(r"[0-9a-f]{40}", override):
+        return override
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=HERE,
+            capture_output=True,
+            text=True,
+            timeout=1,
+            check=True,
+        )
+        revision = completed.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        revision = ""
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise RuntimeError(
+            "an immutable source revision is required; set "
+            "WHISPER_FACE_SOURCE_REVISION for packaged builds")
+    return revision
+
+
+def local_license_notice() -> str:
+    """Serve the notices shipped beside this exact running source tree."""
+    sections = []
+    for name in ("NOTICE", "LICENSE_POLICY.md", "LICENSE", "THIRD_PARTY_NOTICES.md"):
+        path = HERE / name
+        sections.append(f"===== {name} =====\n{path.read_text(encoding='utf-8')}")
+    return "\n".join(sections)
+
+
 class PhoneHandler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass                                # our own log lines are enough
@@ -3561,6 +4443,18 @@ class PhoneHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/health"):
             self._reply(200, b"ok", "text/plain")
+        elif self.path == "/source":
+            self._reply(
+                200,
+                json.dumps(source_metadata(), sort_keys=True).encode(),
+                "application/json",
+            )
+        elif self.path == "/license":
+            self._reply(
+                200,
+                local_license_notice().encode(),
+                "text/plain; charset=utf-8",
+            )
         else:
             self._reply(404, b"not found", "text/plain")
 
@@ -3955,8 +4849,26 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         hit = match_snippet(raw)
         if hit is not None:
             name, snippet = hit
-            paste_snippet_and_watch(name, snippet, bundle, rec.mode)
-            play("Pop")
+            paste_snippet_and_watch(
+                name, snippet, bundle, rec.mode, rec=rec)
+            integrity_receipt = rec.insertion_receipt
+            if (integrity_receipt is not None
+                    and integrity_receipt.state != ReceiptState.VERIFIED):
+                if integrity_receipt.paste_attempted:
+                    CAPTION["text"] = (
+                        "Paste unverified — check target; saved in Outbox")
+                    print("[insertion] snippet paste unverified "
+                          f"({integrity_receipt.reason.value}); saved in "
+                          "Voice Outbox")
+                else:
+                    CAPTION["text"] = (
+                        "Destination changed — saved in Voice Outbox")
+                    print("[insertion] snippet destination changed "
+                          f"({integrity_receipt.reason.value}); saved in "
+                          "Voice Outbox")
+                play("Funk")
+            else:
+                play("Pop")
             release_total = time.perf_counter() - released_at
             print(f"[release {release_total:.2f}s | snippet:{name} | "
                   f"asr {t_asr:.2f}s]")
@@ -4075,14 +4987,36 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 text = " " + text                       # joining needs a space
 
         learn_correction = not verbatim and rec.mode != "edit"
-        correction_target = focused_snapshot() if learn_correction else None
-        event_id = f"{time.time_ns():x}-{id(rec):x}"
+        if rec.insertion_lease is not None:
+            insertion_target = resolve_insertion_target(rec)
+        else:
+            insertion_target = focused_snapshot() if learn_correction else None
+        event_id = rec.utterance_id or f"{time.time_ns():x}-{id(rec):x}"
         receipt = make_paste_receipt(
-            correction_target, text, bundle, rec.mode, event_id) \
+            insertion_target, text, bundle, rec.mode, event_id) \
             if learn_correction else None
-        paste(text)
-        play("Pop")
-        if learn_correction:
+        integrity_receipt = commit_insertion(
+            rec, text, bundle, insertion_target)
+        verified = (integrity_receipt is None
+                    or integrity_receipt.state == ReceiptState.VERIFIED)
+        attempted = (integrity_receipt is None
+                     or integrity_receipt.paste_attempted)
+        if verified:
+            play("Pop")
+        elif attempted:
+            CAPTION["text"] = (
+                "Paste unverified — check target; saved in Voice Outbox")
+            print("[insertion] paste attempted but unverified "
+                  f"({integrity_receipt.reason.value}); saved in Voice "
+                  "Outbox")
+            play("Funk")
+        else:
+            CAPTION["text"] = "Destination changed — saved in Voice Outbox"
+            print("[insertion] destination changed "
+                  f"({integrity_receipt.reason.value}); text saved in Voice "
+                  "Outbox")
+            play("Funk")
+        if learn_correction and verified:
             threading.Thread(
                 target=learn_from_corrections,
                 args=(receipt,),
@@ -4095,12 +5029,17 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             path = f"{rec.mode}/{path}"
         if rec.source == "flight":
             path = f"flight/{path}"
+        if not verified:
+            path = f"outbox/{path}"
         now = time.perf_counter()
         release_total = now - released_at
         press_total = now - rec.press_at if rec.press_at else release_total
         audio_ready = (rec.capture_ready_at - rec.press_at) \
             if rec.capture_ready_at and rec.press_at else 0.0
         tail_wait = capture_done_at - released_at
+        PIPELINE_STATE["last_asr_engine"] = recognition.engine or "unknown"
+        PIPELINE_STATE["last_release_s"] = release_total
+        PIPELINE_STATE["last_word_count"] = len(text.split())
         print(f"[release {release_total:.2f}s | press {press_total:.2f}s | "
               f"{path} | ready {audio_ready:.2f}s | tail {tail_wait:.2f}s | "
               f"asr {t_asr:.2f}s/{recognition.engine or 'unknown'}"
@@ -4131,7 +5070,15 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "proof_edits_rejected": sum(
                 1 for edit in proof_edits if not edit.accepted),
             "proof_reconstruction_match": proof_reconstruction_match,
-        }, event_id=event_id if learn_correction else None)
+            "insertion_state": (
+                integrity_receipt.state.value
+                if integrity_receipt is not None else "legacy"),
+            "insertion_reason": (
+                integrity_receipt.reason.value
+                if integrity_receipt is not None else "unsupported_field"),
+            "paste_attempted": attempted,
+            "insertion_verified": verified,
+        }, event_id=event_id)
     finally:
         if rec.recording:
             try:
@@ -4171,7 +5118,9 @@ def warmup():
                                          dtype=np.float32)).result()
     try:
         ollama_chat(None, "hi", num_predict=1)
+        PIPELINE_STATE["cleanup_status"] = "Ready"
     except Exception as e:
+        PIPELINE_STATE["cleanup_status"] = "Unavailable"
         print(f"! Ollama warmup failed: {e}")
         print("  Is Ollama running, and has qwen3.5:4b been pulled?")
     print("Ready (phone endpoint only)." if SERVER_ONLY else
@@ -4195,6 +5144,79 @@ def preload_model_files():
             print(f"Caching {repo}...")
             resolve_asr_model(repo)
     print("Whisper model cache ready.")
+
+
+def preload_parakeet_model():
+    """Materialize the exact audited Core ML model before FluidAudio loads it."""
+    if not IS_MACOS:
+        raise RuntimeError("Parakeet Unified is available only on macOS")
+    from huggingface_hub import snapshot_download
+    resolved = snapshot_download(
+        repo_id=PARAKEET_MODEL_REPO,
+        revision=PARAKEET_MODEL_REVISION,
+        local_dir=str(PARAKEET_MODEL_DIR),
+        allow_patterns=(
+            "parakeet_unified_encoder_int8.mlmodelc/**",
+            "parakeet_unified_decoder.mlmodelc/**",
+            "parakeet_unified_joint_decision_single_step.mlmodelc/**",
+            "vocab.json",
+            "metadata.json",
+            "README.md",
+        ),
+    )
+    verify_parakeet_model_revision()
+    print(f"Parakeet Unified model ready: {resolved}")
+
+
+def verify_ollama_model_manifest():
+    """Reject a moving Ollama tag until its model and license are re-audited."""
+    models_root = Path(os.environ.get(
+        "OLLAMA_MODELS", str(Path.home() / ".ollama" / "models")))
+    manifest = (
+        models_root / "manifests" / "registry.ollama.ai" / "library" /
+        "qwen3.5" / "4b")
+    try:
+        digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    except OSError as error:
+        raise RuntimeError(
+            f"Ollama manifest is missing for {OLLAMA_MODEL}: {manifest}") from error
+    if digest != OLLAMA_MODEL_MANIFEST_SHA256:
+        raise RuntimeError(
+            f"{OLLAMA_MODEL} manifest drift: sha256:{digest}; expected "
+            f"sha256:{OLLAMA_MODEL_MANIFEST_SHA256}. Re-audit the model before use.")
+    print(f"Ollama manifest verified: sha256:{digest}")
+
+
+def verify_parakeet_model_revision():
+    """Fail closed if FluidAudio would load weights from another revision."""
+    required = (
+        "parakeet_unified_encoder_int8.mlmodelc",
+        "parakeet_unified_decoder.mlmodelc",
+        "parakeet_unified_joint_decision_single_step.mlmodelc",
+        "vocab.json",
+        "metadata.json",
+    )
+    metadata_root = (
+        PARAKEET_MODEL_DIR / ".cache" / "huggingface" / "download")
+    for relative in required:
+        target = PARAKEET_MODEL_DIR / relative
+        paths = [target] if target.is_file() else (
+            list(target.rglob("*")) if target.is_dir() else [])
+        files = [path for path in paths if path.is_file()]
+        if not files:
+            raise RuntimeError(f"Parakeet model asset is missing: {relative}")
+        for path in files:
+            metadata = metadata_root / path.relative_to(PARAKEET_MODEL_DIR)
+            metadata = Path(f"{metadata}.metadata")
+            try:
+                revision = metadata.read_text().splitlines()[0]
+            except (OSError, IndexError) as error:
+                raise RuntimeError(
+                    f"Parakeet revision metadata is missing: {path.name}") from error
+            if revision != PARAKEET_MODEL_REVISION:
+                raise RuntimeError(
+                    f"Parakeet model revision drift: {path.name} is {revision}")
+    print(f"Parakeet revision verified: {PARAKEET_MODEL_REVISION}")
 
 
 def platform_smoke_test():
@@ -4267,6 +5289,23 @@ def main():
     # tail just opens a second short-lived stream instead of being swallowed.
     active = {"rec": None}
 
+    if IS_MACOS:
+        STATUS["bar"].gui = create_gui(GUIActions(
+            status_snapshot=runtime_status_snapshot,
+            set_face=STATUS["bar"].set_face_choice,
+            set_flight_recorder=STATUS["bar"].set_flight_enabled,
+            pause=lambda: STATUS["bar"].set_paused(True),
+            resume=lambda: STATUS["bar"].set_paused(False),
+            open_log=lambda: subprocess.Popen(
+                ["open", str(HERE / "dictate.log")]),
+            open_source_and_license=lambda: subprocess.Popen(
+                ["open", source_metadata()["source"]]),
+            open_local_license_notices=lambda: subprocess.Popen(
+                ["open", str(HERE / "LICENSE_POLICY.md")]),
+            copy_latest_outbox=copy_latest_outbox,
+            rerun_verification=verify_mac_installation,
+        ))
+
     threading.Thread(target=warmup, daemon=True).start()
     threading.Thread(target=learn_scheduler, daemon=True).start()
     threading.Thread(target=keepwarm_loop, daemon=True).start()
@@ -4304,6 +5343,13 @@ def main():
                     (rec.focus_at_press, rec.context_terms,
                      rec.context_pack) = capture_recognition_context(
                          rec.bundle_at_press)
+                    rec.insertion_lease = (
+                        capture_insertion_lease(
+                            rec.focus_at_press,
+                            rec.bundle_at_press,
+                            rec.utterance_id,
+                        ) if IS_MACOS else None
+                    )
                     with GLOSS["lock"]:
                         stable_terms = list(GLOSS["terms"])
                     rec.prompt = recognition_prompt(
@@ -4402,5 +5448,11 @@ if __name__ == "__main__":
         platform_smoke_test()
     elif "--preload-models" in sys.argv:
         preload_model_files()
+    elif "--preload-parakeet-model" in sys.argv:
+        preload_parakeet_model()
+    elif "--verify-parakeet-model" in sys.argv:
+        verify_parakeet_model_revision()
+    elif "--verify-ollama-model" in sys.argv:
+        verify_ollama_model_manifest()
     else:
         main()

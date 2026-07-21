@@ -2,7 +2,7 @@
 
 ## Installer parity is a release gate
 
-Whispering Parrot must remain reproducible on a fresh Mac or Windows machine
+Whisper Face must remain reproducible on a fresh Mac or Windows machine
 through `Install.command` or `Install.cmd`. Treat installer parity as part of
 every runtime change, regardless of which agent or contributor makes it.
 
@@ -30,7 +30,11 @@ arguments:
    uv run tests/test_benchmark_voice_compiler.py
    uv run tests/test_benchmark_asr.py
    uv run tests/test_dictate.py
+   uv run tests/test_insertion_integrity.py
+   uv run tests/test_personal_regression.py
+   uv run tests/test_whisper_face_gui.py
    uv run tests/test_installers.py
+   uv run tests/test_repository_governance.py
    ```
 
 6. On an installed Mac, also run `./setup.sh --verify`. On Windows, run
@@ -43,6 +47,24 @@ arguments:
 
 The complete decision table and definition of done are in
 `docs/installer-release-process.md`.
+
+## Licensing and contribution rights are a merge gate
+
+Current first-party work is `AGPL-3.0-only` with a separately negotiated
+commercial/OEM path. Historical repository snapshots through
+`8f317df7ac5bb687ac8fbbfcd23abc1385be396d` remain under their original MIT
+grant. Do not rewrite, remove, or describe that grant as revoked.
+
+Before merging an outside contribution, require a repository-controlled ledger
+entry with the contributor's immutable GitHub user ID accepting `CLA.md`; a
+mutable pull-request body or commit metadata alone is not enough. New
+dependencies, models, copied or generated assets, and
+third-party code must have their provenance and license recorded in
+`THIRD_PARTY_NOTICES.md`. Changes to `LICENSE`, `LICENSE_POLICY.md`, `CLA.md`,
+the CLA acceptance ledger, commercial-license policy, or historical transition
+boundary require explicit Project Owner approval.
+
+The complete decision table is in `docs/licensing-release-process.md`.
 
 ## Agent skills
 

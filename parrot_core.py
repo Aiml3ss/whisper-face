@@ -1,4 +1,4 @@
-"""Pure decision logic for Whispering Parrot's Mac voice pipeline.
+"""Pure decision logic for Whisper Face's voice pipeline.
 
 This module deliberately has no macOS, audio-device, MLX, or network imports.
 Its small interface concentrates context ranking, deterministic cleanup,

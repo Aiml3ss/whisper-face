@@ -289,7 +289,7 @@ def run_parakeet(engine: str, samples: Sequence[Sample], cli: Path) -> list[dict
 def run_parrot_helper(
     engine: str, samples: Sequence[Sample], helper: Path
 ) -> list[dict]:
-    """Drive Whispering Parrot's shipping RAM-only helper protocol."""
+    """Drive Whisper Face's shipping RAM-only helper protocol."""
     process = subprocess.Popen(
         [str(helper), "--server"], stdin=subprocess.PIPE,
         stdout=subprocess.PIPE, stderr=None, bufsize=0)

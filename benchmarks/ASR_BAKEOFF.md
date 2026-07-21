@@ -48,7 +48,7 @@ uv run benchmark_asr.py \
   --output-dir /tmp/parrot-asr-results
 ```
 
-The installed Mac helper exercises Whispering Parrot's shipping Parakeet path:
+The installed Mac helper exercises Whisper Face's shipping Parakeet path:
 
 ```sh
 uv run benchmark_asr.py \
@@ -61,7 +61,7 @@ uv run benchmark_asr.py \
 
 An independently downloaded `macparakeet-cli` may be supplied with
 `--macparakeet-cli` for research comparison when the Parrot helper is omitted.
-It is not a Whispering Parrot dependency and must never be bundled by either
+It is not a Whisper Face dependency and must never be bundled by either
 installer.
 
 Generated JSONL may contain public corpus text. Keep it outside the repository
