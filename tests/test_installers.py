@@ -3,6 +3,7 @@
 # dependencies = []
 # ///
 
+import ast
 import re
 import unittest
 from pathlib import Path
@@ -18,6 +19,52 @@ class InstallerContractTests(unittest.TestCase):
         cls.powershell = (ROOT / "setup.ps1").read_text(encoding="utf-8")
         cls.script = (ROOT / "dictate.py").read_text(encoding="utf-8")
         cls.lock = (ROOT / "dictate.py.lock").read_text(encoding="utf-8")
+
+    def test_repository_makes_installer_parity_a_release_gate(self):
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        process = (ROOT / "docs" / "installer-release-process.md").read_text(
+            encoding="utf-8")
+        pull_request = (
+            ROOT / ".github" / "pull_request_template.md"
+        ).read_text(encoding="utf-8")
+        for required in (
+            "uv lock --check --script dictate.py",
+            "uv run tests/test_parrot_core.py",
+            "uv run tests/test_dictate.py",
+            "uv run tests/test_installers.py",
+            "setup.sh --verify",
+            "setup.ps1 --verify",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, agents)
+                self.assertIn(required, process)
+        self.assertIn("Installer parity", pull_request)
+        self.assertIn("distribution branch", agents)
+
+    def test_cleanup_model_stays_in_sync_with_both_installers(self):
+        tree = ast.parse(self.script)
+        model = None
+        for node in tree.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            if any(isinstance(target, ast.Name)
+                   and target.id == "OLLAMA_MODEL" for target in node.targets):
+                model = ast.literal_eval(node.value)
+                break
+        self.assertIsInstance(model, str)
+        self.assertIn(model, self.shell)
+        self.assertIn(model, self.powershell)
+
+    def test_both_installers_use_current_runtime_and_preload_contract(self):
+        for name, installer in (
+            ("shell", self.shell), ("powershell", self.powershell)
+        ):
+            with self.subTest(installer=name):
+                self.assertIn("dictate.py", installer)
+                self.assertIn("parrot_core.py", installer)
+                self.assertIn("dictate.py.lock", installer)
+                self.assertIn("--preload-models", installer)
+                self.assertIn("--verify", installer)
 
     def test_shell_dispatches_windows_before_mac_only_work(self):
         dispatch = self.shell.index("MINGW*|MSYS*|CYGWIN*")

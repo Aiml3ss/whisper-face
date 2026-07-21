@@ -119,6 +119,12 @@ Homebrew's official installer may pause once to explain its changes and ask
 for your macOS password. Model downloads are several gigabytes, so the first
 run can take a while. Subsequent runs are idempotent and reuse the caches.
 
+Every runtime change is governed by the repository's
+[installer release process](docs/installer-release-process.md). It requires
+Mac/Windows impact review, locked-environment and installer-contract tests,
+live platform verification where available, and publication of the commit
+before a fresh machine is told the build is available.
+
 macOS will prompt for permissions — enable **"uv"** under System Settings →
 Privacy & Security → **Input Monitoring**, **Accessibility**, and
 **Microphone**. The app waits and restarts itself automatically once granted.
