@@ -10,9 +10,12 @@ logic can run in under a second without loading either model.
 """
 
 import ast
+import io
 import json
 import os
 import re
+import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -27,7 +30,20 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from parrot_core import Recognition, compile_cleanup  # noqa: E402
+from parrot_core import (  # noqa: E402
+    Recognition,
+    RecognitionWord,
+    compile_cleanup,
+    infer_revised_insertion,
+)
+from voice_compiler import (  # noqa: E402
+    ContextCandidate,
+    ContextPack,
+    RecognitionHypothesis,
+    VoiceCompiler,
+    VoiceIR,
+    WordEvidence,
+)
 
 TREE = ast.parse((ROOT / "dictate.py").read_text(encoding="utf-8"))
 
@@ -73,6 +89,49 @@ class FakeStream:
 
     def close(self):
         self.closed = True
+
+
+class ParakeetClientTests(unittest.TestCase):
+    def test_native_helper_protocol_keeps_audio_in_memory(self):
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = io.BytesIO()
+                self.stdout = io.BytesIO(
+                    b'{"ready":true,"load_s":0.1}\n'
+                    b'{"ok":true,"text":"hello","processing_s":0.02}\n')
+                self.terminated = False
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                self.terminated = True
+
+        process = FakeProcess()
+        with tempfile.TemporaryDirectory() as directory:
+            helper = Path(directory) / "parrot-asr-helper"
+            helper.write_bytes(b"helper")
+            ns = load_definitions(
+                "ParakeetClient",
+                extra={
+                    "PARAKEET_HELPER": helper,
+                    "PARAKEET_ENABLED": True,
+                    "Path": Path,
+                    "subprocess": subprocess,
+                    "threading": threading,
+                    "struct": struct,
+                    "json": json,
+                    "np": np,
+                },
+            )
+            client = ns["ParakeetClient"](
+                helper=helper, process_factory=lambda *_args, **_kwargs: process)
+            result = client.transcribe(np.array([0.25, -0.5], dtype=np.float32))
+
+        self.assertEqual(result, ("hello", 0.02))
+        payload = process.stdin.getvalue()
+        self.assertEqual(struct.unpack("<Q", payload[:8])[0], 2)
+        self.assertEqual(len(payload), 8 + 2 * 4)
 
 
 class AudioPoolTests(unittest.TestCase):
@@ -205,6 +264,9 @@ class CleanupGuardTests(unittest.TestCase):
             extra={"compile_cleanup": compile_cleanup},
         )
         self.assertEqual(ns["quick_clean"]("um this is ready"), "This is ready.")
+        self.assertEqual(ns["quick_clean"]("already punctuated,"),
+                         "Already punctuated.")
+        self.assertEqual(ns["quick_clean"]("Two things:"), "Two things:")
         self.assertEqual(
             ns["quick_clean"]("I, um, think this is ready"),
             "I think this is ready.",
@@ -248,6 +310,7 @@ class CleanupGuardTests(unittest.TestCase):
                 "CleanupEdit": object,
                 "ollama_chat": fake_ollama_chat,
                 "quick_clean": lambda text: text,
+                "STRUCTURED_FEW_SHOT": [],
             },
         )
         cleaned, edits = ns["llm_clean_with_edits"](
@@ -275,6 +338,48 @@ class CleanupGuardTests(unittest.TestCase):
             guard("A complete source sentence", "", "stop", "edit"),
             "empty or truncated",
         )
+
+    def test_live_caption_publishes_only_the_compiler_stable_prefix(self):
+        caption = {"text": "Listening"}
+        ns = load_definitions(
+            "_caption_add",
+            extra={
+                "Recognition": Recognition,
+                "CAPTION": caption,
+                "compile_voice_evidence": lambda *_args, **_kwargs: (
+                    None, SimpleNamespace(stable_prefix="stable words")),
+                "is_hallucination": lambda _text: False,
+            },
+        )
+        future = SimpleNamespace(result=lambda: Recognition(
+            "stable words provisional tail"))
+        ns["_caption_add"](future)
+        self.assertEqual(caption["text"], "stable words")
+
+    def test_active_context_is_compiled_before_cleanup(self):
+        ns = load_definitions(
+            "compile_voice_evidence",
+            extra={
+                "Recognition": Recognition,
+                "WordEvidence": WordEvidence,
+                "RecognitionHypothesis": RecognitionHypothesis,
+                "ContextCandidate": ContextCandidate,
+                "ContextPack": ContextPack,
+                "VoiceIR": VoiceIR,
+                "VOICE_COMPILER": VoiceCompiler(),
+                "learned_alternatives": lambda *_args: [],
+                "compiler_personal_priors": lambda _bundle: (),
+                "np": np,
+                "analyze_prosody": lambda *_args: (),
+                "SAMPLE_RATE": 16_000,
+            },
+        )
+        _voice, result = ns["compile_voice_evidence"](
+            Recognition("Use Gwen here", confidence=0.7, engine="tiny"),
+            ["Qwen"],
+            "com.openai.codex",
+        )
+        self.assertEqual(result.text, "Use Qwen here")
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -315,6 +420,32 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(entry["metrics"]["release_s"], 0.12)
             self.assertEqual(entry["metrics"]["asr_engine"], "tiny")
 
+    def test_paste_outcome_updates_only_its_receipted_record(self):
+        ns = load_definitions(
+            "append_transcript", "record_paste_outcome",
+            extra={
+                "os": os,
+                "time": time,
+                "PasteReceipt": object,
+                "atomic_write_text": lambda path, value: path.write_text(value),
+            },
+        )
+        with tempfile.TemporaryDirectory() as td:
+            transcript = Path(td) / "transcripts.jsonl"
+            ns.update({
+                "TRANSCRIPTS_FILE": transcript,
+                "TRANSCRIPTS_LOCK": threading.Lock(),
+            })
+            ns["append_transcript"](
+                "raw", "clean", "app", "fast", event_id="receipt-1")
+            receipt = SimpleNamespace(
+                event_id="receipt-1", pasted="clean")
+            self.assertTrue(ns["record_paste_outcome"](
+                receipt, "corrected"))
+            entry = json.loads(transcript.read_text())
+            self.assertEqual(entry["observed_text"], "corrected")
+            self.assertFalse(entry["metrics"]["zero_edit"])
+
     def test_wrong_shaped_tones_file_degrades_to_empty_map(self):
         ns = load_definitions("load_app_tones")
         with tempfile.TemporaryDirectory() as td:
@@ -338,8 +469,116 @@ class ConfigurationTests(unittest.TestCase):
             ns["SNIPPETS_FILE"] = snippets
             self.assertIsNone(ns["match_snippet"]("insert email"))
 
-
 class LearningTests(unittest.TestCase):
+    def test_early_correction_reaches_learned_state(self):
+        elapsed = [0.0]
+        observed = []
+        fake_time = SimpleNamespace(
+            monotonic=lambda: elapsed[0],
+            sleep=lambda seconds: elapsed.__setitem__(
+                0, elapsed[0] + seconds),
+            time=lambda: 1.0,
+        )
+        ns = load_definitions(
+            "load_learned", "save_learned", "observe_paste_outcome",
+            "learn_from_corrections",
+            extra={
+                "Path": Path,
+                "PasteReceipt": object,
+                "atomic_write_text": lambda path, value: path.write_text(value),
+                "time": fake_time,
+                "difflib": __import__("difflib"),
+                "correction_similarity": lambda _old, _new: 0.8,
+                "infer_revised_insertion": infer_revised_insertion,
+                "parse_dictionary": lambda: ([], set()),
+                "record_paste_outcome": lambda _receipt, value:
+                    observed.append(value),
+                "refresh_glossary": lambda: None,
+            },
+        )
+        values = iter(["Hello Gwen world", "Hello Qwen world", ""])
+        with tempfile.TemporaryDirectory() as td:
+            learned = Path(td) / "learned.json"
+            ns.update({
+                "LEARNED_FILE": learned,
+                "LEARN_LOCK": threading.Lock(),
+                "CORRECTION_DELAY": 10.0,
+                "CORRECTION_POLL_INTERVAL": 0.2,
+                "CORRECTION_MAX_LEARN": 3,
+                "PROMOTE_MIN_COUNT": 2,
+                "_ax_text": lambda _element: next(values),
+            })
+            receipt = SimpleNamespace(
+                element=object(),
+                before="Hello  world",
+                selection=(6, 0),
+                pasted="Gwen",
+                bundle="com.openai.codex",
+                mode="capture",
+            )
+
+            ns["learn_from_corrections"](receipt)
+
+            state = json.loads(learned.read_text())
+        self.assertEqual(observed, ["Qwen"])
+        self.assertEqual(state["fixes"]["gwen"], {"to": "Qwen", "n": 1})
+        self.assertEqual(state["confusions"]["gwen->qwen"]["n"], 1)
+
+    def test_correction_is_observed_before_chat_composer_clears(self):
+        ns = load_definitions(
+            "observe_paste_outcome",
+            extra={
+                "PasteReceipt": object,
+                "infer_revised_insertion": infer_revised_insertion,
+            },
+        )
+        receipt = SimpleNamespace(
+            element=object(),
+            before="Hello  world",
+            selection=(6, 0),
+            pasted="Gwen",
+        )
+        values = iter(["Hello Gwen world", "Hello Qwen world", ""])
+        elapsed = [0.0]
+
+        observed = ns["observe_paste_outcome"](
+            receipt,
+            timeout=10.0,
+            poll_interval=0.2,
+            reader=lambda _element: next(values),
+            clock=lambda: elapsed[0],
+            sleeper=lambda seconds: elapsed.__setitem__(
+                0, elapsed[0] + seconds),
+        )
+
+        self.assertEqual(observed, "Qwen")
+        self.assertLess(elapsed[0], 10.0)
+
+    def test_cleared_chat_composer_is_not_reported_as_unchanged(self):
+        ns = load_definitions(
+            "observe_paste_outcome",
+            extra={
+                "PasteReceipt": object,
+                "infer_revised_insertion": infer_revised_insertion,
+            },
+        )
+        receipt = SimpleNamespace(
+            element=object(), before="", selection=(0, 0), pasted="Gwen")
+        values = ["Gwen", ""]
+        elapsed = [0.0]
+
+        observed = ns["observe_paste_outcome"](
+            receipt,
+            timeout=0.4,
+            poll_interval=0.2,
+            reader=lambda _element: values.pop(0) if values else "",
+            clock=lambda: elapsed[0],
+            sleeper=lambda seconds: elapsed.__setitem__(
+                0, elapsed[0] + seconds),
+        )
+
+        self.assertIsNone(observed)
+
     def test_wrong_shaped_learned_state_uses_safe_defaults(self):
         ns = load_definitions("load_learned")
         with tempfile.TemporaryDirectory() as td:
@@ -432,6 +671,42 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertEqual(result.engine, "tiny")
         self.assertEqual(pool.submissions, 1)
 
+    def test_assembly_offsets_word_evidence_across_chunks(self):
+        class Future:
+            def __init__(self, value):
+                self.value = value
+
+            def result(self):
+                return self.value
+
+        ns = load_definitions(
+            "assemble_raw",
+            extra={
+                "np": SimpleNamespace(ndarray=object),
+                "SAMPLE_RATE": 16_000,
+                "GATE_PEAK_RMS": 0.002,
+                "ASR_POOL": SimpleNamespace(),
+                "transcribe_detailed": None,
+                "peak_rms": lambda _audio: 0.0,
+                "is_hallucination": lambda _text: False,
+                "Recognition": Recognition,
+                "RecognitionWord": RecognitionWord,
+            },
+        )
+        first = Recognition(
+            "hello", engine="tiny", audio_duration=1.0,
+            words=(RecognitionWord("hello", 0.2, 0.5, 0.9),),
+        )
+        second = Recognition(
+            "world", engine="turbo", audio_duration=0.8,
+            words=(RecognitionWord("world", 0.1, 0.4, 0.8),),
+        )
+        result = ns["assemble_raw"](
+            [Future(first)], Future(second), [], None)
+        self.assertEqual(result.text, "hello world")
+        self.assertAlmostEqual(result.words[1].start, 1.1)
+        self.assertAlmostEqual(result.audio_duration, 1.8)
+
     def test_tiny_first_cascade_skips_large_when_confident(self):
         class ImmediatePool:
             def __init__(self):
@@ -457,12 +732,58 @@ class ReleasePlanTests(unittest.TestCase):
                 "FAST_WHISPER_REPO": "tiny",
                 "WHISPER_REPO": "large",
                 "FAST_ACCEPT_CONFIDENCE": 0.70,
+                "IS_MACOS": False,
+                "PARAKEET_ENABLED": False,
+                "PARAKEET_HELPER": Path("missing"),
             },
         )
         result = ns["_speculative_frames"](
             [np.ones((100, 1), dtype=np.float32)], still_valid=lambda: True)
         self.assertEqual(result.text, "tiny")
         self.assertEqual(pool.calls, ["tiny"])
+
+    def test_mac_parakeet_route_verifies_even_confident_tiny(self):
+        class ImmediatePool:
+            def __init__(self):
+                self.calls = []
+
+            def submit(self, function, *args):
+                self.calls.append(args[-1])
+                return SimpleNamespace(result=lambda: function(*args))
+
+        pool = ImmediatePool()
+
+        def detailed(audio, prompt, verify, model):
+            confidence = 0.99 if model == "tiny" else 0.84
+            return Recognition(model, confidence)
+
+        with tempfile.TemporaryDirectory() as directory:
+            helper = Path(directory) / "parrot-asr-helper"
+            helper.write_bytes(b"helper")
+            ns = load_definitions(
+                "_speculative_frames",
+                extra={
+                    "np": np,
+                    "Recognition": Recognition,
+                    "ASR_POOL": pool,
+                    "transcribe_detailed": detailed,
+                    "FAST_WHISPER_REPO": "tiny",
+                    "WHISPER_REPO": "parakeet-or-whisper-fallback",
+                    "FAST_ACCEPT_CONFIDENCE": 0.70,
+                    "IS_MACOS": True,
+                    "PARAKEET_ENABLED": True,
+                    "PARAKEET_HELPER": helper,
+                },
+            )
+            result = ns["_speculative_frames"](
+                [np.ones((100, 1), dtype=np.float32)],
+                still_valid=lambda: True,
+            )
+
+        self.assertEqual(result.text, "parakeet-or-whisper-fallback")
+        self.assertEqual(result.alternative, "tiny")
+        self.assertTrue(result.verified)
+        self.assertEqual(pool.calls, ["tiny", "parakeet-or-whisper-fallback"])
 
     def test_tiny_first_cascade_escalates_low_confidence(self):
         class ImmediatePool:
@@ -488,6 +809,9 @@ class ReleasePlanTests(unittest.TestCase):
                 "FAST_WHISPER_REPO": "tiny",
                 "WHISPER_REPO": "large",
                 "FAST_ACCEPT_CONFIDENCE": 0.70,
+                "IS_MACOS": False,
+                "PARAKEET_ENABLED": False,
+                "PARAKEET_HELPER": Path("missing"),
             },
         )
         result = ns["_speculative_frames"](

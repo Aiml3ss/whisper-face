@@ -100,7 +100,10 @@ render_plist() {
 }
 
 required=(
-    dictate.py dictate.py.lock parrot_core.py
+    dictate.py dictate.py.lock parrot_core.py voice_compiler.py
+    native/ParrotASRHelper/Package.swift
+    native/ParrotASRHelper/Package.resolved
+    native/ParrotASRHelper/Sources/parrot-asr-helper/main.swift
     setup.ps1 Install.command Install.cmd
     com.berg.dictate.plist.template com.berg.ollama.plist.template
     snippets.template.json tones.template.json preferences.template.json
@@ -121,6 +124,7 @@ fi
 launch_dir="$HOME/Library/LaunchAgents"
 dictate_plist="$launch_dir/com.berg.dictate.plist"
 ollama_plist="$launch_dir/com.berg.ollama.plist"
+parakeet_helper="$DIR/.models/bin/parrot-asr-helper"
 
 verify_install() {
     step "verifying installation"
@@ -130,6 +134,10 @@ verify_install() {
     [ -n "$uv_bin" ] || fail "uv is not installed"
     command -v ffmpeg >/dev/null 2>&1 || fail "ffmpeg is not installed"
     [ -n "$ollama_bin" ] || fail "ollama is not installed"
+    command -v swift >/dev/null 2>&1 || fail "Swift toolchain is not installed"
+    [ -x "$parakeet_helper" ] || fail "Parakeet ASR helper is missing"
+    "$parakeet_helper" --verify >/dev/null \
+        || fail "Parakeet Unified model/helper verification failed"
     [ -f "$dictate_plist" ] || fail "dictation LaunchAgent is missing"
     [ -f "$ollama_plist" ] || fail "Ollama LaunchAgent is missing"
     plutil -lint "$dictate_plist" "$ollama_plist" >/dev/null
@@ -142,7 +150,7 @@ verify_install() {
         || fail "dictation LaunchAgent is not running"
     curl -fsS --max-time 3 http://127.0.0.1:8787/health >/dev/null \
         || fail "dictation process is not ready; inspect $DIR/dictate.log"
-    echo "== verified: locked Python environment, models, services, and health"
+    echo "== verified: locked Python environment, Whisper + Parakeet + Qwen models, services, and health"
 }
 
 if [ "$VERIFY_ONLY" -eq 1 ]; then
@@ -155,8 +163,8 @@ step "Whispering Parrot setup in $DIR (mode: $MODE)"
 # Keep enough headroom for Ollama, both Whisper models, Python wheels, caches,
 # and model expansion. Existing cached files make reruns much cheaper.
 available_kb="$(df -Pk "$DIR" | awk 'NR == 2 {print $4}')"
-if [ "${available_kb:-0}" -lt 7340032 ]; then
-    fail "at least 7 GB of free disk space is required"
+if [ "${available_kb:-0}" -lt 8388608 ]; then
+    fail "at least 8 GB of free disk space is required"
 fi
 
 # --- Homebrew and native dependencies --------------------------------------
@@ -183,6 +191,22 @@ fi
 UV="$(command -v uv)"
 OLLAMA="$(command -v ollama)"
 mkdir -p "$launch_dir"
+
+# --- Native Parakeet helper ------------------------------------------------
+# FluidAudio is pinned by Package.resolved. The warm helper receives Float32
+# audio over a pipe, so the RAM-only application contract remains intact.
+step "building the native Parakeet Unified helper"
+command -v swift >/dev/null 2>&1 \
+    || fail "Swift is unavailable; install the Xcode Command Line Tools"
+mkdir -p "$DIR/.models/bin"
+swift build -c release \
+    --package-path "$DIR/native/ParrotASRHelper" \
+    --scratch-path "$DIR/.models/swift-build"
+install -m 755 \
+    "$DIR/.models/swift-build/release/parrot-asr-helper" \
+    "$parakeet_helper"
+step "downloading and compiling Parakeet Unified (~565 MB, first run only)"
+"$parakeet_helper" --preload
 
 # --- Ollama service and cleanup model --------------------------------------
 step "configuring the tuned local Ollama service"

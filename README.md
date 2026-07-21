@@ -34,10 +34,11 @@ recognized in the background before you release the key.
   window title, local document, sibling filenames, app name, and a short
   clipboard sample temporarily bias recognition toward the words already in
   front of you. This context is neither logged nor learned.
-- **Two-engine confidence cascade** — a tiny Whisper model speculates during
-  an end pause. Clear speech can paste immediately; uncertain speech is
-  verified by large-v3-turbo, and disagreements remain available under
-  **Last Recognition** instead of being silently discarded.
+- **Three-engine confidence cascade on Mac** — Whisper Tiny speculates during
+  an end pause. Clear speech can paste immediately; uncertain English is
+  verified by a warm native Parakeet Unified helper, with Whisper
+  large-v3-turbo retained as the independent fallback. Audio reaches the
+  helper through a RAM-only pipe. Windows retains the Tiny → Turbo cascade.
 - **Pre-resolved local models** — MLX model repositories are resolved once at
   launch and every decode uses the cached snapshot path directly, avoiding a
   repeated Hugging Face metadata walk on the release-critical path.
@@ -48,6 +49,16 @@ recognized in the background before you release the key.
   JSON edit plan is guarded against refusals, over-deletion, and truncation;
   nearby context is explicitly marked as untrusted, with a faithful local
   fallback.
+- **Evidence-driven Voice Compiler** — acoustic hypotheses, ephemeral context,
+  app-scoped personal priors, and native timing evidence meet in a local
+  `VoiceIR`. A conservative span graph chooses terms; protected names,
+  numbers, dates, URLs, paths, identifiers, commands, and flags survive
+  cleanup; LLM edits apply only when bounded proof edits reconstruct the
+  claimed output exactly.
+- **Stable semantic feedback** — rolling recognition publishes only a stable
+  prefix to the HUD, never provisional text into the target app. Native word
+  timing may add conservative pause/paragraph formatting without enabling the
+  expensive Whisper alignment pass.
 - **Six explicit voice modes** — modifier keys turn the same Right Option
   gesture into faithful capture, polished composition, context-aware reply,
   selected-text editing, spoken-code compilation, or a small allowlist of
@@ -81,10 +92,12 @@ recognized in the background before you release the key.
 
 | Platform | Requirements |
 |---|---|
-| macOS | Apple Silicon, macOS 14 or newer recommended, ~7 GB free |
+| macOS | Apple Silicon, macOS 14 or newer recommended, ~8 GB free |
 | Windows | Windows 10/11 x64, ~8 GB free; NVIDIA GPU preferred, CPU fallback supported |
 
 Both platforms install Whisper Tiny, Whisper large-v3-turbo, and Qwen3.5-4B.
+Mac also builds a pinned FluidAudio helper and downloads Parakeet Unified;
+Whisper remains installed for fallback and broader language support.
 
 ## Install
 
@@ -110,7 +123,8 @@ The launcher detects the OS. A Windows Git Bash or WSL invocation of
    packages on Windows), then installs `uv`, `ffmpeg`, and Ollama.
 2. Reproduces the locked Python dependency environment from
    `dictate.py.lock`.
-3. Downloads Qwen3.5-4B and both Whisper models before launching the app.
+3. Downloads Qwen3.5-4B and both Whisper models before launching the app. On
+   Mac it also builds and preloads the native Parakeet Unified helper.
 4. Creates private configuration files without overwriting existing ones.
 5. Installs and validates the tuned Ollama and dictation login services
    (`launchd` on Mac, Task Scheduler on Windows).
@@ -189,6 +203,10 @@ learning loop. Then in the Diction app on iOS: *Self-Hosted* →
 | "Formal tone, …" / "casual, …" / "verbatim: …" | that style, this once |
 | "insert my email" | your snippet from `snippets.json` |
 
+The bundled `EDIT ME` snippet values are setup placeholders. Configure them in
+`snippets.json`; snippets are explicit saved text and do not appear under
+**Learned Corrections**.
+
 On Windows, use **Right Alt** wherever the table says Right Option and the
 **Windows key** wherever it says Command. Shift and Control are unchanged.
 
@@ -208,8 +226,11 @@ use, on pause, when disabled, and on quit. The menu-bar dot and macOS microphone
 indicator remain visible while it is active.
 
 Each local transcript entry includes latency, ASR engine, confidence,
-verification, and alternative-count metrics. This makes performance and
-accuracy tuning evidence-based without storing any additional content.
+verification, compiler decisions, and proof-edit metrics. When macOS can
+safely re-read the exact pasted range, the same private record is updated with
+the text observed in that range after ten seconds; unsafe observations are
+skipped. This enables a clearly labeled zero-edit proxy and observed
+correction-burden measurement.
 
 ## Tuning
 
@@ -219,12 +240,24 @@ app-bundle. The `eval_cleanup.py` harness replays adversarial cases and your
 own transcripts through candidate Ollama models if you want to test a
 different cleanup model.
 
+Run `uv run benchmark_voice_compiler.py` for the platform-independent golden
+corpus plus p50/p95 telemetry from the private local transcript log. JSON
+output is available with `--format json`. Quality metrics remain explicitly
+unavailable until safe post-paste observations exist.
+
+Run `uv run benchmark_asr.py` with a local LibriSpeech `test-clean` directory
+for an apples-to-apples Mac engine comparison. Downloaded audio and generated
+hypotheses stay outside the repository; see `benchmarks/ASR_BAKEOFF.md`.
+
 ## Verify
 
 Run the fast regression suite after changing the pipeline:
 
 ```sh
 uv run tests/test_parrot_core.py
+uv run tests/test_voice_compiler.py
+uv run tests/test_benchmark_voice_compiler.py
+uv run tests/test_benchmark_asr.py
 uv run tests/test_dictate.py
 ```
 

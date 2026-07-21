@@ -12,3 +12,6 @@ ollama-error.log
 .models/
 .windows/
 __pycache__/
+.build/
+# Local ASR corpora and generated bakeoff hypotheses are never repository data.
+benchmarks/asr-local/

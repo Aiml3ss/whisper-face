@@ -26,6 +26,9 @@ arguments:
    ```sh
    uv lock --check --script dictate.py
    uv run tests/test_parrot_core.py
+   uv run tests/test_voice_compiler.py
+   uv run tests/test_benchmark_voice_compiler.py
+   uv run tests/test_benchmark_asr.py
    uv run tests/test_dictate.py
    uv run tests/test_installers.py
    ```
@@ -40,3 +43,20 @@ arguments:
 
 The complete decision table and definition of done are in
 `docs/installer-release-process.md`.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs live in this repository's GitHub Issues. See
+`docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the standard `needs-triage`, `needs-info`, `ready-for-agent`,
+`ready-for-human`, and `wontfix` labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repository: read root `CONTEXT.md` and relevant ADRs
+under `docs/adr/` before architecture work. See `docs/agents/domain.md`.

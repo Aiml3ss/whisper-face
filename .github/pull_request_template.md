@@ -16,6 +16,9 @@
 
 - [ ] `uv lock --check --script dictate.py`
 - [ ] `uv run tests/test_parrot_core.py`
+- [ ] `uv run tests/test_voice_compiler.py`
+- [ ] `uv run tests/test_benchmark_voice_compiler.py`
+- [ ] `uv run tests/test_benchmark_asr.py`
 - [ ] `uv run tests/test_dictate.py`
 - [ ] `uv run tests/test_installers.py`
 - [ ] Live Mac or Windows installer verification was run, or the unavailable

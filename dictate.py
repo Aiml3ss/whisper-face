@@ -71,10 +71,10 @@ New in v3.3:
   * Snippets: say "insert <name>" / "paste my <name>" and the matching entry
     from snippets.json pastes instead of the transcription. Unknown names
     fall through to normal dictation, so triggers can't misfire.
-  * Learns from corrections: ~10s after a paste, the focused text field is
-    re-read via Accessibility; if you changed a word we pasted, the corrected
-    spelling goes straight into the dictionary (strong signal, immediate
-    promotion). Local-only, best-effort, skips apps that hide their text.
+  * Learns from corrections: for ~10s after a paste, the focused text field is
+    observed via Accessibility; if you change a word we pasted, the corrected
+    spelling goes straight into the dictionary before transient chat composers
+    clear. Local-only, best-effort, skips apps that hide their text.
   * Whispered speech: quiet audio is gain-normalized before ASR and the
     energy gate now sits just above the noise floor, so whispering works
     without any toggle. HUD bars use a square-root curve so you can see
@@ -181,6 +181,7 @@ import os
 import queue
 import re
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -286,16 +287,30 @@ else:
 from parrot_core import (  # noqa: E402
     CleanupEdit,
     Recognition,
+    RecognitionWord,
     compile_cleanup,
     compile_code_dictation,
     confidence_from_segments,
     correction_similarity,
     infer_revised_insertion,
     mode_from_modifiers,
-    rank_context_terms,
+    recognition_words_from_segments,
     recognition_prompt,
     should_start_speculation,
     can_reuse_speculation,
+)
+from voice_compiler import (  # noqa: E402
+    ContextCandidate,
+    ContextObservation,
+    ContextPack,
+    ContextRouter,
+    EditProposal,
+    PersonalPrior,
+    RecognitionHypothesis,
+    VoiceCompiler,
+    VoiceIR,
+    WordEvidence,
+    analyze_prosody,
 )
 
 # ------------------------- config -------------------------
@@ -310,6 +325,10 @@ OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_MODEL = "qwen3.5:4b"
 
 HERE = Path(__file__).parent
+PARAKEET_HELPER = HERE / ".models" / "bin" / "parrot-asr-helper"
+PARAKEET_ENABLED = (
+    IS_MACOS and os.environ.get("PARROT_ASR_BACKEND", "parakeet") != "whisper"
+)
 DICTIONARY_FILE = HERE / "dictionary.txt"
 TRANSCRIPTS_FILE = HERE / "transcripts.jsonl"   # local-only usage log
 LEARNED_FILE = HERE / "learned.json"            # mined term counts
@@ -325,6 +344,10 @@ LOW_CONFIDENCE = 0.52        # verify only uncertain Whisper output
 # 0.68-0.73 on clean speech. 0.70 accepts its clearest common-language output
 # while routing uncertain/proper-name-heavy audio through large-v3-turbo.
 FAST_ACCEPT_CONFIDENCE = 0.70
+# Parakeet Unified does not expose a calibrated utterance confidence through
+# its current offline API. This is a routing prior, deliberately below a very
+# confident Whisper hypothesis; actual disagreements remain inspectable.
+PARAKEET_ROUTE_CONFIDENCE = 0.84
 LLM_CLEANUP_TIMEOUT = (1, 4) # localhost connect/read deadline. Capture must
                              # fall back faithfully instead of blocking paste.
 
@@ -340,7 +363,8 @@ SNIPPETS_FILE = HERE / "snippets.json"
 SNIPPET_RE = re.compile(
     r"^(?:insert|snippet|paste)\s+(?:my\s+)?(.+?)[.!?]*$", re.I)
 
-CORRECTION_DELAY = 10        # recheck the field this long after pasting
+CORRECTION_DELAY = 10        # watch the pasted range for this long
+CORRECTION_POLL_INTERVAL = 0.2
 CORRECTION_MAX_LEARN = 3     # per dictation
 
 PHONE_PORT = 8787            # /v1/audio/transcriptions for the Diction app
@@ -483,6 +507,42 @@ FEW_SHOT = [
         "need to send the deposit to the contractor."},
 ]
 
+# Structured examples must demonstrate exact, replayable edits. The Voice
+# Compiler independently validates these spans and rejects a response whose
+# edits do not reconstruct its claimed final text.
+STRUCTURED_FEW_SHOT = [
+    {"role": "user", "content": "um ship API v2 tomorrow"},
+    {"role": "assistant", "content": json.dumps({
+        "text": "Ship API v2 tomorrow.",
+        "edits": [
+            {"kind": "remove_filler", "before": "um ", "after": ""},
+            {"kind": "punctuation", "before": "ship API v2 tomorrow",
+             "after": "Ship API v2 tomorrow."},
+        ],
+    })},
+    {"role": "user", "content": "Ship Tuesday actually Wednesday"},
+    {"role": "assistant", "content": json.dumps({
+        "text": "Ship Wednesday.",
+        "edits": [
+            {"kind": "self_correction",
+             "before": "Tuesday actually Wednesday", "after": "Wednesday"},
+            {"kind": "punctuation", "before": "Ship Wednesday",
+             "after": "Ship Wednesday."},
+        ],
+    })},
+    {"role": "user", "content":
+        "Two things first ship the installer and second update the docs"},
+    {"role": "assistant", "content": json.dumps({
+        "text": "Two things:\n- Ship the installer\n- Update the docs.",
+        "edits": [{
+            "kind": "spoken_enumeration",
+            "before": ("Two things first ship the installer and second "
+                       "update the docs"),
+            "after": "Two things:\n- Ship the installer\n- Update the docs.",
+        }],
+    })},
+]
+
 TONE = {
     "casual": "Style: casual chat message. Contractions fine, keep it light. "
               "Never end the message with a period — trailing periods read "
@@ -570,7 +630,14 @@ PIPELINE_STATE = {
     "last_alternatives": [],
     "last_cleanup_edits": [],
     "last_mode": "capture",
+    "last_compiler_decisions": 0,
+    "last_compiler_details": [],
+    "last_protected_anchors": 0,
+    "last_stable_prefix_words": 0,
 }
+
+VOICE_COMPILER = VoiceCompiler()
+CONTEXT_ROUTER = ContextRouter()
 
 APP_TONES = {"map": {}, "lock": threading.Lock()}
 PREFERENCES = {"flight_recorder": False}
@@ -706,11 +773,16 @@ AMBER = (0.984, 0.573, 0.235)           # processing accent #fb923c
 CAPTION = {"text": ""}
 
 
-def _caption_add(fut):
+def _caption_add(fut, context_terms=(), bundle="", context_pack=None):
     try:
         result = fut.result()
-        t = result.text.strip() if isinstance(result, Recognition) \
-            else str(result or "").strip()
+        if isinstance(result, Recognition):
+            _voice, compiled = compile_voice_evidence(
+                result, context_terms, bundle, "capture", finalized=False,
+                context_pack=context_pack)
+            t = compiled.stable_prefix.strip()
+        else:
+            t = str(result or "").strip()
     except Exception:
         return
     if t and not is_hallucination(t):
@@ -1264,6 +1336,19 @@ class StatusBar(NSObject):
             f"Confidence: {confidence:.0%} · {mode}", None, "")
         summary.setEnabled_(False)
         self.recognition_menu.addItem_(summary)
+        compiler_summary = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Compiler: "
+            f"{PIPELINE_STATE['last_compiler_decisions']} decisions · "
+            f"{PIPELINE_STATE['last_protected_anchors']} anchors · "
+            f"{PIPELINE_STATE['last_stable_prefix_words']} stable words",
+            None, "")
+        compiler_summary.setEnabled_(False)
+        self.recognition_menu.addItem_(compiler_summary)
+        for detail in PIPELINE_STATE["last_compiler_details"][:6]:
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                f"  {detail}", None, "")
+            item.setEnabled_(False)
+            self.recognition_menu.addItem_(item)
         edits = PIPELINE_STATE["last_cleanup_edits"]
         if edits:
             edit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -1718,7 +1803,15 @@ def _speculative_frames(frames, prompt=None, still_valid=None) -> Recognition:
     ).result()
     if still_valid is not None and not still_valid():
         return fast
-    if fast.text and fast.confidence >= FAST_ACCEPT_CONFIDENCE:
+    # On Mac, the warm Parakeet batch path is both more accurate and faster
+    # than accepting Tiny as final text in the measured bakeoff. Tiny remains
+    # valuable for early HUD feedback; every reusable final speculation is
+    # verified while the user is still speaking or releasing the key.
+    final_parakeet_route = (
+        IS_MACOS and PARAKEET_ENABLED and PARAKEET_HELPER.is_file()
+    )
+    if (not final_parakeet_route and fast.text
+            and fast.confidence >= FAST_ACCEPT_CONFIDENCE):
         return fast
     accurate = ASR_POOL.submit(
         transcribe_detailed, segment, prompt, True, WHISPER_REPO).result()
@@ -1741,6 +1834,7 @@ class Recorder:
         self.source = "hold"
         self.focus_at_press = None
         self.context_terms = []
+        self.context_pack = ContextPack()
         self.prompt = None
         self.bundle_at_press = ""
         self.mode = "capture"
@@ -1857,7 +1951,12 @@ class Recorder:
                 frames_for_chunk = tuple(self.frames[self._cut_frame_idx:])
                 fut = CHUNK_PREP_POOL.submit(
                     _transcribe_frames, frames_for_chunk, self.prompt)
-            fut.add_done_callback(_caption_add)   # live caption in the HUD
+            # Only compiler-approved stable text reaches the HUD. Provisional
+            # text is never typed into the focused application.
+            fut.add_done_callback(
+                lambda done, terms=tuple(self.context_terms),
+                bundle=self.bundle_at_press, pack=self.context_pack:
+                    _caption_add(done, terms, bundle, pack))
             self.chunks.append(fut)
             self.speculative_future = None
             self.speculative_invalid = False
@@ -2019,9 +2118,12 @@ def refresh_glossary():
 
 
 def append_transcript(raw: str, cleaned: str, bundle: str, path: str,
-                      metrics: dict | None = None):
+                      metrics: dict | None = None,
+                      event_id: str | None = None):
     entry = {"ts": time.time(), "app": bundle, "raw": raw,
              "clean": cleaned, "path": path}
+    if event_id:
+        entry["id"] = event_id
     if metrics:
         entry["metrics"] = metrics
     with TRANSCRIPTS_LOCK:
@@ -2332,6 +2434,90 @@ def ensure_event_permissions():
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
+# ------------------------- native Mac ASR helper -------------------------
+
+
+class ParakeetClient:
+    """Persistent, RAM-only bridge to the native FluidAudio helper.
+
+    Requests are serialized because the app's ASR executor is deliberately
+    single-threaded. Audio is framed Float32 over stdin; it is never written to
+    disk. Any helper failure closes the process and returns ``None`` so the
+    existing Whisper Turbo path remains the faithful fallback.
+    """
+
+    def __init__(self, helper=PARAKEET_HELPER, process_factory=None):
+        self.helper = Path(helper)
+        self.process_factory = process_factory or subprocess.Popen
+        self.process = None
+        self.lock = threading.Lock()
+
+    def _close(self):
+        process, self.process = self.process, None
+        if process is None:
+            return
+        for stream in (process.stdin, process.stdout):
+            try:
+                stream and stream.close()
+            except Exception:
+                pass
+        try:
+            process.terminate()
+        except Exception:
+            pass
+
+    def _start(self):
+        if self.process is not None and self.process.poll() is None:
+            return self.process
+        self._close()
+        if not PARAKEET_ENABLED or not self.helper.is_file():
+            return None
+        process = self.process_factory(
+            [str(self.helper), "--server"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=None,
+            bufsize=0,
+        )
+        ready = process.stdout.readline()
+        try:
+            status = json.loads(ready.decode("utf-8"))
+        except Exception:
+            process.terminate()
+            return None
+        if not status.get("ready"):
+            process.terminate()
+            return None
+        self.process = process
+        print(f"[asr] Parakeet Unified ready in "
+              f"{float(status.get('load_s', 0.0)):.2f}s")
+        return process
+
+    def transcribe(self, audio: np.ndarray) -> tuple[str, float] | None:
+        payload = np.ascontiguousarray(audio, dtype="<f4")
+        with self.lock:
+            process = self._start()
+            if process is None:
+                return None
+            try:
+                process.stdin.write(struct.pack("<Q", len(payload)))
+                process.stdin.write(memoryview(payload).cast("B"))
+                process.stdin.flush()
+                response = json.loads(
+                    process.stdout.readline().decode("utf-8"))
+                if not response.get("ok"):
+                    raise RuntimeError(str(response.get("error", "ASR error")))
+                return (str(response.get("text", "")).strip(),
+                        float(response.get("processing_s", 0.0)))
+            except Exception as error:
+                print(f"! Parakeet helper failed; using Whisper Turbo: {error}")
+                self._close()
+                return None
+
+
+PARAKEET = ParakeetClient()
+
+
 # ------------------------- pipeline -------------------------
 
 if IS_MACOS:
@@ -2400,8 +2586,19 @@ def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
     if prompt is None:
         with GLOSS["lock"]:
             prompt = GLOSS["prompt"]
-    resolved_model = resolve_asr_model(model_repo)
     engine = "tiny" if model_repo == FAST_WHISPER_REPO else "turbo"
+
+    if IS_MACOS and model_repo == WHISPER_REPO and PARAKEET_ENABLED:
+        parakeet = PARAKEET.transcribe(audio)
+        if parakeet is not None and parakeet[0]:
+            return Recognition(
+                text=parakeet[0],
+                confidence=PARAKEET_ROUTE_CONFIDENCE,
+                engine="parakeet-unified",
+                audio_duration=len(audio) / SAMPLE_RATE,
+            )
+
+    resolved_model = resolve_asr_model(model_repo)
 
     def decode(temperature):
         if IS_MACOS:
@@ -2427,16 +2624,30 @@ def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
             )
             converted = [{
                 "text": segment.text,
+                "start": float(segment.start),
+                "end": float(segment.end),
                 "avg_logprob": float(segment.avg_logprob),
+                # faster-whisper may expose words when a future experimental
+                # backend enables them; the default path does not pay for the
+                # expensive alignment pass.
+                "words": [{
+                    "word": word.word,
+                    "start": float(word.start),
+                    "end": float(word.end),
+                    "probability": float(word.probability),
+                } for word in (segment.words or ())],
             } for segment in segments]
             result = {
                 "text": "".join(segment["text"] for segment in converted),
                 "segments": converted,
             }
+        segments = result.get("segments", [])
         return Recognition(
             text=result["text"].strip(),
-            confidence=confidence_from_segments(result.get("segments", [])),
+            confidence=confidence_from_segments(segments),
             engine=engine,
+            words=recognition_words_from_segments(segments),
+            audio_duration=len(audio) / SAMPLE_RATE,
         )
 
     primary = decode((0.0, 0.2))
@@ -2494,6 +2705,84 @@ def learned_alternatives(text: str, bundle: str) -> list[str]:
             if candidate != text:
                 alternatives.append(candidate)
     return alternatives[:3]
+
+
+def compiler_personal_priors(bundle: str) -> tuple[PersonalPrior, ...]:
+    """Project local correction history into contextual compiler evidence."""
+    with GLOSS["lock"]:
+        fixes = dict(GLOSS["fixes"])
+        confusions = dict(GLOSS["confusions"])
+    priors: dict[tuple[str, str], PersonalPrior] = {}
+    for heard, preferred in fixes.items():
+        if isinstance(heard, str) and isinstance(preferred, str):
+            priors[(heard.casefold(), preferred.casefold())] = PersonalPrior(
+                heard, preferred, count=3)
+    for info in confusions.values():
+        heard, preferred = info.get("from"), info.get("to")
+        if not isinstance(heard, str) or not isinstance(preferred, str):
+            continue
+        apps = tuple(
+            (str(app), int(count))
+            for app, count in info.get("apps", {}).items()
+            if isinstance(count, int)
+        )
+        key = (heard.casefold(), preferred.casefold())
+        candidate = PersonalPrior(
+            heard, preferred, max(1, int(info.get("n", 1))), apps)
+        existing = priors.get(key)
+        if existing is None or candidate.count > existing.count \
+                or candidate.app_count(bundle) > existing.app_count(bundle):
+            priors[key] = candidate
+    return tuple(priors.values())
+
+
+def compile_voice_evidence(recognition: Recognition,
+                           context_terms=(), bundle: str = "",
+                           mode: str = "capture", audio=None,
+                           finalized: bool = True,
+                           context_pack: ContextPack | None = None):
+    """Build VoiceIR and compile acoustic, contextual, and personal evidence."""
+    words = tuple(WordEvidence(
+        word.text, word.start, word.end, word.confidence,
+        recognition.engine, word.timing,
+    ) for word in recognition.words)
+    hypotheses = [RecognitionHypothesis(
+        recognition.text, recognition.confidence,
+        recognition.engine or "primary", words)]
+    alternatives = []
+    if recognition.alternative:
+        alternatives.append(recognition.alternative)
+    alternatives.extend(learned_alternatives(recognition.text, bundle))
+    for index, alternative in enumerate(dict.fromkeys(alternatives)):
+        if not alternative or alternative == recognition.text:
+            continue
+        hypotheses.append(RecognitionHypothesis(
+            alternative,
+            max(0.0, recognition.confidence - 0.08),
+            f"{recognition.engine or 'primary'}:alternative-{index + 1}",
+        ))
+    if context_pack is None:
+        candidates = tuple(ContextCandidate(
+            str(term), max(2.5, 4.5 - index * 0.08), "active-context")
+            for index, term in enumerate(context_terms)
+            if str(term).strip()
+        )
+        context_pack = ContextPack(candidates)
+    prosody = ()
+    if audio is not None and len(audio):
+        # memoryview avoids turning every audio sample into a Python float.
+        samples = memoryview(np.ascontiguousarray(audio, dtype=np.float32))
+        prosody = analyze_prosody(samples, SAMPLE_RATE)
+    voice = VoiceIR(
+        hypotheses=tuple(hypotheses),
+        context=context_pack,
+        personal_priors=compiler_personal_priors(bundle),
+        prosody=prosody,
+        app_bundle=bundle,
+        mode=mode,
+        finalized=finalized,
+    )
+    return voice, VOICE_COMPILER.compile(voice)
 
 
 def match_snippet(raw: str) -> tuple[str, str] | None:
@@ -2652,19 +2941,22 @@ def focused_text() -> str | None:
     return snapshot.text if snapshot else None
 
 
-def capture_recognition_context() -> tuple[FocusSnapshot | None, list[str]]:
+def capture_recognition_context(bundle: str = "") \
+        -> tuple[FocusSnapshot | None, list[str], ContextPack]:
     """Build an ephemeral vocabulary from what the user can currently see."""
     if IS_WINDOWS:
+        title = windows_foreground_title()
         clipboard = None
         try:
             candidate = pyperclip.paste()
             clipboard = candidate if len(candidate) <= 800 else None
         except Exception:
             pass
-        return None, rank_context_terms([
-            (windows_foreground_title(), 4.0),
-            (clipboard, 1.0),
-        ])
+        observation = ContextObservation(
+            app=title, bundle=bundle, window_title=title,
+            clipboard=clipboard or "")
+        pack = CONTEXT_ROUTER.collect(observation)
+        return None, [candidate.text for candidate in pack.candidates[:24]], pack
     snapshot = focused_snapshot()
     app = NSWorkspace.sharedWorkspace().frontmostApplication()
     app_name = str(app.localizedName()) if app is not None else None
@@ -2676,14 +2968,8 @@ def capture_recognition_context() -> tuple[FocusSnapshot | None, list[str]]:
             clipboard = None
     except Exception:
         pass
-    sources = [
-        (snapshot.selected_text if snapshot else None, 6.0),
-        (snapshot.window_title if snapshot else None, 4.0),
-        (snapshot.document if snapshot else None, 4.0),
-        (snapshot.text if snapshot else None, 2.5),
-        (app_name, 3.0),
-        (clipboard, 1.0),
-    ]
+    document_context = snapshot.document if snapshot and snapshot.document else ""
+    sibling_names: tuple[str, ...] = ()
     if snapshot and snapshot.document:
         try:
             parsed = urllib.parse.urlparse(snapshot.document)
@@ -2692,15 +2978,26 @@ def capture_recognition_context() -> tuple[FocusSnapshot | None, list[str]]:
             document_path = Path(raw_path)
             if document_path.is_file():
                 if document_path.stat().st_size <= 1_000_000:
-                    sources.append((
-                        document_path.read_text(errors="ignore")[-6000:], 3.5))
-                sibling_names = " ".join(
-                    child.name for child in list(document_path.parent.iterdir())[:80]
+                    document_context += "\n" + document_path.read_text(
+                        errors="ignore")[-6000:]
+                sibling_names = tuple(
+                    child.name
+                    for child in list(document_path.parent.iterdir())[:80]
                     if not child.name.startswith("."))
-                sources.append((sibling_names, 2.0))
         except Exception:
             pass
-    return snapshot, rank_context_terms(sources)
+    observation = ContextObservation(
+        app=app_name or "",
+        bundle=bundle,
+        selected_text=(snapshot.selected_text if snapshot else None) or "",
+        field_text=(snapshot.text if snapshot else None) or "",
+        window_title=(snapshot.window_title if snapshot else None) or "",
+        document=document_context,
+        clipboard=clipboard or "",
+        sibling_names=sibling_names,
+    )
+    pack = CONTEXT_ROUTER.collect(observation)
+    return snapshot, [candidate.text for candidate in pack.candidates[:24]], pack
 
 
 @dataclass
@@ -2711,10 +3008,12 @@ class PasteReceipt:
     pasted: str
     bundle: str
     mode: str
+    event_id: str = ""
 
 
 def make_paste_receipt(snapshot: FocusSnapshot | None, pasted: str,
-                       bundle: str, mode: str) -> PasteReceipt | None:
+                       bundle: str, mode: str,
+                       event_id: str = "") -> PasteReceipt | None:
     if snapshot is None or snapshot.text is None or snapshot.selection is None:
         return None
     return PasteReceipt(
@@ -2724,24 +3023,86 @@ def make_paste_receipt(snapshot: FocusSnapshot | None, pasted: str,
         pasted=pasted,
         bundle=bundle,
         mode=mode,
+        event_id=event_id,
     )
+
+
+def record_paste_outcome(receipt: PasteReceipt, observed_text: str) -> bool:
+    """Attach a safe, bounded local observation to its dictation record."""
+    if not receipt.event_id:
+        return False
+    with TRANSCRIPTS_LOCK:
+        try:
+            lines = TRANSCRIPTS_FILE.read_text().splitlines()
+        except OSError:
+            return False
+        for index in range(len(lines) - 1, -1, -1):
+            try:
+                entry = json.loads(lines[index])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(entry, dict) or entry.get("id") != receipt.event_id:
+                continue
+            entry["observed_text"] = observed_text
+            metrics = entry.setdefault("metrics", {})
+            if not isinstance(metrics, dict):
+                metrics = entry["metrics"] = {}
+            metrics["zero_edit"] = observed_text == receipt.pasted
+            lines[index] = json.dumps(entry)
+            atomic_write_text(TRANSCRIPTS_FILE, "\n".join(lines) + "\n")
+            return True
+    return False
+
+
+def observe_paste_outcome(receipt: PasteReceipt, timeout=None,
+                          poll_interval=None, reader=None, clock=None,
+                          sleeper=None) -> str | None:
+    """Return the first safe correction before a transient field disappears.
+
+    Chat composers are commonly cleared as soon as the user submits. Polling
+    throughout the correction window preserves a correction made just before
+    submission; an unchanged paste is reported only when it is still present
+    at the end of the window.
+    """
+    timeout = CORRECTION_DELAY if timeout is None else max(0.0, float(timeout))
+    poll_interval = CORRECTION_POLL_INTERVAL if poll_interval is None \
+        else max(0.01, float(poll_interval))
+    reader = reader or _ax_text
+    clock = clock or time.monotonic
+    sleeper = sleeper or time.sleep
+    start, length = receipt.selection
+    if start < 0 or length < 0 or start + length > len(receipt.before):
+        return None
+    expected = (receipt.before[:start] + receipt.pasted
+                + receipt.before[start + length:])
+    deadline = clock() + timeout
+
+    while True:
+        current = reader(receipt.element)
+        if current and current not in {receipt.before, expected}:
+            revised = infer_revised_insertion(
+                receipt.before,
+                receipt.selection,
+                receipt.pasted,
+                current,
+            )
+            if revised is not None:
+                return revised
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return receipt.pasted if current == expected else None
+        sleeper(min(poll_interval, remaining))
 
 
 def learn_from_corrections(receipt: PasteReceipt | None):
     """Learn only edits made inside the exact range that received our paste."""
     if receipt is None:
         return
-    time.sleep(CORRECTION_DELAY)
-    current = _ax_text(receipt.element)
-    if not current:
-        return
-    revised = infer_revised_insertion(
-        receipt.before,
-        receipt.selection,
-        receipt.pasted,
-        current,
-    )
+    revised = observe_paste_outcome(receipt)
     if revised is None:
+        return
+    record_paste_outcome(receipt, revised)
+    if revised == receipt.pasted:
         return
     p_words, c_words = receipt.pasted.split(), revised.split()
     if not p_words or not c_words:
@@ -2874,7 +3235,9 @@ def quick_clean(text: str, verbatim: bool = False,
         return ""
     if t[0].islower() and not continuing:   # mid-sentence joins stay lower
         t = t[0].upper() + t[1:]
-    if t[-1] not in ".!?…":
+    if t[-1] in ",;":
+        t = t[:-1] + "."
+    elif t[-1] not in ".!?…:":
         t += "."
     return t
 
@@ -2939,17 +3302,7 @@ def llm_clean_with_edits(text: str, tone: str, mode: str = "capture",
         user = json.dumps({"source": context or "", "instruction": text})
     elif mode == "reply":
         user = json.dumps({"nearby_context": context or "", "dictation": text})
-    few_shot = []
-    if mode in {"capture", "code"}:
-        for message in FEW_SHOT:
-            if message["role"] == "assistant":
-                few_shot.append({
-                    "role": "assistant",
-                    "content": json.dumps({"text": message["content"],
-                                           "edits": []}),
-                })
-            else:
-                few_shot.append(message)
+    few_shot = STRUCTURED_FEW_SHOT if mode in {"capture", "code"} else []
     words = len(text.split()) + len((context or "").split())
     try:
         reply, done = ollama_chat(
@@ -3278,6 +3631,7 @@ def assemble_raw(chunk_futs: list, pre_future,
                  rem_full: np.ndarray, prompt=None) -> Recognition:
     """Join rolling chunks and exactly one remainder decode."""
     def harvest(fut, parts, confidences, alternatives):
+        nonlocal elapsed
         try:
             result = fut.result()
         except Exception as e:
@@ -3285,10 +3639,23 @@ def assemble_raw(chunk_futs: list, pre_future,
             return
         if isinstance(result, str):
             result = Recognition(result)
+        offset = elapsed
+        duration = max(
+            float(result.audio_duration or 0.0),
+            max((word.end for word in result.words), default=0.0),
+        )
+        elapsed += duration
         t = result.text.strip()
         if t and not is_hallucination(t):
             parts.append(t)
             confidences.append(result.confidence)
+            words.extend(RecognitionWord(
+                word.text,
+                word.start + offset,
+                word.end + offset,
+                word.confidence,
+                word.timing,
+            ) for word in result.words)
             if result.engine:
                 engines.append(result.engine)
             verifications.append(result.verified)
@@ -3296,6 +3663,7 @@ def assemble_raw(chunk_futs: list, pre_future,
                 alternatives.append(result.alternative)
 
     parts, confidences, alternatives, engines, verifications = [], [], [], [], []
+    words, elapsed = [], 0.0
     for f in chunk_futs:
         harvest(f, parts, confidences, alternatives)
     if pre_future is not None:
@@ -3315,6 +3683,8 @@ def assemble_raw(chunk_futs: list, pre_future,
         alternative=" ".join(alternatives).strip() or None,
         verified=any(verifications),
         engine="+".join(dict.fromkeys(engines)),
+        words=tuple(words),
+        audio_duration=elapsed,
     )
 
 
@@ -3381,27 +3751,54 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             return
 
         raw, looped = collapse_repeats(raw)
+        recognition.text = raw
+        if looped:
+            # Collapsing a decode loop invalidates the original token indexes.
+            recognition.words = ()
         if looks_like_prompt_echo(raw) and (
                 looped or raw.casefold().startswith(("glossary", "common terms"))):
             print("[dropped] ASR echoed the glossary prompt")
             return
 
         bundle = rec.bundle_at_press or frontmost_bundle()
+        recognized_raw = raw
+        compiler_started_at = time.perf_counter()
+        voice_ir, compiler_result = compile_voice_evidence(
+            recognition,
+            rec.context_terms,
+            bundle,
+            rec.mode,
+            audio=full_audio,
+            finalized=True,
+            context_pack=rec.context_pack,
+        )
+        t_compile = time.perf_counter() - compiler_started_at
+        raw = compiler_result.text
         alternatives = []
         if recognition.alternative:
             alternatives.append(recognition.alternative)
-        alternatives.extend(learned_alternatives(raw, bundle))
-        raw = apply_learned_fixes(raw, bundle)
-        PIPELINE_STATE["last_confidence"] = recognition.confidence
+        alternatives.extend(learned_alternatives(recognized_raw, bundle))
+        PIPELINE_STATE["last_confidence"] = compiler_result.confidence
         PIPELINE_STATE["last_alternatives"] = list(
             dict.fromkeys(a for a in alternatives if a and a != raw))[:3]
         PIPELINE_STATE["last_mode"] = rec.mode
+        PIPELINE_STATE["last_compiler_decisions"] = len(
+            compiler_result.decisions)
+        PIPELINE_STATE["last_compiler_details"] = [
+            ((f"{decision.before} → {decision.after} · "
+              f"{decision.reason}")[:90])
+            for decision in compiler_result.decisions
+        ]
+        PIPELINE_STATE["last_protected_anchors"] = len(
+            compiler_result.anchors)
+        PIPELINE_STATE["last_stable_prefix_words"] = len(
+            compiler_result.stable_prefix.split())
         rec.uncertain = bool(
             PIPELINE_STATE["last_alternatives"]
-            and recognition.confidence < 0.65)
+            and compiler_result.confidence < 0.65)
         if rec.uncertain:
             CAPTION["text"] = (
-                f"Uncertain ({recognition.confidence:.0%}): {raw} · Alt: "
+                f"Uncertain ({compiler_result.confidence:.0%}): {raw} · Alt: "
                 f"{PIPELINE_STATE['last_alternatives'][0]}")
         else:
             CAPTION["text"] = raw        # full transcript during processing
@@ -3425,6 +3822,11 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             return
 
         raw, tone_override = extract_tone_override(raw)
+        if ((is_verbatim_app(bundle) or tone_override == "verbatim")
+                and rec.mode in {"capture", "code"}):
+            # Verbatim is a hard contract: retain acoustic text rather than a
+            # context/personal compiler substitution.
+            raw, tone_override = extract_tone_override(recognized_raw)
         plan = compile_code_dictation(raw) \
             if rec.mode == "code" else compile_cleanup(raw)
         compiled = plan.text
@@ -3471,9 +3873,37 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 "sentence truly starts, and never repeat the existing text.")
         clean_started_at = time.perf_counter()
         semantic_edits = []
+        proof_edits = ()
+        proof_reconstruction_match = True
         if needs_llm:
-            text, semantic_edits = llm_clean_with_edits(
+            candidate, semantic_edits = llm_clean_with_edits(
                 compiled, tone_txt, rec.mode, mode_context)
+            if rec.mode in {"capture", "code"}:
+                proof = VOICE_COMPILER.verify_edits(
+                    compiled,
+                    (EditProposal(edit.kind, edit.before, edit.after)
+                     for edit in semantic_edits),
+                    voice_ir.context.candidates,
+                    mode=rec.mode,
+                )
+                proof_edits = proof.edits
+                proof_reconstruction_match = proof.text == candidate
+                if proof_reconstruction_match:
+                    semantic_edits = [CleanupEdit(
+                        f"proof:{edit.kind}", edit.before, edit.after)
+                        for edit in proof_edits if edit.accepted]
+                    text = proof.text if rec.mode == "code" else quick_clean(
+                        proof.text, verbatim=verbatim, continuing=continuing)
+                else:
+                    print("! LLM proof edits did not reconstruct its output; "
+                          "pasting deterministic cleanup")
+                    semantic_edits = []
+                    text = compiled if rec.mode == "code" else quick_clean(
+                        compiled, verbatim=verbatim, continuing=continuing)
+            else:
+                # Compose/reply/edit retain their explicit broad-rewrite
+                # contracts; proof edits constrain ordinary capture only.
+                text = candidate
         elif rec.mode == "code":
             text = compiled
         else:
@@ -3505,8 +3935,9 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
 
         learn_correction = not verbatim and rec.mode != "edit"
         correction_target = focused_snapshot() if learn_correction else None
+        event_id = f"{time.time_ns():x}-{id(rec):x}"
         receipt = make_paste_receipt(
-            correction_target, text, bundle, rec.mode) \
+            correction_target, text, bundle, rec.mode, event_id) \
             if learn_correction else None
         paste(text)
         play("Pop")
@@ -3532,20 +3963,34 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         print(f"[release {release_total:.2f}s | press {press_total:.2f}s | "
               f"{path} | ready {audio_ready:.2f}s | tail {tail_wait:.2f}s | "
               f"asr {t_asr:.2f}s/{recognition.engine or 'unknown'}"
-              f"@{recognition.confidence:.0%} | clean {t_clean:.2f}s | "
+              f"@{compiler_result.confidence:.0%} | "
+              f"compile {t_compile:.3f}s/{len(compiler_result.decisions)}d | "
+              f"clean {t_clean:.2f}s | "
               f"{len(text.split())} words]")
-        append_transcript(raw, text, bundle, path, metrics={
+        append_transcript(recognized_raw, text, bundle, path, metrics={
             "release_s": round(release_total, 4),
             "press_s": round(press_total, 4),
             "capture_ready_s": round(audio_ready, 4),
             "tail_s": round(tail_wait, 4),
             "asr_s": round(t_asr, 4),
+            "compiler_s": round(t_compile, 4),
             "cleanup_s": round(t_clean, 4),
             "asr_engine": recognition.engine or "unknown",
-            "confidence": round(recognition.confidence, 4),
+            "confidence": round(compiler_result.confidence, 4),
             "verified": recognition.verified,
             "alternatives": len(PIPELINE_STATE["last_alternatives"]),
-        })
+            "word_evidence": len(recognition.words),
+            "prosody_events": len(voice_ir.prosody),
+            "compiler_decisions": len(compiler_result.decisions),
+            "protected_anchors": len(compiler_result.anchors),
+            "stable_prefix_words": len(
+                compiler_result.stable_prefix.split()),
+            "proof_edits_accepted": sum(
+                1 for edit in proof_edits if edit.accepted),
+            "proof_edits_rejected": sum(
+                1 for edit in proof_edits if not edit.accepted),
+            "proof_reconstruction_match": proof_reconstruction_match,
+        }, event_id=event_id if learn_correction else None)
     finally:
         if rec.recording:
             try:
@@ -3569,7 +4014,10 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
 
 
 def warmup():
-    print("Warming up Whisper Tiny + large-v3-turbo cascade...")
+    route = "Parakeet Unified + Whisper fallback" \
+        if PARAKEET_ENABLED and PARAKEET_HELPER.is_file() \
+        else "Whisper Tiny + large-v3-turbo"
+    print(f"Warming up {route} cascade...")
     # Through the pool, so a dictation fired mid-warmup can't race model load.
     ASR_POOL.submit(
         transcribe_detailed,
@@ -3712,8 +4160,9 @@ def main():
                     set_status("rec")
                     AppHelper.callAfter(hud.showMode_, "recording")
                     play("Tink")              # the cue now means capture-ready
-                    rec.focus_at_press, rec.context_terms = \
-                        capture_recognition_context()
+                    (rec.focus_at_press, rec.context_terms,
+                     rec.context_pack) = capture_recognition_context(
+                         rec.bundle_at_press)
                     with GLOSS["lock"]:
                         stable_terms = list(GLOSS["terms"])
                     rec.prompt = recognition_prompt(

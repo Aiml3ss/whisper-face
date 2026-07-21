@@ -1,4 +1,6 @@
 # One-click, repeatable Windows installer for Whispering Parrot.
+# Windows deliberately retains the faster-whisper Tiny -> Turbo cascade;
+# FluidAudio/Parakeet is an Apple Core ML optimization and is Mac-only.
 # Safe to rerun: the login task is replaced and private user files survive.
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
@@ -66,7 +68,7 @@ function Test-Endpoint([string]$Uri) {
 }
 
 $Required = @(
-    "dictate.py", "dictate.py.lock", "parrot_core.py",
+    "dictate.py", "dictate.py.lock", "parrot_core.py", "voice_compiler.py",
     "snippets.template.json", "tones.template.json",
     "preferences.template.json", "dictionary.template.txt",
     "icons\glyph.svg"
