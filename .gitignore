@@ -1,0 +1,9 @@
+# personal data — never ship these to another machine or a repo
+transcripts.jsonl
+learned.json
+snippets.json
+dictionary.txt
+dictate.log
+ollama.log
+.dictate.lock
+__pycache__/

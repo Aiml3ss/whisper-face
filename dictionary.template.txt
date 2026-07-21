@@ -1,0 +1,6 @@
+# One term per line. Feeds both Whisper biasing and the LLM cleanup prompt.
+# Add names, products, and jargon the recognizer tends to get wrong.
+# A line starting with "-" bans that term from ever being auto-learned.
+# Everything below the marker is managed automatically — edit above it only.
+
+# --- auto-learned (managed by dictate.py) ---
