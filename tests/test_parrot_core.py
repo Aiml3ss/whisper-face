@@ -67,6 +67,23 @@ class CleanupCompilerTests(unittest.TestCase):
             "three things first speed second trust third privacy"
         ).needs_semantic_cleanup)
 
+    def test_explicit_list_introductions_request_semantic_cleanup(self):
+        for spoken in (
+            "here's a list of ideas that I have improve speed and keep trust",
+            "here are some feedback items make it scannable and keep it short",
+            "okay here are a few ideas improve speed and preserve privacy",
+            "I have a few points reliability matters and privacy matters",
+            "let me list out some things improve speed and preserve privacy",
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertTrue(
+                    compile_cleanup(spoken).needs_semantic_cleanup)
+
+    def test_ordinary_reference_to_a_list_stays_on_the_fast_path(self):
+        self.assertFalse(compile_cleanup(
+            "I sent the contractor a list of ideas yesterday"
+        ).needs_semantic_cleanup)
+
     def test_code_mode_compiles_spoken_tokens(self):
         plan = compile_code_dictation(
             "result equals parse open paren payload close paren semicolon")

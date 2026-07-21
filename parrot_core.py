@@ -38,6 +38,22 @@ CORRECTION_RE = re.compile(
     r"([A-Za-z0-9][A-Za-z0-9_'’-]{0,30})\b",
     re.I,
 )
+LIST_INTENT_RE = re.compile(
+    r"^(?:(?:okay|ok|alright)[, ]+)?(?:so\s+)?(?:"
+    r"here(?:['’]s|\s+is)\s+(?:a|my)\s+list\b|"
+    r"here\s+(?:is|are)\s+(?:(?:a|some|the|my)\s+)?"
+    r"(?:(?:few|several)\s+)?(?:feedback\s+)?"
+    r"(?:items|ideas|points|things)\b|"
+    r"I\s+(?:have|have\s+got|['’]ve\s+got)\s+"
+    r"(?:(?:a|some|the|my)\s+)?(?:few\s+|several\s+)?"
+    r"(?:feedback\s+)?(?:items|ideas|points|things)\b|"
+    r"(?:let\s+me|I\s+(?:want|would\s+like|['’]d\s+like)\s+to)\s+"
+    r"list(?:\s+out)?\s+(?:(?:a|some|the|my)\s+)?"
+    r"(?:few\s+|several\s+)?(?:items|ideas|points|things)\b|"
+    r"my\s+(?:feedback\s+)?(?:items|ideas|points)\s+are\b"
+    r")",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -213,7 +229,7 @@ def compile_cleanup(raw: str) -> CleanupPlan:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
     text = re.sub(r"\s+([,.;:!?])", r"\1", text).strip()
-    needs_semantic = bool(re.search(
+    needs_semantic = bool(LIST_INTENT_RE.search(text) or re.search(
         r"\b(?:first|second|third|lastly)\b|"
         r"\b(?:two|three|four|five) (?:things|points|items|ideas)\b|"
         r"\b(?:you know|I mean)\b",
