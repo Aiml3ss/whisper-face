@@ -77,7 +77,18 @@ def load_definitions(*names, assignments=(), extra=None):
         "threading": threading,
     }
     namespace.update(extra or {})
-    module = ast.Module(body=selected, type_ignores=[])
+    # Production uses modern annotations throughout. Execute the selected AST
+    # with postponed annotation evaluation so this harness behaves consistently
+    # on every supported Python, including the Windows runner's Python 3.12.
+    future_annotations = ast.ImportFrom(
+        module="__future__",
+        names=[ast.alias(name="annotations")],
+        level=0,
+    )
+    module = ast.fix_missing_locations(ast.Module(
+        body=[future_annotations, *selected],
+        type_ignores=[],
+    ))
     exec(compile(module, "dictate-selected", "exec"), namespace)
     return namespace
 
@@ -518,6 +529,46 @@ class ConfigurationTests(unittest.TestCase):
             entry = json.loads(transcript.read_text())
             self.assertEqual(entry["metrics"]["release_s"], 0.12)
             self.assertEqual(entry["metrics"]["asr_engine"], "tiny")
+
+    def test_transcript_log_closes_descriptor_without_fchmod(self):
+        class OsWithoutFchmod:
+            O_WRONLY = os.O_WRONLY
+            O_CREAT = os.O_CREAT
+            O_APPEND = os.O_APPEND
+
+            def __init__(self):
+                self.fd = None
+
+            def open(self, *args, **kwargs):
+                self.fd = os.open(*args, **kwargs)
+                return self.fd
+
+            @staticmethod
+            def fdopen(*args, **kwargs):
+                return os.fdopen(*args, **kwargs)
+
+            @staticmethod
+            def close(fd):
+                os.close(fd)
+
+        portable_os = OsWithoutFchmod()
+        ns = load_definitions(
+            "append_transcript",
+            extra={"os": portable_os, "time": time},
+        )
+        with tempfile.TemporaryDirectory() as td:
+            transcript = Path(td) / "transcripts.jsonl"
+            ns.update({
+                "TRANSCRIPTS_FILE": transcript,
+                "TRANSCRIPTS_LOCK": threading.Lock(),
+                "USAGE_CACHE": {
+                    "at": 0.0, "value": (0, 0.0),
+                    "lock": threading.Lock()},
+            })
+            ns["append_transcript"]("raw", "clean", "app", "fast")
+            self.assertEqual(json.loads(transcript.read_text())["clean"], "clean")
+            with self.assertRaises(OSError):
+                os.fstat(portable_os.fd)
 
     def test_paste_outcome_updates_only_its_receipted_record(self):
         ns = load_definitions(

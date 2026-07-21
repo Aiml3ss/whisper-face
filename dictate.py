@@ -2737,9 +2737,20 @@ def append_transcript(raw: str, cleaned: str, bundle: str, path: str,
             os.O_WRONLY | os.O_CREAT | os.O_APPEND,
             0o600,
         )
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "a") as f:
-            f.write(json.dumps(entry) + "\n")
+        try:
+            # Windows has no os.fchmod. The mode supplied to os.open remains
+            # the creation policy there; POSIX platforms additionally tighten
+            # an existing file before appending private transcript data.
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            stream = os.fdopen(fd, "a")
+            fd = None
+            with stream:
+                stream.write(json.dumps(entry) + "\n")
+        finally:
+            # If permission setup or fdopen fails, do not leak the raw handle.
+            if fd is not None:
+                os.close(fd)
     with USAGE_CACHE["lock"]:
         USAGE_CACHE["at"] = 0.0
 
