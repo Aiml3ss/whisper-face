@@ -11,10 +11,12 @@ logic can run in under a second without loading either model.
 
 import ast
 import json
+import os
 import re
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -276,6 +278,43 @@ class CleanupGuardTests(unittest.TestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_model_repository_is_resolved_only_once_per_process(self):
+        downloads = []
+
+        def download(repo_id):
+            downloads.append(repo_id)
+            return f"/models/{repo_id.replace('/', '--')}"
+
+        ns = load_definitions(
+            "resolve_asr_model",
+            assignments={"ASR_MODEL_PATHS", "ASR_MODEL_PATHS_LOCK"},
+            extra={"IS_MACOS": True},
+        )
+        first = ns["resolve_asr_model"]("org/tiny", downloader=download)
+        second = ns["resolve_asr_model"]("org/tiny", downloader=download)
+        self.assertEqual(first, "/models/org--tiny")
+        self.assertEqual(second, first)
+        self.assertEqual(downloads, ["org/tiny"])
+
+    def test_transcript_log_keeps_performance_metrics(self):
+        ns = load_definitions(
+            "append_transcript",
+            extra={"os": os, "time": time},
+        )
+        with tempfile.TemporaryDirectory() as td:
+            transcript = Path(td) / "transcripts.jsonl"
+            ns.update({
+                "TRANSCRIPTS_FILE": transcript,
+                "TRANSCRIPTS_LOCK": threading.Lock(),
+            })
+            ns["append_transcript"](
+                "raw", "clean", "app", "fast",
+                metrics={"release_s": 0.12, "asr_engine": "tiny"},
+            )
+            entry = json.loads(transcript.read_text())
+            self.assertEqual(entry["metrics"]["release_s"], 0.12)
+            self.assertEqual(entry["metrics"]["asr_engine"], "tiny")
+
     def test_wrong_shaped_tones_file_degrades_to_empty_map(self):
         ns = load_definitions("load_app_tones")
         with tempfile.TemporaryDirectory() as td:
@@ -373,7 +412,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "GATE_PEAK_RMS": 0.002,
                 "ASR_POOL": pool,
                 "transcribe_detailed": lambda audio, prompt=None:
-                    Recognition("remainder"),
+                    Recognition("remainder", verified=True, engine="tiny"),
                 "peak_rms": lambda audio: 0.1,
                 "is_hallucination": lambda text: False,
                 "Recognition": Recognition,
@@ -387,8 +426,10 @@ class ReleasePlanTests(unittest.TestCase):
         )
         self.assertEqual(pool.submissions, 0)
 
-        self.assertEqual(
-            ns["assemble_raw"]([], None, audio).text, "remainder")
+        result = ns["assemble_raw"]([], None, audio)
+        self.assertEqual(result.text, "remainder")
+        self.assertTrue(result.verified)
+        self.assertEqual(result.engine, "tiny")
         self.assertEqual(pool.submissions, 1)
 
     def test_tiny_first_cascade_skips_large_when_confident(self):
@@ -453,6 +494,7 @@ class ReleasePlanTests(unittest.TestCase):
             [np.ones((100, 1), dtype=np.float32)], still_valid=lambda: True)
         self.assertEqual(result.text, "large")
         self.assertEqual(result.alternative, "tiny")
+        self.assertTrue(result.verified)
         self.assertEqual(pool.calls, ["tiny", "large"])
 
 

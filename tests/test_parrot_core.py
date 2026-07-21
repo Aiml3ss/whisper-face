@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from parrot_core import (  # noqa: E402
+    Recognition,
     compile_cleanup,
     compile_code_dictation,
     confidence_from_segments,
@@ -93,6 +94,9 @@ class CorrectionTests(unittest.TestCase):
 
 
 class RecognitionTests(unittest.TestCase):
+    def test_recognition_retains_its_engine(self):
+        self.assertEqual(Recognition("hello", engine="tiny").engine, "tiny")
+
     def test_confidence_is_weighted_and_bounded(self):
         score = confidence_from_segments([
             {"text": "high confidence words", "avg_logprob": -0.1},

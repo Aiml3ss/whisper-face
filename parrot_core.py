@@ -64,6 +64,7 @@ class Recognition:
     confidence: float = 1.0
     alternative: str | None = None
     verified: bool = False
+    engine: str = ""
 
 
 def _interesting_token(token: str) -> bool:

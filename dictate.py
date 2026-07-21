@@ -538,6 +538,8 @@ ASR_POOL = ThreadPoolExecutor(max_workers=1)
 # PortAudio's real-time callback. This pool prepares one chunk at a time, then
 # hands the actual MLX call to the single-threaded ASR pool.
 CHUNK_PREP_POOL = ThreadPoolExecutor(max_workers=1)
+ASR_MODEL_PATHS = {}
+ASR_MODEL_PATHS_LOCK = threading.Lock()
 
 # Current glossary + active mishearing-fix rules, hot-swapped by the
 # learning loop.
@@ -1720,9 +1722,9 @@ def _speculative_frames(frames, prompt=None, still_valid=None) -> Recognition:
         return fast
     accurate = ASR_POOL.submit(
         transcribe_detailed, segment, prompt, True, WHISPER_REPO).result()
+    accurate.verified = True
     if fast.text and fast.text != accurate.text:
         accurate.alternative = fast.text
-        accurate.verified = True
     return accurate
 
 
@@ -2016,9 +2018,12 @@ def refresh_glossary():
     return terms
 
 
-def append_transcript(raw: str, cleaned: str, bundle: str, path: str):
+def append_transcript(raw: str, cleaned: str, bundle: str, path: str,
+                      metrics: dict | None = None):
     entry = {"ts": time.time(), "app": bundle, "raw": raw,
              "clean": cleaned, "path": path}
+    if metrics:
+        entry["metrics"] = metrics
     with TRANSCRIPTS_LOCK:
         fd = os.open(
             TRANSCRIPTS_FILE,
@@ -2338,6 +2343,27 @@ else:
     WINDOWS_ASR_MODELS = {}
 
 
+def resolve_asr_model(model_repo: str, downloader=None) -> str:
+    """Resolve an MLX repository once, then decode from its local snapshot.
+
+    Passing a Hugging Face repository to mlx_whisper makes every transcription
+    re-run snapshot resolution. The weights are cached, but the metadata walk
+    still costs measurable release latency and prints a progress bar each time.
+    """
+    if not IS_MACOS:
+        return model_repo
+    with ASR_MODEL_PATHS_LOCK:
+        cached = ASR_MODEL_PATHS.get(model_repo)
+        if cached:
+            return cached
+        if downloader is None:
+            from huggingface_hub import snapshot_download
+            downloader = snapshot_download
+        resolved = str(downloader(repo_id=model_repo))
+        ASR_MODEL_PATHS[model_repo] = resolved
+        return resolved
+
+
 def windows_whisper_model(model_repo: str):
     """Load the Windows CTranslate2 model once, preferring an NVIDIA GPU."""
     if model_repo in WINDOWS_ASR_MODELS:
@@ -2374,12 +2400,14 @@ def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
     if prompt is None:
         with GLOSS["lock"]:
             prompt = GLOSS["prompt"]
+    resolved_model = resolve_asr_model(model_repo)
+    engine = "tiny" if model_repo == FAST_WHISPER_REPO else "turbo"
 
     def decode(temperature):
         if IS_MACOS:
             result = mlx_whisper.transcribe(
                 audio,
-                path_or_hf_repo=model_repo,
+                path_or_hf_repo=resolved_model,
                 language="en",
                 initial_prompt=prompt,
                 temperature=temperature,
@@ -2408,6 +2436,7 @@ def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
         return Recognition(
             text=result["text"].strip(),
             confidence=confidence_from_segments(result.get("segments", [])),
+            engine=engine,
         )
 
     primary = decode((0.0, 0.2))
@@ -3260,10 +3289,13 @@ def assemble_raw(chunk_futs: list, pre_future,
         if t and not is_hallucination(t):
             parts.append(t)
             confidences.append(result.confidence)
+            if result.engine:
+                engines.append(result.engine)
+            verifications.append(result.verified)
             if result.alternative:
                 alternatives.append(result.alternative)
 
-    parts, confidences, alternatives = [], [], []
+    parts, confidences, alternatives, engines, verifications = [], [], [], [], []
     for f in chunk_futs:
         harvest(f, parts, confidences, alternatives)
     if pre_future is not None:
@@ -3281,7 +3313,8 @@ def assemble_raw(chunk_futs: list, pre_future,
         text=" ".join(parts).strip(),
         confidence=min(confidences) if confidences else 0.0,
         alternative=" ".join(alternatives).strip() or None,
-        verified=bool(alternatives),
+        verified=any(verifications),
+        engine="+".join(dict.fromkeys(engines)),
     )
 
 
@@ -3498,9 +3531,21 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         tail_wait = capture_done_at - released_at
         print(f"[release {release_total:.2f}s | press {press_total:.2f}s | "
               f"{path} | ready {audio_ready:.2f}s | tail {tail_wait:.2f}s | "
-              f"asr {t_asr:.2f}s | clean {t_clean:.2f}s | "
+              f"asr {t_asr:.2f}s/{recognition.engine or 'unknown'}"
+              f"@{recognition.confidence:.0%} | clean {t_clean:.2f}s | "
               f"{len(text.split())} words]")
-        append_transcript(raw, text, bundle, path)
+        append_transcript(raw, text, bundle, path, metrics={
+            "release_s": round(release_total, 4),
+            "press_s": round(press_total, 4),
+            "capture_ready_s": round(audio_ready, 4),
+            "tail_s": round(tail_wait, 4),
+            "asr_s": round(t_asr, 4),
+            "cleanup_s": round(t_clean, 4),
+            "asr_engine": recognition.engine or "unknown",
+            "confidence": round(recognition.confidence, 4),
+            "verified": recognition.verified,
+            "alternatives": len(PIPELINE_STATE["last_alternatives"]),
+        })
     finally:
         if rec.recording:
             try:
@@ -3557,10 +3602,9 @@ def preload_model_files():
             print(f"Caching faster-Whisper {repo}...")
             windows_whisper_model(repo)
     else:
-        from huggingface_hub import snapshot_download
         for repo in (FAST_WHISPER_REPO, WHISPER_REPO):
             print(f"Caching {repo}...")
-            snapshot_download(repo_id=repo)
+            resolve_asr_model(repo)
     print("Whisper model cache ready.")
 
 

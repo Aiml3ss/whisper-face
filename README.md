@@ -38,6 +38,9 @@ recognized in the background before you release the key.
   an end pause. Clear speech can paste immediately; uncertain speech is
   verified by large-v3-turbo, and disagreements remain available under
   **Last Recognition** instead of being silently discarded.
+- **Pre-resolved local models** — MLX model repositories are resolved once at
+  launch and every decode uses the cached snapshot path directly, avoiding a
+  repeated Hugging Face metadata walk on the release-critical path.
 - **Structured cleanup with a safety net** — fillers and false starts removed,
   self-corrections applied ("Tuesday, actually Wednesday" → Wednesday),
   punctuation fixed. Safe edits are compiled deterministically; the local LLM
@@ -197,6 +200,10 @@ Flight Recorder is disabled by default and must be enabled from the parrot
 menu. Its audio is never written to disk: the bounded buffer is cleared after
 use, on pause, when disabled, and on quit. The menu-bar dot and macOS microphone
 indicator remain visible while it is active.
+
+Each local transcript entry includes latency, ASR engine, confidence,
+verification, and alternative-count metrics. This makes performance and
+accuracy tuning evidence-based without storing any additional content.
 
 ## Tuning
 
