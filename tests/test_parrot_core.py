@@ -12,9 +12,11 @@ sys.path.insert(0, str(ROOT))
 
 from parrot_core import (  # noqa: E402
     Recognition,
+    RecognitionWord,
     compile_cleanup,
     compile_code_dictation,
     confidence_from_segments,
+    recognition_words_from_segments,
     correction_similarity,
     infer_revised_insertion,
     mode_from_modifiers,
@@ -96,6 +98,31 @@ class CorrectionTests(unittest.TestCase):
 class RecognitionTests(unittest.TestCase):
     def test_recognition_retains_its_engine(self):
         self.assertEqual(Recognition("hello", engine="tiny").engine, "tiny")
+
+    def test_recognition_retains_word_evidence(self):
+        words = recognition_words_from_segments([{
+            "text": "hello world",
+            "start": 1.0,
+            "end": 2.0,
+            "avg_logprob": -0.1,
+        }])
+        self.assertEqual([word.text for word in words], ["hello", "world"])
+        self.assertEqual((words[0].start, words[1].end), (1.0, 2.0))
+        self.assertIsInstance(words[0], RecognitionWord)
+        self.assertTrue(all(word.timing == "segment" for word in words))
+
+    def test_sdk_word_confidence_wins_over_segment_interpolation(self):
+        words = recognition_words_from_segments([{
+            "text": "Qwen",
+            "avg_logprob": -1.0,
+            "words": [{
+                "word": "Qwen", "start": 0.1, "end": 0.4,
+                "probability": 0.97,
+            }],
+        }])
+        self.assertEqual(words[0].text, "Qwen")
+        self.assertAlmostEqual(words[0].confidence, 0.97)
+        self.assertEqual(words[0].timing, "native")
 
     def test_confidence_is_weighted_and_bounded(self):
         score = confidence_from_segments([

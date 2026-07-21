@@ -30,6 +30,9 @@ class InstallerContractTests(unittest.TestCase):
         for required in (
             "uv lock --check --script dictate.py",
             "uv run tests/test_parrot_core.py",
+            "uv run tests/test_voice_compiler.py",
+            "uv run tests/test_benchmark_voice_compiler.py",
+            "uv run tests/test_benchmark_asr.py",
             "uv run tests/test_dictate.py",
             "uv run tests/test_installers.py",
             "setup.sh --verify",
@@ -62,6 +65,7 @@ class InstallerContractTests(unittest.TestCase):
             with self.subTest(installer=name):
                 self.assertIn("dictate.py", installer)
                 self.assertIn("parrot_core.py", installer)
+                self.assertIn("voice_compiler.py", installer)
                 self.assertIn("dictate.py.lock", installer)
                 self.assertIn("--preload-models", installer)
                 self.assertIn("--verify", installer)
@@ -72,6 +76,25 @@ class InstallerContractTests(unittest.TestCase):
         self.assertLess(dispatch, homebrew)
         self.assertIn("powershell.exe", self.shell[dispatch:homebrew])
         self.assertIn("wslpath -w", self.shell[dispatch:homebrew])
+
+    def test_mac_installer_builds_and_verifies_native_parakeet_helper(self):
+        for expected in (
+            "native/ParrotASRHelper/Package.swift",
+            "native/ParrotASRHelper/Package.resolved",
+            "swift build -c release",
+            "parrot-asr-helper",
+            '"$parakeet_helper" --preload',
+            '"$parakeet_helper" --verify',
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, self.shell)
+        self.assertIn("PARAKEET_HELPER", self.script)
+        self.assertIn("PARROT_ASR_BACKEND", self.script)
+
+    def test_windows_keeps_independent_whisper_fallback(self):
+        self.assertIn("Tiny -> Turbo", self.powershell)
+        self.assertNotIn("swift build", self.powershell)
+        self.assertNotIn("parrot-asr-helper", self.powershell)
 
     def test_each_platform_has_a_clickable_entrypoint(self):
         self.assertTrue((ROOT / "Install.command").exists())

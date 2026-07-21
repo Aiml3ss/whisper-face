@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "description": "Platform-independent golden cases for the Whispering Parrot Voice Compiler.",
+  "cases": [
+    {
+      "id": "rare-term-visible-context",
+      "category": "rare_terms",
+      "operation": "compile",
+      "voice": {
+        "hypotheses": [
+          {"text": "Use Gwen for cleanup", "confidence": 0.68, "engine": "tiny"}
+        ],
+        "context": {
+          "candidates": [
+            {"text": "Qwen", "weight": 6.0, "source": "selection"}
+          ]
+        }
+      },
+      "expect": {
+        "text": "Use Qwen for cleanup",
+        "decision_sources": ["span-graph"]
+      }
+    },
+    {
+      "id": "rare-term-engine-fusion",
+      "category": "rare_terms",
+      "operation": "compile",
+      "voice": {
+        "hypotheses": [
+          {"text": "Deploy with Kuberflow", "confidence": 0.62, "engine": "tiny"},
+          {"text": "Deploy with KubeFlow", "confidence": 0.86, "engine": "turbo"}
+        ]
+      },
+      "expect": {
+        "text": "Deploy with KubeFlow",
+        "decision_sources": ["span-graph"]
+      }
+    },
+    {
+      "id": "personal-prior-app-scoped",
+      "category": "personal_priors",
+      "operation": "compile",
+      "voice": {
+        "hypotheses": [
+          {"text": "Run Gwen locally", "confidence": 0.72, "engine": "tiny"}
+        ],
+        "personal_priors": [
+          {
+            "heard": "Gwen",
+            "preferred": "Qwen",
+            "count": 1,
+            "apps": [["com.openai.codex", 2]]
+          }
+        ],
+        "app_bundle": "com.openai.codex"
+      },
+      "expect": {
+        "text": "Run Qwen locally",
+        "decision_reasons": ["personal-prior"]
+      }
+    },
+    {
+      "id": "protected-factual-anchors",
+      "category": "anchor_preservation",
+      "operation": "verify_edits",
+      "source": "Um ship API v2 at 15:30 via https://example.com/build",
+      "proposals": [
+        {"kind": "remove_filler", "before": "Um ", "after": ""},
+        {"kind": "semantic_cleanup", "before": "API v2 at 15:30", "after": "the service later"}
+      ],
+      "expect": {
+        "text": "ship API v2 at 15:30 via https://example.com/build",
+        "accepted_edits": [0],
+        "rejected_edits": [1],
+        "rejection_contains": {"1": "protected anchor"}
+      }
+    },
+    {
+      "id": "bounded-self-correction",
+      "category": "corrections",
+      "operation": "verify_edits",
+      "source": "Ship Tuesday actually Wednesday",
+      "proposals": [
+        {
+          "kind": "self_correction",
+          "before": "Tuesday actually Wednesday",
+          "after": "Wednesday"
+        }
+      ],
+      "expect": {
+        "text": "Ship Wednesday",
+        "accepted_edits": [0],
+        "rejected_edits": []
+      }
+    },
+    {
+      "id": "cross-engine-stable-prefix",
+      "category": "stable_prefixes",
+      "operation": "compile",
+      "voice": {
+        "hypotheses": [
+          {"text": "Ship this Tuesday morning", "confidence": 0.70, "engine": "tiny"},
+          {"text": "Ship this Thursday morning", "confidence": 0.82, "engine": "turbo"}
+        ],
+        "finalized": false
+      },
+      "expect": {
+        "stable_prefix": "Ship this"
+      }
+    },
+    {
+      "id": "prosody-long-pause-paragraph",
+      "category": "prosody",
+      "operation": "compile",
+      "voice": {
+        "hypotheses": [
+          {
+            "text": "First point. Second point.",
+            "confidence": 0.80,
+            "engine": "turbo",
+            "words": [
+              {"text": "First", "start": 0.0, "end": 0.3},
+              {"text": "point.", "start": 0.35, "end": 0.8},
+              {"text": "Second", "start": 1.9, "end": 2.2},
+              {"text": "point.", "start": 2.25, "end": 2.7}
+            ]
+          }
+        ],
+        "prosody": [
+          {"kind": "pause", "at": 0.9, "duration": 1.0, "strength": 0.9}
+        ]
+      },
+      "expect": {
+        "text": "First point.\n\nSecond point.",
+        "decision_reasons": ["paragraph"]
+      }
+    },
+    {
+      "id": "prosody-rising-question",
+      "category": "prosody",
+      "operation": "compile",
+      "voice": {
+        "hypotheses": [
+          {"text": "Can we ship this.", "confidence": 0.84, "engine": "turbo"}
+        ],
+        "prosody": [
+          {"kind": "rising_end", "at": 1.4, "duration": 0.0, "strength": 0.8}
+        ]
+      },
+      "expect": {
+        "text": "Can we ship this?",
+        "decision_reasons": ["rising question contour"]
+      }
+    }
+  ]
+}

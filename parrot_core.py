@@ -59,12 +59,24 @@ class CleanupPlan:
 
 
 @dataclass
+class RecognitionWord:
+    """Word-level evidence retained without coupling core logic to an ASR SDK."""
+    text: str
+    start: float = 0.0
+    end: float = 0.0
+    confidence: float = 0.5
+    timing: str = "native"
+
+
+@dataclass
 class Recognition:
     text: str
     confidence: float = 1.0
     alternative: str | None = None
     verified: bool = False
     engine: str = ""
+    words: tuple[RecognitionWord, ...] = ()
+    audio_duration: float = 0.0
 
 
 def _interesting_token(token: str) -> bool:
@@ -307,6 +319,52 @@ def confidence_from_segments(segments: Iterable[dict]) -> float:
         return 0.5
     mean_logprob = sum(weighted) / len(weighted)
     return max(0.0, min(1.0, math.exp(mean_logprob)))
+
+
+def recognition_words_from_segments(
+        segments: Iterable[dict]) -> tuple[RecognitionWord, ...]:
+    """Normalize SDK word evidence, interpolating only when it is absent.
+
+    MLX Whisper and faster-whisper expose slightly different segment/word
+    shapes.  The runtime converts those shapes to dictionaries before calling
+    this dependency-free seam.  Segment interpolation preserves useful timing
+    without enabling a slower alignment pass on the latency-critical path.
+    """
+    evidence: list[RecognitionWord] = []
+    for segment in segments or []:
+        segment_confidence = confidence_from_segments([segment])
+        sdk_words = segment.get("words") or []
+        for word in sdk_words:
+            text = str(word.get("word", word.get("text", ""))).strip()
+            if not text:
+                continue
+            probability = word.get("probability", segment_confidence)
+            confidence = float(probability) \
+                if isinstance(probability, (int, float)) \
+                else segment_confidence
+            evidence.append(RecognitionWord(
+                text=text,
+                start=float(word.get("start", 0.0) or 0.0),
+                end=float(word.get("end", 0.0) or 0.0),
+                confidence=max(0.0, min(1.0, confidence)),
+                timing="native",
+            ))
+        if sdk_words:
+            continue
+        tokens = str(segment.get("text", "")).split()
+        if not tokens:
+            continue
+        start = float(segment.get("start", 0.0) or 0.0)
+        end = float(segment.get("end", start) or start)
+        width = max(0.0, end - start) / len(tokens)
+        evidence.extend(RecognitionWord(
+            text=token,
+            start=start + index * width,
+            end=start + (index + 1) * width,
+            confidence=segment_confidence,
+            timing="segment",
+        ) for index, token in enumerate(tokens))
+    return tuple(evidence)
 
 
 def mode_from_modifiers(shift: bool, command: bool, control: bool) -> str:
