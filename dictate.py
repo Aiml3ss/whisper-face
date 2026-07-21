@@ -3682,6 +3682,33 @@ def focus_destination_id(snapshot: FocusSnapshot | None,
         return None
 
 
+def frontmost_window_destination(bundle: str) -> str | None:
+    """Privacy-safe fallback identity when an app hides focused AX fields."""
+    if not IS_MACOS or not bundle:
+        return None
+    try:
+        from Quartz import (
+            CGWindowListCopyWindowInfo,
+            kCGNullWindowID,
+            kCGWindowListOptionOnScreenOnly,
+        )
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        if app is None or str(app.bundleIdentifier() or "") != bundle:
+            return None
+        pid = int(app.processIdentifier())
+        windows = CGWindowListCopyWindowInfo(
+            kCGWindowListOptionOnScreenOnly, kCGNullWindowID)
+        for window in windows or ():
+            if (int(window.get("kCGWindowOwnerPID", -1)) == pid
+                    and int(window.get("kCGWindowLayer", -1)) == 0):
+                number = int(window.get("kCGWindowNumber", 0))
+                if number > 0:
+                    return f"{bundle}:{pid}:{number}"
+    except Exception:
+        pass
+    return None
+
+
 def _ax_elements_equal(left: object, right: object) -> bool:
     """Compare the represented AX objects, not transient PyObjC wrappers."""
     if left is None or right is None:
@@ -3718,15 +3745,19 @@ def capture_insertion_lease(snapshot: FocusSnapshot | None, bundle: str,
     """Lease readable Mac fields; hidden/terminal fields keep legacy paste."""
     destination = focus_destination_id(snapshot, bundle)
     if destination is None:
-        # No focused AX element means there is no safe same-app identity.
-        # Keep a deliberately unmatchable lease so commit fails closed instead
-        # of silently reverting to a blind paste.
+        destination = frontmost_window_destination(bundle)
+    if destination is None:
+        # If neither AX nor CoreGraphics identifies a destination, preserve
+        # the fail-closed contract instead of reverting to a blind paste.
         return InsertionLease.capture_opaque(
             utterance_id,
             f"{bundle or 'unknown'}:unavailable:{utterance_id}",
             "unavailable",
         )
-    if snapshot is None or snapshot.selection is None:
+    if snapshot is None:
+        return InsertionLease.capture_opaque(
+            utterance_id, destination, "frontmost-window")
+    if snapshot.selection is None:
         return InsertionLease.capture_opaque(
             utterance_id, destination, opaque_focus_context(snapshot))
     surrounding = bounded_focus_text(snapshot)
@@ -3752,10 +3783,14 @@ def destination_observation(snapshot: FocusSnapshot | None,
             original, snapshot, original_bundle, bundle
         ) else f"{bundle or 'unknown'}:focus-drift"
     if lease is not None and lease.opaque:
+        context = opaque_focus_context(snapshot)
+        if original is None:
+            destination = frontmost_window_destination(bundle)
+            context = "frontmost-window"
         return DestinationObservation.capture(
             destination,
             (0, 0),
-            opaque_focus_context(snapshot),
+            context,
         )
     if snapshot is None:
         return DestinationObservation.capture(None, None, None)
