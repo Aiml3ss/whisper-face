@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -2279,6 +2280,212 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertAlmostEqual(result.words[1].start, 1.1)
         self.assertAlmostEqual(result.audio_duration, 1.8)
         self.assertEqual({word.timing for word in result.words}, {"segment"})
+
+    def test_bounded_chunks_preserve_absolute_word_timing_across_silence(self):
+        class Future:
+            def __init__(self, value):
+                self.value = value
+
+            def result(self):
+                return self.value
+
+        ns = load_definitions(
+            "BoundedRecognitionFuture",
+            "assemble_raw",
+            extra={
+                "dataclass": dataclass,
+                "np": SimpleNamespace(ndarray=object),
+                "SAMPLE_RATE": 16_000,
+                "GATE_PEAK_RMS": 0.002,
+                "ASR_POOL": SimpleNamespace(),
+                "transcribe_detailed": None,
+                "peak_rms": lambda _audio: 0.0,
+                "is_hallucination": lambda _text: False,
+                "Recognition": Recognition,
+                "RecognitionWord": RecognitionWord,
+            },
+        )
+        bounded = ns["BoundedRecognitionFuture"]
+        first = Recognition(
+            "hello", engine="tiny", audio_duration=1.0,
+            words=(RecognitionWord("hello", 0.2, 0.5, 0.9),),
+        )
+        second = Recognition(
+            "world", engine="turbo", audio_duration=1.0,
+            words=(RecognitionWord("world", 0.1, 0.4, 0.8),),
+        )
+
+        result = ns["assemble_raw"]([
+            bounded(Future(first), 0, 16_000),
+            bounded(Future(second), 32_000, 48_000),
+        ], None, [], None)
+
+        self.assertEqual(result.text, "hello world")
+        self.assertEqual([word.timing for word in result.words], [
+            "native", "native"])
+        self.assertAlmostEqual(result.words[0].start, 0.2)
+        self.assertAlmostEqual(result.words[1].start, 2.1)
+        self.assertAlmostEqual(result.audio_duration, 3.0)
+
+    def test_invalid_capture_bounds_fail_closed_without_losing_text(self):
+        class Future:
+            def result(self):
+                return Recognition(
+                    "invoice 2042", engine="tiny", audio_duration=0.8,
+                    words=(RecognitionWord(
+                        "2042", "invalid", 0.7, 0.8, "native"),),
+                )
+
+        ns = load_definitions(
+            "BoundedRecognitionFuture",
+            "assemble_raw",
+            extra={
+                "dataclass": dataclass,
+                "np": SimpleNamespace(ndarray=object),
+                "SAMPLE_RATE": 16_000,
+                "GATE_PEAK_RMS": 0.002,
+                "ASR_POOL": SimpleNamespace(),
+                "transcribe_detailed": None,
+                "peak_rms": lambda _audio: 0.0,
+                "is_hallucination": lambda _text: False,
+                "Recognition": Recognition,
+                "RecognitionWord": RecognitionWord,
+            },
+        )
+        scheduled = ns["BoundedRecognitionFuture"](
+            Future(), 16_000, 8_000)
+
+        result = ns["assemble_raw"]([scheduled], None, [], None)
+
+        self.assertEqual(result.text, "invoice 2042")
+        self.assertEqual(result.engine, "tiny")
+        self.assertEqual(result.words[0].timing, "segment")
+
+    def test_recorder_attaches_capture_bounds_to_rolling_decode(self):
+        class Future:
+            def add_done_callback(self, callback):
+                self.callback = callback
+
+        future = Future()
+        prep_pool = SimpleNamespace(
+            submit=lambda *_args, **_kwargs: future)
+        ns = load_definitions(
+            "BoundedRecognitionFuture",
+            "Recorder",
+            extra={
+                "dataclass": dataclass,
+                "np": np,
+                "ContextPack": SimpleNamespace,
+                "LEVELS": [],
+                "SILENCE_RMS": 0.01,
+                "SAMPLE_RATE": 16_000,
+                "should_start_speculation": lambda *_args: False,
+                "SPECULATIVE_MIN_SECONDS": 0.5,
+                "SPECULATIVE_SILENCE": 0.1,
+                "CHUNK_MIN_SECONDS": 0.5,
+                "CHUNK_CUT_SILENCE": 0.1,
+                "can_reuse_speculation": lambda *_args: False,
+                "CHUNK_PREP_POOL": prep_pool,
+                "_transcribe_frames": object(),
+                "_caption_add": lambda *_args: None,
+            },
+        )
+        recorder = ns["Recorder"]()
+        recorder.recording = True
+        recorder.voiced_since_cut = True
+
+        recorder._callback(
+            np.zeros((16_000, 1), dtype=np.float32), 16_000, None, None)
+
+        self.assertEqual(len(recorder.chunks), 1)
+        scheduled = recorder.chunks[0]
+        self.assertIsInstance(scheduled, ns["BoundedRecognitionFuture"])
+        self.assertIs(scheduled.future, future)
+        self.assertEqual((scheduled.start_sample, scheduled.end_sample), (
+            0, 16_000))
+
+    def test_release_attaches_capture_bounds_to_remainder_decode(self):
+        class Pool:
+            def __init__(self):
+                self.future = SimpleNamespace()
+
+            def submit(self, *_args):
+                return self.future
+
+        pool = Pool()
+        assembled = []
+
+        def assemble(chunk_futures, pre_future, remainder, prompt):
+            assembled.append((chunk_futures, pre_future, remainder, prompt))
+            return Recognition("")
+
+        ns = load_definitions(
+            "BoundedRecognitionFuture",
+            "finish_and_process",
+            extra={
+                "dataclass": dataclass,
+                "np": np,
+                "time": SimpleNamespace(
+                    perf_counter=lambda: 10.0, time=lambda: 10.0),
+                "release_should_wait_for_tail": lambda _rec: False,
+                "can_reuse_speculation": lambda *_args: False,
+                "ASR_POOL": pool,
+                "transcribe_detailed": object(),
+                "SAMPLE_RATE": 16_000,
+                "MIN_SECONDS": 0.25,
+                "GATE_PEAK_RMS": 0.002,
+                "peak_rms": lambda _audio: 0.1,
+                "audio_gate_measurements": lambda _audio: (1.0, 0.1),
+                "assemble_raw": assemble,
+                "Recognition": Recognition,
+                "is_hallucination": lambda _text: False,
+                "print": lambda *_args: None,
+                "LAST_USE": {},
+                "AppHelper": SimpleNamespace(callAfter=lambda *_args: None),
+            },
+        )
+        audio = np.ones(16_000, dtype=np.float32)
+        class Recorder:
+            released_at = 1.0
+            speculative_future = None
+            speculative_invalid = False
+            speculative_start = 0
+            speculative_end = 0
+            prompt = None
+            recording = False
+            uncertain = False
+
+            def __init__(self):
+                self.stopped = False
+
+            def stop(self):
+                self.stopped = True
+                return audio
+
+            def snapshot(self):
+                raise AssertionError("release plan read before capture stopped")
+
+            @property
+            def cut_samples(self):
+                if not self.stopped:
+                    raise AssertionError("cut read before capture stopped")
+                return 8_000
+
+            @property
+            def chunks(self):
+                if not self.stopped:
+                    raise AssertionError("chunks read before capture stopped")
+                return []
+
+        recorder = Recorder()
+
+        ns["finish_and_process"](recorder, SimpleNamespace(), {})
+
+        scheduled = assembled[0][1]
+        self.assertIsInstance(scheduled, ns["BoundedRecognitionFuture"])
+        self.assertIs(scheduled.future, pool.future)
+        self.assertEqual((scheduled.start_sample, scheduled.end_sample), (
+            8_000, 16_000))
 
     def test_failed_chunk_downgrades_surviving_word_timing(self):
         class Future:

@@ -110,8 +110,9 @@ not declare a winner before the same physical tasks have been run.
   Recognition and Results. The selective re-listen selector is bounded to two
   native-timed microspans and never a full utterance. Re-listen execution is
   intentionally disabled until a killable process-isolated verifier beats the
-  current stack in a public accuracy/latency comparison; rolling-chunk timing
-  is conservatively ineligible until it carries absolute capture bounds.
+  current stack in a public accuracy/latency comparison. Rolling and
+  speculative decodes now retain exact capture-sample bounds, including real
+  silence gaps; malformed or overlapping timing evidence still fails closed.
 - **Counterfactual Context Firewall** — every finalized, insertion-bound
   contextual/personalized compile is compared with a context-free shadow
   compile. Protected influence is quarantined in a transcript-free receipt;
