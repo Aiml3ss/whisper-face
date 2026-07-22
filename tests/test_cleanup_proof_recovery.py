@@ -39,7 +39,7 @@ class CleanupProofRecoveryTests(unittest.TestCase):
                 self.assertEqual(replay_edits(case["raw"], result.edits),
                                  case["candidate"])
 
-        self.assertEqual(outcomes, {
+        expected_regressions = {
             "correction-in-place": "recovered",
             "question-not-answer": "recovered",
             "layout-command": "recovered",
@@ -48,7 +48,9 @@ class CleanupProofRecoveryTests(unittest.TestCase):
             # the phrase filler or an exact diff can remove it.
             "filler-and-anchor": "rejected",
             "scratch-that": "recovered",
-        })
+        }
+        for case_id, expected in expected_regressions.items():
+            self.assertEqual(outcomes[case_id], expected)
 
     def test_exact_diff_does_not_make_arbitrary_rewrite_eligible(self):
         source = "send the customer refund tomorrow"

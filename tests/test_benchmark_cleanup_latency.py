@@ -12,7 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from benchmark_cleanup_latency import (  # noqa: E402
-    MODEL, TransportTimeout, VARIANTS, build_report, load_cases, run_variant,
+    MODEL, RISK_LABELS, TransportTimeout, VARIANTS, _semantic_failure,
+    build_report, load_cases, run_variant,
 )
 
 
@@ -38,6 +39,7 @@ class CleanupLatencyBenchmarkTests(unittest.TestCase):
             "both_accepted": len(cases), "baseline_only_accepted": 0,
             "recovered_only_accepted": 0, "neither_accepted": 0,
             "acceptance_delta": 0,
+            "risk_results": [],
             "model_candidates_evaluated": len(cases),
             "recovery_attempted": len(cases), "recovery_rejected": 0,
             "recovery_replay_verified": len(cases),
@@ -59,13 +61,27 @@ class CleanupLatencyBenchmarkTests(unittest.TestCase):
         current = self._result(cases)
         report = build_report(cases, [current, {**current, "id": "lean-three-shot",
                                                 "latency_ms": {"p50": 70.0, "p95": 80.0, "max": 90.0}}], read_timeout=4.0)
-        self.assertEqual(report["schema_version"], 2)
+        self.assertEqual(report["schema_version"], 3)
         self.assertEqual(report["model"], MODEL)
         self.assertEqual(report["runtime_authority"], "none")
         self.assertFalse(report["claim"]["runtime_change_recommended"])
         encoded = json.dumps(report)
-        self.assertNotIn(cases[0]["raw"], encoded)
-        self.assertNotIn(cases[0]["id"], encoded)
+        for case in cases:
+            self.assertNotIn(case["raw"], encoded)
+            self.assertNotIn(case["candidate"], encoded)
+            self.assertNotIn(case["id"], encoded)
+
+    def test_corpus_has_explicit_golden_constraints_and_risk_coverage(self):
+        cases = load_cases()
+        covered = {risk for case in cases for risk in case["risks"]}
+
+        self.assertGreaterEqual(len(cases), 24)
+        self.assertEqual(covered, RISK_LABELS)
+        for case in cases:
+            with self.subTest(case=case["id"]):
+                self.assertTrue(case["candidate"])
+                self.assertFalse(
+                    _semantic_failure(case, case["candidate"]))
 
     def test_timeout_is_counted_and_uses_current_runtime_deadline(self):
         def timeout(*_args, **kwargs):
@@ -119,10 +135,17 @@ class CleanupLatencyBenchmarkTests(unittest.TestCase):
         self.assertEqual(result["recovered_only_accepted"], 1)
         self.assertEqual(result["recovery_attempted"], 1)
         self.assertEqual(result["recovery_reason_counts"], {"eligible": 1})
+        by_risk = {item["risk"]: item for item in result["risk_results"]}
+        for risk in case["risks"]:
+            self.assertEqual(by_risk[risk]["cases"], 1)
+            self.assertEqual(by_risk[risk]["baseline_accepted"], 0)
+            self.assertEqual(by_risk[risk]["recovered_accepted"], 1)
+            self.assertEqual(by_risk[risk]["acceptance_delta"], 1)
 
     def test_independent_comparison_exposes_a_recovery_regression(self):
         case = {
             "id": "punctuation-policy",
+            "risks": ["punctuation"],
             "raw": "hello team",
             "candidate": "Hello\nteam.",
             "must_contain": ["hello", "team"],
@@ -149,6 +172,10 @@ class CleanupLatencyBenchmarkTests(unittest.TestCase):
         self.assertEqual(result["recovery_rejected"], 1)
         self.assertEqual(
             result["recovery_reason_counts"], {"candidate-symbol-policy": 1})
+        risk = result["risk_results"][0]
+        self.assertEqual(risk["risk"], "punctuation")
+        self.assertEqual(risk["baseline_only_accepted"], 1)
+        self.assertEqual(risk["acceptance_delta"], -1)
 
     def test_model_candidate_and_recovery_measurements_remain_content_free(self):
         case = load_cases()[1]

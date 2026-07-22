@@ -62,7 +62,10 @@ from insertion_integrity import (  # noqa: E402
 from model_wallet import (  # noqa: E402
     MAX_LATENCY_BOUND_MS,
     Capability,
+    CURRENT_PROVIDER_PROFILES,
     ModelRequest,
+    PARAKEET_PROFILE,
+    QWEN_CLEANUP_PROFILE,
     ReadinessState,
     WHISPER_LARGE_TURBO_PROFILE,
     WHISPER_TINY_PROFILE,
@@ -128,16 +131,25 @@ class DictationSuccessSoundTests(unittest.TestCase):
 
 
 class ModelWalletShadowRuntimeStatusTests(unittest.TestCase):
-    def snapshot(self, *, is_macos=True, resolved=()):
+    def snapshot(self, *, resolved=(), warm=()):
+        evidence = SimpleNamespace(providers=tuple(
+            SimpleNamespace(
+                provider_id=profile.provider_id,
+                state=(ReadinessState.RESOLVED
+                       if profile.provider_id in resolved
+                       else ReadinessState.NOT_INSTALLED),
+                revision_verified=profile.provider_id in resolved,
+            )
+            for profile in CURRENT_PROVIDER_PROFILES
+        ))
         function = load_definitions(
             "model_wallet_shadow_status_snapshot",
             extra={
-                "IS_MACOS": is_macos,
-                "ASR_MODEL_PATHS": {repository: f"/resolved/{index}"
-                                    for index, repository
-                                    in enumerate(resolved)},
-                "FAST_WHISPER_REPO": "mlx-community/whisper-tiny",
-                "WHISPER_REPO": "mlx-community/whisper-large-v3-turbo",
+                "MODEL_READINESS_CACHE": {
+                    "receipt": evidence, "lock": threading.Lock()},
+                "MODEL_WARM_PATHS": {
+                    "providers": set(warm), "lock": threading.Lock()},
+                "CURRENT_PROVIDER_PROFILES": CURRENT_PROVIDER_PROFILES,
                 "WHISPER_TINY_PROFILE": WHISPER_TINY_PROFILE,
                 "WHISPER_LARGE_TURBO_PROFILE":
                     WHISPER_LARGE_TURBO_PROFILE,
@@ -151,14 +163,20 @@ class ModelWalletShadowRuntimeStatusTests(unittest.TestCase):
         )["model_wallet_shadow_status_snapshot"]
         return function()
 
-    def test_resolved_whisper_pins_do_not_overclaim_readiness(self):
-        snapshot = self.snapshot(resolved=(
-            "mlx-community/whisper-tiny",
-            "mlx-community/whisper-large-v3-turbo",
-        ))
+    def test_all_exact_pins_and_warm_paths_do_not_overclaim_readiness(self):
+        resolved = tuple(
+            profile.provider_id for profile in CURRENT_PROVIDER_PROFILES)
+        snapshot = self.snapshot(resolved=resolved, warm=resolved)
         encoded = json.dumps(snapshot, sort_keys=True)
 
         self.assertEqual(snapshot["mode"], "shadow-only")
+        self.assertEqual(len(snapshot["pins"]), 4)
+        self.assertTrue(all(
+            item["resolution_state"] == "resolved"
+            and item["warm_path_observed"]
+            and item["revision_verified"]
+            and not item["capability_bounds_attested"]
+            for item in snapshot["pins"]))
         self.assertFalse(snapshot["attempted"])
         self.assertEqual(
             {item["capability"] for item in snapshot["capabilities"]},
@@ -187,9 +205,9 @@ class ModelWalletShadowRuntimeStatusTests(unittest.TestCase):
         self.assertNotIn("transcript", encoded.casefold())
         self.assertNotIn("/resolved/", encoded)
 
-    def test_non_mac_or_unresolved_pins_fail_closed_as_missing_runtime_evidence(self):
-        snapshot = self.snapshot(is_macos=False, resolved=(
-            "mlx-community/whisper-tiny",
+    def test_unresolved_pins_fail_closed_as_not_ready_or_missing(self):
+        snapshot = self.snapshot(resolved=(
+            WHISPER_TINY_PROFILE.provider_id,
         ))
         supported = [
             provider["eligibility"]
@@ -199,7 +217,8 @@ class ModelWalletShadowRuntimeStatusTests(unittest.TestCase):
         ]
 
         self.assertTrue(supported)
-        self.assertEqual(set(supported), {"missing_runtime_evidence"})
+        self.assertEqual(
+            set(supported), {"not_ready"})
 
     def test_routine_status_wires_only_the_non_executing_projection(self):
         status = next(
@@ -224,6 +243,7 @@ class ModelWalletShadowRuntimeStatusTests(unittest.TestCase):
         self.assertFalse(projection_names & {
             "transcribe", "transcribe_detailed", "ollama_chat",
             "resolve_asr_model", "windows_whisper_model", "PARAKEET",
+            "collect_model_readiness",
         })
 
 
@@ -603,6 +623,8 @@ class ParakeetClientTests(unittest.TestCase):
                     "struct": struct,
                     "json": json,
                     "np": np,
+                    "PARAKEET_PROFILE": PARAKEET_PROFILE,
+                    "mark_model_warm_path_observed": lambda _provider: True,
                 },
             )
             client = ns["ParakeetClient"](
@@ -1229,6 +1251,9 @@ class PerformanceTraceTests(unittest.TestCase):
                 "np": SimpleNamespace(
                     float32="float32", zeros=lambda _size, dtype: []),
                 "ollama_chat": lambda *_args, **_kwargs: ("ok", "stop"),
+                "QWEN_CLEANUP_PROFILE": QWEN_CLEANUP_PROFILE,
+                "mark_model_warm_path_observed": lambda _provider: True,
+                "refresh_model_readiness_evidence": lambda: True,
                 "transcribe": lambda *_args: "",
                 "transcribe_detailed": lambda *_args: SimpleNamespace(text=""),
                 "time": SimpleNamespace(

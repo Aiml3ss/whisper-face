@@ -304,7 +304,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "models.unknown": "Unknown",
         "models.waiting.detail": "Open this window after startup completes",
         "models.guidance": "Models prepare locally and can finish in the background.",
-        "models.wallet.unavailable": "Model wallet shadow advisory only · No model execution or routing · Unavailable: exact runtime or bounded capability evidence is missing.",
+        "models.wallet.unavailable": "Model wallet shadow advisory only · No model execution or routing · Exact pin evidence unavailable · Runtime readiness and capability evidence remain separate.",
+        "models.wallet.evidence": "Model wallet shadow advisory only · No model execution or routing · Exact files resolved {resolved}/4 · Warm path observed {warm}/4 · Runtime readiness attested 0/4 · Capability bounds available 0/4.",
         "models.wallet.informational": "Model wallet shadow advisory only · No model execution or routing · Eligible ordering is informational.",
         "models.accessibility.name": "Model name",
         "models.accessibility.detail": "{name} role and detail",
@@ -1335,13 +1336,44 @@ def _model_wallet_advisory_copy(value: Any, *, locale: str = "en") -> str:
     """Validate the closed receipt and return fixed, content-free UI copy."""
     unavailable = localized_string("models.wallet.unavailable", locale=locale)
     if not isinstance(value, Mapping) or set(value) != {
-            "schema_version", "mode", "capabilities", "attempted"}:
+            "schema_version", "mode", "pins", "capabilities", "attempted"}:
         return unavailable
     if (value.get("schema_version") != 1
             or value.get("mode") != "shadow-only"
             or value.get("attempted") is not False):
         return unavailable
     capabilities = value.get("capabilities")
+    pins = value.get("pins")
+    if (isinstance(pins, (str, bytes)) or not isinstance(pins, Sequence)
+            or len(pins) != len(MODEL_WALLET_PROVIDER_IDS)):
+        return unavailable
+    pin_ids = set()
+    resolved_count = warm_count = 0
+    for pin in pins:
+        if not isinstance(pin, Mapping) or set(pin) != {
+                "provider_id", "resolution_state", "warm_path_observed",
+                "revision_verified", "capability_bounds_attested"}:
+            return unavailable
+        provider_id = pin.get("provider_id")
+        resolution = pin.get("resolution_state")
+        warm = pin.get("warm_path_observed")
+        verified = pin.get("revision_verified")
+        if (provider_id not in MODEL_WALLET_PROVIDER_IDS
+                or provider_id in pin_ids
+                or resolution not in {
+                    "resolved", "not_installed", "load_failed",
+                    "revision_mismatch", "unavailable"}
+                or not isinstance(warm, bool)
+                or not isinstance(verified, bool)
+                or pin.get("capability_bounds_attested") is not False
+                or (resolution == "resolved") != verified
+                or (warm and not verified)):
+            return unavailable
+        pin_ids.add(provider_id)
+        resolved_count += int(verified)
+        warm_count += int(warm)
+    if pin_ids != MODEL_WALLET_PROVIDER_IDS:
+        return unavailable
     if (isinstance(capabilities, (str, bytes))
             or not isinstance(capabilities, Sequence)
             or len(capabilities) != len(MODEL_WALLET_CAPABILITIES)):
@@ -1402,11 +1434,11 @@ def _model_wallet_advisory_copy(value: Any, *, locale: str = "en") -> str:
         any_fail_closed = any_fail_closed or fail_closed
     if seen != MODEL_WALLET_CAPABILITIES:
         return unavailable
+    if not pins:
+        return unavailable
     return localized_string(
-        "models.wallet.unavailable" if any_fail_closed
-        else "models.wallet.informational",
-        locale=locale,
-    )
+        "models.wallet.evidence", locale=locale,
+        resolved=resolved_count, warm=warm_count)
 
 
 def _text_items(value: Any, *, maximum: int = 500) -> tuple[str, ...]:
@@ -1780,6 +1812,7 @@ def _status_contains(value: str, words: Sequence[str]) -> bool:
 
 def _models_ready(models: Sequence[ModelStatus]) -> bool:
     return any(_status_contains(model.status, ("ready", "running", "installed"))
+               or "warm path observed" in model.detail.casefold()
                for model in models)
 
 
@@ -4038,13 +4071,13 @@ if APPKIT_AVAILABLE:
                     "models.accessibility.wallet"))
             page.addSubview_(advisory)
             rows = []
-            for index in range(3):
-                row = _card(NSMakeRect(0, 220 - index * 88, 758, 72))
-                name = _label(self._l("models.waiting"), NSMakeRect(20, 36, 430, 22),
+            for index in range(4):
+                row = _card(NSMakeRect(0, 232 - index * 62, 758, 56))
+                name = _label(self._l("models.waiting"), NSMakeRect(20, 29, 430, 20),
                               size=14, weight="medium")
-                detail = _label("", NSMakeRect(20, 13, 530, 18),
+                detail = _label("", NSMakeRect(20, 9, 560, 16),
                                 size=11, color=_SECONDARY)
-                status = _label(self._l("models.unknown"), NSMakeRect(610, 26, 120, 20),
+                status = _label(self._l("models.unknown"), NSMakeRect(610, 20, 120, 20),
                                 size=12, weight="medium", color=_ACCENT)
                 row.addSubview_(name)
                 row.addSubview_(detail)

@@ -31,8 +31,13 @@ from voice_compiler import EditProposal, VoiceCompiler
 HERE = Path(__file__).resolve().parent
 DEFAULT_CASES = HERE / "benchmarks" / "cleanup_latency_cases.json"
 OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
-REPORT_SCHEMA_VERSION = 2
+REPORT_SCHEMA_VERSION = 3
 CURRENT_TOKEN_BUDGET = "max(160, int(words * 4.0) + 64)"
+RISK_LABELS = frozenset({
+    "acronyms", "code", "dates", "false_starts", "fillers", "layout",
+    "meaningful_filler", "money", "names", "numbers", "punctuation",
+    "urls",
+})
 SHORT_PROMPT = """Clean raw dictation faithfully. Remove fillers and false starts,
 apply explicit corrections in place, preserve facts and anchors, and render
 spoken layout/list commands. Never answer, refuse, explain, or add content."""
@@ -120,14 +125,19 @@ VARIANTS = (
 def load_cases(path: Path = DEFAULT_CASES) -> tuple[dict[str, Any], ...]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     cases = payload.get("cases") if isinstance(payload, dict) else None
-    if (not isinstance(payload, dict) or payload.get("schema_version") != 1
+    if (not isinstance(payload, dict) or payload.get("schema_version") != 2
             or payload.get("privacy") != "checked-in-synthetic-public-text-only"
             or not isinstance(cases, list) or not cases):
         raise ValueError("unsupported cleanup latency corpus")
     seen: set[str] = set()
     for case in cases:
-        if (not isinstance(case, dict) or set(case) != {"id", "raw", "candidate", "must_contain", "must_not_contain"}
+        risks = case.get("risks") if isinstance(case, dict) else None
+        if (not isinstance(case, dict) or set(case) != {"id", "risks", "raw", "candidate", "must_contain", "must_not_contain"}
                 or not isinstance(case["id"], str) or not case["id"]
+                or not isinstance(risks, list) or not risks or len(risks) > 4
+                or len(risks) != len(set(risks))
+                or any(not isinstance(item, str) or item not in RISK_LABELS
+                       for item in risks)
                 or not isinstance(case["raw"], str) or not case["raw"] or len(case["raw"]) > 1000
                 or not isinstance(case["candidate"], str) or not case["candidate"]
                 or len(case["candidate"]) > 1000
@@ -181,6 +191,16 @@ def _percentile(samples: list[float], point: float) -> float | None:
     return sorted(samples)[math.ceil((len(samples) - 1) * point)] if samples else None
 
 
+def _empty_risk_counts() -> dict[str, int]:
+    return {key: 0 for key in (
+        "cases", "baseline_accepted", "recovered_accepted",
+        "both_accepted", "baseline_only_accepted",
+        "recovered_only_accepted", "neither_accepted",
+        "guard_rejected", "semantic_failed", "proof_failed",
+        "parse_failed", "timeout", "transport_failed",
+    )}
+
+
 def run_variant(variant: dict[str, Any], cases: tuple[dict[str, Any], ...], *,
                 post: Callable[..., Any] = local_post,
                 clock: Callable[[], float] = time.perf_counter,
@@ -195,11 +215,17 @@ def run_variant(variant: dict[str, Any], cases: tuple[dict[str, Any], ...], *,
         "parse_failed", "timeout", "transport_failed",
     )}
     recovery_reasons: dict[str, int] = {}
+    risk_counts = {
+        risk: _empty_risk_counts()
+        for risk in sorted({risk for case in cases for risk in case["risks"]})
+    }
     latencies: list[float] = []
     recovery_latencies: list[float] = []
     for case in cases:
         started = clock()
         baseline_accepted = recovered_accepted = False
+        failure: str | None = None
+        proof_failed = False
         try:
             response = post(OLLAMA_CHAT_URL, json=_payload(variant, case["raw"]), timeout=(1, read_timeout))
             response.raise_for_status()
@@ -213,8 +239,10 @@ def run_variant(variant: dict[str, Any], cases: tuple[dict[str, Any], ...], *,
                 case["raw"], output, done_reason, "capture")
             if reason:
                 counts["guard_rejected"] += 1
+                failure = "guard_rejected"
             elif _semantic_failure(case, output):
                 counts["semantic_failed"] += 1
+                failure = "semantic_failed"
             else:
                 baseline_accepted = _proof_matches(
                     case["raw"], parsed, output)
@@ -223,6 +251,7 @@ def run_variant(variant: dict[str, Any], cases: tuple[dict[str, Any], ...], *,
                     counts["baseline_accepted"] += 1
                 else:
                     counts["proof_failed"] += 1
+                    proof_failed = True
 
                 recovery_started = clock()
                 recovery = recover_cleanup_proof(
@@ -246,25 +275,48 @@ def run_variant(variant: dict[str, Any], cases: tuple[dict[str, Any], ...], *,
                     receipt.replay_verified)
         except TransportTimeout:
             counts["timeout"] += 1
+            failure = "timeout"
         except (urllib.error.URLError, urllib.error.HTTPError):
             counts["transport_failed"] += 1
-        except (KeyError, TypeError, ValueError):
+            failure = "transport_failed"
+        except (AttributeError, KeyError, TypeError, ValueError):
             counts["parse_failed"] += 1
+            failure = "parse_failed"
         finally:
             if baseline_accepted and recovered_accepted:
-                counts["both_accepted"] += 1
+                overlap = "both_accepted"
             elif baseline_accepted:
-                counts["baseline_only_accepted"] += 1
+                overlap = "baseline_only_accepted"
             elif recovered_accepted:
-                counts["recovered_only_accepted"] += 1
+                overlap = "recovered_only_accepted"
             else:
-                counts["neither_accepted"] += 1
+                overlap = "neither_accepted"
+            counts[overlap] += 1
+            for risk in case["risks"]:
+                aggregate = risk_counts[risk]
+                aggregate["cases"] += 1
+                aggregate["baseline_accepted"] += int(baseline_accepted)
+                aggregate["recovered_accepted"] += int(recovered_accepted)
+                aggregate[overlap] += 1
+                aggregate["proof_failed"] += int(proof_failed)
+                if failure is not None:
+                    aggregate[failure] += 1
             latencies.append((clock() - started) * 1000.0)
+    risk_results = []
+    for risk, aggregate in risk_counts.items():
+        risk_results.append({
+            "risk": risk,
+            **aggregate,
+            "acceptance_delta": (
+                aggregate["recovered_accepted"]
+                - aggregate["baseline_accepted"]),
+        })
     return {"id": variant["id"], "few_shot_pairs": len(variant["few_shot"]) // 2,
             "token_budget": variant["budget_description"], "cases": len(cases), **counts,
             "acceptance_delta": (
                 counts["recovered_accepted"]
                 - counts["baseline_accepted"]),
+            "risk_results": risk_results,
             "recovery_reason_counts": dict(sorted(recovery_reasons.items())),
             "recovery_latency_ms": {
                 "p50": _percentile(recovery_latencies, .50),

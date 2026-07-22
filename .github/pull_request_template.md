@@ -67,5 +67,6 @@ before submitting outside contributions.
 - [ ] `uv run tests/test_installers.py`
 - [ ] `uv run tests/test_repository_governance.py`
 - [ ] `uv run tests/test_macos_distribution.py`
+- [ ] `uv run tests/test_safe_update_advisor.py`
 - [ ] Live Mac or Windows installer verification was run, or the unavailable
       platform is explicitly disclosed.
