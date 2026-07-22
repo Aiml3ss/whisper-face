@@ -34,6 +34,7 @@ uv lock --check --script dictate.py
 uv run tests/test_parrot_core.py
 uv run tests/test_voice_compiler.py
 uv run tests/test_consequence_routing.py
+uv run tests/test_process_verifier.py
 uv run tests/test_benchmark_voice_compiler.py
 uv run tests/test_benchmark_consequence_routing.py
 uv run tests/test_benchmark_asr.py

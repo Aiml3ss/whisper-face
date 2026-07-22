@@ -113,6 +113,22 @@ class DictationSuccessSoundTests(unittest.TestCase):
         self.assertEqual(select("review", is_macos=False), "Pop")
 
 
+class RecognitionMenuTitleTests(unittest.TestCase):
+    def test_review_route_marks_last_recognition_for_review(self):
+        title = load_definitions(
+            "recognition_root_title")["recognition_root_title"]
+
+        self.assertEqual(title("review"), "Last Recognition — Review")
+
+    def test_all_other_or_invalid_routes_keep_neutral_title(self):
+        title = load_definitions(
+            "recognition_root_title")["recognition_root_title"]
+
+        self.assertEqual(title("Review"), "Last Recognition")
+        self.assertEqual(title("review-needed"), "Last Recognition")
+        self.assertEqual(title(None), "Last Recognition")
+
+
 class FakeStream:
     def __init__(self, **kwargs):
         self.callback = kwargs["callback"]

@@ -10,8 +10,11 @@ work, performance improvements, and measured accuracy improvements.
 2. Keep the Mac experience primary while preserving Windows installer parity.
 3. Do not include private transcripts, audio, credentials, personal
    dictionaries, model caches, or generated service files.
-4. Run the release gates in
-   [docs/installer-release-process.md](docs/installer-release-process.md).
+4. Keep installers in scope for every runtime change. Audit the Mac and Windows
+   setup scripts, clickable launchers, service templates, private-state
+   templates, lockfile, installer tests, and install documentation as
+   applicable. Both installers must execute the current checkout rather than a
+   copied runtime.
 5. Disclose all third-party code, assets, model material, and generated output
    included in the contribution.
 
@@ -38,13 +41,39 @@ If You contribute for a company, confirm that You have authority to make the
 grant or arrange a separate entity agreement before the pull request is
 merged. The Project Owner is not required to sign a CLA with themself.
 
+## Verification
+
+Run the focused test for the area you changed. For example, the Voice Input
+Protocol conformance contract uses:
+
+```sh
+uv run tests/test_voice_input_protocol.py
+```
+
+For a distributable change, run the complete, canonical command list in the
+[installer release process](docs/installer-release-process.md). That file is
+the single source of truth so release commands do not drift across documents.
+Also run the live verification available on your platform:
+
+```sh
+./setup.sh --verify
+```
+
+```powershell
+.\setup.ps1 --verify
+```
+
+State unavailable platform verification plainly. Before telling someone on
+another machine to install a build, confirm the relevant commit is published
+on the distribution branch.
+
 ## Pull-request scope
 
 Prefer one independently testable change per pull request. Explain user impact,
-installer impact on both platforms, privacy or security implications, and the
-commands used for verification. New runtime behavior should include regression
-tests. New dependencies or model assets must include provenance and license
-information.
+installer impact on both platforms (or why no installer file changes were
+needed), privacy or security implications, and the commands used for
+verification. New runtime behavior should include regression tests. New
+dependencies or model assets must include provenance and license information.
 
 By submitting a Contribution, You also agree that the contribution itself is
 distributed under `AGPL-3.0-only`, in addition to the rights granted by the
