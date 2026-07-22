@@ -236,6 +236,10 @@ class MacDistributionContractTests(unittest.TestCase):
             self.assertEqual(tampered.returncode, 2)
             self.assertIn("tree digest mismatch", tampered.stderr)
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "checkout-backed Mac launcher bundle is not a Windows contract",
+    )
     def test_unsigned_launcher_app_is_reproducible_and_checkout_backed(self):
         with tempfile.TemporaryDirectory() as directory:
             app = Path(directory) / "Whisper Face.app"
