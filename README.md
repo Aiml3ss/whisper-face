@@ -47,6 +47,12 @@ The dated [neutral competitor evaluation](docs/benchmarks/competitor-evaluation.
 separates official product claims from reproducible measured results. It does
 not declare a winner before the same physical tasks have been run.
 
+The [Support and setup pilot](SUPPORT.md) makes the free-local covenant
+explicit and collects only public, nonbinding interest in voluntary Supporter
+recognition or a limited Mac setup session. No payment account or paid service
+is active, and core accuracy, privacy, accessibility, installers, and local use
+are never Supporter-only features.
+
 ## Features
 
 - **A real native Mac app window** — choose **Open Whisper Face…** from the

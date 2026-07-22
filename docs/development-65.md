@@ -56,9 +56,9 @@ explicit Mac-first sequencing rather than dropping the item.
 | 46 | Reproducible demonstration corpora | complete | Public synthetic corpus, deterministic compiler stress replay, privacy-safe observation schema, CLI instructions, and CI regressions are committed |
 | 47 | Honest competitor comparison pages | active | The dated official-source comparison documents setup, privacy, pricing, and unknowns for Whisper Face, Wispr Flow, Superwhisper, MacWhisper, OpenWhispr, and Handy; it explicitly publishes no winner until reproducible physical task results exist |
 | 48 | Independently assignable GitHub implementation issues | complete | Vertical-slice issues [#6](https://github.com/Aiml3ss/whispering-parrot/issues/6) through [#19](https://github.com/Aiml3ss/whispering-parrot/issues/19) link the roadmap to acceptance criteria and dependencies |
-| 49 | Sponsors and voluntary Supporter experiment | queued | Public tiers/benefits with no core feature lock |
-| 50 | Concierge setup/migration offering | queued | Documented scope, privacy process, fulfillment path |
-| 51 | Pricing/willingness-to-pay experiment | queued | Landing/waitlist experiment before cloud build |
+| 49 | Sponsors and voluntary Supporter experiment | active | The public free-local covenant prohibits core feature locks and defines recognition-only proposed Supporter benefits; a nonbinding GitHub interest form is live, but no payment account, final benefits, pricing, or paid conversion exists |
+| 50 | Concierge setup/migration offering | active | A bounded one-Mac interest pilot documents scope, private-data exclusions, user-present fulfillment, capacity acceptance, and public-to-private coordination boundaries; no booking, payment, operator capacity, or completed session exists |
+| 51 | Pricing/willingness-to-pay experiment | active | The public form measures deduplicated stated support/concierge shape only under dated zero-inclusive reporting and explicitly rejects revenue, conversion, or willingness-to-pay claims; owner-approved price points and observed submissions remain outstanding |
 | 52 | Optional E2EE preference/vocabulary/correction/recovery sync | queued | Threat model, protocol, clients, recovery, delete/export |
 | 53 | Away-from-home encrypted relay to owned Mac | queued | Ciphertext-only fallback relay and direct-path preference |
 | 54 | Team vocabulary/deployment/policy/diagnostics/roles/updates | queued | Self-hosted vertical slice with transcript-free metrics |
