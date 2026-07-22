@@ -43,6 +43,10 @@ tracks the Mac trust/performance work, future native iPhone architecture, and a
 sustainable business that never sells speech, transcripts, or behavioral
 profiles.
 
+The dated [neutral competitor evaluation](docs/benchmarks/competitor-evaluation.md)
+separates official product claims from reproducible measured results. It does
+not declare a winner before the same physical tasks have been run.
+
 ## Features
 
 - **A real native Mac app window** — choose **Open Whisper Face…** from the
@@ -374,6 +378,11 @@ delay fault injection. It checks at-most-once platform paste attempts and
 stable terminal receipts, while explicitly reporting zero real apps tested and
 making no 50-app or four-nines claim.
 
+Run `uv run public_scorecard.py` for the transcript-free aggregate of five
+checked-in synthetic suites. Use `uv run competitor_benchmark.py` with the
+neutral task corpus and externally collected observation files for product
+comparisons; vendor claims and unavailable tasks never enter measured totals.
+
 `voice_input_protocol.py` defines the strict versioned proposal, stable-prefix,
 final-text, commit, acknowledgement, and cancellation contract used by five
 synthetic capability profiles. `compatibility_fingerprint.py` can build a
@@ -419,6 +428,8 @@ uv run tests/test_point_and_speak_resolver.py
 uv run tests/test_drop_to_target.py
 uv run tests/test_voice_objects.py
 uv run tests/test_voice_inbox.py
+uv run tests/test_competitor_benchmark.py
+uv run tests/test_public_scorecard.py
 uv run tests/test_personal_regression.py
 uv run tests/test_whisper_face_gui.py
 uv run --locked --script dictate.py --native-gui-smoke-test
