@@ -3,6 +3,8 @@
 # dependencies = []
 # ///
 
+from dataclasses import asdict
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -14,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 from voice_compiler import (
     ContextCandidate,
     ContextObservation,
+    ContextPack,
     ContextRouter,
     EditProposal,
     PersonalPrior,
@@ -23,6 +26,7 @@ from voice_compiler import (
     VoiceIR,
     WordEvidence,
     analyze_prosody,
+    context_firewall_receipt,
     protected_anchors,
 )
 
@@ -321,6 +325,107 @@ class VoiceCompilerTests(unittest.TestCase):
         samples = [0.1] * 4_000 + [0.0] * 8_000 + [0.1] * 4_000
         events = analyze_prosody(samples, sample_rate=16_000)
         self.assertTrue(any(event.kind == "pause" for event in events))
+
+
+class ContextFirewallTests(unittest.TestCase):
+    def setUp(self):
+        self.compiler = VoiceCompiler()
+
+    def test_protected_context_influence_is_shadow_quarantined(self):
+        voice = VoiceIR(
+            (RecognitionHypothesis("Use Gwen for cleanup", 0.68, "tiny"),),
+            context=ContextRouter().collect(ContextObservation(
+                app="Codex", bundle="com.openai.codex",
+                selected_text="Qwen",
+            )),
+        )
+        active = self.compiler.compile(voice)
+        receipt = context_firewall_receipt(
+            voice, compiled=active, compiler=self.compiler)
+
+        self.assertEqual(active.text, "Use Qwen for cleanup")
+        self.assertEqual(receipt.disposition, "quarantine")
+        self.assertTrue(receipt.counterfactual_changed)
+        self.assertEqual(receipt.context_influences, 1)
+        self.assertEqual(receipt.protected_influences, 1)
+        self.assertEqual(receipt.promotion_candidates, 0)
+        self.assertEqual(
+            dict(receipt.reason_counts), {"context-protected": 1})
+
+    def test_protected_prior_and_unprotected_prior_are_separated(self):
+        protected = VoiceIR(
+            (RecognitionHypothesis(
+                "Please email Alice Smyth", 0.55, "tiny"),),
+            personal_priors=(PersonalPrior("Smyth", "Smith", 6),),
+        )
+        safe = VoiceIR(
+            (RecognitionHypothesis("this is teh draft", 0.55, "tiny"),),
+            personal_priors=(PersonalPrior("teh", "the", 6),),
+        )
+
+        protected_receipt = context_firewall_receipt(protected)
+        safe_receipt = context_firewall_receipt(safe)
+
+        self.assertEqual(protected_receipt.disposition, "quarantine")
+        self.assertEqual(protected_receipt.quarantined, 1)
+        self.assertEqual(
+            dict(protected_receipt.reason_counts),
+            {"personal-prior-protected": 1},
+        )
+        self.assertEqual(safe_receipt.disposition, "promotion-candidate")
+        self.assertEqual(safe_receipt.promotion_candidates, 1)
+        self.assertEqual(safe_receipt.quarantined, 0)
+
+    def test_shadow_compiler_receives_no_context_or_personal_priors(self):
+        voice = VoiceIR(
+            (RecognitionHypothesis("this is teh draft", 0.55, "tiny"),),
+            context=ContextPack((ContextCandidate(
+                "private-context-value", 10.0, "document"),)),
+            personal_priors=(PersonalPrior("teh", "the", 6),),
+        )
+        active = self.compiler.compile(voice)
+        seen = []
+
+        class RecordingCompiler:
+            def compile(_self, counterfactual):
+                seen.append(counterfactual)
+                return self.compiler.compile(counterfactual)
+
+        context_firewall_receipt(
+            voice, compiled=active, compiler=RecordingCompiler())
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0].context, ContextPack())
+        self.assertEqual(seen[0].personal_priors, ())
+        self.assertEqual(voice.context.candidates[0].text,
+                         "private-context-value")
+        self.assertEqual(voice.personal_priors[0].preferred, "the")
+
+    def test_receipt_never_serializes_adversarial_private_text(self):
+        private = "Alice private@example.com /Users/alice/secret"
+        voice = VoiceIR(
+            (RecognitionHypothesis("this is teh draft", 0.55, "tiny"),),
+            context=ContextPack((ContextCandidate(
+                private, 10.0, private),)),
+            personal_priors=(PersonalPrior("teh", "the", 6),),
+            app_bundle=private,
+        )
+        receipt = context_firewall_receipt(voice)
+        encoded = json.dumps(asdict(receipt), sort_keys=True)
+        self.assertNotIn("Alice", encoded)
+        self.assertNotIn("private@example.com", encoded)
+        self.assertNotIn("/Users/alice/secret", encoded)
+        self.assertNotIn("teh", encoded)
+        self.assertNotIn("the", encoded)
+
+    def test_no_influence_is_reported_without_changing_the_live_result(self):
+        voice = VoiceIR((RecognitionHypothesis(
+            "ordinary dictated prose", 0.92, "turbo"),))
+        active = self.compiler.compile(voice)
+        receipt = context_firewall_receipt(voice, compiled=active)
+        self.assertEqual(active, self.compiler.compile(voice))
+        self.assertEqual(receipt.disposition, "no-effect")
+        self.assertFalse(receipt.counterfactual_changed)
+        self.assertEqual(dict(receipt.reason_counts), {"no-influence": 1})
 
 
 if __name__ == "__main__":

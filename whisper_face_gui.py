@@ -42,6 +42,28 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "nav.settings": "Settings",
         "nav.models": "Models",
         "nav.diagnostics": "Diagnostics",
+        "app.subtitle": "Private, fast voice input on your Mac",
+        "onboarding.permissions.title": "Allow Mac permissions",
+        "onboarding.permissions.detail": "Microphone captures speech; Accessibility safely inserts it into the field you chose.",
+        "onboarding.hotkey.title": "Practice {hotkey}",
+        "onboarding.hotkey.detail": "Hold {hotkey} while speaking, then release. You can keep using the Mac normally.",
+        "onboarding.models.title": "Confirm local models",
+        "onboarding.models.detail": "At least one local recognition engine must be ready; fallbacks can finish warming in the background.",
+        "onboarding.first_dictation.title": "Make your first dictation",
+        "onboarding.first_dictation.detail": "Speak one sentence in any text field. Whisper Face will keep the result recoverable if focus changes.",
+        "onboarding.status.done": "Done",
+        "onboarding.status.attention": "Needs attention",
+        "onboarding.status.try": "Try it now",
+        "onboarding.status.warming": "Warming up",
+        "onboarding.status.turn": "Your turn",
+        "onboarding.progress": "FIRST-RUN SETUP · {completed} OF {total} COMPLETE",
+        "onboarding.action.permissions": "Review Permissions",
+        "onboarding.action.hotkey": "Show Practice",
+        "onboarding.action.models": "View Models",
+        "onboarding.action.first_dictation": "Show How",
+        "onboarding.action.continue": "Continue Setup",
+        "onboarding.action.help": "Open the next incomplete first-run setup step.",
+        "onboarding.complete": "Setup is complete — Whisper Face is ready.",
         "settings.title": "Settings",
         "settings.subtitle": "Modes, personal language, appearance, and privacy in one place.",
         "settings.pane.modes": "Modes",
@@ -81,6 +103,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.action.forget": "Forget",
         "settings.action.save": "Save",
         "settings.action.cancel": "Cancel",
+        "settings.action.diagnostics": "Open Diagnostics",
         "settings.empty.tones": "No recent apps yet",
         "settings.empty.snippets": "No snippets",
         "settings.empty.corrections": "No learned corrections",
@@ -138,6 +161,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.accessibility.flight.label": "Flight Recorder",
         "settings.accessibility.flight.help": "Toggle the rolling twenty second audio buffer held only in memory.",
         "settings.accessibility.privacy_summary.label": "Privacy status",
+        "settings.accessibility.diagnostics.help": "Open local service, permission, model, and installation diagnostics.",
         "settings.accessibility.tones_summary.label": "App tones summary",
         "settings.accessibility.snippets_summary.label": "Snippets summary",
         "settings.accessibility.vocabulary_summary.label": "Vocabulary summary",
@@ -153,6 +177,16 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
 SUPPORTED_LOCALES = tuple(STRING_CATALOGS)
 
 
+def resolve_locale(locale: str | None) -> str:
+    """Resolve an Apple-style language tag to an available catalog."""
+
+    tag = str(locale or "").strip().replace("_", "-").casefold()
+    for candidate in (tag, tag.split("-", 1)[0]):
+        if candidate in STRING_CATALOGS:
+            return candidate
+    return "en"
+
+
 def localized_string(key: str, *, locale: str = "en", **values: Any) -> str:
     """Return catalog copy with deterministic English fallback.
 
@@ -160,7 +194,7 @@ def localized_string(key: str, *, locale: str = "en", **values: Any) -> str:
     locale falls back to English so a partially translated build remains usable.
     """
 
-    catalog = STRING_CATALOGS.get(locale, STRING_CATALOGS["en"])
+    catalog = STRING_CATALOGS[resolve_locale(locale)]
     template = catalog.get(key, STRING_CATALOGS["en"].get(key))
     if template is None:
         raise KeyError(f"unknown localized string: {key}")
@@ -186,6 +220,9 @@ class NativeAppKitSmokeContract:
     settings_panes: tuple[str, ...]
     model_actions: tuple[str, ...]
     accessibility_catalog_keys: tuple[str, ...]
+    onboarding_steps: tuple[str, ...]
+    key_equivalents: tuple[str, ...]
+    locale_fallback: str
     allowed_side_effects: tuple[str, ...] = ()
 
 
@@ -221,6 +258,14 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "settings.dialog.vocabulary.bans",
             "settings.dialog.correction.chooser.label",
         ),
+        onboarding_steps=(
+            "permissions", "hotkey", "models", "first_dictation"),
+        key_equivalents=(
+            "return:continue-setup",
+            "command-d:diagnostics",
+            "command-r:verification",
+        ),
+        locale_fallback="en",
     )
 
 
@@ -516,7 +561,11 @@ def _build_onboarding_steps(
     hotkey_practiced: bool,
     models: Sequence[ModelStatus],
     first_dictation_complete: bool,
+    locale: str = "en",
 ) -> tuple[OnboardingStep, ...]:
+    def copy(key: str, **values: Any) -> str:
+        return localized_string(key, locale=locale, **values)
+
     microphone_ready = _status_contains(
         microphone_status, ("ready", "granted", "available"))
     accessibility_ready = _status_contains(
@@ -525,31 +574,31 @@ def _build_onboarding_steps(
     model_ready = _models_ready(models)
     return (
         OnboardingStep(
-            "permissions", "Allow Mac permissions",
-            "Microphone captures speech; Accessibility safely inserts it into "
-            "the field you chose.",
-            "Done" if permissions_ready else "Needs attention",
+            "permissions", copy("onboarding.permissions.title"),
+            copy("onboarding.permissions.detail"),
+            copy("onboarding.status.done") if permissions_ready else copy(
+                "onboarding.status.attention"),
             permissions_ready,
         ),
         OnboardingStep(
-            "hotkey", f"Practice {hotkey_label}",
-            f"Hold {hotkey_label} while speaking, then release. You can keep "
-            "using the Mac normally.",
-            "Done" if hotkey_practiced else "Try it now",
+            "hotkey", copy("onboarding.hotkey.title", hotkey=hotkey_label),
+            copy("onboarding.hotkey.detail", hotkey=hotkey_label),
+            copy("onboarding.status.done") if hotkey_practiced else copy(
+                "onboarding.status.try"),
             hotkey_practiced,
         ),
         OnboardingStep(
-            "models", "Confirm local models",
-            "At least one local recognition engine must be ready; fallbacks can "
-            "finish warming in the background.",
-            "Done" if model_ready else "Warming up",
+            "models", copy("onboarding.models.title"),
+            copy("onboarding.models.detail"),
+            copy("onboarding.status.done") if model_ready else copy(
+                "onboarding.status.warming"),
             model_ready,
         ),
         OnboardingStep(
-            "first_dictation", "Make your first dictation",
-            "Speak one sentence in any text field. Whisper Face will keep the "
-            "result recoverable if focus changes.",
-            "Done" if first_dictation_complete else "Your turn",
+            "first_dictation", copy("onboarding.first_dictation.title"),
+            copy("onboarding.first_dictation.detail"),
+            copy("onboarding.status.done") if first_dictation_complete else copy(
+                "onboarding.status.turn"),
             first_dictation_complete,
         ),
     )
@@ -735,6 +784,7 @@ def normalize_snapshot(
     onboarding_acknowledged: bool = False,
     settings_pane: str = "Modes",
     settings: UnifiedSettings | None = None,
+    locale: str = "en",
 ) -> GUIState:
     """Convert an intentionally loose runtime snapshot to stable UI state."""
 
@@ -772,6 +822,7 @@ def normalize_snapshot(
         hotkey_practiced=hotkey_practiced,
         models=models,
         first_dictation_complete=successful_dictation,
+        locale=locale,
     )
     degraded_issues = _build_degraded_issues(
         service_status=service_status,
@@ -841,15 +892,36 @@ def normalize_snapshot(
 class WhisperFaceViewModel:
     """Pure state/actions seam between the runtime and the native window."""
 
-    def __init__(self, actions: GUIActions):
+    def __init__(self, actions: GUIActions, *, locale: str = "en"):
         self.actions = actions
+        self.locale = resolve_locale(locale)
         self.state = GUIState()
         self._onboarding_acknowledged = False
+        self._hotkey_practiced = False
         self.refresh()
+
+    def localized(self, key: str, **values: Any) -> str:
+        return localized_string(key, locale=self.locale, **values)
+
+    def set_locale(self, locale: str | None) -> GUIState:
+        """Apply a supported system locale and rebuild locale-owned state."""
+
+        self.locale = resolve_locale(locale)
+        return self.refresh()
 
     def refresh(self) -> GUIState:
         try:
-            snapshot = self.actions.status_snapshot()
+            raw_snapshot = self.actions.status_snapshot()
+            snapshot = dict(raw_snapshot) if isinstance(
+                raw_snapshot, Mapping) else {}
+            if (snapshot.get("hotkey_practiced") is True
+                    or snapshot.get("first_dictation_complete") is True
+                    or _nonnegative_int(snapshot.get("last_word_count")) > 0
+                    or _status_contains(
+                        _clean_text(snapshot.get("capture_state"), ""),
+                        ("listen", "record", "captur"))):
+                self._hotkey_practiced = True
+            snapshot["hotkey_practiced"] = self._hotkey_practiced
             self.state = normalize_snapshot(
                 snapshot,
                 section=self.state.section,
@@ -857,6 +929,7 @@ class WhisperFaceViewModel:
                 onboarding_acknowledged=self._onboarding_acknowledged,
                 settings_pane=self.state.settings_pane,
                 settings=self.state.settings,
+                locale=self.locale,
             )
         except Exception as error:
             self.state = replace(
@@ -914,7 +987,7 @@ class WhisperFaceViewModel:
         try:
             self.actions.set_app_tone(app_id, normalized)
             return self.load_settings(
-                notice=localized_string("settings.notice.tone_saved"),
+                notice=self.localized("settings.notice.tone_saved"),
                 notice_level="success")
         except Exception as error:
             self.state = replace(
@@ -946,7 +1019,7 @@ class WhisperFaceViewModel:
             self.actions.save_snippet(
                 normalized_name, expected_original, value)
             return self.load_settings(
-                notice=localized_string("settings.notice.snippet_saved"),
+                notice=self.localized("settings.notice.snippet_saved"),
                 notice_level="success")
         except Exception as error:
             self.state = replace(
@@ -963,7 +1036,7 @@ class WhisperFaceViewModel:
         try:
             self.actions.delete_snippet(normalized_name, expected_original)
             return self.load_settings(
-                notice=localized_string("settings.notice.snippet_deleted"),
+                notice=self.localized("settings.notice.snippet_deleted"),
                 notice_level="success")
         except Exception as error:
             self.state = replace(
@@ -1017,7 +1090,7 @@ class WhisperFaceViewModel:
         try:
             self.actions.save_vocabulary(terms, exclusions)
             return self.load_settings(
-                notice=localized_string("settings.notice.vocabulary_saved"),
+                notice=self.localized("settings.notice.vocabulary_saved"),
                 notice_level="success")
         except Exception as error:
             self.state = replace(
@@ -1042,7 +1115,7 @@ class WhisperFaceViewModel:
                 raise RuntimeError(
                     "the learned snippet edit no longer exists")
             return self.load_settings(
-                notice=localized_string(
+                notice=self.localized(
                     "settings.notice.correction_forgotten"),
                 notice_level="success")
         except Exception as error:
@@ -1060,7 +1133,7 @@ class WhisperFaceViewModel:
         if step is None:
             self.state = replace(
                 self.state, section="Overview",
-                notice="Setup is complete — Whisper Face is ready.",
+                notice=self.localized("onboarding.complete"),
                 notice_level="success")
         elif step.key == "permissions":
             self.state = replace(
@@ -1251,6 +1324,7 @@ try:  # The view-model above remains usable in headless test environments.
         NSColor,
         NSControlStateValueOff,
         NSControlStateValueOn,
+        NSEventModifierFlagCommand,
         NSFont,
         NSMakeRect,
         NSNoBorder,
@@ -1269,7 +1343,7 @@ try:  # The view-model above remains usable in headless test environments.
         NSWindowStyleMaskMiniaturizable,
         NSWindowStyleMaskTitled,
     )
-    from Foundation import NSObject, NSTimer, NSUserDefaults
+    from Foundation import NSLocale, NSObject, NSTimer, NSUserDefaults
 
     APPKIT_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised only outside macOS installs
@@ -1340,6 +1414,12 @@ if APPKIT_AVAILABLE:
             self.timer = None
             self.defaults = None
             if read_system_state:
+                try:
+                    preferred = NSLocale.preferredLanguages()
+                    if preferred:
+                        self.view_model.set_locale(str(preferred[0]))
+                except Exception:
+                    pass
                 self.defaults = NSUserDefaults.alloc().initWithSuiteName_(
                     DEFAULTS_SUITE)
                 self.view_model.acknowledge_onboarding(bool(
@@ -1356,6 +1436,10 @@ if APPKIT_AVAILABLE:
                     pass
             self._build_window()
             return self
+
+        @objc.python_method
+        def _l(self, key: str, **values: Any) -> str:
+            return self.view_model.localized(key, **values)
 
         def initWithViewModel_(self, view_model: WhisperFaceViewModel):
             self = objc.super(WhisperFaceWindowController, self).init()
@@ -1384,7 +1468,7 @@ if APPKIT_AVAILABLE:
 
             title = _label(APP_NAME, NSMakeRect(32, 518, 300, 30),
                            size=24, weight="bold")
-            subtitle = _label("Private, fast voice input on your Mac",
+            subtitle = _label(self._l("app.subtitle"),
                               NSMakeRect(33, 493, 360, 20),
                               size=12, color=_SECONDARY)
             root.addSubview_(title)
@@ -1396,15 +1480,15 @@ if APPKIT_AVAILABLE:
             self.section_control.setSegmentStyle_(NSSegmentStyleRounded)
             for index, section in enumerate(SECTIONS):
                 self.section_control.setLabel_forSegment_(
-                    localized_string(f"nav.{section.casefold()}"), index)
+                    self._l(f"nav.{section.casefold()}"), index)
                 self.section_control.setWidth_forSegment_(148, index)
             self.section_control.setSelectedSegment_(0)
             self.section_control.setTarget_(self)
             self.section_control.setAction_("sectionChanged:")
             _accessible(
                 self.section_control,
-                localized_string("settings.accessibility.sections.label"),
-                localized_string("settings.accessibility.sections.help"))
+                self._l("settings.accessibility.sections.label"),
+                self._l("settings.accessibility.sections.help"))
             root.addSubview_(self.section_control)
 
             page_frame = NSMakeRect(31, 25, 758, 402)
@@ -1425,6 +1509,23 @@ if APPKIT_AVAILABLE:
                             size=11, color=NSColor.systemRedColor())
             root.addSubview_(notice)
             self.dynamic["notice"] = notice
+            self.key_views_by_section = {
+                "Overview": (
+                    self.dynamic["onboarding_action"],
+                    self.dynamic["pause_button"],
+                    self.dynamic["review_issue_button"],
+                    self.dynamic["copy_outbox_button"],
+                ),
+                "Results": (),
+                "Settings": (self.dynamic["settings_pane_control"],),
+                "Models": (),
+                "Diagnostics": (
+                    self.dynamic["open_log_button"],
+                    self.dynamic["verify_button"],
+                    self.dynamic["license_button"],
+                    self.dynamic["source_button"],
+                ),
+            }
             self.window.setInitialFirstResponder_(self.section_control)
             self.render()
 
@@ -1478,9 +1579,11 @@ if APPKIT_AVAILABLE:
             onboarding_detail = _label(
                 "", NSMakeRect(20, 22, 540, 24), size=11, color=_SECONDARY)
             onboarding_action = _button(
-                "Continue Setup", NSMakeRect(590, 40, 136, 36),
+                self._l("onboarding.action.continue"),
+                NSMakeRect(590, 40, 136, 36),
                 self, "continueSetup:",
-                help_text="Open the next incomplete first-run setup step.")
+                help_text=self._l("onboarding.action.help"))
+            onboarding_action.setKeyEquivalent_("\r")
             onboarding.addSubview_(onboarding_progress)
             onboarding.addSubview_(onboarding_title)
             onboarding.addSubview_(onboarding_detail)
@@ -1574,25 +1677,25 @@ if APPKIT_AVAILABLE:
 
         def _build_settings(self, page: Any) -> None:
             page.addSubview_(_label(
-                localized_string("settings.title"),
+                self._l("settings.title"),
                 NSMakeRect(4, 351, 500, 32), size=22, weight="bold"))
             page.addSubview_(_label(
-                localized_string("settings.subtitle"),
+                self._l("settings.subtitle"),
                 NSMakeRect(5, 326, 720, 20), size=13, color=_SECONDARY))
             pane_control = NSSegmentedControl.alloc().initWithFrame_(
                 NSMakeRect(0, 284, 758, 32))
             pane_control.setSegmentCount_(len(SETTINGS_PANES))
             pane_control.setSegmentStyle_(NSSegmentStyleRounded)
             for index, pane in enumerate(SETTINGS_PANES):
-                pane_control.setLabel_forSegment_(localized_string(
+                pane_control.setLabel_forSegment_(self._l(
                     f"settings.pane.{pane.casefold()}"), index)
                 pane_control.setWidth_forSegment_(250, index)
             pane_control.setTarget_(self)
             pane_control.setAction_("settingsPaneChanged:")
             _accessible(
                 pane_control,
-                localized_string("settings.accessibility.category.label"),
-                localized_string("settings.accessibility.category.help"))
+                self._l("settings.accessibility.category.label"),
+                self._l("settings.accessibility.category.help"))
             page.addSubview_(pane_control)
 
             content_frame = NSMakeRect(0, 0, 758, 268)
@@ -1603,29 +1706,30 @@ if APPKIT_AVAILABLE:
 
             modes = panes["Modes"]
             modes.addSubview_(_label(
-                localized_string("settings.modes.title"),
+                self._l("settings.modes.title"),
                 NSMakeRect(5, 238, 720, 22), size=14, weight="medium"))
             for index, mode in enumerate(MODE_GUIDE):
                 column, row = index % 2, index // 2
                 card = _card(NSMakeRect(column * 379, 153 - row * 66, 365, 54))
                 card.addSubview_(_label(
-                    localized_string(f"settings.mode.{mode}.name"),
+                    self._l(f"settings.mode.{mode}.name"),
                     NSMakeRect(14, 28, 105, 18),
                     size=12, weight="bold"))
                 card.addSubview_(_label(
-                    localized_string(f"settings.mode.{mode}.shortcut"),
+                    self._l(f"settings.mode.{mode}.shortcut"),
                     NSMakeRect(115, 28, 235, 18),
                     size=11, weight="medium", color=_ACCENT))
                 card.addSubview_(_label(
-                    localized_string(f"settings.mode.{mode}.detail"),
+                    self._l(f"settings.mode.{mode}.detail"),
                     NSMakeRect(14, 8, 330, 17),
                     size=10, color=_SECONDARY))
                 modes.addSubview_(card)
             modes.addSubview_(_label(
-                localized_string("settings.modes.footer"),
+                self._l("settings.modes.footer"),
                 NSMakeRect(5, 12, 720, 18), size=11, color=_SECONDARY))
 
             personalize = panes["Personalize"]
+            personalize_key_views: list[Any] = []
             rows = (
                 ("tones", "settings.personalize.tones", "editTone:"),
                 ("snippets", "settings.personalize.snippets", "editSnippets:"),
@@ -1636,7 +1740,7 @@ if APPKIT_AVAILABLE:
                 y = 202 - index * 62
                 card = _card(NSMakeRect(0, y, 758, 52))
                 card.addSubview_(_label(
-                    localized_string(title_key), NSMakeRect(18, 25, 260, 19),
+                    self._l(title_key), NSMakeRect(18, 25, 260, 19),
                     size=13, weight="bold"))
                 detail = _label("", NSMakeRect(18, 7, 550, 18),
                                 size=11, color=_SECONDARY)
@@ -1646,24 +1750,25 @@ if APPKIT_AVAILABLE:
                             if key == "corrections"
                             else "settings.accessibility.edit.help")
                 button = _button(
-                    localized_string(action_key), NSMakeRect(645, 10, 94, 32),
+                    self._l(action_key), NSMakeRect(645, 10, 94, 32),
                     self, selector,
-                    help_text=localized_string(
+                    help_text=self._l(
                         help_key,
-                        setting=localized_string(title_key).casefold()))
+                        setting=self._l(title_key).casefold()))
                 card.addSubview_(detail)
                 card.addSubview_(button)
                 personalize.addSubview_(card)
+                personalize_key_views.append(button)
                 self.dynamic[f"settings_{key}_detail"] = detail
                 self.dynamic[f"settings_{key}_button"] = button
 
             privacy = panes["Privacy"]
             privacy.addSubview_(_label(
-                localized_string("settings.privacy.title"),
+                self._l("settings.privacy.title"),
                 NSMakeRect(5, 238, 500, 22), size=14, weight="medium"))
             face_card = _card(NSMakeRect(0, 137, 758, 84))
             face_card.addSubview_(_label(
-                localized_string("settings.privacy.face"),
+                self._l("settings.privacy.face"),
                 NSMakeRect(18, 53, 200, 20), size=13, weight="bold"))
             picker = NSSegmentedControl.alloc().initWithFrame_(
                 NSMakeRect(18, 12, 720, 36))
@@ -1672,47 +1777,62 @@ if APPKIT_AVAILABLE:
             for index, face in enumerate(FACES):
                 picker.setLabel_forSegment_(
                     f"{FACE_EMOJI[face]} "
-                    f"{localized_string(f'settings.face.{face}')}", index)
+                    f"{self._l(f'settings.face.{face}')}", index)
                 picker.setWidth_forSegment_(138, index)
             picker.setTarget_(self)
             picker.setAction_("faceChanged:")
             _accessible(
                 picker,
-                localized_string("settings.accessibility.face.label"),
-                localized_string("settings.accessibility.face.help"))
+                self._l("settings.accessibility.face.label"),
+                self._l("settings.accessibility.face.help"))
             face_card.addSubview_(picker)
             privacy.addSubview_(face_card)
 
             flight_card = _card(NSMakeRect(0, 35, 758, 84))
             flight_card.addSubview_(_label(
-                localized_string("settings.privacy.flight"),
+                self._l("settings.privacy.flight"),
                 NSMakeRect(18, 50, 260, 22), size=14, weight="bold"))
             flight_card.addSubview_(_label(
-                localized_string("settings.privacy.flight.detail"),
+                self._l("settings.privacy.flight.detail"),
                 NSMakeRect(18, 24, 535, 20), size=11, color=_SECONDARY))
             flight = NSButton.alloc().initWithFrame_(NSMakeRect(625, 26, 110, 32))
             flight.setButtonType_(3)
-            flight.setTitle_(localized_string("settings.state.enabled"))
+            flight.setTitle_(self._l("settings.state.enabled"))
             flight.setTarget_(self)
             flight.setAction_("flightChanged:")
             _accessible(
                 flight,
-                localized_string("settings.accessibility.flight.label"),
-                localized_string("settings.accessibility.flight.help"))
+                self._l("settings.accessibility.flight.label"),
+                self._l("settings.accessibility.flight.help"))
             flight_card.addSubview_(flight)
             privacy.addSubview_(flight_card)
             privacy_summary = _label(
-                localized_string("settings.state.local_processing"),
+                self._l("settings.state.local_processing"),
                 NSMakeRect(5, 5, 700, 20),
                 size=11, weight="medium", color=_ACCENT)
             privacy.addSubview_(privacy_summary)
+            diagnostics = _button(
+                self._l("settings.action.diagnostics"),
+                NSMakeRect(600, 230, 138, 30), self, "openDiagnostics:",
+                help_text=self._l(
+                    "settings.accessibility.diagnostics.help"))
+            diagnostics.setKeyEquivalent_("d")
+            diagnostics.setKeyEquivalentModifierMask_(
+                NSEventModifierFlagCommand)
+            privacy.addSubview_(diagnostics)
 
             self.dynamic.update(
                 settings_pane_control=pane_control,
                 settings_panes=panes,
+                settings_key_views={
+                    "Modes": (),
+                    "Personalize": tuple(personalize_key_views),
+                    "Privacy": (picker, flight, diagnostics),
+                },
                 face_picker=picker,
                 flight_toggle=flight,
                 privacy_summary=privacy_summary,
+                diagnostics_button=diagnostics,
             )
 
         def _build_models(self, page: Any) -> None:
@@ -1769,6 +1889,8 @@ if APPKIT_AVAILABLE:
                                self, "openLog:")
             verify = _button("Run Verification", NSMakeRect(132, 89, 152, 36),
                              self, "verify:")
+            verify.setKeyEquivalent_("r")
+            verify.setKeyEquivalentModifierMask_(NSEventModifierFlagCommand)
             license_notices = _button(
                 "License Notices", NSMakeRect(296, 89, 138, 36),
                 self, "openLicense:")
@@ -1793,9 +1915,15 @@ if APPKIT_AVAILABLE:
             page.addSubview_(_label(
                 "AGPL-3.0-only · no warranty · corresponding source available",
                 NSMakeRect(5, 24, 620, 20), size=11, color=_SECONDARY))
-            self.dynamic.update(verify_button=verify, verify_progress=progress,
-                                verification=verification,
-                                diag_guidance=guidance)
+            self.dynamic.update(
+                open_log_button=open_log,
+                verify_button=verify,
+                license_button=license_notices,
+                source_button=source,
+                verify_progress=progress,
+                verification=verification,
+                diag_guidance=guidance,
+            )
 
         def show(self) -> None:
             self.view_model.refresh()
@@ -1805,6 +1933,34 @@ if APPKIT_AVAILABLE:
             if self.timer is None:
                 self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                     2.0, self, "refreshTimer:", None, True)
+
+        @objc.python_method
+        def _configure_key_view_loop(self, state: GUIState) -> int:
+            """Make Tab order explicit while leaving arrows to native controls."""
+
+            controls = list(self.key_views_by_section[state.section])
+            if state.section == "Settings":
+                controls.extend(
+                    self.dynamic["settings_key_views"][state.settings_pane])
+
+            def visible_and_enabled(control: Any) -> bool:
+                if hasattr(control, "isEnabled") and not bool(
+                        control.isEnabled()):
+                    return False
+                view = control
+                while view is not None:
+                    if bool(view.isHidden()):
+                        return False
+                    view = view.superview()
+                return True
+
+            chain = [self.section_control]
+            chain.extend(
+                control for control in controls
+                if visible_and_enabled(control))
+            for current, following in zip(chain, chain[1:] + chain[:1]):
+                current.setNextKeyView_(following)
+            return len(chain)
 
         def render(self) -> None:
             state = self.view_model.state
@@ -1892,15 +2048,18 @@ if APPKIT_AVAILABLE:
                 next_step is None or state.onboarding_acknowledged)
             if next_step is not None:
                 self.dynamic["onboarding_progress"].setStringValue_(
-                    f"FIRST-RUN SETUP · {completed} OF {len(state.onboarding_steps)} COMPLETE")
+                    self._l(
+                        "onboarding.progress", completed=completed,
+                        total=len(state.onboarding_steps)))
                 self.dynamic["onboarding_title"].setStringValue_(next_step.title)
                 self.dynamic["onboarding_detail"].setStringValue_(next_step.detail)
                 action_title = {
-                    "permissions": "Review Permissions",
-                    "hotkey": "Show Practice",
-                    "models": "View Models",
-                    "first_dictation": "Show How",
-                }.get(next_step.key, "Continue Setup")
+                    "permissions": self._l("onboarding.action.permissions"),
+                    "hotkey": self._l("onboarding.action.hotkey"),
+                    "models": self._l("onboarding.action.models"),
+                    "first_dictation": self._l(
+                        "onboarding.action.first_dictation"),
+                }.get(next_step.key, self._l("onboarding.action.continue"))
                 self.dynamic["onboarding_action"].setTitle_(action_title)
                 for key, label in (
                     ("onboarding_progress", "First run setup progress"),
@@ -1970,24 +2129,24 @@ if APPKIT_AVAILABLE:
                 view.setHidden_(pane != state.settings_pane)
             settings = state.settings
             setting_summaries = {
-                "tones": localized_string(
+                "tones": self._l(
                     "settings.personalize.tones.detail",
                     count=len(settings.app_tones)),
-                "snippets": localized_string(
+                "snippets": self._l(
                     "settings.personalize.snippets.detail",
                     count=len(settings.snippets)),
-                "vocabulary": localized_string(
+                "vocabulary": self._l(
                     "settings.personalize.vocabulary.detail",
                     terms=len(settings.manual_vocabulary),
                     bans=len(settings.banned_vocabulary)),
-                "corrections": localized_string(
+                "corrections": self._l(
                     "settings.personalize.corrections.detail",
                     count=len(settings.corrections)),
             }
             for key, value in setting_summaries.items():
                 set_accessible_text(
                     self.dynamic[f"settings_{key}_detail"], value,
-                    label=localized_string(
+                    label=self._l(
                         f"settings.accessibility.{key}_summary.label"))
             self.dynamic["settings_tones_button"].setEnabled_(
                 bool(settings.app_tones))
@@ -1997,8 +2156,8 @@ if APPKIT_AVAILABLE:
             self.dynamic["face_picker"].setSelectedSegment_(FACES.index(state.face))
             sync_accessibility(
                 self.dynamic["face_picker"],
-                localized_string(f"settings.face.{state.face}"),
-                label=localized_string(
+                self._l(f"settings.face.{state.face}"),
+                label=self._l(
                     "settings.accessibility.face.label"),
             )
             self.dynamic["flight_toggle"].setState_(
@@ -2007,13 +2166,13 @@ if APPKIT_AVAILABLE:
             self.dynamic["flight_toggle"].setTitle_(state.flight_state)
             sync_accessibility(
                 self.dynamic["flight_toggle"], state.flight_state,
-                label=localized_string(
+                label=self._l(
                     "settings.accessibility.flight.label"),
             )
             self.dynamic["privacy_summary"].setStringValue_(state.privacy_summary)
             sync_accessibility(
                 self.dynamic["privacy_summary"], state.privacy_summary,
-                label=localized_string(
+                label=self._l(
                     "settings.accessibility.privacy_summary.label"),
             )
 
@@ -2093,6 +2252,7 @@ if APPKIT_AVAILABLE:
                 else NSColor.systemGreenColor()
                 if state.notice_level == "success" else _SECONDARY)
             self.dynamic["notice"].setTextColor_(notice_color)
+            self._configure_key_view_loop(state)
 
         @objc.python_method
         def _text_editor(self, frame: Any, value: str, *,
@@ -2114,7 +2274,7 @@ if APPKIT_AVAILABLE:
             alert.setMessageText_(title)
             alert.setInformativeText_(message)
             alert.addButtonWithTitle_(primary)
-            alert.addButtonWithTitle_(localized_string("settings.action.cancel"))
+            alert.addButtonWithTitle_(self._l("settings.action.cancel"))
             return alert.runModal() == 1000
 
         def settingsPaneChanged_(self, sender: Any) -> None:
@@ -2132,17 +2292,17 @@ if APPKIT_AVAILABLE:
                 f"{item.name} — {item.bundle}" for item in tones])
             _accessible(
                 app_popup,
-                localized_string("settings.dialog.tone.app.label"),
-                localized_string("settings.dialog.tone.app.help"))
+                self._l("settings.dialog.tone.app.label"),
+                self._l("settings.dialog.tone.app.help"))
             tone_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
                 NSMakeRect(0, 4, 430, 28), False)
             tone_popup.addItemsWithTitles_([
-                localized_string(f"settings.tone.{tone}")
+                self._l(f"settings.tone.{tone}")
                 for tone in TONE_CHOICES])
             _accessible(
                 tone_popup,
-                localized_string("settings.dialog.tone.choice.label"),
-                localized_string("settings.dialog.tone.choice.help"))
+                self._l("settings.dialog.tone.choice.label"),
+                self._l("settings.dialog.tone.choice.help"))
             self._tone_dialog_apps = tones
             self._tone_dialog_tone_popup = tone_popup
             app_popup.setTarget_(self)
@@ -2157,13 +2317,13 @@ if APPKIT_AVAILABLE:
             if not tones:
                 return
             alert = NSAlert.alloc().init()
-            alert.setMessageText_(localized_string("settings.dialog.tone.title"))
-            alert.setInformativeText_(localized_string(
+            alert.setMessageText_(self._l("settings.dialog.tone.title"))
+            alert.setInformativeText_(self._l(
                 "settings.dialog.tone.message"))
             form, app_popup, tone_popup = self._tone_dialog_form(tones)
             alert.setAccessoryView_(form)
-            alert.addButtonWithTitle_(localized_string("settings.action.save"))
-            alert.addButtonWithTitle_(localized_string("settings.action.cancel"))
+            alert.addButtonWithTitle_(self._l("settings.action.save"))
+            alert.addButtonWithTitle_(self._l("settings.action.cancel"))
             if alert.runModal() == 1000:
                 selected = tones[app_popup.indexOfSelectedItem()]
                 self.view_model.set_app_tone(
@@ -2185,33 +2345,33 @@ if APPKIT_AVAILABLE:
         @objc.python_method
         def _edit_snippet(self, snippet: SnippetSetting | None) -> None:
             alert = NSAlert.alloc().init()
-            alert.setMessageText_(localized_string(
+            alert.setMessageText_(self._l(
                 "settings.dialog.snippet.edit" if snippet else
                 "settings.dialog.snippet.add"))
             form = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 500, 200))
             form.addSubview_(_label(
-                localized_string("settings.dialog.snippet.name"),
+                self._l("settings.dialog.snippet.name"),
                 NSMakeRect(0, 177, 500, 18), size=11, color=_SECONDARY))
             name = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 145, 500, 28))
             name.setStringValue_(snippet.name if snippet else "")
             name.setEditable_(snippet is None)
             _accessible(
                 name,
-                localized_string("settings.dialog.snippet.name"),
-                localized_string("settings.dialog.snippet.name.help"))
+                self._l("settings.dialog.snippet.name"),
+                self._l("settings.dialog.snippet.name.help"))
             form.addSubview_(name)
             form.addSubview_(_label(
-                localized_string("settings.dialog.snippet.value"),
+                self._l("settings.dialog.snippet.value"),
                 NSMakeRect(0, 120, 500, 18), size=11, color=_SECONDARY))
             scroll, editor = self._text_editor(
                 NSMakeRect(0, 0, 500, 116), snippet.text if snippet else "",
-                label=localized_string("settings.dialog.snippet.value"),
-                help_text=localized_string(
+                label=self._l("settings.dialog.snippet.value"),
+                help_text=self._l(
                     "settings.dialog.snippet.value.help"))
             form.addSubview_(scroll)
             alert.setAccessoryView_(form)
-            alert.addButtonWithTitle_(localized_string("settings.action.save"))
-            alert.addButtonWithTitle_(localized_string("settings.action.cancel"))
+            alert.addButtonWithTitle_(self._l("settings.action.save"))
+            alert.addButtonWithTitle_(self._l("settings.action.cancel"))
             if alert.runModal() == 1000:
                 self.view_model.save_snippet(
                     str(name.stringValue()), str(editor.string()),
@@ -2221,22 +2381,22 @@ if APPKIT_AVAILABLE:
         def editSnippets_(self, _sender: Any) -> None:
             snippets = self.view_model.state.settings.snippets
             alert = NSAlert.alloc().init()
-            alert.setMessageText_(localized_string("settings.personalize.snippets"))
+            alert.setMessageText_(self._l("settings.personalize.snippets"))
             chooser = NSPopUpButton.alloc().initWithFrame_pullsDown_(
                 NSMakeRect(0, 0, 430, 28), False)
             chooser.addItemsWithTitles_([
-                item.name for item in snippets] or [localized_string(
+                item.name for item in snippets] or [self._l(
                     "settings.empty.snippets")])
             chooser.setEnabled_(bool(snippets))
             _accessible(
                 chooser,
-                localized_string("settings.dialog.snippet.chooser.label"),
-                localized_string("settings.dialog.snippet.chooser.help"))
+                self._l("settings.dialog.snippet.chooser.label"),
+                self._l("settings.dialog.snippet.chooser.help"))
             alert.setAccessoryView_(chooser)
-            alert.addButtonWithTitle_(localized_string("settings.action.edit"))
-            alert.addButtonWithTitle_(localized_string("settings.action.add"))
-            alert.addButtonWithTitle_(localized_string("settings.action.delete"))
-            alert.addButtonWithTitle_(localized_string("settings.action.cancel"))
+            alert.addButtonWithTitle_(self._l("settings.action.edit"))
+            alert.addButtonWithTitle_(self._l("settings.action.add"))
+            alert.addButtonWithTitle_(self._l("settings.action.delete"))
+            alert.addButtonWithTitle_(self._l("settings.action.cancel"))
             response = alert.runModal()
             selected = (snippets[chooser.indexOfSelectedItem()]
                         if snippets else None)
@@ -2245,44 +2405,44 @@ if APPKIT_AVAILABLE:
             elif response == 1001:
                 self._edit_snippet(None)
             elif response == 1002 and selected is not None and self._confirm(
-                    localized_string("settings.dialog.delete.title"),
-                    localized_string("settings.dialog.delete.message",
+                    self._l("settings.dialog.delete.title"),
+                    self._l("settings.dialog.delete.message",
                                      name=selected.name),
-                    localized_string("settings.action.delete")):
+                    self._l("settings.action.delete")):
                 self.view_model.delete_snippet(selected.name, selected.text)
                 self.render()
 
         def editVocabulary_(self, _sender: Any) -> None:
             settings = self.view_model.state.settings
             alert = NSAlert.alloc().init()
-            alert.setMessageText_(localized_string(
+            alert.setMessageText_(self._l(
                 "settings.dialog.vocabulary.title"))
-            alert.setInformativeText_(localized_string(
+            alert.setInformativeText_(self._l(
                 "settings.dialog.vocabulary.message"))
             form = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 520, 220))
             form.addSubview_(_label(
-                localized_string("settings.dialog.vocabulary.terms"),
+                self._l("settings.dialog.vocabulary.terms"),
                 NSMakeRect(0, 198, 250, 18), size=11, color=_SECONDARY))
             form.addSubview_(_label(
-                localized_string("settings.dialog.vocabulary.bans"),
+                self._l("settings.dialog.vocabulary.bans"),
                 NSMakeRect(270, 198, 250, 18), size=11, color=_SECONDARY))
             term_scroll, term_editor = self._text_editor(
                 NSMakeRect(0, 0, 250, 194),
                 "\n".join(settings.manual_vocabulary),
-                label=localized_string("settings.dialog.vocabulary.terms"),
-                help_text=localized_string(
+                label=self._l("settings.dialog.vocabulary.terms"),
+                help_text=self._l(
                     "settings.dialog.vocabulary.terms.help"))
             ban_scroll, ban_editor = self._text_editor(
                 NSMakeRect(270, 0, 250, 194),
                 "\n".join(settings.banned_vocabulary),
-                label=localized_string("settings.dialog.vocabulary.bans"),
-                help_text=localized_string(
+                label=self._l("settings.dialog.vocabulary.bans"),
+                help_text=self._l(
                     "settings.dialog.vocabulary.bans.help"))
             form.addSubview_(term_scroll)
             form.addSubview_(ban_scroll)
             alert.setAccessoryView_(form)
-            alert.addButtonWithTitle_(localized_string("settings.action.save"))
-            alert.addButtonWithTitle_(localized_string("settings.action.cancel"))
+            alert.addButtonWithTitle_(self._l("settings.action.save"))
+            alert.addButtonWithTitle_(self._l("settings.action.cancel"))
             if alert.runModal() == 1000:
                 self.view_model.save_vocabulary(
                     str(term_editor.string()).splitlines(),
@@ -2294,7 +2454,7 @@ if APPKIT_AVAILABLE:
             if not corrections:
                 return
             alert = NSAlert.alloc().init()
-            alert.setMessageText_(localized_string(
+            alert.setMessageText_(self._l(
                 "settings.personalize.corrections"))
             chooser = NSPopUpButton.alloc().initWithFrame_pullsDown_(
                 NSMakeRect(0, 0, 500, 28), False)
@@ -2303,22 +2463,22 @@ if APPKIT_AVAILABLE:
                 for item in corrections])
             _accessible(
                 chooser,
-                localized_string(
+                self._l(
                     "settings.dialog.correction.chooser.label"),
-                localized_string(
+                self._l(
                     "settings.dialog.correction.chooser.help"))
             alert.setAccessoryView_(chooser)
-            alert.addButtonWithTitle_(localized_string("settings.action.forget"))
-            alert.addButtonWithTitle_(localized_string("settings.action.cancel"))
+            alert.addButtonWithTitle_(self._l("settings.action.forget"))
+            alert.addButtonWithTitle_(self._l("settings.action.cancel"))
             if alert.runModal() != 1000:
                 return
             selected = corrections[chooser.indexOfSelectedItem()]
             if self._confirm(
-                    localized_string("settings.dialog.forget.title"),
-                    localized_string("settings.dialog.forget.message",
+                    self._l("settings.dialog.forget.title"),
+                    self._l("settings.dialog.forget.message",
                                      source=selected.source,
                                      target=selected.target),
-                    localized_string("settings.action.forget")):
+                    self._l("settings.action.forget")):
                 self.view_model.forget_learned(selected.kind, selected.key)
                 self.render()
 
@@ -2341,6 +2501,10 @@ if APPKIT_AVAILABLE:
 
         def continueSetup_(self, _sender: Any) -> None:
             self.view_model.show_next_onboarding_step()
+            self.render()
+
+        def openDiagnostics_(self, _sender: Any) -> None:
+            self.view_model.select_section("Diagnostics")
             self.render()
 
         def reviewIssue_(self, _sender: Any) -> None:
@@ -2507,7 +2671,7 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         forget_correction=lambda key: forget("correction", key),
         forget_snippet_edit=lambda key: forget("snippet", key),
     )
-    model = WhisperFaceViewModel(actions)
+    model = WhisperFaceViewModel(actions, locale="en-US")
     controller = None
 
     def require(condition: bool, label: str) -> None:
@@ -2529,6 +2693,50 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         require(
             tuple(controller.dynamic["settings_panes"]) == SETTINGS_PANES,
             "settings panes")
+        require(model.locale == "en", "locale propagation")
+        require(
+            model.state.onboarding_steps[0].key == "permissions",
+            "first-run permissions")
+        require(
+            str(controller.dynamic["onboarding_action"].keyEquivalent()) ==
+            "\r", "onboarding key equivalent")
+        require(
+            int(controller._configure_key_view_loop(model.state)) >= 3,
+            "overview key-view loop")
+        require(
+            controller.section_control.nextKeyView() is not None,
+            "initial next key view")
+
+        controller.continueSetup_(None)
+        require(model.state.section == "Diagnostics", "permission route")
+        runtime.update(
+            service_status="Running",
+            microphone_status="Ready",
+            accessibility_status="Granted",
+        )
+        model.refresh()
+        require(
+            next(step for step in model.state.onboarding_steps
+                 if not step.complete).key == "hotkey",
+            "hotkey practice")
+        runtime["capture_state"] = "Listening"
+        model.refresh()
+        require(
+            next(step for step in model.state.onboarding_steps
+                 if not step.complete).key == "models",
+            "model readiness")
+        runtime["capture_state"] = "Ready"
+        runtime["models"][0]["status"] = "Running"
+        model.refresh()
+        require(
+            next(step for step in model.state.onboarding_steps
+                 if not step.complete).key == "first_dictation",
+            "first dictation")
+        runtime["last_word_count"] = 4
+        model.refresh()
+        controller.render()
+        require(model.state.onboarding_complete, "onboarding completion")
+        require(model.state.onboarding_acknowledged, "onboarding acknowledgement")
 
         for index, section in enumerate(SECTIONS):
             controller.section_control.setSelectedSegment_(index)
@@ -2551,6 +2759,30 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                 if not bool(view.isHidden()))
             require(model.state.settings_pane == pane, f"pane {pane}")
             require(visible == (pane,), f"render pane {pane}")
+        require(
+            int(controller._configure_key_view_loop(model.state)) >= 2,
+            "settings key-view loop")
+        require(
+            controller.section_control.nextKeyView() == pane_control,
+            "settings Tab order")
+        require(
+            str(controller.dynamic["diagnostics_button"].keyEquivalent()) ==
+            "d", "diagnostics key equivalent")
+        require(
+            int(controller.dynamic[
+                "diagnostics_button"].keyEquivalentModifierMask()) & int(
+                    NSEventModifierFlagCommand),
+            "diagnostics command modifier")
+        controller.openDiagnostics_(None)
+        require(model.state.section == "Diagnostics", "diagnostics route")
+        require(
+            str(controller.dynamic["verify_button"].keyEquivalent()) == "r",
+            "verification key equivalent")
+        require(
+            int(controller.dynamic[
+                "verify_button"].keyEquivalentModifierMask()) & int(
+                    NSEventModifierFlagCommand),
+            "verification command modifier")
 
         require(
             accessible_value(controller.section_control,
@@ -2624,6 +2856,8 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             "sections": len(SECTIONS),
             "settings_panes": len(SETTINGS_PANES),
             "model_actions": len(expected_calls),
+            "onboarding_steps": len(model.state.onboarding_steps),
+            "key_equivalents": 3,
         }
     finally:
         if controller is not None:
@@ -2640,8 +2874,8 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
 class WhisperFaceGUI:
     """Retained facade suitable for ownership by the existing status bar."""
 
-    def __init__(self, actions: GUIActions):
-        self.view_model = WhisperFaceViewModel(actions)
+    def __init__(self, actions: GUIActions, *, locale: str = "en"):
+        self.view_model = WhisperFaceViewModel(actions, locale=locale)
         self._controller: Any = None
 
     @property
@@ -2657,10 +2891,10 @@ class WhisperFaceGUI:
         self._controller.show()
 
 
-def create_gui(actions: GUIActions) -> WhisperFaceGUI:
+def create_gui(actions: GUIActions, *, locale: str = "en") -> WhisperFaceGUI:
     """Create (but do not display) the GUI facade."""
 
-    return WhisperFaceGUI(actions)
+    return WhisperFaceGUI(actions, locale=locale)
 
 
 __all__ = [
@@ -2689,5 +2923,6 @@ __all__ = [
     "normalize_snapshot",
     "normalize_settings",
     "run_native_appkit_smoke",
+    "resolve_locale",
     "tone_for_app_index",
 ]

@@ -28,6 +28,7 @@ from whisper_face_gui import (
     normalize_snapshot,
     normalize_settings,
     run_native_appkit_smoke,
+    resolve_locale,
     set_accessible_text,
     sync_accessibility,
     tone_for_app_index,
@@ -67,6 +68,8 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(SUPPORTED_LOCALES, ("en",))
         self.assertEqual(tuple(STRING_CATALOGS), ("en",))
         self.assertEqual(localized_string("nav.settings"), "Settings")
+        self.assertEqual(resolve_locale("en-US"), "en")
+        self.assertEqual(resolve_locale("fr-CA"), "en")
         self.assertEqual(
             localized_string("settings.personalize.snippets.detail",
                              locale="fr", count=2),
@@ -75,12 +78,28 @@ class SnapshotTests(unittest.TestCase):
             localized_string("missing.key")
         with self.assertRaises(ValueError):
             localized_string("settings.personalize.snippets.detail")
+        for key in (
+            "onboarding.permissions.title",
+            "onboarding.hotkey.title",
+            "onboarding.models.title",
+            "onboarding.first_dictation.title",
+            "onboarding.progress",
+            "settings.action.diagnostics",
+        ):
+            with self.subTest(key=key):
+                self.assertIn(key, STRING_CATALOGS["en"])
 
     def test_native_appkit_smoke_contract_is_headless_and_catalog_complete(self):
         contract = native_appkit_smoke_contract()
         self.assertEqual(contract.sections, SECTIONS)
         self.assertEqual(contract.settings_panes, SETTINGS_PANES)
         self.assertEqual(contract.allowed_side_effects, ())
+        self.assertEqual(
+            contract.onboarding_steps,
+            ("permissions", "hotkey", "models", "first_dictation"),
+        )
+        self.assertEqual(contract.locale_fallback, "en")
+        self.assertIn("command-d:diagnostics", contract.key_equivalents)
         self.assertIn("select_section", contract.model_actions)
         self.assertIn("forget_snippet", contract.model_actions)
         for key in contract.accessibility_catalog_keys:
@@ -159,6 +178,46 @@ class SnapshotTests(unittest.TestCase):
         self.assertFalse(first_run.onboarding_complete)
         self.assertEqual(first_run.onboarding_steps[0].key, "permissions")
         self.assertEqual(first_run.onboarding_steps[0].status, "Needs attention")
+
+    def test_first_run_progresses_only_from_runtime_evidence(self):
+        runtime = {
+            "service_status": "Running",
+            "microphone_status": "Not requested",
+            "accessibility_status": "Not requested",
+            "capture_state": "Ready",
+            "models": [{"name": "Parakeet", "status": "Preparing"}],
+        }
+        model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: dict(runtime)), locale="en-US")
+        self.assertEqual(model.locale, "en")
+        self.assertEqual(
+            next(step for step in model.state.onboarding_steps
+                 if not step.complete).key,
+            "permissions",
+        )
+
+        runtime.update(
+            microphone_status="Ready", accessibility_status="Granted")
+        self.assertEqual(
+            next(step for step in model.refresh().onboarding_steps
+                 if not step.complete).key,
+            "hotkey",
+        )
+        runtime["capture_state"] = "Listening"
+        self.assertEqual(
+            next(step for step in model.refresh().onboarding_steps
+                 if not step.complete).key,
+            "models",
+        )
+        runtime["capture_state"] = "Ready"
+        runtime["models"] = [{"name": "Parakeet", "status": "Running"}]
+        self.assertEqual(
+            next(step for step in model.refresh().onboarding_steps
+                 if not step.complete).key,
+            "first_dictation",
+        )
+        runtime["last_word_count"] = 5
+        self.assertTrue(model.refresh().onboarding_complete)
 
     def test_status_presentation_covers_capture_processing_recovery_and_degraded(self):
         common = {

@@ -32,6 +32,7 @@ from voice_compiler import (
     VoiceCompiler,
     VoiceIR,
     WordEvidence,
+    context_firewall_receipt,
 )
 
 
@@ -195,6 +196,32 @@ def evaluate_case(case: dict[str, Any],
                 if str(fragment) not in reason:
                     errors.append(
                         f"edit {index} reason: missing {fragment!r} in {reason!r}")
+        elif operation == "context_firewall":
+            voice = _voice(case["voice"])
+            compiled = compiler.compile(voice)
+            receipt = context_firewall_receipt(
+                voice, compiled=compiled, compiler=compiler)
+            observed = {
+                "disposition": receipt.disposition,
+                "counterfactual_changed": receipt.counterfactual_changed,
+                "risky_spans": receipt.risky_spans,
+                "influence_count": receipt.influence_count,
+                "context_influences": receipt.context_influences,
+                "personal_prior_influences":
+                    receipt.personal_prior_influences,
+                "protected_influences": receipt.protected_influences,
+                "promotion_candidates": receipt.promotion_candidates,
+                "quarantined": receipt.quarantined,
+                "reason_counts": dict(receipt.reason_counts),
+            }
+            unknown_expectations = sorted(set(expected) - set(observed))
+            if unknown_expectations:
+                errors.append(
+                    "unsupported context firewall expectations: "
+                    f"{unknown_expectations!r}")
+            for key, wanted in expected.items():
+                if key in observed:
+                    _expect_equal(errors, key, observed[key], wanted)
         else:
             errors.append(f"unsupported operation: {operation!r}")
     except Exception as exc:  # A bad fixture should be a result, not a crash.

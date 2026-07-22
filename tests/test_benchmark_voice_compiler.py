@@ -42,12 +42,41 @@ class GoldenCorpusTests(unittest.TestCase):
             set(golden["categories"]),
             {
                 "anchor_preservation",
+                "context_firewall",
                 "corrections",
                 "personal_priors",
                 "prosody",
                 "rare_terms",
                 "stable_prefixes",
             },
+        )
+
+    def test_context_firewall_benchmark_reports_aggregate_evidence_only(self):
+        report = build_report(DEFAULT_CASES, None)
+        cases = [case for case in report["golden"]["cases"]
+                 if case["category"] == "context_firewall"]
+        self.assertEqual(len(cases), 3)
+        self.assertTrue(all(case["passed"] for case in cases))
+        encoded = json.dumps(cases, sort_keys=True)
+        for private in (
+                "Use Gwen", "Qwen", "teh", "ordinary dictated prose",
+                "2042.76it/s"):
+            self.assertNotIn(private, encoded)
+
+    def test_context_firewall_rejects_unknown_expectation_keys(self):
+        result = evaluate_case({
+            "id": "misspelled-expectation",
+            "category": "context_firewall",
+            "operation": "context_firewall",
+            "voice": {
+                "hypotheses": [{"text": "Ship it", "confidence": 0.9}],
+            },
+            "expect": {"dispositoin": "no_effect"},
+        })
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "unsupported context firewall expectations: ['dispositoin']",
+            result["errors"],
         )
 
     def test_a_regression_is_explained_instead_of_hidden(self):

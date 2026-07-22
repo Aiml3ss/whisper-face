@@ -9,11 +9,11 @@ explicit Mac-first sequencing rather than dropping the item.
 | # | Deliverable | State | Completion evidence required |
 |---:|---|---|---|
 | 1 | Signed/notarized Mac app, package, checksums, rollback, safe updater | active | Reproducible package; unsigned local path; signed CI release; notarization and update verification |
-| 2 | Permission/model/hotkey/first-dictation onboarding | active | Native flow plus state and UI tests; fresh-Mac walkthrough |
+| 2 | Permission/model/hotkey/first-dictation onboarding | active | Runtime-backed state and the side-effect-free native AppKit gate now exercise permissions, observed hotkey practice, local model readiness, first dictation, routing, and completion acknowledgement; a fresh-Mac walkthrough remains |
 | 3 | Confidence/Stable Prefix/processing/recovery HUD | complete | Native Overview states consume runtime capture/confidence/prefix/outbox evidence; 15 GUI tests and an AppKit construction/render pass cover all phases |
-| 4 | Unified settings for modes, tones, snippets, vocabulary, corrections, privacy, diagnostics | active | Native Settings panes cover the existing controls with validation and atomic persistence; an invisible AppKit construction/interaction gate now renders every pane, while the remaining keyboard workflow and final diagnostics integration still require evidence |
+| 4 | Unified settings for modes, tones, snippets, vocabulary, corrections, privacy, diagnostics | complete | Native panes cover modes, tones, snippets, vocabulary, corrections, and privacy with validation and atomic persistence; an explicit native key-view loop, key equivalents, and Settings-to-Diagnostics route are exercised by the side-effect-free AppKit gate |
 | 5 | Result inspector for alternatives, anchors, edits, context, timing | complete | Transcript-free runtime projection and Results UI expose counts, anchors, canonical edit categories, context influence, confidence, and timing with privacy regressions |
-| 6 | VoiceOver, keyboard, contrast, reduced motion, localization readiness | active | VoiceOver metadata, system colors, Reduce Motion behavior, native AppKit accessibility assertions, and an English Settings catalog exist; real key-view/arrow/key-equivalent coverage, locale propagation, and remaining visible-copy cataloging are still required |
+| 6 | VoiceOver, keyboard, contrast, reduced motion, localization readiness | active | VoiceOver metadata, system colors, Reduce Motion, native Tab loops, segmented-control arrow semantics, Return/Command key equivalents, Apple language-tag propagation, and catalog-owned Settings/onboarding copy are covered; cataloging the remaining Results, Models, and Diagnostics copy is still required before additional locales can be added safely |
 | 7 | Clear non-blocking degraded-mode UX | complete | Blocking microphone/permission/service failures route to Action Needed while a failed fallback remains a non-blocking warning; GUI and AudioPool failure tests cover both |
 | 8 | Competitor task-based UX evaluation | queued | Reproducible task protocol and published measured results |
 | 9 | Representative speech/semantic-safety benchmark corpus | complete | `benchmarks/representative_dictation_cases.json` has 19 synthetic cases covering every declared risk dimension; acoustic labels remain explicit physical-recording requirements |
@@ -30,12 +30,12 @@ explicit Mac-first sequencing rather than dropping the item.
 | 20 | Consequence-aware risk routing | active | Eleven protected categories, punctuation/sign-safe disagreement detection, fixed decision receipts, a 12-case exact-category selector benchmark, and a worst-case-per-case 5 ms gate exist; receipts remain evidence-only until verifier quality justifies behavioral routing |
 | 21 | Acoustic Time Machine microspan replay | queued | Opt-in bounded audio buffer, UI, deletion proof, tests |
 | 22 | Inspectable personal acoustic keyword memory | queued | Local storage, false-insertion threshold, export/forget |
-| 23 | Counterfactual Context Firewall | queued | With/without-context comparison for risky spans |
-| 24 | Context influence receipts and shadow personalization/model evaluation | queued | Receipt UI, shadow runner, quarantine/promotion tests |
+| 23 | Counterfactual Context Firewall | complete | Every finalized insertion-bound compile is compared with a Context Candidate/Personal Prior-free shadow baseline; protected influence is classified without changing recognition, cleanup, insertion, or routing, with adversarial compiler and golden-corpus coverage |
+| 24 | Context influence receipts and shadow personalization/model evaluation | active | Fixed transcript-free runtime receipts report no-effect, promotion-candidate, or quarantine with bounded reason counts; shadow promotion/quarantine and privacy tests pass, while visible receipt UI and any behavior-changing promotion workflow remain outstanding |
 | 25 | Delayed cleanup merges only untouched VoiceIR spans | queued | Concurrent-edit merge algorithm and adversarial tests |
-| 26 | Public 50-app insertion/capability corpus | queued | Versioned app matrix and reproducible protocol |
-| 27 | Adversarial focus/duplicate/typing/relaunch/clipboard/delay tests | queued | Automated and manual corpus covering every failure stage |
-| 28 | Four-nines exactly-once insertion measurement | queued | Long-run fault-injection report meeting target |
+| 26 | Public 50-app insertion/capability corpus | active | Versioned synthetic capability profiles run reproducibly with `uv run benchmark_insertion_reliability.py`; zero real apps have been exercised, so the public 50-app matrix remains outstanding |
+| 27 | Adversarial focus/duplicate/typing/relaunch/clipboard/delay tests | active | Deterministic cases cover focus and selection drift, concurrent nearby typing, duplicate callbacks, relaunch-like identity change, unavailable target/clipboard/readback, and phase-delayed readback; manual real-app evidence remains |
+| 28 | Four-nines exactly-once insertion measurement | active | The simulation harness repeats every case and reports at-most-once paste-attempt and terminal-receipt violations; it explicitly makes no four-nines or physical reliability claim |
 | 29 | Privacy-safe compatibility fingerprint network | queued | Text-free schema, opt-in transport, threat model |
 | 30 | Voice Input Protocol and initial adapters | queued | Versioned protocol, conformance tests, five adapters |
 | 31 | Networkless sandboxed XPC speech worker | queued | Narrow IPC, sandbox profile, network-denial proof |

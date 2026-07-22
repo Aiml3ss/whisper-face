@@ -151,6 +151,76 @@
         "text": "Can we ship this?",
         "decision_reasons": ["rising question contour"]
       }
+    },
+    {
+      "id": "firewall-protected-context-shadow",
+      "category": "context_firewall",
+      "operation": "context_firewall",
+      "voice": {
+        "hypotheses": [
+          {"text": "Use Gwen for cleanup", "confidence": 0.68, "engine": "tiny"}
+        ],
+        "context": {
+          "candidates": [
+            {"text": "Qwen", "weight": 6.0, "source": "selection"}
+          ]
+        }
+      },
+      "expect": {
+        "disposition": "quarantine",
+        "counterfactual_changed": true,
+        "context_influences": 1,
+        "protected_influences": 1,
+        "promotion_candidates": 0,
+        "quarantined": 1,
+        "reason_counts": {"context-protected": 1}
+      }
+    },
+    {
+      "id": "firewall-benign-personal-prior-shadow",
+      "category": "context_firewall",
+      "operation": "context_firewall",
+      "voice": {
+        "hypotheses": [
+          {"text": "this is teh draft", "confidence": 0.55, "engine": "tiny"}
+        ],
+        "personal_priors": [
+          {"heard": "teh", "preferred": "the", "count": 6}
+        ]
+      },
+      "expect": {
+        "disposition": "promotion-candidate",
+        "counterfactual_changed": true,
+        "personal_prior_influences": 1,
+        "protected_influences": 0,
+        "promotion_candidates": 1,
+        "quarantined": 0,
+        "reason_counts": {"personal-prior-unprotected": 1}
+      }
+    },
+    {
+      "id": "firewall-adversarial-context-no-effect",
+      "category": "context_firewall",
+      "operation": "context_firewall",
+      "voice": {
+        "hypotheses": [
+          {"text": "ordinary dictated prose", "confidence": 0.92, "engine": "turbo"}
+        ],
+        "context": {
+          "candidates": [
+            {"text": "2042.76it/s", "weight": 10.0, "source": "field"}
+          ]
+        }
+      },
+      "expect": {
+        "disposition": "no-effect",
+        "counterfactual_changed": false,
+        "influence_count": 0,
+        "protected_influences": 0,
+        "promotion_candidates": 0,
+        "quarantined": 0,
+        "reason_counts": {"no-influence": 1}
+      }
     }
   ]
 }

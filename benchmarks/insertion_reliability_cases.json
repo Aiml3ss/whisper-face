@@ -1,0 +1,171 @@
+{
+  "schema_version": 1,
+  "privacy": "synthetic-payload-only",
+  "evidence_scope": "adapter-simulation-only",
+  "capability_profiles": [
+    {
+      "id": "readable-complete",
+      "target": "readable",
+      "paste": "available",
+      "readback": "available"
+    },
+    {
+      "id": "readable-no-readback",
+      "target": "readable",
+      "paste": "available",
+      "readback": "unavailable"
+    },
+    {
+      "id": "opaque-reviewed",
+      "target": "opaque",
+      "paste": "available",
+      "readback": "unavailable"
+    },
+    {
+      "id": "clipboard-unavailable",
+      "target": "readable",
+      "paste": "unavailable",
+      "readback": "available"
+    },
+    {
+      "id": "target-unavailable",
+      "target": "unavailable",
+      "paste": "unavailable",
+      "readback": "unavailable"
+    }
+  ],
+  "cases": [
+    {
+      "id": "baseline-verified",
+      "profile": "readable-complete",
+      "fault": "none",
+      "expect": {
+        "state": "verified",
+        "reason": "commit_verified",
+        "paste_attempted": true,
+        "paste_callbacks": 1,
+        "recoverable": false
+      }
+    },
+    {
+      "id": "focus-drift",
+      "profile": "readable-complete",
+      "fault": "focus-drift",
+      "expect": {
+        "state": "conflict",
+        "reason": "focus_drift",
+        "paste_attempted": false,
+        "paste_callbacks": 0,
+        "recoverable": true
+      }
+    },
+    {
+      "id": "duplicate-commit",
+      "profile": "readable-complete",
+      "fault": "duplicate-commit",
+      "expect": {
+        "state": "verified",
+        "reason": "commit_verified",
+        "paste_attempted": true,
+        "paste_callbacks": 1,
+        "recoverable": false
+      }
+    },
+    {
+      "id": "concurrent-typing-selection",
+      "profile": "readable-complete",
+      "fault": "selection-drift",
+      "expect": {
+        "state": "conflict",
+        "reason": "selection_drift",
+        "paste_attempted": false,
+        "paste_callbacks": 0,
+        "recoverable": true
+      }
+    },
+    {
+      "id": "concurrent-typing-surrounding",
+      "profile": "readable-complete",
+      "fault": "surrounding-drift",
+      "expect": {
+        "state": "conflict",
+        "reason": "surrounding_text_drift",
+        "paste_attempted": false,
+        "paste_callbacks": 0,
+        "recoverable": true
+      }
+    },
+    {
+      "id": "relaunch-destination-identity",
+      "profile": "readable-complete",
+      "fault": "relaunch-identity",
+      "expect": {
+        "state": "conflict",
+        "reason": "focus_drift",
+        "paste_attempted": false,
+        "paste_callbacks": 0,
+        "recoverable": true
+      }
+    },
+    {
+      "id": "clipboard-unavailable",
+      "profile": "clipboard-unavailable",
+      "fault": "none",
+      "expect": {
+        "state": "unresolved",
+        "reason": "paste_outcome_unknown",
+        "paste_attempted": true,
+        "paste_callbacks": 1,
+        "recoverable": true
+      }
+    },
+    {
+      "id": "readback-unavailable",
+      "profile": "readable-no-readback",
+      "fault": "none",
+      "expect": {
+        "state": "unverifiable",
+        "reason": "readback_unavailable",
+        "paste_attempted": true,
+        "paste_callbacks": 1,
+        "recoverable": true
+      }
+    },
+    {
+      "id": "opaque-reviewed-unverifiable",
+      "profile": "opaque-reviewed",
+      "fault": "none",
+      "expect": {
+        "state": "unverifiable",
+        "reason": "readback_unavailable",
+        "paste_attempted": true,
+        "paste_callbacks": 1,
+        "recoverable": true
+      }
+    },
+    {
+      "id": "target-observation-unavailable",
+      "profile": "target-unavailable",
+      "fault": "none",
+      "expect": {
+        "state": "unverifiable",
+        "reason": "target_unreadable",
+        "paste_attempted": false,
+        "paste_callbacks": 0,
+        "recoverable": true
+      }
+    },
+    {
+      "id": "phase-delayed-readback-duplicate",
+      "profile": "readable-complete",
+      "fault": "delayed-readback-duplicate",
+      "expect": {
+        "state": "verified",
+        "reason": "commit_verified",
+        "paste_attempted": true,
+        "paste_callbacks": 1,
+        "recoverable": false
+      }
+    }
+  ]
+}
