@@ -36,6 +36,7 @@ arguments:
    uv run tests/test_benchmark_relisten_activation.py
    uv run tests/test_benchmark_voice_compiler.py
    uv run tests/test_benchmark_consequence_routing.py
+   uv run tests/test_benchmark_cleanup_latency.py
    uv run tests/test_benchmark_asr.py
    uv run tests/test_performance_lab.py
    uv run tests/test_dictate.py
@@ -48,6 +49,7 @@ arguments:
    uv run tests/test_voice_input_protocol_transport.py
    uv run tests/test_macos_networkless_worker.py
    uv run tests/test_acoustic_keyword_memory.py
+   uv run tests/test_acoustic_keyword_bias_evaluation.py
    uv run tests/test_acoustic_time_machine.py
    uv run tests/test_acoustic_calibration.py
    uv run tests/test_benchmark_acoustic_calibration.py

@@ -134,6 +134,7 @@ required=(
     acoustic_keyword_memory.py
     acoustic_time_machine.py voice_objects.py voice_object_command_parser.py
     voice_inbox.py voice_object_inbox_bridge.py demonstration_drafts.py
+    risky_action_confirmation.py
     point_and_speak_resolver.py macos_point_and_speak_snapshot.py
     whisper_face_gui.py
     native/ParrotASRHelper/Package.swift

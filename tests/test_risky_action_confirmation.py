@@ -19,6 +19,7 @@ UNKNOWN_ID = "act-00000000000000000000000000000002"
 from risky_action_confirmation import (  # noqa: E402
     ConfirmationReason,
     ConfirmationState,
+    InertRiskyActionConfirmationRuntime,
     RiskClass,
     RiskyActionConfirmationGate,
     VoiceDecision,
@@ -125,6 +126,74 @@ class RiskyActionConfirmationTests(unittest.TestCase):
                 "send-project-bluebird-to-ada",
                 RiskClass.EXTERNAL_COMMUNICATION,
             )
+
+
+class InertRuntimeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.clock = FakeClock()
+        self.counter = 0
+
+        def tokens(_length: int) -> bytes:
+            self.counter += 1
+            return self.counter.to_bytes(16, "big")
+
+        self.runtime = InertRiskyActionConfirmationRuntime(
+            gate=RiskyActionConfirmationGate(clock=self.clock),
+            random_bytes=tokens,
+        )
+
+    def test_explicit_start_voice_receipt_then_distinct_click(self):
+        started = self.runtime.start(
+            RiskClass.EXTERNAL_COMMUNICATION, window_seconds=10.0)
+        voice = self.runtime.consume_voice("Confirm risky action.")
+        clicked = self.runtime.click_confirm()
+
+        self.assertEqual(started.state, "awaiting_voice")
+        self.assertTrue(voice.consumed)
+        self.assertEqual(voice.status.state, "awaiting_click")
+        self.assertEqual(clicked.state, "confirmed")
+        self.assertEqual(clicked.reason, "two_factor_confirmed")
+
+    def test_non_command_is_not_consumed_or_retained(self):
+        secret = "send the Project Bluebird budget to Ada"
+        self.runtime.start(RiskClass.FILE_MUTATION)
+
+        receipt = self.runtime.consume_voice(secret)
+
+        self.assertFalse(receipt.consumed)
+        self.assertEqual(receipt.status.state, "awaiting_voice")
+        self.assertNotIn(secret, repr(self.runtime))
+        self.assertNotIn(secret, repr(receipt))
+
+    def test_cancel_expiry_early_click_and_terminal_replay_fail_closed(self):
+        self.runtime.start(RiskClass.AGENT_EXECUTION, window_seconds=10.0)
+        early = self.runtime.click_confirm()
+        cancelled = self.runtime.consume_voice("cancel risky action")
+        replay = self.runtime.consume_voice("confirm risky action")
+
+        self.assertEqual(early.state, "awaiting_voice")
+        self.assertEqual(early.reason, "click_before_voice")
+        self.assertEqual(cancelled.status.state, "cancelled")
+        self.assertEqual(replay.status.state, "cancelled")
+        self.assertEqual(replay.status.reason, "already_terminal")
+
+        self.runtime.start(RiskClass.CALENDAR_COMMIT, window_seconds=10.0)
+        self.runtime.consume_voice("confirm risky action")
+        self.clock.now = 110.0
+        expired = self.runtime.click_confirm()
+        self.assertEqual(expired.state, "expired")
+        self.assertEqual(expired.reason, "deadline_expired")
+
+    def test_only_one_closed_risk_ceremony_can_be_pending(self):
+        self.runtime.start(RiskClass.FILE_MUTATION)
+        with self.assertRaisesRegex(RuntimeError, "already pending"):
+            self.runtime.start(RiskClass.CALENDAR_COMMIT)
+        with self.assertRaisesRegex(ValueError, "closed RiskClass"):
+            self.runtime.start("delete_everything")
+
+        status = self.runtime.status()
+        self.assertEqual(status.risk, RiskClass.FILE_MUTATION)
+        self.assertEqual(set(asdict(status)), {"risk", "state", "reason"})
 
 
 if __name__ == "__main__":

@@ -159,7 +159,13 @@ are never Supporter-only features.
   audio, transcript history, or unhashed app identifiers. It is exportable and
   forgettable from the on-demand Pronunciation Keywords inspector. Only exact,
   verified user corrections add idempotent global evidence; routine status does
-  not load keyword text. It deliberately has no recognition authority yet.
+  not load keyword text. A separate offline evaluator can compare caller-
+  supplied unbiased and keyword-biased candidate outcomes using categorical,
+  transcript-free evidence. Synthetic evidence can never earn a keep receipt;
+  at least 20 positive and 20 negative caller-attested physical cases must show
+  at least three selection gains with no selection or candidate regressions.
+  Receipts contain aggregate counts only, distinguish synthetic from caller-
+  attested physical evidence, and have no runtime or recognition authority.
 - **Conservative acoustic calibration lab** — an offline policy consumes only
   the existing closed numeric capture telemetry and emits bounded candidate
   gain, noise-gate, VAD, and end-silence settings. Nonfinite/clipped evidence
@@ -195,8 +201,12 @@ are never Supporter-only features.
   menu recipe without replaying it. On Mac, the Privacy pane provides an
   explicit **Demonstrations** editor; its routine list returns and renders only
   draft number, domain, state, and step count, and private step text is returned
-  to the editor only after **Reveal/Edit**. None of these foundations can send,
-  schedule, click, type, drag, automate an app, or run an agent yet.
+  to the editor only after **Reveal/Edit**. The same pane also offers an inert
+  four-class risk-confirmation ceremony: explicitly start one class, say the
+  exact phrase “confirm risky action,” then use the separately enabled click
+  within 30 seconds. Its content-free RAM-only receipt cannot invoke an action.
+  None of these foundations can send, schedule, click, type, drag, automate an
+  app, or run an agent yet.
 - **Personal Regression Lab** — confirmed correction mappings are evaluated
   against a private, deterministic suite of the user's exact corrected spans.
   Conflicting candidates are quarantined instead of silently becoming a bad
@@ -377,6 +387,16 @@ a selected draft and purge acknowledged/cancelled drafts; queued drafts are not
 purged. The inspector never sends, schedules, launches, executes, or copies a
 draft, and it remains available when command diversion is turned off.
 
+The Mac Privacy pane's **Risk confirmation (inert)** row is a safety ceremony,
+not an agent-action launcher. Choose one of four closed risk classes and select
+**Start**. While it is awaiting voice, an exact capture-mode dictation of
+`confirm risky action` is consumed before compilation, transcript logging,
+clipboard access, or insertion. Only then is **Confirm click** enabled, and the
+ceremony expires after at most 30 monotonic seconds. `cancel risky action`, the
+Cancel button, an early click, expiry, or replay all fail closed. The runtime
+keeps only a RAM-only opaque ID plus risk/state/reason; it has no action payload
+or execution callback.
+
 Choose **Author** beside **Demonstrations** in the Mac Privacy pane to create an
 inert Finder, Mail, Notes, or menu recipe. Whisper Face generates an opaque
 local ID, lists only content-free metadata, and reveals private described steps
@@ -405,6 +425,10 @@ drafts), and `demonstrations.json` (manually authored inert recipe steps).
 `acoustic_keyword_memory.json` stores bounded
 keyword candidates, hashed app scopes, and evidence digests without raw audio,
 surrounding context, or transcript history.
+`benchmark_acoustic_keyword_bias.py` exercises the keyword-bias evaluator with
+constructed categorical fixtures only. Its physical-shaped fixtures test policy
+branches and are explicitly not physical recognition evidence or an activation
+claim.
 
 Command mode intentionally recognizes only undo, redo, select all, copy, cut,
 paste, delete selection, new line, and escape. It cannot launch arbitrary shell
@@ -450,6 +474,13 @@ Run `uv run benchmark_consequence_routing.py` for the synthetic selector-only
 consequence corpus. Its closed artifact explicitly says that no audio,
 verifier, runtime ASR backend, or physical device was exercised, and its 5 ms
 gate uses the worst per-case p95 rather than corpus-average throughput.
+
+Run `uv run benchmark_cleanup_latency.py --run --format json` to compare the
+current pinned Qwen3.5-4B structured-cleanup prompt with smaller prompt,
+few-shot, and token-budget variants against six checked-in synthetic cases.
+It contacts only local Ollama after the explicit `--run` opt-in, never reads
+transcript logs, reports aggregate latency/guard/proof results, and has no
+runtime authority even if a candidate looks faster.
 
 Run `uv run benchmark_insertion_reliability.py` for deterministic focus,
 typing, duplicate-callback, destination-relaunch, clipboard, readback, and

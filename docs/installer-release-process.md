@@ -10,7 +10,8 @@ machine without maintaining a second copy of the application.
 `insertion_integrity.py`, `personal_regression.py`,
 `cleanup_circuit_breaker.py`, `whisper_face_gui.py`, `voice_objects.py`,
 `voice_object_command_parser.py`, `voice_inbox.py`,
-`voice_object_inbox_bridge.py`, and `demonstration_drafts.py`,
+`voice_object_inbox_bridge.py`, `demonstration_drafts.py`, and
+`risky_action_confirmation.py`,
 the PEP 723 dependency block, and `dictate.py.lock` are the runtime source of
 truth. The Mac LaunchAgent and
 Windows scheduled task execute those files from the checkout. Installers may
@@ -45,6 +46,7 @@ uv run tests/test_prewarmed_whisper_verifier_adapter.py
 uv run tests/test_benchmark_relisten_activation.py
 uv run tests/test_benchmark_voice_compiler.py
 uv run tests/test_benchmark_consequence_routing.py
+uv run tests/test_benchmark_cleanup_latency.py
 uv run tests/test_benchmark_asr.py
 uv run tests/test_performance_lab.py
 uv run tests/test_dictate.py
@@ -57,6 +59,7 @@ uv run tests/test_voice_input_protocol_wire.py
 uv run tests/test_voice_input_protocol_transport.py
 uv run tests/test_macos_networkless_worker.py
 uv run tests/test_acoustic_keyword_memory.py
+uv run tests/test_acoustic_keyword_bias_evaluation.py
 uv run tests/test_acoustic_time_machine.py
 uv run tests/test_acoustic_calibration.py
 uv run tests/test_benchmark_acoustic_calibration.py

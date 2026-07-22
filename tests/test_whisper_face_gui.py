@@ -20,6 +20,7 @@ from whisper_face_gui import (
     FACES,
     GUIActions,
     POINT_AND_SPEAK_MAX_PHRASE_CHARS,
+    RISKY_ACTION_CLASSES,
     SECTIONS,
     SETTINGS_PANES,
     STRING_CATALOGS,
@@ -260,6 +261,9 @@ class SnapshotTests(unittest.TestCase):
                 "operation.demonstrations.approve_failed",
                 "operation.demonstrations.cancel_failed",
                 "operation.demonstrations.delete_failed",
+                "operation.risky_confirmation.start_failed",
+                "operation.risky_confirmation.click_failed",
+                "operation.risky_confirmation.cancel_failed",
                 "operation.log.open_failed",
                 "operation.support_snapshot.copy_failed",
                 "operation.source.open_failed",
@@ -355,6 +359,8 @@ class SnapshotTests(unittest.TestCase):
         self.assertIn("select_section", contract.model_actions)
         self.assertIn("forget_snippet", contract.model_actions)
         self.assertIn("preview_point_and_speak", contract.model_actions)
+        self.assertIn(
+            "click_risky_action_confirmation", contract.model_actions)
         for key in contract.accessibility_catalog_keys:
             with self.subTest(key=key):
                 self.assertIn(key, STRING_CATALOGS["en"])
@@ -898,6 +904,29 @@ class ViewModelTests(unittest.TestCase):
                 },),
             }
 
+        def start_risky_confirmation(risk):
+            self.calls.append(("risk_start", risk))
+            self.runtime["risky_action_confirmation"] = {
+                "risk": risk,
+                "state": "awaiting_voice",
+                "reason": "proposed",
+            }
+            return True
+
+        def click_risky_confirmation():
+            self.calls.append(("risk_click",))
+            self.runtime["risky_action_confirmation"]["state"] = "confirmed"
+            self.runtime["risky_action_confirmation"][
+                "reason"] = "two_factor_confirmed"
+            return True
+
+        def cancel_risky_confirmation():
+            self.calls.append(("risk_cancel",))
+            self.runtime["risky_action_confirmation"]["state"] = "cancelled"
+            self.runtime["risky_action_confirmation"][
+                "reason"] = "explicitly_cancelled"
+            return True
+
         self.actions = GUIActions(
             status_snapshot=lambda: dict(self.runtime),
             settings_snapshot=lambda: dict(self.private_settings),
@@ -932,6 +961,9 @@ class ViewModelTests(unittest.TestCase):
             delete_approved_demonstration_draft=lambda draft_id:
                 self.calls.append(
                     ("delete_approved_demonstration", draft_id)) or True,
+            start_risky_action_confirmation=start_risky_confirmation,
+            click_risky_action_confirmation=click_risky_confirmation,
+            cancel_risky_action_confirmation=cancel_risky_confirmation,
             play_retained_span=lambda:
                 self.calls.append(("play_retained",)) or True,
             clear_retained_spans=clear_acoustic,
@@ -1036,6 +1068,42 @@ class ViewModelTests(unittest.TestCase):
             "Nothing is sent or scheduled",
             localized_string("settings.accessibility.voice_objects.help"),
         )
+
+    def test_risky_confirmation_renders_only_closed_content_free_state(self):
+        self.assertEqual(len(RISKY_ACTION_CLASSES), 4)
+
+        state = self.model.start_risky_action_confirmation(
+            "external_communication")
+        self.assertEqual(state.risky_action_risk, "external_communication")
+        self.assertEqual(
+            state.risky_action_confirmation_state, "awaiting_voice")
+        self.assertIn(("risk_start", "external_communication"), self.calls)
+
+        self.runtime["risky_action_confirmation"][
+            "state"] = "awaiting_click"
+        state = self.model.refresh()
+        self.assertEqual(state.risky_action_confirmation_state, "awaiting_click")
+        state = self.model.click_risky_action_confirmation()
+        self.assertEqual(state.risky_action_confirmation_state, "confirmed")
+        self.assertIn(("risk_click",), self.calls)
+
+        with self.assertRaises(ValueError):
+            self.model.start_risky_action_confirmation("arbitrary_payload")
+
+    def test_risky_confirmation_snapshot_rejects_content_and_unknown_values(self):
+        secret = "send the Project Bluebird budget to Ada"
+        state = normalize_snapshot({
+            "risky_action_confirmation": {
+                "risk": secret,
+                "state": secret,
+                "reason": secret,
+                "payload": secret,
+            },
+        })
+
+        self.assertEqual(state.risky_action_risk, "none")
+        self.assertEqual(state.risky_action_confirmation_state, "idle")
+        self.assertNotIn(secret, repr(state))
 
     def test_voice_inbox_content_is_lazy_transient_and_actions_are_explicit(self):
         self.model.refresh()

@@ -33,6 +33,7 @@ before submitting outside contributions.
 - [ ] `uv run tests/test_cleanup_circuit_breaker.py`
 - [ ] `uv run tests/test_benchmark_voice_compiler.py`
 - [ ] `uv run tests/test_benchmark_consequence_routing.py`
+- [ ] `uv run tests/test_benchmark_cleanup_latency.py`
 - [ ] `uv run tests/test_benchmark_asr.py`
 - [ ] `uv run tests/test_performance_lab.py`
 - [ ] `uv run tests/test_dictate.py`
@@ -42,6 +43,7 @@ before submitting outside contributions.
 - [ ] `uv run tests/test_compatibility_fingerprint.py`
 - [ ] `uv run tests/test_voice_input_protocol.py`
 - [ ] `uv run tests/test_acoustic_keyword_memory.py`
+- [ ] `uv run tests/test_acoustic_keyword_bias_evaluation.py`
 - [ ] `uv run tests/test_acoustic_calibration.py`
 - [ ] `uv run tests/test_benchmark_acoustic_calibration.py`
 - [ ] `uv run tests/test_delayed_cleanup_merge.py`

@@ -51,6 +51,16 @@ DEMONSTRATION_ACTIONS = {
 DEMONSTRATION_INSPECT_LIMIT = 64
 DEMONSTRATION_STEP_LIMIT = 12
 DEMONSTRATION_TEXT_LIMIT = 512
+RISKY_ACTION_CLASSES = (
+    "external_communication",
+    "calendar_commit",
+    "file_mutation",
+    "agent_execution",
+)
+RISKY_ACTION_STATES = frozenset({
+    "idle", "awaiting_voice", "awaiting_click", "confirmed", "cancelled",
+    "expired",
+})
 POINT_AND_SPEAK_MAX_PHRASE_CHARS = 96
 POINT_AND_SPEAK_ROLES = frozenset({
     "button", "checkbox", "link", "menu_item", "radio_button", "tab",
@@ -427,6 +437,22 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.privacy.demonstrations.detail": "Manually author inert Finder, Mail, Notes, and menu recipes.",
         "settings.privacy.demonstrations.author": "Author",
         "settings.privacy.demonstrations.author.help": "Open the private demonstration editor. Step text stays hidden until you explicitly reveal or edit one selected recipe.",
+        "settings.privacy.risky_confirmation": "Risk confirmation (inert)",
+        "settings.privacy.risky_confirmation.detail": "Choose a class, start, say “confirm risky action,” then use the enabled click. Nothing executes.",
+        "settings.privacy.risky_confirmation.risk.external_communication": "External communication",
+        "settings.privacy.risky_confirmation.risk.calendar_commit": "Calendar commit",
+        "settings.privacy.risky_confirmation.risk.file_mutation": "File mutation",
+        "settings.privacy.risky_confirmation.risk.agent_execution": "Agent execution",
+        "settings.privacy.risky_confirmation.state.idle": "Idle — choose a class to start",
+        "settings.privacy.risky_confirmation.state.awaiting_voice": "Awaiting exact voice confirmation",
+        "settings.privacy.risky_confirmation.state.awaiting_click": "Voice received — distinct click required",
+        "settings.privacy.risky_confirmation.state.confirmed": "Confirmed — inert receipt only",
+        "settings.privacy.risky_confirmation.state.cancelled": "Cancelled — blocked",
+        "settings.privacy.risky_confirmation.state.expired": "Expired — blocked",
+        "settings.privacy.risky_confirmation.status": "{risk} · {state}",
+        "settings.privacy.risky_confirmation.start": "Start",
+        "settings.privacy.risky_confirmation.click": "Confirm click",
+        "settings.privacy.risky_confirmation.cancel": "Cancel",
         "settings.privacy.face": "Companion",
         "settings.face.parrot": "Parrot",
         "settings.face.fox": "Fox",
@@ -458,6 +484,15 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.accessibility.demonstrations.action": "Demonstration step action",
         "settings.accessibility.demonstrations.text": "Private demonstration step text",
         "settings.accessibility.demonstrations.preview": "Selected inert demonstration recipe",
+        "settings.accessibility.risky_confirmation.risk": "Risk class",
+        "settings.accessibility.risky_confirmation.risk.help": "Choose one closed risk class. No action details are collected.",
+        "settings.accessibility.risky_confirmation.start": "Start inert risk confirmation",
+        "settings.accessibility.risky_confirmation.start.help": "Begin a bounded RAM-only ceremony. This creates no action and executes nothing.",
+        "settings.accessibility.risky_confirmation.click": "Distinct confirmation click",
+        "settings.accessibility.risky_confirmation.click.help": "Enabled only after the exact voice receipt. It records an inert confirmation and executes nothing.",
+        "settings.accessibility.risky_confirmation.cancel": "Cancel risk confirmation",
+        "settings.accessibility.risky_confirmation.cancel.help": "Cancel the current ceremony so it remains blocked.",
+        "settings.accessibility.risky_confirmation.status": "Risk confirmation state",
         "settings.accessibility.privacy_summary.label": "Privacy status",
         "settings.accessibility.diagnostics.help": "Open local service, permission, model, and installation diagnostics.",
         "settings.accessibility.tones_summary.label": "App tones summary",
@@ -527,6 +562,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "operation.demonstrations.approve_failed": "Could not approve the selected demonstration draft.",
         "operation.demonstrations.cancel_failed": "Could not cancel the selected demonstration draft.",
         "operation.demonstrations.delete_failed": "Could not delete the selected approved demonstration recipe.",
+        "operation.risky_confirmation.start_failed": "Could not start the inert confirmation ceremony.",
+        "operation.risky_confirmation.click_failed": "Confirmation stayed blocked; no valid voice receipt was followed by this click.",
+        "operation.risky_confirmation.cancel_failed": "Could not cancel the inert confirmation ceremony.",
         "operation.acoustic.play_failed": "Could not play retained audio: {error}",
         "operation.acoustic.clear_failed": "Could not clear retained audio: {error}",
         "operation.log.open_failed": "Could not open log: {error}",
@@ -670,6 +708,9 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "approve_demonstration_draft",
             "cancel_demonstration_draft",
             "delete_approved_demonstration_draft",
+            "start_risky_action_confirmation",
+            "click_risky_action_confirmation",
+            "cancel_risky_action_confirmation",
             "play_retained_span",
             "clear_retained_spans",
             "preview_point_and_speak",
@@ -701,6 +742,11 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "settings.accessibility.demonstrations.action",
             "settings.accessibility.demonstrations.text",
             "settings.accessibility.demonstrations.preview",
+            "settings.accessibility.risky_confirmation.risk",
+            "settings.accessibility.risky_confirmation.start",
+            "settings.accessibility.risky_confirmation.click",
+            "settings.accessibility.risky_confirmation.cancel",
+            "settings.accessibility.risky_confirmation.status",
             "settings.dialog.tone.app.label",
             "settings.dialog.tone.choice.label",
             "settings.dialog.snippet.chooser.label",
@@ -763,6 +809,10 @@ class GUIActions:
         lambda _draft_id: False)
     delete_approved_demonstration_draft: Callable[[str], bool] = (
         lambda _draft_id: False)
+    start_risky_action_confirmation: Callable[[str], bool] = (
+        lambda _risk: False)
+    click_risky_action_confirmation: Callable[[], bool] = lambda: False
+    cancel_risky_action_confirmation: Callable[[], bool] = lambda: False
     play_retained_span: Callable[[], bool] = lambda: False
     clear_retained_spans: Callable[[], None] = _noop
     set_app_tone: Callable[[str, str], None] = _noop
@@ -995,6 +1045,8 @@ class GUIState:
     voice_object_commands: bool = False
     voice_object_inbox_count: int = 0
     voice_object_inbox_status: str = "Off"
+    risky_action_risk: str = "none"
+    risky_action_confirmation_state: str = "idle"
     active_engine: str = localized_string("overview.engine.waiting")
     last_latency_ms: float | None = None
     last_word_count: int | None = None
@@ -1796,6 +1848,16 @@ def normalize_snapshot(
         source.get("voice_object_inbox_status", "Off")).strip().casefold()
     if voice_object_inbox_status not in {"off", "ready", "unavailable"}:
         voice_object_inbox_status = "unavailable"
+    confirmation = source.get("risky_action_confirmation")
+    confirmation = confirmation if isinstance(confirmation, Mapping) else {}
+    risky_action_risk = str(confirmation.get("risk", "none")).casefold()
+    confirmation_state = str(confirmation.get("state", "idle")).casefold()
+    if risky_action_risk not in RISKY_ACTION_CLASSES:
+        risky_action_risk = "none"
+    if confirmation_state not in RISKY_ACTION_STATES:
+        confirmation_state = "idle"
+    if risky_action_risk == "none":
+        confirmation_state = "idle"
     unknown_status = localized_string("default.status.unknown", locale=locale)
     service_status = _clean_text(source.get("service_status"), unknown_status)
     microphone_status = _clean_text(
@@ -1853,6 +1915,8 @@ def normalize_snapshot(
         voice_object_inbox_count=_nonnegative_int(
             source.get("voice_object_inbox_count")),
         voice_object_inbox_status=voice_object_inbox_status.title(),
+        risky_action_risk=risky_action_risk,
+        risky_action_confirmation_state=confirmation_state,
         active_engine=active_engine,
         last_latency_ms=normalized_latency,
         last_word_count=last_word_count,
@@ -2315,6 +2379,48 @@ class WhisperFaceViewModel:
                     "operation.voice_objects.update_failed", error=error),
                 notice_level="error")
         return self.state
+
+    def start_risky_action_confirmation(self, risk: str) -> GUIState:
+        normalized = str(risk).strip().casefold()
+        if normalized not in RISKY_ACTION_CLASSES:
+            raise ValueError("unsupported risk class")
+        try:
+            if not self.actions.start_risky_action_confirmation(normalized):
+                raise RuntimeError
+            return self.refresh()
+        except Exception:
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "operation.risky_confirmation.start_failed"),
+                notice_level="error")
+            return self.state
+
+    def click_risky_action_confirmation(self) -> GUIState:
+        try:
+            if not self.actions.click_risky_action_confirmation():
+                raise RuntimeError
+            return self.refresh()
+        except Exception:
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "operation.risky_confirmation.click_failed"),
+                notice_level="error")
+            return self.state
+
+    def cancel_risky_action_confirmation(self) -> GUIState:
+        try:
+            if not self.actions.cancel_risky_action_confirmation():
+                raise RuntimeError
+            return self.refresh()
+        except Exception:
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "operation.risky_confirmation.cancel_failed"),
+                notice_level="error")
+            return self.state
 
     def inspect_voice_object_drafts(self) -> tuple[VoiceDraftMetadata, ...]:
         """Load content-free metadata only after an explicit inspector action."""
@@ -3451,12 +3557,52 @@ if APPKIT_AVAILABLE:
                 self._l("settings.accessibility.demonstrations.inspector"),
                 self._l("settings.privacy.demonstrations.author.help"))
             privacy.addSubview_(author_demonstrations)
-            face_card = _card(NSMakeRect(0, 132, 758, 60))
-            face_card.addSubview_(_label(
-                self._l("settings.privacy.face"),
-                NSMakeRect(18, 38, 200, 20), size=13, weight="bold"))
+
+            risk_card = _card(NSMakeRect(0, 139, 758, 54))
+            risk_card.addSubview_(_label(
+                self._l("settings.privacy.risky_confirmation"),
+                NSMakeRect(14, 31, 270, 18), size=12, weight="bold"))
+            risk_status = _label(
+                self._l("settings.privacy.risky_confirmation.state.idle"),
+                NSMakeRect(14, 8, 278, 18), size=10, color=_SECONDARY)
+            risk_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                NSMakeRect(300, 12, 145, 30), False)
+            for risk in RISKY_ACTION_CLASSES:
+                risk_popup.addItemWithTitle_(self._l(
+                    f"settings.privacy.risky_confirmation.risk.{risk}"))
+            _accessible(
+                risk_popup,
+                self._l("settings.accessibility.risky_confirmation.risk"),
+                self._l(
+                    "settings.accessibility.risky_confirmation.risk.help"))
+            risk_start = _button(
+                self._l("settings.privacy.risky_confirmation.start"),
+                NSMakeRect(451, 11, 62, 32), self,
+                "startRiskyConfirmation:",
+                help_text=self._l(
+                    "settings.accessibility.risky_confirmation.start.help"))
+            risk_click = _button(
+                self._l("settings.privacy.risky_confirmation.click"),
+                NSMakeRect(519, 11, 112, 32), self,
+                "clickRiskyConfirmation:",
+                help_text=self._l(
+                    "settings.accessibility.risky_confirmation.click.help"))
+            risk_cancel = _button(
+                self._l("settings.privacy.risky_confirmation.cancel"),
+                NSMakeRect(637, 11, 94, 32), self,
+                "cancelRiskyConfirmation:",
+                help_text=self._l(
+                    "settings.accessibility.risky_confirmation.cancel.help"))
+            risk_card.addSubview_(risk_status)
+            risk_card.addSubview_(risk_popup)
+            risk_card.addSubview_(risk_start)
+            risk_card.addSubview_(risk_click)
+            risk_card.addSubview_(risk_cancel)
+            privacy.addSubview_(risk_card)
+
+            face_card = _card(NSMakeRect(0, 94, 758, 40))
             picker = NSSegmentedControl.alloc().initWithFrame_(
-                NSMakeRect(18, 3, 720, 32))
+                NSMakeRect(18, 4, 720, 32))
             picker.setSegmentCount_(len(FACES))
             picker.setSegmentStyle_(NSSegmentStyleRounded)
             for index, face in enumerate(FACES):
@@ -3473,14 +3619,14 @@ if APPKIT_AVAILABLE:
             face_card.addSubview_(picker)
             privacy.addSubview_(face_card)
 
-            flight_card = _card(NSMakeRect(0, 70, 758, 54))
+            flight_card = _card(NSMakeRect(0, 49, 758, 40))
             flight_card.addSubview_(_label(
                 self._l("settings.privacy.flight"),
-                NSMakeRect(18, 31, 260, 20), size=13, weight="bold"))
+                NSMakeRect(18, 18, 260, 18), size=12, weight="bold"))
             flight_card.addSubview_(_label(
                 self._l("settings.privacy.flight.detail"),
-                NSMakeRect(18, 8, 535, 18), size=10, color=_SECONDARY))
-            flight = NSButton.alloc().initWithFrame_(NSMakeRect(625, 11, 110, 32))
+                NSMakeRect(155, 18, 450, 18), size=10, color=_SECONDARY))
+            flight = NSButton.alloc().initWithFrame_(NSMakeRect(625, 5, 110, 30))
             flight.setButtonType_(3)
             flight.setTitle_(self._l("settings.state.enabled"))
             flight.setTarget_(self)
@@ -3491,15 +3637,15 @@ if APPKIT_AVAILABLE:
                 self._l("settings.accessibility.flight.help"))
             flight_card.addSubview_(flight)
             privacy.addSubview_(flight_card)
-            acoustic_card = _card(NSMakeRect(0, 8, 758, 54))
+            acoustic_card = _card(NSMakeRect(0, 4, 758, 40))
             acoustic_card.addSubview_(_label(
                 self._l("settings.privacy.acoustic"),
-                NSMakeRect(18, 31, 280, 20), size=13, weight="bold"))
+                NSMakeRect(18, 18, 280, 18), size=12, weight="bold"))
             acoustic_card.addSubview_(_label(
                 self._l("settings.privacy.acoustic.detail"),
-                NSMakeRect(18, 8, 580, 18), size=10, color=_SECONDARY))
+                NSMakeRect(180, 18, 430, 18), size=10, color=_SECONDARY))
             acoustic = NSButton.alloc().initWithFrame_(
-                NSMakeRect(625, 11, 110, 32))
+                NSMakeRect(625, 5, 110, 30))
             acoustic.setButtonType_(3)
             acoustic.setTitle_(self._l("settings.state.enabled"))
             acoustic.setTarget_(self)
@@ -3533,7 +3679,8 @@ if APPKIT_AVAILABLE:
                     "Personalize": tuple(personalize_key_views),
                     "Privacy": (
                         voice_objects, inspect_voice_objects,
-                        author_demonstrations, picker, flight, acoustic,
+                        author_demonstrations, risk_popup, risk_start,
+                        risk_click, risk_cancel, picker, flight, acoustic,
                         diagnostics),
                 },
                 face_picker=picker,
@@ -3543,6 +3690,11 @@ if APPKIT_AVAILABLE:
                 voice_object_commands_status=voice_object_status,
                 voice_object_inspect_button=inspect_voice_objects,
                 demonstration_author_button=author_demonstrations,
+                risky_confirmation_status=risk_status,
+                risky_confirmation_popup=risk_popup,
+                risky_confirmation_start=risk_start,
+                risky_confirmation_click=risk_click,
+                risky_confirmation_cancel=risk_cancel,
                 privacy_summary=privacy_summary,
                 diagnostics_button=diagnostics,
             )
@@ -3983,6 +4135,35 @@ if APPKIT_AVAILABLE:
                 voice_object_status,
                 label=self._l("settings.accessibility.voice_objects.label"),
             )
+            confirmation_state = state.risky_action_confirmation_state
+            confirmation_copy = self._l(
+                f"settings.privacy.risky_confirmation.state."
+                f"{confirmation_state}")
+            if state.risky_action_risk == "none":
+                risk_copy = self._l(
+                    "settings.privacy.risky_confirmation")
+            else:
+                risk_copy = self._l(
+                    "settings.privacy.risky_confirmation.risk."
+                    f"{state.risky_action_risk}")
+            confirmation_status = self._l(
+                "settings.privacy.risky_confirmation.status",
+                risk=risk_copy,
+                state=confirmation_copy,
+            )
+            set_accessible_text(
+                self.dynamic["risky_confirmation_status"],
+                confirmation_status,
+                label=self._l(
+                    "settings.accessibility.risky_confirmation.status"),
+            )
+            pending = confirmation_state in {
+                "awaiting_voice", "awaiting_click"}
+            self.dynamic["risky_confirmation_popup"].setEnabled_(not pending)
+            self.dynamic["risky_confirmation_start"].setEnabled_(not pending)
+            self.dynamic["risky_confirmation_click"].setEnabled_(
+                confirmation_state == "awaiting_click")
+            self.dynamic["risky_confirmation_cancel"].setEnabled_(pending)
             self.dynamic["privacy_summary"].setStringValue_(state.privacy_summary)
             sync_accessibility(
                 self.dynamic["privacy_summary"], state.privacy_summary,
@@ -4784,6 +4965,22 @@ if APPKIT_AVAILABLE:
             self.view_model.set_voice_object_commands(enabled)
             self.render()
 
+        def startRiskyConfirmation_(self, _sender: Any) -> None:
+            index = int(self.dynamic[
+                "risky_confirmation_popup"].indexOfSelectedItem())
+            if 0 <= index < len(RISKY_ACTION_CLASSES):
+                self.view_model.start_risky_action_confirmation(
+                    RISKY_ACTION_CLASSES[index])
+            self.render()
+
+        def clickRiskyConfirmation_(self, _sender: Any) -> None:
+            self.view_model.click_risky_action_confirmation()
+            self.render()
+
+        def cancelRiskyConfirmation_(self, _sender: Any) -> None:
+            self.view_model.cancel_risky_action_confirmation()
+            self.render()
+
         def playRetainedSpan_(self, _sender: Any) -> None:
             self.view_model.play_retained_span()
             self.render()
@@ -4997,6 +5194,27 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         keyword_reads[0] += 1
         return dict(private_keyword_export)
 
+    def start_risky_confirmation(risk: str) -> bool:
+        calls.append(("risk_start", risk))
+        runtime["risky_action_confirmation"] = {
+            "risk": risk,
+            "state": "awaiting_voice",
+            "reason": "proposed",
+        }
+        return True
+
+    def click_risky_confirmation() -> bool:
+        calls.append(("risk_click",))
+        runtime["risky_action_confirmation"].update(
+            state="confirmed", reason="two_factor_confirmed")
+        return True
+
+    def cancel_risky_confirmation() -> bool:
+        calls.append(("risk_cancel",))
+        runtime["risky_action_confirmation"].update(
+            state="cancelled", reason="explicitly_cancelled")
+        return True
+
     actions = GUIActions(
         status_snapshot=lambda: dict(runtime),
         settings_snapshot=lambda: dict(private_settings),
@@ -5015,6 +5233,9 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             calls.append(("forget_acoustic_keyword", keyword, scope)),
         forget_all_acoustic_keywords=lambda:
             calls.append(("forget_all_acoustic_keywords",)),
+        start_risky_action_confirmation=start_risky_confirmation,
+        click_risky_action_confirmation=click_risky_confirmation,
+        cancel_risky_action_confirmation=cancel_risky_confirmation,
     )
     model = WhisperFaceViewModel(actions, locale="en-US")
     controller = None
@@ -5164,6 +5385,48 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             str(controller.dynamic["settings_keywords_button"].action()) ==
             "inspectKeywords:", "keyword inspection surface")
         require(
+            str(controller.dynamic["risky_confirmation_start"].action()) ==
+            "startRiskyConfirmation:", "risk start action")
+        require(
+            str(controller.dynamic["risky_confirmation_click"].action()) ==
+            "clickRiskyConfirmation:", "risk click action")
+        require(
+            not bool(controller.dynamic[
+                "risky_confirmation_click"].isEnabled()),
+            "risk click starts disabled")
+        controller.dynamic[
+            "risky_confirmation_popup"].selectItemAtIndex_(0)
+        controller.startRiskyConfirmation_(None)
+        require(
+            model.state.risky_action_confirmation_state == "awaiting_voice",
+            "risk awaits voice")
+        require(
+            not bool(controller.dynamic[
+                "risky_confirmation_click"].isEnabled()),
+            "risk click disabled before voice")
+        runtime["risky_action_confirmation"].update(
+            state="awaiting_click", reason="voice_confirmed")
+        model.refresh()
+        controller.render()
+        require(
+            bool(controller.dynamic[
+                "risky_confirmation_click"].isEnabled()),
+            "risk click enabled after voice")
+        controller.clickRiskyConfirmation_(None)
+        require(
+            model.state.risky_action_confirmation_state == "confirmed",
+            "risk receipt remains inert")
+        require(
+            not bool(controller.dynamic[
+                "risky_confirmation_click"].isEnabled()),
+            "risk click disables after terminal state")
+        require(
+            accessible_value(
+                controller.dynamic["risky_confirmation_status"],
+                "accessibilityLabel") == localized_string(
+                    "settings.accessibility.risky_confirmation.status"),
+            "risk status accessibility")
+        require(
             int(controller.dynamic[
                 "diagnostics_button"].keyEquivalentModifierMask()) & int(
                     NSEventModifierFlagCommand),
@@ -5283,6 +5546,8 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             ("forget_all_acoustic_keywords",),
             ("face", "owl"),
             ("flight", True),
+            ("risk_start", "external_communication"),
+            ("risk_click",),
         }
         require(expected_calls.issubset(set(calls)), "model actions")
         require(not bool(controller.window.isVisible()), "window activation")
