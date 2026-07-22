@@ -5,6 +5,7 @@
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -206,7 +207,12 @@ class MacDistributionContractTests(unittest.TestCase):
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, script)
-        subprocess.run(["bash", "-n", str(PACKAGE_SCRIPT)], check=True)
+        # Native Windows may expose a ``bash.exe`` WSL launcher even when no
+        # Linux distribution is installed.  Keep the package-contract checks
+        # platform independent, and run the shell parser everywhere Bash is a
+        # native POSIX tool (including macOS and Linux CI).
+        if os.name == "posix":
+            subprocess.run(["bash", "-n", str(PACKAGE_SCRIPT)], check=True)
 
     def test_release_workflow_fails_closed_and_publishes_only_tags(self):
         workflow = self.read(".github/workflows/macos-release.yml")
