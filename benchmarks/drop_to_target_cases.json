@@ -1,0 +1,184 @@
+{
+  "schema_version": 1,
+  "evidence_scope": "synthetic-decision-only",
+  "physical_validation": false,
+  "scenes": [
+    {
+      "scene_id": "workspace",
+      "targets": [
+        {
+          "schema_version": 1,
+          "target_id": "team-inbox",
+          "title": "Team Inbox",
+          "label": "",
+          "accepted_kinds": ["file_reference", "text_selection", "url_reference"],
+          "accepted_effects": ["copy", "move"],
+          "visible": true,
+          "enabled": true,
+          "drop_enabled": true
+        },
+        {
+          "schema_version": 1,
+          "target_id": "image-well",
+          "title": "Image Well",
+          "label": "",
+          "accepted_kinds": ["image_reference"],
+          "accepted_effects": ["copy"],
+          "visible": true,
+          "enabled": true,
+          "drop_enabled": true
+        },
+        {
+          "schema_version": 1,
+          "target_id": "cold-archive",
+          "title": "Cold Archive",
+          "label": "",
+          "accepted_kinds": ["file_reference"],
+          "accepted_effects": ["move"],
+          "visible": true,
+          "enabled": true,
+          "drop_enabled": true
+        },
+        {
+          "schema_version": 1,
+          "target_id": "bookmark-shelf",
+          "title": "",
+          "label": "Bookmark Shelf",
+          "accepted_kinds": ["url_reference"],
+          "accepted_effects": ["link"],
+          "visible": true,
+          "enabled": true,
+          "drop_enabled": true
+        },
+        {
+          "schema_version": 1,
+          "target_id": "hidden-trash",
+          "title": "Hidden Trash",
+          "label": "",
+          "accepted_kinds": ["file_reference"],
+          "accepted_effects": ["move"],
+          "visible": false,
+          "enabled": true,
+          "drop_enabled": true
+        },
+        {
+          "schema_version": 1,
+          "target_id": "disabled-export-bin",
+          "title": "Export Bin",
+          "label": "",
+          "accepted_kinds": ["file_reference"],
+          "accepted_effects": ["copy"],
+          "visible": true,
+          "enabled": true,
+          "drop_enabled": false
+        }
+      ]
+    },
+    {
+      "scene_id": "duplicate-lanes",
+      "targets": [
+        {
+          "schema_version": 1,
+          "target_id": "review-lane-a",
+          "title": "Review Lane",
+          "label": "",
+          "accepted_kinds": ["text_selection"],
+          "accepted_effects": ["copy"],
+          "visible": true,
+          "enabled": true,
+          "drop_enabled": true
+        },
+        {
+          "schema_version": 1,
+          "target_id": "review-lane-b",
+          "title": "Review Lane",
+          "label": "",
+          "accepted_kinds": ["text_selection"],
+          "accepted_effects": ["copy"],
+          "visible": true,
+          "enabled": true,
+          "drop_enabled": true
+        }
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "exact-inbox",
+      "scene_id": "workspace",
+      "proposal": {"schema_version": 1, "target_hint": "Team Inbox", "source_kind": "file_reference", "effect": "copy"},
+      "expected_state": "resolved",
+      "expected_target_id": "team-inbox"
+    },
+    {
+      "case_id": "normalized-inbox",
+      "scene_id": "workspace",
+      "proposal": {"schema_version": 1, "target_hint": "team-inbox", "source_kind": "text_selection", "effect": "move"},
+      "expected_state": "resolved",
+      "expected_target_id": "team-inbox"
+    },
+    {
+      "case_id": "token-image",
+      "scene_id": "workspace",
+      "proposal": {"schema_version": 1, "target_hint": "image", "source_kind": "image_reference", "effect": "copy"},
+      "expected_state": "resolved",
+      "expected_target_id": "image-well"
+    },
+    {
+      "case_id": "move-archive",
+      "scene_id": "workspace",
+      "proposal": {"schema_version": 1, "target_hint": "Cold Archive", "source_kind": "file_reference", "effect": "move"},
+      "expected_state": "resolved",
+      "expected_target_id": "cold-archive"
+    },
+    {
+      "case_id": "link-bookmark",
+      "scene_id": "workspace",
+      "proposal": {"schema_version": 1, "target_hint": "Bookmark Shelf", "source_kind": "url_reference", "effect": "link"},
+      "expected_state": "resolved",
+      "expected_target_id": "bookmark-shelf"
+    },
+    {
+      "case_id": "duplicate-ambiguous",
+      "scene_id": "duplicate-lanes",
+      "proposal": {"schema_version": 1, "target_hint": "Review Lane", "source_kind": "text_selection", "effect": "copy"},
+      "expected_state": "ambiguous",
+      "expected_target_id": null
+    },
+    {
+      "case_id": "kind-conflict",
+      "scene_id": "workspace",
+      "proposal": {"schema_version": 1, "target_hint": "Team Inbox", "source_kind": "image_reference", "effect": "copy"},
+      "expected_state": "unavailable",
+      "expected_target_id": null
+    },
+    {
+      "case_id": "effect-conflict",
+      "scene_id": "workspace",
+      "proposal": {"schema_version": 1, "target_hint": "Cold Archive", "source_kind": "file_reference", "effect": "copy"},
+      "expected_state": "unavailable",
+      "expected_target_id": null
+    },
+    {
+      "case_id": "hidden-target",
+      "scene_id": "workspace",
+      "proposal": {"schema_version": 1, "target_hint": "Hidden Trash", "source_kind": "file_reference", "effect": "move"},
+      "expected_state": "unavailable",
+      "expected_target_id": null
+    },
+    {
+      "case_id": "drop-disabled",
+      "scene_id": "workspace",
+      "proposal": {"schema_version": 1, "target_hint": "Export Bin", "source_kind": "file_reference", "effect": "copy"},
+      "expected_state": "unavailable",
+      "expected_target_id": null
+    },
+    {
+      "case_id": "missing-target",
+      "scene_id": "workspace",
+      "proposal": {"schema_version": 1, "target_hint": "Unknown Destination", "source_kind": "file_reference", "effect": "copy"},
+      "expected_state": "unavailable",
+      "expected_target_id": null
+    }
+  ]
+}

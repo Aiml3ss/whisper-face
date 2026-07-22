@@ -145,6 +145,12 @@ profiles.
   readiness, and bounded evidence through one in-process policy. Failover is
   sequential and requires an explicit typed failure receipt; live routing is
   intentionally not wired yet.
+- **Voice action foundations without surprise execution** — typed Voice
+  Objects can project closed facts into inert text, email, task, and calendar
+  drafts; a private Voice Inbox can durably queue exact payloads with source
+  provenance; and Drop-to-Target can resolve or refuse a synthetic target
+  behind strict capability and ambiguity gates. None of these foundations can
+  send, schedule, click, type, drag, or run an agent yet.
 - **Personal Regression Lab** — confirmed correction mappings are evaluated
   against a private, deterministic suite of the user's exact corrected spans.
   Conflicting candidates are quarantined instead of silently becoming a bad
@@ -383,6 +389,11 @@ destination snapshots and a final atomic compare-and-swap, with content-free
 idempotent receipts. A real platform destination adapter is still required
 before runtime activation.
 
+`voice_objects.py`, `voice_inbox.py`, and `drop_to_target.py` define inert,
+local foundations for the next interaction layer. They can prepare typed
+drafts, hold explicitly deferred payloads, and make a synthetic target decision;
+they have no live destination or agent execution integration.
+
 ## Verify
 
 Run the fast regression suite after changing the pipeline:
@@ -405,6 +416,9 @@ uv run tests/test_acoustic_keyword_memory.py
 uv run tests/test_delayed_cleanup_merge.py
 uv run tests/test_model_wallet.py
 uv run tests/test_point_and_speak_resolver.py
+uv run tests/test_drop_to_target.py
+uv run tests/test_voice_objects.py
+uv run tests/test_voice_inbox.py
 uv run tests/test_personal_regression.py
 uv run tests/test_whisper_face_gui.py
 uv run --locked --script dictate.py --native-gui-smoke-test

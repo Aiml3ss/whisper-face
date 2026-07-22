@@ -43,9 +43,9 @@ explicit Mac-first sequencing rather than dropping the item.
 | 33 | Personal Regression cardinality-boundary tests | complete | `tests/test_personal_regression.py` covers deterministic `MAX_CASES + 1`, `MAX_MAPPINGS + 1`, and `MAX_QUARANTINED + 1` eviction |
 | 34 | Full installed-Windows verification | queued | Real Windows `setup.ps1 --verify` and first dictation |
 | 35 | Point-and-Speak | active | A closed non-writing resolver combines accessible name/role, ordinal/spatial language, focus/selection, strict confidence/margin, and contradiction refusal; its 17-case synthetic corpus has 17 correct outcomes and zero wrong-target resolutions, but no physical AX integration, writes, or >95% real-app claim |
-| 36 | Drop-to-Target | queued | Prototype plus measured kill/continue decision |
-| 37 | Voice Objects projected across destinations | queued | Typed object and contradiction-safe projections |
-| 38 | Agent Voice Inbox | queued | Provenance-preserving queue and local-agent adapters |
+| 36 | Drop-to-Target | active | A closed non-writing resolver gates source kind, effect, target capability, confidence, margin, and contradictions; its 11-case synthetic corpus has 11 correct outcomes and zero wrong-target resolutions, but no physical target capture, drop action, or real-app keep/kill evidence exists |
+| 37 | Voice Objects projected across destinations | active | A pure typed model deterministically projects closed facts into inert plain-text, email, task, and calendar drafts, rejecting contradictory, incomplete, and invalid-time inputs with content-free receipts; dictation extraction and destination adapters remain unwired |
+| 38 | Agent Voice Inbox | active | A strict local queue preserves opaque source provenance and exact payloads through atomic, idempotent queued/acknowledged/cancelled transitions with content-free receipts; no local-agent adapter or execution authority exists |
 | 39 | Voice-plus-click confirmation for risky agent actions | queued | Risk policy, explicit confirmation, audit receipt |
 | 40 | Teach-by-demonstration workflows | queued | Finder/Mail/Notes/menu vertical slices with preview/rollback |
 | 41 | Risk sonification/haptic feedback | queued | Isolated prototype and usability/error-rate evidence |
