@@ -215,6 +215,7 @@ class AcousticKeywordMemoryRuntimeTests(unittest.TestCase):
             "_load_acoustic_keyword_memory",
             "acoustic_keyword_memory_status_snapshot",
             "export_acoustic_keyword_memory",
+            "remember_explicit_acoustic_keyword_correction",
             "forget_acoustic_keyword",
             "forget_all_acoustic_keywords",
             assignments={"ACOUSTIC_KEYWORD_MEMORY_LOCK"},
@@ -227,6 +228,34 @@ class AcousticKeywordMemoryRuntimeTests(unittest.TestCase):
         )
         namespace["ACOUSTIC_KEYWORD_MEMORY_FILE"] = path
         return namespace
+
+    def test_exact_correction_signal_populates_global_memory_idempotently(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "acoustic_keyword_memory.json"
+            namespace = self.runtime_namespace(path)
+
+            self.assertFalse(
+                namespace["remember_explicit_acoustic_keyword_correction"](
+                    "Qwen", evidence_id=""))
+            self.assertTrue(
+                namespace["remember_explicit_acoustic_keyword_correction"](
+                    "Qwen", evidence_id="opaque-1"))
+            self.assertTrue(
+                namespace["remember_explicit_acoustic_keyword_correction"](
+                    "Qwen", evidence_id="opaque-1"))
+            self.assertTrue(
+                namespace["remember_explicit_acoustic_keyword_correction"](
+                    "Qwen", evidence_id="opaque-2"))
+
+            candidate = AcousticKeywordMemory.loads(
+                path.read_text(encoding="utf-8")).candidates[0]
+            self.assertEqual(candidate.keyword, "Qwen")
+            self.assertIsNone(candidate.app_scope)
+            self.assertEqual(
+                (candidate.observations, candidate.confirmations), (2, 2))
+            encoded = path.read_text(encoding="utf-8")
+            self.assertNotIn("opaque-1", encoded)
+            self.assertNotIn("opaque-2", encoded)
 
     def test_status_is_bounded_and_omits_keywords_evidence_and_app_ids(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -269,6 +298,36 @@ class AcousticKeywordMemoryRuntimeTests(unittest.TestCase):
             self.assertNotIn("private-utterance-1", encoded)
             self.assertNotIn("observation_tokens", encoded)
 
+    def test_explicit_export_callback_copies_only_the_token_free_projection(self):
+        copied = []
+
+        class Pasteboard:
+            def clearContents(self):
+                return None
+
+            def setString_forType_(self, value, kind):
+                copied.append((value, kind))
+                return True
+
+        namespace = load_definitions(
+            "copy_acoustic_keyword_memory_export",
+            extra={
+                "json": json,
+                "export_acoustic_keyword_memory": lambda: {
+                    "candidates": [{"keyword": "Qwen", "observations": 1}],
+                },
+                "NSPasteboard": SimpleNamespace(
+                    generalPasteboard=lambda: Pasteboard()),
+                "NSPasteboardTypeString": "public.utf8-plain-text",
+            },
+        )
+
+        namespace["copy_acoustic_keyword_memory_export"]()
+
+        self.assertEqual(copied[0][1], "public.utf8-plain-text")
+        self.assertIn('"keyword": "Qwen"', copied[0][0])
+        self.assertNotIn("observation_tokens", copied[0][0])
+
     def test_exact_and_all_forget_actions_atomically_persist(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "acoustic_keyword_memory.json"
@@ -310,6 +369,9 @@ class AcousticKeywordMemoryRuntimeTests(unittest.TestCase):
                 namespace["export_acoustic_keyword_memory"]()
             with self.assertRaisesRegex(ValueError, "forget all"):
                 namespace["forget_acoustic_keyword"]("must-not-activate")
+            self.assertFalse(
+                namespace["remember_explicit_acoustic_keyword_correction"](
+                    "Qwen", evidence_id="opaque-correction"))
 
             self.assertEqual(namespace["forget_all_acoustic_keywords"](), 0)
             self.assertEqual(
@@ -1290,6 +1352,7 @@ class LearningTests(unittest.TestCase):
     def test_early_correction_reaches_learned_state(self):
         elapsed = [0.0]
         observed = []
+        remembered = []
         fake_time = SimpleNamespace(
             monotonic=lambda: elapsed[0],
             sleep=lambda seconds: elapsed.__setitem__(
@@ -1310,6 +1373,9 @@ class LearningTests(unittest.TestCase):
                 "parse_dictionary": lambda: ([], set()),
                 "record_paste_outcome": lambda _receipt, value:
                     observed.append(value),
+                "remember_explicit_acoustic_keyword_correction":
+                    lambda keyword, evidence_id:
+                    remembered.append((keyword, evidence_id)) or True,
                 "refresh_glossary": lambda: None,
                 "PersonalRegressionLab": PersonalRegressionLab,
                 "PERSONAL_APP_MIN_COUNT": 2,
@@ -1335,6 +1401,7 @@ class LearningTests(unittest.TestCase):
                 pasted="Gwen",
                 bundle="com.openai.codex",
                 mode="capture",
+                event_id="opaque-correction-event",
             )
 
             ns["learn_from_corrections"](receipt)
@@ -1348,6 +1415,11 @@ class LearningTests(unittest.TestCase):
             ns["learn_from_corrections"](receipt)
             global_state = json.loads(learned.read_text())
         self.assertEqual(observed, ["Qwen", "Qwen", "Qwen"])
+        self.assertEqual(remembered, [
+            ("Qwen", "opaque-correction-event:0"),
+            ("Qwen", "opaque-correction-event:0"),
+            ("Qwen", "opaque-correction-event:0"),
+        ])
         self.assertEqual(
             below_threshold["regression_lab"]["promoted"], [])
         self.assertEqual(state["fixes"]["gwen"], {"to": "Qwen", "n": 2})

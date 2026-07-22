@@ -2817,6 +2817,30 @@ def export_acoustic_keyword_memory() -> dict:
         return memory.export_dict()
 
 
+def remember_explicit_acoustic_keyword_correction(
+        keyword: str, *, evidence_id: str) -> bool:
+    """Persist one already-accepted exact correction as global evidence.
+
+    This is intentionally downstream of the existing exact-range correction
+    validator. It never reads transcripts or alternatives, and malformed
+    keyword state remains inactive rather than being silently replaced.
+    """
+    if not isinstance(evidence_id, str) or not evidence_id:
+        return False
+    with ACOUSTIC_KEYWORD_MEMORY_LOCK:
+        memory, storage_status = _load_acoustic_keyword_memory()
+        if storage_status == "invalid":
+            return False
+        memory.accept_explicit_correction(
+            keyword,
+            evidence_id=evidence_id,
+            app_scope=None,
+        )
+        atomic_write_text(
+            ACOUSTIC_KEYWORD_MEMORY_FILE, memory.dumps() + "\n")
+    return True
+
+
 def forget_acoustic_keyword(keyword: str, *,
                             app_scope: str | None = None) -> bool:
     """Forget one explicitly named candidate and atomically persist it."""
@@ -2840,6 +2864,20 @@ def forget_all_acoustic_keywords() -> int:
         atomic_write_text(
             ACOUSTIC_KEYWORD_MEMORY_FILE, memory.dumps() + "\n")
         return removed
+
+
+def copy_acoustic_keyword_memory_export() -> None:
+    """Copy the explicit, token-free keyword export to the Mac clipboard."""
+    payload = json.dumps(
+        export_acoustic_keyword_memory(),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )
+    pb = NSPasteboard.generalPasteboard()
+    pb.clearContents()
+    if not pb.setString_forType_(payload, NSPasteboardTypeString):
+        raise RuntimeError("macOS clipboard rejected the keyword export")
 
 
 GUI_TONES = {"auto", "casual", "formal", "code", "verbatim", "default"}
@@ -4950,11 +4988,14 @@ def learn_from_corrections(receipt: PasteReceipt | None):
         return
     manual, banned = parse_dictionary()
     known = {t.casefold() for t in manual} | banned
+    accepted_keywords: list[tuple[str, str]] = []
+    event_id = getattr(receipt, "event_id", "")
     with LEARN_LOCK:
         state = load_learned()
         regression = personal_regression_lab(state)
         changed = False
-        for old, term in learned[:CORRECTION_MAX_LEARN]:
+        for correction_index, (old, term) in enumerate(
+                learned[:CORRECTION_MAX_LEARN]):
             # dictionary: the corrected spelling is a strong signal
             if term.casefold() not in known \
                     and state["counts"].get(term, 0) < PROMOTE_MIN_COUNT:
@@ -5011,9 +5052,20 @@ def learn_from_corrections(receipt: PasteReceipt | None):
             state["history"] = state["history"][-100:]
             if fix["n"] == PERSONAL_GLOBAL_MIN_COUNT:
                 print(f"[learn] fix rule active: {old!r} -> {term!r}")
+            if isinstance(event_id, str) and event_id:
+                accepted_keywords.append(
+                    (term, f"{event_id}:{correction_index}"))
         if changed:
             save_learned(state)
             refresh_glossary()
+    for keyword, evidence_id in accepted_keywords:
+        try:
+            remember_explicit_acoustic_keyword_correction(
+                keyword, evidence_id=evidence_id)
+        except (OSError, ValueError) as error:
+            # Keyword evidence must never break established correction
+            # learning, recognition, cleanup, or insertion.
+            print(f"! acoustic keyword memory unavailable: {error}")
 
 
 def peak_rms(audio: np.ndarray, win: int = SAMPLE_RATE // 10) -> float:
@@ -6383,6 +6435,11 @@ def main():
             save_vocabulary=save_gui_vocabulary,
             forget_correction=forget_gui_correction,
             forget_snippet_edit=forget_snippet_edit,
+            inspect_acoustic_keywords=export_acoustic_keyword_memory,
+            export_acoustic_keywords=copy_acoustic_keyword_memory_export,
+            forget_acoustic_keyword=lambda keyword, scope:
+                forget_acoustic_keyword(keyword, app_scope=scope),
+            forget_all_acoustic_keywords=forget_all_acoustic_keywords,
             pause=lambda: STATUS["bar"].set_paused(True),
             resume=lambda: STATUS["bar"].set_paused(False),
             open_log=lambda: subprocess.Popen(

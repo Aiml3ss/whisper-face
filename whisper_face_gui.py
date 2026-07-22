@@ -281,7 +281,13 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.personalize.vocabulary.detail": "{terms} terms · {bans} exclusions",
         "settings.personalize.corrections": "Learned corrections",
         "settings.personalize.corrections.detail": "{count} inspectable mappings",
+        "settings.personalize.keywords": "Pronunciation keywords",
+        "settings.personalize.keywords.detail": "Open to inspect correction-backed evidence",
         "settings.action.edit": "Edit",
+        "settings.action.inspect": "Inspect",
+        "settings.action.export": "Copy Export",
+        "settings.action.done": "Done",
+        "settings.action.forget_all": "Forget All",
         "settings.action.add": "Add",
         "settings.action.delete": "Delete",
         "settings.action.forget": "Forget",
@@ -323,6 +329,22 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.dialog.forget.message": "Whisper Face will stop applying “{source} → {target}”.",
         "settings.dialog.correction.chooser.label": "Learned correction",
         "settings.dialog.correction.chooser.help": "Choose a learned correction to inspect and forget.",
+        "settings.dialog.keywords.title": "Pronunciation keywords",
+        "settings.dialog.keywords.message": "These candidates come only from exact corrections you made. They do not affect recognition yet.",
+        "settings.dialog.keywords.empty": "No correction-backed keyword candidates yet.",
+        "settings.dialog.keywords.chooser.label": "Pronunciation keyword candidate",
+        "settings.dialog.keywords.chooser.help": "Choose a pronunciation keyword to inspect, export, or forget.",
+        "settings.dialog.keywords.row": "{keyword} · {observations} observations · {confirmations} confirmations · {status} · {scope}",
+        "settings.dialog.keywords.status.eligible": "eligible for evaluation",
+        "settings.dialog.keywords.status.gathering": "gathering evidence",
+        "settings.dialog.keywords.scope.global": "Global",
+        "settings.dialog.keywords.scope.private_app": "Private app scope",
+        "settings.dialog.keywords.forget.title": "Forget pronunciation keyword?",
+        "settings.dialog.keywords.forget.message": "This removes all aggregate evidence for “{keyword}” in {scope} scope.",
+        "settings.dialog.keywords.forget_all.title": "Forget all pronunciation keywords?",
+        "settings.dialog.keywords.forget_all.message": "This removes every correction-backed pronunciation candidate from this Mac.",
+        "settings.dialog.keywords.invalid.title": "Pronunciation keyword memory needs attention",
+        "settings.dialog.keywords.invalid.message": "The private state is malformed and remains inactive. You can explicitly forget all to reset it.",
         "settings.privacy.title": "Privacy controls",
         "settings.privacy.flight": "Flight Recorder",
         "settings.privacy.flight.detail": "Keeps a rolling 20-second audio buffer in RAM only.",
@@ -350,12 +372,16 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.accessibility.snippets_summary.label": "Snippets summary",
         "settings.accessibility.vocabulary_summary.label": "Vocabulary summary",
         "settings.accessibility.corrections_summary.label": "Learned corrections summary",
+        "settings.accessibility.keywords_summary.label": "Pronunciation keyword evidence",
         "settings.notice.loaded": "Settings loaded",
         "settings.notice.tone_saved": "App tone saved",
         "settings.notice.snippet_saved": "Snippet saved",
         "settings.notice.snippet_deleted": "Snippet deleted",
         "settings.notice.vocabulary_saved": "Vocabulary saved",
         "settings.notice.correction_forgotten": "Learned correction forgotten",
+        "settings.notice.keyword_exported": "Pronunciation keyword export copied",
+        "settings.notice.keyword_forgotten": "Pronunciation keyword forgotten",
+        "settings.notice.keywords_forgotten": "All pronunciation keywords forgotten",
         "default.model.name": "Model",
         "default.status.unknown": "Unknown",
         "default.capture.ready": "Ready",
@@ -383,6 +409,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "validation.correction.kind": "unknown learned correction kind",
         "validation.correction.unknown": "unknown learned correction",
         "validation.correction.stale_snippet": "the learned snippet edit no longer exists",
+        "validation.keyword.unknown": "unknown pronunciation keyword",
         "validation.face.unsupported": "unsupported face: {face}",
         "operation.settings.load_failed": "Could not load settings: {error}",
         "operation.tone.save_failed": "Could not save app tone: {error}",
@@ -390,6 +417,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "operation.snippet.delete_failed": "Could not delete snippet: {error}",
         "operation.vocabulary.save_failed": "Could not save vocabulary: {error}",
         "operation.correction.forget_failed": "Could not forget correction: {error}",
+        "operation.keyword.inspect_failed": "Could not inspect pronunciation keywords: {error}",
+        "operation.keyword.export_failed": "Could not export pronunciation keywords: {error}",
+        "operation.keyword.forget_failed": "Could not forget pronunciation keyword: {error}",
         "operation.face.change_failed": "Could not change face: {error}",
         "operation.flight.update_failed": "Could not update Flight Recorder: {error}",
         "operation.log.open_failed": "Could not open log: {error}",
@@ -464,6 +494,10 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "save_vocabulary",
             "forget_correction",
             "forget_snippet",
+            "inspect_acoustic_keywords",
+            "export_acoustic_keywords",
+            "forget_acoustic_keyword",
+            "forget_all_acoustic_keywords",
             "choose_face",
             "set_flight_recorder",
         ),
@@ -491,6 +525,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "settings.dialog.vocabulary.terms",
             "settings.dialog.vocabulary.bans",
             "settings.dialog.correction.chooser.label",
+            "settings.dialog.keywords.chooser.label",
             "results.accessibility.firewall",
             "models.accessibility.guidance",
             "diagnostics.accessibility.verification",
@@ -524,6 +559,10 @@ class GUIActions:
     save_vocabulary: Callable[[Sequence[str], Sequence[str]], None] = _noop
     forget_correction: Callable[[str], None] = _noop
     forget_snippet_edit: Callable[[str], Any] = _noop
+    inspect_acoustic_keywords: Callable[[], Mapping[str, Any]] = lambda: {}
+    export_acoustic_keywords: Callable[[], None] = _noop
+    forget_acoustic_keyword: Callable[[str, str | None], Any] = _noop
+    forget_all_acoustic_keywords: Callable[[], Any] = _noop
     pause: Callable[[], None] = _noop
     resume: Callable[[], None] = _noop
     open_log: Callable[[], None] = _noop
@@ -561,6 +600,26 @@ class CorrectionSetting:
     target: str
     count: int = 0
     kind: str = "correction"
+
+
+@dataclass(frozen=True)
+class AcousticKeywordCandidate:
+    """One private candidate returned only after explicit inspection."""
+
+    keyword: str
+    app_scope: str | None
+    observations: int
+    confirmations: int
+    eligible: bool
+
+
+@dataclass(frozen=True)
+class AcousticKeywordInspection:
+    """Strict, token-free projection for the on-demand Settings dialog."""
+
+    candidates: tuple[AcousticKeywordCandidate, ...] = field(
+        default_factory=tuple)
+    recognition_effect: str = "none"
 
 
 @dataclass(frozen=True)
@@ -791,6 +850,91 @@ def normalize_settings(snapshot: Mapping[str, Any] | None) -> UnifiedSettings:
         banned_vocabulary=_text_items(source.get("banned_vocabulary")),
         corrections=tuple(corrections),
     )
+
+
+def normalize_acoustic_keyword_inspection(
+    snapshot: Mapping[str, Any] | None,
+) -> AcousticKeywordInspection:
+    """Fail closed on any unexpected private export field or invariant."""
+
+    if not isinstance(snapshot, Mapping) or set(snapshot) != {
+            "schema_version", "kind", "policy", "candidates"}:
+        raise ValueError("pronunciation keyword export is malformed")
+    if (snapshot.get("schema_version") != 1
+            or snapshot.get("kind") !=
+            "whisper-face/acoustic-keyword-memory-export"):
+        raise ValueError("pronunciation keyword export is malformed")
+    policy = snapshot.get("policy")
+    if not isinstance(policy, Mapping) or set(policy) != {
+            "minimum_observations", "minimum_confirmations", "max_entries",
+            "recognition_effect"}:
+        raise ValueError("pronunciation keyword export is malformed")
+    if (policy.get("minimum_observations") != 3
+            or policy.get("minimum_confirmations") != 2
+            or policy.get("recognition_effect") != "none"
+            or not isinstance(policy.get("max_entries"), int)
+            or isinstance(policy.get("max_entries"), bool)
+            or not 1 <= policy["max_entries"] <= 256):
+        raise ValueError("pronunciation keyword export is malformed")
+    raw_candidates = snapshot.get("candidates")
+    if (not isinstance(raw_candidates, Sequence)
+            or isinstance(raw_candidates, (str, bytes))
+            or len(raw_candidates) > policy["max_entries"]):
+        raise ValueError("pronunciation keyword export is malformed")
+    candidates: list[AcousticKeywordCandidate] = []
+    seen: set[tuple[str, str | None]] = set()
+    for raw in raw_candidates:
+        if not isinstance(raw, Mapping) or set(raw) != {
+                "keyword", "app_scope", "observations", "confirmations",
+                "eligible", "status"}:
+            raise ValueError("pronunciation keyword export is malformed")
+        keyword = raw.get("keyword")
+        scope = raw.get("app_scope")
+        observations = raw.get("observations")
+        confirmations = raw.get("confirmations")
+        eligible = raw.get("eligible")
+        if (not isinstance(keyword, str) or not keyword
+                or keyword != " ".join(keyword.split())
+                or len(keyword) > 80
+                or any(ord(character) < 32 or ord(character) == 127
+                       for character in keyword)):
+            raise ValueError("pronunciation keyword export is malformed")
+        if scope is not None and (
+                not isinstance(scope, str) or len(scope) != 20
+                or not scope.startswith("app-")
+                or any(character not in "0123456789abcdef"
+                       for character in scope[4:])):
+            raise ValueError("pronunciation keyword export is malformed")
+        if (not isinstance(observations, int)
+                or isinstance(observations, bool)
+                or not 0 <= observations <= 3
+                or not isinstance(confirmations, int)
+                or isinstance(confirmations, bool)
+                or not 0 <= confirmations <= 2
+                or not isinstance(eligible, bool)):
+            raise ValueError("pronunciation keyword export is malformed")
+        expected_eligible = observations >= 3 and confirmations >= 2
+        expected_status = (
+            "eligible-not-connected-to-recognition"
+            if expected_eligible else
+            f"needs-{3 - observations}-observations-and-"
+            f"{2 - confirmations}-confirmations"
+        )
+        if eligible != expected_eligible or raw.get("status") != expected_status:
+            raise ValueError("pronunciation keyword export is malformed")
+        key = (keyword.casefold(), scope)
+        if key in seen:
+            raise ValueError("pronunciation keyword export is malformed")
+        seen.add(key)
+        candidates.append(AcousticKeywordCandidate(
+            keyword=keyword,
+            app_scope=scope,
+            observations=observations,
+            confirmations=confirmations,
+            eligible=eligible,
+        ))
+    return AcousticKeywordInspection(
+        candidates=tuple(candidates), recognition_effect="none")
 
 
 def _status_contains(value: str, words: Sequence[str]) -> bool:
@@ -1511,6 +1655,67 @@ class WhisperFaceViewModel:
                 notice_level="error")
             return self.state
 
+    def inspect_acoustic_keywords(self) -> AcousticKeywordInspection:
+        """Load candidate text only for an explicit inspection action."""
+        try:
+            return normalize_acoustic_keyword_inspection(
+                self.actions.inspect_acoustic_keywords())
+        except Exception as error:
+            message = self.localized(
+                "operation.keyword.inspect_failed", error=error)
+            self.state = replace(
+                self.state, notice=message, notice_level="error")
+            raise ValueError(message) from error
+
+    def export_acoustic_keywords(self) -> GUIState:
+        try:
+            self.actions.export_acoustic_keywords()
+            self.state = replace(
+                self.state,
+                notice=self.localized("settings.notice.keyword_exported"),
+                notice_level="success")
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.keyword.export_failed", error=error),
+                notice_level="error")
+        return self.state
+
+    def forget_acoustic_keyword(
+        self, candidate: AcousticKeywordCandidate,
+    ) -> GUIState:
+        if not isinstance(candidate, AcousticKeywordCandidate):
+            raise ValueError(self.localized("validation.keyword.unknown"))
+        try:
+            removed = self.actions.forget_acoustic_keyword(
+                candidate.keyword, candidate.app_scope)
+            if removed is False:
+                raise KeyError(self.localized("validation.keyword.unknown"))
+            self.state = replace(
+                self.state,
+                notice=self.localized("settings.notice.keyword_forgotten"),
+                notice_level="success")
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.keyword.forget_failed", error=error),
+                notice_level="error")
+        return self.state
+
+    def forget_all_acoustic_keywords(self) -> GUIState:
+        try:
+            self.actions.forget_all_acoustic_keywords()
+            self.state = replace(
+                self.state,
+                notice=self.localized("settings.notice.keywords_forgotten"),
+                notice_level="success")
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.keyword.forget_failed", error=error),
+                notice_level="error")
+        return self.state
+
     def show_next_onboarding_step(self) -> GUIState:
         """Route to the next useful setup surface without blocking capture."""
         step = next(
@@ -2152,22 +2357,26 @@ if APPKIT_AVAILABLE:
                 ("snippets", "settings.personalize.snippets", "editSnippets:"),
                 ("vocabulary", "settings.personalize.vocabulary", "editVocabulary:"),
                 ("corrections", "settings.personalize.corrections", "forgetCorrection:"),
+                ("keywords", "settings.personalize.keywords", "inspectKeywords:"),
             )
             for index, (key, title_key, selector) in enumerate(rows):
-                y = 202 - index * 62
-                card = _card(NSMakeRect(0, y, 758, 52))
+                y = 216 - index * 52
+                card = _card(NSMakeRect(0, y, 758, 44))
                 card.addSubview_(_label(
-                    self._l(title_key), NSMakeRect(18, 25, 260, 19),
+                    self._l(title_key), NSMakeRect(18, 22, 260, 18),
                     size=13, weight="bold"))
-                detail = _label("", NSMakeRect(18, 7, 550, 18),
-                                size=11, color=_SECONDARY)
-                action_key = ("settings.action.forget" if key == "corrections"
-                              else "settings.action.edit")
-                help_key = ("settings.accessibility.forget.help"
-                            if key == "corrections"
-                            else "settings.accessibility.edit.help")
+                detail = _label("", NSMakeRect(18, 4, 550, 17),
+                                size=10, color=_SECONDARY)
+                action_key = (
+                    "settings.action.forget" if key == "corrections" else
+                    "settings.action.inspect" if key == "keywords" else
+                    "settings.action.edit")
+                help_key = (
+                    "settings.accessibility.forget.help"
+                    if key in {"corrections", "keywords"}
+                    else "settings.accessibility.edit.help")
                 button = _button(
-                    self._l(action_key), NSMakeRect(645, 10, 94, 32),
+                    self._l(action_key), NSMakeRect(645, 6, 94, 32),
                     self, selector,
                     help_text=self._l(
                         help_key,
@@ -2596,6 +2805,8 @@ if APPKIT_AVAILABLE:
                 "corrections": self._l(
                     "settings.personalize.corrections.detail",
                     count=len(settings.corrections)),
+                "keywords": self._l(
+                    "settings.personalize.keywords.detail"),
             }
             for key, value in setting_summaries.items():
                 set_accessible_text(
@@ -2952,6 +3163,80 @@ if APPKIT_AVAILABLE:
                 self.view_model.forget_learned(selected.kind, selected.key)
                 self.render()
 
+        def inspectKeywords_(self, _sender: Any) -> None:
+            try:
+                inspection = self.view_model.inspect_acoustic_keywords()
+            except ValueError:
+                if self._confirm(
+                        self._l("settings.dialog.keywords.invalid.title"),
+                        self._l("settings.dialog.keywords.invalid.message"),
+                        self._l("settings.action.forget_all")):
+                    self.view_model.forget_all_acoustic_keywords()
+                    self.render()
+                return
+
+            candidates = inspection.candidates
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(self._l(
+                "settings.dialog.keywords.title"))
+            alert.setInformativeText_(self._l(
+                "settings.dialog.keywords.message") if candidates else self._l(
+                    "settings.dialog.keywords.empty"))
+            chooser = None
+            if candidates:
+                chooser = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                    NSMakeRect(0, 0, 680, 28), False)
+                chooser.addItemsWithTitles_([
+                    self._l(
+                        "settings.dialog.keywords.row",
+                        keyword=item.keyword,
+                        observations=item.observations,
+                        confirmations=item.confirmations,
+                        status=self._l(
+                            "settings.dialog.keywords.status.eligible"
+                            if item.eligible else
+                            "settings.dialog.keywords.status.gathering"),
+                        scope=self._l(
+                            "settings.dialog.keywords.scope.global"
+                            if item.app_scope is None else
+                            "settings.dialog.keywords.scope.private_app"),
+                    )
+                    for item in candidates
+                ])
+                _accessible(
+                    chooser,
+                    self._l("settings.dialog.keywords.chooser.label"),
+                    self._l("settings.dialog.keywords.chooser.help"))
+                alert.setAccessoryView_(chooser)
+            alert.addButtonWithTitle_(self._l("settings.action.done"))
+            alert.addButtonWithTitle_(self._l("settings.action.export"))
+            if candidates:
+                alert.addButtonWithTitle_(self._l("settings.action.forget"))
+            alert.addButtonWithTitle_(self._l("settings.action.forget_all"))
+            response = alert.runModal()
+            if response == 1001:
+                self.view_model.export_acoustic_keywords()
+            elif candidates and response == 1002:
+                selected = candidates[chooser.indexOfSelectedItem()]
+                scope = self._l(
+                    "settings.dialog.keywords.scope.global"
+                    if selected.app_scope is None else
+                    "settings.dialog.keywords.scope.private_app")
+                if self._confirm(
+                        self._l("settings.dialog.keywords.forget.title"),
+                        self._l(
+                            "settings.dialog.keywords.forget.message",
+                            keyword=selected.keyword,
+                            scope=scope.casefold()),
+                        self._l("settings.action.forget")):
+                    self.view_model.forget_acoustic_keyword(selected)
+            elif response == (1003 if candidates else 1002) and self._confirm(
+                    self._l("settings.dialog.keywords.forget_all.title"),
+                    self._l("settings.dialog.keywords.forget_all.message"),
+                    self._l("settings.action.forget_all")):
+                self.view_model.forget_all_acoustic_keywords()
+            self.render()
+
         def sectionChanged_(self, sender: Any) -> None:
             self.view_model.select_section(SECTIONS[sender.selectedSegment()])
             self.render()
@@ -3094,7 +3379,26 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             },
         ],
     }
+    private_keyword_export: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "whisper-face/acoustic-keyword-memory-export",
+        "policy": {
+            "minimum_observations": 3,
+            "minimum_confirmations": 2,
+            "max_entries": 256,
+            "recognition_effect": "none",
+        },
+        "candidates": [{
+            "keyword": "Qwen",
+            "app_scope": None,
+            "observations": 1,
+            "confirmations": 1,
+            "eligible": False,
+            "status": "needs-2-observations-and-1-confirmations",
+        }],
+    }
     calls: list[tuple[Any, ...]] = []
+    keyword_reads = [0]
 
     def set_face(face: str) -> None:
         calls.append(("face", face))
@@ -3137,6 +3441,10 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             item for item in private_settings["corrections"]
             if not (item["kind"] == kind and item["key"] == key)]
 
+    def inspect_keywords() -> Mapping[str, Any]:
+        keyword_reads[0] += 1
+        return dict(private_keyword_export)
+
     actions = GUIActions(
         status_snapshot=lambda: dict(runtime),
         settings_snapshot=lambda: dict(private_settings),
@@ -3148,6 +3456,13 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         save_vocabulary=save_vocabulary,
         forget_correction=lambda key: forget("correction", key),
         forget_snippet_edit=lambda key: forget("snippet", key),
+        inspect_acoustic_keywords=inspect_keywords,
+        export_acoustic_keywords=lambda:
+            calls.append(("export_acoustic_keywords",)),
+        forget_acoustic_keyword=lambda keyword, scope:
+            calls.append(("forget_acoustic_keyword", keyword, scope)),
+        forget_all_acoustic_keywords=lambda:
+            calls.append(("forget_all_acoustic_keywords",)),
     )
     model = WhisperFaceViewModel(actions, locale="en-US")
     controller = None
@@ -3282,6 +3597,9 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             str(controller.dynamic["diagnostics_button"].keyEquivalent()) ==
             "d", "diagnostics key equivalent")
         require(
+            str(controller.dynamic["settings_keywords_button"].action()) ==
+            "inspectKeywords:", "keyword inspection surface")
+        require(
             int(controller.dynamic[
                 "diagnostics_button"].keyEquivalentModifierMask()) & int(
                     NSEventModifierFlagCommand),
@@ -3357,6 +3675,15 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         model.save_vocabulary(["Qwen", "Parakeet"], ["Gwen"])
         model.forget_learned("correction", "gwen")
         model.forget_learned("snippet", "gwen")
+        require(keyword_reads[0] == 0, "keyword inspection stays on demand")
+        keyword_inspection = model.inspect_acoustic_keywords()
+        require(keyword_reads[0] == 1, "explicit keyword inspection")
+        require(
+            keyword_inspection.candidates[0].keyword == "Qwen",
+            "keyword inspection candidate")
+        model.export_acoustic_keywords()
+        model.forget_acoustic_keyword(keyword_inspection.candidates[0])
+        model.forget_all_acoustic_keywords()
         model.choose_face("owl")
         model.set_flight_recorder(True)
         expected_calls = {
@@ -3366,6 +3693,9 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             ("vocabulary", ("Qwen", "Parakeet"), ("Gwen",)),
             ("forget_correction", "gwen"),
             ("forget_snippet", "gwen"),
+            ("export_acoustic_keywords",),
+            ("forget_acoustic_keyword", "Qwen", None),
+            ("forget_all_acoustic_keywords",),
             ("face", "owl"),
             ("flight", True),
         }
@@ -3418,6 +3748,8 @@ def create_gui(actions: GUIActions, *, locale: str = "en") -> WhisperFaceGUI:
 
 __all__ = [
     "APPKIT_AVAILABLE",
+    "AcousticKeywordCandidate",
+    "AcousticKeywordInspection",
     "AppToneSetting",
     "CorrectionSetting",
     "DegradedIssue",
@@ -3440,6 +3772,7 @@ __all__ = [
     "localized_string",
     "native_appkit_smoke_contract",
     "normalize_snapshot",
+    "normalize_acoustic_keyword_inspection",
     "normalize_settings",
     "run_native_appkit_smoke",
     "resolve_locale",

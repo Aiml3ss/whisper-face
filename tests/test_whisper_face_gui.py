@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 
 from whisper_face_gui import (
     APPKIT_AVAILABLE,
+    AcousticKeywordCandidate,
     FACES,
     GUIActions,
     SECTIONS,
@@ -25,6 +26,7 @@ from whisper_face_gui import (
     create_gui,
     localized_string,
     native_appkit_smoke_contract,
+    normalize_acoustic_keyword_inspection,
     normalize_snapshot,
     normalize_settings,
     run_native_appkit_smoke,
@@ -36,6 +38,44 @@ from whisper_face_gui import (
 
 
 class SnapshotTests(unittest.TestCase):
+    @staticmethod
+    def keyword_export(keyword="Qwen"):
+        return {
+            "schema_version": 1,
+            "kind": "whisper-face/acoustic-keyword-memory-export",
+            "policy": {
+                "minimum_observations": 3,
+                "minimum_confirmations": 2,
+                "max_entries": 256,
+                "recognition_effect": "none",
+            },
+            "candidates": [{
+                "keyword": keyword,
+                "app_scope": None,
+                "observations": 1,
+                "confirmations": 1,
+                "eligible": False,
+                "status": "needs-2-observations-and-1-confirmations",
+            }],
+        }
+
+    def test_keyword_inspection_is_strict_token_free_and_derives_scope(self):
+        inspection = normalize_acoustic_keyword_inspection(
+            self.keyword_export())
+
+        self.assertEqual(inspection.candidates[0].keyword, "Qwen")
+        self.assertIsNone(inspection.candidates[0].app_scope)
+        self.assertFalse(inspection.candidates[0].eligible)
+        malformed = self.keyword_export()
+        malformed["candidates"][0]["transcript"] = "private words"
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            normalize_acoustic_keyword_inspection(malformed)
+
+        malformed = self.keyword_export()
+        malformed["candidates"][0]["eligible"] = True
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            normalize_acoustic_keyword_inspection(malformed)
+
     def test_private_settings_snapshot_normalizes_malformed_rows(self):
         settings = normalize_settings({
             "app_tones": [
@@ -138,6 +178,7 @@ class SnapshotTests(unittest.TestCase):
                 "validation.correction.kind",
                 "validation.correction.unknown",
                 "validation.correction.stale_snippet",
+                "validation.keyword.unknown",
                 "validation.face.unsupported",
             },
             "operation.": {
@@ -147,6 +188,9 @@ class SnapshotTests(unittest.TestCase):
                 "operation.snippet.delete_failed",
                 "operation.vocabulary.save_failed",
                 "operation.correction.forget_failed",
+                "operation.keyword.inspect_failed",
+                "operation.keyword.export_failed",
+                "operation.keyword.forget_failed",
                 "operation.face.change_failed",
                 "operation.flight.update_failed",
                 "operation.log.open_failed",
@@ -541,6 +585,7 @@ class ViewModelTests(unittest.TestCase):
             "active_engine": "Parakeet Unified",
         }
         self.calls = []
+        self.keyword_reads = 0
         self.private_settings = {
             "app_tones": [{
                 "bundle": "com.example.mail", "name": "Mail", "tone": "auto"}],
@@ -572,6 +617,10 @@ class ViewModelTests(unittest.TestCase):
             self.calls.append(("resume",))
             self.runtime["paused"] = False
 
+        def inspect_keywords():
+            self.keyword_reads += 1
+            return SnapshotTests.keyword_export()
+
         self.actions = GUIActions(
             status_snapshot=lambda: dict(self.runtime),
             settings_snapshot=lambda: dict(self.private_settings),
@@ -589,6 +638,14 @@ class ViewModelTests(unittest.TestCase):
                 self.calls.append(("forget_correction", key)),
             forget_snippet_edit=lambda key:
                 self.calls.append(("forget_snippet", key)),
+            inspect_acoustic_keywords=inspect_keywords,
+            export_acoustic_keywords=lambda:
+                self.calls.append(("export_acoustic_keywords",)),
+            forget_acoustic_keyword=lambda keyword, scope:
+                self.calls.append(
+                    ("forget_acoustic_keyword", keyword, scope)) or True,
+            forget_all_acoustic_keywords=lambda:
+                self.calls.append(("forget_all_acoustic_keywords",)),
             pause=pause,
             resume=resume,
             open_log=lambda: self.calls.append(("log",)),
@@ -615,6 +672,43 @@ class ViewModelTests(unittest.TestCase):
                 self.model.select_settings_pane(pane).settings_pane, pane)
         with self.assertRaises(ValueError):
             self.model.select_settings_pane("Cloud")
+
+    def test_keyword_text_loads_only_on_explicit_inspection_and_actions_are_callbacks(self):
+        self.model.select_section("Settings")
+        self.model.refresh()
+        self.assertEqual(self.keyword_reads, 0)
+        self.assertFalse(hasattr(self.model.state, "acoustic_keywords"))
+
+        inspection = self.model.inspect_acoustic_keywords()
+
+        self.assertEqual(self.keyword_reads, 1)
+        candidate = inspection.candidates[0]
+        self.assertEqual(candidate.keyword, "Qwen")
+        self.assertFalse(hasattr(self.model.state, "acoustic_keywords"))
+        self.model.export_acoustic_keywords()
+        self.model.forget_acoustic_keyword(candidate)
+        self.model.forget_all_acoustic_keywords()
+        self.assertIn(("export_acoustic_keywords",), self.calls)
+        self.assertIn(
+            ("forget_acoustic_keyword", "Qwen", None), self.calls)
+        self.assertIn(("forget_all_acoustic_keywords",), self.calls)
+
+    def test_malformed_keyword_inspection_stays_fail_closed(self):
+        malformed = SnapshotTests.keyword_export()
+        malformed["candidates"][0]["raw_transcript"] = "private"
+        model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {},
+            inspect_acoustic_keywords=lambda: malformed,
+        ))
+
+        with self.assertRaisesRegex(ValueError, "Could not inspect"):
+            model.inspect_acoustic_keywords()
+        self.assertEqual(model.state.notice_level, "error")
+        self.assertNotIn("private", model.state.notice)
+
+    def test_keyword_forget_rejects_uninspected_identity(self):
+        with self.assertRaisesRegex(ValueError, "unknown pronunciation"):
+            self.model.forget_acoustic_keyword("Qwen")
 
     def test_personalization_actions_validate_and_call_runtime(self):
         self.model.select_section("Settings")

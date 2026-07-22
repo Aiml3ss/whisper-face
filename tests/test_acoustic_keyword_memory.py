@@ -49,6 +49,27 @@ class AcousticKeywordMemoryTests(unittest.TestCase):
         self.assertEqual(
             second.status, "eligible-not-connected-to-recognition")
 
+    def test_explicit_correction_counts_once_in_each_channel_and_is_idempotent(self):
+        memory = AcousticKeywordMemory()
+
+        first = memory.accept_explicit_correction(
+            "Qwen", evidence_id="opaque-correction-1")
+        duplicate = memory.accept_explicit_correction(
+            "Qwen", evidence_id="opaque-correction-1")
+        second = memory.accept_explicit_correction(
+            "Qwen", evidence_id="opaque-correction-2")
+        eligible = memory.accept_explicit_correction(
+            "Qwen", evidence_id="opaque-correction-3")
+
+        self.assertEqual((first.observations, first.confirmations), (1, 1))
+        self.assertEqual(
+            (duplicate.observations, duplicate.confirmations), (1, 1))
+        self.assertEqual((second.observations, second.confirmations), (2, 2))
+        self.assertEqual((eligible.observations, eligible.confirmations), (3, 2))
+        self.assertTrue(eligible.eligible)
+        encoded = memory.dumps()
+        self.assertNotIn("opaque-correction", encoded)
+
     def test_hashed_app_scopes_are_salted_and_isolate_evidence(self):
         raw_app = "com.example.SecretProject"
         first_scope = hash_app_scope(raw_app, salt=b"a" * 16)
