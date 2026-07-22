@@ -132,9 +132,19 @@ profiles.
 - **Acoustic keyword memory foundation** — a strict local store can count
   unique observations and explicit confirmations for hard names without raw
   audio, transcript history, or unhashed app identifiers. It is exportable and
-  forgettable, and runtime status exposes only bounded counts and hashed scopes.
-  It deliberately has no recognition authority and no automatic observation
-  source until a later inspected UI/integration earns it.
+  forgettable from the on-demand Pronunciation Keywords inspector. Only exact,
+  verified user corrections add idempotent global evidence; routine status does
+  not load keyword text. It deliberately has no recognition authority yet.
+- **Point-and-Speak resolver foundation** — a non-writing resolver combines
+  accessible names, roles, ordinal and spatial language, visibility, focus,
+  and selection facts behind strict confidence/margin gates. Its 17-case
+  synthetic corpus has zero wrong-target resolutions, but it has no live
+  Accessibility automation and makes no physical-app accuracy claim.
+- **Provider-neutral model wallet foundation** — immutable Parakeet, Whisper
+  Tiny, Whisper large-v3-turbo, and Qwen profiles expose capabilities,
+  readiness, and bounded evidence through one in-process policy. Failover is
+  sequential and requires an explicit typed failure receipt; live routing is
+  intentionally not wired yet.
 - **Personal Regression Lab** — confirmed correction mappings are evaluated
   against a private, deterministic suite of the user's exact corrected spans.
   Conflicting candidates are quarantined instead of silently becoming a bad
@@ -393,6 +403,8 @@ uv run tests/test_compatibility_fingerprint.py
 uv run tests/test_voice_input_protocol.py
 uv run tests/test_acoustic_keyword_memory.py
 uv run tests/test_delayed_cleanup_merge.py
+uv run tests/test_model_wallet.py
+uv run tests/test_point_and_speak_resolver.py
 uv run tests/test_personal_regression.py
 uv run tests/test_whisper_face_gui.py
 uv run --locked --script dictate.py --native-gui-smoke-test

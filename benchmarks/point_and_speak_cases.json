@@ -1,0 +1,221 @@
+{
+  "schema_version": 1,
+  "evidence_scope": "synthetic-resolution-only",
+  "physical_validation": false,
+  "scenes": [
+    {
+      "scene_id": "settings-window",
+      "targets": [
+        {
+          "schema_version": 1,
+          "target_id": "settings-save",
+          "role": "button",
+          "title": "Save Changes",
+          "label": "",
+          "geometry": {"x": 620, "y": 520, "width": 110, "height": 32},
+          "visible": true,
+          "enabled": true,
+          "focused": false,
+          "selection": "not_applicable"
+        },
+        {
+          "schema_version": 1,
+          "target_id": "settings-cancel",
+          "role": "button",
+          "title": "Cancel",
+          "label": "",
+          "geometry": {"x": 500, "y": 520, "width": 100, "height": 32},
+          "visible": true,
+          "enabled": true,
+          "focused": false,
+          "selection": "not_applicable"
+        },
+        {
+          "schema_version": 1,
+          "target_id": "settings-submit",
+          "role": "button",
+          "title": "Submit account changes",
+          "label": "",
+          "geometry": {"x": 620, "y": 460, "width": 150, "height": 32},
+          "visible": true,
+          "enabled": true,
+          "focused": false,
+          "selection": "not_applicable"
+        },
+        {
+          "schema_version": 1,
+          "target_id": "settings-search",
+          "role": "text_field",
+          "title": "",
+          "label": "Search",
+          "geometry": {"x": 40, "y": 30, "width": 250, "height": 30},
+          "visible": true,
+          "enabled": true,
+          "focused": true,
+          "selection": "not_applicable"
+        },
+        {
+          "schema_version": 1,
+          "target_id": "settings-docs",
+          "role": "link",
+          "title": "Documentation",
+          "label": "",
+          "geometry": {"x": 40, "y": 470, "width": 120, "height": 24},
+          "visible": true,
+          "enabled": true,
+          "focused": false,
+          "selection": "not_applicable"
+        },
+        {
+          "schema_version": 1,
+          "target_id": "settings-notifications",
+          "role": "checkbox",
+          "title": "",
+          "label": "Notifications",
+          "geometry": {"x": 40, "y": 150, "width": 180, "height": 24},
+          "visible": true,
+          "enabled": true,
+          "focused": false,
+          "selection": "selected"
+        },
+        {
+          "schema_version": 1,
+          "target_id": "settings-compact",
+          "role": "checkbox",
+          "title": "",
+          "label": "Compact mode",
+          "geometry": {"x": 40, "y": 185, "width": 180, "height": 24},
+          "visible": true,
+          "enabled": true,
+          "focused": false,
+          "selection": "unselected"
+        },
+        {
+          "schema_version": 1,
+          "target_id": "settings-hidden-reset",
+          "role": "button",
+          "title": "Factory Reset",
+          "label": "",
+          "geometry": {"x": 40, "y": 560, "width": 120, "height": 32},
+          "visible": false,
+          "enabled": true,
+          "focused": false,
+          "selection": "not_applicable"
+        },
+        {
+          "schema_version": 1,
+          "target_id": "settings-disabled-export",
+          "role": "button",
+          "title": "Export Archive",
+          "label": "",
+          "geometry": {"x": 180, "y": 560, "width": 120, "height": 32},
+          "visible": true,
+          "enabled": false,
+          "focused": false,
+          "selection": "not_applicable"
+        }
+      ]
+    },
+    {
+      "scene_id": "duplicate-actions",
+      "targets": [
+        {
+          "schema_version": 1,
+          "target_id": "delete-first",
+          "role": "button",
+          "title": "Delete",
+          "label": "",
+          "geometry": {"x": 40, "y": 100, "width": 90, "height": 30},
+          "visible": true,
+          "enabled": true,
+          "focused": false,
+          "selection": "not_applicable"
+        },
+        {
+          "schema_version": 1,
+          "target_id": "delete-second",
+          "role": "button",
+          "title": "Delete",
+          "label": "",
+          "geometry": {"x": 40, "y": 200, "width": 90, "height": 30},
+          "visible": true,
+          "enabled": true,
+          "focused": false,
+          "selection": "not_applicable"
+        }
+      ]
+    },
+    {
+      "scene_id": "microphone-grid",
+      "targets": [
+        {
+          "schema_version": 1,
+          "target_id": "mic-top-left",
+          "role": "button",
+          "title": "Microphone",
+          "label": "",
+          "geometry": {"x": 40, "y": 40, "width": 60, "height": 60},
+          "visible": true,
+          "enabled": true,
+          "focused": false,
+          "selection": "not_applicable"
+        },
+        {
+          "schema_version": 1,
+          "target_id": "mic-top-right",
+          "role": "button",
+          "title": "Microphone",
+          "label": "",
+          "geometry": {"x": 240, "y": 40, "width": 60, "height": 60},
+          "visible": true,
+          "enabled": true,
+          "focused": false,
+          "selection": "not_applicable"
+        },
+        {
+          "schema_version": 1,
+          "target_id": "mic-bottom-left",
+          "role": "button",
+          "title": "Microphone",
+          "label": "",
+          "geometry": {"x": 40, "y": 240, "width": 60, "height": 60},
+          "visible": true,
+          "enabled": true,
+          "focused": false,
+          "selection": "not_applicable"
+        },
+        {
+          "schema_version": 1,
+          "target_id": "mic-bottom-right",
+          "role": "button",
+          "title": "Microphone",
+          "label": "",
+          "geometry": {"x": 240, "y": 240, "width": 60, "height": 60},
+          "visible": true,
+          "enabled": true,
+          "focused": false,
+          "selection": "not_applicable"
+        }
+      ]
+    }
+  ],
+  "cases": [
+    {"case_id": "exact-save", "scene_id": "settings-window", "phrase": "Save Changes", "expected_state": "resolved", "expected_target_id": "settings-save"},
+    {"case_id": "normalized-save", "scene_id": "settings-window", "phrase": "save-changes", "expected_state": "resolved", "expected_target_id": "settings-save"},
+    {"case_id": "token-submit", "scene_id": "settings-window", "phrase": "submit account", "expected_state": "resolved", "expected_target_id": "settings-submit"},
+    {"case_id": "role-docs", "scene_id": "settings-window", "phrase": "documentation link", "expected_state": "resolved", "expected_target_id": "settings-docs"},
+    {"case_id": "focus-search", "scene_id": "settings-window", "phrase": "focused search field", "expected_state": "resolved", "expected_target_id": "settings-search"},
+    {"case_id": "selected-notifications", "scene_id": "settings-window", "phrase": "selected notifications checkbox", "expected_state": "resolved", "expected_target_id": "settings-notifications"},
+    {"case_id": "unselected-compact", "scene_id": "settings-window", "phrase": "unchecked compact mode checkbox", "expected_state": "resolved", "expected_target_id": "settings-compact"},
+    {"case_id": "ordinal-second", "scene_id": "duplicate-actions", "phrase": "second delete button", "expected_state": "resolved", "expected_target_id": "delete-second"},
+    {"case_id": "ordinal-last", "scene_id": "duplicate-actions", "phrase": "last delete button", "expected_state": "resolved", "expected_target_id": "delete-second"},
+    {"case_id": "spatial-right", "scene_id": "microphone-grid", "phrase": "right microphone button", "expected_state": "ambiguous", "expected_target_id": null},
+    {"case_id": "spatial-top-right", "scene_id": "microphone-grid", "phrase": "top right microphone button", "expected_state": "resolved", "expected_target_id": "mic-top-right"},
+    {"case_id": "spatial-bottom-left", "scene_id": "microphone-grid", "phrase": "bottom left microphone button", "expected_state": "resolved", "expected_target_id": "mic-bottom-left"},
+    {"case_id": "duplicate-ambiguous", "scene_id": "duplicate-actions", "phrase": "delete button", "expected_state": "ambiguous", "expected_target_id": null},
+    {"case_id": "ordinal-missing", "scene_id": "duplicate-actions", "phrase": "third delete button", "expected_state": "unavailable", "expected_target_id": null},
+    {"case_id": "spatial-contradiction", "scene_id": "microphone-grid", "phrase": "left right microphone button", "expected_state": "unavailable", "expected_target_id": null},
+    {"case_id": "hidden-target", "scene_id": "settings-window", "phrase": "factory reset button", "expected_state": "unavailable", "expected_target_id": null},
+    {"case_id": "disabled-target", "scene_id": "settings-window", "phrase": "export archive button", "expected_state": "unavailable", "expected_target_id": null}
+  ]
+}

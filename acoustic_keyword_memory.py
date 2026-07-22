@@ -238,6 +238,31 @@ class AcousticKeywordMemory:
             return self._snapshot(entry)
         return self._snapshot(retained)
 
+    def accept_explicit_correction(
+        self,
+        keyword: str,
+        *,
+        evidence_id: str,
+        app_scope: str | None = None,
+    ) -> KeywordCandidate:
+        """Count one exact user correction once in each evidence channel.
+
+        The opaque event identifier is domain-separated before storage. The
+        corrected keyword is never folded into the identifier, so repeated
+        delivery of the same correction stays idempotent without retaining
+        the original transcript or the rejected alternative.
+        """
+        self.observe(
+            keyword,
+            evidence_id=f"{evidence_id}:observation",
+            app_scope=app_scope,
+        )
+        return self.confirm(
+            keyword,
+            evidence_id=f"{evidence_id}:confirmation",
+            app_scope=app_scope,
+        )
+
     @staticmethod
     def _snapshot(entry: _Entry) -> KeywordCandidate:
         observations = len(entry.observation_tokens)
