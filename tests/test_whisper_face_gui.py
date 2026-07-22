@@ -19,6 +19,7 @@ from whisper_face_gui import (
     AcousticKeywordCandidate,
     FACES,
     GUIActions,
+    POINT_AND_SPEAK_MAX_PHRASE_CHARS,
     SECTIONS,
     SETTINGS_PANES,
     STRING_CATALOGS,
@@ -28,6 +29,7 @@ from whisper_face_gui import (
     localized_string,
     native_appkit_smoke_contract,
     normalize_acoustic_keyword_inspection,
+    normalize_point_and_speak_preview,
     normalize_snapshot,
     normalize_settings,
     run_native_appkit_smoke,
@@ -40,6 +42,52 @@ from whisper_face_gui import (
 
 
 class SnapshotTests(unittest.TestCase):
+    @staticmethod
+    def point_preview(
+        *, state="resolved", name="Save Changes", role="button",
+        capture_state="captured",
+    ):
+        captured = capture_state == "captured"
+        return {
+            "schema_version": 1,
+            "state": state,
+            "accessibility_name": name,
+            "role": role,
+            "receipt": {
+                "schema_version": 1,
+                "capture_state": capture_state,
+                "observed_elements": 8 if captured else 0,
+                "emitted_targets": 2 if captured else 0,
+                "skipped_elements": 1 if captured else 0,
+                "truncated": False,
+                "observed_targets": 2 if captured else 0,
+                "eligible_targets": 2 if captured else 0,
+                "contradiction_count": 0,
+                "evidence": ["exact", "role"] if captured else [],
+                "confidence_bucket": "very_high" if captured else "none",
+                "margin_bucket": "wide" if captured else "none",
+            },
+        }
+
+    def test_point_and_speak_preview_projection_is_strict_and_content_scoped(self):
+        preview = normalize_point_and_speak_preview(self.point_preview())
+
+        self.assertEqual(preview.state, "resolved")
+        self.assertEqual(preview.accessibility_name, "Save Changes")
+        self.assertEqual(preview.role, "button")
+        self.assertNotIn("Save Changes", repr(preview))
+        self.assertEqual(preview.receipt.evidence, ("exact", "role"))
+
+        malformed = self.point_preview()
+        malformed["document_text"] = "private document"
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            normalize_point_and_speak_preview(malformed)
+
+        malformed = self.point_preview(
+            state="ambiguous", name="Secret target", role="button")
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            normalize_point_and_speak_preview(malformed)
+
     @staticmethod
     def keyword_export(keyword="Qwen"):
         return {
@@ -299,6 +347,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertIn("command-d:diagnostics", contract.key_equivalents)
         self.assertIn("select_section", contract.model_actions)
         self.assertIn("forget_snippet", contract.model_actions)
+        self.assertIn("preview_point_and_speak", contract.model_actions)
         for key in contract.accessibility_catalog_keys:
             with self.subTest(key=key):
                 self.assertIn(key, STRING_CATALOGS["en"])
@@ -654,6 +703,51 @@ class SnapshotTests(unittest.TestCase):
 
 
 class ViewModelTests(unittest.TestCase):
+    def test_point_and_speak_preview_is_explicit_bounded_and_never_enters_state(self):
+        phrases = []
+        private_name = "Project Bluebird Submit"
+        model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {},
+            preview_point_and_speak=lambda phrase: (
+                phrases.append(phrase)
+                or SnapshotTests.point_preview(name=private_name)),
+        ))
+
+        preview = model.preview_point_and_speak("submit button")
+
+        self.assertEqual(phrases, ["submit button"])
+        self.assertEqual(preview.accessibility_name, private_name)
+        self.assertNotIn(private_name, repr(model.state))
+        self.assertNotIn(private_name, support_snapshot_text(model.state))
+        self.assertNotIn(private_name, repr(preview))
+        for invalid in ("", "line\nbreak", "x" * (
+                POINT_AND_SPEAK_MAX_PHRASE_CHARS + 1)):
+            with self.subTest(invalid_length=len(invalid)):
+                with self.assertRaisesRegex(ValueError, "between 1"):
+                    model.preview_point_and_speak(invalid)
+        self.assertEqual(phrases, ["submit button"])
+
+    def test_point_and_speak_permission_ambiguity_and_malformed_data_fail_closed(self):
+        cases = [
+            SnapshotTests.point_preview(
+                state="permission_denied", name="", role="",
+                capture_state="permission_denied"),
+            SnapshotTests.point_preview(
+                state="ambiguous", name="", role=""),
+            {"unexpected": "private target text"},
+        ]
+        expected = ("permission_denied", "ambiguous", "unavailable")
+        for raw, state in zip(cases, expected):
+            with self.subTest(state=state):
+                model = WhisperFaceViewModel(GUIActions(
+                    status_snapshot=lambda: {},
+                    preview_point_and_speak=lambda _phrase, raw=raw: raw,
+                ))
+                preview = model.preview_point_and_speak("save button")
+                self.assertEqual(preview.state, state)
+                self.assertEqual(preview.accessibility_name, "")
+                self.assertEqual(preview.role, "")
+
     def test_dynamic_accessibility_updates_label_and_value_together(self):
         class FakeControl:
             def setStringValue_(self, value):

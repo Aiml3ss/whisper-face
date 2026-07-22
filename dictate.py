@@ -336,6 +336,14 @@ from insertion_integrity import (  # noqa: E402
 from personal_regression import PersonalRegressionLab  # noqa: E402
 from acoustic_keyword_memory import AcousticKeywordMemory  # noqa: E402
 from acoustic_time_machine import AcousticTimeMachine  # noqa: E402
+from macos_point_and_speak_snapshot import (  # noqa: E402
+    SnapshotState as PointAndSpeakSnapshotState,
+    capture_frontmost_accessibility_targets,
+)
+from point_and_speak_resolver import (  # noqa: E402
+    ResolutionState as PointAndSpeakResolutionState,
+    resolve_point_and_speak,
+)
 from voice_inbox import InboxState, VoiceInbox  # noqa: E402
 from voice_object_command_parser import parse_command  # noqa: E402
 from voice_object_inbox_bridge import VoiceObjectInboxBridge  # noqa: E402
@@ -3480,6 +3488,98 @@ def runtime_status_snapshot() -> dict:
             },
         ],
     }
+
+
+def preview_point_and_speak(phrase: str) -> dict:
+    """Resolve one explicit, read-only preview against the focused Mac app.
+
+    The target phrase and captured accessible names remain transient.  The
+    returned target projection contains only the winning accessible name and
+    role; its receipt is aggregate and content-free.  This function has no AX
+    action, pointer, keyboard, pasteboard, logging, or persistence surface.
+    """
+
+    def receipt(
+        *, capture_state: str = "unavailable", observed_elements: int = 0,
+        emitted_targets: int = 0, skipped_elements: int = 0,
+        truncated: bool = False, resolution=None,
+    ) -> dict:
+        decision = getattr(resolution, "receipt", None)
+        return {
+            "schema_version": 1,
+            "capture_state": capture_state,
+            "observed_elements": observed_elements,
+            "emitted_targets": emitted_targets,
+            "skipped_elements": skipped_elements,
+            "truncated": truncated,
+            "observed_targets": getattr(decision, "observed_targets", 0),
+            "eligible_targets": getattr(decision, "eligible_targets", 0),
+            "contradiction_count": getattr(
+                decision, "contradiction_count", 0),
+            "evidence": list(getattr(decision, "evidence", ())),
+            "confidence_bucket": getattr(
+                decision, "confidence_bucket", "none"),
+            "margin_bucket": getattr(decision, "margin_bucket", "none"),
+        }
+
+    unavailable = {
+        "schema_version": 1,
+        "state": "unavailable",
+        "accessibility_name": "",
+        "role": "",
+        "receipt": receipt(),
+    }
+    if not IS_MACOS:
+        return unavailable
+    if (not isinstance(phrase, str) or not phrase.strip()
+            or len(phrase) > 96
+            or any(ord(character) < 32 for character in phrase)):
+        return unavailable
+
+    try:
+        capture = capture_frontmost_accessibility_targets()
+        capture_receipt = capture.receipt
+        common = {
+            "capture_state": capture_receipt.state.value,
+            "observed_elements": capture_receipt.observed_elements,
+            "emitted_targets": capture_receipt.emitted_targets,
+            "skipped_elements": capture_receipt.skipped_elements,
+            "truncated": capture_receipt.truncated,
+        }
+        if capture_receipt.state is not PointAndSpeakSnapshotState.CAPTURED:
+            return {
+                **unavailable,
+                "state": capture_receipt.state.value,
+                "receipt": receipt(**common),
+            }
+
+        resolution = resolve_point_and_speak(phrase, capture.targets)
+        result = {
+            **unavailable,
+            "state": resolution.state.value,
+            "receipt": receipt(**common, resolution=resolution),
+        }
+        if resolution.state is not PointAndSpeakResolutionState.RESOLVED:
+            return result
+        matches = tuple(
+            target for target in capture.targets
+            if target.get("target_id") == resolution.target_id
+        )
+        if len(matches) != 1:
+            return {**unavailable, "receipt": receipt(**common)}
+        target = matches[0]
+        name = target.get("title") or target.get("label")
+        role = target.get("role")
+        if not isinstance(name, str) or not name.strip() \
+                or not isinstance(role, str) or not role:
+            return {**unavailable, "receipt": receipt(**common)}
+        return {
+            **result,
+            "accessibility_name": name.strip(),
+            "role": role,
+        }
+    except Exception:
+        return unavailable
 
 
 def verify_mac_installation() -> dict:
@@ -7106,6 +7206,7 @@ def main():
             open_local_license_notices=lambda: subprocess.Popen(
                 ["open", str(HERE / "LICENSE_POLICY.md")]),
             copy_latest_outbox=copy_latest_outbox,
+            preview_point_and_speak=preview_point_and_speak,
             rerun_verification=verify_mac_installation,
         ))
 

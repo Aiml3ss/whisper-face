@@ -45,6 +45,7 @@ arguments:
    uv run tests/test_voice_input_protocol.py
    uv run tests/test_voice_input_protocol_wire.py
    uv run tests/test_voice_input_protocol_transport.py
+   uv run tests/test_macos_networkless_worker.py
    uv run tests/test_acoustic_keyword_memory.py
    uv run tests/test_acoustic_time_machine.py
    uv run tests/test_delayed_cleanup_merge.py
@@ -58,6 +59,7 @@ arguments:
    uv run tests/test_voice_inbox.py
    uv run tests/test_voice_object_inbox_bridge.py
    uv run tests/test_risky_action_confirmation.py
+   uv run tests/test_demonstration_drafts.py
    uv run tests/test_competitor_benchmark.py
    uv run tests/test_public_scorecard.py
    uv run tests/test_personal_regression.py

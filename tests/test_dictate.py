@@ -114,6 +114,157 @@ class DictationSuccessSoundTests(unittest.TestCase):
         self.assertEqual(select("review", is_macos=False), "Pop")
 
 
+class PointAndSpeakPreviewRuntimeTests(unittest.TestCase):
+    @staticmethod
+    def namespace(capture, resolution, *, is_macos=True):
+        captured = (
+            capture.receipt.state
+            if capture is not None
+            and getattr(capture.receipt.state, "value", None) == "captured"
+            else object()
+        )
+        resolved = SimpleNamespace(value="resolved")
+        ns = load_definitions(
+            "preview_point_and_speak",
+            extra={
+                "IS_MACOS": is_macos,
+                "PointAndSpeakSnapshotState": SimpleNamespace(
+                    CAPTURED=captured),
+                "PointAndSpeakResolutionState": SimpleNamespace(
+                    RESOLVED=resolved),
+                "capture_frontmost_accessibility_targets": lambda: capture,
+                "resolve_point_and_speak": lambda phrase, targets: resolution(
+                    phrase, targets, resolved),
+            },
+        )
+        return ns["preview_point_and_speak"]
+
+    def test_resolved_preview_returns_only_name_role_and_content_free_receipt(self):
+        captured = SimpleNamespace(value="captured")
+        capture = SimpleNamespace(
+            targets=({
+                "target_id": "ax-private-id",
+                "title": "Save Project Bluebird",
+                "label": "",
+                "role": "button",
+            },),
+            receipt=SimpleNamespace(
+                state=captured, observed_elements=4, emitted_targets=1,
+                skipped_elements=2, truncated=False),
+        )
+
+        def resolution(phrase, targets, resolved):
+            self.assertEqual(phrase, "save project button")
+            self.assertIs(targets, capture.targets)
+            return SimpleNamespace(
+                state=resolved, target_id="ax-private-id",
+                receipt=SimpleNamespace(
+                    observed_targets=1, eligible_targets=1,
+                    contradiction_count=0, evidence=("token", "role"),
+                    confidence_bucket="high", margin_bucket="wide"),
+            )
+
+        preview = self.namespace(capture, resolution)("save project button")
+        serialized_receipt = json.dumps(preview["receipt"], sort_keys=True)
+
+        self.assertEqual(preview["state"], "resolved")
+        self.assertEqual(preview["accessibility_name"],
+                         "Save Project Bluebird")
+        self.assertEqual(preview["role"], "button")
+        self.assertNotIn("save project button", serialized_receipt)
+        self.assertNotIn("Bluebird", serialized_receipt)
+        self.assertNotIn("ax-private-id", serialized_receipt)
+
+    def test_permission_no_focus_ambiguity_and_invalid_phrase_fail_closed(self):
+        calls = []
+        denied = SimpleNamespace(
+            targets=(),
+            receipt=SimpleNamespace(
+                state=SimpleNamespace(value="permission_denied"),
+                observed_elements=0, emitted_targets=0,
+                skipped_elements=0, truncated=False),
+        )
+        preview = self.namespace(
+            denied, lambda *_args: calls.append("resolve"))("save")
+        self.assertEqual(preview["state"], "permission_denied")
+        self.assertEqual(calls, [])
+
+        unavailable = SimpleNamespace(
+            targets=(),
+            receipt=SimpleNamespace(
+                state=SimpleNamespace(value="unavailable"),
+                observed_elements=0, emitted_targets=0,
+                skipped_elements=0, truncated=False),
+        )
+        preview = self.namespace(
+            unavailable, lambda *_args: calls.append("resolve"))("save")
+        self.assertEqual(preview["state"], "unavailable")
+        self.assertEqual(calls, [])
+
+        captured = SimpleNamespace(value="captured")
+        capture = SimpleNamespace(
+            targets=(), receipt=SimpleNamespace(
+                state=captured, observed_elements=1, emitted_targets=0,
+                skipped_elements=0, truncated=False))
+
+        def ambiguous(_phrase, _targets, _resolved):
+            return SimpleNamespace(
+                state=SimpleNamespace(value="ambiguous"), target_id=None,
+                receipt=SimpleNamespace(
+                    observed_targets=0, eligible_targets=0,
+                    contradiction_count=0, evidence=(),
+                    confidence_bucket="none", margin_bucket="none"))
+
+        preview = self.namespace(capture, ambiguous)("save")
+        self.assertEqual(preview["state"], "ambiguous")
+        self.assertEqual(preview["accessibility_name"], "")
+        self.assertEqual(preview["role"], "")
+
+        capture_calls = []
+        invalid_preview = load_definitions(
+            "preview_point_and_speak",
+            extra={
+                "IS_MACOS": True,
+                "PointAndSpeakSnapshotState": SimpleNamespace(
+                    CAPTURED=object()),
+                "PointAndSpeakResolutionState": SimpleNamespace(
+                    RESOLVED=object()),
+                "capture_frontmost_accessibility_targets": lambda:
+                    capture_calls.append(True),
+                "resolve_point_and_speak": lambda *_args: None,
+            },
+        )["preview_point_and_speak"]
+        for invalid in ("", "line\nbreak", "x" * 97):
+            with self.subTest(invalid=invalid[:8]):
+                preview = invalid_preview(invalid)
+                self.assertEqual(preview["state"], "unavailable")
+        self.assertEqual(capture_calls, [])
+
+        non_mac = self.namespace(None, lambda *_args: None, is_macos=False)
+        self.assertEqual(non_mac("save")["state"], "unavailable")
+
+    def test_preview_has_no_write_logging_or_routine_status_surface(self):
+        preview = next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "preview_point_and_speak")
+        called = {
+            node.func.id for node in ast.walk(preview)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        self.assertFalse(called & {
+            "print", "open", "paste_text", "type_text", "click", "focus",
+        })
+        status = next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "runtime_status_snapshot")
+        status_names = {
+            node.id for node in ast.walk(status) if isinstance(node, ast.Name)
+        }
+        self.assertNotIn("preview_point_and_speak", status_names)
+
+
 class RecognitionMenuTitleTests(unittest.TestCase):
     def test_review_route_marks_last_recognition_for_review(self):
         title = load_definitions(
