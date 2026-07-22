@@ -34,6 +34,13 @@ SEMVER = re.compile(
     r"(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$"
 )
 REVISION = re.compile(r"^[0-9a-f]{40}$")
+LAUNCHER_NAME = "Whisper Face.app"
+LAUNCHER_BASE_FILES = {
+    "Contents/Info.plist",
+    "Contents/MacOS/Whisper Face",
+    "Contents/Resources/launcher-source-sha256",
+}
+LAUNCHER_SIGNATURE_FILES = {"Contents/_CodeSignature/CodeResources"}
 
 
 class PackageError(ValueError):
@@ -274,6 +281,45 @@ def _attach_disk_image(disk_image: Path) -> tuple[Path, str]:
     raise PackageError("attached disk image did not report a mounted filesystem")
 
 
+def _verify_generic_launcher(app: Path, source_root: Path) -> None:
+    if not app.is_dir():
+        raise PackageError("disk image is missing the generic launcher app")
+    entries = {
+        path.relative_to(app).as_posix()
+        for path in app.rglob("*")
+        if path.is_file() or path.is_symlink()
+    }
+    if entries not in (
+        LAUNCHER_BASE_FILES,
+        LAUNCHER_BASE_FILES | LAUNCHER_SIGNATURE_FILES,
+    ):
+        raise PackageError("disk image launcher contains unexpected contents")
+    try:
+        info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+    except (OSError, plistlib.InvalidFileException) as exc:
+        raise PackageError("disk image launcher Info.plist is invalid") from exc
+    if (
+        info.get("CFBundleIdentifier") != "com.berg.whisper-face.launcher"
+        or info.get("CFBundleExecutable") != "Whisper Face"
+    ):
+        raise PackageError("disk image launcher identity is invalid")
+    executable = app / "Contents/MacOS/Whisper Face"
+    if executable.read_bytes()[:4] != b"\xcf\xfa\xed\xfe":
+        raise PackageError("disk image launcher is not an arm64 Mach-O")
+    for forbidden in ("checkout-path", "source-revision", "dictate.py", "setup.sh"):
+        if any(path.name == forbidden for path in app.rglob("*")):
+            raise PackageError("disk image launcher embeds machine or runtime state")
+    if entries == LAUNCHER_BASE_FILES | LAUNCHER_SIGNATURE_FILES:
+        _run("codesign", "--verify", "--deep", "--strict", str(app))
+    _run(
+        sys.executable,
+        str(source_root / "scripts/macos_launcher_app.py"),
+        "verify",
+        "--app", str(app),
+        "--policy", str(source_root / "config/macos-signing-policy.json"),
+    )
+
+
 def verify_artifacts(
     source_zip: Path, disk_image: Path, version: str, revision: str
 ) -> dict:
@@ -297,10 +343,12 @@ def verify_artifacts(
             dmg_root = mount_point / expected_root
             dmg_receipt = verify_tree(dmg_root, version, revision)
             _verify_exact_checkout(dmg_root, version, revision)
+            _verify_generic_launcher(mount_point / LAUNCHER_NAME, dmg_root)
             if dmg_receipt != zip_receipt:
                 raise PackageError("ZIP and DMG package receipts differ")
             allowed_volume_entries = {
-                expected_root, ".fseventsd", ".Spotlight-V100", ".Trashes"
+                expected_root, LAUNCHER_NAME,
+                ".fseventsd", ".Spotlight-V100", ".Trashes"
             }
             unexpected = {
                 path.name for path in mount_point.iterdir()

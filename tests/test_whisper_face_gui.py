@@ -973,15 +973,16 @@ class ViewModelTests(unittest.TestCase):
         model = WhisperFaceViewModel(GUIActions(
             status_snapshot=lambda: {},
             issue_point_and_speak_nonce=lambda: nonce,
-            press_point_and_speak=lambda supplied_nonce, phrase: (
-                calls.append((supplied_nonce, phrase))
+            press_point_and_speak=lambda supplied_nonce, phrase, role: (
+                calls.append((supplied_nonce, phrase, role))
                 or SnapshotTests.point_action()),
         ))
 
         issued = model.issue_point_and_speak_nonce()
-        result = model.press_point_and_speak(issued, "save button")
+        result = model.press_point_and_speak(
+            issued, "save button", "button")
 
-        self.assertEqual(calls, [(nonce, "save button")])
+        self.assertEqual(calls, [(nonce, "save button", "button")])
         self.assertEqual(result.state, "executed")
         self.assertNotIn("save button", repr(model.state).casefold())
         self.assertNotIn(nonce, repr(model.state))
@@ -989,24 +990,39 @@ class ViewModelTests(unittest.TestCase):
         malformed = WhisperFaceViewModel(GUIActions(
             status_snapshot=lambda: {},
             issue_point_and_speak_nonce=lambda: nonce,
-            press_point_and_speak=lambda _nonce, _phrase: {
+            press_point_and_speak=lambda _nonce, _phrase, _role: {
                 "target_id": "private-native-identity"},
         ))
-        fallback = malformed.press_point_and_speak(nonce, "save button")
+        fallback = malformed.press_point_and_speak(
+            nonce, "save button", "button")
         self.assertEqual(fallback.state, "unavailable")
         self.assertFalse(fallback.receipt.attempted)
+        for unsupported in ("text_field", ["button"]):
+            with self.subTest(unsupported=unsupported), self.assertRaises(
+                    ValueError):
+                model.press_point_and_speak(
+                    nonce, "search field", unsupported)
 
-    def test_point_and_speak_copy_scopes_confirmation_to_fresh_button_action(self):
+    def test_point_and_speak_copy_scopes_confirmation_to_fresh_role_action(self):
         message = localized_string(
             "point_and_speak.dialog.message",
             limit=POINT_AND_SPEAK_MAX_PHRASE_CHARS)
         help_text = localized_string(
             "diagnostics.action.point_and_speak.help")
 
-        self.assertIn("After a button resolves", message)
+        self.assertIn("After a supported control resolves", message)
         self.assertIn("fresh strong resolution", message)
+        self.assertIn("same role", message)
         self.assertIn("exact app, window, and element", message)
-        self.assertIn("one resolved button once", help_text)
+        self.assertIn("button, checkbox, radio button, tab, menu item, or link",
+                      help_text)
+        self.assertIn("text fields", help_text)
+        for role in ("button", "checkbox", "radio_button", "tab",
+                     "menu_item", "link"):
+            self.assertIn(
+                f"Activate {role.replace('_', ' ')} once",
+                localized_string(
+                    f"point_and_speak.action.confirm.{role}"))
 
     def test_drop_target_preview_is_explicit_inert_and_never_enters_state(self):
         calls = []

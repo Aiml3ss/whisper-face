@@ -3979,8 +3979,8 @@ def issue_point_and_speak_nonce() -> str:
     return POINT_AND_SPEAK_TRANSACTIONS.issue_nonce()
 
 
-def press_point_and_speak(nonce: str, phrase: str) -> dict:
-    """Explicitly resolve and press one exact, still-focused Mac button once.
+def press_point_and_speak(nonce: str, phrase: str, expected_role: str) -> dict:
+    """Explicitly AXPress one exact, still-focused supported Mac control once.
 
     The phrase, accessible names, target identifier, and native identities are
     transient. The returned projection is aggregate and content-free. There is
@@ -4028,6 +4028,10 @@ def press_point_and_speak(nonce: str, phrase: str) -> dict:
 
     if (not IS_MACOS or not isinstance(nonce, str)
             or not isinstance(phrase, str) or not phrase.strip()
+            or not isinstance(expected_role, str)
+            or expected_role not in {
+                "button", "checkbox", "radio_button", "tab", "menu_item",
+                "link"}
             or len(phrase) > 96
             or any(ord(character) < 32 for character in phrase)):
         return result()
@@ -4056,7 +4060,8 @@ def press_point_and_speak(nonce: str, phrase: str) -> dict:
                 and decision.confidence_bucket == "very_high"
                 and decision.margin_bucket == "wide"):
             lease = prepare_point_and_speak_press_lease(
-                capture, resolution.target_id, created_at=captured_at)
+                capture, resolution.target_id, expected_role,
+                created_at=captured_at)
         transaction = POINT_AND_SPEAK_TRANSACTIONS.execute(nonce, lease)
         return result(
             transaction.state.value,

@@ -20,6 +20,7 @@ from macos_point_and_speak_snapshot import (  # noqa: E402
     prepare_point_and_speak_press_lease,
 )
 from point_and_speak_transaction import (  # noqa: E402
+    AX_PRESS_SAFE_ROLES,
     PointAndSpeakTransactions,
     TargetLease,
     TransactionState,
@@ -203,7 +204,7 @@ class MacPointAndSpeakSnapshotTests(unittest.TestCase):
         reader = FakeReader(tree())
         capture = capture_accessibility_targets(reader)
         lease = prepare_point_and_speak_press_lease(
-            capture, "ax-0000", created_at=10.0)
+            capture, "ax-0000", "button", created_at=10.0)
         transactions = PointAndSpeakTransactions(clock=lambda: 10.1)
         nonce = transactions.issue_nonce()
 
@@ -219,7 +220,7 @@ class MacPointAndSpeakSnapshotTests(unittest.TestCase):
         reader = FakeReader(tree())
         capture = capture_accessibility_targets(reader)
         lease = prepare_point_and_speak_press_lease(
-            capture, "ax-0000", created_at=10.0)
+            capture, "ax-0000", "button", created_at=10.0)
         transactions = PointAndSpeakTransactions(
             clock=lambda: 10.1, max_receipts=1)
         drift_nonce = transactions.issue_nonce()
@@ -249,7 +250,7 @@ class MacPointAndSpeakSnapshotTests(unittest.TestCase):
         calls = []
         lease = TargetLease(
             created_at=1.0,
-            role="checkbox",
+            role="text_field",
             evidence=object(),
             recheck=lambda _evidence: calls.append("recheck") or True,
             execute=lambda _evidence: calls.append("execute") or True,
@@ -258,10 +259,51 @@ class MacPointAndSpeakSnapshotTests(unittest.TestCase):
 
         arbitrary = transactions.execute("a" * 32, lease)
         issued = transactions.execute(transactions.issue_nonce(), lease)
+        unhashable_role = transactions.execute(
+            transactions.issue_nonce(),
+            TargetLease(
+                created_at=1.0,
+                role=["button"],
+                evidence=object(),
+                recheck=lambda _evidence: calls.append("recheck") or True,
+                execute=lambda _evidence: calls.append("execute") or True,
+            ),
+        )
 
         self.assertEqual(arbitrary.state, TransactionState.UNAVAILABLE)
         self.assertEqual(issued.state, TransactionState.UNSUPPORTED)
+        self.assertEqual(unhashable_role.state, TransactionState.UNSUPPORTED)
         self.assertEqual(calls, [])
+
+    def test_closed_axpress_role_allowlist_executes_and_role_drift_fails_closed(self):
+        ax_roles = {
+            "button": "AXButton",
+            "checkbox": "AXCheckBox",
+            "radio_button": "AXRadioButton",
+            "tab": "AXTabButton",
+            "menu_item": "AXMenuItem",
+            "link": "AXLink",
+        }
+        self.assertEqual(set(ax_roles), set(AX_PRESS_SAFE_ROLES))
+        for role, ax_role in ax_roles.items():
+            with self.subTest(role=role):
+                nodes = tree()
+                nodes["save"]["role"] = ax_role
+                reader = FakeReader(nodes)
+                capture = capture_accessibility_targets(reader)
+                lease = prepare_point_and_speak_press_lease(
+                    capture, "ax-0000", role, created_at=1.0)
+                transactions = PointAndSpeakTransactions(clock=lambda: 1.1)
+                receipt = transactions.execute(
+                    transactions.issue_nonce(), lease)
+                self.assertEqual(receipt.state, TransactionState.EXECUTED)
+                self.assertEqual(reader.presses, ["save"])
+
+                mismatch = prepare_point_and_speak_press_lease(
+                    capture, "ax-0000",
+                    "link" if role != "link" else "button",
+                    created_at=1.0)
+                self.assertIsNone(mismatch)
 
     def test_concrete_reader_uses_only_read_only_application_services_calls(self):
         services = FakeApplicationServices()

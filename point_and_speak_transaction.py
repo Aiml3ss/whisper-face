@@ -23,6 +23,9 @@ from typing import Callable
 SCHEMA_VERSION = 1
 MAX_LEASE_AGE_SECONDS = 2.0
 MAX_RECEIPTS = 128
+AX_PRESS_SAFE_ROLES = frozenset({
+    "button", "checkbox", "radio_button", "tab", "menu_item", "link",
+})
 
 
 class TransactionState(str, Enum):
@@ -135,7 +138,8 @@ class PointAndSpeakTransactions:
             if not isinstance(lease, TargetLease):
                 return self._remember(nonce, TransactionReceipt(
                     TransactionState.UNAVAILABLE, False, "not_run"))
-            if lease.role != "button":
+            if (not isinstance(lease.role, str)
+                    or lease.role not in AX_PRESS_SAFE_ROLES):
                 return self._remember(nonce, TransactionReceipt(
                     TransactionState.UNSUPPORTED, False, "not_run"))
             try:

@@ -69,6 +69,9 @@ POINT_AND_SPEAK_ROLES = frozenset({
     "button", "checkbox", "link", "menu_item", "radio_button", "tab",
     "text_field",
 })
+POINT_AND_SPEAK_ACTION_ROLES = frozenset({
+    "button", "checkbox", "radio_button", "tab", "menu_item", "link",
+})
 POINT_AND_SPEAK_STATES = frozenset({
     "resolved", "ambiguous", "unavailable", "permission_denied",
 })
@@ -333,7 +336,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "diagnostics.action.copy_support.help": "Copy a transcript-free support summary with health, permissions, build, model status, and aggregate last-result counts. It never includes dictation text, selections, context, paths, logs, or personal language data.",
         "diagnostics.action.verify": "Run Verification",
         "diagnostics.action.point_and_speak": "Point-and-Speak…",
-        "diagnostics.action.point_and_speak.help": "Enter a short target phrase for a read-only preview or explicitly press one resolved button once. The press path rechecks the exact app, window, and Accessibility element immediately before AXPress; drift, replay, weak evidence, and unsupported roles fail closed.",
+        "diagnostics.action.point_and_speak.help": "Enter a short target phrase for a read-only preview or explicitly AXPress one resolved button, checkbox, radio button, tab, menu item, or link once. The action path rechecks the same role plus the exact app, window, and Accessibility element immediately before AXPress; text fields, drift, replay, weak evidence, and unknown roles fail closed.",
         "diagnostics.action.drop_target": "Preview Drop Target…",
         "diagnostics.action.drop_target.help": "Declare a hypothetical target role, source kind, and effect for a read-only preview. Whisper Face reads bounded Accessibility capability evidence and never drags, drops, clicks, focuses, pastes, or performs an AX action.",
         "diagnostics.action.licenses": "License Notices",
@@ -360,11 +363,16 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "diagnostics.accessibility.guidance": "Diagnostic guidance",
         "diagnostics.accessibility.notice": "Whisper Face notice",
         "point_and_speak.dialog.title": "Point-and-Speak",
-        "point_and_speak.dialog.message": "Enter a target phrase of at most {limit} characters. Preview is read-only. After a button resolves, a separate Press once confirmation can allow one AXPress only if a fresh strong resolution and the exact app, window, and element still match; otherwise it does nothing.",
+        "point_and_speak.dialog.message": "Enter a target phrase of at most {limit} characters. Preview is read-only. After a supported control resolves, a separate role-specific confirmation can allow one AXPress only if a fresh strong resolution has the same role and the exact app, window, and element still match; otherwise it does nothing. Text fields are never activated.",
         "point_and_speak.dialog.input.label": "Point-and-Speak target phrase",
         "point_and_speak.dialog.input.help": "Describe one visible control by its accessible name, role, position, selection, or focus state.",
         "point_and_speak.action.preview": "Preview",
-        "point_and_speak.action.press_once": "Press once",
+        "point_and_speak.action.confirm.button": "Activate button once…",
+        "point_and_speak.action.confirm.checkbox": "Activate checkbox once…",
+        "point_and_speak.action.confirm.radio_button": "Activate radio button once…",
+        "point_and_speak.action.confirm.tab": "Activate tab once…",
+        "point_and_speak.action.confirm.menu_item": "Activate menu item once…",
+        "point_and_speak.action.confirm.link": "Activate link once…",
         "point_and_speak.action.cancel": "Cancel",
         "point_and_speak.result.title.resolved": "Target resolved",
         "point_and_speak.result.title.ambiguous": "Target is ambiguous",
@@ -375,15 +383,20 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "point_and_speak.result.none": "none",
         "point_and_speak.result.yes": "yes",
         "point_and_speak.result.no": "no",
-        "point_and_speak.action.result.title.executed": "Button pressed once",
+        "point_and_speak.action.result.title.executed.button": "Button activated once",
+        "point_and_speak.action.result.title.executed.checkbox": "Checkbox activated once",
+        "point_and_speak.action.result.title.executed.radio_button": "Radio button activated once",
+        "point_and_speak.action.result.title.executed.tab": "Tab activated once",
+        "point_and_speak.action.result.title.executed.menu_item": "Menu item activated once",
+        "point_and_speak.action.result.title.executed.link": "Link activated once",
         "point_and_speak.action.result.title.recheck_failed": "Target changed; nothing pressed",
         "point_and_speak.action.result.title.expired": "Target evidence expired",
-        "point_and_speak.action.result.title.unsupported": "Target is not a supported button",
-        "point_and_speak.action.result.title.execution_failed": "Button press was not confirmed",
-        "point_and_speak.action.result.title.unavailable": "Safe button action unavailable",
+        "point_and_speak.action.result.title.unsupported": "Target role is not AXPress-safe",
+        "point_and_speak.action.result.title.execution_failed": "AXPress was not confirmed",
+        "point_and_speak.action.result.title.unavailable": "Safe control action unavailable",
         "point_and_speak.action.result.title.ambiguous": "Target is ambiguous",
         "point_and_speak.action.result.title.permission_denied": "Accessibility permission is needed",
-        "point_and_speak.action.result.receipt": "Content-free action receipt: state {state}; capture {capture}; {observed} elements observed; {emitted} targets emitted; confidence {confidence}; margin {margin}; focus and identity recheck {recheck}; action attempted {attempted}; truncated {truncated}.",
+        "point_and_speak.action.result.receipt": "Content-free action receipt: confirmed role {role}; state {state}; capture {capture}; {observed} elements observed; {emitted} targets emitted; confidence {confidence}; margin {margin}; focus, identity, and role recheck {recheck}; one AXPress attempted {attempted}; truncated {truncated}.",
         "point_and_speak.validation.phrase": "Enter one target phrase between 1 and {limit} characters.",
         "drop_target.dialog.title": "Preview Drop-to-Target",
         "drop_target.dialog.message": "Enter a target phrase and explicitly declare the role, source kind, and effect to test. Accessibility cannot prove those source/effect semantics. After you choose Preview, Whisper Face briefly hides and performs read-only capture only—never a drag, drop, write, or Accessibility action.",
@@ -949,8 +962,8 @@ class GUIActions:
     preview_point_and_speak: Callable[[str], Mapping[str, Any]] = (
         lambda _phrase: {})
     issue_point_and_speak_nonce: Callable[[], str] = lambda: ""
-    press_point_and_speak: Callable[[str, str], Mapping[str, Any]] = (
-        lambda _nonce, _phrase: {})
+    press_point_and_speak: Callable[[str, str, str], Mapping[str, Any]] = (
+        lambda _nonce, _phrase, _role: {})
     preview_drop_to_target: Callable[
         [str, str, str, str], Mapping[str, Any]
     ] = lambda _phrase, _role, _source_kind, _effect: {}
@@ -3478,7 +3491,7 @@ class WhisperFaceViewModel:
             return PointAndSpeakPreview(state="unavailable")
 
     def press_point_and_speak(
-        self, nonce: str, phrase: str,
+        self, nonce: str, phrase: str, expected_role: str,
     ) -> PointAndSpeakActionResult:
         """Request one explicit press without retaining phrase or target data."""
 
@@ -3486,6 +3499,8 @@ class WhisperFaceViewModel:
                 or any(not (character.isalnum() or character in "-_")
                        for character in nonce)
                 or not isinstance(phrase, str) or not phrase.strip()
+                or not isinstance(expected_role, str)
+                or expected_role not in POINT_AND_SPEAK_ACTION_ROLES
                 or len(phrase) > POINT_AND_SPEAK_MAX_PHRASE_CHARS
                 or any(ord(character) < 32 for character in phrase)):
             raise ValueError(self.localized(
@@ -3493,7 +3508,8 @@ class WhisperFaceViewModel:
                 limit=POINT_AND_SPEAK_MAX_PHRASE_CHARS))
         try:
             return normalize_point_and_speak_action(
-                self.actions.press_point_and_speak(nonce, phrase))
+                self.actions.press_point_and_speak(
+                    nonce, phrase, expected_role))
         except Exception:
             return unavailable_point_and_speak_action()
 
@@ -5606,10 +5622,11 @@ if APPKIT_AVAILABLE:
             result_alert.setInformativeText_(detail)
             result_alert.addButtonWithTitle_(self._l(
                 "settings.action.done"))
-            can_press = result.state == "resolved" and result.role == "button"
+            can_press = (result.state == "resolved"
+                         and result.role in POINT_AND_SPEAK_ACTION_ROLES)
             if can_press:
                 result_alert.addButtonWithTitle_(self._l(
-                    "point_and_speak.action.press_once"))
+                    f"point_and_speak.action.confirm.{result.role}"))
             response = result_alert.runModal()
             if not can_press or response != 1001:
                 return
@@ -5624,17 +5641,19 @@ if APPKIT_AVAILABLE:
                 try:
                     nonce = self.view_model.issue_point_and_speak_nonce()
                     action_result = self.view_model.press_point_and_speak(
-                        nonce, phrase)
+                        nonce, phrase, result.role)
                 except Exception:
                     action_result = unavailable_point_and_speak_action()
                 self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                    "pointAndSpeakActionFinished:", action_result, False)
+                    "pointAndSpeakActionFinished:",
+                    (action_result, result.role), False)
 
             threading.Thread(
                 target=run_action, name="whisper-face-point-action",
                 daemon=True).start()
 
-        def pointAndSpeakActionFinished_(self, result: Any) -> None:
+        def pointAndSpeakActionFinished_(self, payload: Any) -> None:
+            result, confirmed_role = payload
             app = NSApplication.sharedApplication()
             app.unhide_(None)
             self.window.makeKeyAndOrderFront_(None)
@@ -5642,6 +5661,7 @@ if APPKIT_AVAILABLE:
             receipt = result.receipt
             detail = self._l(
                 "point_and_speak.action.result.receipt",
+                role=confirmed_role.replace("_", " "),
                 state=result.state.replace("_", " "),
                 capture=receipt.capture_state.replace("_", " "),
                 observed=receipt.observed_elements,
@@ -5657,8 +5677,10 @@ if APPKIT_AVAILABLE:
                     "point_and_speak.result.no"),
             )
             alert = NSAlert.alloc().init()
-            alert.setMessageText_(self._l(
-                f"point_and_speak.action.result.title.{result.state}"))
+            title_key = f"point_and_speak.action.result.title.{result.state}"
+            if result.state == "executed":
+                title_key += f".{confirmed_role}"
+            alert.setMessageText_(self._l(title_key))
             alert.setInformativeText_(detail)
             alert.addButtonWithTitle_(self._l("settings.action.done"))
             alert.runModal()

@@ -50,6 +50,7 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_cleanup_proof_recovery.py",
             "uv run tests/test_benchmark_cleanup_proof_recovery.py",
             "uv run tests/test_benchmark_asr.py",
+            "uv run tests/test_benchmark_macos_asr_warm_path.py",
             "uv run tests/test_performance_lab.py",
             "uv run tests/test_dictate.py",
             "uv run tests/test_gui_settings_runtime.py",
@@ -102,6 +103,7 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_benchmark_cleanup_latency.py",
             "uv run tests/test_cleanup_proof_recovery.py",
             "uv run tests/test_benchmark_cleanup_proof_recovery.py",
+            "uv run tests/test_benchmark_macos_asr_warm_path.py",
             "uv run tests/test_macos_drop_to_target_snapshot.py",
             "uv run tests/test_macos_delayed_cleanup_destination.py",
             "uv run tests/test_acoustic_keyword_bias_evaluation.py",
@@ -262,17 +264,20 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn(
             "setup.ps1", (ROOT / "Install.cmd").read_text(encoding="utf-8"))
 
-    def test_mac_installs_verified_checkout_backed_launcher_app_only(self):
+    def test_mac_installs_generic_launcher_with_external_checkout_receipt(self):
         launcher_tool = (
             ROOT / "scripts" / "macos_launcher_app.py"
         ).read_text(encoding="utf-8")
         gui_source = (ROOT / "whisper_face_gui.py").read_text(encoding="utf-8")
         for expected in (
             "scripts/macos_launcher_app.py",
+            "config/macos-signing-policy.json",
             'launcher_app="$HOME/Applications/Whisper Face.app"',
-            'macos_launcher_app.py" create',
+            'macos_launcher_app.py" "${launcher_install_args[@]}"',
             'macos_launcher_app.py" verify',
             '--checkout "$DIR"',
+            '--receipt "$launcher_receipt"',
+            '--source-app "$packaged_launcher_app"',
             "--installed-runtime",
         ):
             with self.subTest(expected=expected):
@@ -282,11 +287,15 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("import AppKit", launcher_tool)
         self.assertIn('"-framework", "AppKit"', launcher_tool)
         self.assertIn('shutil.which("swiftc")', launcher_tool)
-        self.assertIn("requestExistingGUI(at: socketPath)", launcher_tool)
+        self.assertIn("func requestExistingGUI(at socketPath: String)", launcher_tool)
+        self.assertIn("requestExistingGUI(at:", launcher_tool)
         self.assertIn('process.arguments = ["-U", socketPath]', launcher_tool)
         self.assertIn('isExecutableFile(atPath: "/usr/bin/nc")', launcher_tool)
         self.assertIn("addingTimeInterval(5.0)", launcher_tool)
         self.assertIn("launcher must not embed runtime source", launcher_tool)
+        self.assertIn("launcher-install.json", launcher_tool)
+        self.assertIn("macos-signing-policy.json", launcher_tool)
+        self.assertIn("0o600", launcher_tool)
         self.assertNotIn("dictate.py\n", launcher_tool)
         self.assertNotIn('"/usr/bin/python', launcher_tool)
         self.assertNotIn('"uv"', launcher_tool)

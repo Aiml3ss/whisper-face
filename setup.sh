@@ -142,6 +142,7 @@ required=(
     macos_drop_to_target_snapshot.py drop_to_target.py
     whisper_face_gui.py
     scripts/macos_launcher_app.py
+    config/macos-signing-policy.json
     native/ParrotASRHelper/Package.swift
     native/ParrotASRHelper/Package.resolved
     native/ParrotASRHelper/Sources/parrot-asr-helper/main.swift
@@ -171,6 +172,7 @@ launch_dir="$HOME/Library/LaunchAgents"
 dictate_plist="$launch_dir/com.berg.dictate.plist"
 ollama_plist="$launch_dir/com.berg.ollama.plist"
 launcher_app="$HOME/Applications/Whisper Face.app"
+launcher_receipt="$HOME/Library/Application Support/Whisper Face/launcher-install.json"
 parakeet_helper="$DIR/.models/bin/parrot-asr-helper"
 
 verify_install() {
@@ -193,6 +195,7 @@ verify_install() {
     if [ "$MODE" = "full" ]; then
         python3 "$DIR/scripts/macos_launcher_app.py" verify \
             --app "$launcher_app" --checkout "$DIR" \
+            --receipt "$launcher_receipt" \
             --installed-runtime >/dev/null \
             || fail "Whisper Face launcher app is missing or stale"
     fi
@@ -347,9 +350,17 @@ render_plist com.berg.dictate.plist.template "$dictate_plist" \
     -e "$extra_sed"
 
 if [ "$MODE" = "full" ]; then
-    step "installing the checkout-backed Whisper Face app launcher"
-    python3 "$DIR/scripts/macos_launcher_app.py" create \
-        --app "$launcher_app" --checkout "$DIR"
+    step "installing the generic Whisper Face app launcher"
+    packaged_launcher_app="$(cd "$DIR/.." && pwd)/Whisper Face.app"
+    launcher_install_args=(
+        install --app "$launcher_app" --checkout "$DIR"
+        --receipt "$launcher_receipt"
+    )
+    if [ -d "$packaged_launcher_app" ] \
+            && [ "$packaged_launcher_app" != "$launcher_app" ]; then
+        launcher_install_args+=(--source-app "$packaged_launcher_app")
+    fi
+    python3 "$DIR/scripts/macos_launcher_app.py" "${launcher_install_args[@]}"
 fi
 
 log_start=1

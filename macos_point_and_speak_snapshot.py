@@ -16,7 +16,7 @@ import math
 import sys
 from typing import Any, Protocol
 
-from point_and_speak_transaction import TargetLease
+from point_and_speak_transaction import AX_PRESS_SAFE_ROLES, TargetLease
 
 
 MAX_OBSERVED_ELEMENTS = 2_048
@@ -257,10 +257,11 @@ def capture_accessibility_targets(
 def prepare_point_and_speak_press_lease(
     capture: AccessibilityTargetCapture,
     target_id: str,
+    expected_role: str,
     *,
     created_at: float,
 ) -> TargetLease | None:
-    """Bind one resolved button to exact app/window/element evidence."""
+    """Bind one resolved AXPress-safe role to exact native evidence."""
 
     matches = [
         index for index, target in enumerate(capture.targets)
@@ -270,8 +271,11 @@ def prepare_point_and_speak_press_lease(
         return None
     index = matches[0]
     target = capture.targets[index]
-    if target.get("role") != "button" or index >= len(capture._elements) \
-            or index >= len(capture._target_windows):
+    role = target.get("role")
+    if (not isinstance(expected_role, str)
+            or role not in AX_PRESS_SAFE_ROLES or role != expected_role
+            or index >= len(capture._elements) \
+            or index >= len(capture._target_windows)):
         return None
     reader = capture._reader
     application = capture._application
@@ -318,7 +322,7 @@ def prepare_point_and_speak_press_lease(
 
     return TargetLease(
         created_at=created_at,
-        role="button",
+        role=role,
         evidence=element,
         recheck=recheck,
         execute=execute,

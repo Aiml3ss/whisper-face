@@ -240,12 +240,12 @@ class MacDistributionContractTests(unittest.TestCase):
         sys.platform == "darwin",
         "compiled AppKit launcher bundle requires macOS",
     )
-    def test_compiled_launcher_app_is_reproducible_and_checkout_backed(self):
+    def test_generic_launcher_is_reproducible_and_uses_external_receipt(self):
         with tempfile.TemporaryDirectory() as directory:
-            app = Path(directory) / "Whisper Face.app"
+            root = Path(directory)
+            app = root / "built" / "Whisper Face.app"
             command = [
-                sys.executable, str(LAUNCHER_TOOL), "create",
-                "--app", str(app), "--checkout", str(ROOT),
+                sys.executable, str(LAUNCHER_TOOL), "build", "--app", str(app),
             ]
             subprocess.run(command, cwd=ROOT, check=True, capture_output=True)
             first = {
@@ -265,32 +265,90 @@ class MacDistributionContractTests(unittest.TestCase):
             plist = plistlib.loads((app / "Contents/Info.plist").read_bytes())
             self.assertEqual(plist["CFBundlePackageType"], "APPL")
             self.assertEqual(
-                (app / "Contents/Resources/checkout-path").read_text().strip(),
-                str(ROOT),
+                {path.relative_to(app).as_posix() for path in app.rglob("*") if path.is_file()},
+                {
+                    "Contents/Info.plist",
+                    "Contents/MacOS/Whisper Face",
+                    "Contents/Resources/launcher-source-sha256",
+                },
             )
+            installed = root / "installed" / "Whisper Face.app"
+            receipt = root / "state" / "launcher-install.json"
+            subprocess.run([
+                sys.executable, str(LAUNCHER_TOOL), "install",
+                "--app", str(installed), "--source-app", str(app),
+                "--checkout", str(ROOT), "--receipt", str(receipt),
+            ], cwd=ROOT, check=True, capture_output=True)
+            self.assertEqual(first, {
+                path.relative_to(installed).as_posix(): path.read_bytes()
+                for path in installed.rglob("*") if path.is_file()
+            })
+            self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(receipt.parent.stat().st_mode & 0o777, 0o700)
+            self.assertNotIn(str(ROOT), b"".join(first.values()).decode("utf-8", "ignore"))
             verification = subprocess.run(
                 [
                     sys.executable, str(LAUNCHER_TOOL), "verify",
-                    "--app", str(app), "--checkout", str(ROOT),
+                    "--app", str(installed), "--checkout", str(ROOT),
+                    "--receipt", str(receipt),
                 ],
                 cwd=ROOT, text=True, capture_output=True,
             )
             self.assertEqual(verification.returncode, 0, verification.stderr)
 
-            (app / "Contents/Resources/checkout-path").write_text(
-                "/tmp/not-the-checkout\n", encoding="utf-8")
+            tampered = root / "tampered" / "Whisper Face.app"
+            subprocess.run(["ditto", str(app), str(tampered)], check=True)
+            tampered_executable = tampered / "Contents/MacOS/Whisper Face"
+            data = tampered_executable.read_bytes()
+            tampered_executable.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
+            unsigned_rejected = subprocess.run([
+                sys.executable, str(LAUNCHER_TOOL), "install",
+                "--app", str(root / "rejected-unsigned" / "Whisper Face.app"),
+                "--source-app", str(tampered), "--checkout", str(ROOT),
+                "--receipt", str(root / "rejected-unsigned.json"),
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual(unsigned_rejected.returncode, 2)
+            self.assertIn("compiled binary mismatch", unsigned_rejected.stderr)
+
+            untrusted = root / "untrusted" / "Whisper Face.app"
+            subprocess.run(["ditto", str(app), str(untrusted)], check=True)
+            subprocess.run(["codesign", "--force", "--sign", "-", str(untrusted)],
+                           check=True, capture_output=True)
+            signed_rejected = subprocess.run([
+                sys.executable, str(LAUNCHER_TOOL), "install",
+                "--app", str(root / "rejected-signed" / "Whisper Face.app"),
+                "--source-app", str(untrusted), "--checkout", str(ROOT),
+                "--receipt", str(root / "rejected-signed.json"),
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual(signed_rejected.returncode, 2)
+            self.assertIn("pinned Developer ID", signed_rejected.stderr)
+
+            payload = json.loads(receipt.read_text())
+            payload["checkout"] = "/tmp/not-the-checkout"
+            receipt.write_text(json.dumps(payload), encoding="utf-8")
+            receipt.chmod(0o600)
             rejected = subprocess.run(
                 [
                     sys.executable, str(LAUNCHER_TOOL), "verify",
-                    "--app", str(app), "--checkout", str(ROOT),
+                    "--app", str(installed), "--checkout", str(ROOT),
+                    "--receipt", str(receipt),
                 ],
                 cwd=ROOT, text=True, capture_output=True,
             )
             self.assertEqual(rejected.returncode, 2)
-            self.assertIn("different checkout", rejected.stderr)
+            self.assertIn("stale or invalid", rejected.stderr)
 
     def test_packager_exports_one_exact_source_and_applies_apple_trust(self):
         script = self.read("scripts/package_macos.sh")
+        policy = json.loads(self.read("config/macos-signing-policy.json"))
+        self.assertEqual(policy, {
+            "developer_id_team_identifier": None,
+            "schema_version": 1,
+        })
+        launcher = self.read("scripts/macos_launcher_app.py")
+        self.assertIn("certificate leaf[subject.OU]", launcher)
+        self.assertIn("1.2.840.113635.100.6.1.13", launcher)
+        self.assertIn("1.2.840.113635.100.6.2.6", launcher)
         for expected in (
             "git -C \"$REPO_DIR\" archive \"$FULL_REVISION\"",
             "fetch -q --depth 1",
@@ -301,6 +359,12 @@ class MacDistributionContractTests(unittest.TestCase):
             "SOURCE_DATE_EPOCH",
             "verify_macos_package.py\" stamp",
             "verify_macos_package.py\" verify-artifacts",
+            "macos_launcher_app.py\" build",
+            "codesign --force --options runtime --timestamp",
+            "--require-signed",
+            "config/macos-signing-policy.json",
+            "APPLE_TEAM_ID is required with --sign",
+            "selected revision's pinned Developer ID policy",
             "hdiutil create",
             "codesign --verify --strict",
             "xcrun notarytool submit",
@@ -317,6 +381,9 @@ class MacDistributionContractTests(unittest.TestCase):
                 self.assertIn(expected, script)
         self.assertIn("PACKAGE-CONTENTS.json", self.read(
             "scripts/verify_macos_package.py"))
+        verifier = self.read("scripts/verify_macos_package.py")
+        self.assertIn('source_root / "scripts/macos_launcher_app.py"', verifier)
+        self.assertIn('source_root / "config/macos-signing-policy.json"', verifier)
         # Native Windows may expose a ``bash.exe`` WSL launcher even when no
         # Linux distribution is installed.  Keep the package-contract checks
         # platform independent, and run the shell parser everywhere Bash is a

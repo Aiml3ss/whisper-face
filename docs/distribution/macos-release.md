@@ -11,7 +11,8 @@ The release produces:
 
 - `WhisperFace-VERSION-source.zip`, the architecture-neutral writable source
   bundle (its Mac installer currently requires Apple Silicon);
-- `WhisperFace-VERSION-macOS-arm64.dmg`, the signed/notarized transport;
+- `WhisperFace-VERSION-macOS-arm64.dmg`, the signed/notarized transport with a
+  generic compiled launcher app beside the exact source folder;
 - `PACKAGE-CONTENTS.json` inside both containers, a deterministic logical-tree
   receipt bound to the version, full revision, commit timestamp, entry count,
   executable bits, symlink targets, and file hashes;
@@ -19,17 +20,23 @@ The release produces:
   artifact sizes and SHA-256 hashes, Apple trust state, and rollback target;
 - `SHA256SUMS`, covering both artifacts and the update manifest.
 
-The disk image and ZIP contain the same exact source. A DMG user must copy its
-source folder to a writable local folder before clicking `Install.command`.
-The ZIP expands to a writable folder directly.
+The disk image and ZIP contain the same exact source. The DMG additionally
+contains `Whisper Face.app`. A DMG user copies both the source folder and its
+app sibling into one writable local folder before clicking `Install.command`;
+setup then installs that exact app without modifying its signed bundle. The ZIP
+expands to a writable source folder and setup builds an unsigned local launcher.
 
-On a full Mac install, `setup.sh` creates `~/Applications/Whisper Face.app` as
-a checkout-backed Mac launcher app bundle. It contains only `Info.plist`, a
-minimal compiled Swift/AppKit launcher, and the installed checkout path/revision;
+On a full Mac install, `setup.sh` installs `~/Applications/Whisper Face.app` as
+a generic Mac launcher app bundle. It contains only `Info.plist`, a minimal
+compiled Swift/AppKit launcher, and its source-contract hash;
 it does not copy `dictate.py`, its lockfile, models, private state, or any second
 source tree. `setup.sh` builds the arm64 Mach-O executable with the system
-`swiftc` supplied by the already-required Xcode Command Line Tools. Opening it
-validates the bound full Git revision and LaunchAgent working directory, asks
+`swiftc` supplied by the already-required Xcode Command Line Tools. Machine
+binding lives outside the immutable bundle in the same-user, strict `0600`
+`~/Library/Application Support/Whisper Face/launcher-install.json`, whose
+parent is strict `0700` and which binds the exact app digest, checkout, and full
+Git revision. Opening the app validates that receipt's owner and modes, the
+bound full Git revision, and LaunchAgent working directory, then asks
 `launchd` to start that existing runtime entrypoint, and uses AppKit to activate
 a runtime-owned window. The running service exposes one same-user `0600` Unix
 socket whose name binds the launchd PID and full source revision. After
@@ -45,18 +52,22 @@ owners, live PIDs, and unrelated paths are untouched. Accepted peers have a
 short read timeout so an idle same-user client cannot block later launches. It
 never constructs a second settings GUI; the checkout-backed menu-bar service
 continues to own its UI.
-Rerunning the installer reproducibly replaces an app owned by this launcher
-contract and `./setup.sh --verify` recompiles the fixed source contract to
-reject a missing, modified, redirected, stale, script-backed, or unexpected
-binary, then executes its no-action `--verify` mode to prove the Mach-O can
-load and validate the installed checkout without kickstarting `launchd`.
+Rerunning the installer replaces only an app owned by this launcher contract.
+For a DMG install it copies and digest-checks the packaged app without rewriting
+it, preserving its Developer ID signature; for a source checkout it reproducibly
+builds an unsigned app. `./setup.sh --verify` checks the app structure and
+signature when present, exact receipt digest and checkout/revision binding, and
+then executes no-action `--verify` mode without kickstarting `launchd`.
 
-This locally generated launcher is unsigned. It is a convenience entry point,
-not the signed/notarized release artifact, and macOS permissions continue to
-belong to the checkout-backed Python service. The release workflow makes no
-signature or notarization claim for this app; shipping a compiled,
-Developer-ID-signed app remains separate work requiring Apple credentials and
-a permission migration plan.
+App acceptance is fail closed. An unsigned sibling is accepted only when its
+Mach-O is byte-identical to recompiling the exact Swift source contract in the
+checkout. A signed sibling must satisfy an Apple Developer ID Application
+designated requirement for bundle ID `com.berg.whisper-face.launcher` and the
+exact ten-character Team ID pinned in
+`config/macos-signing-policy.json`; an arbitrary valid or ad-hoc signature is
+not accepted. The policy is intentionally unconfigured until the Project Owner
+records the production Team ID, so the signed release path currently aborts
+rather than trusting an unknown signer.
 
 `scripts/package_macos.sh` normalizes the staged tree to the selected commit's
 timestamp, stamps its logical-tree digest, then reopens both containers and
@@ -108,7 +119,9 @@ As an alternative to a keychain profile, notarization reads `APPLE_ID`,
 `APPLE_TEAM_ID`, and `APPLE_APP_SPECIFIC_PASSWORD`. Do not place secrets in a
 shell history, source file, release artifact, manifest, or log.
 
-The script signs the final disk image, waits for Apple's notarization result,
+The script compiles the generic launcher from the selected exported revision,
+signs it with hardened runtime before creating the disk image, signs the final
+disk image, waits for Apple's notarization result,
 downloads and checks the notarization log, staples the ticket, validates the
 ticket, structurally re-verifies the ZIP and DMG, computes digests only after
 stapling, then re-verifies every manifest artifact. Missing or partial
@@ -118,6 +131,13 @@ Apple's current [custom notarization workflow](https://developer.apple.com/docum
 which accepts UDIF disk images and uses `notarytool` plus `stapler`. Apple
 documents Developer ID Application as the appropriate certificate for signing
 disk images in its [notarization troubleshooting guide](https://developer.apple.com/documentation/security/resolving-common-notarization-issues).
+Before the first signed release, replace the `null` Team ID in
+`config/macos-signing-policy.json` with the production certificate's Team ID in
+an owner-reviewed commit. Packaging requires `APPLE_TEAM_ID` and the Team ID in
+`APPLE_DEVELOPER_ID_APPLICATION` to match that selected revision's policy before
+using the credential. Artifact verification reuses the launcher verifier from
+the exact packaged source: unsigned previews are rebuilt and byte-compared;
+signed apps must satisfy that source revision's pinned designated requirement.
 
 ## GitHub release automation
 
