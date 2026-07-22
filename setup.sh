@@ -52,6 +52,30 @@ fail() {
     exit 1
 }
 
+private_log_is_valid() {
+    local path="$1"
+    [ -f "$path" ] && [ ! -L "$path" ] \
+        && [ "$(stat -f '%u' "$path")" = "$(id -u)" ] \
+        && [ "$(stat -f '%Lp' "$path")" = "600" ]
+}
+
+provision_private_log() {
+    local path="$1"
+    if [ -L "$path" ]; then
+        fail "private runtime log is not a regular file: $path"
+    elif [ -e "$path" ]; then
+        [ -f "$path" ] \
+            || fail "private runtime log is not a regular file: $path"
+    else
+        (umask 077 && : > "$path") \
+            || fail "could not create private runtime log: $path"
+    fi
+    chmod 600 "$path" \
+        || fail "could not restrict private runtime log: $path"
+    private_log_is_valid "$path" \
+        || fail "private runtime log permissions could not be verified: $path"
+}
+
 step() {
     echo
     echo "== $*"
@@ -231,6 +255,8 @@ launcher_receipt="$HOME/Library/Application Support/Whisper Face/launcher-instal
 service_receipt_dir="$HOME/Library/Application Support/Whisper Face"
 ollama_service_receipt="$service_receipt_dir/ollama-service.sha256"
 parakeet_helper="$DIR/.models/bin/parrot-asr-helper"
+dictate_log="$DIR/dictate.log"
+ollama_log="$DIR/ollama.log"
 
 verify_install() {
     step "verifying installation"
@@ -250,6 +276,10 @@ verify_install() {
         || fail "Parakeet Unified model/helper verification failed"
     [ -f "$dictate_plist" ] || fail "dictation LaunchAgent is missing"
     [ -f "$ollama_plist" ] || fail "Ollama LaunchAgent is missing"
+    for private_log in "$dictate_log" "$ollama_log"; do
+        private_log_is_valid "$private_log" \
+            || fail "private runtime log is missing or has unsafe permissions"
+    done
     plutil -lint "$dictate_plist" "$ollama_plist" >/dev/null
     escaped_verify_ollama="$(escape_sed_replacement "$ollama_bin")"
     escaped_verify_dir="$(escape_sed_replacement "$DIR")"
@@ -315,6 +345,11 @@ available_kb="$(df -Pk "$DIR" | awk 'NR == 2 {print $4}')"
 if [ "${available_kb:-0}" -lt 8388608 ]; then
     fail "at least 8 GB of free disk space is required"
 fi
+
+# Create and lock logs before either service can create them with a default
+# mode. Existing logs are retained; rerunning setup repairs their mode.
+provision_private_log "$dictate_log"
+provision_private_log "$ollama_log"
 
 # --- Homebrew and native dependencies --------------------------------------
 if ! command -v brew >/dev/null 2>&1; then

@@ -16,7 +16,10 @@ dictation to train a shared model.
   written into the transcript history or learned-state files.
 - Dictionary terms, snippets, preferences, transcript telemetry, correction
   mappings, and Personal Regression cases are private, gitignored files in the
-  installed checkout. The installer restricts them to the current user.
+  installed checkout. On a fresh installation the installer provisions runtime
+  logs before starting either local service; reruns repair their protection
+  without truncating content and verification checks their current-user-only
+  posture.
 
 Flight Recorder is off on a fresh installation. When enabled, its menu state
 and the operating system microphone indicator make continuous capture visible;
@@ -58,11 +61,11 @@ GitHub, Apple, and their delivery infrastructure as documented in
 `THIRD_PARTY_NOTICES.md` and the installer.
 
 The current runtime also exposes an unauthenticated HTTP transcription endpoint
-on port 8787 for experimental phone/headless integration. It listens on network
-interfaces, not only loopback. Treat it as available to devices on the same
-reachable network: use only a trusted network and host firewall, and do not
-forward the port to the internet. This interface is a documented trust boundary
-and is not represented as an internet-safe API.
+on port 8787 for experimental phone/headless integration. Ordinary desktop mode
+binds it to loopback. Only the explicit `--server-only` mode binds reachable
+network interfaces; use that mode only on a trusted network with a host firewall
+and do not forward the port to the internet. The headless interface is a
+documented trust boundary and is not represented as an internet-safe API.
 
 ## Our commitments
 

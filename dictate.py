@@ -87,7 +87,8 @@ New in v3.4 (iPhone):
     that API). Uploads run through the SAME pipeline as local dictation:
     glossary-biased Whisper, snippets, spoken tone override, LLM cleanup,
     and the transcript log (so phone vocabulary feeds learning too).
-    LAN-only and unauthenticated; needs ffmpeg for audio decode.
+    Desktop mode binds loopback only. Explicit --server-only mode binds the
+    trusted LAN and remains unauthenticated; audio decode needs ffmpeg.
   * --server-only: phone endpoint + models + learning loop with NO hotkey,
     HUD, mic, or TCC permission prompts. For a headless always-on Mac
     (e.g. a Mac mini serving the iPhone). Requires Apple Silicon (MLX).
@@ -2601,6 +2602,12 @@ class StatusBar(NSObject):
             item.setTarget_(self)
             item.setRepresentedObject_(alternative)
             self.recognition_menu.addItem_(item)
+        self.recognition_menu.addItem_(NSMenuItem.separatorItem())
+        results_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Open Last Result…", "openResults:", "")
+        results_item.setTarget_(self)
+        results_item.setEnabled_(self.gui is not None)
+        self.recognition_menu.addItem_(results_item)
 
     def copyAlternative_(self, sender):
         alternative = str(sender.representedObject())
@@ -2634,6 +2641,11 @@ class StatusBar(NSObject):
         """Open the existing explicit inspector; it remains metadata-first."""
         if self.gui is not None:
             self.gui.show_voice_inbox()
+
+    def openResults_(self, sender):
+        """Open the existing transcript-free result inspector."""
+        if self.gui is not None:
+            self.gui.show_results()
 
     def quitApp_(self, sender):
         # Clean exit(0): launchd's SuccessfulExit=false means no respawn
@@ -7324,13 +7336,22 @@ class PhoneHandler(BaseHTTPRequestHandler):
                         "application/json")
 
 
+def phone_bind_host(server_only: bool) -> str:
+    """Keep the desktop health endpoint local unless LAN mode is explicit."""
+    if not isinstance(server_only, bool):
+        raise TypeError("server_only must be a bool")
+    return "0.0.0.0" if server_only else "127.0.0.1"
+
+
 def phone_server():
+    bind_host = phone_bind_host(SERVER_ONLY)
     try:
-        srv = ThreadingHTTPServer(("0.0.0.0", PHONE_PORT), PhoneHandler)
+        srv = ThreadingHTTPServer((bind_host, PHONE_PORT), PhoneHandler)
     except OSError as e:
         print(f"! phone endpoint disabled: {e}")
         return
-    print(f"Phone endpoint: http://{lan_ip()}:{PHONE_PORT}"
+    display_host = lan_ip() if SERVER_ONLY else bind_host
+    print(f"Phone endpoint: http://{display_host}:{PHONE_PORT}"
           f"/v1/audio/transcriptions")
     srv.serve_forever()
 

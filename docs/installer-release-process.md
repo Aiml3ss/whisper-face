@@ -126,6 +126,12 @@ model presence. This proves task-to-launcher-to-checkout configuration; because
 Ollama is independently managed on Windows, it does not prove scheduled-task
 ownership of the endpoint listener.
 
+On a fresh installation both installers provision runtime logs before starting
+either service. Reruns retain existing content, reject non-file targets, and
+repair the platform-native current-user-only protection. Mac rejects symbolic
+links; Windows rejects reparse points. Read-only verification fails when an
+expected log is missing or no longer has that private posture.
+
 For dependency, service, model, preload, or permission changes, also rerun the
 full one-click installer on an appropriate clean or disposable machine before
 calling the release fully cross-platform verified.
