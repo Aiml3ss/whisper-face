@@ -149,7 +149,11 @@ def write_support_bundle(destination: str | Path, snapshot_text: str) -> Path:
         descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.",
                                                 dir=path.parent)
         temporary_path = Path(temporary)
-        os.fchmod(descriptor, 0o600)
+        fchmod = getattr(os, "fchmod", None)
+        if fchmod is None:
+            raise SupportBundleError(
+                "support bundle export is unavailable on this platform")
+        fchmod(descriptor, 0o600)
         if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o600:
             raise SupportBundleError("support bundle permissions are unsafe")
         with os.fdopen(descriptor, "wb") as handle:

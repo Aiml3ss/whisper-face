@@ -1,6 +1,7 @@
 """Regression coverage for the local, content-free Diagnostics bundle."""
 
 import json
+import os
 import stat
 import sys
 import tempfile
@@ -90,6 +91,12 @@ class SupportBundleTests(unittest.TestCase):
     def test_writes_a_local_private_json_file(self):
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "support.json"
+            if os.name != "posix":
+                with self.assertRaisesRegex(
+                        SupportBundleError, "unavailable on this platform"):
+                    write_support_bundle(destination, snapshot())
+                self.assertFalse(destination.exists())
+                return
             saved = write_support_bundle(destination, snapshot())
 
             self.assertEqual(saved, destination)
@@ -120,6 +127,16 @@ class SupportBundleTests(unittest.TestCase):
                     side_effect=OSError("read only")):
                 with self.assertRaisesRegex(SupportBundleError, "could not save"):
                     write_support_bundle(destination, snapshot())
+
+    def test_missing_descriptor_permissions_fail_closed_and_clean_up(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "support.json"
+            with patch.object(support_bundle_module.os, "fchmod", None):
+                with self.assertRaisesRegex(
+                        SupportBundleError, "unavailable on this platform"):
+                    write_support_bundle(destination, snapshot())
+            self.assertFalse(destination.exists())
+            self.assertEqual(list(Path(directory).iterdir()), [])
 
     def test_replacement_has_no_post_rename_path_following_operations(self):
         source = (Path(__file__).resolve().parents[1] /
