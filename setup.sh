@@ -137,6 +137,7 @@ required=(
     voice_inbox.py voice_object_inbox_bridge.py demonstration_drafts.py
     risky_action_confirmation.py
     point_and_speak_resolver.py macos_point_and_speak_snapshot.py
+    macos_drop_to_target_snapshot.py drop_to_target.py
     whisper_face_gui.py
     native/ParrotASRHelper/Package.swift
     native/ParrotASRHelper/Package.resolved

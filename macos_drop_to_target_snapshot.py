@@ -11,7 +11,9 @@ those semantics, so this module never guesses them.
 It cannot start a drag, drop, click, focus an element, paste, invoke an AX
 action, or request AX values, selected text, document contents, paths, or
 payloads.
-The module is intentionally unwired from the GUI and runtime.
+The native Mac Diagnostics preview may invoke this boundary after an explicit
+user action. It remains transient and inert: no routine capture, action,
+logging, or persistence surface exists.
 """
 
 from __future__ import annotations

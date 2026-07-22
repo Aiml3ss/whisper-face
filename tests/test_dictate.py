@@ -378,6 +378,167 @@ class PointAndSpeakPreviewRuntimeTests(unittest.TestCase):
         self.assertNotIn("preview_point_and_speak", status_names)
 
 
+class DropTargetPreviewRuntimeTests(unittest.TestCase):
+    @staticmethod
+    def namespace(
+        capture, decision, *, is_macos=True, captured_state=None,
+    ):
+        captured = captured_state if captured_state is not None else object()
+        resolved = SimpleNamespace(value="resolved")
+
+        class EnumFactory:
+            def __init__(self, allowed):
+                self.allowed = allowed
+
+            def __call__(self, value):
+                if value not in self.allowed:
+                    raise ValueError(value)
+                return SimpleNamespace(value=value)
+
+        class Capability:
+            def __init__(self, kinds, effects):
+                self.accepted_kinds = kinds
+                self.accepted_effects = effects
+
+        ns = load_definitions(
+            "preview_drop_to_target",
+            assignments=("DROP_TARGET_PREVIEW_ROLES",),
+            extra={
+                "IS_MACOS": is_macos,
+                "DropTargetSnapshotState": SimpleNamespace(CAPTURED=captured),
+                "DropTargetDecisionState": SimpleNamespace(RESOLVED=resolved),
+                "SourceKind": EnumFactory({
+                    "file_reference", "image_reference", "text_selection",
+                    "url_reference"}),
+                "DropEffect": EnumFactory({"copy", "link", "move"}),
+                "DropCapability": Capability,
+                "capture_frontmost_drop_target_evidence":
+                    lambda policy: capture(policy),
+                "decide_drop_to_target":
+                    lambda proposal, targets: decision(
+                        proposal, targets, resolved),
+            },
+        )
+        return ns["preview_drop_to_target"]
+
+    def test_resolved_preview_is_transient_content_scoped_and_no_execution(self):
+        captured = SimpleNamespace(value="captured")
+        capture_value = SimpleNamespace(
+            targets=({
+                "target_id": "ax-drop-private",
+                "title": "Project Bluebird Team Inbox",
+                "label": "",
+            },),
+            receipt=SimpleNamespace(
+                state=captured, observed_elements=5, emitted_targets=1,
+                skipped_elements=2, truncated=False),
+        )
+
+        def capture(policy):
+            self.assertEqual(set(policy), {"AXGroup"})
+            capability = policy["AXGroup"]
+            self.assertEqual(capability.accepted_kinds[0].value,
+                             "file_reference")
+            self.assertEqual(capability.accepted_effects[0].value, "copy")
+            return capture_value
+
+        def decide(proposal, targets, resolved):
+            self.assertEqual(proposal, {
+                "schema_version": 1,
+                "target_hint": "team inbox",
+                "source_kind": "file_reference",
+                "effect": "copy",
+            })
+            self.assertIs(targets, capture_value.targets)
+            return SimpleNamespace(
+                state=resolved, target_id="ax-drop-private",
+                receipt=SimpleNamespace(
+                    observed_targets=1, eligible_targets=1,
+                    contradiction_count=0,
+                    evidence=("exact_name", "source_compatible",
+                              "effect_compatible"),
+                    confidence_bucket="very_high", margin_bucket="wide"),
+            )
+
+        preview = self.namespace(
+            capture, decide, captured_state=captured)(
+            "team inbox", "AXGroup", "file_reference", "copy")
+        receipt = json.dumps(preview["receipt"], sort_keys=True)
+
+        self.assertEqual(preview["state"], "resolved")
+        self.assertEqual(preview["accessibility_name"],
+                         "Project Bluebird Team Inbox")
+        self.assertEqual(preview["role"], "AXGroup")
+        self.assertEqual(preview["receipt"]["execution"], "none")
+        self.assertEqual(preview["receipt"]["capability_basis"],
+                         "caller_declared_role_policy")
+        self.assertNotIn("team inbox", receipt)
+        self.assertNotIn("Bluebird", receipt)
+        self.assertNotIn("ax-drop-private", receipt)
+
+    def test_permission_invalid_and_non_mac_paths_fail_closed(self):
+        calls = []
+        denied_value = SimpleNamespace(
+            targets=(), receipt=SimpleNamespace(
+                state=SimpleNamespace(value="permission_denied"),
+                observed_elements=0, emitted_targets=0,
+                skipped_elements=0, truncated=False))
+
+        denied = self.namespace(
+            lambda _policy: denied_value,
+            lambda *_args: calls.append("decide"))
+        preview = denied("inbox", "AXGroup", "file_reference", "copy")
+        self.assertEqual(preview["state"], "permission_denied")
+        self.assertEqual(calls, [])
+        self.assertEqual(preview["receipt"]["execution"], "none")
+
+        capture_calls = []
+        worker = self.namespace(
+            lambda _policy: capture_calls.append(True),
+            lambda *_args: None)
+        for arguments in (
+            ("", "AXGroup", "file_reference", "copy"),
+            ("inbox\nname", "AXGroup", "file_reference", "copy"),
+            ("inbox", "AXButton", "file_reference", "copy"),
+            ("inbox", "AXGroup", "payload", "copy"),
+            ("inbox", "AXGroup", "file_reference", "execute"),
+        ):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(worker(*arguments)["state"], "unavailable")
+        self.assertEqual(capture_calls, [])
+
+        non_mac = self.namespace(
+            lambda _policy: capture_calls.append(True),
+            lambda *_args: None, is_macos=False)
+        self.assertEqual(non_mac(
+            "inbox", "AXGroup", "file_reference", "copy")["state"],
+            "unavailable")
+        self.assertEqual(capture_calls, [])
+
+    def test_preview_has_no_write_log_persistence_or_routine_status_surface(self):
+        preview = next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "preview_drop_to_target")
+        called = {
+            node.func.id for node in ast.walk(preview)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        self.assertFalse(called & {
+            "print", "open", "paste_text", "type_text", "click", "focus",
+            "drag", "drop", "save", "write_transcript_log",
+        })
+        status = next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "runtime_status_snapshot")
+        status_names = {
+            node.id for node in ast.walk(status)
+            if isinstance(node, ast.Name)
+        }
+        self.assertNotIn("preview_drop_to_target", status_names)
+
+
 class RecognitionMenuTitleTests(unittest.TestCase):
     def test_review_route_marks_last_recognition_for_review(self):
         title = load_definitions(

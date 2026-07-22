@@ -28,17 +28,38 @@ class _Response:
 
 
 class CleanupLatencyBenchmarkTests(unittest.TestCase):
+    @staticmethod
+    def _result(cases, **changes):
+        result = {
+            "id": "current", "few_shot_pairs": 4, "token_budget": "x",
+            "cases": len(cases), "accepted": len(cases),
+            "baseline_accepted": len(cases),
+            "recovered_accepted": len(cases),
+            "both_accepted": len(cases), "baseline_only_accepted": 0,
+            "recovered_only_accepted": 0, "neither_accepted": 0,
+            "acceptance_delta": 0,
+            "model_candidates_evaluated": len(cases),
+            "recovery_attempted": len(cases), "recovery_rejected": 0,
+            "recovery_replay_verified": len(cases),
+            "guard_rejected": 0, "semantic_failed": 0,
+            "proof_failed": 0, "parse_failed": 0, "timeout": 0,
+            "transport_failed": 0, "recovery_reason_counts": {
+                "eligible": len(cases),
+            },
+            "recovery_latency_ms": {
+                "p50": 0.1, "p95": 0.2, "max": 0.3,
+            },
+            "latency_ms": {"p50": 100.0, "p95": 120.0, "max": 130.0},
+        }
+        result.update(changes)
+        return result
+
     def test_report_is_aggregate_only_and_never_claims_runtime_authority(self):
         cases = load_cases()
-        current = {"id": "current", "few_shot_pairs": 4, "token_budget": "x",
-                   "cases": len(cases), "accepted": len(cases), "guard_rejected": 0,
-                   "semantic_failed": 0, "proof_failed": 0, "parse_failed": 0,
-                   "timeout": 0,
-                   "transport_failed": 0,
-                   "latency_ms": {"p50": 100.0, "p95": 120.0, "max": 130.0}}
+        current = self._result(cases)
         report = build_report(cases, [current, {**current, "id": "lean-three-shot",
                                                 "latency_ms": {"p50": 70.0, "p95": 80.0, "max": 90.0}}], read_timeout=4.0)
-        self.assertEqual(report["schema_version"], 1)
+        self.assertEqual(report["schema_version"], 2)
         self.assertEqual(report["model"], MODEL)
         self.assertEqual(report["runtime_authority"], "none")
         self.assertFalse(report["claim"]["runtime_change_recommended"])
@@ -66,15 +87,91 @@ class CleanupLatencyBenchmarkTests(unittest.TestCase):
         self.assertEqual(result["parse_failed"], 1)
         self.assertEqual(result["transport_failed"], 0)
 
+    def test_guard_rejection_is_never_offered_to_recovery(self):
+        case = load_cases()[0]
+
+        def truncated(*_args, **_kwargs):
+            return _Response({"done_reason": "length", "message": {
+                "content": json.dumps({
+                    "text": case["candidate"], "edits": [],
+                }),
+            }})
+
+        result = run_variant(VARIANTS[0], (case,), post=truncated)
+        self.assertEqual(result["guard_rejected"], 1)
+        self.assertEqual(result["recovery_attempted"], 0)
+        self.assertEqual(result["recovery_reason_counts"], {})
+
     def test_proof_mismatch_is_not_accepted(self):
+        case = load_cases()[0]
+
         def response(*_args, **_kwargs):
             return _Response({"done_reason": "stop", "message": {"content": json.dumps({
-                "text": "Schedule the review for Wednesday with the API team.", "edits": [],
+                "text": case["candidate"], "edits": [],
             })}})
 
-        result = run_variant(VARIANTS[0], load_cases()[:1], post=response)
+        result = run_variant(VARIANTS[0], (case,), post=response)
         self.assertEqual(result["proof_failed"], 1)
         self.assertEqual(result["accepted"], 0)
+        self.assertEqual(result["baseline_accepted"], 0)
+        self.assertEqual(result["recovered_accepted"], 1)
+        self.assertEqual(result["acceptance_delta"], 1)
+        self.assertEqual(result["recovered_only_accepted"], 1)
+        self.assertEqual(result["recovery_attempted"], 1)
+        self.assertEqual(result["recovery_reason_counts"], {"eligible": 1})
+
+    def test_independent_comparison_exposes_a_recovery_regression(self):
+        case = {
+            "id": "punctuation-policy",
+            "raw": "hello team",
+            "candidate": "Hello\nteam.",
+            "must_contain": ["hello", "team"],
+            "must_not_contain": [],
+        }
+
+        def response(*_args, **_kwargs):
+            return _Response({"done_reason": "stop", "message": {
+                "content": json.dumps({
+                    "text": case["candidate"],
+                    "edits": [{
+                        "kind": "formatting",
+                        "before": case["raw"],
+                        "after": case["candidate"],
+                    }],
+                }),
+            }})
+
+        result = run_variant(VARIANTS[0], (case,), post=response)
+        self.assertEqual(result["baseline_accepted"], 1)
+        self.assertEqual(result["recovered_accepted"], 0)
+        self.assertEqual(result["acceptance_delta"], -1)
+        self.assertEqual(result["baseline_only_accepted"], 1)
+        self.assertEqual(result["recovery_rejected"], 1)
+        self.assertEqual(
+            result["recovery_reason_counts"], {"candidate-symbol-policy": 1})
+
+    def test_model_candidate_and_recovery_measurements_remain_content_free(self):
+        case = load_cases()[1]
+
+        def response(*_args, **_kwargs):
+            return _Response({"done_reason": "stop", "message": {
+                "content": json.dumps({
+                    "text": case["candidate"],
+                    "edits": [{
+                        "kind": "formatting",
+                        "before": case["raw"],
+                        "after": case["candidate"],
+                    }],
+                }),
+            }})
+
+        result = run_variant(VARIANTS[0], (case,), post=response)
+        self.assertEqual(result["both_accepted"], 1)
+        self.assertEqual(result["baseline_only_accepted"], 0)
+        encoded = json.dumps(result)
+        self.assertNotIn(case["id"], encoded)
+        self.assertNotIn(case["raw"], encoded)
+        self.assertNotIn(case["candidate"], encoded)
 
 
 if __name__ == "__main__":

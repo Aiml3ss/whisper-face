@@ -271,7 +271,7 @@ def harness_provenance(
     except (OSError, subprocess.CalledProcessError):
         revision = None
     try:
-        scorecard_name = str(scorecard.relative_to(HERE))
+        scorecard_name = scorecard.relative_to(HERE).as_posix()
     except ValueError:
         scorecard_name = scorecard.name
     return {

@@ -358,6 +358,17 @@ from macos_point_and_speak_snapshot import (  # noqa: E402
     SnapshotState as PointAndSpeakSnapshotState,
     capture_frontmost_accessibility_targets,
 )
+from macos_drop_to_target_snapshot import (  # noqa: E402
+    DropCapability,
+    SnapshotState as DropTargetSnapshotState,
+    capture_frontmost_drop_target_evidence,
+)
+from drop_to_target import (  # noqa: E402
+    DecisionState as DropTargetDecisionState,
+    DropEffect,
+    SourceKind,
+    decide_drop_to_target,
+)
 from point_and_speak_resolver import (  # noqa: E402
     ResolutionState as PointAndSpeakResolutionState,
     resolve_point_and_speak,
@@ -3831,6 +3842,120 @@ def preview_point_and_speak(phrase: str) -> dict:
         role = target.get("role")
         if not isinstance(name, str) or not name.strip() \
                 or not isinstance(role, str) or not role:
+            return {**unavailable, "receipt": receipt(**common)}
+        return {
+            **result,
+            "accessibility_name": name.strip(),
+            "role": role,
+        }
+    except Exception:
+        return unavailable
+
+
+DROP_TARGET_PREVIEW_ROLES = frozenset({
+    "AXGroup", "AXImage", "AXList", "AXScrollArea",
+})
+
+
+def preview_drop_to_target(
+    phrase: str, role: str, source_kind: str, effect: str,
+) -> dict:
+    """Resolve one explicit, inert Drop-to-Target diagnostics preview.
+
+    The role capability is declared by the caller rather than inferred from
+    Accessibility. Captured labels and the phrase remain transient; only a
+    resolved accessible name is returned for the immediate dialog. No target
+    identifier, source payload, AX action, drag, drop, logging, or persistence
+    crosses this boundary.
+    """
+
+    def receipt(
+        *, capture_state: str = "unavailable", observed_elements: int = 0,
+        emitted_targets: int = 0, skipped_elements: int = 0,
+        truncated: bool = False, decision=None,
+    ) -> dict:
+        evidence = getattr(decision, "receipt", None)
+        return {
+            "schema_version": 1,
+            "capture_state": capture_state,
+            "observed_elements": observed_elements,
+            "emitted_targets": emitted_targets,
+            "skipped_elements": skipped_elements,
+            "truncated": truncated,
+            "observed_targets": getattr(evidence, "observed_targets", 0),
+            "eligible_targets": getattr(evidence, "eligible_targets", 0),
+            "contradiction_count": getattr(
+                evidence, "contradiction_count", 0),
+            "evidence": list(getattr(evidence, "evidence", ())),
+            "confidence_bucket": getattr(
+                evidence, "confidence_bucket", "none"),
+            "margin_bucket": getattr(evidence, "margin_bucket", "none"),
+            "capability_basis": "caller_declared_role_policy",
+            "execution": "none",
+        }
+
+    unavailable = {
+        "schema_version": 1,
+        "state": "unavailable",
+        "accessibility_name": "",
+        "role": "",
+        "declared_role": role if isinstance(role, str) else "",
+        "source_kind": source_kind if isinstance(source_kind, str) else "",
+        "effect": effect if isinstance(effect, str) else "",
+        "receipt": receipt(),
+    }
+    if not IS_MACOS:
+        return unavailable
+    if (not isinstance(phrase, str) or not phrase.strip()
+            or len(phrase) > 96
+            or any(ord(character) < 32 for character in phrase)
+            or role not in DROP_TARGET_PREVIEW_ROLES):
+        return unavailable
+    try:
+        parsed_kind = SourceKind(source_kind)
+        parsed_effect = DropEffect(effect)
+    except (TypeError, ValueError):
+        return unavailable
+
+    try:
+        capture = capture_frontmost_drop_target_evidence({
+            role: DropCapability((parsed_kind,), (parsed_effect,)),
+        })
+        capture_receipt = capture.receipt
+        common = {
+            "capture_state": capture_receipt.state.value,
+            "observed_elements": capture_receipt.observed_elements,
+            "emitted_targets": capture_receipt.emitted_targets,
+            "skipped_elements": capture_receipt.skipped_elements,
+            "truncated": capture_receipt.truncated,
+        }
+        if capture_receipt.state is not DropTargetSnapshotState.CAPTURED:
+            return {
+                **unavailable,
+                "state": capture_receipt.state.value,
+                "receipt": receipt(**common),
+            }
+        decision = decide_drop_to_target({
+            "schema_version": 1,
+            "target_hint": phrase,
+            "source_kind": parsed_kind.value,
+            "effect": parsed_effect.value,
+        }, capture.targets)
+        result = {
+            **unavailable,
+            "state": decision.state.value,
+            "receipt": receipt(**common, decision=decision),
+        }
+        if decision.state is not DropTargetDecisionState.RESOLVED:
+            return result
+        matches = tuple(
+            target for target in capture.targets
+            if target.get("target_id") == decision.target_id)
+        if len(matches) != 1:
+            return {**unavailable, "receipt": receipt(**common)}
+        target = matches[0]
+        name = target.get("title") or target.get("label")
+        if not isinstance(name, str) or not name.strip():
             return {**unavailable, "receipt": receipt(**common)}
         return {
             **result,
@@ -7503,6 +7628,7 @@ def main():
                 ["open", str(HERE / "LICENSE_POLICY.md")]),
             copy_latest_outbox=copy_latest_outbox,
             preview_point_and_speak=preview_point_and_speak,
+            preview_drop_to_target=preview_drop_to_target,
             rerun_verification=verify_mac_installation,
         ))
 

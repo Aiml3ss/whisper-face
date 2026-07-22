@@ -76,6 +76,10 @@ FULL_REVISION="$(git -C "$REPO_DIR" rev-parse --verify "${REVISION}^{commit}")" 
     || fail "revision does not identify a commit: $REVISION"
 [[ "$FULL_REVISION" =~ ^[0-9a-f]{40}$ ]] \
     || fail "release revision must resolve to a full Git SHA-1"
+SOURCE_DATE_EPOCH="$(git -C "$REPO_DIR" show -s --format=%ct "$FULL_REVISION")" \
+    || fail "could not read the release revision timestamp"
+[[ "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]] \
+    || fail "release revision timestamp is invalid"
 git -C "$REPO_DIR" cat-file -e "$FULL_REVISION:Install.command" \
     || fail "release revision does not contain Install.command"
 for required in LICENSE LICENSE_POLICY.md NOTICE THIRD_PARTY_NOTICES.md setup.sh; do
@@ -133,6 +137,7 @@ git -C "$REPO_DIR" archive "$FULL_REVISION" | tar -x -C "$BUNDLE_DIR"
 # response. Add only the selected commit's shallow Git metadata, discard the
 # local fetch path, and identify the public repository as origin.
 git -C "$BUNDLE_DIR" init -q
+git -C "$BUNDLE_DIR" config core.logAllRefUpdates false
 git -C "$BUNDLE_DIR" fetch -q --depth 1 "$REPO_DIR" "$FULL_REVISION"
 git -C "$BUNDLE_DIR" update-ref refs/heads/packaged-release "$FULL_REVISION"
 git -C "$BUNDLE_DIR" symbolic-ref HEAD refs/heads/packaged-release
@@ -146,6 +151,11 @@ python3 "$SCRIPT_DIR/release_manifest.py" source-metadata \
     --version "$VERSION" \
     --revision "$FULL_REVISION" \
     --output "$BUNDLE_DIR/RELEASE-METADATA.json"
+python3 "$SCRIPT_DIR/verify_macos_package.py" stamp \
+    --root "$BUNDLE_DIR" \
+    --version "$VERSION" \
+    --revision "$FULL_REVISION" \
+    --source-date-epoch "$SOURCE_DATE_EPOCH"
 
 echo "== creating source archive"
 rm -f "$ZIP_PATH" "$DMG_PATH" "$MANIFEST_PATH" "$CHECKSUM_PATH"
@@ -207,6 +217,13 @@ if issues:
 else
     DMG_NOTARIZED=0
 fi
+
+echo "== verifying ZIP and disk image contain the same exact source"
+python3 "$SCRIPT_DIR/verify_macos_package.py" verify-artifacts \
+    --source-zip "$ZIP_PATH" \
+    --disk-image "$DMG_PATH" \
+    --version "$VERSION" \
+    --revision "$FULL_REVISION"
 
 echo "== creating update and rollback metadata"
 manifest_args=(

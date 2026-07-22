@@ -2,10 +2,12 @@
 # requires-python = ">=3.10"
 # dependencies = []
 # ///
-"""Opt-in, offline-by-default Qwen cleanup latency comparison.
+"""Opt-in Qwen cleanup latency and standalone proof-recovery comparison.
 
 This lab sends only checked-in synthetic cases to local Ollama, never reads
-transcript logs, and emits aggregate reports. It has no runtime authority.
+transcript logs, and emits aggregate, content-free reports. It independently
+compares the model-provided edit proof with bounded cleanup proof recovery and
+has no runtime authority.
 
 Run: uv run benchmark_cleanup_latency.py --run --format json
 """
@@ -23,12 +25,13 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
+from cleanup_proof_recovery import recover_cleanup_proof
 from voice_compiler import EditProposal, VoiceCompiler
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_CASES = HERE / "benchmarks" / "cleanup_latency_cases.json"
 OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 CURRENT_TOKEN_BUDGET = "max(160, int(words * 4.0) + 64)"
 SHORT_PROMPT = """Clean raw dictation faithfully. Remove fillers and false starts,
 apply explicit corrections in place, preserve facts and anchors, and render
@@ -163,6 +166,17 @@ def _proof_matches(raw: str, payload: Any, output: str) -> bool:
     return VoiceCompiler().verify_edits(raw, proposals).text == output
 
 
+def _recovery_guard(case: dict[str, Any], done_reason: str) \
+        -> Callable[[str, str], str | None]:
+    """Reapply both independent candidate gates inside the mediator."""
+    def guard(source: str, candidate: str) -> str | None:
+        return (_guard_cleaned_output(
+            source, candidate, done_reason, "capture")
+                or ("semantic-fixture-failed"
+                    if _semantic_failure(case, candidate) else None))
+    return guard
+
+
 def _percentile(samples: list[float], point: float) -> float | None:
     return sorted(samples)[math.ceil((len(samples) - 1) * point)] if samples else None
 
@@ -172,12 +186,20 @@ def run_variant(variant: dict[str, Any], cases: tuple[dict[str, Any], ...], *,
                 clock: Callable[[], float] = time.perf_counter,
                 read_timeout: float = 4.0) -> dict[str, Any]:
     counts = {key: 0 for key in (
-        "accepted", "guard_rejected", "semantic_failed", "proof_failed",
+        "accepted", "baseline_accepted", "recovered_accepted",
+        "both_accepted", "baseline_only_accepted",
+        "recovered_only_accepted", "neither_accepted",
+        "model_candidates_evaluated", "recovery_attempted",
+        "recovery_rejected", "recovery_replay_verified",
+        "guard_rejected", "semantic_failed", "proof_failed",
         "parse_failed", "timeout", "transport_failed",
     )}
+    recovery_reasons: dict[str, int] = {}
     latencies: list[float] = []
+    recovery_latencies: list[float] = []
     for case in cases:
         started = clock()
+        baseline_accepted = recovered_accepted = False
         try:
             response = post(OLLAMA_CHAT_URL, json=_payload(variant, case["raw"]), timeout=(1, read_timeout))
             response.raise_for_status()
@@ -185,15 +207,43 @@ def run_variant(variant: dict[str, Any], cases: tuple[dict[str, Any], ...], *,
             answer = re.sub(r"<think>.*?</think>", "", wire["message"]["content"], flags=re.S).strip()
             parsed = json.loads(answer)
             output = str(parsed.get("text", "")).strip().strip('"').strip()
-            reason = _guard_cleaned_output(case["raw"], output, str(wire.get("done_reason", "stop")), "capture")
+            done_reason = str(wire.get("done_reason", "stop"))
+            counts["model_candidates_evaluated"] += 1
+            reason = _guard_cleaned_output(
+                case["raw"], output, done_reason, "capture")
             if reason:
                 counts["guard_rejected"] += 1
             elif _semantic_failure(case, output):
                 counts["semantic_failed"] += 1
-            elif not _proof_matches(case["raw"], parsed, output):
-                counts["proof_failed"] += 1
             else:
-                counts["accepted"] += 1
+                baseline_accepted = _proof_matches(
+                    case["raw"], parsed, output)
+                if baseline_accepted:
+                    counts["accepted"] += 1
+                    counts["baseline_accepted"] += 1
+                else:
+                    counts["proof_failed"] += 1
+
+                recovery_started = clock()
+                recovery = recover_cleanup_proof(
+                    case["raw"], output,
+                    output_guard=_recovery_guard(case, done_reason))
+                recovery_latencies.append(
+                    (clock() - recovery_started) * 1000.0)
+                counts["recovery_attempted"] += 1
+                receipt = recovery.receipt
+                recovery_reasons[receipt.reason] = (
+                    recovery_reasons.get(receipt.reason, 0) + 1)
+                recovered_accepted = (
+                    receipt.disposition in {"recovered", "no-effect"}
+                    and receipt.replay_verified
+                    and recovery.text == output)
+                if recovered_accepted:
+                    counts["recovered_accepted"] += 1
+                else:
+                    counts["recovery_rejected"] += 1
+                counts["recovery_replay_verified"] += int(
+                    receipt.replay_verified)
         except TransportTimeout:
             counts["timeout"] += 1
         except (urllib.error.URLError, urllib.error.HTTPError):
@@ -201,9 +251,26 @@ def run_variant(variant: dict[str, Any], cases: tuple[dict[str, Any], ...], *,
         except (KeyError, TypeError, ValueError):
             counts["parse_failed"] += 1
         finally:
+            if baseline_accepted and recovered_accepted:
+                counts["both_accepted"] += 1
+            elif baseline_accepted:
+                counts["baseline_only_accepted"] += 1
+            elif recovered_accepted:
+                counts["recovered_only_accepted"] += 1
+            else:
+                counts["neither_accepted"] += 1
             latencies.append((clock() - started) * 1000.0)
     return {"id": variant["id"], "few_shot_pairs": len(variant["few_shot"]) // 2,
             "token_budget": variant["budget_description"], "cases": len(cases), **counts,
+            "acceptance_delta": (
+                counts["recovered_accepted"]
+                - counts["baseline_accepted"]),
+            "recovery_reason_counts": dict(sorted(recovery_reasons.items())),
+            "recovery_latency_ms": {
+                "p50": _percentile(recovery_latencies, .50),
+                "p95": _percentile(recovery_latencies, .95),
+                "max": max(recovery_latencies) if recovery_latencies else None,
+            },
             "latency_ms": {"p50": _percentile(latencies, .50), "p95": _percentile(latencies, .95),
                            "max": max(latencies) if latencies else None}}
 
@@ -239,7 +306,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(report, sort_keys=True))
     else:
         for result in report["results"]:
-            print(f"{result['id']}: accepted={result['accepted']}/{result['cases']} p50={result['latency_ms']['p50']:.0f}ms p95={result['latency_ms']['p95']:.0f}ms")
+            print(f"{result['id']}: baseline={result['baseline_accepted']}/{result['cases']} "
+                  f"recovered={result['recovered_accepted']}/{result['cases']} "
+                  f"p50={result['latency_ms']['p50']:.0f}ms "
+                  f"p95={result['latency_ms']['p95']:.0f}ms")
         print("Runtime prompt unchanged: lab has no runtime authority.")
     return 0
 

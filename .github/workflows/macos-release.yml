@@ -97,6 +97,11 @@ jobs:
           uv run tests/test_voice_compiler.py
           uv run tests/test_consequence_routing.py
           uv run tests/test_cleanup_circuit_breaker.py
+          uv run tests/test_process_verifier.py
+          uv run tests/test_prewarmed_verifier.py
+          uv run tests/test_whisper_verifier_adapter.py
+          uv run tests/test_prewarmed_whisper_verifier_adapter.py
+          uv run tests/test_benchmark_relisten_activation.py
           uv run tests/test_benchmark_voice_compiler.py
           uv run tests/test_benchmark_consequence_routing.py
           uv run tests/test_benchmark_cleanup_latency.py
@@ -110,18 +115,27 @@ jobs:
           uv run tests/test_benchmark_insertion_reliability.py
           uv run tests/test_compatibility_fingerprint.py
           uv run tests/test_voice_input_protocol.py
+          uv run tests/test_voice_input_protocol_wire.py
+          uv run tests/test_voice_input_protocol_transport.py
+          uv run tests/test_macos_networkless_worker.py
           uv run tests/test_acoustic_keyword_memory.py
           uv run tests/test_acoustic_keyword_bias_evaluation.py
+          uv run tests/test_acoustic_time_machine.py
           uv run tests/test_acoustic_calibration.py
           uv run tests/test_benchmark_acoustic_calibration.py
           uv run tests/test_delayed_cleanup_merge.py
           uv run tests/test_model_wallet.py
           uv run tests/test_model_wallet_shadow.py
           uv run tests/test_point_and_speak_resolver.py
+          uv run tests/test_macos_point_and_speak_snapshot.py
           uv run tests/test_drop_to_target.py
           uv run tests/test_macos_drop_to_target_snapshot.py
           uv run tests/test_voice_objects.py
+          uv run tests/test_voice_object_command_parser.py
+          uv run tests/test_voice_object_commands_runtime.py
           uv run tests/test_voice_inbox.py
+          uv run tests/test_voice_object_inbox_bridge.py
+          uv run tests/test_risky_action_confirmation.py
           uv run tests/test_demonstration_drafts.py
           uv run tests/test_competitor_benchmark.py
           uv run tests/test_public_scorecard.py
@@ -241,8 +255,16 @@ jobs:
           scripts/package_macos.sh "${args[@]}"
 
       - name: Verify release artifacts
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          SOURCE_REVISION: ${{ steps.release.outputs.revision }}
         shell: bash
         run: |
+          python3 scripts/verify_macos_package.py verify-artifacts \
+            --source-zip "dist/WhisperFace-$RELEASE_VERSION-source.zip" \
+            --disk-image "dist/WhisperFace-$RELEASE_VERSION-macOS-arm64.dmg" \
+            --version "$RELEASE_VERSION" \
+            --revision "$SOURCE_REVISION"
           python3 scripts/release_manifest.py verify \
             --manifest dist/update-manifest.json --artifact-dir dist
           (cd dist && shasum -a 256 -c SHA256SUMS)

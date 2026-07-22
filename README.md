@@ -201,11 +201,12 @@ are never Supporter-only features.
   Objects can project closed facts into inert text, email, task, and calendar
   drafts; a private Voice Inbox can durably queue exact payloads with source
   provenance; and Drop-to-Target can resolve or refuse a synthetic target
-  behind strict capability and ambiguity gates. Its standalone Mac-only
-  read-only evidence adapter can
-  inspect bounded Accessibility role/name/geometry/state and `AXDropEnabled`
-  for a caller-declared role policy, but cannot infer source-kind/effect
-  semantics, initiate a drag/drop, or make a physical accuracy claim. Inert
+  behind strict capability and ambiguity gates. Mac Diagnostics now exposes
+  that resolver as an explicit, transient read-only preview: the user declares
+  a hypothetical role, source kind, and effect before bounded Accessibility
+  role/name/geometry/state and `AXDropEnabled` evidence is inspected. The
+  preview returns a no-execution receipt, cannot infer those declared
+  semantics, and cannot initiate a drag/drop or make a physical accuracy claim. Inert
   demonstration drafts can
   also record, preview, approve, or roll back a bounded Finder, Mail, Notes, or
   menu recipe without replaying it. On Mac, the Privacy pane provides an
@@ -489,8 +490,13 @@ Run `uv run benchmark_cleanup_latency.py --run --format json` to compare the
 current pinned Qwen3.5-4B structured-cleanup prompt with smaller prompt,
 few-shot, and token-budget variants against six checked-in synthetic cases.
 It contacts only local Ollama after the explicit `--run` opt-in, never reads
-transcript logs, reports aggregate latency/guard/proof results, and has no
-runtime authority even if a candidate looks faster.
+transcript logs, and independently compares each eligible model-provided edit
+proof with the bounded standalone proof mediator. Its content-free report
+includes baseline/recovered overlap, acceptance delta, fixed rejection reasons,
+and recovery latency. One local run improved the current prompt from 2/6 to
+4/6 proof-accepted cases with zero baseline-only losses and about 1.3 ms
+recovery p95; the three-shot variant reached 5/6. Six synthetic cases on one
+machine are not activation evidence, so the benchmark has no runtime authority.
 
 Run `uv run benchmark_cleanup_proof_recovery.py --format json` to exercise a
 standalone exact-proof mediator over the same public synthetic cases. It
