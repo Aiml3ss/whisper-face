@@ -363,6 +363,23 @@ class DemonstrationDraftStore:
                 existing.domain, DemonstrationState.CANCELLED,
                 existing.sequence, len(existing.steps))
 
+    def delete_approved(self, draft_id: str) -> DemonstrationReceipt:
+        """Atomically remove one explicitly approved recipe and its text."""
+        draft_id = _draft_id(draft_id)
+        with self._lock:
+            existing = self._drafts.get(draft_id)
+            if existing is None:
+                raise DemonstrationNotFoundError(
+                    "demonstration draft was not found")
+            if existing.state != DemonstrationState.APPROVED:
+                raise DemonstrationTransitionError(
+                    "only approved demonstration drafts can be deleted")
+            proposed = dict(self._drafts)
+            del proposed[draft_id]
+            _atomic_write(self.path, _encode(proposed, self._next_sequence))
+            self._drafts = proposed
+            return self._receipt(existing)
+
     def get(self, draft_id: str) -> DemonstrationDraft:
         draft_id = _draft_id(draft_id)
         with self._lock:

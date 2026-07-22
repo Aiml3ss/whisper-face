@@ -1,9 +1,11 @@
+import ast
 import json
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -22,6 +24,25 @@ from demonstration_drafts import (  # noqa: E402
     MAX_STEP_TEXT_CHARS,
     MAX_STEPS,
 )
+
+
+DICTATE_TREE = ast.parse((ROOT / "dictate.py").read_text(encoding="utf-8"))
+
+
+def load_runtime_definitions(*names, extra=None):
+    selected = [
+        node for node in DICTATE_TREE.body
+        if isinstance(node, ast.FunctionDef) and node.name in names
+    ]
+    if {node.name for node in selected} != set(names):
+        raise AssertionError("production demonstration runtime definitions missing")
+    future_annotations = ast.ImportFrom(
+        module="__future__", names=[ast.alias(name="annotations")], level=0)
+    module = ast.fix_missing_locations(ast.Module(
+        body=[future_annotations, *selected], type_ignores=[]))
+    namespace = dict(extra or {})
+    exec(compile(module, "dictate-demonstration-selected", "exec"), namespace)
+    return namespace
 
 
 def demo_id(number: int) -> str:
@@ -92,6 +113,12 @@ class DemonstrationDraftStoreTests(unittest.TestCase):
             restored.record(approve_id, DemonstrationAction.RENAME_ITEM, "Never execute")
         with self.assertRaises(DemonstrationTransitionError):
             restored.cancel(approve_id)
+        deleted = restored.delete_approved(approve_id)
+        self.assertEqual(deleted.state, DemonstrationState.APPROVED)
+        with self.assertRaises(DemonstrationNotFoundError):
+            restored.preview(approve_id)
+        self.assertNotIn(
+            "Quarterly plan", self.path.read_text(encoding="utf-8"))
 
     def test_rejects_cross_domain_actions_and_bounded_or_invalid_inputs(self):
         draft_id = demo_id(30)
@@ -141,6 +168,120 @@ class DemonstrationDraftStoreTests(unittest.TestCase):
         self.store.begin(draft_id, DemonstrationDomain.NOTES)
         with self.assertRaisesRegex(DemonstrationTransitionError, "empty"):
             self.store.approve(draft_id)
+        with self.assertRaisesRegex(DemonstrationTransitionError, "approved"):
+            self.store.delete_approved(draft_id)
+
+
+class DemonstrationDraftRuntimeTests(unittest.TestCase):
+    @staticmethod
+    def namespace(path: Path, *, is_macos: bool = True):
+        state = {"lock": __import__("threading").RLock(), "store": None}
+        return load_runtime_definitions(
+            "_demonstration_draft_store",
+            "_demonstration_metadata",
+            "inspect_demonstration_drafts",
+            "create_demonstration_draft",
+            "reveal_demonstration_draft",
+            "record_demonstration_step",
+            "approve_demonstration_draft",
+            "cancel_demonstration_draft",
+            "delete_approved_demonstration_draft",
+            extra={
+                "IS_MACOS": is_macos,
+                "DEMONSTRATION_DRAFTS_FILE": path,
+                "DEMONSTRATION_DRAFTS_STATE": state,
+                "DemonstrationAction": DemonstrationAction,
+                "DemonstrationDomain": DemonstrationDomain,
+                "DemonstrationDraftStore": DemonstrationDraftStore,
+                "os": SimpleNamespace(urandom=lambda size: b"\x2a" * size),
+            },
+        )
+
+    def test_runtime_allocates_opaque_ids_and_keeps_listing_content_free(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "demonstrations.json"
+            ns = self.namespace(path)
+
+            created = ns["create_demonstration_draft"]("mail")
+            self.assertEqual(created["draft_id"], "demo-" + "2a" * 16)
+            self.assertEqual(created["step_count"], 0)
+            self.assertTrue(ns["record_demonstration_step"](
+                created["draft_id"], "set_subject", "Private launch"))
+
+            metadata = ns["inspect_demonstration_drafts"]()
+            self.assertEqual(metadata[0]["step_count"], 1)
+            self.assertNotIn("Private launch", repr(metadata))
+            revealed = ns["reveal_demonstration_draft"](
+                created["draft_id"])
+            self.assertEqual(revealed["steps"], ({
+                "action": "set_subject", "text": "Private launch"},))
+            self.assertTrue(ns["approve_demonstration_draft"](
+                created["draft_id"]))
+            self.assertEqual(
+                ns["inspect_demonstration_drafts"]()[0]["state"],
+                "approved")
+            self.assertFalse(ns["cancel_demonstration_draft"](
+                created["draft_id"]))
+            self.assertTrue(ns["delete_approved_demonstration_draft"](
+                created["draft_id"]))
+            self.assertEqual(ns["inspect_demonstration_drafts"](), ())
+
+    def test_runtime_cancel_rolls_back_and_non_mac_surface_is_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "demonstrations.json"
+            ns = self.namespace(path)
+            created = ns["create_demonstration_draft"]("notes")
+            self.assertTrue(ns["record_demonstration_step"](
+                created["draft_id"], "set_note_body", "Remove me"))
+            self.assertFalse(ns["delete_approved_demonstration_draft"](
+                created["draft_id"]))
+            self.assertTrue(ns["cancel_demonstration_draft"](
+                created["draft_id"]))
+            self.assertEqual(ns["inspect_demonstration_drafts"](), ())
+            self.assertNotIn("Remove me", path.read_text(encoding="utf-8"))
+
+            windows = self.namespace(path, is_macos=False)
+            self.assertIsNone(windows["create_demonstration_draft"]("finder"))
+            self.assertEqual(windows["inspect_demonstration_drafts"](), ())
+            self.assertFalse(windows[
+                "delete_approved_demonstration_draft"](demo_id(1)))
+
+    def test_runtime_has_no_routine_or_execution_authority_path(self):
+        routine = next(
+            node for node in DICTATE_TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "runtime_status_snapshot")
+        routine_names = {
+            node.id for node in ast.walk(routine) if isinstance(node, ast.Name)}
+        self.assertFalse({
+            "inspect_demonstration_drafts", "reveal_demonstration_draft",
+        } & routine_names)
+
+        feature_names = {
+            "_demonstration_draft_store", "_demonstration_metadata",
+            "inspect_demonstration_drafts", "create_demonstration_draft",
+            "reveal_demonstration_draft", "record_demonstration_step",
+            "approve_demonstration_draft", "cancel_demonstration_draft",
+            "delete_approved_demonstration_draft",
+        }
+        feature_nodes = [
+            node for node in DICTATE_TREE.body
+            if isinstance(node, ast.FunctionDef) and node.name in feature_names
+        ]
+        storage_tree = ast.parse(
+            (ROOT / "demonstration_drafts.py").read_text(encoding="utf-8"))
+        identifiers = {
+            node.id
+            for tree in (*feature_nodes, storage_tree)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name)
+        }
+        forbidden = {
+            "subprocess", "socket", "requests", "AppKit", "Quartz",
+            "AXUIElement", "pyautogui", "keyboard", "clipboard",
+            "NSWorkspace",
+        }
+        self.assertFalse(forbidden & identifiers)
 
 
 if __name__ == "__main__":

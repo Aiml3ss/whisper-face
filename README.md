@@ -160,6 +160,12 @@ are never Supporter-only features.
   forgettable from the on-demand Pronunciation Keywords inspector. Only exact,
   verified user corrections add idempotent global evidence; routine status does
   not load keyword text. It deliberately has no recognition authority yet.
+- **Conservative acoustic calibration lab** — an offline policy consumes only
+  the existing closed numeric capture telemetry and emits bounded candidate
+  gain, noise-gate, VAD, and end-silence settings. Nonfinite/clipped evidence
+  is killed, ambiguous silence/noise/quiet speech or near-saturation headroom
+  stays insufficient, reverb is explicitly unavailable, and no recommendation
+  affects the runtime yet.
 - **Read-only Point-and-Speak preview (Mac)** — from Diagnostics, explicitly
   enter a bounded target phrase to preview the focused app. Whisper Face reads
   only bounded Accessibility names, roles, geometry, visibility, enablement,
@@ -172,8 +178,9 @@ are never Supporter-only features.
 - **Provider-neutral model wallet foundation** — immutable Parakeet, Whisper
   Tiny, Whisper large-v3-turbo, and Qwen profiles expose capabilities,
   readiness, and bounded evidence through one in-process policy. Failover is
-  sequential and requires an explicit typed failure receipt; live routing is
-  intentionally not wired yet.
+  sequential and requires an explicit typed failure receipt. A transcript-free
+  shadow adapter now reports current-pin eligibility and deterministic advisory
+  order without executing a model; live routing is intentionally not wired.
 - **Networkless worker experiment (Mac)** — an opt-in, one-shot local worker
   proves OS-enforced denial of IP bind and outbound connection while retaining
   one private, bounded Unix-socket exchange. It accepts no transcript-bearing
@@ -185,7 +192,10 @@ are never Supporter-only features.
   provenance; and Drop-to-Target can resolve or refuse a synthetic target
   behind strict capability and ambiguity gates. Inert demonstration drafts can
   also record, preview, approve, or roll back a bounded Finder, Mail, Notes, or
-  menu recipe without replaying it. None of these foundations can send,
+  menu recipe without replaying it. On Mac, the Privacy pane provides an
+  explicit **Demonstrations** editor; its routine list returns and renders only
+  draft number, domain, state, and step count, and private step text is returned
+  to the editor only after **Reveal/Edit**. None of these foundations can send,
   schedule, click, type, drag, automate an app, or run an agent yet.
 - **Personal Regression Lab** — confirmed correction mappings are evaluated
   against a private, deterministic suite of the user's exact corrected spans.
@@ -367,6 +377,17 @@ a selected draft and purge acknowledged/cancelled drafts; queued drafts are not
 purged. The inspector never sends, schedules, launches, executes, or copies a
 draft, and it remains available when command diversion is turned off.
 
+Choose **Author** beside **Demonstrations** in the Mac Privacy pane to create an
+inert Finder, Mail, Notes, or menu recipe. Whisper Face generates an opaque
+local ID, lists only content-free metadata, and reveals private described steps
+only when you explicitly select **Reveal/Edit**. From that revealed editor you
+can record one bounded, domain-valid description or explicitly approve a
+non-empty recipe. **Cancel Draft** atomically rolls an unapproved recipe and its
+step text out of storage; **Delete Approved** explicitly removes a selected
+approved recipe and its private text. Approval remains a local inert state:
+this editor has no replay, automation, click, type, paste, Accessibility action,
+subprocess, network, or application API path.
+
 The bundled `EDIT ME` values are setup placeholders. On Mac, insert one and
 replace the pasted placeholder in place within ten seconds; Whisper Face saves
 that exact replacement to `snippets.json`. You can also edit the private JSON file
@@ -379,8 +400,9 @@ On Windows, use **Right Alt** wherever the table says Right Option and the
 Everything personal stays in private, gitignored local files: `dictionary.txt`
 (your terms; `-word` bans one), `snippets.json`, `tones.json`, `preferences.json`,
 `transcripts.jsonl` (your history, trimmed to recent), `learned.json` (mined
-vocabulary and fix rules), and `voice_inbox.json` (only opt-in inert Voice
-Object drafts). `acoustic_keyword_memory.json` stores bounded
+vocabulary and fix rules), `voice_inbox.json` (only opt-in inert Voice Object
+drafts), and `demonstrations.json` (manually authored inert recipe steps).
+`acoustic_keyword_memory.json` stores bounded
 keyword candidates, hashed app scopes, and evidence digests without raw audio,
 surrounding context, or transcript history.
 

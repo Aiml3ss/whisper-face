@@ -30,6 +30,7 @@ before submitting outside contributions.
 - [ ] `uv run tests/test_parrot_core.py`
 - [ ] `uv run tests/test_voice_compiler.py`
 - [ ] `uv run tests/test_consequence_routing.py`
+- [ ] `uv run tests/test_cleanup_circuit_breaker.py`
 - [ ] `uv run tests/test_benchmark_voice_compiler.py`
 - [ ] `uv run tests/test_benchmark_consequence_routing.py`
 - [ ] `uv run tests/test_benchmark_asr.py`
@@ -41,12 +42,16 @@ before submitting outside contributions.
 - [ ] `uv run tests/test_compatibility_fingerprint.py`
 - [ ] `uv run tests/test_voice_input_protocol.py`
 - [ ] `uv run tests/test_acoustic_keyword_memory.py`
+- [ ] `uv run tests/test_acoustic_calibration.py`
+- [ ] `uv run tests/test_benchmark_acoustic_calibration.py`
 - [ ] `uv run tests/test_delayed_cleanup_merge.py`
 - [ ] `uv run tests/test_model_wallet.py`
+- [ ] `uv run tests/test_model_wallet_shadow.py`
 - [ ] `uv run tests/test_point_and_speak_resolver.py`
 - [ ] `uv run tests/test_drop_to_target.py`
 - [ ] `uv run tests/test_voice_objects.py`
 - [ ] `uv run tests/test_voice_inbox.py`
+- [ ] `uv run tests/test_demonstration_drafts.py`
 - [ ] `uv run tests/test_competitor_benchmark.py`
 - [ ] `uv run tests/test_public_scorecard.py`
 - [ ] `uv run tests/test_personal_regression.py`

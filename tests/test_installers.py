@@ -27,11 +27,18 @@ class InstallerContractTests(unittest.TestCase):
         pull_request = (
             ROOT / ".github" / "pull_request_template.md"
         ).read_text(encoding="utf-8")
+        macos_workflow = (
+            ROOT / ".github" / "workflows" / "macos-release.yml"
+        ).read_text(encoding="utf-8")
+        windows_workflow = (
+            ROOT / ".github" / "workflows" / "windows-smoke.yml"
+        ).read_text(encoding="utf-8")
         for required in (
             "uv lock --check --script dictate.py",
             "uv run tests/test_parrot_core.py",
             "uv run tests/test_voice_compiler.py",
             "uv run tests/test_consequence_routing.py",
+            "uv run tests/test_cleanup_circuit_breaker.py",
             "uv run tests/test_process_verifier.py",
             "uv run tests/test_prewarmed_verifier.py",
             "uv run tests/test_whisper_verifier_adapter.py",
@@ -52,8 +59,11 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_macos_networkless_worker.py",
             "uv run tests/test_acoustic_keyword_memory.py",
             "uv run tests/test_acoustic_time_machine.py",
+            "uv run tests/test_acoustic_calibration.py",
+            "uv run tests/test_benchmark_acoustic_calibration.py",
             "uv run tests/test_delayed_cleanup_merge.py",
             "uv run tests/test_model_wallet.py",
+            "uv run tests/test_model_wallet_shadow.py",
             "uv run tests/test_point_and_speak_resolver.py",
             "uv run tests/test_macos_point_and_speak_snapshot.py",
             "uv run tests/test_drop_to_target.py",
@@ -79,6 +89,17 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn(required, process)
         self.assertIn("Installer parity", pull_request)
         self.assertIn("distribution branch", agents)
+        for batch_gate in (
+            "uv run tests/test_cleanup_circuit_breaker.py",
+            "uv run tests/test_acoustic_calibration.py",
+            "uv run tests/test_benchmark_acoustic_calibration.py",
+            "uv run tests/test_model_wallet_shadow.py",
+            "uv run tests/test_demonstration_drafts.py",
+        ):
+            with self.subTest(batch_gate=batch_gate):
+                self.assertIn(batch_gate, pull_request)
+                self.assertIn(batch_gate, macos_workflow)
+                self.assertIn(batch_gate, windows_workflow)
 
     def test_cleanup_model_stays_in_sync_with_both_installers(self):
         tree = ast.parse(self.script)
@@ -104,6 +125,7 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn("voice_compiler.py", installer)
                 self.assertIn("insertion_integrity.py", installer)
                 self.assertIn("personal_regression.py", installer)
+                self.assertIn("cleanup_circuit_breaker.py", installer)
                 self.assertIn("acoustic_time_machine.py", installer)
                 self.assertIn("point_and_speak_resolver.py", installer)
                 self.assertIn("macos_point_and_speak_snapshot.py", installer)
@@ -173,15 +195,20 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn('"voice_object_commands": false', template)
         for runtime_module in (
                 "voice_objects.py", "voice_object_command_parser.py",
-                "voice_inbox.py", "voice_object_inbox_bridge.py"):
+                "voice_inbox.py", "voice_object_inbox_bridge.py",
+                "demonstration_drafts.py"):
             with self.subTest(runtime_module=runtime_module):
                 self.assertIn(runtime_module, self.shell)
                 self.assertIn(runtime_module, self.powershell)
         self.assertIn("voice_inbox.json", self.shell)
         self.assertIn("voice_inbox.json", self.powershell)
+        self.assertIn("demonstrations.json", self.shell)
+        self.assertIn("demonstrations.json", self.powershell)
         gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
         self.assertIn("voice_inbox.json", gitignore)
         self.assertIn(".voice_inbox.json.*.tmp", gitignore)
+        self.assertIn("demonstrations.json", gitignore)
+        self.assertIn(".demonstrations.json.*.tmp", gitignore)
         for face in ("parrot", "fox", "owl", "cat", "bear"):
             for frame in ("idle", "talk"):
                 relative = f"icons/faces/{face}-{frame}.svg"
@@ -229,6 +256,7 @@ class InstallerContractTests(unittest.TestCase):
             "transcripts.jsonl",
             "learned.json",
             "voice_inbox.json",
+            "demonstrations.json",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, guide)
