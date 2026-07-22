@@ -144,6 +144,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "results.context.unreported": "Context influence not reported by runtime",
         "results.context.summary": "Context: {influence}",
         "results.consequence.summary": "Consequence: {route} · {high} high-risk · {uncertain} uncertain{risks} · Re-listen: {relisten}",
+        "results.consequence.review.advisory": "Check names, numbers, dates, and recipients before relying on this result.",
         "results.consequence.risk": "{category} {count}",
         "results.consequence.risks": " · {risks}",
         "results.route.standard": "Standard",
@@ -194,6 +195,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "results.accessibility.context": "Context influence",
         "results.accessibility.firewall": "Context safety shadow receipt",
         "results.accessibility.consequence": "Consequence decision receipt",
+        "results.accessibility.consequence_advisory": "Review guidance",
         "models.title": "Your local voice stack",
         "models.subtitle": "Fast recognition, accurate fallback, and private cleanup.",
         "models.waiting": "Waiting for model status",
@@ -685,6 +687,7 @@ class ResultInspection:
     context_firewall_summary: str = localized_string(
         "results.firewall.unavailable")
     consequence_summary: str = localized_string("results.consequence.empty")
+    consequence_advisory: str = ""
 
 
 @dataclass(frozen=True)
@@ -1178,6 +1181,9 @@ def _build_result_inspection(
             risks=risk_summary,
             relisten=copy(f"results.relisten.{relisten}"),
         ),
+        consequence_advisory=(
+            copy("results.consequence.review.advisory")
+            if route == "review" else ""),
     )
 
 
@@ -1964,6 +1970,7 @@ if APPKIT_AVAILABLE:
         0.31, 0.36, 0.95, 1.0)
     _TEXT = NSColor.labelColor()
     _SECONDARY = NSColor.secondaryLabelColor()
+    _REVIEW = NSColor.systemOrangeColor()
     _CARD = NSColor.controlBackgroundColor()
 
     def _accessible(view: Any, label: str, help_text: str = "") -> Any:
@@ -2237,22 +2244,22 @@ if APPKIT_AVAILABLE:
                 self._l("results.subtitle"),
                 NSMakeRect(5, 326, 690, 20), size=13, color=_SECONDARY))
 
-            summary_card = _card(NSMakeRect(0, 213, 758, 92))
+            summary_card = _card(NSMakeRect(0, 216, 758, 89))
             result_summary = _label(
-                self._l("results.summary.empty"), NSMakeRect(20, 48, 430, 27),
+                self._l("results.summary.empty"), NSMakeRect(20, 45, 430, 27),
                 size=18, weight="bold")
             result_engine = _label(
-                self._l("results.engine.waiting"), NSMakeRect(20, 21, 500, 20),
+                self._l("results.engine.waiting"), NSMakeRect(20, 18, 500, 20),
                 size=12, color=_SECONDARY)
             result_mode = _label(
-                self._l("results.mode.capture"), NSMakeRect(620, 42, 110, 22),
+                self._l("results.mode.capture"), NSMakeRect(620, 39, 110, 22),
                 size=12, weight="medium", color=_ACCENT)
             summary_card.addSubview_(result_summary)
             summary_card.addSubview_(result_engine)
             summary_card.addSubview_(result_mode)
             page.addSubview_(summary_card)
 
-            evidence_card = _card(NSMakeRect(0, 72, 758, 125))
+            evidence_card = _card(NSMakeRect(0, 83, 758, 125))
             evidence_keys = (
                 ("results.evidence.stable", "result_stable"),
                 ("results.evidence.anchors", "result_anchors"),
@@ -2274,20 +2281,25 @@ if APPKIT_AVAILABLE:
             page.addSubview_(evidence_card)
             firewall = _label(
                 self._l("results.firewall.unavailable"),
-                NSMakeRect(5, 51, 740, 17),
+                NSMakeRect(5, 62, 740, 17),
                 size=11, weight="medium", color=_ACCENT)
             page.addSubview_(firewall)
             context = _label(
                 self._l("results.context.unreported"),
-                NSMakeRect(5, 34, 740, 17),
+                NSMakeRect(5, 45, 740, 17),
                 size=11, color=_SECONDARY)
             page.addSubview_(context)
             consequence = _label(
-                "", NSMakeRect(5, 17, 740, 17), size=10, color=_SECONDARY)
+                "", NSMakeRect(5, 28, 740, 17), size=10, color=_SECONDARY)
             page.addSubview_(consequence)
+            consequence_advisory = _label(
+                "", NSMakeRect(5, 12, 740, 16), size=10, weight="medium",
+                color=_REVIEW)
+            consequence_advisory.setHidden_(True)
+            page.addSubview_(consequence_advisory)
             page.addSubview_(_label(
                 self._l("results.privacy"),
-                NSMakeRect(5, 1, 740, 16), size=9, color=_SECONDARY))
+                NSMakeRect(5, 1, 740, 11), size=9, color=_SECONDARY))
             self.dynamic.update(
                 result_summary=result_summary,
                 result_engine=result_engine,
@@ -2295,6 +2307,7 @@ if APPKIT_AVAILABLE:
                 result_context=context,
                 result_firewall=firewall,
                 result_consequence=consequence,
+                result_consequence_advisory=consequence_advisory,
             )
 
         def _build_settings(self, page: Any) -> None:
@@ -2767,6 +2780,12 @@ if APPKIT_AVAILABLE:
                 result.context_firewall_summary)
             self.dynamic["result_consequence"].setStringValue_(
                 result.consequence_summary)
+            self.dynamic["result_consequence_advisory"].setStringValue_(
+                result.consequence_advisory)
+            self.dynamic["result_consequence_advisory"].setHidden_(
+                not bool(result.consequence_advisory))
+            self.dynamic["result_consequence_advisory"].setTextColor_(
+                _REVIEW if result.consequence_advisory else _SECONDARY)
             for key, label_key in (
                 ("result_summary", "results.accessibility.summary"),
                 ("result_engine", "results.accessibility.engine"),
@@ -2780,6 +2799,8 @@ if APPKIT_AVAILABLE:
                 ("result_context", "results.accessibility.context"),
                 ("result_firewall", "results.accessibility.firewall"),
                 ("result_consequence", "results.accessibility.consequence"),
+                ("result_consequence_advisory",
+                 "results.accessibility.consequence_advisory"),
             ):
                 sync_accessibility(
                     self.dynamic[key],
@@ -3353,6 +3374,12 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             "quarantined": 1,
             "private_context": "must never reach the GUI",
         },
+        "last_consequence": {
+            "route": "review",
+            "risk_counts": {"name": 1},
+            "high_risks": 1,
+            "relisten_status": "skipped",
+        },
     }
     private_settings: dict[str, Any] = {
         "app_tones": [
@@ -3565,6 +3592,18 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         require(
             "must never" not in repr(model.state.last_result),
             "context firewall privacy")
+        require(
+            model.state.last_result.consequence_advisory == localized_string(
+                "results.consequence.review.advisory"),
+            "review consequence guidance")
+        require(
+            str(controller.dynamic["result_consequence_advisory"].stringValue())
+            == localized_string("results.consequence.review.advisory"),
+            "review consequence guidance rendering")
+        require(
+            not bool(controller.dynamic[
+                "result_consequence_advisory"].isHidden()),
+            "review consequence guidance visibility")
 
         for index, section in enumerate(SECTIONS):
             controller.section_control.setSelectedSegment_(index)
@@ -3620,6 +3659,12 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                 "accessibilityLabel") == localized_string(
                     "results.accessibility.firewall"),
             "context firewall accessibility")
+        require(
+            accessible_value(
+                controller.dynamic["result_consequence_advisory"],
+                "accessibilityLabel") == localized_string(
+                    "results.accessibility.consequence_advisory"),
+            "review consequence guidance accessibility")
 
         require(
             accessible_value(controller.section_control,

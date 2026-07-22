@@ -29,6 +29,7 @@ arguments:
    uv run tests/test_voice_compiler.py
    uv run tests/test_consequence_routing.py
    uv run tests/test_process_verifier.py
+   uv run tests/test_whisper_verifier_adapter.py
    uv run tests/test_benchmark_voice_compiler.py
    uv run tests/test_benchmark_consequence_routing.py
    uv run tests/test_benchmark_asr.py
@@ -39,6 +40,7 @@ arguments:
    uv run tests/test_benchmark_insertion_reliability.py
    uv run tests/test_compatibility_fingerprint.py
    uv run tests/test_voice_input_protocol.py
+   uv run tests/test_voice_input_protocol_wire.py
    uv run tests/test_acoustic_keyword_memory.py
    uv run tests/test_delayed_cleanup_merge.py
    uv run tests/test_model_wallet.py

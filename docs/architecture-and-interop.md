@@ -68,11 +68,17 @@ conformance command is:
 uv run tests/test_voice_input_protocol.py
 ```
 
+`voice_input_protocol_wire.py` supplies deterministic, canonical UTF-8 JSON
+encoding for one validated message with a strict frame-size limit. It delegates
+all message and payload validation to the protocol contract. It is a
+transport-neutral codec only: it opens no socket, starts no server or process,
+and stores no message.
+
 ## What remains outstanding
 
 This repository does **not** currently ship a cross-process SDK, public ABI,
-wire protocol, network service, or physical-app adapter suite. The in-process
-v1 contract is a foundation for future interoperability work, not a stability
-or compatibility promise to external clients. Any such surface needs its own
-transport, versioning, security/privacy model, adapter evidence, and release
-commitment before it can be described as public.
+transport, network service, or physical-app adapter suite. The in-process v1
+contract and JSON codec are foundations for future interoperability work, not
+a stability or compatibility promise to external clients. Any such surface
+needs its own transport, versioning, security/privacy model, adapter evidence,
+and release commitment before it can be described as public.

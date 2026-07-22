@@ -139,6 +139,8 @@ class SnapshotTests(unittest.TestCase):
             "results.title",
             "results.firewall.quarantine.one",
             "results.accessibility.firewall",
+            "results.consequence.review.advisory",
+            "results.accessibility.consequence_advisory",
             "models.title",
             "models.accessibility.guidance",
             "diagnostics.title",
@@ -515,13 +517,35 @@ class SnapshotTests(unittest.TestCase):
             result.consequence_summary,
             "Consequence: Review · 1 high-risk · 1 uncertain · currency 1 · "
             "Re-listen: skipped")
+        self.assertEqual(
+            result.consequence_advisory,
+            "Check names, numbers, dates, and recipients before relying on "
+            "this result.")
         self.assertNotIn("private transcript", result.consequence_summary)
+        self.assertNotIn("private transcript", result.consequence_advisory)
         self.assertNotIn("private@example.com", repr(result))
         self.assertNotIn("/Users/alice/secret", repr(result))
         self.assertNotIn("private before", repr(result))
         self.assertFalse(hasattr(result, "transcript"))
         self.assertFalse(hasattr(result, "compiler_details"))
         self.assertTrue(state.prefers_reduced_motion)
+
+    def test_review_advisory_is_scoped_to_the_review_route(self):
+        for route in ("standard", "protected", "verified", "unavailable"):
+            with self.subTest(route=route):
+                result = normalize_snapshot({
+                    "last_word_count": 4,
+                    "last_consequence": {"route": route},
+                }).last_result
+                self.assertEqual(result.consequence_advisory, "")
+
+        review = normalize_snapshot({
+            "last_word_count": 4,
+            "last_consequence": {"route": "review"},
+        }).last_result
+        self.assertEqual(
+            review.consequence_advisory,
+            localized_string("results.consequence.review.advisory"))
 
     def test_context_firewall_receipt_copy_is_bounded_and_truthful(self):
         common = {"last_word_count": 4, "active_engine": "Parakeet"}

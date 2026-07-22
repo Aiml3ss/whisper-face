@@ -146,6 +146,8 @@ class RepositoryGovernanceTests(unittest.TestCase):
         self.assertIn(
             "does **not** currently ship a cross-process SDK", architecture)
         self.assertIn("public ABI", architecture)
+        self.assertIn("voice_input_protocol_wire.py", architecture)
+        self.assertIn("transport-neutral codec only", architecture)
         self.assertIn("uv run tests/test_voice_input_protocol.py", contributing)
         self.assertIn(
             "Both installers must execute the current checkout", contributing)
