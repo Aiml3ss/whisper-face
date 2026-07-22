@@ -681,6 +681,17 @@ class CleanupGuardTests(unittest.TestCase):
             "- Here's one as a test.\n"
             "- Here's two as a test.",
         )
+        feedback = (
+            "Here's some feedback items. One, this is great. Two, this is "
+            "not so great."
+        )
+        self.assertFalse(ns["needs_llm_cleanup"](feedback, None, False))
+        self.assertEqual(
+            ns["quick_clean"](feedback),
+            "Here's some feedback items:\n"
+            "- This is great.\n"
+            "- This is not so great.",
+        )
 
     def test_llm_cleanup_has_a_short_read_deadline(self):
         seen = {}

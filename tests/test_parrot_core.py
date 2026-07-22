@@ -98,13 +98,41 @@ class CleanupCompilerTests(unittest.TestCase):
         self.assertIn("spoken_enumeration", plan.edit_kinds)
         self.assertFalse(plan.needs_semantic_cleanup)
 
+    def test_plain_numbered_feedback_items_become_bullets(self):
+        plan = compile_cleanup(
+            "Here's some feedback items. One, this is great. Two, this is "
+            "not so great."
+        )
+
+        self.assertEqual(
+            plan.text,
+            "Here's some feedback items:\n"
+            "- This is great.\n"
+            "- This is not so great.",
+        )
+        self.assertIn("spoken_enumeration", plan.edit_kinds)
+        self.assertFalse(plan.needs_semantic_cleanup)
+
+    def test_plain_numbered_list_accepts_comma_item_boundaries(self):
+        plan = compile_cleanup("Let's make a list. One high, two by.")
+
+        self.assertEqual(
+            plan.text,
+            "Let's make a list:\n"
+            "- High.\n"
+            "- By.",
+        )
+        self.assertFalse(plan.needs_semantic_cleanup)
+
     def test_repeated_number_words_without_list_intent_stay_as_prose(self):
-        spoken = "Here's one reason I stayed, and here's two tickets tomorrow"
-
-        plan = compile_cleanup(spoken)
-
-        self.assertEqual(plan.text, spoken)
-        self.assertNotIn("spoken_enumeration", plan.edit_kinds)
+        for spoken in (
+            "Here's one reason I stayed, and here's two tickets tomorrow",
+            "I put the list on the shelf. One day, two people arrived.",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken)
+                self.assertNotIn("spoken_enumeration", plan.edit_kinds)
 
     def test_ordinary_reference_to_a_list_stays_on_the_fast_path(self):
         self.assertFalse(compile_cleanup(
