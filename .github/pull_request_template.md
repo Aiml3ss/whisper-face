@@ -34,6 +34,8 @@ before submitting outside contributions.
 - [ ] `uv run tests/test_benchmark_voice_compiler.py`
 - [ ] `uv run tests/test_benchmark_consequence_routing.py`
 - [ ] `uv run tests/test_benchmark_cleanup_latency.py`
+- [ ] `uv run tests/test_cleanup_proof_recovery.py`
+- [ ] `uv run tests/test_benchmark_cleanup_proof_recovery.py`
 - [ ] `uv run tests/test_benchmark_asr.py`
 - [ ] `uv run tests/test_performance_lab.py`
 - [ ] `uv run tests/test_dictate.py`
@@ -51,6 +53,7 @@ before submitting outside contributions.
 - [ ] `uv run tests/test_model_wallet_shadow.py`
 - [ ] `uv run tests/test_point_and_speak_resolver.py`
 - [ ] `uv run tests/test_drop_to_target.py`
+- [ ] `uv run tests/test_macos_drop_to_target_snapshot.py`
 - [ ] `uv run tests/test_voice_objects.py`
 - [ ] `uv run tests/test_voice_inbox.py`
 - [ ] `uv run tests/test_demonstration_drafts.py`

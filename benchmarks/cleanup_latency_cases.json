@@ -2,11 +2,11 @@
   "schema_version": 1,
   "privacy": "checked-in-synthetic-public-text-only",
   "cases": [
-    {"id":"correction-in-place","raw":"um schedule the review for Tuesday actually Wednesday with the API team","must_contain":["wednesday","api","team"],"must_not_contain":["tuesday","um "]},
-    {"id":"question-not-answer","raw":"what are the five questions I should ask the contractor tomorrow","must_contain":["contractor","?"],"must_not_contain":["i cannot","as an ai","sorry"]},
-    {"id":"layout-command","raw":"thanks for the update new paragraph I will review the release notes tonight","must_contain":["\n","release notes"],"must_not_contain":["new paragraph"]},
-    {"id":"spoken-list","raw":"two things first ship API v2 tomorrow and second update the Windows installer guide","must_contain":["api v2","windows","-"],"must_not_contain":[]},
-    {"id":"filler-and-anchor","raw":"hey um can you check the logs for build 2026-07-21 you know before the 9 AM deploy","must_contain":["2026-07-21","9","deploy"],"must_not_contain":["um ","you know"]},
-    {"id":"scratch-that","raw":"tell Morgan the migration starts at six scratch that at seven","must_contain":["morgan","seven"],"must_not_contain":["six","scratch that"]}
+    {"id":"correction-in-place","raw":"um schedule the review for Tuesday actually Wednesday with the API team","candidate":"Schedule the review for Wednesday with the API team.","must_contain":["wednesday","api","team"],"must_not_contain":["tuesday","um "]},
+    {"id":"question-not-answer","raw":"what are the five questions I should ask the contractor tomorrow","candidate":"What are the five questions I should ask the contractor tomorrow?","must_contain":["contractor","?"],"must_not_contain":["i cannot","as an ai","sorry"]},
+    {"id":"layout-command","raw":"thanks for the update new paragraph I will review the release notes tonight","candidate":"Thanks for the update.\n\nI will review the release notes tonight.","must_contain":["\n","release notes"],"must_not_contain":["new paragraph"]},
+    {"id":"spoken-list","raw":"two things first ship API v2 tomorrow and second update the Windows installer guide","candidate":"Two things:\n- Ship API v2 tomorrow\n- Update the Windows installer guide.","must_contain":["api v2","windows","-"],"must_not_contain":[]},
+    {"id":"filler-and-anchor","raw":"hey um can you check the logs for build 2026-07-21 you know before the 9 AM deploy","candidate":"Hey, can you check the logs for build 2026-07-21 before the 9 AM deploy?","must_contain":["2026-07-21","9","deploy"],"must_not_contain":["um ","you know"]},
+    {"id":"scratch-that","raw":"tell Morgan the migration starts at six scratch that at seven","candidate":"Tell Morgan the migration starts at seven.","must_contain":["morgan","seven"],"must_not_contain":["six","scratch that"]}
   ]
 }

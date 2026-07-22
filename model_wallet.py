@@ -31,6 +31,7 @@ class Capability(str, Enum):
 
 class ReadinessState(str, Enum):
     READY = "ready"
+    RESOLVED = "resolved"
     NOT_INSTALLED = "not_installed"
     LOAD_FAILED = "load_failed"
     REVISION_MISMATCH = "revision_mismatch"

@@ -186,7 +186,12 @@ are never Supporter-only features.
   readiness, and bounded evidence through one in-process policy. Failover is
   sequential and requires an explicit typed failure receipt. A transcript-free
   shadow adapter now reports current-pin eligibility and deterministic advisory
-  order without executing a model; live routing is intentionally not wired.
+  order without executing a model. The Mac runtime projects only exact local
+  Whisper pin-resolution evidence into that adapter without treating resolution
+  as readiness, and the native Models pane labels the result as a shadow
+  advisory with no execution or routing. Because the runtime exposes
+  no conservative capability bounds, the current advisory stays fail-closed as
+  missing evidence; live routing is intentionally not wired.
 - **Networkless worker experiment (Mac)** — an opt-in, one-shot local worker
   proves OS-enforced denial of IP bind and outbound connection while retaining
   one private, bounded Unix-socket exchange. It accepts no transcript-bearing
@@ -196,7 +201,12 @@ are never Supporter-only features.
   Objects can project closed facts into inert text, email, task, and calendar
   drafts; a private Voice Inbox can durably queue exact payloads with source
   provenance; and Drop-to-Target can resolve or refuse a synthetic target
-  behind strict capability and ambiguity gates. Inert demonstration drafts can
+  behind strict capability and ambiguity gates. Its standalone Mac-only
+  read-only evidence adapter can
+  inspect bounded Accessibility role/name/geometry/state and `AXDropEnabled`
+  for a caller-declared role policy, but cannot infer source-kind/effect
+  semantics, initiate a drag/drop, or make a physical accuracy claim. Inert
+  demonstration drafts can
   also record, preview, approve, or roll back a bounded Finder, Mail, Notes, or
   menu recipe without replaying it. On Mac, the Privacy pane provides an
   explicit **Demonstrations** editor; its routine list returns and renders only
@@ -482,6 +492,14 @@ It contacts only local Ollama after the explicit `--run` opt-in, never reads
 transcript logs, reports aggregate latency/guard/proof results, and has no
 runtime authority even if a candidate looks faster.
 
+Run `uv run benchmark_cleanup_proof_recovery.py --format json` to exercise a
+standalone exact-proof mediator over the same public synthetic cases. It
+requires the existing output and semantic guards, independently limits lexical
+changes and protected-anchor abandonment, emits only content-free aggregate
+receipts, and currently recovers five of six cases. The meaningful phrase
+`you know` remains deliberately ineligible, so the mediator has no runtime
+authority and the benchmark makes no no-worse quality claim.
+
 Run `uv run benchmark_insertion_reliability.py` for deterministic focus,
 typing, duplicate-callback, destination-relaunch, clipboard, readback, and
 delay fault injection. It checks at-most-once platform paste attempts and
@@ -516,6 +534,10 @@ before runtime activation.
 local foundations for the next interaction layer. Typed drafts can now enter
 the local inbox through canonical closed-schema JSON and explicit-read decoding,
 but there is still no live destination, automatic dispatch, or agent execution.
+`macos_drop_to_target_snapshot.py` is likewise unwired: an explicit caller can
+request bounded Accessibility evidence for a future decision, and accessible
+titles/descriptions are treated as transient private labels. The adapter has no
+logging, persistence, drag/drop, or AX action surface.
 
 `acoustic_time_machine.py` is a default-off, RAM-only buffer foundation for at
 most eight 2.4-second microspans and ten seconds total. It has explicit

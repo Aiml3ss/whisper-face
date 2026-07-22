@@ -399,6 +399,67 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(state.regression_quarantined, 1)
         self.assertEqual(state.models[0].name, "Parakeet Unified")
 
+    def test_model_wallet_shadow_is_fixed_advisory_copy_and_never_execution(self):
+        provider_ids = (
+            "local.parakeet-coreml",
+            "local.whisper-tiny-mlx",
+            "local.whisper-large-v3-turbo-mlx",
+            "local.qwen3.5-4b-ollama",
+        )
+        supported = {
+            "fast_asr": {"local.whisper-tiny-mlx"},
+            "final_asr": {
+                "local.parakeet-coreml",
+                "local.whisper-large-v3-turbo-mlx",
+            },
+            "cleanup": {"local.qwen3.5-4b-ollama"},
+        }
+        capabilities = []
+        for capability, supported_ids in supported.items():
+            capabilities.append({
+                "capability": capability,
+                "providers": [{
+                    "provider_id": provider_id,
+                    "eligibility": (
+                        "missing_capability_evidence"
+                        if provider_id in supported_ids
+                        else "unsupported_capability"
+                    ),
+                } for provider_id in provider_ids],
+                "advisory_order": [],
+                "selected_provider_id": None,
+                "fail_closed": True,
+                "attempted": False,
+            })
+        receipt = {
+            "schema_version": 1,
+            "mode": "shadow-only",
+            "capabilities": capabilities,
+            "attempted": False,
+        }
+
+        state = normalize_snapshot({"model_wallet_shadow": receipt})
+
+        self.assertEqual(
+            state.model_wallet_advisory,
+            localized_string("models.wallet.unavailable"),
+        )
+        self.assertIn("shadow advisory only",
+                      state.model_wallet_advisory.casefold())
+        self.assertIn("No model execution or routing",
+                      state.model_wallet_advisory)
+        self.assertIn("Unavailable", state.model_wallet_advisory)
+
+        poisoned = dict(receipt, transcript="Private Project Bluebird")
+        poisoned_state = normalize_snapshot({
+            "model_wallet_shadow": poisoned,
+        })
+        self.assertEqual(
+            poisoned_state.model_wallet_advisory,
+            localized_string("models.wallet.unavailable"),
+        )
+        self.assertNotIn("Bluebird", poisoned_state.model_wallet_advisory)
+
     def test_support_snapshot_is_deterministic_and_strictly_transcript_free(self):
         state = normalize_snapshot({
             "service_status": "Running",

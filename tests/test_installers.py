@@ -47,6 +47,8 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_benchmark_voice_compiler.py",
             "uv run tests/test_benchmark_consequence_routing.py",
             "uv run tests/test_benchmark_cleanup_latency.py",
+            "uv run tests/test_cleanup_proof_recovery.py",
+            "uv run tests/test_benchmark_cleanup_proof_recovery.py",
             "uv run tests/test_benchmark_asr.py",
             "uv run tests/test_performance_lab.py",
             "uv run tests/test_dictate.py",
@@ -68,6 +70,7 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_model_wallet_shadow.py",
             "uv run tests/test_point_and_speak_resolver.py",
             "uv run tests/test_macos_point_and_speak_snapshot.py",
+            "uv run tests/test_macos_drop_to_target_snapshot.py",
             "uv run tests/test_drop_to_target.py",
             "uv run tests/test_voice_objects.py",
             "uv run tests/test_voice_object_command_parser.py",
@@ -94,6 +97,9 @@ class InstallerContractTests(unittest.TestCase):
         for batch_gate in (
             "uv run tests/test_cleanup_circuit_breaker.py",
             "uv run tests/test_benchmark_cleanup_latency.py",
+            "uv run tests/test_cleanup_proof_recovery.py",
+            "uv run tests/test_benchmark_cleanup_proof_recovery.py",
+            "uv run tests/test_macos_drop_to_target_snapshot.py",
             "uv run tests/test_acoustic_keyword_bias_evaluation.py",
             "uv run tests/test_acoustic_calibration.py",
             "uv run tests/test_benchmark_acoustic_calibration.py",
@@ -130,6 +136,8 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn("insertion_integrity.py", installer)
                 self.assertIn("personal_regression.py", installer)
                 self.assertIn("cleanup_circuit_breaker.py", installer)
+                self.assertIn("model_wallet.py", installer)
+                self.assertIn("model_wallet_shadow.py", installer)
                 self.assertIn("acoustic_time_machine.py", installer)
                 self.assertIn("risky_action_confirmation.py", installer)
                 self.assertIn("point_and_speak_resolver.py", installer)
