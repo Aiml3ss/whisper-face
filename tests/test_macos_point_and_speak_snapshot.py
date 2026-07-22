@@ -17,6 +17,12 @@ from macos_point_and_speak_snapshot import (  # noqa: E402
     SnapshotState,
     SystemMacAccessibilityReader,
     capture_accessibility_targets,
+    prepare_point_and_speak_press_lease,
+)
+from point_and_speak_transaction import (  # noqa: E402
+    PointAndSpeakTransactions,
+    TargetLease,
+    TransactionState,
 )
 from point_and_speak_resolver import (  # noqa: E402
     ResolutionState,
@@ -31,6 +37,7 @@ class FakeReader:
         self.is_trusted = trusted
         self.root_value = root
         self.requested = []
+        self.presses = []
 
     def trusted(self):
         return self.is_trusted
@@ -45,6 +52,13 @@ class FakeReader:
     def geometry(self, element):
         self.requested.append("geometry")
         return self.nodes.get(element, {}).get("geometry")
+
+    def same_element(self, left, right):
+        return left is right or left == right
+
+    def press(self, element):
+        self.presses.append(element)
+        return True
 
 
 class FakeApplicationServices:
@@ -78,22 +92,28 @@ class FakeApplicationServices:
 
 def tree():
     return {
-        "root": {"children": ["save", "search", "private"]},
+        "root": {
+            "children": ["save", "search", "private"],
+            "focused_window": "window-1",
+        },
         "save": {
             "role": "AXButton", "title": "Save Changes", "description": "",
             "geometry": (10, 10, 100, 30), "enabled": True,
             "focused": False, "hidden": False,
+            "window": "window-1",
         },
         "search": {
             "role": "AXTextField", "title": "", "description": "Search",
             "geometry": (150, 10, 200, 30), "enabled": True,
             "focused": True, "hidden": False,
+            "window": "window-1",
         },
         "private": {
             "role": "AXTextArea", "title": "", "description": "",
             "value": "Project Bluebird budget 8492",
             "geometry": (10, 80, 300, 200), "enabled": True,
             "focused": False, "hidden": False,
+            "window": "window-1",
         },
     }
 
@@ -178,6 +198,70 @@ class MacPointAndSpeakSnapshotTests(unittest.TestCase):
         self.assertEqual(capture.receipt.observed_elements, 2)
         self.assertGreaterEqual(capture.receipt.skipped_elements, 2)
         self.assertFalse(capture.receipt.truncated)
+
+    def test_press_lease_rechecks_exact_app_window_element_and_calls_ax_once(self):
+        reader = FakeReader(tree())
+        capture = capture_accessibility_targets(reader)
+        lease = prepare_point_and_speak_press_lease(
+            capture, "ax-0000", created_at=10.0)
+        transactions = PointAndSpeakTransactions(clock=lambda: 10.1)
+        nonce = transactions.issue_nonce()
+
+        receipt = transactions.execute(nonce, lease)
+        replay = transactions.execute(nonce, lease)
+
+        self.assertEqual(receipt.state, TransactionState.EXECUTED)
+        self.assertIs(replay, receipt)
+        self.assertEqual(reader.presses, ["save"])
+        self.assertNotIn("Save Changes", json.dumps(receipt.to_mapping()))
+
+    def test_focus_drift_expiry_and_evicted_nonce_never_execute(self):
+        reader = FakeReader(tree())
+        capture = capture_accessibility_targets(reader)
+        lease = prepare_point_and_speak_press_lease(
+            capture, "ax-0000", created_at=10.0)
+        transactions = PointAndSpeakTransactions(
+            clock=lambda: 10.1, max_receipts=1)
+        drift_nonce = transactions.issue_nonce()
+        reader.nodes["root"]["focused_window"] = "window-2"
+        drift = transactions.execute(drift_nonce, lease)
+        self.assertEqual(drift.state, TransactionState.RECHECK_FAILED)
+        self.assertEqual(reader.presses, [])
+
+        reader.nodes["root"]["focused_window"] = "window-1"
+        expired_transactions = PointAndSpeakTransactions(clock=lambda: 12.1)
+        expired_nonce = expired_transactions.issue_nonce()
+        expired = expired_transactions.execute(expired_nonce, lease)
+        self.assertEqual(expired.state, TransactionState.EXPIRED)
+        self.assertEqual(reader.presses, [])
+
+        first_nonce = transactions.issue_nonce()
+        first = transactions.execute(first_nonce, lease)
+        second_nonce = transactions.issue_nonce()
+        second = transactions.execute(second_nonce, lease)
+        evicted_replay = transactions.execute(first_nonce, lease)
+        self.assertEqual(first.state, TransactionState.EXECUTED)
+        self.assertEqual(second.state, TransactionState.EXECUTED)
+        self.assertEqual(evicted_replay.state, TransactionState.UNAVAILABLE)
+        self.assertEqual(reader.presses, ["save", "save"])
+
+    def test_coordinator_rejects_arbitrary_nonce_and_unsupported_role(self):
+        calls = []
+        lease = TargetLease(
+            created_at=1.0,
+            role="checkbox",
+            evidence=object(),
+            recheck=lambda _evidence: calls.append("recheck") or True,
+            execute=lambda _evidence: calls.append("execute") or True,
+        )
+        transactions = PointAndSpeakTransactions(clock=lambda: 1.1)
+
+        arbitrary = transactions.execute("a" * 32, lease)
+        issued = transactions.execute(transactions.issue_nonce(), lease)
+
+        self.assertEqual(arbitrary.state, TransactionState.UNAVAILABLE)
+        self.assertEqual(issued.state, TransactionState.UNSUPPORTED)
+        self.assertEqual(calls, [])
 
     def test_concrete_reader_uses_only_read_only_application_services_calls(self):
         services = FakeApplicationServices()

@@ -136,7 +136,8 @@ required=(
     acoustic_time_machine.py voice_objects.py voice_object_command_parser.py
     voice_inbox.py voice_object_inbox_bridge.py demonstration_drafts.py
     risky_action_confirmation.py
-    point_and_speak_resolver.py macos_point_and_speak_snapshot.py
+    point_and_speak_resolver.py point_and_speak_transaction.py
+    macos_point_and_speak_snapshot.py
     macos_drop_to_target_snapshot.py drop_to_target.py
     whisper_face_gui.py
     scripts/macos_launcher_app.py
@@ -180,6 +181,8 @@ verify_install() {
     command -v ffmpeg >/dev/null 2>&1 || fail "ffmpeg is not installed"
     [ -n "$ollama_bin" ] || fail "ollama is not installed"
     command -v swift >/dev/null 2>&1 || fail "Swift toolchain is not installed"
+    command -v swiftc >/dev/null 2>&1 \
+        || fail "Swift compiler is not installed"
     [ -x "$parakeet_helper" ] || fail "Parakeet ASR helper is missing"
     "$parakeet_helper" --verify >/dev/null \
         || fail "Parakeet Unified model/helper verification failed"
@@ -188,7 +191,8 @@ verify_install() {
     plutil -lint "$dictate_plist" "$ollama_plist" >/dev/null
     if [ "$MODE" = "full" ]; then
         python3 "$DIR/scripts/macos_launcher_app.py" verify \
-            --app "$launcher_app" --checkout "$DIR" >/dev/null \
+            --app "$launcher_app" --checkout "$DIR" \
+            --installed-runtime >/dev/null \
             || fail "Whisper Face launcher app is missing or stale"
     fi
     "$uv_bin" lock --check --script "$DIR/dictate.py" >/dev/null
@@ -260,7 +264,7 @@ step "downloading the pinned Parakeet Unified model (~565 MB, first run only)"
 "$UV" run --locked --script "$DIR/dictate.py" --preload-parakeet-model
 
 step "building the native Parakeet Unified helper"
-command -v swift >/dev/null 2>&1 \
+command -v swift >/dev/null 2>&1 && command -v swiftc >/dev/null 2>&1 \
     || fail "Swift is unavailable; install the Xcode Command Line Tools"
 mkdir -p "$DIR/.models/bin"
 swift build -c release \

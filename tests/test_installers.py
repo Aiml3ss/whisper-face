@@ -148,6 +148,7 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn("acoustic_time_machine.py", installer)
                 self.assertIn("risky_action_confirmation.py", installer)
                 self.assertIn("point_and_speak_resolver.py", installer)
+                self.assertIn("point_and_speak_transaction.py", installer)
                 self.assertIn("macos_point_and_speak_snapshot.py", installer)
                 self.assertIn("macos_drop_to_target_snapshot.py", installer)
                 self.assertIn("drop_to_target.py", installer)
@@ -270,13 +271,19 @@ class InstallerContractTests(unittest.TestCase):
             'macos_launcher_app.py" create',
             'macos_launcher_app.py" verify',
             '--checkout "$DIR"',
+            "--installed-runtime",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.shell)
         self.assertNotIn("macos_launcher_app.py", self.powershell)
         self.assertIn('"CFBundlePackageType": "APPL"', launcher_tool)
+        self.assertIn("import AppKit", launcher_tool)
+        self.assertIn('"-framework", "AppKit"', launcher_tool)
+        self.assertIn('shutil.which("swiftc")', launcher_tool)
+        self.assertIn("NSRunningApplication(processIdentifier: pid)?.activate", launcher_tool)
         self.assertIn("launcher must not embed runtime source", launcher_tool)
         self.assertNotIn("dictate.py\n", launcher_tool)
+        self.assertIn("command -v swiftc", self.shell)
 
     def test_update_and_rollback_guide_uses_supported_install_paths(self):
         guide = (

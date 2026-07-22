@@ -398,6 +398,95 @@ class PointAndSpeakPreviewRuntimeTests(unittest.TestCase):
         self.assertNotIn("preview_point_and_speak", status_names)
 
 
+class PointAndSpeakActionRuntimeTests(unittest.TestCase):
+    def test_explicit_press_returns_only_content_free_terminal_evidence(self):
+        captured_state = SimpleNamespace(value="captured")
+        resolved_state = object()
+        captured = SimpleNamespace(
+            targets=({
+                "target_id": "ax-secret", "title": "Project Bluebird Save",
+                "label": "", "role": "button",
+            },),
+            receipt=SimpleNamespace(
+                state=captured_state, observed_elements=5, emitted_targets=1,
+                truncated=False),
+        )
+        decision = SimpleNamespace(
+            state=resolved_state,
+            target_id="ax-secret",
+            receipt=SimpleNamespace(
+                eligible_targets=1, contradiction_count=0,
+                evidence=("normalized", "role"),
+                confidence_bucket="very_high", margin_bucket="wide"),
+        )
+        calls = []
+
+        class Transactions:
+            def execute(self, nonce, lease):
+                calls.append((nonce, lease))
+                return SimpleNamespace(
+                    state=SimpleNamespace(value="executed"),
+                    to_mapping=lambda: {
+                        "schema_version": 1, "state": "executed",
+                        "attempted": True, "recheck": "matched",
+                    })
+
+        lease = object()
+        function = load_definitions(
+            "press_point_and_speak",
+            extra={
+                "IS_MACOS": True,
+                "time": SimpleNamespace(monotonic=lambda: 42.0),
+                "PointAndSpeakSnapshotState": SimpleNamespace(
+                    CAPTURED=captured_state),
+                "PointAndSpeakResolutionState": SimpleNamespace(
+                    RESOLVED=resolved_state),
+                "capture_frontmost_accessibility_targets": lambda: captured,
+                "resolve_point_and_speak": lambda phrase, targets: decision,
+                "prepare_point_and_speak_press_lease": (
+                    lambda capture, target_id, created_at: lease),
+                "POINT_AND_SPEAK_TRANSACTIONS": Transactions(),
+            },
+        )["press_point_and_speak"]
+
+        result = function("n" * 32, "save project bluebird button")
+        encoded = json.dumps(result, sort_keys=True)
+
+        self.assertEqual(result["state"], "executed")
+        self.assertTrue(result["receipt"]["transaction"]["attempted"])
+        self.assertEqual(calls, [("n" * 32, lease)])
+        self.assertNotIn("Bluebird", encoded)
+        self.assertNotIn("save project", encoded.casefold())
+        self.assertNotIn("ax-secret", encoded)
+
+    def test_action_is_not_reachable_from_preview_or_status_polling(self):
+        action = next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "press_point_and_speak")
+        action_calls = {
+            node.func.id for node in ast.walk(action)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        self.assertIn("capture_frontmost_accessibility_targets", action_calls)
+        self.assertIn("resolve_point_and_speak", action_calls)
+        self.assertIn("prepare_point_and_speak_press_lease", action_calls)
+
+        for function_name in ("runtime_status_snapshot",
+                              "preview_point_and_speak"):
+            function = next(
+                node for node in TREE.body
+                if isinstance(node, ast.FunctionDef)
+                and node.name == function_name)
+            names = {
+                node.id for node in ast.walk(function)
+                if isinstance(node, ast.Name)
+            }
+            self.assertNotIn("press_point_and_speak", names)
+            self.assertNotIn("POINT_AND_SPEAK_TRANSACTIONS", names)
+            self.assertNotIn("prepare_point_and_speak_press_lease", names)
+
+
 class DropTargetPreviewRuntimeTests(unittest.TestCase):
     @staticmethod
     def namespace(

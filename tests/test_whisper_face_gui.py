@@ -30,6 +30,7 @@ from whisper_face_gui import (
     create_gui,
     localized_string,
     native_appkit_smoke_contract,
+    normalize_point_and_speak_action,
     normalize_acoustic_keyword_inspection,
     normalize_drop_target_preview,
     normalize_point_and_speak_preview,
@@ -105,6 +106,31 @@ class SnapshotTests(unittest.TestCase):
             },
         }
 
+    @staticmethod
+    def point_action(*, state="executed", attempted=True, recheck="matched"):
+        return {
+            "schema_version": 1,
+            "state": state,
+            "receipt": {
+                "schema_version": 1,
+                "capture_state": "captured",
+                "observed_elements": 8,
+                "emitted_targets": 2,
+                "truncated": False,
+                "eligible_targets": 2,
+                "contradiction_count": 0,
+                "evidence": ["normalized", "role"],
+                "confidence_bucket": "very_high",
+                "margin_bucket": "wide",
+                "transaction": {
+                    "schema_version": 1,
+                    "state": state,
+                    "attempted": attempted,
+                    "recheck": recheck,
+                },
+            },
+        }
+
     def test_point_and_speak_preview_projection_is_strict_and_content_scoped(self):
         preview = normalize_point_and_speak_preview(self.point_preview())
 
@@ -118,6 +144,27 @@ class SnapshotTests(unittest.TestCase):
         malformed["document_text"] = "private document"
         with self.assertRaisesRegex(ValueError, "malformed"):
             normalize_point_and_speak_preview(malformed)
+
+    def test_point_and_speak_action_receipt_is_strict_and_content_free(self):
+        result = normalize_point_and_speak_action(self.point_action())
+
+        self.assertEqual(result.state, "executed")
+        self.assertTrue(result.receipt.attempted)
+        self.assertEqual(result.receipt.recheck, "matched")
+        self.assertNotIn("name", repr(result).casefold())
+
+        for poison in ("phrase", "accessibility_name", "target_id"):
+            malformed = self.point_action()
+            malformed[poison] = "Project Bluebird"
+            with self.subTest(poison=poison), self.assertRaisesRegex(
+                    ValueError, "malformed"):
+                normalize_point_and_speak_action(malformed)
+
+        malformed = self.point_action(
+            state="recheck_failed", attempted=False, recheck="mismatched")
+        malformed["receipt"]["transaction"]["attempted"] = True
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            normalize_point_and_speak_action(malformed)
 
         malformed = self.point_preview(
             state="ambiguous", name="Secret target", role="button")
@@ -416,6 +463,8 @@ class SnapshotTests(unittest.TestCase):
         self.assertIn("select_section", contract.model_actions)
         self.assertIn("forget_snippet", contract.model_actions)
         self.assertIn("preview_point_and_speak", contract.model_actions)
+        self.assertIn("issue_point_and_speak_nonce", contract.model_actions)
+        self.assertIn("press_point_and_speak", contract.model_actions)
         self.assertIn("preview_drop_to_target", contract.model_actions)
         self.assertIn(
             "click_risky_action_confirmation", contract.model_actions)
@@ -889,6 +938,47 @@ class ViewModelTests(unittest.TestCase):
                 self.assertEqual(preview.state, state)
                 self.assertEqual(preview.accessibility_name, "")
                 self.assertEqual(preview.role, "")
+
+    def test_point_and_speak_press_uses_session_nonce_and_never_enters_state(self):
+        calls = []
+        nonce = "session_nonce_1234567890"
+        model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {},
+            issue_point_and_speak_nonce=lambda: nonce,
+            press_point_and_speak=lambda supplied_nonce, phrase: (
+                calls.append((supplied_nonce, phrase))
+                or SnapshotTests.point_action()),
+        ))
+
+        issued = model.issue_point_and_speak_nonce()
+        result = model.press_point_and_speak(issued, "save button")
+
+        self.assertEqual(calls, [(nonce, "save button")])
+        self.assertEqual(result.state, "executed")
+        self.assertNotIn("save button", repr(model.state).casefold())
+        self.assertNotIn(nonce, repr(model.state))
+
+        malformed = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {},
+            issue_point_and_speak_nonce=lambda: nonce,
+            press_point_and_speak=lambda _nonce, _phrase: {
+                "target_id": "private-native-identity"},
+        ))
+        fallback = malformed.press_point_and_speak(nonce, "save button")
+        self.assertEqual(fallback.state, "unavailable")
+        self.assertFalse(fallback.receipt.attempted)
+
+    def test_point_and_speak_copy_scopes_confirmation_to_fresh_button_action(self):
+        message = localized_string(
+            "point_and_speak.dialog.message",
+            limit=POINT_AND_SPEAK_MAX_PHRASE_CHARS)
+        help_text = localized_string(
+            "diagnostics.action.point_and_speak.help")
+
+        self.assertIn("After a button resolves", message)
+        self.assertIn("fresh strong resolution", message)
+        self.assertIn("exact app, window, and element", message)
+        self.assertIn("one resolved button once", help_text)
 
     def test_drop_target_preview_is_explicit_inert_and_never_enters_state(self):
         calls = []

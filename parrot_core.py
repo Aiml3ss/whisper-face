@@ -31,6 +31,9 @@ DISCOURSE_FILLER_RE = re.compile(
     r",\s*(?:you know|I mean|basically|kind of|sort of)\b\s*,",
     re.I | re.M,
 )
+AMBIGUOUS_FILLER_RE = re.compile(r"\b(?:you know|I mean)\b", re.I)
+LITERAL_FILLER_RE = re.compile(
+    r"\b(?:phrase|words?|expression)\s+(?:you know|I mean)\b", re.I)
 STRUCTURE_RE = re.compile(r"\bnew (line|paragraph)\b", re.I)
 CORRECTION_RE = re.compile(
     r"\b([A-Za-z0-9][A-Za-z0-9_'’-]{0,30})\s+"
@@ -89,6 +92,14 @@ LIST_NUMBER = {
     ), start=1)
     for word in pair
 }
+COUNTED_LIST_SIZE = {
+    "two": 2, "three": 3, "four": 4, "five": 5,
+}
+COUNTED_LIST_RE = re.compile(
+    r"^(?P<header>(?P<count>two|three|four|five)\s+"
+    r"(?:things|points|items|ideas))\s+",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -262,6 +273,42 @@ def _format_numbered_list_markers(text: str) -> str | None:
     return header + "\n" + "\n".join(f"- {item}" for item in items)
 
 
+def _format_counted_inline_list(text: str) -> str | None:
+    """Format an exact counted header plus sequential inline ordinals."""
+    header_match = COUNTED_LIST_RE.match(text)
+    if header_match is None:
+        return None
+    expected = COUNTED_LIST_SIZE[header_match.group("count").casefold()]
+    markers = [
+        match for match in re.finditer(
+            r"\b(?:first|second|third|fourth|fifth)\b", text, re.I)
+        if match.start() >= header_match.end()
+    ]
+    numbers = [LIST_NUMBER[match.group(0).casefold()] for match in markers]
+    if numbers != list(range(1, expected + 1)):
+        return None
+    items = []
+    for index, marker in enumerate(markers):
+        end = markers[index + 1].start() \
+            if index + 1 < len(markers) else len(text)
+        item = text[marker.end():end].strip(" \t,;:–—-")
+        if index + 1 < len(markers):
+            item = re.sub(r"\s+and\s*$", "", item, flags=re.I).rstrip()
+        if not item:
+            return None
+        item = item[:1].upper() + item[1:]
+        if item[-1] not in ".!?…":
+            item += "."
+        items.append(item)
+    header = header_match.group("header")
+    return header + ":\n" + "\n".join(f"- {item}" for item in items)
+
+
+def _has_ambiguous_filler(text: str) -> bool:
+    literal_free = LITERAL_FILLER_RE.sub("", text)
+    return bool(AMBIGUOUS_FILLER_RE.search(literal_free))
+
+
 def compile_cleanup(raw: str) -> CleanupPlan:
     """Compile safe spoken transformations into explicit, reversible edits."""
     text = raw.strip()
@@ -269,7 +316,8 @@ def compile_cleanup(raw: str) -> CleanupPlan:
 
     # Expand spoken line boundaries first so discourse fillers at the start of
     # a newly dictated line can be distinguished from meaningful prose.
-    if STRUCTURE_RE.search(text):
+    had_spoken_structure = bool(STRUCTURE_RE.search(text))
+    if had_spoken_structure:
         before = text
         text = STRUCTURE_RE.sub(
             lambda match: "\n" if match.group(1).lower() == "line" else "\n\n",
@@ -296,6 +344,7 @@ def compile_cleanup(raw: str) -> CleanupPlan:
         edits.append(CleanupEdit("self_correction", before, text))
 
     lowered = text.casefold()
+    scratch_needs_semantic = False
     scratch_at = lowered.rfind("scratch that")
     if scratch_at >= 0:
         before = text
@@ -303,25 +352,41 @@ def compile_cleanup(raw: str) -> CleanupPlan:
         sentence = max(left.rfind("."), left.rfind("!"), left.rfind("?"),
                        left.rfind("\n"))
         clause = max(left.rfind(","), left.rfind(";"), left.rfind("—"))
-        cut = max(sentence + 1, clause + 1)
-        text = (left[:cut].rstrip() + " " + right).strip()
-        edits.append(CleanupEdit("scratch_that", before, text))
+        boundary = max(sentence + 1, clause + 1)
+        if boundary:
+            text = (left[:boundary].rstrip() + " " + right).strip()
+            edits.append(CleanupEdit("scratch_that", before, text))
+        else:
+            right_word = re.match(r"[A-Za-z0-9_'’-]+", right)
+            repeated = tuple(re.finditer(
+                rf"\b{re.escape(right_word.group(0))}\b", left, re.I)) \
+                if right_word else ()
+            # Without a repeated boundary, preserve the source and route it
+            # to semantic cleanup instead of guessing how much context to delete.
+            if repeated:
+                cut = repeated[-1].start()
+                text = (left[:cut].rstrip() + " " + right).strip()
+                edits.append(CleanupEdit("scratch_that", before, text))
+            else:
+                scratch_needs_semantic = True
 
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
     text = re.sub(r"\s+([,.;:!?])", r"\1", text).strip()
-    deterministic_list = _format_numbered_list_markers(text)
+    deterministic_list = (
+        _format_numbered_list_markers(text)
+        or _format_counted_inline_list(text))
     if deterministic_list is not None:
         before = text
         text = deterministic_list
         edits.append(CleanupEdit("spoken_enumeration", before, text))
-    needs_semantic = bool(re.search(r"\b(?:you know|I mean)\b", text, re.I))
+    needs_semantic = scratch_needs_semantic or _has_ambiguous_filler(text)
     if deterministic_list is None:
         ordinal_markers = re.findall(
             r"\b(?:first|second|third|lastly)\b", text, re.I)
         needs_semantic = needs_semantic or bool(
             LIST_INTENT_RE.search(text)
-            or len(ordinal_markers) >= 2
+            or (not had_spoken_structure and len(ordinal_markers) >= 2)
             or re.search(
                 r"\b(?:two|three|four|five) "
                 r"(?:things|points|items|ideas)\b",

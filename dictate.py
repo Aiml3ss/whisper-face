@@ -363,6 +363,7 @@ from demonstration_drafts import (  # noqa: E402
 from macos_point_and_speak_snapshot import (  # noqa: E402
     SnapshotState as PointAndSpeakSnapshotState,
     capture_frontmost_accessibility_targets,
+    prepare_point_and_speak_press_lease,
 )
 from macos_drop_to_target_snapshot import (  # noqa: E402
     DropCapability,
@@ -378,6 +379,9 @@ from drop_to_target import (  # noqa: E402
 from point_and_speak_resolver import (  # noqa: E402
     ResolutionState as PointAndSpeakResolutionState,
     resolve_point_and_speak,
+)
+from point_and_speak_transaction import (  # noqa: E402
+    PointAndSpeakTransactions,
 )
 from risky_action_confirmation import (  # noqa: E402
     InertRiskyActionConfirmationRuntime,
@@ -817,6 +821,7 @@ ASR_MODEL_PATHS = {}
 ASR_MODEL_PATHS_LOCK = threading.Lock()
 MODEL_READINESS_CACHE = {"receipt": None, "lock": threading.Lock()}
 MODEL_WARM_PATHS = {"providers": set(), "lock": threading.Lock()}
+POINT_AND_SPEAK_TRANSACTIONS = PointAndSpeakTransactions()
 
 # Current glossary + active mishearing-fix rules, hot-swapped by the
 # learning loop.
@@ -3927,6 +3932,102 @@ def preview_point_and_speak(phrase: str) -> dict:
         }
     except Exception:
         return unavailable
+
+
+def issue_point_and_speak_nonce() -> str:
+    """Issue one process-session capability after explicit GUI confirmation."""
+
+    return POINT_AND_SPEAK_TRANSACTIONS.issue_nonce()
+
+
+def press_point_and_speak(nonce: str, phrase: str) -> dict:
+    """Explicitly resolve and press one exact, still-focused Mac button once.
+
+    The phrase, accessible names, target identifier, and native identities are
+    transient. The returned projection is aggregate and content-free. There is
+    no retry, background action, routine-status surface, logging, or storage.
+    """
+
+    def result(
+        state: str = "unavailable",
+        *,
+        capture_state: str = "unavailable",
+        observed_elements: int = 0,
+        emitted_targets: int = 0,
+        truncated: bool = False,
+        resolution=None,
+        transaction=None,
+    ) -> dict:
+        decision = getattr(resolution, "receipt", None)
+        transaction_mapping = (
+            transaction.to_mapping() if transaction is not None else {
+                "schema_version": 1,
+                "state": "unavailable",
+                "attempted": False,
+                "recheck": "not_run",
+            }
+        )
+        return {
+            "schema_version": 1,
+            "state": state,
+            "receipt": {
+                "schema_version": 1,
+                "capture_state": capture_state,
+                "observed_elements": observed_elements,
+                "emitted_targets": emitted_targets,
+                "truncated": truncated,
+                "eligible_targets": getattr(decision, "eligible_targets", 0),
+                "contradiction_count": getattr(
+                    decision, "contradiction_count", 0),
+                "evidence": list(getattr(decision, "evidence", ())),
+                "confidence_bucket": getattr(
+                    decision, "confidence_bucket", "none"),
+                "margin_bucket": getattr(decision, "margin_bucket", "none"),
+                "transaction": transaction_mapping,
+            },
+        }
+
+    if (not IS_MACOS or not isinstance(nonce, str)
+            or not isinstance(phrase, str) or not phrase.strip()
+            or len(phrase) > 96
+            or any(ord(character) < 32 for character in phrase)):
+        return result()
+
+    captured_at = time.monotonic()
+    try:
+        capture = capture_frontmost_accessibility_targets()
+        receipt = capture.receipt
+        common = {
+            "capture_state": receipt.state.value,
+            "observed_elements": receipt.observed_elements,
+            "emitted_targets": receipt.emitted_targets,
+            "truncated": receipt.truncated,
+        }
+        if receipt.state is not PointAndSpeakSnapshotState.CAPTURED:
+            return result(receipt.state.value, **common)
+        resolution = resolve_point_and_speak(phrase, capture.targets)
+        if resolution.state is not PointAndSpeakResolutionState.RESOLVED:
+            return result(resolution.state.value, resolution=resolution, **common)
+
+        decision = resolution.receipt
+        strong_name_evidence = bool(
+            {"exact", "normalized"} & set(decision.evidence))
+        lease = None
+        if (not receipt.truncated and strong_name_evidence
+                and decision.confidence_bucket == "very_high"
+                and decision.margin_bucket == "wide"):
+            lease = prepare_point_and_speak_press_lease(
+                capture, resolution.target_id, created_at=captured_at)
+        transaction = POINT_AND_SPEAK_TRANSACTIONS.execute(nonce, lease)
+        return result(
+            transaction.state.value,
+            resolution=resolution,
+            transaction=transaction,
+            **common,
+        )
+    except Exception:
+        transaction = POINT_AND_SPEAK_TRANSACTIONS.execute(nonce, None)
+        return result(transaction.state.value, transaction=transaction)
 
 
 DROP_TARGET_PREVIEW_ROLES = frozenset({
@@ -7713,6 +7814,8 @@ def main():
                 ["open", str(HERE / "LICENSE_POLICY.md")]),
             copy_latest_outbox=copy_latest_outbox,
             preview_point_and_speak=preview_point_and_speak,
+            issue_point_and_speak_nonce=issue_point_and_speak_nonce,
+            press_point_and_speak=press_point_and_speak,
             preview_drop_to_target=preview_drop_to_target,
             rerun_verification=verify_mac_installation,
         ))

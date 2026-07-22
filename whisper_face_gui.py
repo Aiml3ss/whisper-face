@@ -76,6 +76,10 @@ POINT_AND_SPEAK_EVIDENCE = frozenset({
     "exact", "normalized", "token", "role", "selection", "focus",
     "ordinal", "spatial",
 })
+POINT_AND_SPEAK_ACTION_STATES = frozenset({
+    "executed", "recheck_failed", "expired", "unsupported",
+    "execution_failed", "unavailable", "ambiguous", "permission_denied",
+})
 DROP_TARGET_MAX_PHRASE_CHARS = 96
 DROP_TARGET_ROLES = (
     "AXGroup", "AXImage", "AXList", "AXScrollArea",
@@ -325,8 +329,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "diagnostics.action.copy_support": "Copy Support Snapshot",
         "diagnostics.action.copy_support.help": "Copy a transcript-free support summary with health, permissions, build, model status, and aggregate last-result counts. It never includes dictation text, selections, context, paths, logs, or personal language data.",
         "diagnostics.action.verify": "Run Verification",
-        "diagnostics.action.point_and_speak": "Preview Point-and-Speak…",
-        "diagnostics.action.point_and_speak.help": "Enter a short target phrase for a read-only preview. Whisper Face briefly hides, reads only bounded Accessibility names and metadata from the focused app, and never clicks, focuses, types, pastes, or runs an action.",
+        "diagnostics.action.point_and_speak": "Point-and-Speak…",
+        "diagnostics.action.point_and_speak.help": "Enter a short target phrase for a read-only preview or explicitly press one resolved button once. The press path rechecks the exact app, window, and Accessibility element immediately before AXPress; drift, replay, weak evidence, and unsupported roles fail closed.",
         "diagnostics.action.drop_target": "Preview Drop Target…",
         "diagnostics.action.drop_target.help": "Declare a hypothetical target role, source kind, and effect for a read-only preview. Whisper Face reads bounded Accessibility capability evidence and never drags, drops, clicks, focuses, pastes, or performs an AX action.",
         "diagnostics.action.licenses": "License Notices",
@@ -352,11 +356,12 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "diagnostics.accessibility.verification": "Verification result",
         "diagnostics.accessibility.guidance": "Diagnostic guidance",
         "diagnostics.accessibility.notice": "Whisper Face notice",
-        "point_and_speak.dialog.title": "Preview Point-and-Speak",
-        "point_and_speak.dialog.message": "Enter a target phrase of at most {limit} characters. After you choose Preview, Whisper Face briefly hides so the app behind it can become focused. The preview is read-only and never performs an Accessibility action.",
+        "point_and_speak.dialog.title": "Point-and-Speak",
+        "point_and_speak.dialog.message": "Enter a target phrase of at most {limit} characters. Preview is read-only. After a button resolves, a separate Press once confirmation can allow one AXPress only if a fresh strong resolution and the exact app, window, and element still match; otherwise it does nothing.",
         "point_and_speak.dialog.input.label": "Point-and-Speak target phrase",
         "point_and_speak.dialog.input.help": "Describe one visible control by its accessible name, role, position, selection, or focus state.",
         "point_and_speak.action.preview": "Preview",
+        "point_and_speak.action.press_once": "Press once",
         "point_and_speak.action.cancel": "Cancel",
         "point_and_speak.result.title.resolved": "Target resolved",
         "point_and_speak.result.title.ambiguous": "Target is ambiguous",
@@ -367,6 +372,15 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "point_and_speak.result.none": "none",
         "point_and_speak.result.yes": "yes",
         "point_and_speak.result.no": "no",
+        "point_and_speak.action.result.title.executed": "Button pressed once",
+        "point_and_speak.action.result.title.recheck_failed": "Target changed; nothing pressed",
+        "point_and_speak.action.result.title.expired": "Target evidence expired",
+        "point_and_speak.action.result.title.unsupported": "Target is not a supported button",
+        "point_and_speak.action.result.title.execution_failed": "Button press was not confirmed",
+        "point_and_speak.action.result.title.unavailable": "Safe button action unavailable",
+        "point_and_speak.action.result.title.ambiguous": "Target is ambiguous",
+        "point_and_speak.action.result.title.permission_denied": "Accessibility permission is needed",
+        "point_and_speak.action.result.receipt": "Content-free action receipt: state {state}; capture {capture}; {observed} elements observed; {emitted} targets emitted; confidence {confidence}; margin {margin}; focus and identity recheck {recheck}; action attempted {attempted}; truncated {truncated}.",
         "point_and_speak.validation.phrase": "Enter one target phrase between 1 and {limit} characters.",
         "drop_target.dialog.title": "Preview Drop-to-Target",
         "drop_target.dialog.message": "Enter a target phrase and explicitly declare the role, source kind, and effect to test. Accessibility cannot prove those source/effect semantics. After you choose Preview, Whisper Face briefly hides and performs read-only capture only—never a drag, drop, write, or Accessibility action.",
@@ -789,6 +803,8 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "play_retained_span",
             "clear_retained_spans",
             "preview_point_and_speak",
+            "issue_point_and_speak_nonce",
+            "press_point_and_speak",
             "preview_drop_to_target",
         ),
         accessibility_catalog_keys=(
@@ -915,6 +931,9 @@ class GUIActions:
     copy_latest_outbox: Callable[[], None] = _noop
     preview_point_and_speak: Callable[[str], Mapping[str, Any]] = (
         lambda _phrase: {})
+    issue_point_and_speak_nonce: Callable[[], str] = lambda: ""
+    press_point_and_speak: Callable[[str, str], Mapping[str, Any]] = (
+        lambda _nonce, _phrase: {})
     preview_drop_to_target: Callable[
         [str, str, str, str], Mapping[str, Any]
     ] = lambda _phrase, _role, _source_kind, _effect: {}
@@ -1047,6 +1066,54 @@ class PointAndSpeakPreview:
     receipt: PointAndSpeakReceipt = field(default_factory=lambda:
         PointAndSpeakReceipt(
             "unavailable", 0, 0, 0, False, 0, 0, 0))
+
+
+@dataclass(frozen=True)
+class PointAndSpeakActionReceipt:
+    """Content-free evidence for one explicit, exactly-once press request."""
+
+    capture_state: str
+    observed_elements: int
+    emitted_targets: int
+    truncated: bool
+    eligible_targets: int
+    contradiction_count: int
+    evidence: tuple[str, ...]
+    confidence_bucket: str
+    margin_bucket: str
+    transaction_state: str
+    attempted: bool
+    recheck: str
+
+
+@dataclass(frozen=True)
+class PointAndSpeakActionResult:
+    """No phrase, accessible name, target id, or native identity is retained."""
+
+    state: str
+    receipt: PointAndSpeakActionReceipt
+
+
+def unavailable_point_and_speak_action() -> PointAndSpeakActionResult:
+    """Build the fixed fallback that lets the GUI always unhide safely."""
+
+    return PointAndSpeakActionResult(
+        state="unavailable",
+        receipt=PointAndSpeakActionReceipt(
+            capture_state="unavailable",
+            observed_elements=0,
+            emitted_targets=0,
+            truncated=False,
+            eligible_targets=0,
+            contradiction_count=0,
+            evidence=(),
+            confidence_bucket="none",
+            margin_bucket="none",
+            transaction_state="unavailable",
+            attempted=False,
+            recheck="not_run",
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -1548,6 +1615,86 @@ def normalize_point_and_speak_preview(
             evidence=tuple(evidence),
             confidence_bucket=raw_receipt["confidence_bucket"],
             margin_bucket=raw_receipt["margin_bucket"],
+        ),
+    )
+
+
+def normalize_point_and_speak_action(
+    snapshot: Mapping[str, Any] | None,
+) -> PointAndSpeakActionResult:
+    """Validate the closed, content-free Point-and-Speak action receipt."""
+
+    if (not isinstance(snapshot, Mapping) or set(snapshot) != {
+            "schema_version", "state", "receipt"}
+            or snapshot.get("schema_version") != 1
+            or snapshot.get("state") not in POINT_AND_SPEAK_ACTION_STATES):
+        raise ValueError("Point-and-Speak action is malformed")
+    raw = snapshot.get("receipt")
+    if not isinstance(raw, Mapping) or set(raw) != {
+            "schema_version", "capture_state", "observed_elements",
+            "emitted_targets", "truncated", "eligible_targets",
+            "contradiction_count", "evidence", "confidence_bucket",
+            "margin_bucket", "transaction"} or raw.get("schema_version") != 1:
+        raise ValueError("Point-and-Speak action is malformed")
+    integer_keys = (
+        "observed_elements", "emitted_targets", "eligible_targets",
+        "contradiction_count",
+    )
+    evidence = raw.get("evidence")
+    transaction = raw.get("transaction")
+    if (any(not isinstance(raw.get(key), int)
+            or isinstance(raw.get(key), bool)
+            or not 0 <= raw[key] <= 2_048 for key in integer_keys)
+            or raw["emitted_targets"] > 256
+            or raw["eligible_targets"] > raw["emitted_targets"]
+            or not isinstance(raw.get("truncated"), bool)
+            or raw.get("capture_state") not in POINT_AND_SPEAK_CAPTURE_STATES
+            or isinstance(evidence, (str, bytes))
+            or not isinstance(evidence, Sequence)
+            or len(evidence) > len(POINT_AND_SPEAK_EVIDENCE)
+            or len(set(evidence)) != len(evidence)
+            or any(item not in POINT_AND_SPEAK_EVIDENCE for item in evidence)
+            or raw.get("confidence_bucket") not in {
+                "none", "below_threshold", "high", "very_high"}
+            or raw.get("margin_bucket") not in {
+                "none", "narrow", "sufficient", "wide"}
+            or not isinstance(transaction, Mapping)
+            or set(transaction) != {
+                "schema_version", "state", "attempted", "recheck"}
+            or transaction.get("schema_version") != 1
+            or transaction.get("state") not in {
+                "executed", "recheck_failed", "expired", "unsupported",
+                "execution_failed", "unavailable"}
+            or not isinstance(transaction.get("attempted"), bool)
+            or transaction.get("recheck") not in {
+                "not_run", "matched", "mismatched"}):
+        raise ValueError("Point-and-Speak action is malformed")
+    attempted = transaction["attempted"]
+    transaction_state = transaction["state"]
+    recheck = transaction["recheck"]
+    if ((attempted != (transaction_state in {
+                "executed", "execution_failed"}))
+            or ((recheck == "matched") != attempted)
+            or ((recheck == "mismatched") !=
+                (transaction_state == "recheck_failed"))
+            or (snapshot["state"] not in {"ambiguous", "permission_denied"}
+                and snapshot["state"] != transaction_state)):
+        raise ValueError("Point-and-Speak action is malformed")
+    return PointAndSpeakActionResult(
+        state=snapshot["state"],
+        receipt=PointAndSpeakActionReceipt(
+            capture_state=raw["capture_state"],
+            observed_elements=raw["observed_elements"],
+            emitted_targets=raw["emitted_targets"],
+            truncated=raw["truncated"],
+            eligible_targets=raw["eligible_targets"],
+            contradiction_count=raw["contradiction_count"],
+            evidence=tuple(evidence),
+            confidence_bucket=raw["confidence_bucket"],
+            margin_bucket=raw["margin_bucket"],
+            transaction_state=transaction_state,
+            attempted=attempted,
+            recheck=recheck,
         ),
     )
 
@@ -3255,6 +3402,36 @@ class WhisperFaceViewModel:
                 self.actions.preview_point_and_speak(phrase))
         except Exception:
             return PointAndSpeakPreview(state="unavailable")
+
+    def press_point_and_speak(
+        self, nonce: str, phrase: str,
+    ) -> PointAndSpeakActionResult:
+        """Request one explicit press without retaining phrase or target data."""
+
+        if (not isinstance(nonce, str) or not 16 <= len(nonce) <= 96
+                or any(not (character.isalnum() or character in "-_")
+                       for character in nonce)
+                or not isinstance(phrase, str) or not phrase.strip()
+                or len(phrase) > POINT_AND_SPEAK_MAX_PHRASE_CHARS
+                or any(ord(character) < 32 for character in phrase)):
+            raise ValueError(self.localized(
+                "point_and_speak.validation.phrase",
+                limit=POINT_AND_SPEAK_MAX_PHRASE_CHARS))
+        try:
+            return normalize_point_and_speak_action(
+                self.actions.press_point_and_speak(nonce, phrase))
+        except Exception:
+            return unavailable_point_and_speak_action()
+
+    def issue_point_and_speak_nonce(self) -> str:
+        """Request a short-lived process-session nonce only after confirmation."""
+
+        nonce = self.actions.issue_point_and_speak_nonce()
+        if (not isinstance(nonce, str) or not 16 <= len(nonce) <= 96
+                or any(not (character.isalnum() or character in "-_")
+                       for character in nonce)):
+            raise ValueError("Point-and-Speak action nonce is unavailable")
+        return nonce
 
     def preview_drop_to_target(
         self, phrase: str, role: str, source_kind: str, effect: str,
@@ -5251,7 +5428,8 @@ if APPKIT_AVAILABLE:
                 "point_and_speak.action.cancel"))
             cancel.setKeyEquivalent_("\x1b")
             alert.window().setInitialFirstResponder_(target_phrase)
-            if alert.runModal() != 1000:
+            response = alert.runModal()
+            if response != 1000:
                 return
             phrase = str(target_phrase.stringValue())
             try:
@@ -5279,13 +5457,14 @@ if APPKIT_AVAILABLE:
                 time.sleep(0.2)
                 result = self.view_model.preview_point_and_speak(phrase)
                 self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                    "pointAndSpeakFinished:", result, False)
+                    "pointAndSpeakFinished:", (result, phrase), False)
 
             threading.Thread(
                 target=run, name="whisper-face-point-preview",
                 daemon=True).start()
 
-        def pointAndSpeakFinished_(self, result: Any) -> None:
+        def pointAndSpeakFinished_(self, payload: Any) -> None:
+            result, phrase = payload
             app = NSApplication.sharedApplication()
             app.unhide_(None)
             self.window.makeKeyAndOrderFront_(None)
@@ -5321,7 +5500,62 @@ if APPKIT_AVAILABLE:
             result_alert.setInformativeText_(detail)
             result_alert.addButtonWithTitle_(self._l(
                 "settings.action.done"))
-            result_alert.runModal()
+            can_press = result.state == "resolved" and result.role == "button"
+            if can_press:
+                result_alert.addButtonWithTitle_(self._l(
+                    "point_and_speak.action.press_once"))
+            response = result_alert.runModal()
+            if not can_press or response != 1001:
+                return
+
+            self.window.orderOut_(None)
+            app.hide_(None)
+
+            def run_action() -> None:
+                # The explicit confirmation authorizes one fresh, bounded
+                # capture/resolution/recheck transaction, not the preview.
+                time.sleep(0.2)
+                try:
+                    nonce = self.view_model.issue_point_and_speak_nonce()
+                    action_result = self.view_model.press_point_and_speak(
+                        nonce, phrase)
+                except Exception:
+                    action_result = unavailable_point_and_speak_action()
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "pointAndSpeakActionFinished:", action_result, False)
+
+            threading.Thread(
+                target=run_action, name="whisper-face-point-action",
+                daemon=True).start()
+
+        def pointAndSpeakActionFinished_(self, result: Any) -> None:
+            app = NSApplication.sharedApplication()
+            app.unhide_(None)
+            self.window.makeKeyAndOrderFront_(None)
+            app.activateIgnoringOtherApps_(True)
+            receipt = result.receipt
+            detail = self._l(
+                "point_and_speak.action.result.receipt",
+                state=result.state.replace("_", " "),
+                capture=receipt.capture_state.replace("_", " "),
+                observed=receipt.observed_elements,
+                emitted=receipt.emitted_targets,
+                confidence=receipt.confidence_bucket.replace("_", " "),
+                margin=receipt.margin_bucket.replace("_", " "),
+                recheck=receipt.recheck.replace("_", " "),
+                attempted=self._l(
+                    "point_and_speak.result.yes" if receipt.attempted else
+                    "point_and_speak.result.no"),
+                truncated=self._l(
+                    "point_and_speak.result.yes" if receipt.truncated else
+                    "point_and_speak.result.no"),
+            )
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(self._l(
+                f"point_and_speak.action.result.title.{result.state}"))
+            alert.setInformativeText_(detail)
+            alert.addButtonWithTitle_(self._l("settings.action.done"))
+            alert.runModal()
 
         def previewDropTarget_(self, _sender: Any) -> None:
             """Collect an explicit hypothetical policy, then capture read-only."""
@@ -6147,6 +6381,8 @@ __all__ = [
     "NativeAppKitSmokeContract",
     "OnboardingStep",
     "POINT_AND_SPEAK_MAX_PHRASE_CHARS",
+    "PointAndSpeakActionReceipt",
+    "PointAndSpeakActionResult",
     "PointAndSpeakPreview",
     "PointAndSpeakReceipt",
     "ResultInspection",
@@ -6167,6 +6403,7 @@ __all__ = [
     "normalize_snapshot",
     "normalize_acoustic_keyword_inspection",
     "normalize_point_and_speak_preview",
+    "normalize_point_and_speak_action",
     "normalize_drop_target_preview",
     "normalize_settings",
     "run_native_appkit_smoke",
