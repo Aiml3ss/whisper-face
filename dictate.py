@@ -3841,11 +3841,17 @@ def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
     if IS_MACOS and model_repo == WHISPER_REPO and PARAKEET_ENABLED:
         parakeet = PARAKEET.transcribe(audio)
         if parakeet is not None and parakeet[0]:
+            native_processing_s = float(parakeet[1])
+            if (native_processing_s < 0.0
+                    or native_processing_s != native_processing_s
+                    or native_processing_s == float("inf")):
+                native_processing_s = None
             return Recognition(
                 text=parakeet[0],
                 confidence=PARAKEET_ROUTE_CONFIDENCE,
                 engine="parakeet-unified",
                 audio_duration=len(audio) / SAMPLE_RATE,
+                native_processing_s=native_processing_s,
             )
 
     resolved_model = resolve_asr_model(model_repo)
@@ -5740,6 +5746,7 @@ def assemble_raw(chunk_futs: list, pre_future,
     """Join rolling chunks and exactly one remainder decode."""
     def harvest(scheduled, parts, confidences, alternatives):
         nonlocal elapsed, timing_reliable, last_bound_end_sample
+        nonlocal native_processing_complete
         fut = getattr(scheduled, "future", scheduled)
         start_sample = getattr(scheduled, "start_sample", None)
         end_sample = getattr(scheduled, "end_sample", None)
@@ -5762,10 +5769,22 @@ def assemble_raw(chunk_futs: list, pre_future,
             # their later relative offsets unsafe. Bound-carrying futures do
             # not contaminate independent evidence from later source ranges.
             timing_reliable = False
+            native_processing_complete = False
             print(f"! chunk decode failed: {e}")
             return
         if isinstance(result, str):
             result = Recognition(result)
+        try:
+            native_processing_s = float(result.native_processing_s)
+        except (TypeError, ValueError):
+            native_processing_complete = False
+        else:
+            if (native_processing_s < 0.0
+                    or native_processing_s != native_processing_s
+                    or native_processing_s == float("inf")):
+                native_processing_complete = False
+            else:
+                native_processing_times.append(native_processing_s)
         normalized_words = []
         word_times_valid = True
         for word in result.words:
@@ -5827,6 +5846,8 @@ def assemble_raw(chunk_futs: list, pre_future,
     words, word_has_bounds, elapsed = [], [], 0.0
     last_bound_end_sample = 0
     timing_reliable = not bool(chunk_futs)
+    native_processing_times = []
+    native_processing_complete = True
     for f in chunk_futs:
         harvest(f, parts, confidences, alternatives)
     if pre_future is not None:
@@ -5854,6 +5875,10 @@ def assemble_raw(chunk_futs: list, pre_future,
         engine="+".join(dict.fromkeys(engines)),
         words=tuple(words),
         audio_duration=elapsed,
+        native_processing_s=(
+            sum(native_processing_times)
+            if native_processing_times and native_processing_complete
+            else None),
     )
 
 
@@ -6225,10 +6250,14 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         PIPELINE_STATE["last_word_count"] = len(text.split())
         consequence_metrics = consequence_state_snapshot()
         context_firewall_metrics = context_firewall_state_snapshot()
+        native_timing = (
+            f" | native {recognition.native_processing_s:.2f}s"
+            if recognition.native_processing_s is not None else ""
+        )
         print(f"[release {release_total:.2f}s | press {press_total:.2f}s | "
               f"{path} | ready {audio_ready:.2f}s | tail {tail_wait:.2f}s | "
               f"asr {t_asr:.2f}s/{recognition.engine or 'unknown'}"
-              f"@{compiler_result.confidence:.0%} | "
+              f"@{compiler_result.confidence:.0%}{native_timing} | "
               f"compile {t_compile:.3f}s/{len(compiler_result.decisions)}d | "
               f"risk {t_consequence:.3f}s/"
               f"{consequence_metrics['route']} | "
@@ -6242,6 +6271,9 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "capture_ready_s": round(audio_ready, 4),
             "tail_s": round(tail_wait, 4),
             "asr_s": round(t_asr, 4),
+            "asr_native_processing_s": (
+                round(recognition.native_processing_s, 4)
+                if recognition.native_processing_s is not None else None),
             "compiler_s": round(t_compile, 4),
             "consequence_s": round(t_consequence, 4),
             "context_firewall_s": round(t_context_firewall, 4),

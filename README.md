@@ -51,10 +51,10 @@ not declare a winner before the same physical tasks have been run.
 
 - **A real native Mac app window** — choose **Open Whisper Face…** from the
   menu-bar face for focused Overview, Results, Settings, Models, and
-  Diagnostics sections. It exposes live latency and usage, inspectable
-  decision evidence, unified personalization/privacy controls, local model
-  health, and one-click installer verification without adding a browser
-  runtime.
+  Diagnostics sections. It exposes live latency and usage—including
+  Parakeet's own processing time when available—inspectable decision evidence,
+  unified personalization/privacy controls, local model health, and one-click
+  installer verification without adding a browser runtime.
 - **Transactional insertion + Voice Outbox (Mac)** — readable text fields are
   leased at key-down and revalidated before the single paste attempt. If focus,
   selection, or nearby text changed while recognition ran, Whisper Face does
