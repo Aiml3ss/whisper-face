@@ -4,6 +4,7 @@ learned.json
 snippets.json
 tones.json
 preferences.json
+acoustic_keyword_memory.json
 dictionary.txt
 dictate.log
 ollama.log

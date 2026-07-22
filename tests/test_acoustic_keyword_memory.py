@@ -182,5 +182,38 @@ class AcousticKeywordMemoryTests(unittest.TestCase):
         self.assertEqual(RECOGNITION_EFFECT, "none")
 
 
+class AcousticKeywordMemoryInstallerContractTests(unittest.TestCase):
+    def test_private_template_is_strict_empty_state(self):
+        template = ROOT / "acoustic_keyword_memory.template.json"
+        restored = AcousticKeywordMemory.loads(
+            template.read_text(encoding="utf-8"))
+
+        self.assertEqual(restored.candidates, ())
+        self.assertEqual(restored.to_dict()["next_sequence"], 1)
+        self.assertEqual(
+            restored.to_dict()["policy"]["recognition_effect"], "none")
+
+    def test_mac_and_windows_installers_create_preserve_and_restrict_state(self):
+        shell = (ROOT / "setup.sh").read_text(encoding="utf-8")
+        powershell = (ROOT / "setup.ps1").read_text(encoding="utf-8")
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+
+        for installer in (shell, powershell):
+            with self.subTest(installer="setup"):
+                self.assertIn("acoustic_keyword_memory.py", installer)
+                self.assertIn(
+                    "acoustic_keyword_memory.template.json", installer)
+        self.assertIn(
+            "for name in snippets tones preferences acoustic_keyword_memory",
+            shell,
+        )
+        self.assertIn('"acoustic_keyword_memory.json"', powershell)
+        self.assertIn('[ -f "$destination" ] || install -m 600', shell)
+        self.assertIn('chmod 600 "$destination"', shell)
+        self.assertIn('if (-not (Test-Path $Destination))', powershell)
+        self.assertIn("icacls $Destination /inheritance:r /grant:r", powershell)
+        self.assertIn("acoustic_keyword_memory.json", gitignore.splitlines())
+
+
 if __name__ == "__main__":
     unittest.main()

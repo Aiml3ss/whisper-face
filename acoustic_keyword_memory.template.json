@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "kind": "whisper-face/acoustic-keyword-memory",
+  "policy": {
+    "minimum_observations": 3,
+    "minimum_confirmations": 2,
+    "max_entries": 256,
+    "recognition_effect": "none"
+  },
+  "next_sequence": 1,
+  "entries": []
+}

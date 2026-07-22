@@ -218,6 +218,10 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "diagnostics.action.licenses": "License Notices",
         "diagnostics.action.source": "Exact Source",
         "diagnostics.verification.not_run": "Not run",
+        "diagnostics.verification.running": "Running…",
+        "diagnostics.verification.passed": "All checks passed",
+        "diagnostics.verification.attention": "Checks need attention",
+        "diagnostics.verification.failed": "Verification failed: {error}",
         "diagnostics.ready": "Everything looks ready.",
         "diagnostics.license": "AGPL-3.0-only · no warranty · corresponding source available",
         "diagnostics.regression.cases": "{count} cases",
@@ -352,6 +356,45 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.notice.snippet_deleted": "Snippet deleted",
         "settings.notice.vocabulary_saved": "Vocabulary saved",
         "settings.notice.correction_forgotten": "Learned correction forgotten",
+        "default.model.name": "Model",
+        "default.status.unknown": "Unknown",
+        "default.capture.ready": "Ready",
+        "default.capture.paused": "Paused",
+        "default.flight.off": "Off",
+        "default.privacy.local": "Local processing",
+        "default.build.development": "Development build",
+        "results.consequence.empty": "Consequence: Standard · no protected spans",
+        "validation.tone.selection": "app tone selection is out of range",
+        "validation.section.unknown": "unknown section: {section}",
+        "validation.settings_pane.unknown": "unknown settings pane: {pane}",
+        "validation.app.bundle": "app identifier must be a non-empty bundle ID",
+        "validation.tone.unsupported": "unsupported tone: {tone}",
+        "validation.snippet.name": "snippet name must be 1–80 characters on one line",
+        "validation.snippet.text": "snippet text must be 1–4000 characters",
+        "validation.snippet.required": "snippet name is required",
+        "validation.snippet.expected": "expected snippet text must be a string",
+        "validation.vocabulary.preferred": "preferred vocabulary",
+        "validation.vocabulary.excluded": "excluded vocabulary",
+        "validation.vocabulary.list": "{label} must be a list of terms",
+        "validation.vocabulary.term_length": "{label} terms must be at most 80 characters",
+        "validation.vocabulary.reserved": "{label} terms cannot start with reserved '-' or '#'",
+        "validation.vocabulary.maximum": "{label} supports at most 500 terms",
+        "validation.vocabulary.overlap": "a term cannot also be excluded",
+        "validation.correction.kind": "unknown learned correction kind",
+        "validation.correction.unknown": "unknown learned correction",
+        "validation.correction.stale_snippet": "the learned snippet edit no longer exists",
+        "validation.face.unsupported": "unsupported face: {face}",
+        "operation.settings.load_failed": "Could not load settings: {error}",
+        "operation.tone.save_failed": "Could not save app tone: {error}",
+        "operation.snippet.save_failed": "Could not save snippet: {error}",
+        "operation.snippet.delete_failed": "Could not delete snippet: {error}",
+        "operation.vocabulary.save_failed": "Could not save vocabulary: {error}",
+        "operation.correction.forget_failed": "Could not forget correction: {error}",
+        "operation.face.change_failed": "Could not change face: {error}",
+        "operation.flight.update_failed": "Could not update Flight Recorder: {error}",
+        "operation.log.open_failed": "Could not open log: {error}",
+        "operation.source.open_failed": "Could not open source and license: {error}",
+        "operation.licenses.open_failed": "Could not open local license notices: {error}",
     },
 }
 SUPPORTED_LOCALES = tuple(STRING_CATALOGS)
@@ -494,7 +537,7 @@ class GUIActions:
 class ModelStatus:
     name: str
     role: str = ""
-    status: str = "Unknown"
+    status: str = localized_string("default.status.unknown")
     detail: str = ""
 
 
@@ -529,11 +572,14 @@ class UnifiedSettings:
     corrections: tuple[CorrectionSetting, ...] = field(default_factory=tuple)
 
 
-def tone_for_app_index(apps: Sequence[AppToneSetting], index: int) -> str:
+def tone_for_app_index(
+    apps: Sequence[AppToneSetting], index: int, *, locale: str = "en",
+) -> str:
     """Resolve the persisted tone for one AppKit popup selection."""
     if not isinstance(index, int) or isinstance(index, bool) \
             or not 0 <= index < len(apps):
-        raise IndexError("app tone selection is out of range")
+        raise IndexError(localized_string(
+            "validation.tone.selection", locale=locale))
     tone = apps[index].tone
     return tone if tone in TONE_CHOICES else "auto"
 
@@ -565,9 +611,9 @@ class ResultInspection:
     """Privacy-safe evidence for the latest result, never transcript history."""
 
     available: bool = False
-    summary: str = "No dictation yet"
-    engine: str = "Waiting for a result"
-    mode: str = "Capture"
+    summary: str = localized_string("results.summary.empty")
+    engine: str = localized_string("results.engine.waiting")
+    mode: str = localized_string("results.mode.capture")
     stable_prefix_words: int = 0
     compiler_decisions: int = 0
     confidence: float | None = None
@@ -576,20 +622,20 @@ class ResultInspection:
     proof_edits_rejected: int | None = None
     protected_anchor_count: int = 0
     alternatives_considered: int = 0
-    context_influence: str = "Context influence not reported by runtime"
-    context_firewall_summary: str = (
-        "Context safety: no finalized shadow check is available yet.")
-    consequence_summary: str = "Consequence: Standard · no protected spans"
+    context_influence: str = localized_string("results.context.unreported")
+    context_firewall_summary: str = localized_string(
+        "results.firewall.unavailable")
+    consequence_summary: str = localized_string("results.consequence.empty")
 
 
 @dataclass(frozen=True)
 class GUIState:
     section: str = "Overview"
-    capture_state: str = "Ready"
+    capture_state: str = localized_string("default.capture.ready")
     paused: bool = False
     face: str = "parrot"
     flight_recorder: bool = False
-    flight_state: str = "Off"
+    flight_state: str = localized_string("default.flight.off")
     active_engine: str = localized_string("overview.engine.waiting")
     last_latency_ms: float | None = None
     last_word_count: int | None = None
@@ -599,11 +645,11 @@ class GUIState:
     outbox_summary: str = ""
     regression_cases: int = 0
     regression_quarantined: int = 0
-    privacy_summary: str = "Local processing"
-    service_status: str = "Unknown"
-    microphone_status: str = "Unknown"
-    accessibility_status: str = "Unknown"
-    version: str = "Development build"
+    privacy_summary: str = localized_string("default.privacy.local")
+    service_status: str = localized_string("default.status.unknown")
+    microphone_status: str = localized_string("default.status.unknown")
+    accessibility_status: str = localized_string("default.status.unknown")
+    version: str = localized_string("default.build.development")
     models: tuple[ModelStatus, ...] = field(default_factory=tuple)
     hotkey_label: str = localized_string("settings.mode.capture.shortcut")
     prefers_reduced_motion: bool = False
@@ -613,10 +659,11 @@ class GUIState:
     status_phase: str = "ready"
     status_title: str = localized_string("overview.status.ready.title")
     status_detail: str = localized_string(
-        "overview.status.ready.detail", hotkey="Right Option")
+        "overview.status.ready.detail", hotkey=localized_string(
+            "settings.mode.capture.shortcut"))
     degraded_issues: tuple[DegradedIssue, ...] = field(default_factory=tuple)
     last_result: ResultInspection = field(default_factory=ResultInspection)
-    verification: str = "Not run"
+    verification: str = localized_string("diagnostics.verification.not_run")
     notice: str = ""
     notice_level: str = "info"
     settings_pane: str = "Modes"
@@ -641,21 +688,27 @@ def _nonnegative_int(value: Any, default: int = 0) -> int:
     return max(0, int(number)) if number is not None else default
 
 
-def _normalize_models(value: Any) -> tuple[ModelStatus, ...]:
+def _normalize_models(
+    value: Any, *, locale: str = "en",
+) -> tuple[ModelStatus, ...]:
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
         return ()
     models: list[ModelStatus] = []
     for item in value:
         if isinstance(item, Mapping):
-            name = _clean_text(item.get("name"), "Model")
+            name = _clean_text(item.get("name"), localized_string(
+                "default.model.name", locale=locale))
             models.append(ModelStatus(
                 name=name,
                 role=_clean_text(item.get("role"), ""),
-                status=_clean_text(item.get("status"), "Unknown"),
+                status=_clean_text(item.get("status"), localized_string(
+                    "default.status.unknown", locale=locale)),
                 detail=_clean_text(item.get("detail"), ""),
             ))
         elif isinstance(item, str) and item.strip():
-            models.append(ModelStatus(item.strip()))
+            models.append(ModelStatus(
+                item.strip(), status=localized_string(
+                    "default.status.unknown", locale=locale)))
     return tuple(models)
 
 
@@ -1051,11 +1104,32 @@ def _localized_runtime_overview_copy(
     return localized_string(key, locale=locale) if key else text
 
 
+def _localized_verification_copy(value: Any, *, locale: str) -> str:
+    """Translate only GUI-owned verification states; preserve runtime copy."""
+
+    if value is None:
+        return localized_string(
+            "diagnostics.verification.not_run", locale=locale)
+    text = _clean_text(value, "")
+    keys = (
+        "diagnostics.verification.not_run",
+        "diagnostics.verification.running",
+        "diagnostics.verification.passed",
+        "diagnostics.verification.attention",
+    )
+    key = next((candidate for candidate in keys
+                if text.casefold() ==
+                STRING_CATALOGS["en"][candidate].casefold()), None)
+    if key:
+        return localized_string(key, locale=locale)
+    return text
+
+
 def normalize_snapshot(
     snapshot: Mapping[str, Any] | None,
     *,
     section: str = "Overview",
-    verification: str = "Not run",
+    verification: str | None = None,
     notice: str = "",
     notice_level: str = "info",
     onboarding_acknowledged: bool = False,
@@ -1073,7 +1147,9 @@ def normalize_snapshot(
     words = source.get("last_word_count")
     last_word_count = None if words is None else _nonnegative_int(words)
     minutes_saved = _finite_number(source.get("minutes_saved"))
-    capture_state = _clean_text(source.get("capture_state"), "Ready")
+    capture_state = _clean_text(
+        source.get("capture_state"), localized_string(
+            "default.capture.ready", locale=locale))
     paused = source.get("paused") is True
     active_engine = _localized_runtime_overview_copy(
         source.get("active_engine"), kind="engine", locale=locale)
@@ -1081,12 +1157,13 @@ def normalize_snapshot(
         active_engine = localized_string(
             "overview.engine.waiting", locale=locale)
     outbox_count = _nonnegative_int(source.get("outbox_count"))
-    service_status = _clean_text(source.get("service_status"), "Unknown")
+    unknown_status = localized_string("default.status.unknown", locale=locale)
+    service_status = _clean_text(source.get("service_status"), unknown_status)
     microphone_status = _clean_text(
-        source.get("microphone_status"), "Unknown")
+        source.get("microphone_status"), unknown_status)
     accessibility_status = _clean_text(
-        source.get("accessibility_status"), "Unknown")
-    models = _normalize_models(source.get("models"))
+        source.get("accessibility_status"), unknown_status)
+    models = _normalize_models(source.get("models"), locale=locale)
     hotkey_label = _clean_text(
         source.get("hotkey_label"), localized_string(
             "settings.mode.capture.shortcut", locale=locale))
@@ -1129,7 +1206,9 @@ def normalize_snapshot(
         paused=paused,
         face=face,
         flight_recorder=source.get("flight_recorder") is True,
-        flight_state=_clean_text(source.get("flight_state"), "Off"),
+        flight_state=_clean_text(
+            source.get("flight_state"), localized_string(
+                "default.flight.off", locale=locale)),
         active_engine=active_engine,
         last_latency_ms=normalized_latency,
         last_word_count=last_word_count,
@@ -1142,11 +1221,14 @@ def normalize_snapshot(
         regression_quarantined=_nonnegative_int(
             source.get("regression_quarantined")),
         privacy_summary=_clean_text(
-            source.get("privacy_summary"), "Local processing"),
+            source.get("privacy_summary"), localized_string(
+                "default.privacy.local", locale=locale)),
         service_status=service_status,
         microphone_status=microphone_status,
         accessibility_status=accessibility_status,
-        version=_clean_text(source.get("version"), "Development build"),
+        version=_clean_text(
+            source.get("version"), localized_string(
+                "default.build.development", locale=locale)),
         models=models,
         hotkey_label=hotkey_label,
         prefers_reduced_motion=(
@@ -1165,7 +1247,8 @@ def normalize_snapshot(
             word_count=last_word_count,
             locale=locale,
         ),
-        verification=verification,
+        verification=_localized_verification_copy(
+            verification, locale=locale),
         notice=notice,
         notice_level=(notice_level if notice_level in {
             "info", "success", "error"} else "info"),
@@ -1235,7 +1318,8 @@ class WhisperFaceViewModel:
 
     def select_section(self, section: str) -> GUIState:
         if section not in SECTIONS:
-            raise ValueError(f"unknown section: {section}")
+            raise ValueError(self.localized(
+                "validation.section.unknown", section=section))
         self.state = replace(
             self.state, section=section, notice="", notice_level="info")
         if section == "Settings":
@@ -1244,7 +1328,8 @@ class WhisperFaceViewModel:
 
     def select_settings_pane(self, pane: str) -> GUIState:
         if pane not in SETTINGS_PANES:
-            raise ValueError(f"unknown settings pane: {pane}")
+            raise ValueError(self.localized(
+                "validation.settings_pane.unknown", pane=pane))
         self.state = replace(
             self.state, settings_pane=pane, notice="", notice_level="info")
         return self.state
@@ -1259,7 +1344,8 @@ class WhisperFaceViewModel:
                 notice_level=notice_level)
         except Exception as error:
             self.state = replace(
-                self.state, notice=f"Could not load settings: {error}",
+                self.state, notice=self.localized(
+                    "operation.settings.load_failed", error=error),
                 notice_level="error")
         return self.state
 
@@ -1268,9 +1354,10 @@ class WhisperFaceViewModel:
         normalized = str(tone).strip().casefold()
         if not app_id or len(app_id) > 255 or any(
                 character.isspace() for character in app_id):
-            raise ValueError("app identifier must be a non-empty bundle ID")
+            raise ValueError(self.localized("validation.app.bundle"))
         if normalized not in TONE_CHOICES:
-            raise ValueError(f"unsupported tone: {tone}")
+            raise ValueError(self.localized(
+                "validation.tone.unsupported", tone=tone))
         try:
             self.actions.set_app_tone(app_id, normalized)
             return self.load_settings(
@@ -1278,19 +1365,19 @@ class WhisperFaceViewModel:
                 notice_level="success")
         except Exception as error:
             self.state = replace(
-                self.state, notice=f"Could not save app tone: {error}",
+                self.state, notice=self.localized(
+                    "operation.tone.save_failed", error=error),
                 notice_level="error")
             return self.state
 
-    @staticmethod
-    def _valid_snippet(name: str, text: str) -> tuple[str, str]:
+    def _valid_snippet(self, name: str, text: str) -> tuple[str, str]:
         normalized_name = str(name).strip()
         value = str(text)
         if (not normalized_name or len(normalized_name) > 80
                 or "\n" in normalized_name or "\r" in normalized_name):
-            raise ValueError("snippet name must be 1–80 characters on one line")
+            raise ValueError(self.localized("validation.snippet.name"))
         if not value.strip() or len(value) > 4000:
-            raise ValueError("snippet text must be 1–4000 characters")
+            raise ValueError(self.localized("validation.snippet.text"))
         return normalized_name, value
 
     def save_snippet(self, name: str, text: str, *,
@@ -1299,7 +1386,8 @@ class WhisperFaceViewModel:
             normalized_name, value = self._valid_snippet(name, text)
         except ValueError as error:
             self.state = replace(
-                self.state, notice=f"Could not save snippet: {error}",
+                self.state, notice=self.localized(
+                    "operation.snippet.save_failed", error=error),
                 notice_level="error")
             return self.state
         try:
@@ -1310,16 +1398,17 @@ class WhisperFaceViewModel:
                 notice_level="success")
         except Exception as error:
             self.state = replace(
-                self.state, notice=f"Could not save snippet: {error}",
+                self.state, notice=self.localized(
+                    "operation.snippet.save_failed", error=error),
                 notice_level="error")
             return self.state
 
     def delete_snippet(self, name: str, expected_original: str) -> GUIState:
         normalized_name = str(name).strip()
         if not normalized_name:
-            raise ValueError("snippet name is required")
+            raise ValueError(self.localized("validation.snippet.required"))
         if not isinstance(expected_original, str):
-            raise ValueError("expected snippet text must be a string")
+            raise ValueError(self.localized("validation.snippet.expected"))
         try:
             self.actions.delete_snippet(normalized_name, expected_original)
             return self.load_settings(
@@ -1327,14 +1416,18 @@ class WhisperFaceViewModel:
                 notice_level="success")
         except Exception as error:
             self.state = replace(
-                self.state, notice=f"Could not delete snippet: {error}",
+                self.state, notice=self.localized(
+                    "operation.snippet.delete_failed", error=error),
                 notice_level="error")
             return self.state
 
-    @staticmethod
-    def _valid_vocabulary(values: Sequence[str], *, label: str) -> tuple[str, ...]:
+    def _valid_vocabulary(
+        self, values: Sequence[str], *, label_key: str,
+    ) -> tuple[str, ...]:
+        label = self.localized(label_key)
         if isinstance(values, (str, bytes)):
-            raise ValueError(f"{label} must be a list of terms")
+            raise ValueError(self.localized(
+                "validation.vocabulary.list", label=label))
         cleaned: list[str] = []
         seen: set[str] = set()
         for raw in values:
@@ -1343,27 +1436,30 @@ class WhisperFaceViewModel:
             if not value:
                 continue
             if len(value) > 80 or "\n" in value or "\r" in value:
-                raise ValueError(f"{label} terms must be at most 80 characters")
+                raise ValueError(self.localized(
+                    "validation.vocabulary.term_length", label=label))
             if value.startswith(("-", "#")):
-                raise ValueError(
-                    f"{label} terms cannot start with reserved '-' or '#'")
+                raise ValueError(self.localized(
+                    "validation.vocabulary.reserved", label=label))
             if folded not in seen:
                 cleaned.append(value)
                 seen.add(folded)
         if len(cleaned) > 500:
-            raise ValueError(f"{label} supports at most 500 terms")
+            raise ValueError(self.localized(
+                "validation.vocabulary.maximum", label=label))
         return tuple(cleaned)
 
     def save_vocabulary(self, manual: Sequence[str],
                         banned: Sequence[str]) -> GUIState:
         try:
             terms = self._valid_vocabulary(
-                manual, label="preferred vocabulary")
+                manual, label_key="validation.vocabulary.preferred")
             exclusions = self._valid_vocabulary(
-                banned, label="excluded vocabulary")
+                banned, label_key="validation.vocabulary.excluded")
         except ValueError as error:
             self.state = replace(
-                self.state, notice=f"Could not save vocabulary: {error}",
+                self.state, notice=self.localized(
+                    "operation.vocabulary.save_failed", error=error),
                 notice_level="error")
             return self.state
         overlap = {item.casefold() for item in terms} & {
@@ -1371,7 +1467,9 @@ class WhisperFaceViewModel:
         if overlap:
             self.state = replace(
                 self.state,
-                notice="Could not save vocabulary: a term cannot also be excluded",
+                notice=self.localized(
+                    "operation.vocabulary.save_failed",
+                    error=self.localized("validation.vocabulary.overlap")),
                 notice_level="error")
             return self.state
         try:
@@ -1381,33 +1479,35 @@ class WhisperFaceViewModel:
                 notice_level="success")
         except Exception as error:
             self.state = replace(
-                self.state, notice=f"Could not save vocabulary: {error}",
+                self.state, notice=self.localized(
+                    "operation.vocabulary.save_failed", error=error),
                 notice_level="error")
             return self.state
 
     def forget_learned(self, kind: str, key: str) -> GUIState:
         normalized_kind = str(kind).strip().casefold()
         if normalized_kind not in {"correction", "snippet"}:
-            raise ValueError("unknown learned correction kind")
+            raise ValueError(self.localized("validation.correction.kind"))
         match = next((item for item in self.state.settings.corrections
                       if item.kind == normalized_kind and item.key == key), None)
         if match is None:
-            raise ValueError("unknown learned correction")
+            raise ValueError(self.localized("validation.correction.unknown"))
         try:
             callback = (self.actions.forget_snippet_edit
                         if match.kind == "snippet"
                         else self.actions.forget_correction)
             result = callback(match.key)
             if match.kind == "snippet" and result is False:
-                raise RuntimeError(
-                    "the learned snippet edit no longer exists")
+                raise RuntimeError(self.localized(
+                    "validation.correction.stale_snippet"))
             return self.load_settings(
                 notice=self.localized(
                     "settings.notice.correction_forgotten"),
                 notice_level="success")
         except Exception as error:
             self.state = replace(
-                self.state, notice=f"Could not forget correction: {error}",
+                self.state, notice=self.localized(
+                    "operation.correction.forget_failed", error=error),
                 notice_level="error")
             return self.state
 
@@ -1449,14 +1549,16 @@ class WhisperFaceViewModel:
     def choose_face(self, face: str) -> GUIState:
         normalized = str(face).strip().casefold()
         if normalized not in FACES:
-            raise ValueError(f"unsupported face: {face}")
+            raise ValueError(self.localized(
+                "validation.face.unsupported", face=face))
         try:
             self.actions.set_face(normalized)
             self.state = replace(
                 self.state, face=normalized, notice="", notice_level="info")
         except Exception as error:
             self.state = replace(
-                self.state, notice=f"Could not change face: {error}",
+                self.state, notice=self.localized(
+                    "operation.face.change_failed", error=error),
                 notice_level="error")
         return self.state
 
@@ -1470,7 +1572,8 @@ class WhisperFaceViewModel:
             return self.refresh()
         except Exception as error:
             self.state = replace(
-                self.state, notice=f"Could not update Flight Recorder: {error}",
+                self.state, notice=self.localized(
+                    "operation.flight.update_failed", error=error),
                 notice_level="error")
         return self.state
 
@@ -1478,7 +1581,9 @@ class WhisperFaceViewModel:
         desired = bool(paused)
         try:
             (self.actions.pause if desired else self.actions.resume)()
-            capture_state = "Paused" if desired else "Ready"
+            capture_state = self.localized(
+                "default.capture.paused" if desired
+                else "default.capture.ready")
             phase, title, detail = _status_presentation(
                 capture_state=capture_state,
                 paused=desired,
@@ -1512,7 +1617,8 @@ class WhisperFaceViewModel:
                 self.state, notice="", notice_level="info")
         except Exception as error:
             self.state = replace(
-                self.state, notice=f"Could not open log: {error}",
+                self.state, notice=self.localized(
+                    "operation.log.open_failed", error=error),
                 notice_level="error")
         return self.state
 
@@ -1523,7 +1629,8 @@ class WhisperFaceViewModel:
                 self.state, notice="", notice_level="info")
         except Exception as error:
             self.state = replace(
-                self.state, notice=f"Could not open source and license: {error}",
+                self.state, notice=self.localized(
+                    "operation.source.open_failed", error=error),
                 notice_level="error")
         return self.state
 
@@ -1535,7 +1642,8 @@ class WhisperFaceViewModel:
         except Exception as error:
             self.state = replace(
                 self.state,
-                notice=f"Could not open local license notices: {error}",
+                notice=self.localized(
+                    "operation.licenses.open_failed", error=error),
                 notice_level="error")
         return self.state
 
@@ -1555,7 +1663,8 @@ class WhisperFaceViewModel:
 
     def rerun_verification(self) -> GUIState:
         self.state = replace(
-            self.state, verification="Running…", notice="",
+            self.state, verification=self.localized(
+                "diagnostics.verification.running"), notice="",
             notice_level="info")
         self.state = replace(
             self.state, verification=self.verification_result())
@@ -1568,17 +1677,20 @@ class WhisperFaceViewModel:
             if isinstance(result, Mapping):
                 passed = result.get("passed")
                 message = _clean_text(result.get("message"), "")
-                status = message or ("All checks passed" if passed is not False
-                                     else "Checks need attention")
+                status = message or self.localized(
+                    "diagnostics.verification.passed" if passed is not False
+                    else "diagnostics.verification.attention")
             elif result is False:
-                status = "Checks need attention"
+                status = self.localized(
+                    "diagnostics.verification.attention")
             elif isinstance(result, str) and result.strip():
                 status = result.strip()
             else:
-                status = "All checks passed"
+                status = self.localized("diagnostics.verification.passed")
             return status
         except Exception as error:
-            return f"Verification failed: {error}"
+            return self.localized(
+                "diagnostics.verification.failed", error=error)
 
     def set_verification(self, status: str) -> GUIState:
         self.state = replace(self.state, verification=status)
@@ -2697,7 +2809,8 @@ if APPKIT_AVAILABLE:
             if tone_popup is None or not 0 <= index < len(apps):
                 return
             tone_popup.selectItemAtIndex_(TONE_CHOICES.index(
-                tone_for_app_index(apps, index)))
+                tone_for_app_index(
+                    apps, index, locale=self.view_model.locale)))
 
         @objc.python_method
         def _edit_snippet(self, snippet: SnippetSetting | None) -> None:
@@ -2890,13 +3003,14 @@ if APPKIT_AVAILABLE:
         def verify_(self, _sender: Any) -> None:
             progress = self.dynamic["verify_progress"]
             button = self.dynamic["verify_button"]
-            self.view_model.set_verification("Running…")
+            running = self._l("diagnostics.verification.running")
+            self.view_model.set_verification(running)
             if not self.view_model.state.prefers_reduced_motion:
                 progress.startAnimation_(None)
             button.setEnabled_(False)
             set_accessible_text(
-                self.dynamic["verification"], "Running…",
-                label="Verification result")
+                self.dynamic["verification"], running,
+                label=self._l("diagnostics.accessibility.verification"))
 
             def run() -> None:
                 result = self.view_model.verification_result()

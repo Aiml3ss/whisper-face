@@ -107,6 +107,83 @@ class SnapshotTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertIn(key, STRING_CATALOGS["en"])
 
+    def test_gui_owned_copy_inventory_has_localized_defaults_and_fallback(self):
+        expected_by_prefix = {
+            "default.": {
+                "default.model.name",
+                "default.status.unknown",
+                "default.capture.ready",
+                "default.capture.paused",
+                "default.flight.off",
+                "default.privacy.local",
+                "default.build.development",
+            },
+            "validation.": {
+                "validation.tone.selection",
+                "validation.section.unknown",
+                "validation.settings_pane.unknown",
+                "validation.app.bundle",
+                "validation.tone.unsupported",
+                "validation.snippet.name",
+                "validation.snippet.text",
+                "validation.snippet.required",
+                "validation.snippet.expected",
+                "validation.vocabulary.preferred",
+                "validation.vocabulary.excluded",
+                "validation.vocabulary.list",
+                "validation.vocabulary.term_length",
+                "validation.vocabulary.reserved",
+                "validation.vocabulary.maximum",
+                "validation.vocabulary.overlap",
+                "validation.correction.kind",
+                "validation.correction.unknown",
+                "validation.correction.stale_snippet",
+                "validation.face.unsupported",
+            },
+            "operation.": {
+                "operation.settings.load_failed",
+                "operation.tone.save_failed",
+                "operation.snippet.save_failed",
+                "operation.snippet.delete_failed",
+                "operation.vocabulary.save_failed",
+                "operation.correction.forget_failed",
+                "operation.face.change_failed",
+                "operation.flight.update_failed",
+                "operation.log.open_failed",
+                "operation.source.open_failed",
+                "operation.licenses.open_failed",
+            },
+            "diagnostics.verification.": {
+                "diagnostics.verification.not_run",
+                "diagnostics.verification.running",
+                "diagnostics.verification.passed",
+                "diagnostics.verification.attention",
+                "diagnostics.verification.failed",
+            },
+        }
+        for prefix, expected in expected_by_prefix.items():
+            with self.subTest(prefix=prefix):
+                actual = {
+                    key for key in STRING_CATALOGS["en"]
+                    if key.startswith(prefix)
+                }
+                self.assertEqual(actual, expected)
+
+        state = normalize_snapshot({}, locale="fr-CA")
+        self.assertEqual(
+            state.capture_state,
+            localized_string("default.capture.ready", locale="fr-CA"))
+        self.assertEqual(
+            state.service_status,
+            localized_string("default.status.unknown", locale="fr-CA"))
+        self.assertEqual(
+            state.privacy_summary,
+            localized_string("default.privacy.local", locale="fr-CA"))
+        self.assertEqual(
+            state.verification,
+            localized_string(
+                "diagnostics.verification.not_run", locale="fr-CA"))
+
     def test_overview_status_copy_uses_catalog_and_locale_fallback(self):
         common = {
             "service_status": "Running",
@@ -654,6 +731,45 @@ class ViewModelTests(unittest.TestCase):
         state = model.choose_face("owl")
         self.assertEqual(state.face, "parrot")
         self.assertIn("read only", state.notice)
+
+    def test_validation_operations_and_verification_use_locale_fallback(self):
+        def fail_face(_face):
+            raise RuntimeError("read only")
+
+        model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {}, set_face=fail_face,
+            rerun_verification=lambda: False), locale="fr-CA")
+        with self.assertRaisesRegex(ValueError, "unknown section: Billing"):
+            model.select_section("Billing")
+        self.assertEqual(
+            model.choose_face("owl").notice,
+            localized_string(
+                "operation.face.change_failed", locale="fr-CA",
+                error="read only"))
+        self.assertEqual(
+            model.rerun_verification().verification,
+            localized_string(
+                "diagnostics.verification.attention", locale="fr-CA"))
+
+        passing = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {}, rerun_verification=lambda: None),
+            locale="fr-CA")
+        self.assertEqual(
+            passing.verification_result(),
+            localized_string(
+                "diagnostics.verification.passed", locale="fr-CA"))
+
+        def fail_verification():
+            raise RuntimeError("install unavailable")
+
+        failed = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {},
+            rerun_verification=fail_verification), locale="fr-CA")
+        self.assertEqual(
+            failed.verification_result(),
+            localized_string(
+                "diagnostics.verification.failed", locale="fr-CA",
+                error="install unavailable"))
 
     def test_status_failure_preserves_last_known_state(self):
         calls = [0]

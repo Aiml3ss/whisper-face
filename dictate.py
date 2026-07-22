@@ -331,6 +331,7 @@ from insertion_integrity import (  # noqa: E402
     ReceiptState,
 )
 from personal_regression import PersonalRegressionLab  # noqa: E402
+from acoustic_keyword_memory import AcousticKeywordMemory  # noqa: E402
 
 if IS_MACOS:
     from whisper_face_gui import GUIActions, create_gui  # noqa: E402
@@ -430,6 +431,7 @@ PARAKEET_ENABLED = (
 DICTIONARY_FILE = HERE / "dictionary.txt"
 TRANSCRIPTS_FILE = HERE / "transcripts.jsonl"   # local-only usage log
 LEARNED_FILE = HERE / "learned.json"            # mined term counts
+ACOUSTIC_KEYWORD_MEMORY_FILE = HERE / "acoustic_keyword_memory.json"
 
 MIN_SECONDS = 0.4
 TAIL_SECONDS = 0.30          # mic keeps running after release (usually free)
@@ -769,6 +771,10 @@ LAST_USE = {"t": 0.0}
 # Serializes learned.json read-modify-write between the mining thread and
 # the correction-observer threads.
 LEARN_LOCK = threading.Lock()
+
+# Acoustic keyword memory is inspection/persistence only.  Nothing on the
+# recognition, cleanup, or insertion path reads this lock or file.
+ACOUSTIC_KEYWORD_MEMORY_LOCK = threading.Lock()
 
 # Serializes snippet edits learned by overlapping correction observers.
 SNIPPETS_LOCK = threading.Lock()
@@ -2762,6 +2768,80 @@ def personal_regression_lab(state: dict | None = None) \
         return PersonalRegressionLab()
 
 
+def _load_acoustic_keyword_memory() \
+        -> tuple[AcousticKeywordMemory, str]:
+    """Load private keyword state without reactivating malformed contents."""
+    if not ACOUSTIC_KEYWORD_MEMORY_FILE.exists():
+        return AcousticKeywordMemory(), "missing"
+    try:
+        return (
+            AcousticKeywordMemory.loads(
+                ACOUSTIC_KEYWORD_MEMORY_FILE.read_text(encoding="utf-8")),
+            "ready",
+        )
+    except (OSError, ValueError):
+        return AcousticKeywordMemory(), "invalid"
+
+
+def acoustic_keyword_memory_status_snapshot() -> dict:
+    """Return bounded aggregates only; keyword text stays out of status."""
+    with ACOUSTIC_KEYWORD_MEMORY_LOCK:
+        memory, storage_status = _load_acoustic_keyword_memory()
+    candidates = memory.candidates
+    return {
+        "storage_status": storage_status,
+        "candidate_count": len(candidates),
+        "eligible_count": sum(
+            1 for candidate in candidates if candidate.eligible),
+        "recognition_effect": "none",
+        "candidate_summaries": [
+            {
+                "scope_hash": candidate.app_scope,
+                "observations": candidate.observations,
+                "confirmations": candidate.confirmations,
+                "eligible": candidate.eligible,
+                "status": candidate.status,
+            }
+            for candidate in candidates
+        ],
+    }
+
+
+def export_acoustic_keyword_memory() -> dict:
+    """Explicit user export; unlike general status, this includes keywords."""
+    with ACOUSTIC_KEYWORD_MEMORY_LOCK:
+        memory, storage_status = _load_acoustic_keyword_memory()
+        if storage_status == "invalid":
+            raise ValueError(
+                "acoustic keyword memory is malformed and cannot be exported")
+        return memory.export_dict()
+
+
+def forget_acoustic_keyword(keyword: str, *,
+                            app_scope: str | None = None) -> bool:
+    """Forget one explicitly named candidate and atomically persist it."""
+    with ACOUSTIC_KEYWORD_MEMORY_LOCK:
+        memory, storage_status = _load_acoustic_keyword_memory()
+        if storage_status == "invalid":
+            raise ValueError(
+                "acoustic keyword memory is malformed; forget all to clear it")
+        removed = memory.forget(keyword, app_scope=app_scope)
+        if removed:
+            atomic_write_text(
+                ACOUSTIC_KEYWORD_MEMORY_FILE, memory.dumps() + "\n")
+        return removed
+
+
+def forget_all_acoustic_keywords() -> int:
+    """Clear all state, including an unreadable file, by explicit request."""
+    with ACOUSTIC_KEYWORD_MEMORY_LOCK:
+        memory, storage_status = _load_acoustic_keyword_memory()
+        removed = memory.forget_all() if storage_status != "invalid" else 0
+        atomic_write_text(
+            ACOUSTIC_KEYWORD_MEMORY_FILE, memory.dumps() + "\n")
+        return removed
+
+
 GUI_TONES = {"auto", "casual", "formal", "code", "verbatim", "default"}
 
 
@@ -3009,6 +3089,7 @@ def runtime_status_snapshot() -> dict:
     else:
         flight_state = "Off"
     outbox = INSERTION_COORDINATOR.recoverable()
+    acoustic_keywords = acoustic_keyword_memory_status_snapshot()
     outbox_summary = ""
     if outbox:
         latest = outbox[-1].receipt
@@ -3053,6 +3134,7 @@ def runtime_status_snapshot() -> dict:
         "outbox_summary": outbox_summary,
         "regression_cases": len(lab.cases),
         "regression_quarantined": len(lab.quarantined),
+        "acoustic_keyword_memory": acoustic_keywords,
         "privacy_summary": "Speech, cleanup, and learning stay on this Mac",
         "service_status": "Running" if bar is not None else "Starting",
         "microphone_status": AUDIO_POOL.readiness(),

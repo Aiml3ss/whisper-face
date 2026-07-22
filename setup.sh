@@ -130,14 +130,15 @@ render_plist() {
 
 required=(
     dictate.py dictate.py.lock parrot_core.py voice_compiler.py
-    insertion_integrity.py personal_regression.py whisper_face_gui.py
+    insertion_integrity.py personal_regression.py acoustic_keyword_memory.py
+    whisper_face_gui.py
     native/ParrotASRHelper/Package.swift
     native/ParrotASRHelper/Package.resolved
     native/ParrotASRHelper/Sources/parrot-asr-helper/main.swift
     setup.ps1 Install.command Install.cmd
     com.berg.dictate.plist.template com.berg.ollama.plist.template
     snippets.template.json tones.template.json preferences.template.json
-    dictionary.template.txt
+    acoustic_keyword_memory.template.json dictionary.template.txt
     icons/faces/parrot-idle.svg icons/faces/parrot-talk.svg
     icons/faces/fox-idle.svg icons/faces/fox-talk.svg
     icons/faces/owl-idle.svg icons/faces/owl-talk.svg
@@ -298,7 +299,7 @@ step "downloading both Whisper models (~1.7 GB total)"
 
 # --- Private, per-machine state --------------------------------------------
 step "creating private per-machine files (existing files are preserved)"
-for name in snippets tones preferences dictionary; do
+for name in snippets tones preferences acoustic_keyword_memory dictionary; do
     destination="$DIR/$name.json"
     template="$DIR/$name.template.json"
     if [ "$name" = "dictionary" ]; then

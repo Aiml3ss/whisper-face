@@ -27,9 +27,12 @@ the bounded buffer is cleared after use, on pause, when disabled, and on quit.
 Whisper Face can keep a bounded `transcripts.jsonl` history containing raw and
 cleaned text plus timing, engine, confidence, compiler, and correction-burden
 telemetry. `learned.json`, `dictionary.txt`, and `snippets.json` hold local
-personalization. Logs can contain transcript fragments and diagnostic details.
-These files are not anonymous simply because they remain local. A person or
-backup product with access to the installed folder may be able to read them.
+personalization. `acoustic_keyword_memory.json` holds keyword candidates,
+salted app-scope hashes, and bounded evidence digests; it does not hold raw
+audio or transcript history. Logs can contain transcript fragments and
+diagnostic details. These files are not anonymous simply because they remain
+local. A person or backup product with access to the installed folder may be
+able to read them.
 
 Users can disable Flight Recorder, inspect or remove the local files, forget
 learned corrections in the Mac UI, or uninstall the checkout. Removing a local

@@ -132,8 +132,9 @@ profiles.
 - **Acoustic keyword memory foundation** — a strict local store can count
   unique observations and explicit confirmations for hard names without raw
   audio, transcript history, or unhashed app identifiers. It is exportable and
-  forgettable, but it deliberately has no recognition authority until a later
-  inspected runtime/UI integration earns it.
+  forgettable, and runtime status exposes only bounded counts and hashed scopes.
+  It deliberately has no recognition authority and no automatic observation
+  source until a later inspected UI/integration earns it.
 - **Personal Regression Lab** — confirmed correction mappings are evaluated
   against a private, deterministic suite of the user's exact corrected spans.
   Conflicting candidates are quarantined instead of silently becoming a bad
@@ -254,8 +255,10 @@ default behavior. Personal state is intentionally gitignored. To carry your
 MacBook vocabulary and preferences to a Mac mini, securely copy any desired
 `dictionary.txt`, `snippets.json`, `tones.json`, `preferences.json`, and
 `learned.json` files into the cloned folder **before** running `./setup.sh`.
-Existing copies are preserved and locked to user-only permissions. You do not
-need `transcripts.jsonl` unless you also want the old transcript history.
+Copy `acoustic_keyword_memory.json` as well if you want to preserve its
+inspectable candidate evidence. Existing copies are preserved and locked to
+user-only permissions. You do not need `transcripts.jsonl` unless you also want
+the old transcript history.
 
 **Headless / server Mac** (for experimental self-hosted clients):
 
@@ -300,7 +303,9 @@ On Windows, use **Right Alt** wherever the table says Right Option and the
 Everything personal stays in private, gitignored local files: `dictionary.txt`
 (your terms; `-word` bans one), `snippets.json`, `tones.json`, `preferences.json`,
 `transcripts.jsonl` (your history, trimmed to recent), and `learned.json`
-(mined vocabulary and fix rules).
+(mined vocabulary and fix rules). `acoustic_keyword_memory.json` stores bounded
+keyword candidates, hashed app scopes, and evidence digests without raw audio,
+surrounding context, or transcript history.
 
 Command mode intentionally recognizes only undo, redo, select all, copy, cut,
 paste, delete selection, new line, and escape. It cannot launch arbitrary shell
@@ -363,8 +368,10 @@ adapter, anonymous user population, telemetry backend, or network service.
 `delayed_cleanup_merge.py` provides a pure three-way merge for cleanup that
 finishes after insertion. It proposes changes only where the original span and
 unique boundary anchors remain untouched, rejects ambiguous or reordered text,
-and returns an explainable candidate without reading or writing any app. A
-transactional destination adapter is still required before runtime activation.
+and returns an explainable candidate. Its callback boundary requires two exact
+destination snapshots and a final atomic compare-and-swap, with content-free
+idempotent receipts. A real platform destination adapter is still required
+before runtime activation.
 
 ## Verify
 

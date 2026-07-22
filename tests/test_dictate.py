@@ -45,6 +45,10 @@ from voice_compiler import (  # noqa: E402
     WordEvidence,
 )
 from personal_regression import PersonalRegressionLab  # noqa: E402
+from acoustic_keyword_memory import (  # noqa: E402
+    AcousticKeywordMemory,
+    hash_app_scope,
+)
 from insertion_integrity import (  # noqa: E402
     DestinationObservation,
     InsertionCoordinator,
@@ -201,6 +205,139 @@ class FacePreferenceTests(unittest.TestCase):
         self.assertEqual(ns["hud_level_step"](0.9, 0.7, "recording", True), 0.0)
         self.assertGreater(
             ns["hud_level_step"](0.9, 0.0, "recording", False), 0.0)
+
+
+class AcousticKeywordMemoryRuntimeTests(unittest.TestCase):
+    @staticmethod
+    def runtime_namespace(path: Path):
+        namespace = load_definitions(
+            "atomic_write_text",
+            "_load_acoustic_keyword_memory",
+            "acoustic_keyword_memory_status_snapshot",
+            "export_acoustic_keyword_memory",
+            "forget_acoustic_keyword",
+            "forget_all_acoustic_keywords",
+            assignments={"ACOUSTIC_KEYWORD_MEMORY_LOCK"},
+            extra={
+                "AcousticKeywordMemory": AcousticKeywordMemory,
+                "os": os,
+                "tempfile": tempfile,
+                "Path": Path,
+            },
+        )
+        namespace["ACOUSTIC_KEYWORD_MEMORY_FILE"] = path
+        return namespace
+
+    def test_status_is_bounded_and_omits_keywords_evidence_and_app_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "acoustic_keyword_memory.json"
+            raw_app = "com.example.private-notes"
+            scope = hash_app_scope(raw_app, salt=b"private-test-salt")
+            memory = AcousticKeywordMemory()
+            memory.observe(
+                "SecretProjectName", evidence_id="private-utterance-1",
+                app_scope=scope)
+            path.write_text(memory.dumps(), encoding="utf-8")
+            namespace = self.runtime_namespace(path)
+
+            status = namespace["acoustic_keyword_memory_status_snapshot"]()
+            encoded = json.dumps(status)
+
+            self.assertEqual(status["storage_status"], "ready")
+            self.assertEqual(status["candidate_count"], 1)
+            self.assertEqual(status["eligible_count"], 0)
+            self.assertEqual(status["recognition_effect"], "none")
+            self.assertEqual(
+                status["candidate_summaries"][0]["scope_hash"], scope)
+            for private_value in (
+                    "SecretProjectName", "private-utterance-1", raw_app,
+                    "observation_tokens", "confirmation_tokens"):
+                self.assertNotIn(private_value, encoded)
+
+    def test_explicit_export_includes_keyword_but_not_evidence_tokens(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "acoustic_keyword_memory.json"
+            memory = AcousticKeywordMemory()
+            memory.observe("Qwen", evidence_id="private-utterance-1")
+            path.write_text(memory.dumps(), encoding="utf-8")
+            namespace = self.runtime_namespace(path)
+
+            exported = namespace["export_acoustic_keyword_memory"]()
+            encoded = json.dumps(exported)
+
+            self.assertEqual(exported["candidates"][0]["keyword"], "Qwen")
+            self.assertNotIn("private-utterance-1", encoded)
+            self.assertNotIn("observation_tokens", encoded)
+
+    def test_exact_and_all_forget_actions_atomically_persist(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "acoustic_keyword_memory.json"
+            memory = AcousticKeywordMemory()
+            memory.observe("Qwen", evidence_id="one")
+            memory.observe("Codex", evidence_id="two")
+            path.write_text(memory.dumps(), encoding="utf-8")
+            namespace = self.runtime_namespace(path)
+
+            self.assertTrue(namespace["forget_acoustic_keyword"]("Qwen"))
+            restored = AcousticKeywordMemory.loads(
+                path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [candidate.keyword for candidate in restored.candidates],
+                ["Codex"],
+            )
+            self.assertEqual(namespace["forget_all_acoustic_keywords"](), 1)
+            self.assertEqual(
+                AcousticKeywordMemory.loads(
+                    path.read_text(encoding="utf-8")).candidates,
+                (),
+            )
+            self.assertEqual(list(path.parent.glob(f".{path.name}.*")), [])
+
+    def test_malformed_state_fails_closed_until_explicit_forget_all(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "acoustic_keyword_memory.json"
+            path.write_text(
+                '{"keyword":"must-not-activate","transcript":"private"}',
+                encoding="utf-8",
+            )
+            namespace = self.runtime_namespace(path)
+
+            status = namespace["acoustic_keyword_memory_status_snapshot"]()
+            self.assertEqual(status["storage_status"], "invalid")
+            self.assertEqual(status["candidate_count"], 0)
+            self.assertEqual(status["candidate_summaries"], [])
+            with self.assertRaisesRegex(ValueError, "malformed"):
+                namespace["export_acoustic_keyword_memory"]()
+            with self.assertRaisesRegex(ValueError, "forget all"):
+                namespace["forget_acoustic_keyword"]("must-not-activate")
+
+            self.assertEqual(namespace["forget_all_acoustic_keywords"](), 0)
+            self.assertEqual(
+                AcousticKeywordMemory.loads(
+                    path.read_text(encoding="utf-8")).candidates,
+                (),
+            )
+
+    def test_final_processing_path_does_not_read_keyword_memory(self):
+        finish = next(
+            node for node in TREE.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "finish_and_process"
+        )
+        names = {
+            node.id for node in ast.walk(finish) if isinstance(node, ast.Name)
+        }
+        self.assertFalse(any("acoustic_keyword" in name for name in names))
+
+        status = next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "runtime_status_snapshot"
+        )
+        status_names = {
+            node.id for node in ast.walk(status) if isinstance(node, ast.Name)
+        }
+        self.assertIn("acoustic_keyword_memory_status_snapshot", status_names)
 
 
 class AudioPoolTests(unittest.TestCase):
