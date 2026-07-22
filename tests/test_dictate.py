@@ -50,6 +50,7 @@ from acoustic_keyword_memory import (  # noqa: E402
     AcousticKeywordMemory,
     hash_app_scope,
 )
+from acoustic_time_machine import AcousticTimeMachine  # noqa: E402
 from insertion_integrity import (  # noqa: E402
     DestinationObservation,
     InsertionCoordinator,
@@ -230,6 +231,8 @@ class FacePreferenceTests(unittest.TestCase):
                 assignments={"FACE_CHOICES", "DEFAULT_FACE", "PREFERENCES"},
                 extra={
                     "PREFERENCES_FILE": preferences,
+                    "IS_MACOS": True,
+                    "ACOUSTIC_TIME_MACHINE": AcousticTimeMachine(),
                     "json": json,
                     "atomic_write_text": lambda path, value:
                         path.write_text(value, encoding="utf-8"),
@@ -237,19 +240,48 @@ class FacePreferenceTests(unittest.TestCase):
             )
             preferences.write_text(json.dumps({
                 "flight_recorder": True,
+                "acoustic_time_machine": True,
                 "face": "dragon",
             }), encoding="utf-8")
             ns["load_preferences"]()
             self.assertEqual(ns["current_face"](), "parrot")
             self.assertTrue(ns["PREFERENCES"]["flight_recorder"])
+            self.assertTrue(ns["PREFERENCES"]["acoustic_time_machine"])
 
             ns["PREFERENCES"]["face"] = "FOX"
             ns["save_preferences"]()
             saved = json.loads(preferences.read_text(encoding="utf-8"))
             self.assertEqual(saved, {
                 "flight_recorder": True,
+                "acoustic_time_machine": True,
                 "face": "fox",
             })
+
+    def test_acoustic_time_machine_preference_is_mac_only_and_defaults_off(self):
+        for is_macos, configured, expected in (
+                (True, True, True), (True, False, False),
+                (False, True, False)):
+            with self.subTest(is_macos=is_macos, configured=configured):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "preferences.json"
+                    path.write_text(json.dumps({
+                        "acoustic_time_machine": configured,
+                    }), encoding="utf-8")
+                    buffer = AcousticTimeMachine()
+                    ns = load_definitions(
+                        "normalize_face", "load_preferences",
+                        assignments={"FACE_CHOICES", "DEFAULT_FACE", "PREFERENCES"},
+                        extra={
+                            "PREFERENCES_FILE": path,
+                            "IS_MACOS": is_macos,
+                            "ACOUSTIC_TIME_MACHINE": buffer,
+                            "json": json,
+                        },
+                    )
+                    ns["load_preferences"]()
+                    self.assertIs(
+                        ns["PREFERENCES"]["acoustic_time_machine"], expected)
+                    self.assertIs(buffer.enabled, expected)
 
     def test_all_default_faces_are_supported(self):
         ns = load_definitions(
@@ -2846,6 +2878,64 @@ class ConsequenceRuntimeProjectionTests(unittest.TestCase):
         self.assertLess(sorted(samples)[189], 0.005)
         self.assertEqual(
             ns["consequence_state_snapshot"]()["route"], "review")
+
+
+class AcousticTimeMachineRuntimeTests(unittest.TestCase):
+    def _namespace(self, *, enabled):
+        buffer = AcousticTimeMachine(enabled=enabled)
+        state = {"span_ids": [], "lock": threading.RLock(), "sound": None}
+        ns = load_definitions(
+            "clear_retained_consequence_spans",
+            "retain_consequence_microspans",
+            "acoustic_time_machine_status_snapshot",
+            extra={
+                "ACOUSTIC_TIME_MACHINE": buffer,
+                "ACOUSTIC_TIME_MACHINE_STATE": state,
+                "IS_MACOS": True,
+                "PREFERENCES": {"acoustic_time_machine": enabled},
+                "SAMPLE_RATE": 16_000,
+                "math": __import__("math"),
+            },
+        )
+        return ns, buffer, state
+
+    def test_disabled_retention_does_not_read_audio(self):
+        class ForbiddenAudio:
+            def __len__(self):
+                raise AssertionError("disabled retention inspected audio")
+
+            def __getitem__(self, _key):
+                raise AssertionError("disabled retention sliced audio")
+
+        ns, buffer, _state = self._namespace(enabled=False)
+        plan = SimpleNamespace(relisten_requests=(
+            SimpleNamespace(start=0.001, end=0.002),
+        ))
+
+        self.assertEqual(ns["retain_consequence_microspans"](
+            ForbiddenAudio(), plan, sample_rate=16_000), 0)
+        self.assertEqual(buffer.span_count, 0)
+
+    def test_exact_selected_span_is_retained_and_clear_drops_it(self):
+        ns, buffer, state = self._namespace(enabled=True)
+        audio = np.linspace(-1.0, 1.0, 64, dtype=np.float32)
+        plan = SimpleNamespace(relisten_requests=(
+            SimpleNamespace(start=16 / 16_000, end=24 / 16_000),
+        ))
+
+        self.assertEqual(ns["retain_consequence_microspans"](
+            audio, plan, sample_rate=16_000), 1)
+        retained = buffer.read(state["span_ids"][0]).audio
+        self.assertEqual(
+            retained.samples, tuple(float(value) for value in audio[16:24]))
+        self.assertEqual(ns["acoustic_time_machine_status_snapshot"](), {
+            "enabled": True,
+            "retained_spans": 1,
+        })
+
+        ns["clear_retained_consequence_spans"]()
+        self.assertEqual(buffer.span_count, 0)
+        self.assertEqual(state["span_ids"], [])
 
 
 class ContextFirewallRuntimeProjectionTests(unittest.TestCase):

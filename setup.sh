@@ -131,6 +131,7 @@ render_plist() {
 required=(
     dictate.py dictate.py.lock parrot_core.py voice_compiler.py
     insertion_integrity.py personal_regression.py acoustic_keyword_memory.py
+    acoustic_time_machine.py
     whisper_face_gui.py
     native/ParrotASRHelper/Package.swift
     native/ParrotASRHelper/Package.resolved

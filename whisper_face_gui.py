@@ -172,7 +172,18 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "results.relisten.inconclusive": "inconclusive",
         "results.relisten.mixed": "mixed",
         "results.relisten.unavailable": "unavailable",
-        "results.privacy": "Whisper Face exposes decision counts, not private transcript text, in this settings window.",
+        "results.audio.off": "Acoustic replay is off",
+        "results.audio.empty": "No consequential span retained for this result",
+        "results.audio.available.one": "1 consequential span retained in RAM",
+        "results.audio.available.many": "{count} consequential spans retained in RAM",
+        "results.audio.play": "Play Span",
+        "results.audio.clear": "Clear",
+        "results.audio.play.help": "Play one selected consequential span directly from memory; repeated presses move through the retained spans. No temporary file is created.",
+        "results.audio.clear.help": "Immediately forget every audio span retained for the latest result.",
+        "results.audio.notice.played": "Playing the retained consequential span from memory",
+        "results.audio.notice.cleared": "Retained consequential audio cleared",
+        "results.audio.notice.unavailable": "No retained consequential span is available",
+        "results.privacy": "Audio replay is off by default. When enabled, only selected consequential spans from the latest result stay in RAM; they are never written, logged, or sent.",
         "results.value.words": "{count} words",
         "results.value.confidence": " · {confidence} confidence",
         "results.value.none_reported": "None reported",
@@ -197,6 +208,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "results.accessibility.firewall": "Context safety shadow receipt",
         "results.accessibility.consequence": "Consequence decision receipt",
         "results.accessibility.consequence_advisory": "Review guidance",
+        "results.accessibility.audio": "Acoustic replay privacy status",
         "models.title": "Your local voice stack",
         "models.subtitle": "Fast recognition, accurate fallback, and private cleanup.",
         "models.waiting": "Waiting for model status",
@@ -353,6 +365,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.privacy.title": "Privacy controls",
         "settings.privacy.flight": "Flight Recorder",
         "settings.privacy.flight.detail": "Keeps a rolling 20-second audio buffer in RAM only.",
+        "settings.privacy.acoustic": "Acoustic Time Machine",
+        "settings.privacy.acoustic.detail": "Opt in to keep only selected consequential spans from the latest result in RAM.",
         "settings.privacy.face": "Companion",
         "settings.face.parrot": "Parrot",
         "settings.face.fox": "Fox",
@@ -371,6 +385,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.accessibility.face.help": "Choose the animal shown in the menu bar and listening HUD.",
         "settings.accessibility.flight.label": "Flight Recorder",
         "settings.accessibility.flight.help": "Toggle the rolling twenty second audio buffer held only in memory.",
+        "settings.accessibility.acoustic.label": "Acoustic Time Machine",
+        "settings.accessibility.acoustic.help": "Opt in to selected consequential audio replay. Disabling immediately clears retained audio.",
         "settings.accessibility.privacy_summary.label": "Privacy status",
         "settings.accessibility.diagnostics.help": "Open local service, permission, model, and installation diagnostics.",
         "settings.accessibility.tones_summary.label": "App tones summary",
@@ -427,6 +443,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "operation.keyword.forget_failed": "Could not forget pronunciation keyword: {error}",
         "operation.face.change_failed": "Could not change face: {error}",
         "operation.flight.update_failed": "Could not update Flight Recorder: {error}",
+        "operation.acoustic.update_failed": "Could not update Acoustic Time Machine: {error}",
+        "operation.acoustic.play_failed": "Could not play retained audio: {error}",
+        "operation.acoustic.clear_failed": "Could not clear retained audio: {error}",
         "operation.log.open_failed": "Could not open log: {error}",
         "operation.support_snapshot.copy_failed": "Could not copy support snapshot: {error}",
         "operation.source.open_failed": "Could not open source and license: {error}",
@@ -507,6 +526,9 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "forget_all_acoustic_keywords",
             "choose_face",
             "set_flight_recorder",
+            "set_acoustic_time_machine",
+            "play_retained_span",
+            "clear_retained_spans",
         ),
         accessibility_catalog_keys=(
             "overview.accessibility.phase",
@@ -524,6 +546,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "settings.accessibility.category.label",
             "settings.accessibility.face.label",
             "settings.accessibility.flight.label",
+            "settings.accessibility.acoustic.label",
             "settings.dialog.tone.app.label",
             "settings.dialog.tone.choice.label",
             "settings.dialog.snippet.chooser.label",
@@ -534,6 +557,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "settings.dialog.correction.chooser.label",
             "settings.dialog.keywords.chooser.label",
             "results.accessibility.firewall",
+            "results.accessibility.audio",
             "models.accessibility.guidance",
             "diagnostics.accessibility.verification",
         ),
@@ -560,6 +584,9 @@ class GUIActions:
     settings_snapshot: Callable[[], Mapping[str, Any]] = lambda: {}
     set_face: Callable[[str], None] = _noop
     set_flight_recorder: Callable[[bool], None] = _noop
+    set_acoustic_time_machine: Callable[[bool], None] = _noop
+    play_retained_span: Callable[[], bool] = lambda: False
+    clear_retained_spans: Callable[[], None] = _noop
     set_app_tone: Callable[[str, str], None] = _noop
     save_snippet: Callable[[str, str | None, str], None] = _noop
     delete_snippet: Callable[[str, str], None] = _noop
@@ -694,6 +721,8 @@ class ResultInspection:
         "results.firewall.unavailable")
     consequence_summary: str = localized_string("results.consequence.empty")
     consequence_advisory: str = ""
+    retained_span_count: int = 0
+    acoustic_replay_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -704,6 +733,7 @@ class GUIState:
     face: str = "parrot"
     flight_recorder: bool = False
     flight_state: str = localized_string("default.flight.off")
+    acoustic_time_machine: bool = False
     active_engine: str = localized_string("overview.engine.waiting")
     last_latency_ms: float | None = None
     last_word_count: int | None = None
@@ -1279,6 +1309,9 @@ def _build_result_inspection(
         consequence_advisory=(
             copy("results.consequence.review.advisory")
             if route == "review" else ""),
+        retained_span_count=min(2, _nonnegative_int(
+            source.get("retained_consequence_spans"))),
+        acoustic_replay_enabled=source.get("acoustic_time_machine") is True,
     )
 
 
@@ -1454,6 +1487,7 @@ def normalize_snapshot(
         flight_state=_clean_text(
             source.get("flight_state"), localized_string(
                 "default.flight.off", locale=locale)),
+        acoustic_time_machine=source.get("acoustic_time_machine") is True,
         active_engine=active_engine,
         last_latency_ms=normalized_latency,
         last_word_count=last_word_count,
@@ -1883,6 +1917,54 @@ class WhisperFaceViewModel:
                 notice_level="error")
         return self.state
 
+    def set_acoustic_time_machine(self, enabled: bool) -> GUIState:
+        desired = bool(enabled)
+        try:
+            self.actions.set_acoustic_time_machine(desired)
+            self.state = replace(
+                self.state, acoustic_time_machine=desired, notice="",
+                notice_level="info")
+            return self.refresh()
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.acoustic.update_failed", error=error),
+                notice_level="error")
+        return self.state
+
+    def play_retained_span(self) -> GUIState:
+        try:
+            played = bool(self.actions.play_retained_span())
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "results.audio.notice.played" if played else
+                    "results.audio.notice.unavailable"),
+                notice_level="success" if played else "info",
+            )
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.acoustic.play_failed", error=error),
+                notice_level="error")
+        return self.state
+
+    def clear_retained_spans(self) -> GUIState:
+        try:
+            self.actions.clear_retained_spans()
+            self.refresh()
+            self.state = replace(
+                self.state,
+                notice=self.localized("results.audio.notice.cleared"),
+                notice_level="success",
+            )
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.acoustic.clear_failed", error=error),
+                notice_level="error")
+        return self.state
+
     def set_paused(self, paused: bool) -> GUIState:
         desired = bool(paused)
         try:
@@ -2240,7 +2322,10 @@ if APPKIT_AVAILABLE:
                     self.dynamic["review_issue_button"],
                     self.dynamic["copy_outbox_button"],
                 ),
-                "Results": (),
+                "Results": (
+                    self.dynamic["result_play_audio_button"],
+                    self.dynamic["result_clear_audio_button"],
+                ),
                 "Settings": (self.dynamic["settings_pane_control"],),
                 "Models": (),
                 "Diagnostics": (
@@ -2360,14 +2445,28 @@ if APPKIT_AVAILABLE:
                 self._l("results.summary.empty"), NSMakeRect(20, 45, 430, 27),
                 size=18, weight="bold")
             result_engine = _label(
-                self._l("results.engine.waiting"), NSMakeRect(20, 18, 500, 20),
+                self._l("results.engine.waiting"), NSMakeRect(20, 26, 500, 20),
                 size=12, color=_SECONDARY)
+            result_audio = _label(
+                self._l("results.audio.off"), NSMakeRect(20, 7, 500, 18),
+                size=10, color=_SECONDARY)
             result_mode = _label(
                 self._l("results.mode.capture"), NSMakeRect(620, 39, 110, 22),
                 size=12, weight="medium", color=_ACCENT)
+            play_audio = _button(
+                self._l("results.audio.play"), NSMakeRect(532, 6, 102, 30),
+                self, "playRetainedSpan:",
+                help_text=self._l("results.audio.play.help"))
+            clear_audio = _button(
+                self._l("results.audio.clear"), NSMakeRect(640, 6, 92, 30),
+                self, "clearRetainedSpans:",
+                help_text=self._l("results.audio.clear.help"))
             summary_card.addSubview_(result_summary)
             summary_card.addSubview_(result_engine)
+            summary_card.addSubview_(result_audio)
             summary_card.addSubview_(result_mode)
+            summary_card.addSubview_(play_audio)
+            summary_card.addSubview_(clear_audio)
             page.addSubview_(summary_card)
 
             evidence_card = _card(NSMakeRect(0, 83, 758, 125))
@@ -2410,11 +2509,14 @@ if APPKIT_AVAILABLE:
             page.addSubview_(consequence_advisory)
             page.addSubview_(_label(
                 self._l("results.privacy"),
-                NSMakeRect(5, 1, 740, 11), size=9, color=_SECONDARY))
+                NSMakeRect(5, 0, 740, 12), size=8, color=_SECONDARY))
             self.dynamic.update(
                 result_summary=result_summary,
                 result_engine=result_engine,
                 result_mode=result_mode,
+                result_audio=result_audio,
+                result_play_audio_button=play_audio,
+                result_clear_audio_button=clear_audio,
                 result_context=context,
                 result_firewall=firewall,
                 result_consequence=consequence,
@@ -2516,12 +2618,12 @@ if APPKIT_AVAILABLE:
             privacy.addSubview_(_label(
                 self._l("settings.privacy.title"),
                 NSMakeRect(5, 238, 500, 22), size=14, weight="medium"))
-            face_card = _card(NSMakeRect(0, 137, 758, 84))
+            face_card = _card(NSMakeRect(0, 151, 758, 70))
             face_card.addSubview_(_label(
                 self._l("settings.privacy.face"),
-                NSMakeRect(18, 53, 200, 20), size=13, weight="bold"))
+                NSMakeRect(18, 45, 200, 20), size=13, weight="bold"))
             picker = NSSegmentedControl.alloc().initWithFrame_(
-                NSMakeRect(18, 12, 720, 36))
+                NSMakeRect(18, 7, 720, 34))
             picker.setSegmentCount_(len(FACES))
             picker.setSegmentStyle_(NSSegmentStyleRounded)
             for index, face in enumerate(FACES):
@@ -2538,14 +2640,14 @@ if APPKIT_AVAILABLE:
             face_card.addSubview_(picker)
             privacy.addSubview_(face_card)
 
-            flight_card = _card(NSMakeRect(0, 35, 758, 84))
+            flight_card = _card(NSMakeRect(0, 81, 758, 60))
             flight_card.addSubview_(_label(
                 self._l("settings.privacy.flight"),
-                NSMakeRect(18, 50, 260, 22), size=14, weight="bold"))
+                NSMakeRect(18, 34, 260, 22), size=13, weight="bold"))
             flight_card.addSubview_(_label(
                 self._l("settings.privacy.flight.detail"),
-                NSMakeRect(18, 24, 535, 20), size=11, color=_SECONDARY))
-            flight = NSButton.alloc().initWithFrame_(NSMakeRect(625, 26, 110, 32))
+                NSMakeRect(18, 11, 535, 20), size=10, color=_SECONDARY))
+            flight = NSButton.alloc().initWithFrame_(NSMakeRect(625, 14, 110, 32))
             flight.setButtonType_(3)
             flight.setTitle_(self._l("settings.state.enabled"))
             flight.setTarget_(self)
@@ -2556,9 +2658,28 @@ if APPKIT_AVAILABLE:
                 self._l("settings.accessibility.flight.help"))
             flight_card.addSubview_(flight)
             privacy.addSubview_(flight_card)
+            acoustic_card = _card(NSMakeRect(0, 11, 758, 60))
+            acoustic_card.addSubview_(_label(
+                self._l("settings.privacy.acoustic"),
+                NSMakeRect(18, 34, 280, 22), size=13, weight="bold"))
+            acoustic_card.addSubview_(_label(
+                self._l("settings.privacy.acoustic.detail"),
+                NSMakeRect(18, 11, 580, 20), size=10, color=_SECONDARY))
+            acoustic = NSButton.alloc().initWithFrame_(
+                NSMakeRect(625, 14, 110, 32))
+            acoustic.setButtonType_(3)
+            acoustic.setTitle_(self._l("settings.state.enabled"))
+            acoustic.setTarget_(self)
+            acoustic.setAction_("acousticTimeMachineChanged:")
+            _accessible(
+                acoustic,
+                self._l("settings.accessibility.acoustic.label"),
+                self._l("settings.accessibility.acoustic.help"))
+            acoustic_card.addSubview_(acoustic)
+            privacy.addSubview_(acoustic_card)
             privacy_summary = _label(
                 self._l("settings.state.local_processing"),
-                NSMakeRect(5, 5, 700, 20),
+                NSMakeRect(5, 0, 580, 11),
                 size=11, weight="medium", color=_ACCENT)
             privacy.addSubview_(privacy_summary)
             diagnostics = _button(
@@ -2577,10 +2698,11 @@ if APPKIT_AVAILABLE:
                 settings_key_views={
                     "Modes": (),
                     "Personalize": tuple(personalize_key_views),
-                    "Privacy": (picker, flight, diagnostics),
+                    "Privacy": (picker, flight, acoustic, diagnostics),
                 },
                 face_picker=picker,
                 flight_toggle=flight,
+                acoustic_time_machine_toggle=acoustic,
                 privacy_summary=privacy_summary,
                 diagnostics_button=diagnostics,
             )
@@ -2902,6 +3024,22 @@ if APPKIT_AVAILABLE:
                 not bool(result.consequence_advisory))
             self.dynamic["result_consequence_advisory"].setTextColor_(
                 _REVIEW if result.consequence_advisory else _SECONDARY)
+            if not result.acoustic_replay_enabled:
+                replay_copy = self._l("results.audio.off")
+            elif result.retained_span_count == 0:
+                replay_copy = self._l("results.audio.empty")
+            elif result.retained_span_count == 1:
+                replay_copy = self._l("results.audio.available.one")
+            else:
+                replay_copy = self._l(
+                    "results.audio.available.many",
+                    count=result.retained_span_count)
+            self.dynamic["result_audio"].setStringValue_(replay_copy)
+            has_replay = (
+                result.acoustic_replay_enabled
+                and result.retained_span_count > 0)
+            self.dynamic["result_play_audio_button"].setEnabled_(has_replay)
+            self.dynamic["result_clear_audio_button"].setEnabled_(has_replay)
             for key, label_key in (
                 ("result_summary", "results.accessibility.summary"),
                 ("result_engine", "results.accessibility.engine"),
@@ -2917,6 +3055,7 @@ if APPKIT_AVAILABLE:
                 ("result_consequence", "results.accessibility.consequence"),
                 ("result_consequence_advisory",
                  "results.accessibility.consequence_advisory"),
+                ("result_audio", "results.accessibility.audio"),
             ):
                 sync_accessibility(
                     self.dynamic[key],
@@ -2970,6 +3109,16 @@ if APPKIT_AVAILABLE:
                 self.dynamic["flight_toggle"], state.flight_state,
                 label=self._l(
                     "settings.accessibility.flight.label"),
+            )
+            self.dynamic["acoustic_time_machine_toggle"].setState_(
+                NSControlStateValueOn if state.acoustic_time_machine
+                else NSControlStateValueOff)
+            sync_accessibility(
+                self.dynamic["acoustic_time_machine_toggle"],
+                (self._l("settings.state.enabled")
+                 if state.acoustic_time_machine else self._l(
+                     "results.audio.off")),
+                label=self._l("settings.accessibility.acoustic.label"),
             )
             self.dynamic["privacy_summary"].setStringValue_(state.privacy_summary)
             sync_accessibility(
@@ -3385,6 +3534,19 @@ if APPKIT_AVAILABLE:
         def flightChanged_(self, sender: Any) -> None:
             enabled = sender.state() == NSControlStateValueOn
             self.view_model.set_flight_recorder(enabled)
+            self.render()
+
+        def acousticTimeMachineChanged_(self, sender: Any) -> None:
+            enabled = sender.state() == NSControlStateValueOn
+            self.view_model.set_acoustic_time_machine(enabled)
+            self.render()
+
+        def playRetainedSpan_(self, _sender: Any) -> None:
+            self.view_model.play_retained_span()
+            self.render()
+
+        def clearRetainedSpans_(self, _sender: Any) -> None:
+            self.view_model.clear_retained_spans()
             self.render()
 
         def pauseChanged_(self, _sender: Any) -> None:
