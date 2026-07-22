@@ -149,11 +149,20 @@ class ProcessIsolatedVerifier:
         return VerificationReceipt(refusal=reason)
 
     @staticmethod
-    def _stop(process: multiprocessing.Process) -> None:
+    def _stop(
+            process: multiprocessing.Process, *, graceful_result: bool = False,
+    ) -> None:
         """Ensure no worker can continue using request data after return."""
         if not process.is_alive():
             process.join()
             return
+        if graceful_result:
+            # A worker that already sent its one result is returning normally.
+            # Let provider cleanup run before the hard-stop fallback so ML
+            # runtimes do not strand multiprocessing resources.
+            process.join(0.25)
+            if not process.is_alive():
+                return
         process.terminate()
         process.join(0.1)
         if process.is_alive():
@@ -191,6 +200,7 @@ class ProcessIsolatedVerifier:
             target=_run_worker,
             args=(self._worker, request, sender),
         )
+        result_received = False
         try:
             try:
                 process.start()
@@ -204,6 +214,7 @@ class ProcessIsolatedVerifier:
                 return self._refused(RefusalReason.TIMEOUT)
             try:
                 payload = receiver.recv()
+                result_received = True
             except (EOFError, OSError):
                 return self._refused(RefusalReason.CRASH)
             except Exception:
@@ -223,4 +234,12 @@ class ProcessIsolatedVerifier:
         finally:
             receiver.close()
             if process.pid is not None:
-                self._stop(process)
+                try:
+                    self._stop(process, graceful_result=result_received)
+                finally:
+                    close_process = getattr(process, "close", None)
+                    if close_process is not None:
+                        try:
+                            close_process()
+                        except (OSError, ValueError):
+                            pass

@@ -201,6 +201,10 @@ class SnapshotTests(unittest.TestCase):
                 "operation.acoustic.play_failed",
                 "operation.acoustic.clear_failed",
                 "operation.voice_objects.update_failed",
+                "operation.voice_objects.inspect_failed",
+                "operation.voice_objects.reveal_failed",
+                "operation.voice_objects.transition_failed",
+                "operation.voice_objects.purge_failed",
                 "operation.log.open_failed",
                 "operation.support_snapshot.copy_failed",
                 "operation.source.open_failed",
@@ -690,6 +694,8 @@ class ViewModelTests(unittest.TestCase):
         }
         self.calls = []
         self.keyword_reads = 0
+        self.voice_draft_inspections = 0
+        self.voice_draft_reveals = 0
         self.private_settings = {
             "app_tones": [{
                 "bundle": "com.example.mail", "name": "Mail", "tone": "auto"}],
@@ -741,6 +747,25 @@ class ViewModelTests(unittest.TestCase):
             self.keyword_reads += 1
             return SnapshotTests.keyword_export()
 
+        def inspect_voice_drafts():
+            self.voice_draft_inspections += 1
+            return ({
+                "item_id": "voice-object:utterance-1",
+                "sequence": 1,
+                "destination": "task",
+                "state": "queued",
+            },)
+
+        def reveal_voice_draft(item_id):
+            self.voice_draft_reveals += 1
+            self.calls.append(("reveal_voice_draft", item_id))
+            return {
+                "sequence": 1,
+                "destination": "task",
+                "state": "queued",
+                "content": "Title: private launch plan",
+            }
+
         self.actions = GUIActions(
             status_snapshot=lambda: dict(self.runtime),
             settings_snapshot=lambda: dict(self.private_settings),
@@ -748,6 +773,14 @@ class ViewModelTests(unittest.TestCase):
             set_flight_recorder=set_flight,
             set_acoustic_time_machine=set_acoustic,
             set_voice_object_commands=set_voice_objects,
+            inspect_voice_object_drafts=inspect_voice_drafts,
+            reveal_voice_object_draft=reveal_voice_draft,
+            acknowledge_voice_object_draft=lambda item_id:
+                self.calls.append(("ack_voice_draft", item_id)) or True,
+            cancel_voice_object_draft=lambda item_id:
+                self.calls.append(("cancel_voice_draft", item_id)) or True,
+            purge_terminal_voice_object_drafts=lambda:
+                self.calls.append(("purge_voice_drafts",)) or 2,
             play_retained_span=lambda:
                 self.calls.append(("play_retained",)) or True,
             clear_retained_spans=clear_acoustic,
@@ -852,6 +885,47 @@ class ViewModelTests(unittest.TestCase):
             "Nothing is sent or scheduled",
             localized_string("settings.accessibility.voice_objects.help"),
         )
+
+    def test_voice_inbox_content_is_lazy_transient_and_actions_are_explicit(self):
+        self.model.refresh()
+        self.assertEqual(self.voice_draft_inspections, 0)
+        self.assertEqual(self.voice_draft_reveals, 0)
+        self.assertNotIn("private launch plan", repr(self.model.state))
+
+        drafts = self.model.inspect_voice_object_drafts()
+        self.assertEqual(self.voice_draft_inspections, 1)
+        self.assertEqual(self.voice_draft_reveals, 0)
+        self.assertEqual(drafts[0].destination, "task")
+        self.assertNotIn("voice-object:utterance-1", repr(drafts[0]))
+
+        revealed = self.model.reveal_voice_object_draft(drafts[0])
+        self.assertEqual(self.voice_draft_reveals, 1)
+        self.assertIn("private launch plan", revealed.content)
+        self.assertNotIn("private launch plan", repr(revealed))
+        self.assertNotIn("private launch plan", repr(self.model.state))
+
+        self.model.transition_voice_object_draft(
+            drafts[0], target="acknowledged")
+        self.assertIn(
+            ("ack_voice_draft", "voice-object:utterance-1"), self.calls)
+        self.model.inspect_voice_object_drafts()
+        self.model.transition_voice_object_draft(
+            drafts[0], target="cancelled")
+        self.assertIn(
+            ("cancel_voice_draft", "voice-object:utterance-1"), self.calls)
+        self.model.purge_terminal_voice_object_drafts()
+        self.assertIn(("purge_voice_drafts",), self.calls)
+
+    def test_voice_inbox_reveal_requires_metadata_from_explicit_inspection(self):
+        from whisper_face_gui import VoiceDraftMetadata
+
+        forged = VoiceDraftMetadata(
+            "voice-object:utterance-1", 1, "task", "queued")
+        with self.assertRaisesRegex(ValueError, "Could not reveal"):
+            self.model.reveal_voice_object_draft(forged)
+
+        self.assertEqual(self.voice_draft_inspections, 0)
+        self.assertEqual(self.voice_draft_reveals, 0)
 
     def test_unified_settings_load_only_on_navigation_and_all_panes_work(self):
         self.assertEqual(self.model.state.settings.snippets, ())

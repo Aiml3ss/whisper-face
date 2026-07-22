@@ -190,6 +190,10 @@ class PrewarmedVerifierSupervisor:
                     and process.is_alive()):
                 try:
                     connection.send(_CLOSE)
+                    # Allow model/provider teardown to run normally before the
+                    # hard-stop fallback. Immediate terminate can strand
+                    # provider-owned multiprocessing resources at shutdown.
+                    process.join(0.5)
                 except Exception:
                     pass
             self._discard_locked()

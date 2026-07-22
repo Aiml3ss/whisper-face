@@ -20,7 +20,12 @@ from test_dictate import load_definitions  # noqa: E402
 from voice_inbox import InboxState, VoiceInbox  # noqa: E402
 from voice_object_command_parser import parse_command  # noqa: E402
 from voice_object_inbox_bridge import VoiceObjectInboxBridge  # noqa: E402
-from voice_objects import TaskDraft  # noqa: E402
+from voice_objects import (  # noqa: E402
+    CalendarDraft,
+    EmailDraft,
+    PlainTextDraft,
+    TaskDraft,
+)
 
 
 def runtime_namespace(path: Path, *, enabled: bool, is_macos: bool):
@@ -29,6 +34,12 @@ def runtime_namespace(path: Path, *, enabled: bool, is_macos: bool):
         "_existing_voice_object_inbox_queued_count",
         "set_voice_object_commands_enabled",
         "voice_object_inbox_status",
+        "inspect_voice_object_drafts",
+        "_voice_object_draft_content",
+        "reveal_voice_object_draft",
+        "acknowledge_voice_object_draft",
+        "cancel_voice_object_draft",
+        "purge_terminal_voice_object_drafts",
         "queue_voice_object_command",
         extra={
             "VOICE_OBJECT_INBOX_STATE": {
@@ -39,6 +50,10 @@ def runtime_namespace(path: Path, *, enabled: bool, is_macos: bool):
             "VoiceObjectInboxBridge": VoiceObjectInboxBridge,
             "InboxState": InboxState,
             "parse_command": parse_command,
+            "PlainTextDraft": PlainTextDraft,
+            "EmailDraft": EmailDraft,
+            "TaskDraft": TaskDraft,
+            "CalendarDraft": CalendarDraft,
             "PREFERENCES": {"voice_object_commands": enabled},
             "IS_MACOS": is_macos,
             "save_preferences": lambda: None,
@@ -131,6 +146,11 @@ class VoiceObjectCommandRuntimeTests(unittest.TestCase):
             })
             self.assertIsNone(runtime["VOICE_OBJECT_INBOX_STATE"]["inbox"])
             self.assertIsNone(runtime["VOICE_OBJECT_INBOX_STATE"]["bridge"])
+            metadata = runtime["inspect_voice_object_drafts"]()
+            self.assertEqual(len(metadata), 1)
+            revealed = runtime["reveal_voice_object_draft"](
+                metadata[0]["item_id"])
+            self.assertIn("Existing local draft", revealed["content"])
             self.assertEqual(len(VoiceInbox(path).items()), 1)
 
     def test_status_is_content_free(self):
@@ -143,6 +163,57 @@ class VoiceObjectCommandRuntimeTests(unittest.TestCase):
 
             self.assertNotIn(
                 secret, json.dumps(runtime["voice_object_inbox_status"]()))
+
+    def test_explicit_inspector_reveals_then_manages_inert_drafts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "voice_inbox.json"
+            runtime = runtime_namespace(path, enabled=True, is_macos=True)
+            first_secret = "Project Bluebird budget 8492"
+            second_secret = "Project Heron launch 73"
+            self.assertTrue(runtime["queue_voice_object_command"](
+                f"create task: {first_secret}", "utterance-10"))
+            self.assertTrue(runtime["queue_voice_object_command"](
+                f"create task: {second_secret}", "utterance-11"))
+
+            metadata = runtime["inspect_voice_object_drafts"]()
+            self.assertEqual(len(metadata), 2)
+            encoded_metadata = json.dumps(metadata)
+            self.assertNotIn(first_secret, encoded_metadata)
+            self.assertNotIn(second_secret, encoded_metadata)
+            self.assertEqual(
+                set(metadata[0]),
+                {"item_id", "sequence", "destination", "state"},
+            )
+
+            revealed = runtime["reveal_voice_object_draft"](
+                metadata[0]["item_id"])
+            self.assertIn(first_secret, revealed["content"])
+            self.assertNotIn(second_secret, revealed["content"])
+            self.assertTrue(runtime["acknowledge_voice_object_draft"](
+                metadata[0]["item_id"]))
+            self.assertTrue(runtime["acknowledge_voice_object_draft"](
+                metadata[0]["item_id"]))
+            self.assertTrue(runtime["cancel_voice_object_draft"](
+                metadata[1]["item_id"]))
+            self.assertEqual(runtime["voice_object_inbox_status"](), {
+                "enabled": True, "queued_count": 0, "status": "Ready",
+            })
+            self.assertEqual(
+                runtime["purge_terminal_voice_object_drafts"](), 2)
+            self.assertEqual(VoiceInbox(path).items(), ())
+
+    def test_windows_inspector_actions_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "voice_inbox.json"
+            runtime = runtime_namespace(path, enabled=True, is_macos=False)
+
+            self.assertEqual(runtime["inspect_voice_object_drafts"](), ())
+            self.assertIsNone(runtime["reveal_voice_object_draft"]("draft-1"))
+            self.assertFalse(runtime["acknowledge_voice_object_draft"](
+                "draft-1"))
+            self.assertFalse(runtime["cancel_voice_object_draft"]("draft-1"))
+            self.assertIsNone(runtime["purge_terminal_voice_object_drafts"]())
+            self.assertFalse(path.exists())
 
 
 if __name__ == "__main__":

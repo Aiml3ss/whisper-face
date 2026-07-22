@@ -349,6 +349,13 @@ opened in another app; all other speech follows the normal paste path.
 Turning the setting off stops new diversion but leaves already queued local
 drafts intact.
 
+Choose **Inspect** beside Voice Object Commands to open the local Voice Inbox.
+The first view lists only bounded draft number, type, and state. Draft text is
+read only after you explicitly choose **Reveal**. You can acknowledge or cancel
+a selected draft and purge acknowledged/cancelled drafts; queued drafts are not
+purged. The inspector never sends, schedules, launches, executes, or copies a
+draft, and it remains available when command diversion is turned off.
+
 The bundled `EDIT ME` values are setup placeholders. On Mac, insert one and
 replace the pasted placeholder in place within ten seconds; Whisper Face saves
 that exact replacement to `snippets.json`. You can also edit the private JSON file
