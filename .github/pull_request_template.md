@@ -63,11 +63,13 @@ before submitting outside contributions.
 - [ ] `uv run tests/test_competitor_benchmark.py`
 - [ ] `uv run tests/test_public_scorecard.py`
 - [ ] `uv run tests/test_personal_regression.py`
+- [ ] `uv run tests/test_support_bundle.py`
 - [ ] `uv run tests/test_whisper_face_gui.py`
 - [ ] `uv run --locked --script dictate.py --native-gui-smoke-test`
 - [ ] `uv run tests/test_installers.py`
 - [ ] `uv run tests/test_repository_governance.py`
 - [ ] `uv run tests/test_macos_distribution.py`
 - [ ] `uv run tests/test_safe_update_advisor.py`
+- [ ] `uv run tests/test_side_by_side_update.py`
 - [ ] Live Mac or Windows installer verification was run, or the unavailable
       platform is explicitly disclosed.

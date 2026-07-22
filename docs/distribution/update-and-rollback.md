@@ -1,8 +1,7 @@
 # Update and rollback
 
-Whisper Face currently updates from its source checkout; it does not have an
-automatic updater. Keep the checkout you installed from, and make a backup of
-your private files before changing versions.
+Whisper Face has no automatic updater. Keep the checkout you installed from,
+and make a backup of your private files before changing versions.
 
 ## Before an update
 
@@ -70,6 +69,44 @@ The current manifest must describe the installed version and exact revision;
 its HTTPS rollback linkage must identify the locally verified older manifest,
 whose version must be lower. The advisor never follows the URL or performs the
 rollback.
+
+## Explicit side-by-side Mac update
+
+When a newer source checkout has already been prepared beside the current one,
+the local helper can validate it without downloading, fetching, switching Git
+branches, resetting source, overwriting either checkout, or changing services:
+
+```sh
+python3 scripts/side_by_side_update.py \
+  --current-checkout /path/to/Whisper-Face-current \
+  --candidate-checkout /path/to/Whisper-Face-candidate \
+  --current-version 1.2.2 \
+  --current-manifest /path/to/current/update-manifest.json \
+  --current-artifact-dir /path/to/current \
+  --manifest /path/to/candidate/update-manifest.json \
+  --artifact-dir /path/to/candidate \
+  --channel preview
+```
+
+Without all four manifest/artifact arguments, this is a non-authorizing
+`review-local-candidate` dry run. With them, it produces an
+`apply-side-by-side` dry run. Both directories must be distinct clean sibling
+Git checkouts with different full revisions; the candidate must contain the
+current installer/runtime contract. The receipt contains only revisions and
+closed effects, not paths or private state. If local release metadata is
+available, add both the candidate `--manifest`/`--artifact-dir` and the
+current `--current-manifest`/`--current-artifact-dir`. Apply requires all four:
+it verifies both artifact sets, requires the current manifest to name the
+actual current checkout revision and version, and requires the candidate
+manifest's supported rollback link to name that exact current release.
+
+After reviewing an `apply-side-by-side` receipt, rerun the same command with
+`--apply`. Only then does it execute the candidate checkout's `./setup.sh` and
+its `./setup.sh --verify`, using argument arrays rather than a shell. The
+current checkout is never altered and remains the source rollback copy. To
+roll back, explicitly rerun that old checkout's `./setup.sh` followed by its
+`./setup.sh --verify`. This tool does not copy private state, download a
+candidate, or authorize an automatic update.
 
 ## Update the current checkout
 

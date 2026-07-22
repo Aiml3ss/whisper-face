@@ -85,11 +85,13 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_competitor_benchmark.py",
             "uv run tests/test_public_scorecard.py",
             "uv run tests/test_personal_regression.py",
+            "uv run tests/test_support_bundle.py",
             "uv run tests/test_whisper_face_gui.py",
             "uv run --locked --script dictate.py --native-gui-smoke-test",
             "uv run tests/test_installers.py",
             "uv run tests/test_macos_distribution.py",
             "uv run tests/test_safe_update_advisor.py",
+            "uv run tests/test_side_by_side_update.py",
             "setup.sh --verify",
             "setup.ps1 --verify",
         ):
@@ -112,7 +114,9 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_model_wallet_shadow.py",
             "uv run tests/test_model_readiness_evidence.py",
             "uv run tests/test_demonstration_drafts.py",
+            "uv run tests/test_support_bundle.py",
             "uv run tests/test_safe_update_advisor.py",
+            "uv run tests/test_side_by_side_update.py",
         ):
             with self.subTest(batch_gate=batch_gate):
                 self.assertIn(batch_gate, pull_request)
@@ -328,6 +332,10 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn("macos_drop_to_target_snapshot.py", installer)
                 self.assertIn("drop_to_target.py", installer)
                 self.assertIn("whisper_face_gui.py", installer)
+                self.assertIn("support_bundle.py", installer)
+                self.assertIn("side_by_side_update.py", installer)
+                self.assertIn("safe_update_advisor.py", installer)
+                self.assertIn("release_manifest.py", installer)
                 self.assertIn("dictate.py.lock", installer)
                 self.assertIn("--preload-models", installer)
                 self.assertIn("--verify", installer)
