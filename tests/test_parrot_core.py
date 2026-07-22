@@ -67,6 +67,16 @@ class CleanupCompilerTests(unittest.TestCase):
             "three things first speed second trust third privacy"
         ).needs_semantic_cleanup)
 
+    def test_single_ordinal_in_ordinary_prose_stays_deterministic(self):
+        raw = (
+            "The second thing regarding the audio is that the microphone "
+            "should remain warm between dictations."
+        )
+        plan = compile_cleanup(raw)
+
+        self.assertEqual(plan.text, raw)
+        self.assertFalse(plan.needs_semantic_cleanup)
+
     def test_explicit_list_introductions_request_semantic_cleanup(self):
         for spoken in (
             "here's a list of ideas that I have improve speed and keep trust",

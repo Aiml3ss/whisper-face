@@ -2,6 +2,7 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #   "mlx-whisper; sys_platform == 'darwin'",
+#   "tqdm; sys_platform == 'darwin'",
 #   "sounddevice",
 #   "pynput",
 #   "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
@@ -3730,8 +3731,23 @@ PARAKEET = ParakeetClient()
 
 # ------------------------- pipeline -------------------------
 
+
+def configure_mlx_progress_lock(tqdm_module) -> None:
+    """Keep MLX progress synchronization inside this threaded process.
+
+    tqdm otherwise creates a multiprocessing RLock on first transcription.
+    macOS service restarts arrive as SIGTERM, so that named semaphore survives
+    long enough for Python's resource tracker to report a false leak. ASR is
+    serialized through a thread pool and needs no multiprocessing lock.
+    """
+    tqdm_module.tqdm.set_lock(threading.RLock())
+
+
 if IS_MACOS:
     import mlx_whisper  # noqa: E402
+    import tqdm as mlx_tqdm  # noqa: E402
+
+    configure_mlx_progress_lock(mlx_tqdm)
 else:
     import ctranslate2  # noqa: E402
     from faster_whisper import WhisperModel  # noqa: E402
@@ -3739,12 +3755,13 @@ else:
     WINDOWS_ASR_MODELS = {}
 
 
-def resolve_asr_model(model_repo: str, downloader=None) -> str:
+def resolve_asr_model(model_repo: str, downloader=None, *,
+                      local_files_only: bool = True) -> str:
     """Resolve an MLX repository once, then decode from its local snapshot.
 
-    Passing a Hugging Face repository to mlx_whisper makes every transcription
-    re-run snapshot resolution. The weights are cached, but the metadata walk
-    still costs measurable release latency and prints a progress bar each time.
+    Runtime resolution is deliberately offline because the Mac clickable
+    installer preloads both pinned snapshots. Preload opts into downloads
+    explicitly; a dictation must never wait on a Hugging Face metadata walk.
     """
     if not IS_MACOS:
         return model_repo
@@ -3758,6 +3775,7 @@ def resolve_asr_model(model_repo: str, downloader=None) -> str:
         resolved = str(downloader(
             repo_id=model_repo,
             revision=ASR_MODEL_REVISIONS.get(model_repo),
+            local_files_only=local_files_only,
         ))
         ASR_MODEL_PATHS[model_repo] = resolved
         return resolved
@@ -6276,7 +6294,7 @@ def preload_model_files():
     else:
         for repo in (FAST_WHISPER_REPO, WHISPER_REPO):
             print(f"Caching {repo}...")
-            resolve_asr_model(repo)
+            resolve_asr_model(repo, local_files_only=False)
     print("Whisper model cache ready.")
 
 

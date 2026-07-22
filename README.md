@@ -25,7 +25,7 @@ not a current setup promise.
 |---|---|
 | **Setup is part of the product** | `Install.command` provisions the app, locked dependencies, models, native helper, login services, and health checks in one repeatable flow. |
 | **Speech evidence stays authoritative** | Multiple local recognizers produce hypotheses; the Voice Compiler may improve presentation but cannot invent unsupported meaning. |
-| **Fast by architecture** | Models stay warm, long speech is recognized while you talk, model paths are pre-resolved, and routine cleanup has bounded deadlines. |
+| **Fast by architecture** | Models stay warm, long speech is recognized while you talk, installed model paths resolve offline, and routine cleanup stays deterministic unless the words truly require semantic work. |
 | **Insertion is a transaction** | The target is leased and revalidated before one paste attempt; destination drift goes to a recoverable Voice Outbox instead of the wrong field. |
 | **Personal without surveillance** | Corrections become scoped, inspectable local rules and regression cases—not a cloud transcript dossier. |
 | **Failure is recoverable** | Faithful fallbacks, rejected-edit evidence, stable prefixes, exact-once insertion guards, and the outbox prevent silent loss. |
@@ -83,9 +83,10 @@ not declare a winner before the same physical tasks have been run.
   verified by a warm native Parakeet Unified helper, with Whisper
   large-v3-turbo retained as the independent fallback. Audio reaches the
   helper through a RAM-only pipe. Windows retains the Tiny → Turbo cascade.
-- **Pre-resolved local models** — MLX model repositories are resolved once at
-  launch and every decode uses the cached snapshot path directly, avoiding a
-  repeated Hugging Face metadata walk on the release-critical path.
+- **Offline runtime model resolution** — the one-click installer downloads both
+  pinned MLX snapshots up front. Dictation then resolves only the installed
+  local paths and memoizes them, so a release never waits on Hugging Face or
+  prints a model-fetch progress bar.
 - **Structured cleanup with a safety net** — fillers and false starts removed,
   self-corrections applied ("Tuesday, actually Wednesday" → Wednesday),
   punctuation fixed. Safe edits are compiled deterministically; the local LLM
@@ -127,7 +128,9 @@ not declare a winner before the same physical tasks have been run.
   or force one per-dictation: *"Formal tone, …"*, *"casual, …"*.
 - **Spoken structure** — "new line" / "new paragraph" / "scratch that" work;
   explicit list lead-ins ("two things", "here's a list", "here are some
-  feedback items") become tidy dash lists when you state multiple items.
+  feedback items") become tidy dash lists when you state multiple items. A
+  lone ordinal in ordinary prose (for example, "the second thing regarding
+  audio") stays on the deterministic fast path instead of waking the LLM.
 - **Reversible personalization** — vocabulary is mined from your usage, while
   corrections are learned only when the exact pasted range is changed. A
   correction activates after two confirmations in the same app or three

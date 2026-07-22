@@ -22,6 +22,7 @@ requirements = [
     { name = "pywin32", marker = "sys_platform == 'win32'" },
     { name = "requests" },
     { name = "sounddevice" },
+    { name = "tqdm", marker = "sys_platform == 'darwin'" },
 ]
 
 [[package]]

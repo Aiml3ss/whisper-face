@@ -316,9 +316,12 @@ def compile_cleanup(raw: str) -> CleanupPlan:
         edits.append(CleanupEdit("spoken_enumeration", before, text))
     needs_semantic = bool(re.search(r"\b(?:you know|I mean)\b", text, re.I))
     if deterministic_list is None:
+        ordinal_markers = re.findall(
+            r"\b(?:first|second|third|lastly)\b", text, re.I)
         needs_semantic = needs_semantic or bool(
-            LIST_INTENT_RE.search(text) or re.search(
-                r"\b(?:first|second|third|lastly)\b|"
+            LIST_INTENT_RE.search(text)
+            or len(ordinal_markers) >= 2
+            or re.search(
                 r"\b(?:two|three|four|five) "
                 r"(?:things|points|items|ideas)\b",
                 text,
