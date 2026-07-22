@@ -31,7 +31,9 @@ class InstallerContractTests(unittest.TestCase):
             "uv lock --check --script dictate.py",
             "uv run tests/test_parrot_core.py",
             "uv run tests/test_voice_compiler.py",
+            "uv run tests/test_consequence_routing.py",
             "uv run tests/test_benchmark_voice_compiler.py",
+            "uv run tests/test_benchmark_consequence_routing.py",
             "uv run tests/test_benchmark_asr.py",
             "uv run tests/test_performance_lab.py",
             "uv run tests/test_dictate.py",
@@ -39,6 +41,7 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_insertion_integrity.py",
             "uv run tests/test_personal_regression.py",
             "uv run tests/test_whisper_face_gui.py",
+            "uv run --locked --script dictate.py --native-gui-smoke-test",
             "uv run tests/test_installers.py",
             "uv run tests/test_macos_distribution.py",
             "setup.sh --verify",
@@ -113,6 +116,24 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("Tiny -> Turbo", self.powershell)
         self.assertNotIn("swift build", self.powershell)
         self.assertNotIn("parrot-asr-helper", self.powershell)
+
+    def test_native_gui_smoke_is_bounded_on_mac_and_static_on_windows(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "macos-release.yml"
+        ).read_text(encoding="utf-8")
+        gui = (ROOT / "whisper_face_gui.py").read_text(encoding="utf-8")
+        command = "--native-gui-smoke-test"
+        self.assertIn(command, self.script)
+        self.assertIn(command, self.shell)
+        self.assertIn(command, workflow)
+        self.assertNotIn(command, self.powershell)
+        self.assertIn("run_with_timeout 30", self.shell)
+        self.assertIn('if [ "$MODE" = "full" ]', self.shell)
+        self.assertIn("subprocess.run(sys.argv[1:], check=True, timeout=30)",
+                      workflow)
+        self.assertIn("native_appkit_smoke_contract", gui)
+        self.assertIn("allowed_side_effects: tuple[str, ...] = ()", gui)
+        self.assertIn("if not IS_MACOS", self.script)
 
     def test_whisper_face_assets_and_preference_ship_on_both_platforms(self):
         template = (ROOT / "preferences.template.json").read_text(

@@ -2013,6 +2013,46 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertEqual(result.text, "hello world")
         self.assertAlmostEqual(result.words[1].start, 1.1)
         self.assertAlmostEqual(result.audio_duration, 1.8)
+        self.assertEqual({word.timing for word in result.words}, {"segment"})
+
+    def test_failed_chunk_downgrades_surviving_word_timing(self):
+        class Future:
+            def __init__(self, value=None, error=None):
+                self.value = value
+                self.error = error
+
+            def result(self):
+                if self.error is not None:
+                    raise self.error
+                return self.value
+
+        ns = load_definitions(
+            "assemble_raw",
+            extra={
+                "np": SimpleNamespace(ndarray=object),
+                "SAMPLE_RATE": 16_000,
+                "GATE_PEAK_RMS": 0.002,
+                "ASR_POOL": SimpleNamespace(),
+                "transcribe_detailed": None,
+                "peak_rms": lambda _audio: 0.0,
+                "is_hallucination": lambda _text: False,
+                "Recognition": Recognition,
+                "RecognitionWord": RecognitionWord,
+            },
+        )
+        later = Recognition(
+            "invoice 2042", engine="tiny", audio_duration=1.0,
+            words=(
+                RecognitionWord("invoice", 0.1, 0.4, 0.8),
+                RecognitionWord("2042", 0.5, 0.8, 0.7),
+            ),
+        )
+        result = ns["assemble_raw"](
+            [Future(error=RuntimeError("decode failed"))],
+            Future(value=later), [], None)
+        self.assertEqual(result.text, "invoice 2042")
+        self.assertTrue(result.words)
+        self.assertEqual({word.timing for word in result.words}, {"segment"})
 
     def test_tiny_first_cascade_skips_large_when_confident(self):
         class ImmediatePool:
@@ -2127,6 +2167,116 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertEqual(result.alternative, "tiny")
         self.assertTrue(result.verified)
         self.assertEqual(pool.calls, ["tiny", "large"])
+
+
+class ConsequenceRuntimeProjectionTests(unittest.TestCase):
+    def _namespace(self):
+        pipeline = {}
+        ns = load_definitions(
+            "_consequence_count",
+            "store_consequence_receipt",
+            "runtime_consequence_evidence",
+            "consequence_state_snapshot",
+            extra={
+                "time": time,
+                "PIPELINE_STATE": pipeline,
+                "CONSEQUENCE_RISK_IDS": frozenset({
+                    "name", "number", "currency", "date", "time",
+                    "recipient", "contact", "url", "path", "command",
+                    "action",
+                }),
+                "CONSEQUENCE_SKIP_IDS": frozenset({
+                    "timing-unavailable", "span-not-micro",
+                    "selection-limit", "overlapping-span",
+                    "verifier-unavailable", "unsafe-verifier-contract",
+                    "audio-unavailable", "deadline-expired",
+                    "verifier-error", "invalid-verifier-result",
+                    "verifier-not-independent", "receipt-error",
+                }),
+                "CONSEQUENCE_ROUTE_IDS": frozenset({
+                    "standard", "protected", "review", "verified",
+                    "unavailable",
+                }),
+                "CONSEQUENCE_RELISTEN_IDS": frozenset({
+                    "not-needed", "skipped", "confirmed", "contradicted",
+                    "timed-out", "inconclusive", "mixed", "unavailable",
+                }),
+                "consequence_receipt": lambda *_args, **_kwargs: None,
+            },
+        )
+        return ns, pipeline
+
+    @staticmethod
+    def _receipt(**overrides):
+        values = {
+            "route": "review",
+            "risk_counts": (("currency", 1),),
+            "high_risks": 1,
+            "uncertain_risks": 1,
+            "relisten_status": "skipped",
+            "relisten_selected": 1,
+            "relisten_attempted": 0,
+            "relisten_confirmed": 0,
+            "relisten_contradicted": 0,
+            "relisten_inconclusive": 0,
+            "relisten_skipped": (("verifier-unavailable", 1),),
+        }
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def test_projection_drops_private_or_unknown_ids(self):
+        ns, pipeline = self._namespace()
+        private = "Alice private@example.com /secret/path"
+        ns["store_consequence_receipt"](self._receipt(
+            route=private,
+            risk_counts=(("currency", 2), (private, 99)),
+            relisten_status=private,
+            relisten_skipped=(("timing-unavailable", 1), (private, 99)),
+        ))
+        snapshot = ns["consequence_state_snapshot"]()
+        encoded = json.dumps(snapshot, sort_keys=True)
+        self.assertNotIn(private, encoded)
+        self.assertEqual(snapshot["route"], "unavailable")
+        self.assertEqual(snapshot["risk_counts"], {"currency": 2})
+        self.assertEqual(
+            snapshot["relisten_skipped"], {"timing-unavailable": 1})
+        self.assertEqual(pipeline["last_relisten_status"], "unavailable")
+
+    def test_evaluator_failure_is_fail_open_and_never_records_error_text(self):
+        ns, _pipeline = self._namespace()
+        audio = np.arange(64, dtype=np.float32)
+        private = "private transcript and /Users/private/path"
+
+        def fail(*_args, **_kwargs):
+            raise RuntimeError(private)
+
+        elapsed = ns["runtime_consequence_evidence"](
+            object(), audio, sample_rate=16_000, audio_duration=0.004,
+            evaluator=fail)
+        snapshot = ns["consequence_state_snapshot"]()
+        self.assertGreaterEqual(elapsed, 0.0)
+        self.assertEqual(snapshot["route"], "unavailable")
+        self.assertEqual(snapshot["relisten_skipped"], {"receipt-error": 1})
+        self.assertNotIn(private, json.dumps(snapshot))
+        np.testing.assert_array_equal(audio, np.arange(64, dtype=np.float32))
+
+    def test_evidence_only_runtime_seam_stays_below_warm_path_budget(self):
+        ns, _pipeline = self._namespace()
+        audio = np.zeros(320, dtype=np.float32)
+        voice = object()
+        seen = []
+
+        def evaluate(received_voice, **kwargs):
+            seen.append((received_voice is voice, kwargs["audio"] is audio))
+            return self._receipt()
+
+        samples = [ns["runtime_consequence_evidence"](
+            voice, audio, sample_rate=16_000, audio_duration=0.02,
+            evaluator=evaluate) for _ in range(200)]
+        self.assertTrue(all(left and right for left, right in seen))
+        self.assertLess(sorted(samples)[189], 0.005)
+        self.assertEqual(
+            ns["consequence_state_snapshot"]()["route"], "review")
 
 
 if __name__ == "__main__":

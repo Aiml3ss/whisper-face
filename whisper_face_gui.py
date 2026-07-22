@@ -19,15 +19,19 @@ APP_NAME = "Whisper Face"
 DEFAULTS_SUITE = "com.whisperface.app"
 SECTIONS = ("Overview", "Results", "Settings", "Models", "Diagnostics")
 SETTINGS_PANES = ("Modes", "Personalize", "Privacy")
-MODE_GUIDE = (
-    ("capture", "Right Option", "Faithful dictation"),
-    ("compose", "Shift + Right Option", "Compose and tighten"),
-    ("edit", "Command + Right Option", "Edit selected text"),
-    ("reply", "Control + Right Option", "Draft a direct reply"),
-    ("command", "Command + Control + Right Option", "Editing commands"),
-    ("code", "Shift + Control + Right Option", "Technical dictation"),
-)
+MODE_GUIDE = ("capture", "compose", "edit", "reply", "command", "code")
 TONE_CHOICES = ("auto", "casual", "formal", "code", "verbatim", "default")
+CONSEQUENCE_CATEGORIES = frozenset({
+    "name", "number", "currency", "date", "time", "recipient", "contact",
+    "url", "path", "command", "action",
+})
+CONSEQUENCE_ROUTES = frozenset({
+    "standard", "protected", "review", "verified", "unavailable",
+})
+CONSEQUENCE_RELISTEN_STATUSES = frozenset({
+    "not-needed", "skipped", "confirmed", "contradicted", "timed-out",
+    "inconclusive", "mixed", "unavailable",
+})
 
 # Stable semantic keys are intentionally separate from AppKit. Additional
 # catalogs can be added without rewriting view logic or persistence schemas.
@@ -45,6 +49,24 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.pane.privacy": "Privacy",
         "settings.modes.title": "Hold Right Option with a modifier to choose a mode",
         "settings.modes.footer": "Shortcuts are fixed so capture behavior stays predictable and safe.",
+        "settings.mode.capture.name": "Capture",
+        "settings.mode.capture.shortcut": "Right Option",
+        "settings.mode.capture.detail": "Faithful dictation",
+        "settings.mode.compose.name": "Compose",
+        "settings.mode.compose.shortcut": "Shift + Right Option",
+        "settings.mode.compose.detail": "Compose and tighten",
+        "settings.mode.edit.name": "Edit",
+        "settings.mode.edit.shortcut": "Command + Right Option",
+        "settings.mode.edit.detail": "Edit selected text",
+        "settings.mode.reply.name": "Reply",
+        "settings.mode.reply.shortcut": "Control + Right Option",
+        "settings.mode.reply.detail": "Draft a direct reply",
+        "settings.mode.command.name": "Command",
+        "settings.mode.command.shortcut": "Command + Control + Right Option",
+        "settings.mode.command.detail": "Editing commands",
+        "settings.mode.code.name": "Code",
+        "settings.mode.code.shortcut": "Shift + Control + Right Option",
+        "settings.mode.code.detail": "Technical dictation",
         "settings.personalize.tones": "App tones",
         "settings.personalize.tones.detail": "{count} recent or configured apps",
         "settings.personalize.snippets": "Snippets",
@@ -64,22 +86,62 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.empty.corrections": "No learned corrections",
         "settings.dialog.tone.title": "App tone",
         "settings.dialog.tone.message": "Choose how cleanup should sound in this app.",
+        "settings.dialog.tone.app.label": "Application",
+        "settings.dialog.tone.app.help": "Choose the application whose cleanup tone you want to change.",
+        "settings.dialog.tone.choice.label": "Cleanup tone",
+        "settings.dialog.tone.choice.help": "Choose the writing tone used when cleaning up dictation in this application.",
+        "settings.tone.auto": "Auto",
+        "settings.tone.casual": "Casual",
+        "settings.tone.formal": "Formal",
+        "settings.tone.code": "Technical",
+        "settings.tone.verbatim": "Verbatim",
+        "settings.tone.default": "Neutral",
         "settings.dialog.snippet.add": "Add snippet",
         "settings.dialog.snippet.edit": "Edit snippet",
         "settings.dialog.snippet.name": "Snippet name",
         "settings.dialog.snippet.value": "Text inserted by this snippet",
+        "settings.dialog.snippet.chooser.label": "Saved snippet",
+        "settings.dialog.snippet.chooser.help": "Choose a saved snippet to edit or delete.",
+        "settings.dialog.snippet.name.help": "Enter a short name for this snippet.",
+        "settings.dialog.snippet.value.help": "Enter the text inserted when this snippet is used.",
         "settings.dialog.vocabulary.title": "Personal vocabulary",
         "settings.dialog.vocabulary.message": "One term per line. Exclusions prevent automatic learning.",
         "settings.dialog.vocabulary.terms": "Preferred terms",
         "settings.dialog.vocabulary.bans": "Excluded terms",
+        "settings.dialog.vocabulary.terms.help": "Enter preferred words or names, one per line.",
+        "settings.dialog.vocabulary.bans.help": "Enter words that Whisper Face must not learn, one per line.",
         "settings.dialog.delete.title": "Delete snippet?",
         "settings.dialog.delete.message": "This removes “{name}” from this Mac.",
         "settings.dialog.forget.title": "Forget learned correction?",
         "settings.dialog.forget.message": "Whisper Face will stop applying “{source} → {target}”.",
+        "settings.dialog.correction.chooser.label": "Learned correction",
+        "settings.dialog.correction.chooser.help": "Choose a learned correction to inspect and forget.",
         "settings.privacy.title": "Privacy controls",
         "settings.privacy.flight": "Flight Recorder",
         "settings.privacy.flight.detail": "Keeps a rolling 20-second audio buffer in RAM only.",
         "settings.privacy.face": "Companion",
+        "settings.face.parrot": "Parrot",
+        "settings.face.fox": "Fox",
+        "settings.face.owl": "Owl",
+        "settings.face.cat": "Cat",
+        "settings.face.bear": "Bear",
+        "settings.state.enabled": "Enabled",
+        "settings.state.local_processing": "Local processing",
+        "settings.accessibility.sections.label": "Settings sections",
+        "settings.accessibility.sections.help": "Use arrow keys to move between Whisper Face settings sections.",
+        "settings.accessibility.category.label": "Settings category",
+        "settings.accessibility.category.help": "Choose modes, personalization, or privacy settings.",
+        "settings.accessibility.edit.help": "Edit {setting}.",
+        "settings.accessibility.forget.help": "Inspect or forget {setting}.",
+        "settings.accessibility.face.label": "Whisper Face companion",
+        "settings.accessibility.face.help": "Choose the animal shown in the menu bar and listening HUD.",
+        "settings.accessibility.flight.label": "Flight Recorder",
+        "settings.accessibility.flight.help": "Toggle the rolling twenty second audio buffer held only in memory.",
+        "settings.accessibility.privacy_summary.label": "Privacy status",
+        "settings.accessibility.tones_summary.label": "App tones summary",
+        "settings.accessibility.snippets_summary.label": "Snippets summary",
+        "settings.accessibility.vocabulary_summary.label": "Vocabulary summary",
+        "settings.accessibility.corrections_summary.label": "Learned corrections summary",
         "settings.notice.loaded": "Settings loaded",
         "settings.notice.tone_saved": "App tone saved",
         "settings.notice.snippet_saved": "Snippet saved",
@@ -88,6 +150,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.notice.correction_forgotten": "Learned correction forgotten",
     },
 }
+SUPPORTED_LOCALES = tuple(STRING_CATALOGS)
 
 
 def localized_string(key: str, *, locale: str = "en", **values: Any) -> str:
@@ -106,13 +169,6 @@ def localized_string(key: str, *, locale: str = "en", **values: Any) -> str:
     except (KeyError, ValueError) as error:
         raise ValueError(f"invalid values for localized string {key!r}") from error
 FACES = ("parrot", "fox", "owl", "cat", "bear")
-FACE_LABELS = {
-    "parrot": "Parrot",
-    "fox": "Fox",
-    "owl": "Owl",
-    "cat": "Cat",
-    "bear": "Bear",
-}
 FACE_EMOJI = {
     "parrot": "🦜",
     "fox": "🦊",
@@ -120,6 +176,52 @@ FACE_EMOJI = {
     "cat": "🐱",
     "bear": "🐻",
 }
+
+
+@dataclass(frozen=True)
+class NativeAppKitSmokeContract:
+    """Static contract Windows can validate without importing AppKit."""
+
+    sections: tuple[str, ...]
+    settings_panes: tuple[str, ...]
+    model_actions: tuple[str, ...]
+    accessibility_catalog_keys: tuple[str, ...]
+    allowed_side_effects: tuple[str, ...] = ()
+
+
+def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
+    """Describe the deterministic native gate without executing native code."""
+
+    return NativeAppKitSmokeContract(
+        sections=SECTIONS,
+        settings_panes=SETTINGS_PANES,
+        model_actions=(
+            "select_section",
+            "select_settings_pane",
+            "set_app_tone",
+            "save_snippet",
+            "delete_snippet",
+            "save_vocabulary",
+            "forget_correction",
+            "forget_snippet",
+            "choose_face",
+            "set_flight_recorder",
+        ),
+        accessibility_catalog_keys=(
+            "settings.accessibility.sections.label",
+            "settings.accessibility.category.label",
+            "settings.accessibility.face.label",
+            "settings.accessibility.flight.label",
+            "settings.dialog.tone.app.label",
+            "settings.dialog.tone.choice.label",
+            "settings.dialog.snippet.chooser.label",
+            "settings.dialog.snippet.name",
+            "settings.dialog.snippet.value",
+            "settings.dialog.vocabulary.terms",
+            "settings.dialog.vocabulary.bans",
+            "settings.dialog.correction.chooser.label",
+        ),
+    )
 
 
 def _noop(*_args: Any, **_kwargs: Any) -> None:
@@ -236,6 +338,7 @@ class ResultInspection:
     protected_anchor_count: int = 0
     alternatives_considered: int = 0
     context_influence: str = "Context influence not reported by runtime"
+    consequence_summary: str = "Consequence: Standard · no protected spans"
 
 
 @dataclass(frozen=True)
@@ -529,6 +632,37 @@ def _build_result_inspection(
                  for item in cleanup_edits))
     explicit_rejected = source.get("last_proof_edits_rejected")
     confidence = _finite_number(source.get("last_confidence"))
+    consequence = source.get("last_consequence")
+    consequence_source = consequence if isinstance(consequence, Mapping) else {}
+    route = str(consequence_source.get("route", "standard")).strip().casefold()
+    if route not in CONSEQUENCE_ROUTES:
+        route = "unavailable"
+    relisten = str(consequence_source.get(
+        "relisten_status", "not-needed")).strip().casefold()
+    if relisten not in CONSEQUENCE_RELISTEN_STATUSES:
+        relisten = "unavailable"
+    risk_counts_value = consequence_source.get("risk_counts")
+    risk_counts: list[tuple[str, int]] = []
+    if isinstance(risk_counts_value, Mapping):
+        for category in sorted(CONSEQUENCE_CATEGORIES):
+            count = _nonnegative_int(risk_counts_value.get(category))
+            if count:
+                risk_counts.append((category, min(1000, count)))
+    high_risks = min(1000, _nonnegative_int(
+        consequence_source.get("high_risks")))
+    uncertain_risks = min(1000, _nonnegative_int(
+        consequence_source.get("uncertain_risks")))
+    consequence_parts = [
+        f"Consequence: {route.replace('-', ' ').title()}",
+        f"{high_risks} high-risk",
+        f"{uncertain_risks} uncertain",
+    ]
+    if risk_counts:
+        consequence_parts.append(
+            ", ".join(f"{category} {count}"
+                      for category, count in risk_counts))
+    consequence_parts.append(
+        f"Re-listen: {relisten.replace('-', ' ')}")
     return ResultInspection(
         available=available,
         summary=summary,
@@ -553,6 +687,7 @@ def _build_result_inspection(
         context_influence=_clean_text(
             source.get("last_context_influence"),
             "Context influence not reported by runtime"),
+        consequence_summary=" · ".join(consequence_parts),
     )
 
 
@@ -1196,29 +1331,45 @@ if APPKIT_AVAILABLE:
     class WhisperFaceWindowController(NSObject):
         """One-window AppKit controller; created lazily by ``WhisperFaceGUI``."""
 
-        def initWithViewModel_(self, view_model: WhisperFaceViewModel):
-            self = objc.super(WhisperFaceWindowController, self).init()
-            if self is None:
-                return None
+        @objc.python_method
+        def _initialize(self, view_model: WhisperFaceViewModel,
+                        *, read_system_state: bool) -> Any:
             self.view_model = view_model
             self.pages: dict[str, Any] = {}
             self.dynamic: dict[str, Any] = {}
             self.timer = None
-            self.defaults = NSUserDefaults.alloc().initWithSuiteName_(
-                DEFAULTS_SUITE)
-            self.view_model.acknowledge_onboarding(bool(
-                self.defaults.boolForKey_("onboardingComplete")))
-            try:
-                reduce_motion = bool(
-                    NSWorkspace.sharedWorkspace()
-                    .accessibilityDisplayShouldReduceMotion())
-                if reduce_motion:
-                    self.view_model.state = replace(
-                        self.view_model.state, prefers_reduced_motion=True)
-            except Exception:
-                pass
+            self.defaults = None
+            if read_system_state:
+                self.defaults = NSUserDefaults.alloc().initWithSuiteName_(
+                    DEFAULTS_SUITE)
+                self.view_model.acknowledge_onboarding(bool(
+                    self.defaults.boolForKey_("onboardingComplete")))
+                try:
+                    reduce_motion = bool(
+                        NSWorkspace.sharedWorkspace()
+                        .accessibilityDisplayShouldReduceMotion())
+                    if reduce_motion:
+                        self.view_model.state = replace(
+                            self.view_model.state,
+                            prefers_reduced_motion=True)
+                except Exception:
+                    pass
             self._build_window()
             return self
+
+        def initWithViewModel_(self, view_model: WhisperFaceViewModel):
+            self = objc.super(WhisperFaceWindowController, self).init()
+            if self is None:
+                return None
+            return self._initialize(view_model, read_system_state=True)
+
+        def initForSmokeWithViewModel_(
+                self, view_model: WhisperFaceViewModel):
+            """Construct without reading or writing any user/system state."""
+            self = objc.super(WhisperFaceWindowController, self).init()
+            if self is None:
+                return None
+            return self._initialize(view_model, read_system_state=False)
 
         def _build_window(self) -> None:
             style = (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
@@ -1251,8 +1402,9 @@ if APPKIT_AVAILABLE:
             self.section_control.setTarget_(self)
             self.section_control.setAction_("sectionChanged:")
             _accessible(
-                self.section_control, "Settings sections",
-                "Use arrow keys to move between Whisper Face settings sections.")
+                self.section_control,
+                localized_string("settings.accessibility.sections.label"),
+                localized_string("settings.accessibility.sections.help"))
             root.addSubview_(self.section_control)
 
             page_frame = NSMakeRect(31, 25, 758, 402)
@@ -1400,18 +1552,24 @@ if APPKIT_AVAILABLE:
             page.addSubview_(evidence_card)
             context = _label(
                 "Context influence not reported by runtime",
-                NSMakeRect(5, 42, 740, 21),
+                NSMakeRect(5, 44, 740, 20),
                 size=12, color=_SECONDARY)
             page.addSubview_(context)
+            consequence = _label(
+                "Consequence: Standard · no protected spans",
+                NSMakeRect(5, 22, 740, 20),
+                size=11, color=_SECONDARY)
+            page.addSubview_(consequence)
             page.addSubview_(_label(
                 "Whisper Face exposes decision counts, not private transcript text, "
                 "in this settings window.",
-                NSMakeRect(5, 15, 740, 20), size=11, color=_SECONDARY))
+                NSMakeRect(5, 2, 740, 18), size=10, color=_SECONDARY))
             self.dynamic.update(
                 result_summary=result_summary,
                 result_engine=result_engine,
                 result_mode=result_mode,
                 result_context=context,
+                result_consequence=consequence,
             )
 
         def _build_settings(self, page: Any) -> None:
@@ -1431,8 +1589,10 @@ if APPKIT_AVAILABLE:
                 pane_control.setWidth_forSegment_(250, index)
             pane_control.setTarget_(self)
             pane_control.setAction_("settingsPaneChanged:")
-            _accessible(pane_control, "Settings category",
-                        "Choose modes, personalization, or privacy settings.")
+            _accessible(
+                pane_control,
+                localized_string("settings.accessibility.category.label"),
+                localized_string("settings.accessibility.category.help"))
             page.addSubview_(pane_control)
 
             content_frame = NSMakeRect(0, 0, 758, 268)
@@ -1445,17 +1605,20 @@ if APPKIT_AVAILABLE:
             modes.addSubview_(_label(
                 localized_string("settings.modes.title"),
                 NSMakeRect(5, 238, 720, 22), size=14, weight="medium"))
-            for index, (mode, shortcut, detail) in enumerate(MODE_GUIDE):
+            for index, mode in enumerate(MODE_GUIDE):
                 column, row = index % 2, index // 2
                 card = _card(NSMakeRect(column * 379, 153 - row * 66, 365, 54))
                 card.addSubview_(_label(
-                    mode.title(), NSMakeRect(14, 28, 105, 18),
+                    localized_string(f"settings.mode.{mode}.name"),
+                    NSMakeRect(14, 28, 105, 18),
                     size=12, weight="bold"))
                 card.addSubview_(_label(
-                    shortcut, NSMakeRect(115, 28, 235, 18),
+                    localized_string(f"settings.mode.{mode}.shortcut"),
+                    NSMakeRect(115, 28, 235, 18),
                     size=11, weight="medium", color=_ACCENT))
                 card.addSubview_(_label(
-                    detail, NSMakeRect(14, 8, 330, 17),
+                    localized_string(f"settings.mode.{mode}.detail"),
+                    NSMakeRect(14, 8, 330, 17),
                     size=10, color=_SECONDARY))
                 modes.addSubview_(card)
             modes.addSubview_(_label(
@@ -1479,10 +1642,15 @@ if APPKIT_AVAILABLE:
                                 size=11, color=_SECONDARY)
                 action_key = ("settings.action.forget" if key == "corrections"
                               else "settings.action.edit")
+                help_key = ("settings.accessibility.forget.help"
+                            if key == "corrections"
+                            else "settings.accessibility.edit.help")
                 button = _button(
                     localized_string(action_key), NSMakeRect(645, 10, 94, 32),
                     self, selector,
-                    help_text=f"Edit {localized_string(title_key).casefold()}.")
+                    help_text=localized_string(
+                        help_key,
+                        setting=localized_string(title_key).casefold()))
                 card.addSubview_(detail)
                 card.addSubview_(button)
                 personalize.addSubview_(card)
@@ -1503,12 +1671,15 @@ if APPKIT_AVAILABLE:
             picker.setSegmentStyle_(NSSegmentStyleRounded)
             for index, face in enumerate(FACES):
                 picker.setLabel_forSegment_(
-                    f"{FACE_EMOJI[face]} {FACE_LABELS[face]}", index)
+                    f"{FACE_EMOJI[face]} "
+                    f"{localized_string(f'settings.face.{face}')}", index)
                 picker.setWidth_forSegment_(138, index)
             picker.setTarget_(self)
             picker.setAction_("faceChanged:")
-            _accessible(picker, "Whisper Face companion",
-                        "Choose the animal shown in the menu bar and listening HUD.")
+            _accessible(
+                picker,
+                localized_string("settings.accessibility.face.label"),
+                localized_string("settings.accessibility.face.help"))
             face_card.addSubview_(picker)
             privacy.addSubview_(face_card)
 
@@ -1521,15 +1692,18 @@ if APPKIT_AVAILABLE:
                 NSMakeRect(18, 24, 535, 20), size=11, color=_SECONDARY))
             flight = NSButton.alloc().initWithFrame_(NSMakeRect(625, 26, 110, 32))
             flight.setButtonType_(3)
-            flight.setTitle_("Enabled")
+            flight.setTitle_(localized_string("settings.state.enabled"))
             flight.setTarget_(self)
             flight.setAction_("flightChanged:")
-            _accessible(flight, "Flight Recorder",
-                        "Toggle the rolling twenty second audio buffer held only in memory.")
+            _accessible(
+                flight,
+                localized_string("settings.accessibility.flight.label"),
+                localized_string("settings.accessibility.flight.help"))
             flight_card.addSubview_(flight)
             privacy.addSubview_(flight_card)
             privacy_summary = _label(
-                "Local processing", NSMakeRect(5, 5, 700, 20),
+                localized_string("settings.state.local_processing"),
+                NSMakeRect(5, 5, 700, 20),
                 size=11, weight="medium", color=_ACCENT)
             privacy.addSubview_(privacy_summary)
 
@@ -1540,65 +1714,6 @@ if APPKIT_AVAILABLE:
                 flight_toggle=flight,
                 privacy_summary=privacy_summary,
             )
-
-        def _build_appearance(self, page: Any) -> None:
-            page.addSubview_(_label("Choose your Whisper Face",
-                                    NSMakeRect(4, 351, 500, 32),
-                                    size=22, weight="bold"))
-            page.addSubview_(_label(
-                "Your companion talks with you in the menu bar and listening HUD.",
-                NSMakeRect(5, 326, 650, 20), size=13, color=_SECONDARY))
-            card = _card(NSMakeRect(0, 152, 758, 148))
-            picker = NSSegmentedControl.alloc().initWithFrame_(
-                NSMakeRect(25, 55, 708, 58))
-            picker.setSegmentCount_(len(FACES))
-            picker.setSegmentStyle_(NSSegmentStyleRounded)
-            for index, face in enumerate(FACES):
-                picker.setLabel_forSegment_(
-                    f"{FACE_EMOJI[face]}  {FACE_LABELS[face]}", index)
-                picker.setWidth_forSegment_(137, index)
-            picker.setTarget_(self)
-            picker.setAction_("faceChanged:")
-            _accessible(
-                picker, "Whisper Face companion",
-                "Choose the animal shown in the menu bar and listening HUD.")
-            card.addSubview_(picker)
-            page.addSubview_(card)
-            page.addSubview_(_label(
-                "More faces can be added later without changing your dictation setup.",
-                NSMakeRect(5, 116, 650, 20), size=12, color=_SECONDARY))
-            self.dynamic["face_picker"] = picker
-
-        def _build_privacy(self, page: Any) -> None:
-            page.addSubview_(_label("Privacy you can see",
-                                    NSMakeRect(4, 351, 500, 32),
-                                    size=22, weight="bold"))
-            page.addSubview_(_label(
-                "Recognition and cleanup run locally. You stay in control.",
-                NSMakeRect(5, 326, 650, 20), size=13, color=_SECONDARY))
-            card = _card(NSMakeRect(0, 190, 758, 108))
-            card.addSubview_(_label("Flight Recorder", NSMakeRect(22, 61, 300, 24),
-                                    size=16, weight="bold"))
-            card.addSubview_(_label(
-                "Keeps a rolling 20-second audio buffer in RAM only.",
-                NSMakeRect(22, 34, 520, 20), size=12, color=_SECONDARY))
-            flight = NSButton.alloc().initWithFrame_(NSMakeRect(625, 39, 110, 32))
-            flight.setButtonType_(3)
-            flight.setTitle_("Enabled")
-            flight.setTarget_(self)
-            flight.setAction_("flightChanged:")
-            _accessible(
-                flight, "Flight Recorder",
-                "Toggle the rolling twenty second audio buffer held only in memory.")
-            card.addSubview_(flight)
-            page.addSubview_(card)
-            privacy = _label("Local processing", NSMakeRect(5, 145, 700, 24),
-                             size=14, weight="medium", color=_ACCENT)
-            page.addSubview_(privacy)
-            page.addSubview_(_label(
-                "Whisper Face never needs cloud speech recognition to dictate.",
-                NSMakeRect(5, 119, 700, 20), size=12, color=_SECONDARY))
-            self.dynamic.update(flight_toggle=flight, privacy_summary=privacy)
 
         def _build_models(self, page: Any) -> None:
             page.addSubview_(_label("Your local voice stack",
@@ -1694,7 +1809,8 @@ if APPKIT_AVAILABLE:
         def render(self) -> None:
             state = self.view_model.state
             if state.onboarding_complete and not state.onboarding_acknowledged:
-                self.defaults.setBool_forKey_(True, "onboardingComplete")
+                if self.defaults is not None:
+                    self.defaults.setBool_forKey_(True, "onboardingComplete")
                 state = self.view_model.acknowledge_onboarding()
             for section, page in self.pages.items():
                 page.setHidden_(section != state.section)
@@ -1828,6 +1944,8 @@ if APPKIT_AVAILABLE:
                 str(result.alternatives_considered))
             self.dynamic["result_context"].setStringValue_(
                 f"Context: {result.context_influence}")
+            self.dynamic["result_consequence"].setStringValue_(
+                result.consequence_summary)
             for key, label in (
                 ("result_summary", "Last result summary"),
                 ("result_engine", "Last result engine"),
@@ -1839,6 +1957,7 @@ if APPKIT_AVAILABLE:
                 ("result_proof", "Proof review"),
                 ("result_alternatives", "Alternatives considered"),
                 ("result_context", "Context influence"),
+                ("result_consequence", "Consequence decision receipt"),
             ):
                 sync_accessibility(
                     self.dynamic[key],
@@ -1868,7 +1987,8 @@ if APPKIT_AVAILABLE:
             for key, value in setting_summaries.items():
                 set_accessible_text(
                     self.dynamic[f"settings_{key}_detail"], value,
-                    label=f"{key.title()} summary")
+                    label=localized_string(
+                        f"settings.accessibility.{key}_summary.label"))
             self.dynamic["settings_tones_button"].setEnabled_(
                 bool(settings.app_tones))
             self.dynamic["settings_snippets_button"].setEnabled_(True)
@@ -1876,8 +1996,10 @@ if APPKIT_AVAILABLE:
                 bool(settings.corrections))
             self.dynamic["face_picker"].setSelectedSegment_(FACES.index(state.face))
             sync_accessibility(
-                self.dynamic["face_picker"], FACE_LABELS[state.face],
-                label="Whisper Face companion",
+                self.dynamic["face_picker"],
+                localized_string(f"settings.face.{state.face}"),
+                label=localized_string(
+                    "settings.accessibility.face.label"),
             )
             self.dynamic["flight_toggle"].setState_(
                 NSControlStateValueOn if state.flight_recorder
@@ -1885,12 +2007,14 @@ if APPKIT_AVAILABLE:
             self.dynamic["flight_toggle"].setTitle_(state.flight_state)
             sync_accessibility(
                 self.dynamic["flight_toggle"], state.flight_state,
-                label="Flight Recorder",
+                label=localized_string(
+                    "settings.accessibility.flight.label"),
             )
             self.dynamic["privacy_summary"].setStringValue_(state.privacy_summary)
             sync_accessibility(
                 self.dynamic["privacy_summary"], state.privacy_summary,
-                label="Privacy status",
+                label=localized_string(
+                    "settings.accessibility.privacy_summary.label"),
             )
 
             for index, (row, name, detail, status_label) in enumerate(
@@ -1971,13 +2095,15 @@ if APPKIT_AVAILABLE:
             self.dynamic["notice"].setTextColor_(notice_color)
 
         @objc.python_method
-        def _text_editor(self, frame: Any, value: str) -> tuple[Any, Any]:
+        def _text_editor(self, frame: Any, value: str, *,
+                         label: str, help_text: str) -> tuple[Any, Any]:
             scroll = NSScrollView.alloc().initWithFrame_(frame)
             scroll.setHasVerticalScroller_(True)
             scroll.setBorderType_(1)
             editor = NSTextView.alloc().initWithFrame_(
                 NSMakeRect(0, 0, frame.size.width, frame.size.height))
             editor.setString_(value)
+            _accessible(editor, label, help_text)
             scroll.setDocumentView_(editor)
             return scroll, editor
 
@@ -1996,6 +2122,36 @@ if APPKIT_AVAILABLE:
                 SETTINGS_PANES[sender.selectedSegment()])
             self.render()
 
+        @objc.python_method
+        def _tone_dialog_form(
+                self, tones: Sequence[AppToneSetting]) -> tuple[Any, Any, Any]:
+            form = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 430, 76))
+            app_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                NSMakeRect(0, 42, 430, 28), False)
+            app_popup.addItemsWithTitles_([
+                f"{item.name} — {item.bundle}" for item in tones])
+            _accessible(
+                app_popup,
+                localized_string("settings.dialog.tone.app.label"),
+                localized_string("settings.dialog.tone.app.help"))
+            tone_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                NSMakeRect(0, 4, 430, 28), False)
+            tone_popup.addItemsWithTitles_([
+                localized_string(f"settings.tone.{tone}")
+                for tone in TONE_CHOICES])
+            _accessible(
+                tone_popup,
+                localized_string("settings.dialog.tone.choice.label"),
+                localized_string("settings.dialog.tone.choice.help"))
+            self._tone_dialog_apps = tones
+            self._tone_dialog_tone_popup = tone_popup
+            app_popup.setTarget_(self)
+            app_popup.setAction_("toneDialogAppChanged:")
+            self.toneDialogAppChanged_(app_popup)
+            form.addSubview_(app_popup)
+            form.addSubview_(tone_popup)
+            return form, app_popup, tone_popup
+
         def editTone_(self, _sender: Any) -> None:
             tones = self.view_model.state.settings.app_tones
             if not tones:
@@ -2004,23 +2160,7 @@ if APPKIT_AVAILABLE:
             alert.setMessageText_(localized_string("settings.dialog.tone.title"))
             alert.setInformativeText_(localized_string(
                 "settings.dialog.tone.message"))
-            form = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 430, 76))
-            app_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-                NSMakeRect(0, 42, 430, 28), False)
-            app_popup.addItemsWithTitles_([
-                f"{item.name} — {item.bundle}" for item in tones])
-            tone_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-                NSMakeRect(0, 4, 430, 28), False)
-            tone_titles = ("Auto", "Casual", "Formal", "Technical",
-                           "Verbatim", "Neutral")
-            tone_popup.addItemsWithTitles_(list(tone_titles))
-            self._tone_dialog_apps = tones
-            self._tone_dialog_tone_popup = tone_popup
-            app_popup.setTarget_(self)
-            app_popup.setAction_("toneDialogAppChanged:")
-            self.toneDialogAppChanged_(app_popup)
-            form.addSubview_(app_popup)
-            form.addSubview_(tone_popup)
+            form, app_popup, tone_popup = self._tone_dialog_form(tones)
             alert.setAccessoryView_(form)
             alert.addButtonWithTitle_(localized_string("settings.action.save"))
             alert.addButtonWithTitle_(localized_string("settings.action.cancel"))
@@ -2055,12 +2195,19 @@ if APPKIT_AVAILABLE:
             name = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 145, 500, 28))
             name.setStringValue_(snippet.name if snippet else "")
             name.setEditable_(snippet is None)
+            _accessible(
+                name,
+                localized_string("settings.dialog.snippet.name"),
+                localized_string("settings.dialog.snippet.name.help"))
             form.addSubview_(name)
             form.addSubview_(_label(
                 localized_string("settings.dialog.snippet.value"),
                 NSMakeRect(0, 120, 500, 18), size=11, color=_SECONDARY))
             scroll, editor = self._text_editor(
-                NSMakeRect(0, 0, 500, 116), snippet.text if snippet else "")
+                NSMakeRect(0, 0, 500, 116), snippet.text if snippet else "",
+                label=localized_string("settings.dialog.snippet.value"),
+                help_text=localized_string(
+                    "settings.dialog.snippet.value.help"))
             form.addSubview_(scroll)
             alert.setAccessoryView_(form)
             alert.addButtonWithTitle_(localized_string("settings.action.save"))
@@ -2081,6 +2228,10 @@ if APPKIT_AVAILABLE:
                 item.name for item in snippets] or [localized_string(
                     "settings.empty.snippets")])
             chooser.setEnabled_(bool(snippets))
+            _accessible(
+                chooser,
+                localized_string("settings.dialog.snippet.chooser.label"),
+                localized_string("settings.dialog.snippet.chooser.help"))
             alert.setAccessoryView_(chooser)
             alert.addButtonWithTitle_(localized_string("settings.action.edit"))
             alert.addButtonWithTitle_(localized_string("settings.action.add"))
@@ -2117,10 +2268,16 @@ if APPKIT_AVAILABLE:
                 NSMakeRect(270, 198, 250, 18), size=11, color=_SECONDARY))
             term_scroll, term_editor = self._text_editor(
                 NSMakeRect(0, 0, 250, 194),
-                "\n".join(settings.manual_vocabulary))
+                "\n".join(settings.manual_vocabulary),
+                label=localized_string("settings.dialog.vocabulary.terms"),
+                help_text=localized_string(
+                    "settings.dialog.vocabulary.terms.help"))
             ban_scroll, ban_editor = self._text_editor(
                 NSMakeRect(270, 0, 250, 194),
-                "\n".join(settings.banned_vocabulary))
+                "\n".join(settings.banned_vocabulary),
+                label=localized_string("settings.dialog.vocabulary.bans"),
+                help_text=localized_string(
+                    "settings.dialog.vocabulary.bans.help"))
             form.addSubview_(term_scroll)
             form.addSubview_(ban_scroll)
             alert.setAccessoryView_(form)
@@ -2144,6 +2301,12 @@ if APPKIT_AVAILABLE:
             chooser.addItemsWithTitles_([
                 f"{item.source} → {item.target} · {item.count}×"
                 for item in corrections])
+            _accessible(
+                chooser,
+                localized_string(
+                    "settings.dialog.correction.chooser.label"),
+                localized_string(
+                    "settings.dialog.correction.chooser.help"))
             alert.setAccessoryView_(chooser)
             alert.addButtonWithTitle_(localized_string("settings.action.forget"))
             alert.addButtonWithTitle_(localized_string("settings.action.cancel"))
@@ -2238,6 +2401,242 @@ if APPKIT_AVAILABLE:
                 self.timer = None
 
 
+def run_native_appkit_smoke() -> Mapping[str, int]:
+    """Construct and exercise the native UI without touching user state.
+
+    This deliberately does not call ``show``, run an event loop, query
+    permissions, load models/audio/services, read private settings, or use
+    ``NSUserDefaults``. The installer invokes it only on macOS.
+    """
+
+    if not APPKIT_AVAILABLE:
+        raise RuntimeError("native AppKit smoke requires macOS")
+
+    runtime = {
+        "face": "parrot",
+        "flight_recorder": False,
+        "capture_state": "Ready",
+        "active_engine": "Smoke ASR",
+        "service_status": "Not started",
+        "microphone_status": "Not requested",
+        "accessibility_status": "Not requested",
+        "hotkey_label": "Right Option",
+        "models": [{
+            "name": "Smoke ASR",
+            "role": "Construction fixture",
+            "status": "Not loaded",
+        }],
+    }
+    private_settings: dict[str, Any] = {
+        "app_tones": [
+            {"bundle": "com.example.mail", "name": "Mail", "tone": "formal"},
+            {"bundle": "com.example.code", "name": "Code", "tone": "code"},
+        ],
+        "snippets": [{"name": "signature", "text": "Cheers"}],
+        "manual_vocabulary": ["Qwen"],
+        "banned_vocabulary": ["Gwen"],
+        "corrections": [
+            {
+                "key": "gwen",
+                "source": "Gwen",
+                "target": "Qwen",
+                "count": 2,
+                "kind": "correction",
+            },
+            {
+                "key": "gwen",
+                "source": "Snippet: gwen",
+                "target": "Qwen snippet",
+                "count": 1,
+                "kind": "snippet",
+            },
+        ],
+    }
+    calls: list[tuple[Any, ...]] = []
+
+    def set_face(face: str) -> None:
+        calls.append(("face", face))
+        runtime["face"] = face
+
+    def set_flight(enabled: bool) -> None:
+        calls.append(("flight", enabled))
+        runtime["flight_recorder"] = enabled
+
+    def set_tone(bundle: str, tone: str) -> None:
+        calls.append(("tone", bundle, tone))
+        for item in private_settings["app_tones"]:
+            if item["bundle"] == bundle:
+                item["tone"] = tone
+
+    def save_snippet(name: str, expected: str | None, text: str) -> None:
+        calls.append(("save_snippet", name, expected, text))
+        snippets = private_settings["snippets"]
+        match = next((item for item in snippets if item["name"] == name), None)
+        if match is None:
+            snippets.append({"name": name, "text": text})
+        else:
+            match["text"] = text
+
+    def delete_snippet(name: str, expected: str) -> None:
+        calls.append(("delete_snippet", name, expected))
+        private_settings["snippets"] = [
+            item for item in private_settings["snippets"]
+            if item["name"] != name]
+
+    def save_vocabulary(
+            terms: Sequence[str], bans: Sequence[str]) -> None:
+        calls.append(("vocabulary", tuple(terms), tuple(bans)))
+        private_settings["manual_vocabulary"] = list(terms)
+        private_settings["banned_vocabulary"] = list(bans)
+
+    def forget(kind: str, key: str) -> None:
+        calls.append((f"forget_{kind}", key))
+        private_settings["corrections"] = [
+            item for item in private_settings["corrections"]
+            if not (item["kind"] == kind and item["key"] == key)]
+
+    actions = GUIActions(
+        status_snapshot=lambda: dict(runtime),
+        settings_snapshot=lambda: dict(private_settings),
+        set_face=set_face,
+        set_flight_recorder=set_flight,
+        set_app_tone=set_tone,
+        save_snippet=save_snippet,
+        delete_snippet=delete_snippet,
+        save_vocabulary=save_vocabulary,
+        forget_correction=lambda key: forget("correction", key),
+        forget_snippet_edit=lambda key: forget("snippet", key),
+    )
+    model = WhisperFaceViewModel(actions)
+    controller = None
+
+    def require(condition: bool, label: str) -> None:
+        if not condition:
+            raise AssertionError(label)
+
+    def accessible_value(control: Any, selector: str) -> str:
+        value = getattr(control, selector)()
+        return "" if value is None else str(value)
+
+    try:
+        NSApplication.sharedApplication()
+        controller = WhisperFaceWindowController.alloc() \
+            .initForSmokeWithViewModel_(model)
+        require(controller is not None, "controller")
+        require(controller.defaults is None, "defaults")
+        require(not bool(controller.window.isVisible()), "window visibility")
+        require(tuple(controller.pages) == SECTIONS, "sections")
+        require(
+            tuple(controller.dynamic["settings_panes"]) == SETTINGS_PANES,
+            "settings panes")
+
+        for index, section in enumerate(SECTIONS):
+            controller.section_control.setSelectedSegment_(index)
+            controller.sectionChanged_(controller.section_control)
+            visible = tuple(
+                name for name, page in controller.pages.items()
+                if not bool(page.isHidden()))
+            require(model.state.section == section, f"section {section}")
+            require(visible == (section,), f"render {section}")
+
+        controller.section_control.setSelectedSegment_(SECTIONS.index("Settings"))
+        controller.sectionChanged_(controller.section_control)
+        pane_control = controller.dynamic["settings_pane_control"]
+        for index, pane in enumerate(SETTINGS_PANES):
+            pane_control.setSelectedSegment_(index)
+            controller.settingsPaneChanged_(pane_control)
+            visible = tuple(
+                name for name, view in
+                controller.dynamic["settings_panes"].items()
+                if not bool(view.isHidden()))
+            require(model.state.settings_pane == pane, f"pane {pane}")
+            require(visible == (pane,), f"render pane {pane}")
+
+        require(
+            accessible_value(controller.section_control,
+                             "accessibilityLabel") == localized_string(
+                                 "settings.accessibility.sections.label"),
+            "section accessibility")
+        require(
+            accessible_value(pane_control, "accessibilityHelp") ==
+            localized_string("settings.accessibility.category.help"),
+            "pane accessibility")
+        require(
+            accessible_value(controller.dynamic["face_picker"],
+                             "accessibilityHelp") == localized_string(
+                                 "settings.accessibility.face.help"),
+            "face accessibility")
+        require(
+            accessible_value(controller.dynamic["flight_toggle"],
+                             "accessibilityHelp") == localized_string(
+                                 "settings.accessibility.flight.help"),
+            "flight accessibility")
+
+        form, app_popup, tone_popup = controller._tone_dialog_form(
+            model.state.settings.app_tones)
+        require(form is not None, "tone form")
+        require(
+            accessible_value(app_popup, "accessibilityLabel") ==
+            localized_string("settings.dialog.tone.app.label"),
+            "tone app accessibility")
+        require(
+            accessible_value(tone_popup, "accessibilityHelp") ==
+            localized_string("settings.dialog.tone.choice.help"),
+            "tone choice accessibility")
+        app_popup.selectItemAtIndex_(1)
+        controller.toneDialogAppChanged_(app_popup)
+        require(
+            int(tone_popup.indexOfSelectedItem()) ==
+            TONE_CHOICES.index("code"),
+            "tone synchronization")
+        _scroll, editor = controller._text_editor(
+            NSMakeRect(0, 0, 240, 80), "fixture",
+            label=localized_string("settings.dialog.snippet.value"),
+            help_text=localized_string(
+                "settings.dialog.snippet.value.help"))
+        require(
+            accessible_value(editor, "accessibilityLabel") ==
+            localized_string("settings.dialog.snippet.value"),
+            "editor accessibility")
+
+        model.set_app_tone("com.example.mail", "casual")
+        model.save_snippet(
+            "signature", "Kind regards", expected_original="Cheers")
+        model.delete_snippet("signature", "Kind regards")
+        model.save_vocabulary(["Qwen", "Parakeet"], ["Gwen"])
+        model.forget_learned("correction", "gwen")
+        model.forget_learned("snippet", "gwen")
+        model.choose_face("owl")
+        model.set_flight_recorder(True)
+        expected_calls = {
+            ("tone", "com.example.mail", "casual"),
+            ("save_snippet", "signature", "Cheers", "Kind regards"),
+            ("delete_snippet", "signature", "Kind regards"),
+            ("vocabulary", ("Qwen", "Parakeet"), ("Gwen",)),
+            ("forget_correction", "gwen"),
+            ("forget_snippet", "gwen"),
+            ("face", "owl"),
+            ("flight", True),
+        }
+        require(expected_calls.issubset(set(calls)), "model actions")
+        require(not bool(controller.window.isVisible()), "window activation")
+        return {
+            "sections": len(SECTIONS),
+            "settings_panes": len(SETTINGS_PANES),
+            "model_actions": len(expected_calls),
+        }
+    finally:
+        if controller is not None:
+            if controller.timer is not None:
+                controller.timer.invalidate()
+                controller.timer = None
+            controller.window.setDelegate_(None)
+            controller.window.orderOut_(None)
+            controller.window.close()
+            controller.pages.clear()
+            controller.dynamic.clear()
+
+
 class WhisperFaceGUI:
     """Retained facade suitable for ownership by the existing status bar."""
 
@@ -2273,18 +2672,22 @@ __all__ = [
     "GUIActions",
     "GUIState",
     "ModelStatus",
+    "NativeAppKitSmokeContract",
     "OnboardingStep",
     "ResultInspection",
     "SECTIONS",
     "SETTINGS_PANES",
     "STRING_CATALOGS",
+    "SUPPORTED_LOCALES",
     "SnippetSetting",
     "UnifiedSettings",
     "WhisperFaceGUI",
     "WhisperFaceViewModel",
     "create_gui",
     "localized_string",
+    "native_appkit_smoke_contract",
     "normalize_snapshot",
     "normalize_settings",
+    "run_native_appkit_smoke",
     "tone_for_app_index",
 ]

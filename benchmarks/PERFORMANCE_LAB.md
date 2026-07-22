@@ -47,6 +47,29 @@ labels, preventing a user string from being reflected into aggregate keys.
 Receipt values exactly match the runtime contract: `verified`, `unverifiable`,
 `conflict`, and `unresolved`. Adding a route requires a reviewed schema change.
 
+## Cold versus warm startup traces
+
+The runtime already emits closed numeric traces for audio-pool warmup, Tiny,
+final ASR, Ollama, and total readiness. Keep physically collected cold and warm
+launches in separate logs, then evaluate both without adding a phase label or
+other open-ended data to the runtime schema:
+
+```sh
+uv run performance_lab.py startup \
+  --cold-trace-log /private/tmp/whisper-face-cold.log \
+  --warm-trace-log /private/tmp/whisper-face-warm.log
+```
+
+The `startup_readiness` profile requires 100% reported success and applies
+independent p95 thresholds and minimum sample counts to all five components:
+three caller-labelled cold launches and ten caller-labelled cache-warm
+launches. The report never returns either input path or any non-trace log
+content. Classification is explicitly
+`caller-separated-trace-logs`; the tool does not infer cache state from event
+order and sets `physical_conditions_verified` to false. A controlled Mac test
+procedure is still required before treating those labels as physical cold and
+steady-state evidence.
+
 ## Deterministic warm-path gate
 
 The stress command warms every synthetic case, compiles the full corpus
@@ -66,6 +89,29 @@ corpus, metrics, scorecard, and lifecycle tests on every push and pull request.
 This harness does not claim to exercise microphone gain, background audio,
 device switching, OS sleep/wake, energy, or thermal behavior. Those require a
 licensed physical-audio corpus and the hardware matrix.
+
+The separate lifecycle command drives the real Voice Compiler behind a
+deterministic adapter, injects unavailable states, verifies blocked operations,
+restores service, and compares recovered output with a synthetic baseline:
+
+```sh
+uv run performance_lab.py lifecycle --iterations 25
+```
+
+It covers back-to-back compilation, the synthetic long-form case, compiler
+re-instantiation, simulated sleep/wake, and simulated audio-device loss and
+restoration. Its artifact says `adapter-simulation-only` and
+`physical_evidence: false`; it cannot prove operating-system sleep, driver
+recovery, microphone behavior, or long-audio memory and thermal stability. A
+read-only scheduled/manual workflow runs the deterministic harness and its test
+suite, then preserves only the synthetic aggregate artifact.
+
+The consequence-routing benchmark is narrower: it exercises only synthetic
+classification and selector policy. Its artifact explicitly reports that no
+audio, verifier, runtime ASR backend, or physical device was exercised. Custom
+case identifiers are replaced by deterministic ordinal labels in every result
+and latency row so caller strings cannot enter an artifact described as
+transcript-free.
 
 ## Model scorecard
 

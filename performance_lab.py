@@ -155,6 +155,13 @@ RUNTIME_TRACE_SCHEMAS = {
         "voiced_fraction",
     ),
 }
+STARTUP_TRACE_EVENTS = (
+    "warmup_audio_pool",
+    "warmup_asr_tiny",
+    "warmup_asr_final",
+    "warmup_ollama",
+    "warmup_total",
+)
 _TRACE_RATIO_FIELDS = {
     "clipped_ratio", "nonfinite_ratio", "silence_ratio", "voiced_fraction",
 }
@@ -445,6 +452,51 @@ def evaluate_runtime_traces(path: Path) -> dict[str, Any]:
         "rejected_by_reason": dict(sorted(rejected.items())),
         "ignored_non_trace_lines": ignored_lines,
         "events": events,
+    }
+
+
+def evaluate_startup_traces(
+        cold_trace_log: Path, warm_trace_log: Path) -> dict[str, Any]:
+    """Compare caller-separated cold and warm closed-schema trace logs.
+
+    Phase labels come only from the two explicit inputs. The evaluator never
+    guesses process or cache state from event order and does not claim that the
+    caller established physical cold-start conditions.
+    """
+    phase_reports: dict[str, Any] = {}
+    rejected: dict[str, int] = {}
+    ignored_lines = 0
+    ignored_non_startup = 0
+    for phase, path in (
+            ("cold", cold_trace_log), ("warm", warm_trace_log)):
+        aggregate = evaluate_runtime_traces(path)
+        events = {
+            event: aggregate["events"][event]
+            for event in STARTUP_TRACE_EVENTS
+            if event in aggregate["events"]
+        }
+        startup_records = sum(event["records"] for event in events.values())
+        ignored_non_startup += aggregate["records"] - startup_records
+        ignored_lines += aggregate["ignored_non_trace_lines"]
+        for reason, count in aggregate["rejected_by_reason"].items():
+            rejected[reason] = rejected.get(reason, 0) + count
+        phase_reports[phase] = {
+            "records": startup_records,
+            "events": events,
+        }
+    return {
+        "schema_version": 1,
+        "trace_schema_version": RUNTIME_TRACE_SCHEMA_VERSION,
+        "privacy": "numeric-aggregates-only",
+        "phase_classification": "caller-separated-trace-logs",
+        "physical_conditions_verified": False,
+        "records": sum(
+            phase["records"] for phase in phase_reports.values()),
+        "rejected_records": sum(rejected.values()),
+        "rejected_by_reason": dict(sorted(rejected.items())),
+        "ignored_non_trace_lines": ignored_lines,
+        "ignored_non_startup_records": ignored_non_startup,
+        "phases": phase_reports,
     }
 
 
@@ -819,6 +871,172 @@ def audit_model_sources(
     }
 
 
+class LifecycleSimulationUnavailable(RuntimeError):
+    """A deterministic adapter fault blocked a simulated operation."""
+
+
+class CompilerLifecycleSimulationAdapter:
+    """Isolate lifecycle fault simulation from the Voice Compiler itself."""
+
+    def __init__(self, compiler_factory, compile_case):
+        self._compiler_factory = compiler_factory
+        self._compile_case = compile_case
+        self._compiler = compiler_factory()
+        self._sleeping = False
+        self._audio_device_available = True
+
+    def compile(self, case: dict[str, Any]) -> str:
+        if self._sleeping or not self._audio_device_available:
+            raise LifecycleSimulationUnavailable("simulated lifecycle fault")
+        return self._compile_case(self._compiler, case)
+
+    def restart(self) -> None:
+        self._compiler = self._compiler_factory()
+
+    def inject_sleep(self) -> None:
+        self._sleeping = True
+
+    def wake(self) -> None:
+        self._sleeping = False
+
+    def inject_audio_device_loss(self) -> None:
+        self._audio_device_available = False
+
+    def restore_audio_device(self) -> None:
+        self._audio_device_available = True
+
+
+def run_lifecycle_simulation(
+        corpus: dict[str, Any] | None = None, *, iterations: int = 10,
+        adapter_factory=None) -> dict[str, Any]:
+    """Exercise compiler recovery through deterministic adapter-only faults.
+
+    Sleep/wake and audio-device changes are state injected at an adapter seam;
+    they never pretend to operate the OS, microphone, driver, or real device.
+    """
+    if (isinstance(iterations, bool) or not isinstance(iterations, int)
+            or iterations <= 0):
+        raise ValueError("iterations must be a positive integer")
+    from voice_compiler import RecognitionHypothesis, VoiceCompiler, VoiceIR
+
+    corpus = corpus or load_corpus()
+    cases = corpus["cases"]
+    long_form_cases = [
+        case for case in cases
+        if case["scenario"].get("delivery") == "long-form"
+    ]
+    if not long_form_cases:
+        raise ValueError("lifecycle simulation requires a long-form case")
+
+    def compile_case(compiler: Any, case: dict[str, Any]) -> str:
+        voice = VoiceIR(hypotheses=(RecognitionHypothesis(
+            text=case["reference"],
+            confidence=0.95,
+            engine="synthetic-lifecycle-simulation",
+        ),))
+        return compiler.compile(voice).text
+
+    baseline_compiler = VoiceCompiler()
+    baseline = {
+        case["id"]: compile_case(baseline_compiler, case)
+        for case in cases
+    }
+    factory = adapter_factory or CompilerLifecycleSimulationAdapter
+    adapter = factory(VoiceCompiler, compile_case)
+    scenario_names = (
+        "back-to-back",
+        "long-form",
+        "process-restart",
+        "sleep-wake",
+        "audio-device-switch",
+    )
+    scenarios = {
+        name: {"operations": 0, "blocked_operations": 0, "failures": 0}
+        for name in scenario_names
+    }
+    failures = 0
+    nondeterministic = 0
+    faults_injected = 0
+    faults_observed = 0
+    recoveries = 0
+
+    def compile_and_compare(name: str, case: dict[str, Any]) -> None:
+        nonlocal failures, nondeterministic
+        scenarios[name]["operations"] += 1
+        try:
+            actual = adapter.compile(case)
+        except Exception:
+            failures += 1
+            scenarios[name]["failures"] += 1
+            return
+        if actual != baseline[case["id"]]:
+            nondeterministic += 1
+            scenarios[name]["failures"] += 1
+
+    def expect_blocked(name: str, case: dict[str, Any]) -> None:
+        nonlocal failures, faults_observed
+        try:
+            adapter.compile(case)
+        except LifecycleSimulationUnavailable:
+            faults_observed += 1
+            scenarios[name]["blocked_operations"] += 1
+        except Exception:
+            failures += 1
+            scenarios[name]["failures"] += 1
+        else:
+            failures += 1
+            scenarios[name]["failures"] += 1
+
+    for index in range(iterations):
+        case = cases[index % len(cases)]
+        compile_and_compare("back-to-back", case)
+        compile_and_compare("back-to-back", case)
+
+        long_case = long_form_cases[index % len(long_form_cases)]
+        compile_and_compare("long-form", long_case)
+
+        adapter.restart()
+        compile_and_compare("process-restart", case)
+
+        faults_injected += 1
+        adapter.inject_sleep()
+        expect_blocked("sleep-wake", case)
+        adapter.wake()
+        recoveries += 1
+        compile_and_compare("sleep-wake", case)
+
+        faults_injected += 1
+        adapter.inject_audio_device_loss()
+        expect_blocked("audio-device-switch", case)
+        adapter.restore_audio_device()
+        recoveries += 1
+        compile_and_compare("audio-device-switch", case)
+
+    return {
+        "schema_version": 1,
+        "privacy": "synthetic-text-only",
+        "evidence_scope": "adapter-simulation-only",
+        "physical_evidence": False,
+        "iterations": iterations,
+        "operations": sum(
+            scenario["operations"] for scenario in scenarios.values()),
+        "blocked_operations": sum(
+            scenario["blocked_operations"]
+            for scenario in scenarios.values()),
+        "faults_injected": faults_injected,
+        "faults_observed": faults_observed,
+        "recoveries": recoveries,
+        "failures": failures,
+        "nondeterministic_outputs": nondeterministic,
+        "scenarios": scenarios,
+        "requires_physical_validation": [
+            "physical-audio-device-switch",
+            "physical-long-audio-memory-thermal",
+            "physical-operating-system-sleep-wake",
+        ],
+    }
+
+
 def run_compiler_stress(
         corpus: dict[str, Any] | None = None, *, cycles: int = 10,
         restart_every: int = 50) -> dict[str, Any]:
@@ -965,6 +1183,45 @@ def render_runtime_traces(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_startup_traces(report: dict[str, Any]) -> str:
+    lines = [
+        "CALLER-LABELLED STARTUP TRACE BUDGETS",
+        "phase  event                         samples   p95 duration ms   success",
+    ]
+    for phase, phase_report in report["phases"].items():
+        for event, result in phase_report["events"].items():
+            duration = result["metrics"]["duration_ms"]["p95"]
+            success = result.get("success_rate")
+            success_label = "n/a" if success is None else f"{success * 100:.1f}%"
+            lines.append(
+                f"{phase:<6} {event:<29} {result['records']:>7} "
+                f"{duration:>17.2f} {success_label:>9}")
+    budget = report.get("budget")
+    lines.extend((
+        "budget: " + ("PASS" if budget and budget["passed"] else "FAIL"),
+        "physical cold/warm conditions verified: no",
+    ))
+    return "\n".join(lines)
+
+
+def render_lifecycle_simulation(report: dict[str, Any]) -> str:
+    lines = [
+        "DETERMINISTIC LIFECYCLE ADAPTER SIMULATION",
+        f"iterations: {report['iterations']}",
+        f"operations: {report['operations']}",
+        f"blocked operations: {report['blocked_operations']}",
+        f"faults observed: {report['faults_observed']}/"
+        f"{report['faults_injected']}",
+        f"recoveries: {report['recoveries']}",
+        f"failures: {report['failures']}",
+        f"nondeterministic outputs: {report['nondeterministic_outputs']}",
+        "physical evidence: no",
+        "physical validation still required: "
+        + ", ".join(report["requires_physical_validation"]),
+    ]
+    return "\n".join(lines)
+
+
 def render_stress(report: dict[str, Any]) -> str:
     latency = report["latency_ms"]["compiler"]
     budget = report.get("budget")
@@ -1066,6 +1323,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     traces.add_argument(
         "--format", choices=("table", "json"), default="table")
 
+    startup = commands.add_parser(
+        "startup", help="compare caller-separated cold and warm trace logs")
+    startup.add_argument("--cold-trace-log", type=Path, required=True)
+    startup.add_argument("--warm-trace-log", type=Path, required=True)
+    startup.add_argument("--budgets", type=Path, default=DEFAULT_BUDGETS)
+    startup.add_argument("--budget-profile", default="startup_readiness")
+    startup.add_argument(
+        "--format", choices=("table", "json"), default="table")
+
+    lifecycle = commands.add_parser(
+        "lifecycle", help="run deterministic lifecycle adapter simulation")
+    lifecycle.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
+    lifecycle.add_argument("--iterations", type=int, default=10)
+    lifecycle.add_argument(
+        "--format", choices=("table", "json"), default="table")
+
     stress = commands.add_parser(
         "stress", help="run deterministic compiler lifecycle stress")
     stress.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
@@ -1116,6 +1389,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             rendered = render_runtime_traces(payload)
             status = int(
                 payload["records"] == 0 or payload["rejected_records"] > 0)
+        elif args.command == "startup":
+            payload = evaluate_startup_traces(
+                args.cold_trace_log, args.warm_trace_log)
+            payload["budget"] = evaluate_budgets(
+                payload, load_budgets(args.budgets), args.budget_profile)
+            rendered = render_startup_traces(payload)
+            status = int(
+                payload["records"] == 0
+                or payload["rejected_records"] > 0
+                or not payload["budget"]["passed"])
+        elif args.command == "lifecycle":
+            payload = run_lifecycle_simulation(
+                load_corpus(args.corpus), iterations=args.iterations)
+            rendered = render_lifecycle_simulation(payload)
+            status = int(
+                payload["failures"] > 0
+                or payload["nondeterministic_outputs"] > 0
+                or payload["faults_observed"] != payload["faults_injected"]
+                or payload["recoveries"] != payload["faults_injected"])
         elif args.command == "stress":
             payload = run_compiler_stress(
                 load_corpus(args.corpus), cycles=args.cycles,
@@ -1156,7 +1448,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             except OSError:
                 pass
         detail = "runtime trace input unavailable" \
-            if args.command == "traces" else str(exc)
+            if args.command in {"traces", "startup"} else str(exc)
         print(f"performance lab configuration error: {detail}", file=sys.stderr)
         return 2
     print(json.dumps(payload, indent=2, sort_keys=True)

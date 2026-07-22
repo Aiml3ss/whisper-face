@@ -46,10 +46,11 @@ profiles.
 ## Features
 
 - **A real native Mac app window** — choose **Open Whisper Face…** from the
-  menu-bar face for a focused Overview, Appearance, Privacy, Models, and
-  Diagnostics experience. It exposes live latency and usage, face selection,
-  pause/Flight Recorder controls, local model health, and one-click installer
-  verification without adding a browser runtime.
+  menu-bar face for focused Overview, Results, Settings, Models, and
+  Diagnostics sections. It exposes live latency and usage, inspectable
+  decision evidence, unified personalization/privacy controls, local model
+  health, and one-click installer verification without adding a browser
+  runtime.
 - **Transactional insertion + Voice Outbox (Mac)** — readable text fields are
   leased at key-down and revalidated before the single paste attempt. If focus,
   selection, or nearby text changed while recognition ran, Whisper Face does
@@ -98,6 +99,14 @@ profiles.
   prefix to the HUD, never provisional text into the target app. Native word
   timing may add conservative pause/paragraph formatting without enabling the
   expensive Whisper alignment pass.
+- **Consequence receipts before consequence automation** — names, numbers,
+  currency, dates, times, recipients, contacts, URLs, paths, commands, and
+  actions receive transcript-free risk/uncertainty receipts in Last
+  Recognition and Results. The selective re-listen selector is bounded to two
+  native-timed microspans and never a full utterance. Re-listen execution is
+  intentionally disabled until a killable process-isolated verifier beats the
+  current stack in a public accuracy/latency comparison; rolling-chunk timing
+  is conservatively ineligible until it carries absolute capture bounds.
 - **Six explicit voice modes** — modifier keys turn the same Right Option
   gesture into faithful capture, polished composition, context-aware reply,
   selected-text editing, spoken-code compilation, or a small allowlist of
@@ -245,6 +254,9 @@ need `transcripts.jsonl` unless you also want the old transcript history.
 
 No hotkey, no HUD, no permission prompts—just the compatibility endpoint and
 the learning loop. This is not the planned native iPhone experience.
+Verify that headless installation later with `./setup.sh --server-only --verify`;
+the runtime/model/service checks still run while the AppKit construction gate
+is correctly skipped.
 
 ## Daily use
 
@@ -319,6 +331,11 @@ The trace command ignores ordinary log lines, rejects any non-allowlisted or
 non-numeric trace field, and never includes raw lines, input paths, app
 identifiers, or transcript text in its table or JSON output.
 
+Run `uv run benchmark_consequence_routing.py` for the synthetic selector-only
+consequence corpus. Its closed artifact explicitly says that no audio,
+verifier, runtime ASR backend, or physical device was exercised, and its 5 ms
+gate uses the worst per-case p95 rather than corpus-average throughput.
+
 ## Verify
 
 Run the fast regression suite after changing the pipeline:
@@ -326,7 +343,9 @@ Run the fast regression suite after changing the pipeline:
 ```sh
 uv run tests/test_parrot_core.py
 uv run tests/test_voice_compiler.py
+uv run tests/test_consequence_routing.py
 uv run tests/test_benchmark_voice_compiler.py
+uv run tests/test_benchmark_consequence_routing.py
 uv run tests/test_benchmark_asr.py
 uv run tests/test_performance_lab.py
 uv run tests/test_dictate.py
@@ -334,6 +353,7 @@ uv run tests/test_gui_settings_runtime.py
 uv run tests/test_insertion_integrity.py
 uv run tests/test_personal_regression.py
 uv run tests/test_whisper_face_gui.py
+uv run --locked --script dictate.py --native-gui-smoke-test
 uv run tests/test_installers.py
 uv run tests/test_repository_governance.py
 uv run tests/test_macos_distribution.py

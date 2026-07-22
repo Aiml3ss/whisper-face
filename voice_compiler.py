@@ -11,6 +11,7 @@ from __future__ import annotations
 import difflib
 import math
 import re
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable, Protocol, Sequence
@@ -353,6 +354,92 @@ class CompileResult:
 
 
 @dataclass(frozen=True)
+class ConsequenceRisk:
+    """Transcript-free description of one consequential source span."""
+
+    category: str
+    severity: str
+    char_start: int
+    char_end: int
+    word_start: int
+    word_end: int
+    confidence: float
+    uncertainty: tuple[str, ...] = ()
+    audio_start: float | None = None
+    audio_end: float | None = None
+
+
+@dataclass(frozen=True)
+class RelistenRequest:
+    """A bounded timed span; expected text remains outside this receipt."""
+
+    risk_indexes: tuple[int, ...]
+    start: float
+    end: float
+
+    @property
+    def risk_index(self) -> int:
+        """Compatibility accessor for the first covered risk."""
+        return self.risk_indexes[0]
+
+
+@dataclass(frozen=True)
+class MicrospanVerification:
+    """Transcript-free result produced by an independent local verifier."""
+
+    outcome: str
+    confidence: float
+    engine: str
+
+
+class MicrospanVerifier(Protocol):
+    """Future process-isolated verifier contract for one audio microspan.
+
+    An in-process implementation cannot safely prove deadline enforcement or
+    audio destruction. Runtime therefore refuses every object implementing
+    this provisional protocol until a killable, quarantined subprocess adapter
+    owns the boundary. The shape remains here to keep selector work testable.
+    """
+
+    strict_deadline: bool
+    retains_audio: bool
+
+    def verify(
+        self,
+        samples: Sequence[float],
+        sample_rate: int,
+        expected: str,
+        *,
+        deadline_at: float,
+    ) -> MicrospanVerification: ...
+
+
+@dataclass(frozen=True)
+class ConsequencePlan:
+    risks: tuple[ConsequenceRisk, ...]
+    relisten_requests: tuple[RelistenRequest, ...]
+    relisten_skipped: tuple[tuple[str, int], ...] = ()
+
+
+@dataclass(frozen=True)
+class ConsequenceReceipt:
+    """Closed, transcript-free decision evidence for Last Recognition."""
+
+    route: str
+    risk_counts: tuple[tuple[str, int], ...]
+    total_risks: int
+    high_risks: int
+    uncertain_risks: int
+    relisten_status: str
+    relisten_selected: int
+    relisten_attempted: int
+    relisten_confirmed: int
+    relisten_contradicted: int
+    relisten_inconclusive: int
+    relisten_skipped: tuple[tuple[str, int], ...] = ()
+
+
+@dataclass(frozen=True)
 class _Token:
     text: str
     start: int
@@ -542,6 +629,476 @@ def protected_anchors(text: str,
         if candidate.weight >= 3.0 and candidate.text.casefold() in lower:
             anchors.append(candidate.text)
     return tuple(dict.fromkeys(anchor for anchor in anchors if anchor))
+
+
+_RISK_URL_RE = re.compile(
+    r"\b(?:(?:https?://|www\.)[^\s]+|"
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"(?:ai|app|cloud|com|co|dev|edu|gov|io|me|net|org|tech|uk|us)"
+    r"(?=\b|/)(?:/[^\s]*)?)",
+    re.I,
+)
+_RISK_PATH_RE = re.compile(
+    r"(?<!\w)(?:(?:/|~/|\.\.?/)[\w.@%+,:=~-]+"
+    r"(?:/[\w.@%+,:=~-]+)*|"
+    r"[A-Za-z]:\\[^\s]+)"
+)
+_RISK_EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b")
+_RISK_HANDLE_RE = re.compile(r"(?<!\w)@[A-Za-z][A-Za-z0-9_.-]{1,63}\b")
+_RISK_PHONE_RE = re.compile(r"(?<!\w)\+?\d(?:[() .-]*\d){6,}(?!\w)")
+_RISK_CURRENCY_RE = re.compile(
+    r"(?<!\w)(?:[+-]?\s*[$€£¥]\s*\d[\d,]*(?:\.\d{1,2})?|"
+    r"[+-]?\s*\d[\d,]*(?:\.\d{1,2})?\s*"
+    r"(?:dollars?|euros?|pounds?|yen))\b",
+    re.I,
+)
+_RISK_DATE_RE = re.compile(
+    r"\b(?:(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|"
+    r"Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|"
+    r"Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?"
+    r"(?:,?\s+\d{4})?|\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\b",
+    re.I,
+)
+_RISK_TIME_RE = re.compile(
+    r"\b(?:(?:[01]?\d|2[0-3]):[0-5]\d(?:\s*[ap]\.?m\.?)?|"
+    r"(?:1[0-2]|0?[1-9])\s*[ap]\.?m\.?)\b",
+    re.I,
+)
+_RISK_NUMBER_RE = re.compile(
+    r"(?<![\w@])(?:[+-]\s*)?\d[\d,]*(?:\.\d+)?%?(?!\w)")
+_SPOKEN_CARDINAL = (
+    r"(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
+    r"eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|"
+    r"eighty|ninety|hundred|thousand|million)"
+)
+_SPOKEN_ORDINAL = (
+    r"(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|"
+    r"tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|"
+    r"sixteenth|seventeenth|eighteenth|nineteenth|twentieth|"
+    r"thirtieth|fortieth|fiftieth|sixtieth|seventieth|eightieth|"
+    r"ninetieth|hundredth|thousandth|millionth)"
+)
+_RISK_SPOKEN_NUMBER_RE = re.compile(
+    rf"\b(?:(?:minus|negative|plus|positive)[-\s]+)?"
+    rf"(?:{_SPOKEN_CARDINAL}(?:[-\s]+(?:and\s+)?{_SPOKEN_CARDINAL})*"
+    rf"(?:[-\s]+{_SPOKEN_ORDINAL})?|{_SPOKEN_ORDINAL})\b",
+    re.I,
+)
+_RISK_RECIPIENT_RE = re.compile(
+    r"(?i:\b(?:send(?:\s+(?:this|it|that))?\s+to|email|message|call|cc|bcc)"
+    r"\s+)(?P<target>[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}|"
+    r"@[A-Za-z][\w.-]*|[A-Z][\w'-]*(?:\s+[A-Z][\w'-]*){0,3})\b",
+)
+_RISK_NAME_RE = re.compile(
+    r"\b[A-Z][A-Za-z'-]{1,40}(?:\s+[A-Z][A-Za-z'-]{1,40})+\b"
+)
+_ACTION_WORDS = {
+    "approve", "call", "cancel", "cc", "delete", "deploy", "email",
+    "execute", "message", "move", "open", "overwrite", "pay", "publish",
+    "remove", "reset", "run", "save", "schedule", "send", "share",
+    "submit", "transfer", "use",
+} | COMMAND_WORDS
+_RISK_SEVERITY = {
+    "name": "high",
+    "number": "high",
+    "currency": "high",
+    "date": "high",
+    "time": "high",
+    "recipient": "high",
+    "contact": "high",
+    "url": "high",
+    "path": "high",
+    "command": "high",
+    "action": "high",
+}
+_RELISEN_MAX_SPANS = 2
+_RELISEN_MAX_SECONDS = 2.4
+_RELISEN_PADDING_SECONDS = 0.08
+
+
+def _overlaps(left: tuple[int, int], right: tuple[int, int]) -> bool:
+    return left[0] < right[1] and right[0] < left[1]
+
+
+def _lexical_tokens(text: str) -> list[_Token]:
+    return [token for token in _tokens(text)
+            if any(character.isalnum() for character in token.text)]
+
+
+def _evidence_token_key(value: str) -> str:
+    """Case-fold evidence without erasing consequential punctuation.
+
+    ASR word rows may carry surrounding whitespace, but decimal points,
+    slashes, currency signs, email punctuation, and path separators are part
+    of the claim being verified and must remain distinct.
+    """
+    return re.sub(r"\s+", "", value.casefold())
+
+
+def _aligned_words(primary: RecognitionHypothesis,
+                   tokens: Sequence[_Token]) -> tuple[WordEvidence, ...] | None:
+    words = tuple(word for word in primary.words
+                  if any(character.isalnum() for character in word.text))
+    if len(words) != len(tokens):
+        return None
+    if any(_evidence_token_key(word.text) != _evidence_token_key(token.text)
+           for word, token in zip(words, tokens)):
+        return None
+    return words
+
+
+def _alternative_disagreements(
+        voice: VoiceIR) -> tuple[tuple[int, int], ...]:
+    """Return changed primary character ranges using punctuation-safe tokens."""
+    primary_tokens = _tokens(voice.hypotheses[0].text)
+    primary = [_evidence_token_key(token.text) for token in primary_tokens]
+    disagreements: list[tuple[int, int]] = []
+    for hypothesis in voice.hypotheses[1:]:
+        alternative_tokens = _tokens(hypothesis.text)
+        alternative = [_evidence_token_key(token.text)
+                       for token in alternative_tokens]
+        matcher = difflib.SequenceMatcher(
+            None, primary, alternative, autojunk=False)
+        for tag, first, last, _other_first, _other_last in matcher.get_opcodes():
+            if tag == "equal":
+                continue
+            if first < last:
+                disagreements.append((
+                    primary_tokens[first].start,
+                    primary_tokens[last - 1].end,
+                ))
+            else:
+                position = primary_tokens[first].start \
+                    if first < len(primary_tokens) \
+                    else len(voice.hypotheses[0].text)
+                disagreements.append((position, position))
+    return tuple(disagreements)
+
+
+def _change_affects_span(
+        change: tuple[int, int], span: tuple[int, int]) -> bool:
+    if change[0] == change[1]:
+        return span[0] <= change[0] <= span[1]
+    return _overlaps(change, span)
+
+
+def _risk_candidates(voice: VoiceIR) -> list[tuple[str, str, int, int]]:
+    text = voice.hypotheses[0].text
+    candidates: list[tuple[str, str, int, int]] = []
+
+    def add_span(category: str, start: int, end: int,
+                 severity: str | None = None) -> None:
+        key = (category, start, end)
+        if any((existing[0], existing[2], existing[3]) == key
+               for existing in candidates):
+            return
+        if category == "name":
+            for index, existing in enumerate(candidates):
+                if existing[0] != "name" or not _overlaps(
+                        (start, end), (existing[2], existing[3])):
+                    continue
+                if end - start < existing[3] - existing[2]:
+                    candidates[index] = (
+                        category, severity or _RISK_SEVERITY[category],
+                        start, end)
+                return
+        candidates.append((
+            category, severity or _RISK_SEVERITY[category], start, end))
+
+    def add(category: str, match, severity: str | None = None) -> None:
+        add_span(category, *match.span(), severity)
+
+    for pattern, category in (
+            (_RISK_URL_RE, "url"),
+            (_RISK_PATH_RE, "path"),
+            (_RISK_EMAIL_RE, "contact"),
+            (_RISK_HANDLE_RE, "contact"),
+            (_RISK_PHONE_RE, "contact"),
+            (_RISK_RECIPIENT_RE, "recipient"),
+            (_RISK_CURRENCY_RE, "currency"),
+            (_RISK_DATE_RE, "date"),
+            (_RISK_TIME_RE, "time")):
+        for match in pattern.finditer(text):
+            if category == "url" and match.start() > 0 \
+                    and text[match.start() - 1] == "@":
+                continue
+            if category == "path" and any(
+                    _overlaps(match.span(), (start, end))
+                    for existing, _severity, start, end in candidates
+                    if existing == "url"):
+                continue
+            if category == "recipient":
+                add_span(category, *match.span("target"))
+            else:
+                add(category, match)
+
+    specialized = [(start, end) for category, _severity, start, end in candidates
+                   if category in {
+                       "contact", "currency", "date", "time", "url", "path"}]
+    for pattern in (_RISK_NUMBER_RE, _RISK_SPOKEN_NUMBER_RE):
+        for match in pattern.finditer(text):
+            if any(_overlaps(match.span(), span) for span in specialized):
+                continue
+            add("number", match)
+
+    for match in _RISK_NAME_RE.finditer(text):
+        name_words = match.group(0).split()
+        if name_words[0].casefold() in _ACTION_WORDS:
+            if len(name_words) >= 3:
+                trailing_start = match.start() + match.group(0).find(
+                    name_words[1])
+                add_span("name", trailing_start, match.end())
+            continue
+        add("name", match)
+    folded = text.casefold()
+    for context in voice.context.candidates:
+        value = context.text.strip()
+        if (context.weight < 2.5 or len(value) < 2
+                or not value[:1].isupper()
+                or any(character.isdigit() for character in value)):
+            continue
+        start = folded.find(value.casefold())
+        while start >= 0:
+            end = start + len(value)
+            if (start == 0 or not text[start - 1].isalnum()) and (
+                    end == len(text) or not text[end:end + 1].isalnum()):
+                add_span("name", start, end)
+            start = folded.find(value.casefold(), end)
+
+    lexical = _lexical_tokens(text)
+    for index, token in enumerate(lexical):
+        word = token.text.casefold()
+        if word not in _ACTION_WORDS:
+            continue
+        if (index + 1 < len(lexical)
+                and lexical[index + 1].text.casefold() in {
+                    "is", "was", "seems", "looks", "contains", "says",
+                }):
+            continue
+        prefix = " ".join(item.text.casefold() for item in lexical[:index])
+        imperative_prefix = prefix in {
+            "", "please", "then", "and then", "please then",
+            "can you", "could you", "would you", "please can you",
+            "please could you", "please would you",
+        }
+        if not imperative_prefix and voice.mode not in {"command", "code"}:
+            continue
+        category = "command" if word in COMMAND_WORDS \
+            or voice.mode == "command" else "action"
+        add_span(category, token.start, token.end)
+        break
+
+    return sorted(candidates, key=lambda item: (item[2], item[3], item[0]))
+
+
+def build_consequence_plan(
+        voice: VoiceIR, *, audio_duration: float | None = None) \
+        -> ConsequencePlan:
+    """Classify consequential spans and select only precise microspans."""
+    primary = voice.hypotheses[0]
+    tokens = _lexical_tokens(primary.text)
+    words = _aligned_words(primary, tokens)
+    disagreements = _alternative_disagreements(voice)
+    duration = audio_duration if isinstance(audio_duration, (int, float)) \
+        and not isinstance(audio_duration, bool) \
+        and math.isfinite(float(audio_duration)) \
+        and float(audio_duration) > 0.0 else None
+    risks: list[ConsequenceRisk] = []
+    for category, severity, char_start, char_end in _risk_candidates(voice):
+        indexes = [index for index, token in enumerate(tokens)
+                   if _overlaps((token.start, token.end),
+                                (char_start, char_end))]
+        if not indexes:
+            continue
+        evidence = tuple(words[index] for index in indexes) \
+            if words is not None else ()
+        confidence = min(
+            [primary.confidence, *(word.confidence for word in evidence)])
+        uncertainty: list[str] = []
+        if primary.confidence < 0.82:
+            uncertainty.append("hypothesis-confidence")
+        if not evidence:
+            uncertainty.append("word-evidence-unavailable")
+        elif min(word.confidence for word in evidence) < 0.78:
+            uncertainty.append("word-confidence")
+        if any(_change_affects_span(
+                change, (char_start, char_end)) for change in disagreements):
+            uncertainty.append("hypothesis-disagreement")
+        audio_start = audio_end = None
+        if evidence and duration is not None and all(
+                word.timing == "native"
+                and math.isfinite(word.start) and math.isfinite(word.end)
+                and 0.0 <= word.start < word.end <= duration
+                for word in evidence):
+            audio_start = min(word.start for word in evidence)
+            audio_end = max(word.end for word in evidence)
+        risks.append(ConsequenceRisk(
+            category=category,
+            severity=severity,
+            char_start=char_start,
+            char_end=char_end,
+            word_start=indexes[0],
+            word_end=indexes[-1] + 1,
+            confidence=round(max(0.0, min(1.0, confidence)), 4),
+            uncertainty=tuple(uncertainty),
+            audio_start=audio_start,
+            audio_end=audio_end,
+        ))
+
+    candidates: list[RelistenRequest] = []
+    skipped: dict[str, int] = {}
+    for risk_index, risk in enumerate(risks):
+        if risk.severity != "high" or not risk.uncertainty:
+            continue
+        if risk.audio_start is None or risk.audio_end is None \
+                or duration is None:
+            skipped["timing-unavailable"] = \
+                skipped.get("timing-unavailable", 0) + 1
+            continue
+        start = max(0.0, risk.audio_start - _RELISEN_PADDING_SECONDS)
+        end = min(duration, risk.audio_end + _RELISEN_PADDING_SECONDS)
+        span_duration = end - start
+        if (span_duration <= 0.0 or span_duration > _RELISEN_MAX_SECONDS
+                or span_duration >= duration * 0.75
+                or (start <= 0.0 and end >= duration)):
+            skipped["span-not-micro"] = skipped.get("span-not-micro", 0) + 1
+            continue
+        candidates.append(RelistenRequest((risk_index,), start, end))
+
+    # Padding commonly makes an imperative verb and its consequential payload
+    # overlap ("pay $500", "open /path"). Verify that single acoustic region
+    # once and resolve every covered risk rather than spending the budget on
+    # the verb while silently dropping the payload.
+    merged: list[RelistenRequest] = []
+    for candidate in sorted(candidates, key=lambda item: (item.start, item.end)):
+        if merged and candidate.start <= merged[-1].end:
+            previous = merged[-1]
+            combined_end = max(previous.end, candidate.end)
+            combined_indexes = tuple(dict.fromkeys(
+                (*previous.risk_indexes, *candidate.risk_indexes)))
+            if (combined_end - previous.start <= _RELISEN_MAX_SECONDS
+                    and combined_end - previous.start < duration * 0.75
+                    and not (previous.start <= 0.0
+                             and combined_end >= duration)):
+                merged[-1] = RelistenRequest(
+                    combined_indexes, previous.start, combined_end)
+                continue
+        merged.append(candidate)
+
+    def priority(request: RelistenRequest) -> tuple[int, float, float]:
+        payload = any(risks[index].category not in {"action", "command"}
+                      for index in request.risk_indexes)
+        return (0 if payload else 1, request.start, request.end)
+
+    ranked = sorted(merged, key=priority)
+    requests = ranked[:_RELISEN_MAX_SPANS]
+    for request in ranked[_RELISEN_MAX_SPANS:]:
+        skipped["selection-limit"] = skipped.get("selection-limit", 0) \
+            + len(request.risk_indexes)
+    requests.sort(key=lambda item: (item.start, item.end))
+    return ConsequencePlan(
+        tuple(risks), tuple(requests), tuple(sorted(skipped.items())))
+
+
+def execute_consequence_plan(
+        voice: VoiceIR,
+        plan: ConsequencePlan,
+        *,
+        audio: Sequence[float] | None = None,
+        sample_rate: int = 16_000,
+        verifier: MicrospanVerifier | None = None,
+        deadline_seconds: float = 0.75,
+        clock=time.monotonic,
+) -> ConsequenceReceipt:
+    """Execute selected re-listens under a closed, transcript-free contract."""
+    if (not isinstance(sample_rate, int) or isinstance(sample_rate, bool)
+            or sample_rate <= 0):
+        raise ValueError("sample_rate must be a positive integer")
+    if (isinstance(deadline_seconds, bool)
+            or not isinstance(deadline_seconds, (int, float))
+            or not 0.0 < float(deadline_seconds) <= 2.0):
+        raise ValueError("deadline_seconds must be between 0 and 2 seconds")
+
+    skipped = dict(plan.relisten_skipped)
+    selected = len(plan.relisten_requests)
+    attempted = confirmed = contradicted = inconclusive = 0
+    confirmed_risks: set[int] = set()
+    contradicted_risks: set[int] = set()
+    if selected and verifier is None:
+        skipped["verifier-unavailable"] = selected
+    elif selected:
+        # Python threads cannot be killed safely and a timed-out native model
+        # may keep reading or copying audio. Never execute an in-process
+        # verifier. Item 19 owns the prewarmed subprocess boundary that can be
+        # terminated, killed, quarantined, and restarted on its hard deadline.
+        skipped["unsafe-verifier-contract"] = selected
+
+    risk_counts: dict[str, int] = {}
+    for risk in plan.risks:
+        risk_counts[risk.category] = risk_counts.get(risk.category, 0) + 1
+    uncertain = sum(bool(risk.uncertainty) for risk in plan.risks)
+    high = sum(risk.severity == "high" for risk in plan.risks)
+    uncertain_high_indexes = {
+        index for index, risk in enumerate(plan.risks)
+        if risk.severity == "high" and bool(risk.uncertainty)
+    }
+    uncertain_high = len(uncertain_high_indexes)
+    unresolved_high = uncertain_high_indexes - confirmed_risks
+    if not plan.risks:
+        route = "standard"
+    elif contradicted_risks or unresolved_high:
+        route = "review"
+    elif uncertain_high:
+        route = "verified"
+    else:
+        route = "protected"
+
+    if not uncertain_high:
+        relisten_status = "not-needed"
+    elif contradicted:
+        relisten_status = "contradicted"
+    elif attempted == 0:
+        relisten_status = "skipped"
+    elif confirmed == attempted and not skipped:
+        relisten_status = "confirmed"
+    elif skipped.get("deadline-expired"):
+        relisten_status = "timed-out"
+    elif inconclusive:
+        relisten_status = "inconclusive"
+    else:
+        relisten_status = "mixed"
+    return ConsequenceReceipt(
+        route=route,
+        risk_counts=tuple(sorted(risk_counts.items())),
+        total_risks=len(plan.risks),
+        high_risks=high,
+        uncertain_risks=uncertain,
+        relisten_status=relisten_status,
+        relisten_selected=selected,
+        relisten_attempted=attempted,
+        relisten_confirmed=confirmed,
+        relisten_contradicted=contradicted,
+        relisten_inconclusive=inconclusive,
+        relisten_skipped=tuple(sorted(skipped.items())),
+    )
+
+
+def consequence_receipt(
+        voice: VoiceIR, *, audio: Sequence[float] | None = None,
+        sample_rate: int = 16_000,
+        audio_duration: float | None = None,
+        verifier: MicrospanVerifier | None = None,
+        deadline_seconds: float = 0.75,
+        clock=time.monotonic) -> ConsequenceReceipt:
+    """Build and execute one bounded consequence-routing decision."""
+    duration = audio_duration
+    if duration is None and audio is not None:
+        duration = len(audio) / sample_rate
+    plan = build_consequence_plan(voice, audio_duration=duration)
+    return execute_consequence_plan(
+        voice, plan, audio=audio, sample_rate=sample_rate,
+        verifier=verifier, deadline_seconds=deadline_seconds, clock=clock)
 
 
 def _engine_bonus(engine: str) -> float:
