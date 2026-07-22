@@ -1,0 +1,20 @@
+---
+const proofs = ['on-device recognition', 'zero telemetry', 'no audio upload', 'local-only rules'];
+---
+
+<section class="privacy" id="privacy">
+  <div class="wrap">
+    <div>
+      <h2>Your voice never leaves the laptop.</h2>
+      <p>
+        No cloud calls. No telemetry. No transcript sitting on someone else's server. Listening,
+        recognizing, cleaning up, and typing all happen on your Mac — even with the Wi-Fi off. When
+        Diagnostics writes a support bundle, it stays private on your disk and contains no
+        transcripts.
+      </p>
+    </div>
+    <div class="vault">
+      {proofs.map((p) => <span>{p}</span>)}
+    </div>
+  </div>
+</section>

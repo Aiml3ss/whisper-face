@@ -1,0 +1,60 @@
+---
+const features = [
+  {
+    icon: '🖥️',
+    color: 'var(--parrot)',
+    title: 'Runs entirely on your Mac',
+    body: 'A stack of local recognizers turns speech into text on-device. No cloud, no API keys. Pull the Wi-Fi and it still works.',
+  },
+  {
+    icon: '🎯',
+    color: 'var(--fox)',
+    title: 'Types into the right place',
+    body: 'It leases the field under your cursor and checks it is still there before pasting once. If focus moved, the text parks safely in your Outbox instead of the wrong box.',
+  },
+  {
+    icon: '⚡',
+    color: 'var(--bear)',
+    title: "Fast enough to forget",
+    body: 'Models stay warm and long sentences are recognized while you are still talking, so the text is ready the moment you let go of the key.',
+  },
+  {
+    icon: '✍️',
+    color: 'var(--owl)',
+    title: 'Cleans up, never makes things up',
+    body: 'The Voice Compiler smooths filler and formatting, but it cannot invent words you did not say. Your names, numbers, and code stay exactly as spoken.',
+  },
+  {
+    icon: '📓',
+    color: 'var(--cat)',
+    title: 'Learns your words, not your life',
+    body: 'Corrections become small, local rules you can read and delete. There is no cloud transcript following you around.',
+  },
+  {
+    icon: '🛟',
+    color: 'var(--teal)',
+    title: 'Nothing gets lost',
+    body: 'Faithful fallbacks, exact-once insertion, and a recoverable Outbox mean a bad moment never eats your sentence.',
+  },
+];
+---
+
+<section class="band wrap" id="features">
+  <div class="sec-head">
+    <span class="kicker">Why it feels different</span>
+    <h2>An interface between thought and software.</h2>
+    <p>Not another transcript box. Every part is built to earn your trust with what you actually said.</p>
+  </div>
+
+  <div class="features">
+    {
+      features.map((f) => (
+        <article class="feature">
+          <div class="badge" style={`background:${f.color}`}>{f.icon}</div>
+          <h3>{f.title}</h3>
+          <p>{f.body}</p>
+        </article>
+      ))
+    }
+  </div>
+</section>

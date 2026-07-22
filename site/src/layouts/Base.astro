@@ -1,0 +1,57 @@
+---
+import '../styles/global.css';
+
+interface Props {
+  title: string;
+  description?: string;
+}
+
+const {
+  title,
+  description = 'Local, one-click voice input for Mac. Hold a key, talk, and trustworthy text appears at your cursor. No account, no cloud, no word cap.',
+} = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <meta name="theme-color" content="#10b981" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <script is:inline>
+      (function () {
+        try {
+          var t = localStorage.getItem('wf-theme');
+          if (t) document.documentElement.setAttribute('data-theme', t);
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body class="dotgrid">
+    <slot />
+    <script>
+      // Theme toggle (event delegation so it works for any [data-theme-toggle]).
+      document.addEventListener('click', function (e) {
+        const t = e.target as HTMLElement;
+        const btn = t.closest ? t.closest('[data-theme-toggle]') : null;
+        if (!btn) return;
+        let cur = document.documentElement.getAttribute('data-theme');
+        if (!cur) {
+          cur = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+        const next = cur === 'dark' ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', next);
+        try {
+          localStorage.setItem('wf-theme', next);
+        } catch (e) {}
+      });
+    </script>
+  </body>
+</html>

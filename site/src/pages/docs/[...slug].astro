@@ -1,0 +1,18 @@
+---
+import Doc from '../../layouts/Doc.astro';
+import { getCollection, render } from 'astro:content';
+
+export async function getStaticPaths() {
+  const docs = await getCollection('docs');
+  return docs.map((doc) => ({ params: { slug: doc.id }, props: { doc } }));
+}
+
+const { doc } = Astro.props;
+const { Content } = await render(doc);
+---
+
+<Doc title={doc.data.title} description={doc.data.description} current={doc.id}>
+  <h1>{doc.data.title}</h1>
+  {doc.data.description && <p class="lead">{doc.data.description}</p>}
+  <Content />
+</Doc>

@@ -1,0 +1,29 @@
+---
+const steps = [
+  { h: 'Hold your key', p: 'Press and hold your hotkey, then just start talking. No window to open, no button to find.' },
+  { h: 'It listens on-device', p: 'A warm cascade of local recognizers turns sound into text as you speak — nothing leaves the Mac.' },
+  { h: 'It tidies the text', p: 'Light cleanup fixes filler and formatting without changing what you meant.' },
+  { h: 'It claims the spot', p: 'Whisper Face leases the field under your cursor and double-checks it is still the right one.' },
+  { h: 'It types', p: 'One clean paste. If the field moved, the text waits safe in your Outbox instead.' },
+];
+---
+
+<section class="band wrap" id="how">
+  <div class="sec-head">
+    <span class="kicker">How it works</span>
+    <h2>From your mouth to your cursor.</h2>
+    <p>Five steps, all on your machine, in the time it takes to let go of a key.</p>
+  </div>
+
+  <ol class="steps">
+    {
+      steps.map((s) => (
+        <li class="step">
+          <div class="num" />
+          <h4>{s.h}</h4>
+          <p>{s.p}</p>
+        </li>
+      ))
+    }
+  </ol>
+</section>

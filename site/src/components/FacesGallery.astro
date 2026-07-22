@@ -1,0 +1,65 @@
+---
+import Face from './Face.astro';
+import { FACES, ORDER } from '../data/faces';
+---
+
+<section class="band wrap" id="faces">
+  <div class="sec-head">
+    <span class="kicker">Pick your face</span>
+    <h2>A little transcriptionist in your menu bar.</h2>
+    <p>
+      Choose who greets you up top. It sits quietly, then opens its mouth the moment you start
+      talking. Hover to say hi — click to send it up to the top of the page.
+    </p>
+  </div>
+
+  <div class="gallery">
+    {
+      ORDER.map((n) => (
+        <button class="card" data-animal={n} aria-label={`Preview and pick the ${FACES[n].label} face`}>
+          <span class="tile" style={`--sc: ${FACES[n].color}`}>
+            <Face animal={n} />
+          </span>
+          <span class="name">{FACES[n].label}</span>
+          <span class="role">{FACES[n].role}</span>
+        </button>
+      ))
+    }
+  </div>
+</section>
+
+<script>
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  document.querySelectorAll<HTMLElement>('.gallery .card').forEach((card) => {
+    const frames = card.querySelector<HTMLElement>('.face-frames');
+    let t: number | undefined;
+
+    function flapOn() {
+      if (reduce || !frames) return;
+      let open = false;
+      const tick = () => {
+        open = !open;
+        frames!.classList.toggle('mouth', open);
+        t = window.setTimeout(tick, 150);
+      };
+      tick();
+    }
+    function flapOff() {
+      window.clearTimeout(t);
+      frames?.classList.remove('mouth');
+    }
+
+    card.addEventListener('mouseenter', flapOn);
+    card.addEventListener('focus', flapOn);
+    card.addEventListener('mouseleave', flapOff);
+    card.addEventListener('blur', flapOff);
+
+    card.addEventListener('click', () => {
+      const animal = card.dataset.animal;
+      if (!animal) return;
+      window.dispatchEvent(new CustomEvent('wf:setface', { detail: animal }));
+      document.getElementById('stage')?.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'center' });
+    });
+  });
+</script>

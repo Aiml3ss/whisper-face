@@ -1,0 +1,46 @@
+---
+const faqs = [
+  {
+    q: 'Is it really free?',
+    a: 'Yes. Core dictation, privacy, accessibility, the installers, and local use are free and stay that way. No account, no word cap, no paywalled accuracy.',
+  },
+  {
+    q: 'Does my voice go to the cloud?',
+    a: 'No. Recognition runs on your Mac. You can turn off Wi-Fi and keep dictating. Nothing about what you say is uploaded.',
+  },
+  {
+    q: 'Which Macs does it run on?',
+    a: 'Modern Apple Silicon Macs. The installer checks your machine and models during setup and tells you if anything is missing.',
+  },
+  {
+    q: 'What about Windows or iPhone?',
+    a: 'Windows shares the same core pipeline and keeps one-click installer parity. A native iPhone product is a future workstream, not a setup promise today.',
+  },
+  {
+    q: 'How accurate is it, honestly?',
+    a: 'It runs multiple local recognizers and protects names, numbers, code, and commands rather than smoothing them into something plausible. The repo includes a dated, neutral competitor evaluation instead of cherry-picked claims.',
+  },
+  {
+    q: 'Is it open source?',
+    a: 'Yes — source-available, with a separate commercial license option. The full license and third-party notices live in the repository.',
+  },
+];
+---
+
+<section class="band wrap" id="faq">
+  <div class="sec-head">
+    <span class="kicker">Questions</span>
+    <h2>The honest FAQ.</h2>
+  </div>
+
+  <div class="faq">
+    {
+      faqs.map((f) => (
+        <details>
+          <summary>{f.q}</summary>
+          <p>{f.a}</p>
+        </details>
+      ))
+    }
+  </div>
+</section>
