@@ -333,6 +333,10 @@ updater yet.
 macOS will prompt for permissions — enable **"uv"** under System Settings →
 Privacy & Security → **Input Monitoring**, **Accessibility**, and
 **Microphone**. The app waits and restarts itself automatically once granted.
+While either evidenced permission is incomplete, Overview and Diagnostics show
+an accessible **Open System Settings** recovery action. It opens the generic
+macOS settings app, never changes a permission, and refreshes the displayed
+evidence while the Whisper Face window remains open.
 Allow the firewall prompt if you want the iPhone endpoint.
 
 Windows may show standard package-install prompts. Enable **Microphone access**
@@ -356,9 +360,10 @@ Whisper caches, and the process health endpoint without changing the
 installation. On Mac it also freshly reconstructs the expected Ollama service
 definition and requires its exact digest receipt plus an exact match between
 the launchd PID and the endpoint's unique listener PID. Windows verifies its
-scheduled task, endpoint health, and model presence; its independently managed
-Ollama process does not currently provide the same task-to-listener identity
-binding.
+scheduled task's current-user principal, sole action, private launcher receipt,
+and exact current-checkout launcher before checking endpoint health and model
+presence. Its independently managed Ollama process does not currently provide
+the same task-to-listener identity binding.
 
 ### Native Mac window
 

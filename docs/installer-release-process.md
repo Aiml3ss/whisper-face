@@ -118,6 +118,14 @@ equality between its PID and the unique listener PID. It does not reload,
 kickstart, rewrite, or repair the installation. Release CI always runs the
 separately bounded native GUI smoke on a windowed macOS runner.
 
+Windows verification requires a strict private digest receipt for the generated
+launcher, binds that launcher to the current checkout and locked `dictate.py`
+command, and requires the scheduled task to have the current user's principal
+and exactly one expected PowerShell action. It then checks service health and
+model presence. This proves task-to-launcher-to-checkout configuration; because
+Ollama is independently managed on Windows, it does not prove scheduled-task
+ownership of the endpoint listener.
+
 For dependency, service, model, preload, or permission changes, also rerun the
 full one-click installer on an appropriate clean or disposable machine before
 calling the release fully cross-platform verified.

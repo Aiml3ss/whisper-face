@@ -407,6 +407,20 @@ from voice_objects import (  # noqa: E402
 if IS_MACOS:
     from whisper_face_gui import GUIActions, create_gui  # noqa: E402
 
+
+def open_mac_system_settings() -> None:
+    """Open the user-controlled macOS settings app without changing TCC."""
+
+    if not IS_MACOS:
+        raise RuntimeError("System Settings recovery is available only on macOS")
+    subprocess.run(
+        ["open", "-a", "System Settings"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=5,
+    )
+
 # ------------------------- config -------------------------
 
 HOTKEY = keyboard.Key.alt_r
@@ -8386,6 +8400,7 @@ def main():
             resume=lambda: STATUS["bar"].set_paused(False),
             open_log=lambda: subprocess.Popen(
                 ["open", str(HERE / "dictate.log")]),
+            open_system_settings=open_mac_system_settings,
             copy_support_snapshot=copy_support_snapshot,
             open_source_and_license=lambda: subprocess.Popen(
                 ["open", source_metadata()["source"]]),

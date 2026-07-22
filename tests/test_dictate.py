@@ -2677,6 +2677,35 @@ class CleanupGuardTests(unittest.TestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_mac_permission_recovery_opens_generic_system_settings(self):
+        calls = []
+        fake_subprocess = SimpleNamespace(
+            DEVNULL=object(),
+            run=lambda *args, **kwargs: calls.append((args, kwargs)),
+        )
+        ns = load_definitions(
+            "open_mac_system_settings",
+            extra={"IS_MACOS": True, "subprocess": fake_subprocess},
+        )
+
+        ns["open_mac_system_settings"]()
+
+        self.assertEqual(calls[0][0], (["open", "-a", "System Settings"],))
+        self.assertTrue(calls[0][1]["check"])
+        self.assertEqual(calls[0][1]["timeout"], 5)
+        self.assertIs(calls[0][1]["stdout"], fake_subprocess.DEVNULL)
+        self.assertIs(calls[0][1]["stderr"], fake_subprocess.DEVNULL)
+
+    def test_permission_recovery_fails_closed_off_mac(self):
+        fake_subprocess = SimpleNamespace(DEVNULL=object(), run=lambda: None)
+        ns = load_definitions(
+            "open_mac_system_settings",
+            extra={"IS_MACOS": False, "subprocess": fake_subprocess},
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "only on macOS"):
+            ns["open_mac_system_settings"]()
+
     def test_mlx_progress_uses_thread_lock_not_multiprocessing_semaphore(self):
         received = []
 

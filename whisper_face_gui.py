@@ -215,7 +215,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "overview.notice.capture.error": "Could not change capture state: {error}",
         "overview.notice.status.error": "Status unavailable: {error}",
         "onboarding.permissions.title": "Allow Mac permissions",
-        "onboarding.permissions.detail": "Microphone captures speech; Accessibility safely inserts it into the field you chose.",
+        "onboarding.permissions.detail": "Microphone captures speech; Accessibility safely inserts it into the field you chose. Input Monitoring lets the hotkey listen.",
         "onboarding.hotkey.title": "Practice {hotkey}",
         "onboarding.hotkey.detail": "Hold {hotkey}, speak, then release. This step completes only after Whisper Face observes capture.",
         "onboarding.models.title": "Confirm local models",
@@ -234,6 +234,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "onboarding.step.first_dictation": "4 Dictate",
         "onboarding.step.summary": "{step} · {status}",
         "onboarding.action.permissions": "Review Permissions",
+        "onboarding.action.open_system_settings": "Open System Settings",
+        "onboarding.action.open_system_settings.help": "Open macOS System Settings so you can review Microphone, Accessibility, and Input Monitoring. Whisper Face does not change permissions.",
         "onboarding.action.hotkey": "Show Practice",
         "onboarding.action.models": "View Models",
         "onboarding.action.first_dictation": "Show How",
@@ -348,6 +350,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "diagnostics.action.copy_support": "Copy Support Snapshot",
         "diagnostics.action.copy_support.help": "Copy a transcript-free support summary with health, permissions, build, model status, and aggregate last-result counts. It never includes dictation text, selections, context, paths, logs, or personal language data.",
         "diagnostics.action.verify": "Run Verification",
+        "diagnostics.action.open_system_settings": "Open System Settings",
+        "diagnostics.action.open_system_settings.help": "Open macOS System Settings so you can review Microphone, Accessibility, and Input Monitoring. Whisper Face does not change permissions.",
         "diagnostics.action.point_and_speak": "Point-and-Speak…",
         "diagnostics.action.point_and_speak.help": "Enter a short target phrase for a read-only preview or explicitly AXPress one resolved button, checkbox, radio button, tab, menu item, or link once. The action path rechecks the same role plus the exact app, window, and Accessibility element immediately before AXPress; text fields, drift, replay, weak evidence, and unknown roles fail closed.",
         "diagnostics.action.drop_target": "Preview Drop Target…",
@@ -359,6 +363,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "diagnostics.verification.passed": "All checks passed",
         "diagnostics.verification.attention": "Checks need attention",
         "diagnostics.verification.failed": "Verification failed: {error}",
+        "diagnostics.notice.system_settings.opened": "System Settings opened. Return here when you finish; Whisper Face will refresh its status.",
         "diagnostics.ready": "Everything looks ready.",
         "diagnostics.license": "AGPL-3.0-only · no warranty · corresponding source available",
         "diagnostics.regression.cases": "{count} cases",
@@ -373,6 +378,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "diagnostics.accessibility.motion": "Motion setting",
         "diagnostics.accessibility.build": "Build version",
         "diagnostics.accessibility.verification": "Verification result",
+        "diagnostics.accessibility.open_system_settings": "Open macOS System Settings",
         "diagnostics.accessibility.guidance": "Diagnostic guidance",
         "diagnostics.accessibility.notice": "Whisper Face notice",
         "point_and_speak.dialog.title": "Point-and-Speak",
@@ -691,6 +697,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "operation.acoustic.play_failed": "Could not play retained audio: {error}",
         "operation.acoustic.clear_failed": "Could not clear retained audio: {error}",
         "operation.log.open_failed": "Could not open log: {error}",
+        "operation.system_settings.open_failed": "Could not open System Settings: {error}",
         "operation.support_snapshot.copy_failed": "Could not copy support snapshot: {error}",
         "operation.source.open_failed": "Could not open source and license: {error}",
         "operation.licenses.open_failed": "Could not open local license notices: {error}",
@@ -868,6 +875,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "issue_point_and_speak_nonce",
             "press_point_and_speak",
             "preview_drop_to_target",
+            "open_system_settings",
         ),
         accessibility_catalog_keys=(
             "overview.accessibility.phase",
@@ -919,6 +927,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "models.accessibility.guidance",
             "models.accessibility.wallet",
             "diagnostics.accessibility.verification",
+            "diagnostics.accessibility.open_system_settings",
             "point_and_speak.dialog.input.label",
             "drop_target.dialog.input.label",
             "drop_target.dialog.role.label",
@@ -1002,6 +1011,7 @@ class GUIActions:
     pause: Callable[[], None] = _noop
     resume: Callable[[], None] = _noop
     open_log: Callable[[], None] = _noop
+    open_system_settings: Callable[[], None] = _noop
     copy_support_snapshot: Callable[[str], None] = _noop
     open_source_and_license: Callable[[], None] = _noop
     open_local_license_notices: Callable[[], None] = _noop
@@ -3622,6 +3632,29 @@ class WhisperFaceViewModel:
                 notice_level="error")
         return self.state
 
+    def permission_recovery_needed(self) -> bool:
+        """True only while the evidence-backed permission step is incomplete."""
+        return bool(self.state.onboarding_steps) and not bool(
+            self.state.onboarding_steps[0].complete)
+
+    def open_system_settings(self) -> GUIState:
+        """Open the user-controlled macOS permission surface without guessing a grant."""
+        if not self.permission_recovery_needed():
+            return self.state
+        try:
+            self.actions.open_system_settings()
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "diagnostics.notice.system_settings.opened"),
+                notice_level="info")
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.system_settings.open_failed", error=error),
+                notice_level="error")
+        return self.state
+
     def copy_support_snapshot(self) -> GUIState:
         """Copy the fixed public diagnostic projection through the injected seam."""
         try:
@@ -4013,6 +4046,7 @@ if APPKIT_AVAILABLE:
                 "Diagnostics": (
                     self.dynamic["point_and_speak_button"],
                     self.dynamic["drop_target_button"],
+                    self.dynamic["open_system_settings_button"],
                     self.dynamic["open_log_button"],
                     self.dynamic["copy_support_snapshot_button"],
                     self.dynamic["verify_button"],
@@ -4085,10 +4119,10 @@ if APPKIT_AVAILABLE:
             onboarding_detail = _label(
                 "", NSMakeRect(20, 48, 540, 22), size=11, color=_SECONDARY)
             onboarding_action = _button(
-                self._l("onboarding.action.continue"),
-                NSMakeRect(590, 68, 136, 36),
+                self._l("onboarding.action.open_system_settings"),
+                NSMakeRect(566, 68, 160, 36),
                 self, "continueSetup:",
-                help_text=self._l("onboarding.action.help"))
+                help_text=self._l("onboarding.action.open_system_settings.help"))
             onboarding_action.setKeyEquivalent_("\r")
             onboarding.addSubview_(onboarding_progress)
             onboarding.addSubview_(onboarding_title)
@@ -4583,6 +4617,13 @@ if APPKIT_AVAILABLE:
                              self, "verify:")
             verify.setKeyEquivalent_("r")
             verify.setKeyEquivalentModifierMask_(NSEventModifierFlagCommand)
+            open_system_settings = _accessible(_button(
+                self._l("diagnostics.action.open_system_settings"),
+                NSMakeRect(0, 36, 178, 28), self, "openSystemSettings:",
+                help_text=self._l(
+                    "diagnostics.action.open_system_settings.help")),
+                self._l("diagnostics.accessibility.open_system_settings"),
+                self._l("diagnostics.action.open_system_settings.help"))
             license_notices = _button(
                 self._l("diagnostics.action.licenses"), NSMakeRect(488, 89, 138, 36),
                 self, "openLicense:")
@@ -4596,12 +4637,13 @@ if APPKIT_AVAILABLE:
             page.addSubview_(open_log)
             page.addSubview_(copy_support_snapshot)
             page.addSubview_(verify)
+            page.addSubview_(open_system_settings)
             page.addSubview_(license_notices)
             page.addSubview_(source)
             page.addSubview_(progress)
             page.addSubview_(verification)
             guidance = _label(
-                self._l("diagnostics.ready"), NSMakeRect(5, 36, 740, 18),
+                self._l("diagnostics.ready"), NSMakeRect(190, 41, 552, 18),
                 size=11, color=_SECONDARY)
             page.addSubview_(guidance)
             page.addSubview_(_label(
@@ -4610,6 +4652,7 @@ if APPKIT_AVAILABLE:
             self.dynamic.update(
                 point_and_speak_button=point_and_speak,
                 drop_target_button=drop_target,
+                open_system_settings_button=open_system_settings,
                 open_log_button=open_log,
                 copy_support_snapshot_button=copy_support_snapshot,
                 verify_button=verify,
@@ -4791,13 +4834,21 @@ if APPKIT_AVAILABLE:
                 self.dynamic["onboarding_title"].setStringValue_(next_step.title)
                 self.dynamic["onboarding_detail"].setStringValue_(next_step.detail)
                 action_title = {
-                    "permissions": self._l("onboarding.action.permissions"),
+                    "permissions": self._l(
+                        "onboarding.action.open_system_settings"),
                     "hotkey": self._l("onboarding.action.hotkey"),
                     "models": self._l("onboarding.action.models"),
                     "first_dictation": self._l(
                         "onboarding.action.first_dictation"),
                 }.get(next_step.key, self._l("onboarding.action.continue"))
                 self.dynamic["onboarding_action"].setTitle_(action_title)
+                try:
+                    self.dynamic["onboarding_action"].setAccessibilityHelp_(
+                        self._l("onboarding.action.open_system_settings.help")
+                        if next_step.key == "permissions" else self._l(
+                            "onboarding.action.help"))
+                except Exception:
+                    pass
                 for key, label_key in (
                     ("onboarding_progress",
                      "overview.accessibility.onboarding.progress"),
@@ -5063,6 +5114,8 @@ if APPKIT_AVAILABLE:
             self.dynamic["diag_microphone"].setStringValue_(state.microphone_status)
             self.dynamic["diag_accessibility"].setStringValue_(
                 state.accessibility_status)
+            self.dynamic["open_system_settings_button"].setHidden_(
+                not self.view_model.permission_recovery_needed())
             regression = self._l(
                 "diagnostics.regression.cases", count=state.regression_cases)
             if state.regression_quarantined:
@@ -6137,7 +6190,14 @@ if APPKIT_AVAILABLE:
             self.render()
 
         def continueSetup_(self, _sender: Any) -> None:
-            self.view_model.show_next_onboarding_step()
+            if self.view_model.permission_recovery_needed():
+                self.view_model.open_system_settings()
+            else:
+                self.view_model.show_next_onboarding_step()
+            self.render()
+
+        def openSystemSettings_(self, _sender: Any) -> None:
+            self.view_model.open_system_settings()
             self.render()
 
         def openDiagnostics_(self, _sender: Any) -> None:
@@ -6358,6 +6418,9 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             state="cancelled", reason="explicitly_cancelled")
         return True
 
+    def open_system_settings() -> None:
+        calls.append(("open_system_settings",))
+
     actions = GUIActions(
         status_snapshot=lambda: dict(runtime),
         settings_snapshot=lambda: dict(private_settings),
@@ -6379,6 +6442,7 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         start_risky_action_confirmation=start_risky_confirmation,
         click_risky_action_confirmation=click_risky_confirmation,
         cancel_risky_action_confirmation=cancel_risky_confirmation,
+        open_system_settings=open_system_settings,
     )
     model = WhisperFaceViewModel(actions, locale="en-US")
     controller = None
@@ -6440,8 +6504,19 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             controller.section_control.nextKeyView() is not None,
             "initial next key view")
 
+        require(
+            not bool(controller.dynamic[
+                "open_system_settings_button"].isHidden()),
+            "permission recovery visible")
+        require(
+            accessible_value(
+                controller.dynamic["open_system_settings_button"],
+                "accessibilityLabel") == localized_string(
+                    "diagnostics.accessibility.open_system_settings"),
+            "permission recovery accessibility")
         controller.continueSetup_(None)
-        require(model.state.section == "Diagnostics", "permission route")
+        require(("open_system_settings",) in calls, "permission recovery")
+        require(model.state.section == "Overview", "permission recovery route")
         runtime.update(
             service_status="Running",
             microphone_status="Ready",
@@ -6449,6 +6524,10 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         )
         model.refresh()
         controller.render()
+        require(
+            bool(controller.dynamic[
+                "open_system_settings_button"].isHidden()),
+            "permission recovery hidden")
         require(
             next(step for step in model.state.onboarding_steps
                  if not step.complete).key == "hotkey",

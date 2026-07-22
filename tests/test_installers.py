@@ -278,6 +278,54 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn(
             'throw "could not apply the private runtime log ACL"', private)
 
+    def test_windows_verify_binds_login_task_to_its_current_checkout(self):
+        helper_start = self.powershell.index("function Confirm-TaskLauncherBinding")
+        helper_end = self.powershell.index("function Confirm-Installation", helper_start)
+        helper = self.powershell[helper_start:helper_end]
+        self.assertIn(
+            '$LauncherReceipt = Join-Path $LauncherDir "launch.sha256"',
+            self.powershell)
+        self.assertIn(
+            "Get-FileHash -Algorithm SHA256 -LiteralPath $Path",
+            self.powershell)
+        for required in (
+            "[IO.File]::ReadAllText($LauncherReceipt)",
+            "Windows login launcher has changed; rerun Install.cmd",
+            "Windows login launcher is outside this checkout; rerun Install.cmd",
+            "Set-Location '$EscapedRepo'",
+            "run --locked --script '$EscapedScript'",
+            "*>> '$EscapedLog'",
+            "[Security.Principal.WindowsIdentity]::GetCurrent()",
+            "$CurrentIdentity.Name",
+            "$CurrentIdentity.User.Value",
+            "$Task.Principal.UserId -ieq $CurrentPrincipalId",
+            "if (-not $TaskPrincipalMatches)",
+            "$Actions.Count -ne 1",
+            '$Actions[0].Execute -ine "powershell.exe"',
+            '$Actions[0].Arguments -cne $ExpectedArguments',
+            "Windows login task does not launch this checkout; rerun Install.cmd",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, helper)
+
+        verify_start = self.powershell.index("function Confirm-Installation")
+        verify_end = self.powershell.index("if ($VerifyOnly)", verify_start)
+        verify = self.powershell[verify_start:verify_end]
+        self.assertIn("Confirm-TaskLauncherBinding", verify)
+
+        task_start = self.powershell.index(
+            'Write-Step "installing the Windows login task"')
+        task = self.powershell[task_start:]
+        for required in (
+            "$LauncherDigest = Get-LauncherDigest $Launcher",
+            "Set-Content -Path $LauncherReceipt -Value $LauncherDigest",
+            '& icacls $LauncherReceipt /inheritance:r /grant:r '
+            '"${env:USERNAME}:(F)" /Q',
+            'throw "could not apply the private Windows launcher receipt ACL"',
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, task)
+
     def test_shell_dispatches_windows_before_mac_only_work(self):
         dispatch = self.shell.index("MINGW*|MSYS*|CYGWIN*")
         homebrew = self.shell.index("installing Homebrew")
