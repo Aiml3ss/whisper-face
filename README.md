@@ -246,6 +246,11 @@ Mac/Windows impact review, locked-environment and installer-contract tests,
 live platform verification where available, and publication of the commit
 before a fresh machine is told the build is available.
 
+For an existing installation, follow the concise
+[update and rollback guide](docs/distribution/update-and-rollback.md). Updates
+currently come from the installed source checkout; there is no automatic
+updater yet.
+
 macOS will prompt for permissions — enable **"uv"** under System Settings →
 Privacy & Security → **Input Monitoring**, **Accessibility**, and
 **Microphone**. The app waits and restarts itself automatically once granted.
