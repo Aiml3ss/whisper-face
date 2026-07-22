@@ -60,6 +60,35 @@ func run(_ executable: String, _ arguments: [String]) throws -> (Int32, String) 
     return (process.terminationStatus, String(decoding: data, as: UTF8.self))
 }
 
+func requestExistingGUI(at socketPath: String) -> Bool {
+    guard FileManager.default.isExecutableFile(atPath: "/usr/bin/nc") else {
+        return false
+    }
+    let process = Process()
+    let input = Pipe()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/nc")
+    process.arguments = ["-U", socketPath]
+    process.standardInput = input
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    do {
+        try process.run()
+        input.fileHandleForWriting.write(Data([0x01]))
+        try input.fileHandleForWriting.close()
+    } catch {
+        return false
+    }
+    let deadline = Date().addingTimeInterval(0.2)
+    while process.isRunning && Date() < deadline {
+        Thread.sleep(forTimeInterval: 0.01)
+    }
+    if process.isRunning {
+        process.terminate()
+    }
+    process.waitUntilExit()
+    return process.terminationStatus == 0
+}
+
 func launchExistingRuntime(start: Bool) throws {
     guard let resources = Bundle.main.resourceURL else {
         throw LauncherFailure.invalidInstallation
@@ -95,19 +124,20 @@ func launchExistingRuntime(start: Bool) throws {
         throw LauncherFailure.invalidInstallation
     }
 
-    // Bring forward an existing runtime-owned window when one is already open.
-    // The launcher never constructs a second settings UI or embeds runtime code.
-    for _ in 0..<10 {
+    // Request the existing GUI over a same-user 0600 Unix socket bound to the
+    // exact launchd PID and source revision. Absence is a bounded safe no-op.
+    let activationDeadline = Date().addingTimeInterval(5.0)
+    repeat {
         let state = try run("/bin/launchctl", ["print", domain])
         if let match = state.1.range(of: #"pid = ([0-9]+)"#, options: .regularExpression),
            let pid = Int32(state.1[match].split(separator: " ").last ?? "") {
-            NSRunningApplication(processIdentifier: pid)?.activate(
-                options: [.activateAllWindows, .activateIgnoringOtherApps]
-            )
-            break
+            let socketPath = "/tmp/whisper-face-gui-\(getuid())-\(pid)-\(revision).sock"
+            if requestExistingGUI(at: socketPath) {
+                return
+            }
         }
         Thread.sleep(forTimeInterval: 0.05)
-    }
+    } while Date() < activationDeadline
 }
 
 @main

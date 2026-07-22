@@ -181,6 +181,7 @@ New in v5.1 (Whisper Face):
 Run with:  uv run dictate.py   (or via the com.berg.dictate LaunchAgent)
 """
 
+import atexit
 import difflib
 import email
 import email.policy
@@ -191,6 +192,7 @@ import os
 import queue
 import re
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -337,6 +339,7 @@ from personal_regression import PersonalRegressionLab  # noqa: E402
 from acoustic_keyword_memory import AcousticKeywordMemory  # noqa: E402
 from acoustic_time_machine import AcousticTimeMachine  # noqa: E402
 from cleanup_circuit_breaker import CleanupCircuitBreaker  # noqa: E402
+from macos_email_compose import MacEmailComposeAdapter  # noqa: E402
 from model_wallet import (  # noqa: E402
     MAX_LATENCY_BOUND_MS,
     Capability,
@@ -391,6 +394,7 @@ from voice_object_command_parser import parse_command  # noqa: E402
 from voice_object_inbox_bridge import VoiceObjectInboxBridge  # noqa: E402
 from voice_objects import (  # noqa: E402
     CalendarDraft,
+    Destination,
     EmailDraft,
     PlainTextDraft,
     TaskDraft,
@@ -983,6 +987,7 @@ VOICE_OBJECT_INBOX_STATE = {
     "inbox": None,
     "bridge": None,
 }
+EMAIL_COMPOSE_ADAPTER = MacEmailComposeAdapter()
 DEMONSTRATION_DRAFTS_STATE = {
     "lock": threading.RLock(),
     "store": None,
@@ -1233,6 +1238,40 @@ def reveal_voice_object_draft(item_id: str) -> dict | None:
         }
     except (OSError, TypeError, ValueError, OverflowError):
         return None
+
+
+def issue_voice_object_email_compose_nonce() -> str:
+    """Issue a capability only for the explicit Mac GUI confirmation path."""
+
+    if not (IS_MACOS and PREFERENCES["voice_object_commands"]):
+        return ""
+    return EMAIL_COMPOSE_ADAPTER.issue_nonce()
+
+
+def compose_voice_object_email(nonce: str, item_id: str) -> dict:
+    """Request one native email compose draft; never send or auto-dispatch."""
+
+    def reject() -> dict:
+        return EMAIL_COMPOSE_ADAPTER.compose(
+            nonce, recipients=(), subject=None, body="").to_mapping()
+
+    if not (IS_MACOS and PREFERENCES["voice_object_commands"]):
+        return {"schema_version": 1, "state": "unavailable", "attempted": False}
+    try:
+        revealed = _voice_object_inbox_bridge().read(item_id)
+        if (revealed.state is not InboxState.QUEUED
+                or revealed.destination is not Destination.EMAIL_DRAFT
+                or type(revealed.draft) is not EmailDraft):
+            return reject()
+        draft = revealed.draft
+        return EMAIL_COMPOSE_ADAPTER.compose(
+            nonce,
+            recipients=draft.recipients,
+            subject=draft.subject,
+            body=draft.body,
+        ).to_mapping()
+    except (OSError, TypeError, ValueError, OverflowError):
+        return reject()
 
 
 def acknowledge_voice_object_draft(item_id: str) -> bool:
@@ -6645,6 +6684,133 @@ def source_revision() -> str:
     return revision
 
 
+def gui_activation_socket_path(pid: int, revision: str, *, uid: int | None = None,
+                               root: str = "/tmp") -> str:
+    """Return the content-free, exact-process launcher activation endpoint."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        raise ValueError("activation pid must be positive")
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("activation revision must be a full Git SHA-1")
+    owner = os.getuid() if uid is None else uid
+    if not isinstance(owner, int) or isinstance(owner, bool) or owner < 0:
+        raise ValueError("activation uid must be non-negative")
+    return str(Path(root) / f"whisper-face-gui-{owner}-{pid}-{revision}.sock")
+
+
+def cleanup_stale_gui_activation_sockets(*, uid: int | None = None,
+                                         root: str = "/tmp") -> int:
+    """Remove only owned exact-pattern sockets whose recorded PID is gone."""
+    owner = os.getuid() if uid is None else uid
+    pattern = re.compile(
+        rf"^whisper-face-gui-{owner}-([1-9][0-9]*)-[0-9a-f]{{40}}\.sock$")
+    removed = 0
+    try:
+        candidates = tuple(Path(root).iterdir())
+    except OSError:
+        return 0
+    for candidate in candidates:
+        match = pattern.fullmatch(candidate.name)
+        if match is None:
+            continue
+        try:
+            info = candidate.lstat()
+            if info.st_uid != owner or not stat.S_ISSOCK(info.st_mode):
+                continue
+            try:
+                os.kill(int(match.group(1)), 0)
+            except ProcessLookupError:
+                candidate.unlink()
+                removed += 1
+            except (PermissionError, OSError):
+                continue
+        except OSError:
+            continue
+    return removed
+
+
+def current_launchd_service_pid(*, uid: int | None = None) -> int | None:
+    """Resolve this process's exact launchd job PID (the uv parent on Mac)."""
+    owner = os.getuid() if uid is None else uid
+    try:
+        result = subprocess.run(
+            ["/bin/launchctl", "print", f"gui/{owner}/com.berg.dictate"],
+            capture_output=True, text=True, timeout=1, check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r"(?m)^\s*pid = ([1-9][0-9]*)\s*$", result.stdout)
+    if match is None:
+        return None
+    service_pid = int(match.group(1))
+    if service_pid not in {os.getpid(), os.getppid()}:
+        return None
+    return service_pid
+
+
+def start_gui_activation_server(gui, *, revision: str | None = None,
+                                pid: int | None = None, uid: int | None = None,
+                                root: str = "/tmp", call_after=None):
+    """Accept one fixed byte that can only request the existing GUI's show()."""
+    if not IS_MACOS or SERVER_ONLY or gui is None:
+        return None
+    listener = None
+    try:
+        cleanup_stale_gui_activation_sockets(uid=uid, root=root)
+        bound_revision = revision or source_revision()
+        bound_pid = current_launchd_service_pid(uid=uid) if pid is None else pid
+        if bound_pid is None:
+            return None
+        path = Path(gui_activation_socket_path(
+            bound_pid, bound_revision, uid=uid, root=root))
+        if path.exists() or path.is_symlink():
+            info = path.lstat()
+            owner = os.getuid() if uid is None else uid
+            if not stat.S_ISSOCK(info.st_mode) or info.st_uid != owner:
+                return None
+            path.unlink()
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(path))
+        os.chmod(path, 0o600)
+        listener.listen(1)
+    except (OSError, RuntimeError, ValueError):
+        if listener is not None:
+            listener.close()
+        return None
+
+    dispatch = call_after or AppHelper.callAfter
+
+    def close_endpoint():
+        try:
+            listener.close()
+        except OSError:
+            pass
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+    def serve():
+        while True:
+            try:
+                connection, _ = listener.accept()
+            except OSError:
+                return
+            try:
+                with connection:
+                    connection.settimeout(0.25)
+                    request = connection.recv(2)
+            except OSError:
+                continue
+            if request == b"\x01":
+                dispatch(gui.show)
+
+    atexit.register(close_endpoint)
+    threading.Thread(
+        target=serve, name="whisper-face-gui-activation", daemon=True,
+    ).start()
+    return listener, path
+
+
 def local_license_notice() -> str:
     """Serve the notices shipped beside this exact running source tree."""
     sections = []
@@ -7775,6 +7941,9 @@ def main():
             set_voice_object_commands=set_voice_object_commands_enabled,
             inspect_voice_object_drafts=inspect_voice_object_drafts,
             reveal_voice_object_draft=reveal_voice_object_draft,
+            issue_voice_object_email_compose_nonce=(
+                issue_voice_object_email_compose_nonce),
+            compose_voice_object_email=compose_voice_object_email,
             acknowledge_voice_object_draft=acknowledge_voice_object_draft,
             cancel_voice_object_draft=cancel_voice_object_draft,
             purge_terminal_voice_object_drafts=(
@@ -7819,6 +7988,7 @@ def main():
             preview_drop_to_target=preview_drop_to_target,
             rerun_verification=verify_mac_installation,
         ))
+        start_gui_activation_server(STATUS["bar"].gui)
 
     threading.Thread(target=warmup, daemon=True).start()
     threading.Thread(target=learn_scheduler, daemon=True).start()

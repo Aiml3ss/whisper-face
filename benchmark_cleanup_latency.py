@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import http.client
 import json
 import math
 import re
@@ -32,18 +33,15 @@ from voice_compiler import EditProposal, VoiceCompiler
 HERE = Path(__file__).resolve().parent
 DEFAULT_CASES = HERE / "benchmarks" / "cleanup_latency_cases.json"
 OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
-REPORT_SCHEMA_VERSION = 4
+REPORT_SCHEMA_VERSION = 5
 CURRENT_TOKEN_BUDGET = "max(160, int(words * 4.0) + 64)"
+CURRENT_READ_TIMEOUT = 4.0
+MEANINGFUL_LATENCY_IMPROVEMENT = 0.10
 RISK_LABELS = frozenset({
     "acronyms", "code", "dates", "false_starts", "fillers", "layout",
     "meaningful_filler", "money", "names", "numbers", "punctuation",
     "urls",
 })
-SHORT_PROMPT = """Clean raw dictation faithfully. Remove fillers and false starts,
-apply explicit corrections in place, preserve facts and anchors, and render
-spoken layout/list commands. Never answer, refuse, explain, or add content."""
-
-
 def _runtime_contract() -> dict[str, Any]:
     """Load only prompt and guard declarations from current runtime source."""
     wanted = {"OLLAMA_MODEL", "REFUSAL_RE", "BASE_PROMPT",
@@ -113,13 +111,16 @@ VARIANTS = (
     {"id": "current", "system": _system(BASE_PROMPT),
      "few_shot": STRUCTURED_FEW_SHOT,
      "budget": lambda words: max(160, int(words * 4.0) + 64),
-     "budget_description": CURRENT_TOKEN_BUDGET},
-    {"id": "lean-three-shot", "system": _system(BASE_PROMPT),
-     "few_shot": STRUCTURED_FEW_SHOT[:6], "budget": lambda _words: 128,
-     "budget_description": "128"},
-    {"id": "lean-prompt-three-shot", "system": _system(SHORT_PROMPT),
-     "few_shot": STRUCTURED_FEW_SHOT[:6], "budget": lambda _words: 128,
-     "budget_description": "128"},
+     "budget_description": CURRENT_TOKEN_BUDGET,
+     "read_timeout": CURRENT_READ_TIMEOUT},
+    {"id": "bounded-128-3.5s", "system": _system(BASE_PROMPT),
+     "few_shot": STRUCTURED_FEW_SHOT, "budget": lambda _words: 128,
+     "budget_description": "128", "read_timeout": 3.5},
+    {"id": "three-shot-current-budget", "system": _system(BASE_PROMPT),
+     "few_shot": STRUCTURED_FEW_SHOT[:6],
+     "budget": lambda words: max(160, int(words * 4.0) + 64),
+     "budget_description": CURRENT_TOKEN_BUDGET,
+     "read_timeout": CURRENT_READ_TIMEOUT},
 )
 
 
@@ -205,7 +206,9 @@ def _empty_risk_counts() -> dict[str, int]:
 def run_variant(variant: dict[str, Any], cases: tuple[dict[str, Any], ...], *,
                 post: Callable[..., Any] = local_post,
                 clock: Callable[[], float] = time.perf_counter,
-                read_timeout: float = 4.0) -> dict[str, Any]:
+                read_timeout: float | None = None) -> dict[str, Any]:
+    deadline = variant["read_timeout"] if read_timeout is None \
+        else min(read_timeout, variant["read_timeout"])
     counts = {key: 0 for key in (
         "accepted", "baseline_accepted", "recovered_accepted",
         "both_accepted", "baseline_only_accepted",
@@ -222,13 +225,14 @@ def run_variant(variant: dict[str, Any], cases: tuple[dict[str, Any], ...], *,
     }
     latencies: list[float] = []
     recovery_latencies: list[float] = []
+    case_outcomes: list[str] = []
     for case in cases:
         started = clock()
         baseline_accepted = recovered_accepted = False
         failure: str | None = None
         proof_failed = False
         try:
-            response = post(OLLAMA_CHAT_URL, json=_payload(variant, case["raw"]), timeout=(1, read_timeout))
+            response = post(OLLAMA_CHAT_URL, json=_payload(variant, case["raw"]), timeout=(1, deadline))
             response.raise_for_status()
             wire = response.json()
             answer = re.sub(r"<think>.*?</think>", "", wire["message"]["content"], flags=re.S).strip()
@@ -277,7 +281,8 @@ def run_variant(variant: dict[str, Any], cases: tuple[dict[str, Any], ...], *,
         except TransportTimeout:
             counts["timeout"] += 1
             failure = "timeout"
-        except (urllib.error.URLError, urllib.error.HTTPError):
+        except (urllib.error.URLError, urllib.error.HTTPError,
+                http.client.HTTPException, ConnectionError):
             counts["transport_failed"] += 1
             failure = "transport_failed"
         except (AttributeError, KeyError, TypeError, ValueError):
@@ -293,6 +298,7 @@ def run_variant(variant: dict[str, Any], cases: tuple[dict[str, Any], ...], *,
             else:
                 overlap = "neither_accepted"
             counts[overlap] += 1
+            case_outcomes.append(failure or overlap)
             for risk in case["risks"]:
                 aggregate = risk_counts[risk]
                 aggregate["cases"] += 1
@@ -314,6 +320,7 @@ def run_variant(variant: dict[str, Any], cases: tuple[dict[str, Any], ...], *,
         })
     return {"id": variant["id"], "few_shot_pairs": len(variant["few_shot"]) // 2,
             "token_budget": variant["budget_description"], "cases": len(cases), **counts,
+            "read_timeout_seconds": deadline,
             "acceptance_delta": (
                 counts["recovered_accepted"]
                 - counts["baseline_accepted"]),
@@ -325,7 +332,51 @@ def run_variant(variant: dict[str, Any], cases: tuple[dict[str, Any], ...], *,
                 "max": max(recovery_latencies) if recovery_latencies else None,
             },
             "latency_ms": {"p50": _percentile(latencies, .50), "p95": _percentile(latencies, .95),
-                           "max": max(latencies) if latencies else None}}
+                           "max": max(latencies) if latencies else None},
+            "_case_outcomes": tuple(case_outcomes)}
+
+
+def _variant_comparison(
+        baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    baseline_outcomes = baseline["_case_outcomes"]
+    candidate_outcomes = candidate["_case_outcomes"]
+    if len(baseline_outcomes) != len(candidate_outcomes):
+        raise ValueError("variant outcome count mismatch")
+    baseline_losses = sum(
+        before in {"both_accepted", "baseline_only_accepted"}
+        and after not in {"both_accepted", "baseline_only_accepted"}
+        for before, after in zip(baseline_outcomes, candidate_outcomes))
+    new_semantic_failures = sum(
+        before != "semantic_failed" and after == "semantic_failed"
+        for before, after in zip(baseline_outcomes, candidate_outcomes))
+    unavailable = {"guard_rejected", "parse_failed", "timeout",
+                   "transport_failed"}
+    new_unavailable = sum(
+        before not in unavailable and after in unavailable
+        for before, after in zip(baseline_outcomes, candidate_outcomes))
+    p95_improvement = (
+        baseline["latency_ms"]["p95"] - candidate["latency_ms"]["p95"])
+    max_improvement = (
+        baseline["latency_ms"]["max"] - candidate["latency_ms"]["max"])
+    p95_fraction = p95_improvement / baseline["latency_ms"]["p95"]
+    max_fraction = max_improvement / baseline["latency_ms"]["max"]
+    eligible = (
+        baseline_losses == 0
+        and new_semantic_failures == 0
+        and new_unavailable == 0
+        and p95_fraction >= MEANINGFUL_LATENCY_IMPROVEMENT
+        and max_fraction >= MEANINGFUL_LATENCY_IMPROVEMENT)
+    return {
+        "id": candidate["id"],
+        "baseline_losses": baseline_losses,
+        "new_semantic_failures": new_semantic_failures,
+        "new_unavailable_failures": new_unavailable,
+        "p95_improvement_ms": p95_improvement,
+        "p95_improvement_fraction": p95_fraction,
+        "max_improvement_ms": max_improvement,
+        "max_improvement_fraction": max_fraction,
+        "runtime_change_eligible": eligible,
+    }
 
 
 def build_report(cases: tuple[dict[str, Any], ...], results: list[dict[str, Any]], *, read_timeout: float) -> dict[str, Any]:
@@ -342,9 +393,17 @@ def build_report(cases: tuple[dict[str, Any], ...], results: list[dict[str, Any]
         for risk in sorted({risk for case in qwen_routed
                             for risk in case["risks"]})
     }
+    comparisons = [
+        _variant_comparison(baseline, result)
+        for result in results if result["id"] != "current"]
+    public_results = [
+        {key: value for key, value in result.items()
+         if key != "_case_outcomes"}
+        for result in results]
     return {"schema_version": REPORT_SCHEMA_VERSION, "scope": "opt-in-local-synthetic-cleanup-prompt-lab",
             "privacy": "checked-in-synthetic-only-aggregate-report", "runtime_authority": "none", "model": MODEL,
-            "cases": len(cases), "read_timeout_seconds": read_timeout, "results": results,
+            "cases": len(cases), "read_timeout_cap_seconds": read_timeout,
+            "results": public_results, "variant_comparisons": comparisons,
             "deterministic_routing": {
                 "fast_path_cases": len(cases) - len(qwen_routed),
                 "qwen_routed_cases": len(qwen_routed),

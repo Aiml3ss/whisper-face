@@ -1,4 +1,5 @@
 import json
+import ast
 import sys
 import tempfile
 import unittest
@@ -31,6 +32,10 @@ from voice_objects import (  # noqa: E402
     VoiceObject,
     project,
 )
+from macos_email_compose import (  # noqa: E402
+    ComposeState,
+    MacEmailComposeAdapter,
+)
 
 
 def projected_task(title: str = "Send release notes"):
@@ -47,6 +52,105 @@ class VoiceObjectInboxBridgeTests(unittest.TestCase):
         self.inbox = VoiceInbox(
             Path(self.temporary_directory.name) / "private" / "inbox.json")
         self.bridge = VoiceObjectInboxBridge(self.inbox)
+
+    def test_native_compose_adapter_hands_private_fields_in_process_once(self):
+        class Service:
+            def __init__(self):
+                self.calls = []
+
+            def canPerformWithItems_(self, items):
+                self.calls.append(("can", items))
+                return True
+
+            def setRecipients_(self, recipients):
+                self.calls.append(("recipients", recipients))
+
+            def setSubject_(self, subject):
+                self.calls.append(("subject", subject))
+
+            def performWithItems_(self, items):
+                self.calls.append(("perform", items))
+
+        service = Service()
+        adapter = MacEmailComposeAdapter(
+            service_factory=lambda: service,
+            main_thread_check=lambda: True)
+        nonce = adapter.issue_nonce()
+        secret_subject = "Project Bluebird"
+        secret_body = "Private launch plan 8492"
+
+        receipt = adapter.compose(
+            nonce,
+            recipients=("ada@example.com",),
+            subject=secret_subject,
+            body=secret_body)
+        replay = adapter.compose(
+            nonce,
+            recipients=("different@example.com",),
+            subject="Different",
+            body="Different")
+
+        self.assertEqual(receipt.state, ComposeState.REQUESTED)
+        self.assertIs(replay, receipt)
+        self.assertEqual(service.calls, [
+            ("can", [secret_body]),
+            ("recipients", ["ada@example.com"]),
+            ("subject", secret_subject),
+            ("perform", [secret_body]),
+        ])
+        encoded = json.dumps(receipt.to_mapping(), sort_keys=True)
+        self.assertNotIn("ada@example.com", encoded)
+        self.assertNotIn(secret_subject, encoded)
+        self.assertNotIn(secret_body, encoded)
+
+    def test_compose_adapter_rejects_non_main_invalid_and_evicted_nonces(self):
+        service_calls = []
+        adapter = MacEmailComposeAdapter(
+            service_factory=lambda: service_calls.append(True),
+            main_thread_check=lambda: False,
+            max_pending=1)
+        evicted = adapter.issue_nonce()
+        current = adapter.issue_nonce()
+
+        arbitrary = adapter.compose(
+            "x" * 32, recipients=("a@example.com",),
+            subject=None, body="Body")
+        old = adapter.compose(
+            evicted, recipients=("a@example.com",),
+            subject=None, body="Body")
+        off_main = adapter.compose(
+            current, recipients=("a@example.com",),
+            subject=None, body="Body")
+        invalid_nonce = adapter.issue_nonce()
+        invalid = adapter.compose(
+            invalid_nonce, recipients=(), subject=None, body="Body")
+
+        self.assertEqual(arbitrary.state, ComposeState.UNAVAILABLE)
+        self.assertEqual(old.state, ComposeState.UNAVAILABLE)
+        self.assertEqual(off_main.state, ComposeState.UNAVAILABLE)
+        self.assertEqual(invalid.state, ComposeState.INVALID)
+        self.assertEqual(service_calls, [])
+        self.assertFalse(any((arbitrary.attempted, old.attempted,
+                              off_main.attempted, invalid.attempted)))
+
+    def test_native_adapter_has_no_send_url_process_or_persistence_surface(self):
+        tree = ast.parse((ROOT / "macos_email_compose.py").read_text(
+            encoding="utf-8"))
+        names = {
+            node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+        }
+        attributes = {
+            node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+        }
+
+        self.assertFalse(names & {
+            "subprocess", "Popen", "open", "NSURL", "NSWorkspace"})
+        self.assertFalse(any("send" in attribute.casefold()
+                             for attribute in attributes))
+        self.assertEqual(
+            {attribute for attribute in attributes
+             if attribute.endswith("WithItems_")},
+            set())
 
     def test_projection_is_canonical_and_decoded_only_by_explicit_read(self):
         projection = projected_task()

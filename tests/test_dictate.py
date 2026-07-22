@@ -14,6 +14,8 @@ import io
 import json
 import os
 import re
+import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -113,6 +115,130 @@ def load_definitions(*names, assignments=(), extra=None):
     ))
     exec(compile(module, "dictate-selected", "exec"), namespace)
     return namespace
+
+
+class GuiLauncherActivationTests(unittest.TestCase):
+    def namespace(self, cleanups):
+        return load_definitions(
+            "gui_activation_socket_path",
+            "cleanup_stale_gui_activation_sockets",
+            "current_launchd_service_pid",
+            "start_gui_activation_server",
+            extra={
+                "AppHelper": SimpleNamespace(callAfter=lambda callback: callback()),
+                "IS_MACOS": True,
+                "SERVER_ONLY": False,
+                "Path": Path,
+                "atexit": SimpleNamespace(register=cleanups.append),
+                "os": os,
+                "socket": socket,
+                "stat": stat,
+                "subprocess": subprocess,
+                "source_revision": lambda: "f" * 40,
+            },
+        )
+
+    @unittest.skipUnless(
+        hasattr(os, "getuid") and hasattr(socket, "AF_UNIX")
+        and Path("/usr/bin/nc").is_file(),
+        "same-user launcher activation requires macOS nc and Unix sockets",
+    )
+    def test_fixed_same_user_socket_opens_only_existing_gui(self):
+        cleanups = []
+        shown = threading.Event()
+        gui = SimpleNamespace(show=shown.set)
+        revision = "a" * 40
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            namespace = self.namespace(cleanups)
+            endpoint = namespace["start_gui_activation_server"](
+                gui,
+                revision=revision,
+                pid=4242,
+                uid=os.getuid(),
+                root=directory,
+                call_after=lambda callback: callback(),
+            )
+            self.assertIsNotNone(endpoint)
+            listener, path = endpoint
+            self.assertEqual(
+                path.name,
+                f"whisper-face-gui-{os.getuid()}-4242-{revision}.sock",
+            )
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+            blocker = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            blocker.connect(str(path))
+            time.sleep(0.3)
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
+                peer.connect(str(path))
+                peer.sendall(b"\x00")
+            self.assertFalse(shown.wait(0.05))
+
+            nc = subprocess.run(
+                ["/usr/bin/nc", "-U", str(path)],
+                input=b"\x01", capture_output=True, timeout=1, check=False,
+            )
+            self.assertEqual(nc.returncode, 0, nc.stderr)
+            self.assertTrue(shown.wait(1.0))
+            blocker.close()
+            listener.close()
+            cleanups[0]()
+
+    @unittest.skipUnless(
+        hasattr(os, "getuid") and hasattr(socket, "AF_UNIX"),
+        "stale Unix activation socket cleanup requires POSIX",
+    )
+    def test_cleanup_removes_only_owned_pattern_socket_for_dead_pid(self):
+        cleanups = []
+        namespace = self.namespace(cleanups)
+        revision = "b" * 40
+        dead_pid = 99999999
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            stale_path = Path(namespace["gui_activation_socket_path"](
+                dead_pid, revision, uid=os.getuid(), root=directory))
+            stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            stale.bind(str(stale_path))
+            stale.close()
+            regular = Path(directory) / (
+                f"whisper-face-gui-{os.getuid()}-{dead_pid}-{'c' * 40}.sock")
+            regular.write_text("not a socket", encoding="utf-8")
+
+            removed = namespace["cleanup_stale_gui_activation_sockets"](
+                uid=os.getuid(), root=directory)
+            self.assertEqual(removed, 1)
+            self.assertFalse(stale_path.exists())
+            self.assertTrue(regular.exists())
+
+    def test_invalid_binding_and_non_gui_modes_fail_closed(self):
+        cleanups = []
+        namespace = self.namespace(cleanups)
+        path_for = namespace["gui_activation_socket_path"]
+        with self.assertRaises(ValueError):
+            path_for(0, "a" * 40)
+        with self.assertRaises(ValueError):
+            path_for(1, "moving-main")
+        namespace["IS_MACOS"] = False
+        self.assertIsNone(namespace["start_gui_activation_server"](object()))
+        self.assertEqual(cleanups, [])
+
+    @unittest.skipUnless(hasattr(os, "getuid"), "launchd PID binding requires POSIX")
+    def test_launchd_pid_binding_accepts_only_runtime_or_uv_parent(self):
+        cleanups = []
+        namespace = self.namespace(cleanups)
+        parent_pid = os.getppid()
+        namespace["subprocess"] = SimpleNamespace(
+            SubprocessError=subprocess.SubprocessError,
+            run=lambda *_args, **_kwargs: SimpleNamespace(
+                stdout=f"state = running\n\tpid = {parent_pid}\n"),
+        )
+        self.assertEqual(
+            namespace["current_launchd_service_pid"](uid=os.getuid()),
+            parent_pid,
+        )
+        namespace["subprocess"].run = lambda *_args, **_kwargs: SimpleNamespace(
+            stdout="state = running\n\tpid = 99999999\n")
+        self.assertIsNone(
+            namespace["current_launchd_service_pid"](uid=os.getuid()))
 
 
 class DictationSuccessSoundTests(unittest.TestCase):
@@ -485,6 +611,133 @@ class PointAndSpeakActionRuntimeTests(unittest.TestCase):
             self.assertNotIn("press_point_and_speak", names)
             self.assertNotIn("POINT_AND_SPEAK_TRANSACTIONS", names)
             self.assertNotIn("prepare_point_and_speak_press_lease", names)
+
+
+class VoiceObjectEmailComposeRuntimeTests(unittest.TestCase):
+    @staticmethod
+    def function(revealed, adapter, *, is_macos=True, enabled=True, reads=None):
+        queued = object()
+        email_destination = object()
+
+        class EmailDraft:
+            def __init__(self, recipients, subject, body):
+                self.recipients = recipients
+                self.subject = subject
+                self.body = body
+
+        if callable(revealed):
+            revealed_value = revealed(EmailDraft, queued, email_destination)
+        else:
+            revealed_value = revealed
+
+        def bridge():
+            return SimpleNamespace(read=lambda item_id: (
+                reads.append(item_id) if reads is not None else None)
+                or revealed_value)
+
+        namespace = load_definitions(
+            "compose_voice_object_email",
+            extra={
+                "IS_MACOS": is_macos,
+                "PREFERENCES": {"voice_object_commands": enabled},
+                "EMAIL_COMPOSE_ADAPTER": adapter,
+                "_voice_object_inbox_bridge": bridge,
+                "InboxState": SimpleNamespace(QUEUED=queued),
+                "Destination": SimpleNamespace(
+                    EMAIL_DRAFT=email_destination),
+                "EmailDraft": EmailDraft,
+            },
+        )
+        return namespace["compose_voice_object_email"], EmailDraft, queued, \
+            email_destination
+
+    def test_email_only_runtime_reads_private_draft_and_returns_closed_receipt(self):
+        calls = []
+
+        class Adapter:
+            def compose(self, nonce, **draft):
+                calls.append((nonce, draft))
+                return SimpleNamespace(to_mapping=lambda: {
+                    "schema_version": 1,
+                    "state": "requested",
+                    "attempted": True,
+                })
+
+        reads = []
+
+        def revealed(EmailDraft, queued, destination):
+            return SimpleNamespace(
+                state=queued,
+                destination=destination,
+                draft=EmailDraft(
+                    ("ada@example.com",), "Project Bluebird",
+                    "Private launch plan 8492"),
+            )
+
+        function, _draft, _queued, _destination = self.function(
+            revealed, Adapter(), reads=reads)
+        result = function("n" * 32, "voice-object:email-1")
+        encoded = json.dumps(result, sort_keys=True)
+
+        self.assertEqual(result, {
+            "schema_version": 1, "state": "requested", "attempted": True})
+        self.assertEqual(reads, ["voice-object:email-1"])
+        self.assertEqual(calls[0][0], "n" * 32)
+        self.assertEqual(calls[0][1]["recipients"], ("ada@example.com",))
+        self.assertNotIn("ada@example.com", encoded)
+        self.assertNotIn("Bluebird", encoded)
+        self.assertNotIn("8492", encoded)
+
+    def test_disabled_and_non_email_paths_never_receive_payload(self):
+        calls = []
+
+        class Adapter:
+            def compose(self, nonce, **draft):
+                calls.append((nonce, draft))
+                state = "invalid" if not draft["recipients"] else "requested"
+                return SimpleNamespace(to_mapping=lambda: {
+                    "schema_version": 1, "state": state,
+                    "attempted": False,
+                })
+
+        reads = []
+        disabled, *_ = self.function(
+            None, Adapter(), enabled=False, reads=reads)
+        self.assertEqual(disabled("n" * 32, "voice-object:email-1")["state"],
+                         "unavailable")
+        self.assertEqual(reads, [])
+        self.assertEqual(calls, [])
+
+        def non_email(_EmailDraft, queued, _destination):
+            return SimpleNamespace(
+                state=queued, destination=object(),
+                draft=SimpleNamespace(
+                    title="Private task", notes="Do not compose"))
+
+        function, *_ = self.function(non_email, Adapter(), reads=reads)
+        result = function("n" * 32, "voice-object:task-1")
+        self.assertEqual(result["state"], "invalid")
+        self.assertEqual(calls, [(
+            "n" * 32,
+            {"recipients": (), "subject": None, "body": ""},
+        )])
+
+    def test_compose_is_absent_from_status_and_has_no_process_url_or_log_calls(self):
+        status = next(
+            node for node in TREE.body if isinstance(node, ast.FunctionDef)
+            and node.name == "runtime_status_snapshot")
+        action = next(
+            node for node in TREE.body if isinstance(node, ast.FunctionDef)
+            and node.name == "compose_voice_object_email")
+        status_names = {
+            node.id for node in ast.walk(status) if isinstance(node, ast.Name)
+        }
+        action_names = {
+            node.id for node in ast.walk(action) if isinstance(node, ast.Name)
+        }
+        self.assertNotIn("compose_voice_object_email", status_names)
+        self.assertFalse(action_names & {
+            "print", "open", "subprocess", "Popen", "NSURL", "NSWorkspace"})
 
 
 class DropTargetPreviewRuntimeTests(unittest.TestCase):

@@ -219,6 +219,7 @@ class InstallerContractTests(unittest.TestCase):
         for runtime_module in (
                 "voice_objects.py", "voice_object_command_parser.py",
                 "voice_inbox.py", "voice_object_inbox_bridge.py",
+                "macos_email_compose.py",
                 "demonstration_drafts.py"):
             with self.subTest(runtime_module=runtime_module):
                 self.assertIn(runtime_module, self.shell)
@@ -265,6 +266,7 @@ class InstallerContractTests(unittest.TestCase):
         launcher_tool = (
             ROOT / "scripts" / "macos_launcher_app.py"
         ).read_text(encoding="utf-8")
+        gui_source = (ROOT / "whisper_face_gui.py").read_text(encoding="utf-8")
         for expected in (
             "scripts/macos_launcher_app.py",
             'launcher_app="$HOME/Applications/Whisper Face.app"',
@@ -280,10 +282,19 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("import AppKit", launcher_tool)
         self.assertIn('"-framework", "AppKit"', launcher_tool)
         self.assertIn('shutil.which("swiftc")', launcher_tool)
-        self.assertIn("NSRunningApplication(processIdentifier: pid)?.activate", launcher_tool)
+        self.assertIn("requestExistingGUI(at: socketPath)", launcher_tool)
+        self.assertIn('process.arguments = ["-U", socketPath]', launcher_tool)
+        self.assertIn('isExecutableFile(atPath: "/usr/bin/nc")', launcher_tool)
+        self.assertIn("addingTimeInterval(5.0)", launcher_tool)
         self.assertIn("launcher must not embed runtime source", launcher_tool)
         self.assertNotIn("dictate.py\n", launcher_tool)
+        self.assertNotIn('"/usr/bin/python', launcher_tool)
+        self.assertNotIn('"uv"', launcher_tool)
         self.assertIn("command -v swiftc", self.shell)
+        self.assertIn("self.window.makeKeyAndOrderFront_(None)", gui_source)
+        self.assertIn("activateIgnoringOtherApps_(True)", gui_source)
+        self.assertIn(
+            'start_gui_activation_server(STATUS["bar"].gui)', self.script)
 
     def test_update_and_rollback_guide_uses_supported_install_paths(self):
         guide = (

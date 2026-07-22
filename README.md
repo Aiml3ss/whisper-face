@@ -208,7 +208,11 @@ are never Supporter-only features.
 - **Voice action foundations without surprise execution** — typed Voice
   Objects can project closed facts into inert text, email, task, and calendar
   drafts; a private Voice Inbox can durably queue exact payloads with source
-  provenance; and Drop-to-Target can resolve or refuse a synthetic target
+  provenance. After revealing a queued email, a separate confirmation can hand
+  its recipients, subject, and body directly to macOS's in-process compose
+  service exactly once. That action can only request a compose window: it has no
+  send API, leaves the inbox item queued, and puts no private field in a URL,
+  process argument, log, status, or receipt. Drop-to-Target can resolve or refuse a synthetic target
   behind strict capability and ambiguity gates. Mac Diagnostics now exposes
   that resolver as an explicit, transient read-only preview: the user declares
   a hypothetical role, source kind, and effect before bounded Accessibility
@@ -224,8 +228,9 @@ are never Supporter-only features.
   four-class risk-confirmation ceremony: explicitly start one class, say the
   exact phrase “confirm risky action,” then use the separately enabled click
   within 30 seconds. Its content-free RAM-only receipt cannot invoke an action.
-  None of these foundations can send, schedule, click, type, drag, automate an
-  app, or run an agent yet.
+  Outside the explicit Point-and-Speak button press and compose-window request,
+  these foundations cannot send, schedule, click, type, drag, automate an app,
+  or run an agent yet.
 - **Personal Regression Lab** — confirmed correction mappings are evaluated
   against a private, deterministic suite of the user's exact corrected spans.
   Conflicting candidates are quarantined instead of silently becoming a bad
@@ -299,8 +304,9 @@ The launcher detects the OS. A Windows Git Bash or WSL invocation of
 6. On Mac, compiles and verifies `~/Applications/Whisper Face.app`, a tiny
    unsigned arm64 AppKit launcher bound to the exact checkout revision. It
    contains no copied runtime, models, or private state; opening it validates
-   and starts the existing `launchd` service and can activate a runtime-owned
-   window. Signing and notarization remain release work.
+   and starts the existing `launchd` service, then asks that one process to open
+   its main GUI over a private, content-free local activation endpoint. Signing
+   and notarization remain release work.
 
 Homebrew's official installer may pause once to explain its changes and ask
 for your macOS password. Model downloads are several gigabytes, so the first

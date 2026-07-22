@@ -30,6 +30,7 @@ from whisper_face_gui import (
     create_gui,
     localized_string,
     native_appkit_smoke_contract,
+    normalize_email_compose_receipt,
     normalize_point_and_speak_action,
     normalize_acoustic_keyword_inspection,
     normalize_drop_target_preview,
@@ -46,6 +47,14 @@ from whisper_face_gui import (
 
 
 class SnapshotTests(unittest.TestCase):
+    @staticmethod
+    def email_compose_receipt(*, state="requested", attempted=True):
+        return {
+            "schema_version": 1,
+            "state": state,
+            "attempted": attempted,
+        }
+
     @staticmethod
     def drop_preview(
         *, state="resolved", name="Team Inbox", role="AXGroup",
@@ -145,6 +154,11 @@ class SnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "malformed"):
             normalize_point_and_speak_preview(malformed)
 
+        malformed = self.point_preview(
+            state="ambiguous", name="Secret target", role="button")
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            normalize_point_and_speak_preview(malformed)
+
     def test_point_and_speak_action_receipt_is_strict_and_content_free(self):
         result = normalize_point_and_speak_action(self.point_action())
 
@@ -166,10 +180,23 @@ class SnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "malformed"):
             normalize_point_and_speak_action(malformed)
 
-        malformed = self.point_preview(
-            state="ambiguous", name="Secret target", role="button")
+    def test_email_compose_receipt_rejects_any_payload_or_identity(self):
+        receipt = normalize_email_compose_receipt(
+            self.email_compose_receipt())
+        self.assertEqual(receipt.state, "requested")
+        self.assertTrue(receipt.attempted)
+
+        for key in ("recipients", "subject", "body", "item_id"):
+            raw = self.email_compose_receipt()
+            raw[key] = "Project Bluebird"
+            with self.subTest(key=key), self.assertRaisesRegex(
+                    ValueError, "malformed"):
+                normalize_email_compose_receipt(raw)
+
         with self.assertRaisesRegex(ValueError, "malformed"):
-            normalize_point_and_speak_preview(malformed)
+            normalize_email_compose_receipt(
+                self.email_compose_receipt(
+                    state="requested", attempted=False))
 
     def test_drop_target_preview_projection_is_strict_transient_and_inert(self):
         preview = normalize_drop_target_preview(self.drop_preview())
@@ -358,6 +385,7 @@ class SnapshotTests(unittest.TestCase):
                 "operation.voice_objects.reveal_failed",
                 "operation.voice_objects.transition_failed",
                 "operation.voice_objects.purge_failed",
+                "operation.voice_objects.compose_failed",
                 "operation.demonstrations.inspect_failed",
                 "operation.demonstrations.create_failed",
                 "operation.demonstrations.reveal_failed",
@@ -1419,6 +1447,78 @@ class ViewModelTests(unittest.TestCase):
 
         self.assertEqual(self.voice_draft_inspections, 0)
         self.assertEqual(self.voice_draft_reveals, 0)
+
+    def test_email_compose_is_explicit_email_only_and_receipt_stays_content_free(self):
+        calls = []
+        nonce = "email_session_nonce_123456"
+        model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {},
+            inspect_voice_object_drafts=lambda: ({
+                "item_id": "voice-object:email-1",
+                "sequence": 7,
+                "destination": "email_draft",
+                "state": "queued",
+            },),
+            reveal_voice_object_draft=lambda _item_id: {
+                "sequence": 7,
+                "destination": "email_draft",
+                "state": "queued",
+                "content": "To: ada@example.com\nSubject: Project Bluebird\n\n8492",
+            },
+            issue_voice_object_email_compose_nonce=lambda: nonce,
+            compose_voice_object_email=lambda supplied_nonce, item_id: (
+                calls.append((supplied_nonce, item_id))
+                or SnapshotTests.email_compose_receipt()),
+        ))
+
+        draft = model.inspect_voice_object_drafts()[0]
+        revealed = model.reveal_voice_object_draft(draft)
+        receipt = model.compose_voice_object_email(draft)
+
+        self.assertIn("Project Bluebird", revealed.content)
+        self.assertEqual(receipt.state, "requested")
+        self.assertEqual(calls, [(nonce, "voice-object:email-1")])
+        self.assertNotIn("ada@example.com", repr(receipt))
+        self.assertNotIn("Project Bluebird", repr(receipt))
+        self.assertNotIn("8492", repr(model.state))
+        self.assertEqual(
+            model.compose_voice_object_email(draft).state, "unavailable")
+        self.assertEqual(len(calls), 1)
+
+        non_email_calls = []
+        non_email = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {},
+            inspect_voice_object_drafts=lambda: ({
+                "item_id": "voice-object:task-1",
+                "sequence": 8,
+                "destination": "task",
+                "state": "queued",
+            },),
+            issue_voice_object_email_compose_nonce=lambda:
+                non_email_calls.append("nonce") or nonce,
+            compose_voice_object_email=lambda *_args:
+                non_email_calls.append("compose") or
+                SnapshotTests.email_compose_receipt(),
+        ))
+        task = non_email.inspect_voice_object_drafts()[0]
+        self.assertEqual(
+            non_email.compose_voice_object_email(task).state, "unavailable")
+        self.assertEqual(non_email_calls, [])
+
+    def test_email_compose_copy_defines_confirmation_and_requested_boundary(self):
+        inbox_copy = localized_string("settings.dialog.voice_objects.message")
+        confirm_copy = localized_string(
+            "settings.dialog.voice_objects.compose.message", sequence=7)
+        receipt_copy = localized_string(
+            "settings.dialog.voice_objects.compose.receipt",
+            state="requested", attempted="yes")
+
+        self.assertIn("separate confirmation", inbox_copy)
+        self.assertIn("cannot send or auto-dispatch", confirm_copy)
+        self.assertIn("never enter a URL, process argument, log, status, or receipt",
+                      confirm_copy)
+        self.assertIn("only handed to the compose UI", receipt_copy)
+        self.assertIn("does not confirm a saved draft or send", receipt_copy)
 
     def test_demonstration_content_is_lazy_redacted_and_actions_stay_inert(self):
         self.model.refresh()

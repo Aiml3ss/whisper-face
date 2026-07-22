@@ -38,6 +38,9 @@ VOICE_DRAFT_DESTINATIONS = frozenset({
     "plain_text", "email_draft", "task", "calendar_draft", "unavailable",
 })
 VOICE_DRAFT_STATES = frozenset({"queued", "acknowledged", "cancelled"})
+EMAIL_COMPOSE_STATES = frozenset({
+    "requested", "unavailable", "invalid", "failed",
+})
 VOICE_DRAFT_INSPECT_LIMIT = 256
 VOICE_DRAFT_CONTENT_LIMIT = 300_000
 DEMONSTRATION_DOMAINS = ("finder", "mail", "notes", "menu")
@@ -644,6 +647,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "operation.voice_objects.reveal_failed": "Could not reveal the selected local draft.",
         "operation.voice_objects.transition_failed": "Could not update the selected local draft.",
         "operation.voice_objects.purge_failed": "Could not purge finished local drafts.",
+        "operation.voice_objects.compose_failed": "Could not request the email compose draft.",
         "operation.demonstrations.inspect_failed": "Could not inspect local demonstration drafts.",
         "operation.demonstrations.create_failed": "Could not create the local demonstration draft.",
         "operation.demonstrations.reveal_failed": "Could not reveal the selected demonstration draft.",
@@ -661,11 +665,18 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "operation.source.open_failed": "Could not open source and license: {error}",
         "operation.licenses.open_failed": "Could not open local license notices: {error}",
         "settings.dialog.voice_objects.title": "Voice Inbox",
-        "settings.dialog.voice_objects.message": "Only bounded draft metadata is listed. Select Reveal to read one draft. Nothing here sends, schedules, launches, executes, or copies a draft.",
+        "settings.dialog.voice_objects.message": "Only bounded draft metadata is listed. Select Reveal to read one draft. A revealed queued email can request a native compose window only after a separate confirmation; nothing here can send or auto-dispatch it.",
         "settings.dialog.voice_objects.empty": "No local Voice Object drafts are stored.",
         "settings.dialog.voice_objects.row": "Draft {sequence} · {destination} · {state}",
         "settings.dialog.voice_objects.reveal.title": "Draft {sequence} · {destination}",
-        "settings.dialog.voice_objects.reveal.message": "Inert local content only. Nothing is sent, scheduled, launched, executed, or copied.",
+        "settings.dialog.voice_objects.reveal.message": "Private local content only. Nothing is sent. Queued email drafts alone can offer a separate native compose-window confirmation.",
+        "settings.dialog.voice_objects.compose.title": "Open this email compose draft?",
+        "settings.dialog.voice_objects.compose.message": "This requests one macOS compose window for Draft {sequence}. It cannot send or auto-dispatch the email. Recipients, subject, and body stay in-process and never enter a URL, process argument, log, status, or receipt.",
+        "settings.dialog.voice_objects.compose.result.requested": "Compose request handed to macOS",
+        "settings.dialog.voice_objects.compose.result.unavailable": "Compose service unavailable",
+        "settings.dialog.voice_objects.compose.result.invalid": "Email draft was rejected",
+        "settings.dialog.voice_objects.compose.result.failed": "Compose request failed",
+        "settings.dialog.voice_objects.compose.receipt": "Content-free receipt: state {state}; native compose request attempted {attempted}. Requested means only handed to the compose UI; it does not confirm a saved draft or send.",
         "settings.dialog.voice_objects.ack.title": "Acknowledge this draft?",
         "settings.dialog.voice_objects.ack.message": "This marks Draft {sequence} finished without sending or executing it.",
         "settings.dialog.voice_objects.cancel.title": "Cancel this draft?",
@@ -673,6 +684,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.dialog.voice_objects.purge.title": "Purge finished drafts?",
         "settings.dialog.voice_objects.purge.message": "Permanently remove acknowledged and cancelled local drafts. Queued drafts remain.",
         "settings.action.reveal": "Reveal",
+        "settings.action.compose_email": "Open Compose Draft…",
         "settings.action.acknowledge": "Acknowledge",
         "settings.action.cancel_draft": "Cancel Draft",
         "settings.action.purge_finished": "Purge Finished",
@@ -787,6 +799,8 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "set_voice_object_commands",
             "inspect_voice_object_drafts",
             "reveal_voice_object_draft",
+            "issue_voice_object_email_compose_nonce",
+            "compose_voice_object_email",
             "acknowledge_voice_object_draft",
             "cancel_voice_object_draft",
             "purge_terminal_voice_object_drafts",
@@ -888,6 +902,9 @@ class GUIActions:
         lambda: ())
     reveal_voice_object_draft: Callable[[str], Mapping[str, Any] | None] = (
         lambda _item_id: None)
+    issue_voice_object_email_compose_nonce: Callable[[], str] = lambda: ""
+    compose_voice_object_email: Callable[[str, str], Mapping[str, Any]] = (
+        lambda _nonce, _item_id: {})
     acknowledge_voice_object_draft: Callable[[str], bool] = (
         lambda _item_id: False)
     cancel_voice_object_draft: Callable[[str], bool] = lambda _item_id: False
@@ -966,6 +983,31 @@ class RevealedVoiceDraft:
     destination: str
     state: str
     content: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class EmailComposeReceipt:
+    """Content-free terminal evidence for one explicit native request."""
+
+    state: str
+    attempted: bool
+
+
+def normalize_email_compose_receipt(
+    snapshot: Mapping[str, Any] | None,
+) -> EmailComposeReceipt:
+    """Validate the closed receipt; no payload or item identity is accepted."""
+
+    if (not isinstance(snapshot, Mapping) or set(snapshot) != {
+            "schema_version", "state", "attempted"}
+            or snapshot.get("schema_version") != 1
+            or snapshot.get("state") not in EMAIL_COMPOSE_STATES
+            or not isinstance(snapshot.get("attempted"), bool)
+            or (snapshot["state"] in {"requested", "failed"}) !=
+            snapshot["attempted"]):
+        raise ValueError("Email compose receipt is malformed")
+    return EmailComposeReceipt(
+        state=snapshot["state"], attempted=snapshot["attempted"])
 
 
 @dataclass(frozen=True)
@@ -2983,6 +3025,38 @@ class WhisperFaceViewModel:
                 notice_level="error",
             )
             raise ValueError(self.state.notice) from None
+
+    def compose_voice_object_email(
+        self, draft: VoiceDraftMetadata,
+    ) -> EmailComposeReceipt:
+        """Request one native compose window after the GUI confirmation."""
+
+        unavailable = EmailComposeReceipt("unavailable", False)
+        if (not isinstance(draft, VoiceDraftMetadata)
+                or draft.item_id not in self._inspected_voice_draft_ids
+                or draft.destination != "email_draft"
+                or draft.state != "queued"):
+            return unavailable
+        try:
+            nonce = self.actions.issue_voice_object_email_compose_nonce()
+            if (not isinstance(nonce, str) or not 16 <= len(nonce) <= 96
+                    or any(not (character.isalnum() or character in "-_")
+                           for character in nonce)):
+                raise ValueError
+            receipt = normalize_email_compose_receipt(
+                self.actions.compose_voice_object_email(
+                    nonce, draft.item_id))
+            self._inspected_voice_draft_ids.clear()
+            return receipt
+        except Exception:
+            self._inspected_voice_draft_ids.clear()
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "operation.voice_objects.compose_failed"),
+                notice_level="error",
+            )
+            return unavailable
 
     def transition_voice_object_draft(
             self, draft: VoiceDraftMetadata, *, target: str) -> GUIState:
@@ -5194,7 +5268,39 @@ if APPKIT_AVAILABLE:
                 editor.setEditable_(False)
                 detail.setAccessoryView_(scroll)
                 detail.addButtonWithTitle_(self._l("settings.action.done"))
-                detail.runModal()
+                can_compose = (
+                    selected.destination == "email_draft"
+                    and selected.state == "queued"
+                    and revealed.destination == "email_draft"
+                    and revealed.state == "queued")
+                if can_compose:
+                    detail.addButtonWithTitle_(self._l(
+                        "settings.action.compose_email"))
+                detail_response = detail.runModal()
+                if (can_compose and detail_response == 1001
+                        and self._confirm(
+                            self._l(
+                                "settings.dialog.voice_objects.compose.title"),
+                            self._l(
+                                "settings.dialog.voice_objects.compose.message",
+                                sequence=selected.sequence),
+                            self._l("settings.action.compose_email"))):
+                    receipt = self.view_model.compose_voice_object_email(
+                        selected)
+                    result = NSAlert.alloc().init()
+                    result.setMessageText_(self._l(
+                        "settings.dialog.voice_objects.compose.result."
+                        f"{receipt.state}"))
+                    result.setInformativeText_(self._l(
+                        "settings.dialog.voice_objects.compose.receipt",
+                        state=receipt.state.replace("_", " "),
+                        attempted=self._l(
+                            "point_and_speak.result.yes" if
+                            receipt.attempted else
+                            "point_and_speak.result.no")))
+                    result.addButtonWithTitle_(self._l(
+                        "settings.action.done"))
+                    result.runModal()
             elif response == 1001 and self._confirm(
                     self._l("settings.dialog.voice_objects.ack.title"),
                     self._l(
@@ -6371,6 +6477,7 @@ __all__ = [
     "DROP_TARGET_MAX_PHRASE_CHARS",
     "DropTargetPreview",
     "DropTargetReceipt",
+    "EmailComposeReceipt",
     "DegradedIssue",
     "DemonstrationDraftMetadata",
     "DemonstrationStepPreview",
@@ -6405,6 +6512,7 @@ __all__ = [
     "normalize_point_and_speak_preview",
     "normalize_point_and_speak_action",
     "normalize_drop_target_preview",
+    "normalize_email_compose_receipt",
     "normalize_settings",
     "run_native_appkit_smoke",
     "resolve_locale",
