@@ -35,6 +35,7 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_process_verifier.py",
             "uv run tests/test_prewarmed_verifier.py",
             "uv run tests/test_whisper_verifier_adapter.py",
+            "uv run tests/test_prewarmed_whisper_verifier_adapter.py",
             "uv run tests/test_benchmark_voice_compiler.py",
             "uv run tests/test_benchmark_consequence_routing.py",
             "uv run tests/test_benchmark_asr.py",
@@ -54,8 +55,10 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_drop_to_target.py",
             "uv run tests/test_voice_objects.py",
             "uv run tests/test_voice_object_command_parser.py",
+            "uv run tests/test_voice_object_commands_runtime.py",
             "uv run tests/test_voice_inbox.py",
             "uv run tests/test_voice_object_inbox_bridge.py",
+            "uv run tests/test_risky_action_confirmation.py",
             "uv run tests/test_competitor_benchmark.py",
             "uv run tests/test_public_scorecard.py",
             "uv run tests/test_personal_regression.py",
@@ -160,6 +163,18 @@ class InstallerContractTests(unittest.TestCase):
             encoding="utf-8")
         self.assertIn('"face": "parrot"', template)
         self.assertIn('"acoustic_time_machine": false', template)
+        self.assertIn('"voice_object_commands": false', template)
+        for runtime_module in (
+                "voice_objects.py", "voice_object_command_parser.py",
+                "voice_inbox.py", "voice_object_inbox_bridge.py"):
+            with self.subTest(runtime_module=runtime_module):
+                self.assertIn(runtime_module, self.shell)
+                self.assertIn(runtime_module, self.powershell)
+        self.assertIn("voice_inbox.json", self.shell)
+        self.assertIn("voice_inbox.json", self.powershell)
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("voice_inbox.json", gitignore)
+        self.assertIn(".voice_inbox.json.*.tmp", gitignore)
         for face in ("parrot", "fox", "owl", "cat", "bear"):
             for frame in ("idle", "talk"):
                 relative = f"icons/faces/{face}-{frame}.svg"
@@ -206,6 +221,7 @@ class InstallerContractTests(unittest.TestCase):
             "dictionary.txt",
             "transcripts.jsonl",
             "learned.json",
+            "voice_inbox.json",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, guide)

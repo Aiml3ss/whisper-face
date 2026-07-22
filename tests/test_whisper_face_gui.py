@@ -200,6 +200,7 @@ class SnapshotTests(unittest.TestCase):
                 "operation.acoustic.update_failed",
                 "operation.acoustic.play_failed",
                 "operation.acoustic.clear_failed",
+                "operation.voice_objects.update_failed",
                 "operation.log.open_failed",
                 "operation.support_snapshot.copy_failed",
                 "operation.source.open_failed",
@@ -718,6 +719,12 @@ class ViewModelTests(unittest.TestCase):
             if not enabled:
                 self.runtime["retained_consequence_spans"] = 0
 
+        def set_voice_objects(enabled):
+            self.calls.append(("voice_objects", enabled))
+            self.runtime["voice_object_commands"] = enabled
+            self.runtime["voice_object_inbox_status"] = (
+                "Ready" if enabled else "Off")
+
         def clear_acoustic():
             self.calls.append(("clear_retained",))
             self.runtime["retained_consequence_spans"] = 0
@@ -740,6 +747,7 @@ class ViewModelTests(unittest.TestCase):
             set_face=set_face,
             set_flight_recorder=set_flight,
             set_acoustic_time_machine=set_acoustic,
+            set_voice_object_commands=set_voice_objects,
             play_retained_span=lambda:
                 self.calls.append(("play_retained",)) or True,
             clear_retained_spans=clear_acoustic,
@@ -802,6 +810,48 @@ class ViewModelTests(unittest.TestCase):
         self.assertIn(("clear_retained",), self.calls)
         self.assertIn(("acoustic", False), self.calls)
         self.assertFalse(self.model.state.acoustic_time_machine)
+
+    def test_acoustic_privacy_copy_and_projection_expose_no_audio_metadata(self):
+        state = normalize_snapshot({
+            "acoustic_time_machine": True,
+            "retained_consequence_spans": 1,
+            "retained_audio_expires_at": "private-monotonic-deadline",
+            "retained_audio_duration": "private-duration",
+            "last_word_count": 4,
+        })
+
+        self.assertTrue(state.last_result.acoustic_replay_enabled)
+        self.assertEqual(state.last_result.retained_span_count, 1)
+        self.assertNotIn("private-monotonic-deadline", repr(state))
+        self.assertNotIn("private-duration", repr(state))
+        privacy = localized_string("results.privacy")
+        self.assertIn("wiped after one minute", privacy)
+        self.assertIn("never written, logged, or sent", privacy)
+
+    def test_voice_object_setting_exposes_only_opt_in_and_queue_count(self):
+        self.runtime.update(
+            voice_object_commands=True,
+            voice_object_inbox_count=2,
+            voice_object_inbox_status="Ready",
+        )
+
+        state = self.model.refresh()
+        self.assertTrue(state.voice_object_commands)
+        self.assertEqual(state.voice_object_inbox_count, 2)
+        self.assertEqual(state.voice_object_inbox_status, "Ready")
+        state = self.model.set_voice_object_commands(False)
+        self.assertIn(("voice_objects", False), self.calls)
+        self.assertFalse(state.voice_object_commands)
+        self.assertEqual(state.voice_object_inbox_count, 2)
+        self.assertEqual(state.voice_object_inbox_status, "Off")
+        self.assertEqual(
+            localized_string("settings.privacy.voice_objects"),
+            "Voice Object Commands",
+        )
+        self.assertIn(
+            "Nothing is sent or scheduled",
+            localized_string("settings.accessibility.voice_objects.help"),
+        )
 
     def test_unified_settings_load_only_on_navigation_and_all_panes_work(self):
         self.assertEqual(self.model.state.settings.snippets, ())

@@ -1,5 +1,6 @@
 {
   "flight_recorder": false,
   "acoustic_time_machine": false,
+  "voice_object_commands": false,
   "face": "parrot"
 }

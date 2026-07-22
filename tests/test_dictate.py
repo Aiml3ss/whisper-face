@@ -241,12 +241,14 @@ class FacePreferenceTests(unittest.TestCase):
             preferences.write_text(json.dumps({
                 "flight_recorder": True,
                 "acoustic_time_machine": True,
+                "voice_object_commands": False,
                 "face": "dragon",
             }), encoding="utf-8")
             ns["load_preferences"]()
             self.assertEqual(ns["current_face"](), "parrot")
             self.assertTrue(ns["PREFERENCES"]["flight_recorder"])
             self.assertTrue(ns["PREFERENCES"]["acoustic_time_machine"])
+            self.assertFalse(ns["PREFERENCES"]["voice_object_commands"])
 
             ns["PREFERENCES"]["face"] = "FOX"
             ns["save_preferences"]()
@@ -254,18 +256,21 @@ class FacePreferenceTests(unittest.TestCase):
             self.assertEqual(saved, {
                 "flight_recorder": True,
                 "acoustic_time_machine": True,
+                "voice_object_commands": False,
                 "face": "fox",
             })
 
-    def test_acoustic_time_machine_preference_is_mac_only_and_defaults_off(self):
-        for is_macos, configured, expected in (
-                (True, True, True), (True, False, False),
-                (False, True, False)):
-            with self.subTest(is_macos=is_macos, configured=configured):
+    def test_privacy_preferences_are_mac_only_and_default_off(self):
+        for is_macos, acoustic, voice_objects, expected in (
+                (True, True, True, True), (True, False, False, False),
+                (False, True, True, False)):
+            with self.subTest(is_macos=is_macos, acoustic=acoustic,
+                              voice_objects=voice_objects):
                 with tempfile.TemporaryDirectory() as directory:
                     path = Path(directory) / "preferences.json"
                     path.write_text(json.dumps({
-                        "acoustic_time_machine": configured,
+                        "acoustic_time_machine": acoustic,
+                        "voice_object_commands": voice_objects,
                     }), encoding="utf-8")
                     buffer = AcousticTimeMachine()
                     ns = load_definitions(
@@ -281,6 +286,8 @@ class FacePreferenceTests(unittest.TestCase):
                     ns["load_preferences"]()
                     self.assertIs(
                         ns["PREFERENCES"]["acoustic_time_machine"], expected)
+                    self.assertIs(
+                        ns["PREFERENCES"]["voice_object_commands"], expected)
                     self.assertIs(buffer.enabled, expected)
 
     def test_all_default_faces_are_supported(self):
@@ -2881,13 +2888,29 @@ class ConsequenceRuntimeProjectionTests(unittest.TestCase):
 
 
 class AcousticTimeMachineRuntimeTests(unittest.TestCase):
+    class ManualClock:
+        def __init__(self):
+            self.value = 100.0
+
+        def __call__(self):
+            return self.value
+
     def _namespace(self, *, enabled):
         buffer = AcousticTimeMachine(enabled=enabled)
-        state = {"span_ids": [], "lock": threading.RLock(), "sound": None}
+        state = {
+            "span_ids": [], "play_index": 0, "expires_at": None,
+            "expiry_timer": None, "lock": threading.RLock(), "sound": None,
+        }
+        clock = self.ManualClock()
         ns = load_definitions(
+            "_clear_retained_consequence_spans_locked",
             "clear_retained_consequence_spans",
+            "expire_retained_consequence_spans",
             "retain_consequence_microspans",
             "acoustic_time_machine_status_snapshot",
+            "_retained_span_wav_bytes",
+            "play_retained_consequence_span",
+            assignments={"ACOUSTIC_TIME_MACHINE_TTL_SECONDS"},
             extra={
                 "ACOUSTIC_TIME_MACHINE": buffer,
                 "ACOUSTIC_TIME_MACHINE_STATE": state,
@@ -2895,9 +2918,12 @@ class AcousticTimeMachineRuntimeTests(unittest.TestCase):
                 "PREFERENCES": {"acoustic_time_machine": enabled},
                 "SAMPLE_RATE": 16_000,
                 "math": __import__("math"),
+                "np": np,
+                "struct": struct,
+                "time": time,
             },
         )
-        return ns, buffer, state
+        return ns, buffer, state, clock
 
     def test_disabled_retention_does_not_read_audio(self):
         class ForbiddenAudio:
@@ -2907,33 +2933,149 @@ class AcousticTimeMachineRuntimeTests(unittest.TestCase):
             def __getitem__(self, _key):
                 raise AssertionError("disabled retention sliced audio")
 
-        ns, buffer, _state = self._namespace(enabled=False)
+        ns, buffer, _state, clock = self._namespace(enabled=False)
         plan = SimpleNamespace(relisten_requests=(
             SimpleNamespace(start=0.001, end=0.002),
         ))
 
         self.assertEqual(ns["retain_consequence_microspans"](
-            ForbiddenAudio(), plan, sample_rate=16_000), 0)
+            ForbiddenAudio(), plan, sample_rate=16_000, clock=clock,
+            timer_factory=None), 0)
         self.assertEqual(buffer.span_count, 0)
 
     def test_exact_selected_span_is_retained_and_clear_drops_it(self):
-        ns, buffer, state = self._namespace(enabled=True)
+        ns, buffer, state, clock = self._namespace(enabled=True)
         audio = np.linspace(-1.0, 1.0, 64, dtype=np.float32)
         plan = SimpleNamespace(relisten_requests=(
             SimpleNamespace(start=16 / 16_000, end=24 / 16_000),
         ))
 
         self.assertEqual(ns["retain_consequence_microspans"](
-            audio, plan, sample_rate=16_000), 1)
+            audio, plan, sample_rate=16_000, clock=clock,
+            timer_factory=None), 1)
         retained = buffer.read(state["span_ids"][0]).audio
         self.assertEqual(
             retained.samples, tuple(float(value) for value in audio[16:24]))
-        self.assertEqual(ns["acoustic_time_machine_status_snapshot"](), {
+        self.assertEqual(ns["acoustic_time_machine_status_snapshot"](
+            clock=clock), {
             "enabled": True,
             "retained_spans": 1,
         })
 
         ns["clear_retained_consequence_spans"]()
+        self.assertEqual(buffer.span_count, 0)
+        self.assertEqual(state["span_ids"], [])
+
+    def test_ttl_callback_wipes_samples_stops_sound_and_releases_references(self):
+        class FakeSound:
+            def __init__(self):
+                self.stopped = False
+
+            def stop(self):
+                self.stopped = True
+
+        class FakeTimer:
+            def __init__(self, interval, action):
+                self.interval = interval
+                self.action = action
+                self.daemon = False
+                self.started = False
+                self.cancelled = False
+
+            def start(self):
+                self.started = True
+
+            def cancel(self):
+                self.cancelled = True
+
+        ns, buffer, state, clock = self._namespace(enabled=True)
+        timers = []
+
+        def timer_factory(interval, action):
+            timer = FakeTimer(interval, action)
+            timers.append(timer)
+            return timer
+
+        audio = np.linspace(-1.0, 1.0, 64, dtype=np.float32)
+        plan = SimpleNamespace(relisten_requests=(
+            SimpleNamespace(start=16 / 16_000, end=24 / 16_000),
+        ))
+        self.assertEqual(ns["retain_consequence_microspans"](
+            audio, plan, sample_rate=16_000, clock=clock,
+            timer_factory=timer_factory), 1)
+        stored = buffer._spans[state["span_ids"][0]].samples
+        sound = FakeSound()
+        state["sound"] = sound
+        self.assertEqual(len(timers), 1)
+        self.assertEqual(ns["ACOUSTIC_TIME_MACHINE_TTL_SECONDS"], 60.0)
+        self.assertEqual(timers[0].interval, 60.0)
+        self.assertTrue(timers[0].started)
+
+        clock.value += 60.0
+        timers[0].action(clock=clock)
+
+        self.assertEqual(stored, [0.0] * len(stored))
+        self.assertEqual(buffer.span_count, 0)
+        self.assertTrue(sound.stopped)
+        self.assertIsNone(state["sound"])
+        self.assertIsNone(state["expiry_timer"])
+        self.assertIsNone(state["expires_at"])
+
+    def test_status_and_play_fail_closed_at_monotonic_expiry(self):
+        ns, buffer, state, clock = self._namespace(enabled=True)
+        audio = np.linspace(-1.0, 1.0, 64, dtype=np.float32)
+        plan = SimpleNamespace(relisten_requests=(
+            SimpleNamespace(start=16 / 16_000, end=24 / 16_000),
+        ))
+        self.assertEqual(ns["retain_consequence_microspans"](
+            audio, plan, sample_rate=16_000, clock=clock,
+            timer_factory=None), 1)
+
+        clock.value += 59.999
+        self.assertEqual(ns["acoustic_time_machine_status_snapshot"](
+            clock=clock)["retained_spans"], 1)
+        clock.value += 0.001
+        self.assertFalse(ns["play_retained_consequence_span"](clock=clock))
+        self.assertEqual(ns["acoustic_time_machine_status_snapshot"](
+            clock=clock)["retained_spans"], 0)
+        self.assertEqual(buffer.span_count, 0)
+        self.assertEqual(state["span_ids"], [])
+
+    def test_expiry_during_sound_construction_cannot_start_playback(self):
+        ns, buffer, state, clock = self._namespace(enabled=True)
+        audio = np.linspace(-1.0, 1.0, 64, dtype=np.float32)
+        plan = SimpleNamespace(relisten_requests=(
+            SimpleNamespace(start=16 / 16_000, end=24 / 16_000),
+        ))
+        self.assertEqual(ns["retain_consequence_microspans"](
+            audio, plan, sample_rate=16_000, clock=clock,
+            timer_factory=None), 1)
+
+        class FakeData:
+            @staticmethod
+            def dataWithBytes_length_(payload, length):
+                self.assertEqual(length, len(payload))
+                clock.value += 60.0
+                return payload
+
+        class FakeSound:
+            played = False
+
+            @classmethod
+            def alloc(cls):
+                return cls()
+
+            def initWithData_(self, _data):
+                return self
+
+            def play(self):
+                type(self).played = True
+                return True
+
+        ns.update(NSData=FakeData, NSSound=FakeSound)
+
+        self.assertFalse(ns["play_retained_consequence_span"](clock=clock))
+        self.assertFalse(FakeSound.played)
         self.assertEqual(buffer.span_count, 0)
         self.assertEqual(state["span_ids"], [])
 

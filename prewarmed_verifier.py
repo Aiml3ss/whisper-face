@@ -67,6 +67,7 @@ def _child_main(
             connection.send((_RESULT, payload))
             request = None
             payload = None
+            message = None
     except BaseException:
         os._exit(70)
     finally:

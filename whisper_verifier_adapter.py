@@ -1,13 +1,10 @@
-"""Bounded macOS Whisper Tiny adapter for disposable-process verification.
+"""Bounded macOS Whisper Tiny adapters for process-isolated verification.
 
-The adapter deliberately has no runtime wiring.  Each accepted request is
-decoded without a prompt or application context, and only a closed decision
-crosses :class:`process_verifier.ProcessIsolatedVerifier`'s process boundary.
-
-Because the current boundary creates a fresh process for every request, its
-first MLX decode includes model startup cost.  This contract is therefore safe
-to measure, but should not be enabled under the current 750 ms routing budget
-until a killable prewarmed-worker design has been measured separately.
+Neither adapter has runtime wiring.  Each accepted request is decoded without
+a prompt or application context, and only a closed decision crosses the child
+process boundary.  The disposable adapter loads per request; the prewarmed
+adapter resolves and loads the pinned local model once in a reusable killable
+child.  No latency, accuracy, activation, or sandbox claim is made here.
 """
 
 from __future__ import annotations
@@ -28,6 +25,7 @@ from process_verifier import (
     VerificationRequest,
     VerificationResult,
 )
+from prewarmed_verifier import PrewarmedVerifierSupervisor
 
 
 WHISPER_TINY_REPO = "mlx-community/whisper-tiny"
@@ -231,6 +229,93 @@ def _transcribe(samples: tuple[float, ...], model_path: str) \
     )
 
 
+def _load_whisper_tiny_model(model_path: str) -> Any:
+    """Load the pinned local snapshot once inside the prewarmed child."""
+    import mlx.core as mx
+    from mlx_whisper.load_models import load_model
+
+    return load_model(model_path, dtype=mx.float16)
+
+
+@dataclass(frozen=True, repr=False)
+class LoadedWhisperTiny:
+    """Child-only model state; never sent through the parent connection."""
+
+    model_path: str
+    model: Any
+
+
+def _transcribe_loaded(
+        samples: tuple[float, ...],
+        loaded: LoadedWhisperTiny) -> Mapping[str, Any]:
+    """Decode through mlx-whisper's holder without reloading the model."""
+    import numpy as np
+    from mlx_whisper.transcribe import ModelHolder, transcribe
+
+    ModelHolder.model = loaded.model
+    ModelHolder.model_path = loaded.model_path
+    audio = np.asarray(samples, dtype=np.float32)
+    peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
+    if 0.0 < peak < 0.25:
+        audio = audio * min(0.25 / peak, 25.0)
+    return transcribe(
+        audio,
+        path_or_hf_repo=loaded.model_path,
+        language="en",
+        temperature=0.0,
+        condition_on_previous_text=False,
+        initial_prompt=None,
+    )
+
+
+@dataclass(frozen=True)
+class PrewarmedWhisperTinyProvider:
+    """Child-only request handler backed by one already loaded model."""
+
+    loaded: LoadedWhisperTiny
+    transcriber: Callable[
+        [tuple[float, ...], LoadedWhisperTiny], Mapping[str, Any]
+    ] = _transcribe_loaded
+
+    def __call__(self, request: VerificationRequest) -> Mapping[str, Any]:
+        bounded = _bounded_request(request)
+        if bounded is None or time.monotonic() >= bounded.deadline_at:
+            return _closed_result("inconclusive", 0.0)
+        if not any(bounded.samples):
+            return _closed_result("inconclusive", 0.0)
+        result = self.transcriber(bounded.samples, self.loaded)
+        if not isinstance(result, Mapping):
+            raise ValueError("transcriber returned a malformed result")
+        transcript = result.get("text")
+        if not isinstance(transcript, str):
+            raise ValueError("transcriber result omitted text")
+        confidence = _confidence_from_result(result)
+        return _compare(transcript, bounded.expected, confidence)
+
+
+@dataclass(frozen=True)
+class PrewarmedWhisperTinyProviderFactory:
+    """Resolve and load exactly once when the supervisor starts its child."""
+
+    resolver: Callable[[], str] = _resolve_local_snapshot
+    loader: Callable[[str], Any] = _load_whisper_tiny_model
+    transcriber: Callable[
+        [tuple[float, ...], LoadedWhisperTiny], Mapping[str, Any]
+    ] = _transcribe_loaded
+
+    def __call__(self) -> PrewarmedWhisperTinyProvider:
+        model_path = self.resolver()
+        if not isinstance(model_path, str) or not Path(model_path).is_dir():
+            raise ValueError("local Whisper Tiny snapshot is unavailable")
+        model = self.loader(model_path)
+        if model is None:
+            raise ValueError("Whisper Tiny loader returned no model")
+        return PrewarmedWhisperTinyProvider(
+            loaded=LoadedWhisperTiny(model_path, model),
+            transcriber=self.transcriber,
+        )
+
+
 @dataclass(frozen=True)
 class WhisperTinyWorker:
     """Picklable child worker with injectable local resolver and transcriber."""
@@ -307,6 +392,63 @@ class WhisperTinyVerifier:
         if bounded is None:
             return self._inconclusive()
         return self._process_verifier.verify(
+            bounded.samples,
+            bounded.sample_rate,
+            bounded.expected,
+            deadline_at=bounded.deadline_at,
+        )
+
+
+class PrewarmedWhisperTinyVerifier:
+    """Parent-side Whisper bounds composed with the prewarmed supervisor."""
+
+    process_isolated = True
+    strict_deadline = True
+    retains_audio = False
+    prewarmed = True
+
+    def __init__(
+            self,
+            *,
+            provider_factory: PrewarmedWhisperTinyProviderFactory | None = None,
+            supervisor: PrewarmedVerifierSupervisor | None = None,
+    ) -> None:
+        if provider_factory is not None and supervisor is not None:
+            raise ValueError("provide provider_factory or supervisor, not both")
+        self._supervisor = supervisor or PrewarmedVerifierSupervisor(
+            provider_factory or PrewarmedWhisperTinyProviderFactory())
+
+    def __enter__(self) -> PrewarmedWhisperTinyVerifier:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self._supervisor.close()
+
+    def verify(
+            self,
+            samples: Sequence[float],
+            sample_rate: int,
+            expected: str,
+            *,
+            deadline_at: float,
+    ) -> VerificationReceipt:
+        if (isinstance(deadline_at, bool) or not isinstance(deadline_at, Real)
+                or not math.isfinite(float(deadline_at))):
+            raise ValueError("deadline_at must be a finite monotonic timestamp")
+        deadline = float(deadline_at)
+        if time.monotonic() >= deadline:
+            return VerificationReceipt(refusal=RefusalReason.TIMEOUT)
+        bounded = _bounded_request(VerificationRequest(
+            samples=samples, sample_rate=sample_rate, expected=expected,
+            deadline_at=deadline))
+        if time.monotonic() >= deadline:
+            return VerificationReceipt(refusal=RefusalReason.TIMEOUT)
+        if bounded is None:
+            return WhisperTinyVerifier._inconclusive()
+        return self._supervisor.verify(
             bounded.samples,
             bounded.sample_rate,
             bounded.expected,

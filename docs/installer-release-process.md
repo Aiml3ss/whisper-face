@@ -8,6 +8,8 @@ machine without maintaining a second copy of the application.
 
 `dictate.py`, `parrot_core.py`, `voice_compiler.py`,
 `insertion_integrity.py`, `personal_regression.py`, `whisper_face_gui.py`,
+`voice_objects.py`, `voice_object_command_parser.py`, `voice_inbox.py`, and
+`voice_object_inbox_bridge.py`,
 the PEP 723 dependency block, and `dictate.py.lock` are the runtime source of
 truth. The Mac LaunchAgent and
 Windows scheduled task execute those files from the checkout. Installers may
@@ -37,6 +39,7 @@ uv run tests/test_consequence_routing.py
 uv run tests/test_process_verifier.py
 uv run tests/test_prewarmed_verifier.py
 uv run tests/test_whisper_verifier_adapter.py
+uv run tests/test_prewarmed_whisper_verifier_adapter.py
 uv run tests/test_benchmark_voice_compiler.py
 uv run tests/test_benchmark_consequence_routing.py
 uv run tests/test_benchmark_asr.py
@@ -56,8 +59,10 @@ uv run tests/test_point_and_speak_resolver.py
 uv run tests/test_drop_to_target.py
 uv run tests/test_voice_objects.py
 uv run tests/test_voice_object_command_parser.py
+uv run tests/test_voice_object_commands_runtime.py
 uv run tests/test_voice_inbox.py
 uv run tests/test_voice_object_inbox_bridge.py
+uv run tests/test_risky_action_confirmation.py
 uv run tests/test_competitor_benchmark.py
 uv run tests/test_public_scorecard.py
 uv run tests/test_personal_regression.py
