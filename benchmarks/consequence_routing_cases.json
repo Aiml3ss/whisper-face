@@ -98,6 +98,18 @@
       "expect": {"categories": ["number"], "route": "review"}
     },
     {
+      "id": "number-unit-disagreement",
+      "text": "Set the dose to 5 milligrams",
+      "alternative": "Set the dose to 5 milliliters",
+      "confidence": 0.93,
+      "audio_duration": 8.0,
+      "expect": {
+        "categories": ["number"],
+        "route": "review",
+        "relisten_min": 1
+      }
+    },
+    {
       "id": "phone-contact",
       "text": "Call +1 (415) 555-0199",
       "confidence": 0.63,

@@ -182,6 +182,7 @@ Run with:  uv run dictate.py   (or via the com.berg.dictate LaunchAgent)
 """
 
 import atexit
+import ctypes
 import difflib
 import email
 import email.policy
@@ -251,13 +252,13 @@ if IS_MACOS:
         NSWindowStyleMaskBorderless,
         NSWindowStyleMaskNonactivatingPanel,
         NSWorkspace,
+        NSWorkspaceDidWakeNotification,
     )
     from Foundation import (
         NSAttributedString, NSData, NSMakeRect, NSMakeSize, NSObject, NSTimer,
     )
     from PyObjCTools import AppHelper
 else:
-    import ctypes
     import pyperclip
     import pystray
     import win32clipboard
@@ -340,6 +341,9 @@ from acoustic_keyword_memory import AcousticKeywordMemory  # noqa: E402
 from acoustic_time_machine import AcousticTimeMachine  # noqa: E402
 from cleanup_circuit_breaker import CleanupCircuitBreaker  # noqa: E402
 from macos_email_compose import MacEmailComposeAdapter  # noqa: E402
+from macos_voice_draft_clipboard import (  # noqa: E402
+    MacVoiceDraftClipboardAdapter,
+)
 from model_wallet import (  # noqa: E402
     MAX_LATENCY_BOUND_MS,
     Capability,
@@ -988,6 +992,7 @@ VOICE_OBJECT_INBOX_STATE = {
     "bridge": None,
 }
 EMAIL_COMPOSE_ADAPTER = MacEmailComposeAdapter()
+VOICE_DRAFT_CLIPBOARD_ADAPTER = MacVoiceDraftClipboardAdapter()
 DEMONSTRATION_DRAFTS_STATE = {
     "lock": threading.RLock(),
     "store": None,
@@ -1269,6 +1274,47 @@ def compose_voice_object_email(nonce: str, item_id: str) -> dict:
             recipients=draft.recipients,
             subject=draft.subject,
             body=draft.body,
+        ).to_mapping()
+    except (OSError, TypeError, ValueError, OverflowError):
+        return reject()
+
+
+def issue_voice_object_copy_nonce() -> str:
+    """Issue a capability only for the explicit Mac GUI confirmation path."""
+
+    if not (IS_MACOS and PREFERENCES["voice_object_commands"]):
+        return ""
+    return VOICE_DRAFT_CLIPBOARD_ADAPTER.issue_nonce()
+
+
+def copy_voice_object_draft(
+    nonce: str, item_id: str, expected_destination: str,
+) -> dict:
+    """Freshly reread one queued task/calendar draft and copy it once."""
+
+    def reject() -> dict:
+        return VOICE_DRAFT_CLIPBOARD_ADAPTER.copy(
+            nonce, content="").to_mapping()
+
+    if not (IS_MACOS and PREFERENCES["voice_object_commands"]):
+        return {"schema_version": 1, "state": "unavailable", "attempted": False}
+    expected_types = {
+        Destination.TASK.value: (Destination.TASK, TaskDraft),
+        Destination.CALENDAR_DRAFT.value: (
+            Destination.CALENDAR_DRAFT, CalendarDraft),
+    }
+    if expected_destination not in expected_types:
+        return reject()
+    try:
+        revealed = _voice_object_inbox_bridge().read(item_id)
+        destination, draft_type = expected_types[expected_destination]
+        if (revealed.state is not InboxState.QUEUED
+                or revealed.destination is not destination
+                or type(revealed.draft) is not draft_type):
+            return reject()
+        return VOICE_DRAFT_CLIPBOARD_ADAPTER.copy(
+            nonce,
+            content=_voice_object_draft_content(revealed.draft),
         ).to_mapping()
     except (OSError, TypeError, ValueError, OverflowError):
         return reject()
@@ -2541,6 +2587,8 @@ class StatusBar(NSObject):
         # until next login — an intentional "off switch".
         try:
             FLIGHT.disable()
+            if AUDIO_RECOVERY is not None:
+                AUDIO_RECOVERY.close()
             AUDIO_POOL.close()
         except Exception:
             pass
@@ -2936,78 +2984,331 @@ class AudioPool:
         self.init_lock = threading.Lock()
         self.warm_attempted = False
         self.warm_error = None
+        self.recovery_pending = False
 
     def readiness(self) -> str:
         """Expose startup failure without leaking device or exception text."""
-        if self.warm_error is not None:
-            return "Unavailable"
-        if self.slots:
-            return "Ready"
-        return "Starting"
-
-    def warm(self):
-        if self.slots:
-            return
-        with self.init_lock:
-            if self.slots:
-                return
-            self.warm_attempted = True
-            slots = []
-            try:
-                for _ in range(self.size):
-                    slots.append(AudioSlot(self.stream_factory))
-                for slot in slots:
-                    slot.warm()
-            except Exception as error:
-                self.warm_error = type(error).__name__
-                for slot in slots:
-                    try:
-                        slot.close()
-                    except Exception:
-                        pass
-                raise
-            self.slots = slots
-            self.warm_error = None
-
-    def acquire(self, recorder):
-        self.warm()
         with self.lock:
-            slot = next((s for s in self.slots if s not in self.busy), None)
-            if slot is None:
-                raise RuntimeError("all pre-opened microphone streams are busy")
-            self.busy.add(slot)
-        try:
-            slot.start(recorder)
-            self.warm_error = None
-            return slot
-        except Exception as error:
-            self.warm_error = type(error).__name__
-            with self.lock:
-                self.busy.discard(slot)
-            raise
+            if self.warm_error is not None:
+                return "Unavailable"
+            if self.slots and not self.recovery_pending:
+                return "Ready"
+            return "Starting"
 
-    def release(self, slot):
-        if slot is None:
-            return
-        try:
-            slot.stop()
-        finally:
-            with self.lock:
-                self.busy.discard(slot)
-
-    def close(self):
-        with self.lock:
-            slots = list(self.slots)
-            self.slots = []
-            self.busy.clear()
+    @staticmethod
+    def _close_slots(slots):
         for slot in slots:
             try:
                 slot.close()
             except Exception:
                 pass
 
+    def _warm_locked(self):
+        """Open the current default device while ``init_lock`` is held."""
+        with self.lock:
+            if self.slots:
+                return
+            self.warm_attempted = True
+        slots = []
+        try:
+            for _ in range(self.size):
+                slots.append(AudioSlot(self.stream_factory))
+            for slot in slots:
+                slot.warm()
+        except Exception as error:
+            with self.lock:
+                self.warm_error = type(error).__name__
+            self._close_slots(slots)
+            raise
+        with self.lock:
+            self.slots = slots
+            self.recovery_pending = False
+            self.warm_error = None
+
+    def _invalidate_locked(self, *, reset_error=True):
+        """Detach idle slots, or defer until every active take releases."""
+        with self.lock:
+            if reset_error:
+                self.warm_error = None
+            if self.busy:
+                self.recovery_pending = True
+                return []
+            slots, self.slots = self.slots, []
+            self.recovery_pending = False
+            return slots
+
+    def warm(self):
+        with self.init_lock:
+            try:
+                self._warm_locked()
+            except Exception:
+                raise RuntimeError("microphone stream unavailable") from None
+
+    def acquire(self, recorder):
+        stale_slots = []
+        with self.init_lock:
+            try:
+                self._warm_locked()
+            except Exception:
+                raise RuntimeError("microphone stream unavailable") from None
+            with self.lock:
+                if self.recovery_pending:
+                    raise RuntimeError("microphone recovery pending")
+                slot = next(
+                    (candidate for candidate in self.slots
+                     if candidate not in self.busy),
+                    None,
+                )
+                if slot is None:
+                    raise RuntimeError(
+                        "all pre-opened microphone streams are busy")
+                self.busy.add(slot)
+            try:
+                slot.start(recorder)
+                with self.lock:
+                    self.warm_error = None
+                return slot
+            except Exception as error:
+                with self.lock:
+                    self.busy.discard(slot)
+                    self.warm_error = type(error).__name__
+                stale_slots = self._invalidate_locked(reset_error=False)
+        self._close_slots(stale_slots)
+        raise RuntimeError("microphone stream unavailable") from None
+
+    def release(self, slot):
+        if slot is None:
+            return
+        stale_slots = []
+        stop_error = None
+        try:
+            slot.stop()
+        except Exception as error:
+            stop_error = type(error).__name__
+        finally:
+            with self.init_lock:
+                with self.lock:
+                    self.busy.discard(slot)
+                    if stop_error is not None:
+                        self.warm_error = stop_error
+                        self.recovery_pending = True
+                    should_recover = (
+                        self.recovery_pending and not self.busy)
+                if should_recover:
+                    stale_slots = self._invalidate_locked(
+                        reset_error=stop_error is None)
+            self._close_slots(stale_slots)
+        if stop_error is not None:
+            raise RuntimeError("microphone stream stop failed") from None
+
+    def invalidate(self):
+        """Forget stale default-device streams without cutting off a take."""
+        with self.init_lock:
+            stale_slots = self._invalidate_locked()
+        self._close_slots(stale_slots)
+
+    def close(self):
+        with self.init_lock:
+            with self.lock:
+                slots = list(self.slots)
+                self.slots = []
+                self.busy.clear()
+                self.recovery_pending = False
+        self._close_slots(slots)
+
+
+class _AudioObjectPropertyAddress(ctypes.Structure):
+    _fields_ = [
+        ("selector", ctypes.c_uint32),
+        ("scope", ctypes.c_uint32),
+        ("element", ctypes.c_uint32),
+    ]
+
+
+class _CoreAudioDefaultInputListener:
+    """Content-free CoreAudio listener for the default input device."""
+
+    SYSTEM_OBJECT = 1
+    DEFAULT_INPUT = int.from_bytes(b"dIn ", "big")
+    GLOBAL_SCOPE = int.from_bytes(b"glob", "big")
+    MAIN_ELEMENT = 0
+    CALLBACK = ctypes.CFUNCTYPE(
+        ctypes.c_int32,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.POINTER(_AudioObjectPropertyAddress),
+        ctypes.c_void_p,
+    )
+
+    def __init__(self, library=None):
+        self.library = library
+        self.callback = None
+        self.address = _AudioObjectPropertyAddress(
+            self.DEFAULT_INPUT, self.GLOBAL_SCOPE, self.MAIN_ELEMENT)
+        self.started = False
+
+    def start(self, notify):
+        if self.started:
+            return
+        library = self.library or ctypes.CDLL(
+            "/System/Library/Frameworks/CoreAudio.framework/CoreAudio")
+        add = library.AudioObjectAddPropertyListener
+        add.argtypes = [
+            ctypes.c_uint32,
+            ctypes.POINTER(_AudioObjectPropertyAddress),
+            self.CALLBACK,
+            ctypes.c_void_p,
+        ]
+        add.restype = ctypes.c_int32
+
+        def changed(_object_id, _count, _addresses, _client_data):
+            notify()
+            return 0
+
+        callback = self.CALLBACK(changed)
+        status = add(
+            self.SYSTEM_OBJECT, ctypes.byref(self.address), callback, None)
+        if status != 0:
+            raise RuntimeError("CoreAudio notification registration failed")
+        self.library = library
+        self.callback = callback
+        self.started = True
+
+    def close(self):
+        if not self.started:
+            return
+        remove = self.library.AudioObjectRemovePropertyListener
+        remove.argtypes = [
+            ctypes.c_uint32,
+            ctypes.POINTER(_AudioObjectPropertyAddress),
+            self.CALLBACK,
+            ctypes.c_void_p,
+        ]
+        remove.restype = ctypes.c_int32
+        status = remove(
+            self.SYSTEM_OBJECT,
+            ctypes.byref(self.address),
+            self.callback,
+            None,
+        )
+        if status != 0:
+            # CoreAudio may still own the function pointer. Keep the ctypes
+            # callback strongly referenced until removal actually succeeds.
+            raise RuntimeError("CoreAudio notification removal failed")
+        self.started = False
+        self.callback = None
+
+
+class MacAudioRecoveryNotifications:
+    """Coalesce native device/wake events onto a non-callback worker."""
+
+    def __init__(self, invalidate, *, core_audio=None,
+                 workspace_center=None, wake_name=None):
+        self.invalidate = invalidate
+        self.core_audio = core_audio
+        self.workspace_center = workspace_center
+        self.wake_name = wake_name
+        self.wake_token = None
+        self.event = threading.Event()
+        self.condition = threading.Condition()
+        self.requested = 0
+        self.completed = 0
+        self.closed = False
+        self.started = False
+        self.worker = None
+
+    def _signal(self):
+        with self.condition:
+            if self.closed:
+                return
+            self.requested += 1
+            self.event.set()
+
+    def _run(self):
+        while True:
+            self.event.wait()
+            with self.condition:
+                if self.closed:
+                    return
+                target = self.requested
+                self.event.clear()
+            try:
+                self.invalidate()
+            except Exception:
+                # A later native event or keypress can retry. Notification
+                # callbacks never surface device details in routine logs.
+                pass
+            with self.condition:
+                self.completed = max(self.completed, target)
+                self.condition.notify_all()
+
+    def start(self):
+        if self.started:
+            return
+        if not IS_MACOS:
+            return
+        self.core_audio = self.core_audio or _CoreAudioDefaultInputListener()
+        self.workspace_center = self.workspace_center or (
+            NSWorkspace.sharedWorkspace().notificationCenter())
+        self.wake_name = self.wake_name or NSWorkspaceDidWakeNotification
+        self.worker = threading.Thread(
+            target=self._run,
+            name="whisper-face-audio-recovery",
+            daemon=True,
+        )
+        self.worker.start()
+        try:
+            self.core_audio.start(self._signal)
+            self.wake_token = (
+                self.workspace_center
+                .addObserverForName_object_queue_usingBlock_(
+                    self.wake_name, None, None,
+                    lambda _notification: self._signal(),
+                )
+            )
+        except Exception:
+            self.close()
+            raise
+        self.started = True
+
+    def wait_for_idle(self, timeout=1.0):
+        """Wait for already-delivered events; used by deterministic tests."""
+        deadline = time.monotonic() + timeout
+        with self.condition:
+            target = self.requested
+            while self.completed < target and not self.closed:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self.condition.wait(remaining)
+            return self.completed >= target
+
+    def close(self):
+        token, self.wake_token = self.wake_token, None
+        if token is not None and self.workspace_center is not None:
+            try:
+                self.workspace_center.removeObserver_(token)
+            except Exception:
+                pass
+        if self.core_audio is not None:
+            try:
+                self.core_audio.close()
+            except Exception:
+                pass
+        with self.condition:
+            self.closed = True
+            self.event.set()
+            self.condition.notify_all()
+        worker, self.worker = self.worker, None
+        if (worker is not None and worker is not threading.current_thread()
+                and worker.is_alive()):
+            worker.join(timeout=1.0)
+        self.started = False
+
 
 AUDIO_POOL = AudioPool(size=2)
+AUDIO_RECOVERY = (
+    MacAudioRecoveryNotifications(AUDIO_POOL.invalidate) if IS_MACOS else None)
 
 
 def _transcribe_frames(frames, prompt=None) -> Recognition:
@@ -7902,6 +8203,13 @@ def main():
 
     ensure_event_permissions()
 
+    if AUDIO_RECOVERY is not None:
+        try:
+            AUDIO_RECOVERY.start()
+            atexit.register(AUDIO_RECOVERY.close)
+        except Exception:
+            print("! Automatic microphone recovery notifications unavailable")
+
     if IS_MACOS:
         app = NSApplication.sharedApplication()
         app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
@@ -7949,6 +8257,8 @@ def main():
             issue_voice_object_email_compose_nonce=(
                 issue_voice_object_email_compose_nonce),
             compose_voice_object_email=compose_voice_object_email,
+            issue_voice_object_copy_nonce=issue_voice_object_copy_nonce,
+            copy_voice_object_draft=copy_voice_object_draft,
             acknowledge_voice_object_draft=acknowledge_voice_object_draft,
             cancel_voice_object_draft=cancel_voice_object_draft,
             purge_terminal_voice_object_drafts=(

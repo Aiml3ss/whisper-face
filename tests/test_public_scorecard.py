@@ -28,8 +28,8 @@ class PublicScorecardTests(unittest.TestCase):
         )
         self.assertEqual(first["totals"], {
             "suites": 5,
-            "cases": 62,
-            "passed": 62,
+            "cases": 63,
+            "passed": 63,
             "failed": 0,
             "critical_failures": 0,
             "all_passed": True,
