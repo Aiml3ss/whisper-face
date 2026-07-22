@@ -113,6 +113,7 @@ $TaskName = "Whisper Face"
 $LegacyTaskName = "Whispering Parrot"
 $LauncherDir = Join-Path $Repo ".windows"
 $Launcher = Join-Path $LauncherDir "launch.ps1"
+$LauncherReceipt = Join-Path $LauncherDir "launch.sha256"
 $Log = Join-Path $Repo "dictate.log"
 
 function Get-InstalledTools {
@@ -126,17 +127,92 @@ function Get-InstalledTools {
     )
 }
 
+function Get-LauncherDigest([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Windows login launcher is missing"
+    }
+    $Digest = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash
+    if ($Digest -notmatch '^[0-9A-F]{64}$') {
+        throw "Windows login launcher digest is invalid"
+    }
+    return $Digest.ToLowerInvariant()
+}
+
+function Confirm-TaskLauncherBinding {
+    if (-not (Test-Path -LiteralPath $LauncherReceipt -PathType Leaf)) {
+        throw "Windows login launcher receipt is missing; rerun Install.cmd"
+    }
+    $RecordedDigest = [IO.File]::ReadAllText($LauncherReceipt)
+    if ($RecordedDigest -notmatch '^[0-9a-f]{64}$') {
+        throw "Windows login launcher receipt is invalid; rerun Install.cmd"
+    }
+    if ((Get-LauncherDigest $Launcher) -cne $RecordedDigest) {
+        throw "Windows login launcher has changed; rerun Install.cmd"
+    }
+
+    $LauncherFull = [IO.Path]::GetFullPath($Launcher)
+    $RepoFull = [IO.Path]::GetFullPath($Repo)
+    $RepoPrefix = $RepoFull.TrimEnd([IO.Path]::DirectorySeparatorChar) +
+        [IO.Path]::DirectorySeparatorChar
+    if (-not $LauncherFull.StartsWith($RepoPrefix,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Windows login launcher is outside this checkout; rerun Install.cmd"
+    }
+
+    $LauncherBody = [IO.File]::ReadAllText($Launcher)
+    $EscapedRepo = $Repo.Replace("'", "''")
+    $EscapedScript = (Join-Path $Repo "dictate.py").Replace("'", "''")
+    $EscapedLog = $Log.Replace("'", "''")
+    foreach ($RequiredLauncherText in @(
+            "Set-Location '$EscapedRepo'",
+            "run --locked --script '$EscapedScript'",
+            "*>> '$EscapedLog'")) {
+        if (-not $LauncherBody.Contains($RequiredLauncherText)) {
+            throw "Windows login launcher does not target this checkout; rerun Install.cmd"
+        }
+    }
+
+    $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($null -eq $Task) {
+        throw "Windows login task is missing"
+    }
+    $CurrentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $CurrentPrincipalIds = @(
+        $env:USERNAME,
+        $CurrentIdentity.Name,
+        $CurrentIdentity.User.Value
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    $TaskPrincipalMatches = $false
+    if ($null -ne $Task.Principal) {
+        foreach ($CurrentPrincipalId in $CurrentPrincipalIds) {
+            if ($Task.Principal.UserId -ieq $CurrentPrincipalId) {
+                $TaskPrincipalMatches = $true
+                break
+            }
+        }
+    }
+    if (-not $TaskPrincipalMatches) {
+        throw "Windows login task is not bound to the current user; rerun Install.cmd"
+    }
+    $Actions = @($Task.Actions)
+    if ($Actions.Count -ne 1) {
+        throw "Windows login task has an unexpected action count; rerun Install.cmd"
+    }
+    $ExpectedArguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Launcher`""
+    if ($Actions[0].Execute -ine "powershell.exe" -or
+            $Actions[0].Arguments -cne $ExpectedArguments) {
+        throw "Windows login task does not launch this checkout; rerun Install.cmd"
+    }
+}
+
 function Confirm-Installation {
     Write-Step "verifying Windows installation"
     Get-InstalledTools
     if (-not $Uv) { throw "uv is not installed" }
     if (-not $Ffmpeg) { throw "ffmpeg is not installed" }
     if (-not $Ollama) { throw "Ollama is not installed" }
-    if (-not (Test-Path $Launcher)) { throw "Windows login launcher is missing" }
-    $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    if ($null -eq $Task) {
-        throw "Windows login task is missing"
-    }
+    Confirm-TaskLauncherBinding
+    $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
     if ($Task.State -ne "Running") {
         throw "Windows login task is not running (state: $($Task.State))"
     }
@@ -272,6 +348,12 @@ Set-Location '$($Repo.Replace("'", "''"))'
 & '$EscapedUv' run --locked --script '$EscapedScript'$ExtraArgument *>> '$EscapedLog'
 "@
 Set-Content -Path $Launcher -Value $LauncherBody -Encoding UTF8
+$LauncherDigest = Get-LauncherDigest $Launcher
+Set-Content -Path $LauncherReceipt -Value $LauncherDigest -Encoding ascii -NoNewline
+& icacls $LauncherReceipt /inheritance:r /grant:r "${env:USERNAME}:(F)" /Q | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "could not apply the private Windows launcher receipt ACL"
+}
 
 foreach ($ExistingName in @($TaskName, $LegacyTaskName)) {
     $ExistingTask = Get-ScheduledTask -TaskName $ExistingName -ErrorAction SilentlyContinue

@@ -377,6 +377,8 @@ class SnapshotTests(unittest.TestCase):
             "onboarding.progress",
             "onboarding.step.permissions",
             "onboarding.step.summary",
+            "onboarding.action.open_system_settings",
+            "onboarding.action.open_system_settings.help",
             "overview.accessibility.onboarding.steps",
             "overview.accessibility.onboarding.step",
             "settings.action.diagnostics",
@@ -389,6 +391,7 @@ class SnapshotTests(unittest.TestCase):
             "models.accessibility.guidance",
             "diagnostics.title",
             "diagnostics.accessibility.verification",
+            "diagnostics.accessibility.open_system_settings",
         ):
             with self.subTest(key=key):
                 self.assertIn(key, STRING_CATALOGS["en"])
@@ -461,6 +464,7 @@ class SnapshotTests(unittest.TestCase):
                 "operation.risky_confirmation.click_failed",
                 "operation.risky_confirmation.cancel_failed",
                 "operation.log.open_failed",
+                "operation.system_settings.open_failed",
                 "operation.support_snapshot.copy_failed",
                 "operation.source.open_failed",
                 "operation.licenses.open_failed",
@@ -553,6 +557,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(contract.locale_fallback, "en")
         self.assertIn("command-d:diagnostics", contract.key_equivalents)
         self.assertIn("select_section", contract.model_actions)
+        self.assertIn("open_system_settings", contract.model_actions)
         self.assertIn("forget_snippet", contract.model_actions)
         self.assertIn("preview_point_and_speak", contract.model_actions)
         self.assertIn("issue_point_and_speak_nonce", contract.model_actions)
@@ -2161,6 +2166,47 @@ class ViewModelTests(unittest.TestCase):
         self.assertEqual(state.section, "Diagnostics")
         self.assertEqual(state.notice_level, "error")
         self.assertIn("Microphone", state.notice)
+
+    def test_permission_recovery_opens_only_while_permission_evidence_is_incomplete(self):
+        runtime = {
+            "service_status": "Running",
+            "microphone_status": "Needs attention",
+            "accessibility_status": "Needs attention",
+        }
+        opened: list[str] = []
+        model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: dict(runtime),
+            open_system_settings=lambda: opened.append("opened")))
+
+        self.assertTrue(model.permission_recovery_needed())
+        state = model.open_system_settings()
+        self.assertEqual(opened, ["opened"])
+        self.assertEqual(state.notice_level, "info")
+        self.assertIn("Return here", state.notice)
+
+        runtime.update(
+            microphone_status="Ready", accessibility_status="Granted")
+        model.refresh()
+        self.assertFalse(model.permission_recovery_needed())
+        model.open_system_settings()
+        self.assertEqual(opened, ["opened"])
+
+    def test_permission_recovery_keeps_failure_local_and_content_free(self):
+        def fail_to_open() -> None:
+            raise RuntimeError("settings unavailable")
+
+        model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {
+                "microphone_status": "Needs attention",
+                "accessibility_status": "Needs attention",
+            },
+            open_system_settings=fail_to_open))
+        state = model.open_system_settings()
+        self.assertEqual(state.notice_level, "error")
+        self.assertEqual(
+            state.notice,
+            localized_string("operation.system_settings.open_failed",
+                             error="settings unavailable"))
 
     def test_completed_onboarding_acknowledgement_survives_refresh(self):
         self.assertFalse(self.model.state.onboarding_acknowledged)
