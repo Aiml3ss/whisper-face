@@ -350,6 +350,9 @@ from point_and_speak_resolver import (  # noqa: E402
     ResolutionState as PointAndSpeakResolutionState,
     resolve_point_and_speak,
 )
+from risky_action_confirmation import (  # noqa: E402
+    InertRiskyActionConfirmationRuntime,
+)
 from voice_inbox import InboxState, VoiceInbox  # noqa: E402
 from voice_object_command_parser import parse_command  # noqa: E402
 from voice_object_inbox_bridge import VoiceObjectInboxBridge  # noqa: E402
@@ -480,6 +483,7 @@ PARAKEET_ROUTE_CONFIDENCE = 0.84
 LLM_CLEANUP_TIMEOUT = (1, 4) # localhost connect/read deadline. Capture must
                              # fall back faithfully instead of blocking paste.
 LLM_CLEANUP_BREAKER = CleanupCircuitBreaker(cooldown_seconds=60.0)
+RISKY_ACTION_CONFIRMATIONS = InertRiskyActionConfirmationRuntime()
 
 # Rolling ASR: while the key is held, segments ending in a solid pause are
 # transcribed in the background, so release only pays for the last few
@@ -1358,6 +1362,59 @@ def delete_approved_demonstration_draft(draft_id: str) -> bool:
         _demonstration_draft_store().delete_approved(draft_id)
         return True
     except (OSError, TypeError, ValueError, OverflowError):
+        return False
+
+
+def risky_action_confirmation_status_snapshot() -> dict:
+    """Project only the closed class and state of the RAM-only ceremony."""
+    status = RISKY_ACTION_CONFIRMATIONS.status()
+    return {
+        "risk": status.risk.value if status.risk is not None else "none",
+        "state": status.state,
+        "reason": status.reason,
+    }
+
+
+def start_risky_action_confirmation(risk: str) -> bool:
+    """Start one explicit inert Mac ceremony; no action payload exists."""
+    if not IS_MACOS:
+        return False
+    try:
+        RISKY_ACTION_CONFIRMATIONS.start(risk)
+    except (RuntimeError, TypeError, ValueError, OSError):
+        return False
+    return True
+
+
+def click_risky_action_confirmation() -> bool:
+    """Record the native click factor without executing any work."""
+    if not IS_MACOS:
+        return False
+    try:
+        RISKY_ACTION_CONFIRMATIONS.click_confirm()
+    except (RuntimeError, TypeError, ValueError):
+        return False
+    return True
+
+
+def cancel_risky_action_confirmation() -> bool:
+    """Fail closed by explicitly cancelling the current ceremony."""
+    if not IS_MACOS:
+        return False
+    try:
+        RISKY_ACTION_CONFIRMATIONS.cancel()
+    except (RuntimeError, TypeError, ValueError):
+        return False
+    return True
+
+
+def consume_risky_action_confirmation_voice(text: str) -> bool:
+    """Consume only the closed active voice command, before any text sink."""
+    if not IS_MACOS:
+        return False
+    try:
+        return RISKY_ACTION_CONFIRMATIONS.consume_voice(text).consumed
+    except (RuntimeError, TypeError, ValueError):
         return False
 
 
@@ -3544,6 +3601,7 @@ def runtime_status_snapshot() -> dict:
     acoustic_keywords = acoustic_keyword_memory_status_snapshot()
     acoustic_replay = acoustic_time_machine_status_snapshot()
     voice_object_inbox = voice_object_inbox_status()
+    risky_confirmation = risky_action_confirmation_status_snapshot()
     outbox_summary = ""
     if outbox:
         latest = outbox[-1].receipt
@@ -3562,6 +3620,7 @@ def runtime_status_snapshot() -> dict:
         "voice_object_commands": voice_object_inbox["enabled"],
         "voice_object_inbox_count": voice_object_inbox["queued_count"],
         "voice_object_inbox_status": voice_object_inbox["status"],
+        "risky_action_confirmation": risky_confirmation,
         "active_engine": engine,
         "last_latency_ms": (
             float(PIPELINE_STATE["last_release_s"]) * 1000
@@ -6695,6 +6754,24 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             print("[dropped] ASR echoed the glossary prompt")
             return
 
+        # An exact active confirmation phrase is consumed before compilation,
+        # captions, transcript logging, clipboard access, or insertion. The
+        # runtime keeps only the closed risk/state receipt and has no action to
+        # execute even after the later native click.
+        if (rec.mode == "capture"
+                and consume_risky_action_confirmation_voice(raw)):
+            confirmation = risky_action_confirmation_status_snapshot()
+            state = confirmation["state"]
+            CAPTION["text"] = {
+                "awaiting_click": "Risk confirmation: click still required",
+                "cancelled": "Risk confirmation cancelled",
+                "expired": "Risk confirmation expired",
+            }.get(state, "Risk confirmation remains blocked")
+            print("[risk-confirmation] voice receipt: "
+                  f"{confirmation['risk']}/{state}")
+            play("Pop" if state == "awaiting_click" else "Funk")
+            return
+
         bundle = rec.bundle_at_press or frontmost_bundle()
         recognized_raw = raw
         # A new usable result supersedes the previous result's replay audio.
@@ -7332,6 +7409,9 @@ def main():
             cancel_demonstration_draft=cancel_demonstration_draft,
             delete_approved_demonstration_draft=(
                 delete_approved_demonstration_draft),
+            start_risky_action_confirmation=start_risky_action_confirmation,
+            click_risky_action_confirmation=click_risky_action_confirmation,
+            cancel_risky_action_confirmation=cancel_risky_action_confirmation,
             play_retained_span=play_retained_consequence_span,
             clear_retained_spans=clear_retained_consequence_spans,
             set_app_tone=set_gui_app_tone,

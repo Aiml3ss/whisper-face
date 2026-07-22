@@ -4,6 +4,7 @@
 # ///
 """Runtime persistence tests for the native unified Settings adapters."""
 
+import ast
 import json
 import os
 import stat
@@ -19,6 +20,106 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from test_dictate import load_definitions  # noqa: E402
 from personal_regression import PersonalRegressionLab  # noqa: E402
+
+
+class RiskyConfirmationRuntimeIntegrationTests(unittest.TestCase):
+    class FakeStatus:
+        def __init__(self, risk=None, state="idle", reason="idle"):
+            self.risk = risk
+            self.state = state
+            self.reason = reason
+
+    class FakeRuntime:
+        def __init__(self):
+            self.calls = []
+            self.current = RiskyConfirmationRuntimeIntegrationTests.FakeStatus()
+
+        def status(self):
+            return self.current
+
+        def start(self, risk):
+            self.calls.append(("start", risk))
+            self.current = RiskyConfirmationRuntimeIntegrationTests.FakeStatus(
+                type("Risk", (), {"value": risk})(),
+                "awaiting_voice", "proposed")
+
+        def click_confirm(self):
+            self.calls.append(("click",))
+
+        def cancel(self):
+            self.calls.append(("cancel",))
+
+        def consume_voice(self, text):
+            self.calls.append(("voice", text))
+            return type("Receipt", (), {"consumed": True})()
+
+    def namespace(self, runtime, *, is_macos=True):
+        return load_definitions(
+            "risky_action_confirmation_status_snapshot",
+            "start_risky_action_confirmation",
+            "click_risky_action_confirmation",
+            "cancel_risky_action_confirmation",
+            "consume_risky_action_confirmation_voice",
+            extra={
+                "IS_MACOS": is_macos,
+                "RISKY_ACTION_CONFIRMATIONS": runtime,
+            },
+        )
+
+    def test_runtime_callbacks_expose_only_closed_status_and_no_action(self):
+        runtime = self.FakeRuntime()
+        ns = self.namespace(runtime)
+
+        self.assertTrue(ns["start_risky_action_confirmation"](
+            "file_mutation"))
+        self.assertEqual(
+            ns["risky_action_confirmation_status_snapshot"](), {
+                "risk": "file_mutation",
+                "state": "awaiting_voice",
+                "reason": "proposed",
+            })
+        self.assertTrue(ns["consume_risky_action_confirmation_voice"](
+            "confirm risky action"))
+        self.assertTrue(ns["click_risky_action_confirmation"]())
+        self.assertTrue(ns["cancel_risky_action_confirmation"]())
+        self.assertEqual(runtime.calls, [
+            ("start", "file_mutation"),
+            ("voice", "confirm risky action"),
+            ("click",),
+            ("cancel",),
+        ])
+
+    def test_non_mac_runtime_is_inert(self):
+        runtime = self.FakeRuntime()
+        ns = self.namespace(runtime, is_macos=False)
+
+        self.assertFalse(ns["start_risky_action_confirmation"](
+            "agent_execution"))
+        self.assertFalse(ns["consume_risky_action_confirmation_voice"](
+            "confirm risky action"))
+        self.assertFalse(ns["click_risky_action_confirmation"]())
+        self.assertFalse(ns["cancel_risky_action_confirmation"]())
+        self.assertEqual(runtime.calls, [])
+
+    def test_voice_intercept_precedes_all_content_sinks(self):
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        function = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "finish_and_process")
+        body = ast.get_source_segment(source, function)
+        self.assertIsNotNone(body)
+        intercept = body.index("consume_risky_action_confirmation_voice(raw)")
+        for sink in (
+            "compile_voice_evidence(",
+            "CAPTION[\"text\"] = raw",
+            "queue_voice_object_command(",
+            "commit_insertion(",
+            "append_transcript(",
+        ):
+            with self.subTest(sink=sink):
+                self.assertLess(intercept, body.index(sink))
 
 
 def settings_namespace(*names):

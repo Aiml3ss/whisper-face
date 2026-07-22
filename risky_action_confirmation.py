@@ -12,13 +12,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import math
+import os
 import re
+import threading
 import time
 from typing import Callable
 
 
 MAX_CONFIRMATION_WINDOW_SECONDS = 30.0
 _OPAQUE_ID = re.compile(r"act-[0-9a-f]{32}\Z")
+_VOICE_COMMAND = re.compile(
+    r"(?P<decision>confirm|cancel) risky action[.!?]?\Z", re.IGNORECASE)
 
 
 class RiskClass(str, Enum):
@@ -60,6 +64,23 @@ class ConfirmationReceipt:
     risk: RiskClass
     state: ConfirmationState
     reason: ConfirmationReason
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeConfirmationStatus:
+    """Content-free state exposed by the inert runtime and native GUI."""
+
+    risk: RiskClass | None
+    state: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceCommandReceipt:
+    """Whether a closed voice command was consumed, without retaining it."""
+
+    consumed: bool
+    status: RuntimeConfirmationStatus
 
 
 @dataclass(slots=True)
@@ -217,4 +238,115 @@ class RiskyActionConfirmationGate:
             risk=proposal.risk,
             state=proposal.state,
             reason=reason,
+        )
+
+
+class InertRiskyActionConfirmationRuntime:
+    """Own one explicit confirmation ceremony without owning an action.
+
+    Only a risk class and RAM-only opaque identifier reach the pure gate. The
+    runtime recognizes two closed voice commands, exposes no action payload,
+    and has no execution callback or persistence surface.
+    """
+
+    def __init__(
+        self,
+        *,
+        gate: RiskyActionConfirmationGate | None = None,
+        random_bytes: Callable[[int], bytes] = os.urandom,
+    ) -> None:
+        if not callable(random_bytes):
+            raise TypeError("random_bytes must be callable")
+        self._gate = gate or RiskyActionConfirmationGate()
+        self._random_bytes = random_bytes
+        self._active_id: str | None = None
+        self._lock = threading.RLock()
+
+    def start(
+        self,
+        risk: RiskClass | str,
+        *,
+        window_seconds: float = MAX_CONFIRMATION_WINDOW_SECONDS,
+    ) -> RuntimeConfirmationStatus:
+        """Begin one user-requested inert ceremony for a closed risk class."""
+        try:
+            normalized_risk = risk if isinstance(risk, RiskClass) else RiskClass(risk)
+        except (TypeError, ValueError) as error:
+            raise ValueError("risk must be a closed RiskClass value") from error
+        with self._lock:
+            if self._active_id is not None:
+                current = self._gate.status(self._active_id)
+                if current.state not in {
+                    ConfirmationState.CONFIRMED,
+                    ConfirmationState.CANCELLED,
+                    ConfirmationState.EXPIRED,
+                }:
+                    raise RuntimeError("a confirmation ceremony is already pending")
+                self._gate.forget(self._active_id)
+                self._active_id = None
+            for _attempt in range(8):
+                token = self._random_bytes(16)
+                if not isinstance(token, bytes) or len(token) != 16:
+                    raise ValueError("random_bytes must return exactly 16 bytes")
+                action_id = f"act-{token.hex()}"
+                try:
+                    receipt = self._gate.propose(
+                        action_id,
+                        normalized_risk,
+                        window_seconds=window_seconds,
+                    )
+                except ValueError as error:
+                    if "already registered" in str(error):
+                        continue
+                    raise
+                self._active_id = action_id
+                return self._project(receipt)
+            raise RuntimeError("could not allocate an opaque confirmation identifier")
+
+    def consume_voice(self, text: str) -> VoiceCommandReceipt:
+        """Consume only an exact confirm/cancel command for the active ceremony."""
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+        command = _VOICE_COMMAND.fullmatch(text.strip())
+        with self._lock:
+            status = self._status_locked()
+            if command is None or self._active_id is None:
+                return VoiceCommandReceipt(False, status)
+            decision = (
+                VoiceDecision.CONFIRM
+                if command.group("decision").casefold() == "confirm"
+                else VoiceDecision.CANCEL
+            )
+            receipt = self._gate.record_voice(self._active_id, decision)
+            return VoiceCommandReceipt(True, self._project(receipt))
+
+    def click_confirm(self) -> RuntimeConfirmationStatus:
+        """Record the distinct native click; this never executes an action."""
+        with self._lock:
+            if self._active_id is None:
+                raise RuntimeError("no confirmation ceremony is active")
+            return self._project(self._gate.click_confirm(self._active_id))
+
+    def cancel(self) -> RuntimeConfirmationStatus:
+        """Cancel the active ceremony without hiding its terminal state."""
+        with self._lock:
+            if self._active_id is None:
+                raise RuntimeError("no confirmation ceremony is active")
+            return self._project(self._gate.cancel(self._active_id))
+
+    def status(self) -> RuntimeConfirmationStatus:
+        with self._lock:
+            return self._status_locked()
+
+    def _status_locked(self) -> RuntimeConfirmationStatus:
+        if self._active_id is None:
+            return RuntimeConfirmationStatus(None, "idle", "idle")
+        return self._project(self._gate.status(self._active_id))
+
+    @staticmethod
+    def _project(receipt: ConfirmationReceipt) -> RuntimeConfirmationStatus:
+        return RuntimeConfirmationStatus(
+            risk=receipt.risk,
+            state=receipt.state.value,
+            reason=receipt.reason.value,
         )

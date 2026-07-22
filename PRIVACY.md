@@ -22,6 +22,14 @@ Flight Recorder is off on a fresh installation. When enabled, its menu state
 and the operating system microphone indicator make continuous capture visible;
 the bounded buffer is cleared after use, on pause, when disabled, and on quit.
 
+The Mac risk-confirmation ceremony is content-free and RAM-only. It stores one
+opaque identifier plus a closed risk class and state for at most the running
+process. An exact `confirm risky action` or `cancel risky action` utterance is
+consumed before compilation, transcript logging, clipboard access, or text
+insertion. The later native click records only an inert receipt: this surface
+has no action payload, Accessibility write, app API, subprocess, clipboard, or
+execution callback.
+
 ## Data written locally
 
 Whisper Face can keep a bounded `transcripts.jsonl` history containing raw and
