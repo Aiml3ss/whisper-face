@@ -29,7 +29,9 @@ before submitting outside contributions.
 - [ ] `uv lock --check --script dictate.py`
 - [ ] `uv run tests/test_parrot_core.py`
 - [ ] `uv run tests/test_voice_compiler.py`
+- [ ] `uv run tests/test_consequence_routing.py`
 - [ ] `uv run tests/test_benchmark_voice_compiler.py`
+- [ ] `uv run tests/test_benchmark_consequence_routing.py`
 - [ ] `uv run tests/test_benchmark_asr.py`
 - [ ] `uv run tests/test_performance_lab.py`
 - [ ] `uv run tests/test_dictate.py`
@@ -37,6 +39,7 @@ before submitting outside contributions.
 - [ ] `uv run tests/test_insertion_integrity.py`
 - [ ] `uv run tests/test_personal_regression.py`
 - [ ] `uv run tests/test_whisper_face_gui.py`
+- [ ] `uv run --locked --script dictate.py --native-gui-smoke-test`
 - [ ] `uv run tests/test_installers.py`
 - [ ] `uv run tests/test_repository_governance.py`
 - [ ] `uv run tests/test_macos_distribution.py`

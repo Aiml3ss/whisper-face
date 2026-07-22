@@ -26,6 +26,7 @@ from performance_lab import (
     evaluate_budgets,
     evaluate_observations,
     evaluate_runtime_traces,
+    evaluate_startup_traces,
     fetch_hub_json,
     generate_model_scorecard,
     load_budgets,
@@ -34,6 +35,7 @@ from performance_lab import (
     main,
     RUNTIME_TRACE_SCHEMAS,
     run_compiler_stress,
+    run_lifecycle_simulation,
     summarize_corpus,
 )
 
@@ -306,6 +308,98 @@ class RuntimeTraceAggregationTests(unittest.TestCase):
         with contextlib.redirect_stderr(error):
             status = main([
                 "traces", "--trace-log", private_path, "--format", "json",
+            ])
+        self.assertEqual(status, 2)
+        self.assertNotIn(private_path, error.getvalue())
+        self.assertEqual(
+            error.getvalue().strip(),
+            "performance lab configuration error: runtime trace input unavailable",
+        )
+
+    def test_caller_separated_startup_traces_have_cold_and_warm_budgets(self):
+        durations = {
+            "warmup_audio_pool": 10,
+            "warmup_asr_tiny": 20,
+            "warmup_asr_final": 30,
+            "warmup_ollama": 40,
+            "warmup_total": 100,
+        }
+
+        def lines(samples):
+            return "\n".join(
+                self._trace(event, duration_ms=duration, success=1)
+                for _ in range(samples)
+                for event, duration in durations.items()
+            )
+
+        private_values = (
+            "/Users/private/cold-start.log",
+            "private transcript must not escape",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            cold = Path(directory) / "private-cold.log"
+            warm = Path(directory) / "private-warm.log"
+            cold.write_text(
+                private_values[0] + "\n" + lines(3) + "\n",
+                encoding="utf-8",
+            )
+            warm.write_text(
+                lines(10) + "\n" + self._trace(
+                    "warmup_total", duration_ms=1, success=1,
+                    transcript=private_values[1]) + "\n",
+                encoding="utf-8",
+            )
+            report = evaluate_startup_traces(cold, warm)
+
+        self.assertEqual(report["records"], 65)
+        self.assertEqual(report["phases"]["cold"]["records"], 15)
+        self.assertEqual(report["phases"]["warm"]["records"], 50)
+        self.assertEqual(report["rejected_records"], 1)
+        self.assertFalse(report["physical_conditions_verified"])
+        self.assertEqual(
+            report["phase_classification"], "caller-separated-trace-logs")
+        self.assertTrue(all(
+            event in report["phases"][phase]["events"]
+            for phase in ("cold", "warm")
+            for event in durations
+        ))
+        serialized = json.dumps(report)
+        self.assertTrue(all(value not in serialized for value in private_values))
+        self.assertNotIn("private-cold", serialized)
+        self.assertNotIn("private-warm", serialized)
+
+        budget = evaluate_budgets(
+            report, load_budgets(DEFAULT_BUDGETS), "startup_readiness")
+        self.assertTrue(budget["passed"])
+        self.assertEqual(len(budget["checks"]), 20)
+
+        report["phases"]["warm"]["events"][
+            "warmup_asr_tiny"]["records"] = 9
+        budget = evaluate_budgets(
+            report, load_budgets(DEFAULT_BUDGETS), "startup_readiness")
+        tiny_warm = next(
+            check for check in budget["checks"]
+            if check["id"] == "warm-asr-tiny-p95")
+        self.assertEqual(tiny_warm["reason"], "insufficient-samples")
+
+        report["phases"]["warm"]["events"][
+            "warmup_asr_tiny"]["records"] = 10
+        report["phases"]["warm"]["events"][
+            "warmup_asr_tiny"]["success_rate"] = 0.9
+        budget = evaluate_budgets(
+            report, load_budgets(DEFAULT_BUDGETS), "startup_readiness")
+        tiny_success = next(
+            check for check in budget["checks"]
+            if check["id"] == "warm-asr-tiny-success")
+        self.assertEqual(tiny_success["reason"], "threshold-exceeded")
+
+    def test_startup_cli_never_reflects_an_unavailable_input_path(self):
+        private_path = "/Users/private/cold-start.log"
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            status = main([
+                "startup", "--cold-trace-log", private_path,
+                "--warm-trace-log", private_path, "--format", "json",
             ])
         self.assertEqual(status, 2)
         self.assertNotIn(private_path, error.getvalue())
@@ -590,6 +684,70 @@ class CompilerLifecycleStressTests(unittest.TestCase):
         budgets = load_budgets(DEFAULT_BUDGETS)
         self.assertTrue(
             evaluate_budgets(report, budgets, "ci_warm_path")["passed"])
+
+    def test_adapter_lifecycle_faults_are_deterministic_not_physical_evidence(self):
+        corpus = load_corpus(DEFAULT_CORPUS)
+        first = run_lifecycle_simulation(corpus, iterations=2)
+        second = run_lifecycle_simulation(corpus, iterations=2)
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["privacy"], "synthetic-text-only")
+        self.assertEqual(first["evidence_scope"], "adapter-simulation-only")
+        self.assertFalse(first["physical_evidence"])
+        self.assertEqual(first["failures"], 0)
+        self.assertEqual(first["nondeterministic_outputs"], 0)
+        self.assertEqual(first["faults_injected"], 4)
+        self.assertEqual(first["faults_observed"], 4)
+        self.assertEqual(first["recoveries"], 4)
+        self.assertEqual(set(first["scenarios"]), {
+            "back-to-back",
+            "long-form",
+            "process-restart",
+            "sleep-wake",
+            "audio-device-switch",
+        })
+        self.assertEqual(
+            first["scenarios"]["sleep-wake"]["blocked_operations"], 2)
+        self.assertEqual(
+            first["scenarios"]["audio-device-switch"]["blocked_operations"],
+            2,
+        )
+        self.assertIn(
+            "physical-operating-system-sleep-wake",
+            first["requires_physical_validation"],
+        )
+        self.assertIn(
+            "physical-audio-device-switch",
+            first["requires_physical_validation"],
+        )
+        serialized = json.dumps(first)
+        self.assertNotIn("reference", serialized.casefold())
+        self.assertNotIn("transcript", serialized.casefold())
+        self.assertNotIn("path", serialized.casefold())
+
+    def test_lifecycle_cli_emits_only_simulation_evidence(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = main([
+                "lifecycle", "--iterations", "2", "--format", "json",
+            ])
+        report = json.loads(output.getvalue())
+        self.assertEqual(status, 0)
+        self.assertFalse(report["physical_evidence"])
+        self.assertEqual(report["failures"], 0)
+
+    def test_scheduled_lifecycle_workflow_is_read_only_and_preserves_evidence(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "performance-lifecycle.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("schedule:", workflow)
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("contents: read", workflow)
+        self.assertIn("performance_lab.py lifecycle", workflow)
+        self.assertIn("tests/test_performance_lab.py", workflow)
+        self.assertIn("actions/upload-artifact@", workflow)
+        self.assertNotIn("contents: write", workflow)
+        self.assertNotIn("pull-requests: write", workflow)
 
 
 class PerformanceLabCliTests(unittest.TestCase):

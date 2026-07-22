@@ -14,15 +14,20 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from whisper_face_gui import (
+    APPKIT_AVAILABLE,
     FACES,
     GUIActions,
     SECTIONS,
     SETTINGS_PANES,
+    STRING_CATALOGS,
+    SUPPORTED_LOCALES,
     WhisperFaceViewModel,
     create_gui,
     localized_string,
+    native_appkit_smoke_contract,
     normalize_snapshot,
     normalize_settings,
+    run_native_appkit_smoke,
     set_accessible_text,
     sync_accessibility,
     tone_for_app_index,
@@ -59,6 +64,8 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(settings.corrections[0].count, 3)
 
     def test_localization_catalog_formats_and_falls_back_to_english(self):
+        self.assertEqual(SUPPORTED_LOCALES, ("en",))
+        self.assertEqual(tuple(STRING_CATALOGS), ("en",))
         self.assertEqual(localized_string("nav.settings"), "Settings")
         self.assertEqual(
             localized_string("settings.personalize.snippets.detail",
@@ -68,6 +75,20 @@ class SnapshotTests(unittest.TestCase):
             localized_string("missing.key")
         with self.assertRaises(ValueError):
             localized_string("settings.personalize.snippets.detail")
+
+    def test_native_appkit_smoke_contract_is_headless_and_catalog_complete(self):
+        contract = native_appkit_smoke_contract()
+        self.assertEqual(contract.sections, SECTIONS)
+        self.assertEqual(contract.settings_panes, SETTINGS_PANES)
+        self.assertEqual(contract.allowed_side_effects, ())
+        self.assertIn("select_section", contract.model_actions)
+        self.assertIn("forget_snippet", contract.model_actions)
+        for key in contract.accessibility_catalog_keys:
+            with self.subTest(key=key):
+                self.assertIn(key, STRING_CATALOGS["en"])
+        if not APPKIT_AVAILABLE:
+            with self.assertRaisesRegex(RuntimeError, "requires macOS"):
+                run_native_appkit_smoke()
 
     def test_snapshot_is_normalized_without_appkit_or_runtime(self):
         state = normalize_snapshot({
@@ -210,6 +231,13 @@ class SnapshotTests(unittest.TestCase):
             "last_alternatives": ["private alternative text"],
             "last_compiler_details": ["private before → private after"],
             "last_context_influence": "Context helped resolve: personal vocabulary",
+            "last_consequence": {
+                "route": "review",
+                "risk_counts": {"currency": 1, "private transcript": 999},
+                "high_risks": 1,
+                "uncertain_risks": 1,
+                "relisten_status": "skipped",
+            },
             "prefers_reduced_motion": True,
             "transcript": "must not be projected into GUIState",
         })
@@ -227,6 +255,11 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(
             result.context_influence,
             "Context helped resolve: personal vocabulary")
+        self.assertEqual(
+            result.consequence_summary,
+            "Consequence: Review · 1 high-risk · 1 uncertain · currency 1 · "
+            "Re-listen: skipped")
+        self.assertNotIn("private transcript", result.consequence_summary)
         self.assertFalse(hasattr(result, "transcript"))
         self.assertFalse(hasattr(result, "compiler_details"))
         self.assertTrue(state.prefers_reduced_motion)

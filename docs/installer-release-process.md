@@ -33,7 +33,9 @@ Run on every change:
 uv lock --check --script dictate.py
 uv run tests/test_parrot_core.py
 uv run tests/test_voice_compiler.py
+uv run tests/test_consequence_routing.py
 uv run tests/test_benchmark_voice_compiler.py
+uv run tests/test_benchmark_consequence_routing.py
 uv run tests/test_benchmark_asr.py
 uv run tests/test_performance_lab.py
 uv run tests/test_dictate.py
@@ -41,6 +43,7 @@ uv run tests/test_gui_settings_runtime.py
 uv run tests/test_insertion_integrity.py
 uv run tests/test_personal_regression.py
 uv run tests/test_whisper_face_gui.py
+uv run --locked --script dictate.py --native-gui-smoke-test
 uv run tests/test_installers.py
 uv run tests/test_repository_governance.py
 uv run tests/test_macos_distribution.py
@@ -55,6 +58,16 @@ Run the live verification available on the current platform:
 ```powershell
 .\setup.ps1 --verify
 ```
+
+The native GUI smoke command is a macOS-only gate. It constructs and tears
+down the AppKit window without showing or activating it, querying permissions,
+loading user files, starting runtime services, or persisting defaults.
+`tests/test_whisper_face_gui.py` validates the same static contract on Windows;
+Windows setup must never execute AppKit.
+Headless Mac endpoints use `./setup.sh --server-only --verify`; that mode skips
+the AppKit construction check while still verifying the locked runtime,
+models, services, and health endpoint. Release CI always runs the separately
+bounded native GUI smoke on a windowed macOS runner.
 
 For dependency, service, model, preload, or permission changes, also rerun the
 full one-click installer on an appropriate clean or disposable machine before

@@ -15,6 +15,191 @@
         }
       ]
     },
+    "startup_readiness": {
+      "description": "Caller-labelled startup trace guardrails. Cold requires three independently collected launches and warm requires ten cache-warm launches. These bounds detect hangs and major regressions; they do not prove physical cold-cache or steady-state conditions.",
+      "checks": [
+        {
+          "id": "cold-audio-pool-p95",
+          "metric": "phases.cold.events.warmup_audio_pool.metrics.duration_ms.p95",
+          "samples_metric": "phases.cold.events.warmup_audio_pool.records",
+          "minimum_samples": 3,
+          "operator": "<=",
+          "threshold": 2000.0,
+          "unit": "ms"
+        },
+        {
+          "id": "cold-asr-tiny-p95",
+          "metric": "phases.cold.events.warmup_asr_tiny.metrics.duration_ms.p95",
+          "samples_metric": "phases.cold.events.warmup_asr_tiny.records",
+          "minimum_samples": 3,
+          "operator": "<=",
+          "threshold": 30000.0,
+          "unit": "ms"
+        },
+        {
+          "id": "cold-asr-final-p95",
+          "metric": "phases.cold.events.warmup_asr_final.metrics.duration_ms.p95",
+          "samples_metric": "phases.cold.events.warmup_asr_final.records",
+          "minimum_samples": 3,
+          "operator": "<=",
+          "threshold": 120000.0,
+          "unit": "ms"
+        },
+        {
+          "id": "cold-ollama-p95",
+          "metric": "phases.cold.events.warmup_ollama.metrics.duration_ms.p95",
+          "samples_metric": "phases.cold.events.warmup_ollama.records",
+          "minimum_samples": 3,
+          "operator": "<=",
+          "threshold": 15000.0,
+          "unit": "ms"
+        },
+        {
+          "id": "cold-total-readiness-p95",
+          "metric": "phases.cold.events.warmup_total.metrics.duration_ms.p95",
+          "samples_metric": "phases.cold.events.warmup_total.records",
+          "minimum_samples": 3,
+          "operator": "<=",
+          "threshold": 180000.0,
+          "unit": "ms"
+        },
+        {
+          "id": "cold-audio-pool-success",
+          "metric": "phases.cold.events.warmup_audio_pool.success_rate",
+          "samples_metric": "phases.cold.events.warmup_audio_pool.records",
+          "minimum_samples": 3,
+          "operator": ">=",
+          "threshold": 1.0,
+          "unit": "fraction"
+        },
+        {
+          "id": "cold-asr-tiny-success",
+          "metric": "phases.cold.events.warmup_asr_tiny.success_rate",
+          "samples_metric": "phases.cold.events.warmup_asr_tiny.records",
+          "minimum_samples": 3,
+          "operator": ">=",
+          "threshold": 1.0,
+          "unit": "fraction"
+        },
+        {
+          "id": "cold-asr-final-success",
+          "metric": "phases.cold.events.warmup_asr_final.success_rate",
+          "samples_metric": "phases.cold.events.warmup_asr_final.records",
+          "minimum_samples": 3,
+          "operator": ">=",
+          "threshold": 1.0,
+          "unit": "fraction"
+        },
+        {
+          "id": "cold-ollama-success",
+          "metric": "phases.cold.events.warmup_ollama.success_rate",
+          "samples_metric": "phases.cold.events.warmup_ollama.records",
+          "minimum_samples": 3,
+          "operator": ">=",
+          "threshold": 1.0,
+          "unit": "fraction"
+        },
+        {
+          "id": "cold-total-readiness-success",
+          "metric": "phases.cold.events.warmup_total.success_rate",
+          "samples_metric": "phases.cold.events.warmup_total.records",
+          "minimum_samples": 3,
+          "operator": ">=",
+          "threshold": 1.0,
+          "unit": "fraction"
+        },
+        {
+          "id": "warm-audio-pool-p95",
+          "metric": "phases.warm.events.warmup_audio_pool.metrics.duration_ms.p95",
+          "samples_metric": "phases.warm.events.warmup_audio_pool.records",
+          "minimum_samples": 10,
+          "operator": "<=",
+          "threshold": 500.0,
+          "unit": "ms"
+        },
+        {
+          "id": "warm-asr-tiny-p95",
+          "metric": "phases.warm.events.warmup_asr_tiny.metrics.duration_ms.p95",
+          "samples_metric": "phases.warm.events.warmup_asr_tiny.records",
+          "minimum_samples": 10,
+          "operator": "<=",
+          "threshold": 5000.0,
+          "unit": "ms"
+        },
+        {
+          "id": "warm-asr-final-p95",
+          "metric": "phases.warm.events.warmup_asr_final.metrics.duration_ms.p95",
+          "samples_metric": "phases.warm.events.warmup_asr_final.records",
+          "minimum_samples": 10,
+          "operator": "<=",
+          "threshold": 15000.0,
+          "unit": "ms"
+        },
+        {
+          "id": "warm-ollama-p95",
+          "metric": "phases.warm.events.warmup_ollama.metrics.duration_ms.p95",
+          "samples_metric": "phases.warm.events.warmup_ollama.records",
+          "minimum_samples": 10,
+          "operator": "<=",
+          "threshold": 5000.0,
+          "unit": "ms"
+        },
+        {
+          "id": "warm-total-readiness-p95",
+          "metric": "phases.warm.events.warmup_total.metrics.duration_ms.p95",
+          "samples_metric": "phases.warm.events.warmup_total.records",
+          "minimum_samples": 10,
+          "operator": "<=",
+          "threshold": 25000.0,
+          "unit": "ms"
+        },
+        {
+          "id": "warm-audio-pool-success",
+          "metric": "phases.warm.events.warmup_audio_pool.success_rate",
+          "samples_metric": "phases.warm.events.warmup_audio_pool.records",
+          "minimum_samples": 10,
+          "operator": ">=",
+          "threshold": 1.0,
+          "unit": "fraction"
+        },
+        {
+          "id": "warm-asr-tiny-success",
+          "metric": "phases.warm.events.warmup_asr_tiny.success_rate",
+          "samples_metric": "phases.warm.events.warmup_asr_tiny.records",
+          "minimum_samples": 10,
+          "operator": ">=",
+          "threshold": 1.0,
+          "unit": "fraction"
+        },
+        {
+          "id": "warm-asr-final-success",
+          "metric": "phases.warm.events.warmup_asr_final.success_rate",
+          "samples_metric": "phases.warm.events.warmup_asr_final.records",
+          "minimum_samples": 10,
+          "operator": ">=",
+          "threshold": 1.0,
+          "unit": "fraction"
+        },
+        {
+          "id": "warm-ollama-success",
+          "metric": "phases.warm.events.warmup_ollama.success_rate",
+          "samples_metric": "phases.warm.events.warmup_ollama.records",
+          "minimum_samples": 10,
+          "operator": ">=",
+          "threshold": 1.0,
+          "unit": "fraction"
+        },
+        {
+          "id": "warm-total-readiness-success",
+          "metric": "phases.warm.events.warmup_total.success_rate",
+          "samples_metric": "phases.warm.events.warmup_total.records",
+          "minimum_samples": 10,
+          "operator": ">=",
+          "threshold": 1.0,
+          "unit": "fraction"
+        }
+      ]
+    },
     "product_quality": {
       "description": "Aspirational release scorecard for representative, safely observed outcomes. It is not a CI gate until the minimum physical-audio sample set exists.",
       "checks": [
