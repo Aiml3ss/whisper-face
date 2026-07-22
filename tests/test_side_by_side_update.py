@@ -4,6 +4,7 @@
 # ///
 
 import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,7 @@ SPEC.loader.exec_module(MODULE)
 CURRENT, CANDIDATE = "1" * 40, "2" * 40
 
 
+@unittest.skipIf(os.name == "nt", "side-by-side updater is Mac-only")
 class SideBySideUpdateTests(unittest.TestCase):
     def make_checkout(self, parent: Path, name: str) -> Path:
         checkout = parent / name
