@@ -14,7 +14,10 @@ import json
 import math
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
+
+from support_bundle import SupportBundleError, write_support_bundle
 
 
 APP_NAME = "Whisper Face"
@@ -349,6 +352,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "diagnostics.action.log": "Open Log",
         "diagnostics.action.copy_support": "Copy Support Snapshot",
         "diagnostics.action.copy_support.help": "Copy a transcript-free support summary with health, permissions, build, model status, and aggregate last-result counts. It never includes dictation text, selections, context, paths, logs, or personal language data.",
+        "diagnostics.action.export_support": "Export Support Bundle…",
+        "diagnostics.action.export_support.help": "Save a local, transcript-free support bundle. You choose the destination; Whisper Face never uploads it. The bundle contains only health, permission, build, model, and aggregate result metadata.",
         "diagnostics.action.verify": "Run Verification",
         "diagnostics.action.open_system_settings": "Open System Settings",
         "diagnostics.action.open_system_settings.help": "Open macOS System Settings so you can review Microphone, Accessibility, and Input Monitoring. Whisper Face does not change permissions.",
@@ -364,6 +369,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "diagnostics.verification.attention": "Checks need attention",
         "diagnostics.verification.failed": "Verification failed: {error}",
         "diagnostics.notice.system_settings.opened": "System Settings opened. Return here when you finish; Whisper Face will refresh its status.",
+        "diagnostics.notice.support_bundle.saved": "Transcript-free support bundle saved locally",
         "diagnostics.ready": "Everything looks ready.",
         "diagnostics.license": "AGPL-3.0-only · no warranty · corresponding source available",
         "diagnostics.regression.cases": "{count} cases",
@@ -699,6 +705,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "operation.log.open_failed": "Could not open log: {error}",
         "operation.system_settings.open_failed": "Could not open System Settings: {error}",
         "operation.support_snapshot.copy_failed": "Could not copy support snapshot: {error}",
+        "operation.support_bundle.export_failed": "Could not save support bundle: {error}",
         "operation.source.open_failed": "Could not open source and license: {error}",
         "operation.licenses.open_failed": "Could not open local license notices: {error}",
         "settings.dialog.voice_objects.title": "Voice Inbox",
@@ -3851,6 +3858,7 @@ try:  # The view-model above remains usable in headless test environments.
         NSNoTitle,
         NSProgressIndicator,
         NSPopUpButton,
+        NSSavePanel,
         NSScrollView,
         NSSegmentedControl,
         NSSegmentStyleRounded,
@@ -4049,6 +4057,7 @@ if APPKIT_AVAILABLE:
                     self.dynamic["open_system_settings_button"],
                     self.dynamic["open_log_button"],
                     self.dynamic["copy_support_snapshot_button"],
+                    self.dynamic["export_support_bundle_button"],
                     self.dynamic["verify_button"],
                     self.dynamic["license_button"],
                     self.dynamic["source_button"],
@@ -4624,6 +4633,10 @@ if APPKIT_AVAILABLE:
                     "diagnostics.action.open_system_settings.help")),
                 self._l("diagnostics.accessibility.open_system_settings"),
                 self._l("diagnostics.action.open_system_settings.help"))
+            export_support_bundle = _button(
+                self._l("diagnostics.action.export_support"),
+                NSMakeRect(190, 36, 180, 28), self, "exportSupportBundle:",
+                help_text=self._l("diagnostics.action.export_support.help"))
             license_notices = _button(
                 self._l("diagnostics.action.licenses"), NSMakeRect(488, 89, 138, 36),
                 self, "openLicense:")
@@ -4638,6 +4651,7 @@ if APPKIT_AVAILABLE:
             page.addSubview_(copy_support_snapshot)
             page.addSubview_(verify)
             page.addSubview_(open_system_settings)
+            page.addSubview_(export_support_bundle)
             page.addSubview_(license_notices)
             page.addSubview_(source)
             page.addSubview_(progress)
@@ -4655,6 +4669,7 @@ if APPKIT_AVAILABLE:
                 open_system_settings_button=open_system_settings,
                 open_log_button=open_log,
                 copy_support_snapshot_button=copy_support_snapshot,
+                export_support_bundle_button=export_support_bundle,
                 verify_button=verify,
                 license_button=license_notices,
                 source_button=source,
@@ -6242,6 +6257,32 @@ if APPKIT_AVAILABLE:
             self.view_model.copy_support_snapshot()
             self.render()
 
+        def exportSupportBundle_(self, _sender: Any) -> None:
+            panel = NSSavePanel.savePanel()
+            panel.setNameFieldStringValue_("whisper-face-support.json")
+            panel.setCanCreateDirectories_(True)
+            panel.setAllowedFileTypes_(["json"])
+            if panel.runModal() != 1:
+                return
+            url = panel.URL()
+            if url is None:
+                return
+            try:
+                write_support_bundle(
+                    Path(str(url.path())),
+                    support_snapshot_text(self.view_model.state))
+                self.view_model.state = replace(
+                    self.view_model.state,
+                    notice=self._l("diagnostics.notice.support_bundle.saved"),
+                    notice_level="success")
+            except SupportBundleError as error:
+                self.view_model.state = replace(
+                    self.view_model.state,
+                    notice=self._l(
+                        "operation.support_bundle.export_failed", error=error),
+                    notice_level="error")
+            self.render()
+
         def openSource_(self, _sender: Any) -> None:
             self.view_model.open_source_and_license()
             self.render()
@@ -6725,6 +6766,10 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             str(controller.dynamic["drop_target_button"].action()) ==
             "previewDropTarget:",
             "Drop-to-Target preview action")
+        require(
+            str(controller.dynamic["export_support_bundle_button"].action()) ==
+            "exportSupportBundle:",
+            "local support bundle action")
         require(
             accessible_value(
                 controller.dynamic["drop_target_button"],

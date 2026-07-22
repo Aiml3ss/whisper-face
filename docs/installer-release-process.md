@@ -9,7 +9,7 @@ machine without maintaining a second copy of the application.
 `dictate.py`, `parrot_core.py`, `voice_compiler.py`,
 `insertion_integrity.py`, `personal_regression.py`,
 `cleanup_circuit_breaker.py`, `model_wallet.py`, `model_wallet_shadow.py`,
-`whisper_face_gui.py`, `voice_objects.py`,
+`whisper_face_gui.py`, `support_bundle.py`, `voice_objects.py`,
 `voice_object_command_parser.py`, `voice_inbox.py`,
 `voice_object_inbox_bridge.py`, `demonstration_drafts.py`, and
 `risky_action_confirmation.py`,
@@ -86,12 +86,14 @@ uv run tests/test_demonstration_drafts.py
 uv run tests/test_competitor_benchmark.py
 uv run tests/test_public_scorecard.py
 uv run tests/test_personal_regression.py
+uv run tests/test_support_bundle.py
 uv run tests/test_whisper_face_gui.py
 uv run --locked --script dictate.py --native-gui-smoke-test
 uv run tests/test_installers.py
 uv run tests/test_repository_governance.py
 uv run tests/test_macos_distribution.py
 uv run tests/test_safe_update_advisor.py
+uv run tests/test_side_by_side_update.py
 ```
 
 Run the live verification available on the current platform:

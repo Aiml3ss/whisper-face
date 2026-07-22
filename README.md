@@ -60,7 +60,10 @@ are never Supporter-only features.
   Diagnostics sections. It exposes live latency and usage—including
   Parakeet's own processing time when available—inspectable decision evidence,
   unified personalization/privacy controls, local model health, and one-click
-  installer verification without adding a browser runtime. First run shows
+  installer verification without adding a browser runtime. Diagnostics can
+  also save a private `0600`, transcript-free support bundle to a destination
+  you choose; it is never uploaded and contains only allowlisted health,
+  permission, model, and aggregate result metadata. First run shows
   Permissions, Hotkey, Models, and Dictate together with live evidence-backed
   status; hotkey practice completes only after capture is actually observed.
 - **Transactional insertion + Voice Outbox (Mac)** — readable text fields are
@@ -336,8 +339,10 @@ before a fresh machine is told the build is available.
 
 For an existing installation, follow the concise
 [update and rollback guide](docs/distribution/update-and-rollback.md). Updates
-currently come from the installed source checkout; there is no automatic
-updater yet.
+remain explicit: a local helper can validate and install an already-prepared
+clean sibling checkout, with linked verified current/candidate release
+metadata required before apply, while leaving the current checkout intact as
+the rollback copy. It does not download a candidate or run in the background.
 
 macOS will prompt for permissions — enable **"uv"** under System Settings →
 Privacy & Security → **Input Monitoring**, **Accessibility**, and

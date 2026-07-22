@@ -468,6 +468,7 @@ class SnapshotTests(unittest.TestCase):
                 "operation.log.open_failed",
                 "operation.system_settings.open_failed",
                 "operation.support_snapshot.copy_failed",
+                "operation.support_bundle.export_failed",
                 "operation.source.open_failed",
                 "operation.licenses.open_failed",
             },
@@ -2077,6 +2078,26 @@ class ViewModelTests(unittest.TestCase):
 
         self.assertEqual(state.notice_level, "error")
         self.assertIn("clipboard unavailable", state.notice)
+
+    def test_support_bundle_export_is_local_save_panel_only(self):
+        source = (ROOT / "whisper_face_gui.py").read_text(encoding="utf-8")
+        start = source.index("def exportSupportBundle_")
+        end = source.index("def openSource_", start)
+        action = source[start:end]
+        self.assertIn("NSSavePanel.savePanel()", action)
+        self.assertIn("write_support_bundle(", action)
+        self.assertIn("support_snapshot_text(self.view_model.state)", action)
+        for forbidden in (
+                "self.actions", "copy_support_snapshot", "open_log",
+                "copy_latest_outbox", "subprocess", "NSPasteboard"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, action)
+        for key in (
+                "diagnostics.action.export_support",
+                "diagnostics.action.export_support.help",
+                "diagnostics.notice.support_bundle.saved",
+                "operation.support_bundle.export_failed"):
+            self.assertIn(key, STRING_CATALOGS["en"])
 
     def test_callback_failure_becomes_user_visible_notice(self):
         def fail(_face):
