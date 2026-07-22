@@ -26,7 +26,7 @@ Options:
   --output-dir DIR               Artifact directory (default: ./dist)
   --channel stable|preview       Update channel (default: stable)
   --download-base-url HTTPS_URL  Release asset base URL
-  --sign                         Sign the disk image with Apple Developer ID
+  --sign                         Sign the launcher app and disk image
   --notarize                     Submit, wait, staple, and validate (implies --sign)
   --previous-version X.Y.Z       Previous safe release for rollback
   --previous-revision SHA        Previous release's full Git SHA
@@ -82,7 +82,8 @@ SOURCE_DATE_EPOCH="$(git -C "$REPO_DIR" show -s --format=%ct "$FULL_REVISION")" 
     || fail "release revision timestamp is invalid"
 git -C "$REPO_DIR" cat-file -e "$FULL_REVISION:Install.command" \
     || fail "release revision does not contain Install.command"
-for required in LICENSE LICENSE_POLICY.md NOTICE THIRD_PARTY_NOTICES.md setup.sh; do
+for required in LICENSE LICENSE_POLICY.md NOTICE THIRD_PARTY_NOTICES.md setup.sh \
+        scripts/macos_launcher_app.py config/macos-signing-policy.json; do
     git -C "$REPO_DIR" cat-file -e "$FULL_REVISION:$required" \
         || fail "release revision is missing $required"
 done
@@ -104,6 +105,8 @@ if [ "$SIGN_RELEASE" -eq 1 ]; then
     command -v codesign >/dev/null 2>&1 || fail "codesign is unavailable"
     [ -n "${APPLE_DEVELOPER_ID_APPLICATION:-}" ] \
         || fail "APPLE_DEVELOPER_ID_APPLICATION is required with --sign"
+    [ -n "${APPLE_TEAM_ID:-}" ] \
+        || fail "APPLE_TEAM_ID is required with --sign"
 fi
 if [ "$NOTARIZE_RELEASE" -eq 1 ]; then
     command -v xcrun >/dev/null 2>&1 || fail "xcrun is unavailable"
@@ -126,6 +129,7 @@ ZIP_NAME="WhisperFace-$VERSION-source.zip"
 DMG_NAME="WhisperFace-$VERSION-macOS-arm64.dmg"
 ZIP_PATH="$OUTPUT_DIR/$ZIP_NAME"
 DMG_PATH="$OUTPUT_DIR/$DMG_NAME"
+LAUNCHER_APP="$TEMP_ROOT/Whisper Face.app"
 MANIFEST_PATH="$OUTPUT_DIR/update-manifest.json"
 CHECKSUM_PATH="$OUTPUT_DIR/SHA256SUMS"
 PUBLISHED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -147,6 +151,22 @@ git -C "$BUNDLE_DIR" remote add origin \
     "https://github.com/Aiml3ss/whispering-parrot.git"
 [ "$(git -C "$BUNDLE_DIR" rev-parse HEAD)" = "$FULL_REVISION" ] \
     || fail "packaged checkout lost its immutable source revision"
+if [ "$SIGN_RELEASE" -eq 1 ]; then
+    python3 - "$BUNDLE_DIR/config/macos-signing-policy.json" \
+            "$APPLE_DEVELOPER_ID_APPLICATION" "$APPLE_TEAM_ID" <<'PY' \
+        || fail "release credentials do not match the selected revision's pinned Developer ID policy"
+import json, re, sys
+policy = json.load(open(sys.argv[1], encoding="utf-8"))
+team = policy.get("developer_id_team_identifier")
+identity, supplied_team = sys.argv[2:]
+if not isinstance(team, str) or not re.fullmatch(r"[A-Z0-9]{10}", team):
+    raise SystemExit("pinned Developer ID team is not configured")
+if supplied_team != team:
+    raise SystemExit("APPLE_TEAM_ID does not match the pinned team")
+if not identity.startswith("Developer ID Application: ") or not identity.endswith(f" ({team})"):
+    raise SystemExit("signing identity is not the pinned Developer ID Application identity")
+PY
+fi
 python3 "$SCRIPT_DIR/release_manifest.py" source-metadata \
     --version "$VERSION" \
     --revision "$FULL_REVISION" \
@@ -161,12 +181,27 @@ echo "== creating source archive"
 rm -f "$ZIP_PATH" "$DMG_PATH" "$MANIFEST_PATH" "$CHECKSUM_PATH"
 ditto -c -k --norsrc --keepParent "$BUNDLE_DIR" "$ZIP_PATH"
 
+echo "== compiling generic launcher from the selected revision"
+python3 "$BUNDLE_DIR/scripts/macos_launcher_app.py" build \
+    --app "$LAUNCHER_APP"
+if [ "$SIGN_RELEASE" -eq 1 ]; then
+    echo "== signing generic launcher app"
+    codesign --force --options runtime --timestamp \
+        --sign "$APPLE_DEVELOPER_ID_APPLICATION" "$LAUNCHER_APP"
+    codesign --verify --deep --strict --verbose=2 "$LAUNCHER_APP"
+    python3 "$BUNDLE_DIR/scripts/macos_launcher_app.py" verify \
+        --app "$LAUNCHER_APP" --require-signed
+else
+    python3 "$BUNDLE_DIR/scripts/macos_launcher_app.py" verify \
+        --app "$LAUNCHER_APP"
+fi
+
 echo "== creating macOS disk image"
 hdiutil create -quiet -fs APFS -format UDZO \
     -volname "$BUNDLE_NAME" -srcfolder "$TEMP_ROOT" "$DMG_PATH"
 
 if [ "$SIGN_RELEASE" -eq 1 ]; then
-    echo "== signing disk image"
+    echo "== signing disk image containing the signed launcher"
     codesign --force --timestamp --sign "$APPLE_DEVELOPER_ID_APPLICATION" "$DMG_PATH"
     codesign --verify --strict --verbose=2 "$DMG_PATH"
     DMG_SIGNED=1

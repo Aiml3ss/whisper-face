@@ -570,12 +570,14 @@ class PointAndSpeakActionRuntimeTests(unittest.TestCase):
                 "capture_frontmost_accessibility_targets": lambda: captured,
                 "resolve_point_and_speak": lambda phrase, targets: decision,
                 "prepare_point_and_speak_press_lease": (
-                    lambda capture, target_id, created_at: lease),
+                    lambda capture, target_id, expected_role, created_at:
+                    lease if expected_role == "button" else None),
                 "POINT_AND_SPEAK_TRANSACTIONS": Transactions(),
             },
         )["press_point_and_speak"]
 
-        result = function("n" * 32, "save project bluebird button")
+        result = function(
+            "n" * 32, "save project bluebird button", "button")
         encoded = json.dumps(result, sort_keys=True)
 
         self.assertEqual(result["state"], "executed")
@@ -611,6 +613,24 @@ class PointAndSpeakActionRuntimeTests(unittest.TestCase):
             self.assertNotIn("press_point_and_speak", names)
             self.assertNotIn("POINT_AND_SPEAK_TRANSACTIONS", names)
             self.assertNotIn("prepare_point_and_speak_press_lease", names)
+
+    def test_malformed_expected_role_fails_before_capture(self):
+        captures = []
+        function = load_definitions(
+            "press_point_and_speak",
+            extra={
+                "IS_MACOS": True,
+                "time": SimpleNamespace(monotonic=lambda: 1.0),
+                "capture_frontmost_accessibility_targets": lambda:
+                    captures.append(True),
+                "POINT_AND_SPEAK_TRANSACTIONS": SimpleNamespace(),
+            },
+        )["press_point_and_speak"]
+
+        result = function("n" * 32, "search field", ["text_field"])
+
+        self.assertEqual(result["state"], "unavailable")
+        self.assertEqual(captures, [])
 
 
 class VoiceObjectEmailComposeRuntimeTests(unittest.TestCase):

@@ -172,15 +172,17 @@ are never Supporter-only features.
   is killed, ambiguous silence/noise/quiet speech or near-saturation headroom
   stays insufficient, reverb is explicitly unavailable, and no recommendation
   affects the runtime yet.
-- **Explicit Point-and-Speak button action (Mac)** — from Diagnostics, enter a
+- **Explicit Point-and-Speak action (Mac)** — from Diagnostics, enter a
   bounded target phrase for a read-only preview of the focused app. Whisper Face
   reads only bounded Accessibility names, roles, geometry, visibility,
   enablement, focus, and selection metadata; strict confidence/margin gates
   either show one selected name and role or fail closed. Only after a separate
   **Press once** confirmation does it take a fresh snapshot and allow one
-  `AXPress` on a strongly named button, with a session-issued nonce and exact
-  app/window/element recheck immediately before the action. Drift, replay,
-  expiry, weak evidence, unsupported roles, and action failure all do nothing.
+  `AXPress` on a strongly named button, checkbox, radio button, tab, menu item,
+  or link, with a session-issued nonce and exact app/window/element/role recheck
+  immediately before the action. Text fields and every unlisted role remain
+  inert. Drift, replay, expiry, weak evidence, unsupported roles, and action
+  failure all do nothing.
   Phrases, names, target identifiers, and native identities remain transient;
   routine status and support snapshots receive only content-free evidence. The
   17-case resolver corpus has zero synthetic wrong-target resolutions, but no
@@ -301,12 +303,15 @@ The launcher detects the OS. A Windows Git Bash or WSL invocation of
 4. Creates private configuration files without overwriting existing ones.
 5. Installs and validates the tuned Ollama and dictation login services
    (`launchd` on Mac, Task Scheduler on Windows).
-6. On Mac, compiles and verifies `~/Applications/Whisper Face.app`, a tiny
-   unsigned arm64 AppKit launcher bound to the exact checkout revision. It
-   contains no copied runtime, models, or private state; opening it validates
-   and starts the existing `launchd` service, then asks that one process to open
-   its main GUI over a private, content-free local activation endpoint. Signing
-   and notarization remain release work.
+6. On Mac, installs and verifies `~/Applications/Whisper Face.app`, a tiny
+   generic arm64 AppKit launcher. A DMG install preserves its packaged app byte
+   for byte, including its Developer ID signature when present; a source-only
+   install builds it unsigned locally. The exact checkout/revision and app
+   digest live in a separate user-only `0600` receipt, so no machine state
+   invalidates the app's signature. The app contains no copied runtime, models,
+   or private state; it validates and starts the existing `launchd` service,
+   then asks that one process to open its main GUI over a private, content-free
+   local endpoint.
 
 Homebrew's official installer may pause once to explain its changes and ask
 for your macOS password. Model downloads are several gigabytes, so the first
@@ -494,6 +499,14 @@ Run `uv run benchmark_asr.py` with a local LibriSpeech `test-clean` directory
 for an apples-to-apples Mac engine comparison. Downloaded audio and generated
 hypotheses stay outside the repository; see `benchmarks/ASR_BAKEOFF.md`.
 
+Run `uv run benchmark_macos_asr_warm_path.py --run --format json` to opt into a
+synthetic, content-free profile of the installed warm Parakeet helper. One
+24-pair Mac run rejected replacing the current two writes with `writev`: output
+matched, but wall p95 improved only 3.11% (35.558 to 34.451 ms), max improved
+2.30% (35.632 to 34.814 ms), and client-overhead p95 worsened from 0.104 to
+0.128 ms. The 10% p95-and-max gate was not met, so the benchmark has no runtime
+authority and the shipping path remains unchanged.
+
 Runtime startup and acoustic-health traces can be reduced to numeric
 aggregates with `uv run performance_lab.py traces --trace-log dictate.log`.
 The trace command ignores ordinary log lines, rejects any non-allowlisted or
@@ -590,9 +603,14 @@ uv run tests/test_installers.py
 
 Public Mac releases are built from one exact Git revision with the same
 `Install.command` used in a checkout. The release pipeline emits an unsigned
-local preview or, when Apple credentials are supplied, a signed, notarized, and
-stapled disk image together with a source ZIP, update/rollback manifest, and
-SHA-256 checksums. See the [Mac release runbook](docs/distribution/macos-release.md).
+local preview or, when Apple credentials are supplied, a generic signed app
+inside a signed, notarized, and stapled disk image, together with a source ZIP,
+update/rollback manifest, and SHA-256 checksums. See the
+[Mac release runbook](docs/distribution/macos-release.md).
+The signed path additionally requires the production Apple Team ID to match the
+repo-pinned `config/macos-signing-policy.json`; its current `null` value safely
+disables signing until the Project Owner records the real Team ID. Unsigned
+local builds and source installs remain available.
 
 Whisper Face's user-facing data commitments are in the
 [privacy promise](PRIVACY.md). Security boundaries and private vulnerability
