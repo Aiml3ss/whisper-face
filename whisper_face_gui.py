@@ -43,6 +43,69 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "nav.models": "Models",
         "nav.diagnostics": "Diagnostics",
         "app.subtitle": "Private, fast voice input on your Mac",
+        "overview.phase.ready": "READY",
+        "overview.phase.recording": "RECORDING",
+        "overview.phase.processing": "PROCESSING",
+        "overview.phase.recovery": "RECOVERY AVAILABLE",
+        "overview.phase.degraded": "ACTION NEEDED",
+        "overview.phase.paused": "PAUSED",
+        "overview.phase.starting": "STARTING LOCALLY",
+        "overview.status.ready.title": "Ready when you are",
+        "overview.status.ready.detail": "Hold {hotkey}, speak, then release to insert.",
+        "overview.status.recording.title": "Listening…",
+        "overview.status.recording.detail": "Keep holding {hotkey}; release when you finish speaking.",
+        "overview.status.processing.title": "Making your words useful…",
+        "overview.status.processing.detail": "Recognizing locally, protecting names and numbers, then checking the destination.",
+        "overview.status.recovery.title": "Your words are safe",
+        "overview.status.recovery.detail.one": "1 dictation needs an explicit Copy & Dismiss review.",
+        "overview.status.recovery.detail.many": "{count} dictations need an explicit Copy & Dismiss review.",
+        "overview.status.degraded.title": "One setup item needs attention",
+        "overview.status.paused.title": "Dictation is paused",
+        "overview.status.paused.detail": "Resume whenever you are ready. Settings and recovery still work.",
+        "overview.status.starting.title": "Finishing local startup…",
+        "overview.status.starting.detail": "You can leave this window open; readiness updates automatically.",
+        "overview.engine.waiting": "Waiting for status",
+        "overview.engine.warming": "Warming up",
+        "overview.engine.active": "Active engine: {engine}",
+        "overview.outbox.empty": "Voice Outbox: all clear",
+        "overview.outbox.pending": "Voice Outbox: {count} recoverable · {summary}",
+        "overview.outbox.summary.paste_attempted": "Paste may have landed — verify before reusing",
+        "overview.outbox.summary.not_pasted": "Not pasted — destination changed",
+        "overview.action.pause": "Pause",
+        "overview.action.resume": "Resume",
+        "overview.action.pause.help": "Pause or resume the global dictation hotkey.",
+        "overview.action.review": "Review Setup",
+        "overview.action.review.help": "Show the most useful recovery guidance.",
+        "overview.action.copy_outbox": "Copy & Dismiss",
+        "overview.action.copy_outbox.help": "Copy the latest recoverable dictation, then remove it from the Voice Outbox.",
+        "overview.action.pause.state.paused": "Dictation paused",
+        "overview.action.pause.state.active": "Dictation active",
+        "overview.action.pause.label": "{action} dictation",
+        "overview.metric.last.heading": "Last dictation",
+        "overview.metric.words.heading": "Words today",
+        "overview.metric.saved.heading": "Time saved",
+        "overview.metric.last.empty": "—",
+        "overview.metric.last.value": "{seconds}s{words}",
+        "overview.metric.last.words.one": " · 1 word",
+        "overview.metric.last.words.many": " · {count} words",
+        "overview.metric.words.value": "{count}",
+        "overview.metric.saved.value": "{minutes} min",
+        "overview.onboarding.initial_progress": "SETUP",
+        "overview.accessibility.phase": "Dictation phase",
+        "overview.accessibility.status": "Dictation status",
+        "overview.accessibility.detail": "Dictation status detail",
+        "overview.accessibility.engine": "Active recognition engine",
+        "overview.accessibility.outbox": "Voice Outbox status",
+        "overview.accessibility.last": "Last dictation duration and word count",
+        "overview.accessibility.words": "Words dictated today",
+        "overview.accessibility.saved": "Estimated time saved today",
+        "overview.accessibility.onboarding.progress": "First run setup progress",
+        "overview.accessibility.onboarding.title": "Next setup step",
+        "overview.accessibility.onboarding.detail": "Setup step detail",
+        "overview.notice.outbox.copied": "Latest recoverable dictation copied and dismissed",
+        "overview.notice.outbox.error": "Could not copy Voice Outbox: {error}",
+        "overview.notice.capture.error": "Could not change capture state: {error}",
+        "overview.notice.status.error": "Status unavailable: {error}",
         "onboarding.permissions.title": "Allow Mac permissions",
         "onboarding.permissions.detail": "Microphone captures speech; Accessibility safely inserts it into the field you chose.",
         "onboarding.hotkey.title": "Practice {hotkey}",
@@ -362,6 +425,17 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "set_flight_recorder",
         ),
         accessibility_catalog_keys=(
+            "overview.accessibility.phase",
+            "overview.accessibility.status",
+            "overview.accessibility.detail",
+            "overview.accessibility.engine",
+            "overview.accessibility.outbox",
+            "overview.accessibility.last",
+            "overview.accessibility.words",
+            "overview.accessibility.saved",
+            "overview.accessibility.onboarding.progress",
+            "overview.accessibility.onboarding.title",
+            "overview.accessibility.onboarding.detail",
             "settings.accessibility.sections.label",
             "settings.accessibility.category.label",
             "settings.accessibility.face.label",
@@ -516,7 +590,7 @@ class GUIState:
     face: str = "parrot"
     flight_recorder: bool = False
     flight_state: str = "Off"
-    active_engine: str = "Waiting for status"
+    active_engine: str = localized_string("overview.engine.waiting")
     last_latency_ms: float | None = None
     last_word_count: int | None = None
     words_today: int = 0
@@ -531,14 +605,15 @@ class GUIState:
     accessibility_status: str = "Unknown"
     version: str = "Development build"
     models: tuple[ModelStatus, ...] = field(default_factory=tuple)
-    hotkey_label: str = "Right Option"
+    hotkey_label: str = localized_string("settings.mode.capture.shortcut")
     prefers_reduced_motion: bool = False
     onboarding_steps: tuple[OnboardingStep, ...] = field(default_factory=tuple)
     onboarding_complete: bool = False
     onboarding_acknowledged: bool = False
     status_phase: str = "ready"
-    status_title: str = "Ready when you are"
-    status_detail: str = "Hold Right Option, speak, then release to insert."
+    status_title: str = localized_string("overview.status.ready.title")
+    status_detail: str = localized_string(
+        "overview.status.ready.detail", hotkey="Right Option")
     degraded_issues: tuple[DegradedIssue, ...] = field(default_factory=tuple)
     last_result: ResultInspection = field(default_factory=ResultInspection)
     verification: str = "Not run"
@@ -917,30 +992,63 @@ def _status_presentation(
     outbox_count: int,
     service_status: str,
     degraded_issues: Sequence[DegradedIssue],
+    locale: str = "en",
 ) -> tuple[str, str, str]:
+    def copy(key: str, **values: Any) -> str:
+        return localized_string(key, locale=locale, **values)
+
     capture = capture_state.strip().casefold()
     if paused:
-        return ("paused", "Dictation is paused",
-                "Resume whenever you are ready. Settings and recovery still work.")
+        return (
+            "paused", copy("overview.status.paused.title"),
+            copy("overview.status.paused.detail"))
     if _status_contains(capture, ("listen", "record", "captur")):
-        return ("recording", "Listening…",
-                f"Keep holding {hotkey_label}; release when you finish speaking.")
+        return (
+            "recording", copy("overview.status.recording.title"),
+            copy("overview.status.recording.detail", hotkey=hotkey_label))
     if _status_contains(capture, ("process", "clean", "insert", "compil")):
-        return ("processing", "Making your words useful…",
-                "Recognizing locally, protecting names and numbers, then "
-                "checking the destination.")
+        return (
+            "processing", copy("overview.status.processing.title"),
+            copy("overview.status.processing.detail"))
     if outbox_count:
-        noun = "dictation" if outbox_count == 1 else "dictations"
-        return ("recovery", "Your words are safe",
-                f"{outbox_count} {noun} need an explicit Copy & Dismiss review.")
+        detail_key = ("overview.status.recovery.detail.one"
+                      if outbox_count == 1
+                      else "overview.status.recovery.detail.many")
+        return (
+            "recovery", copy("overview.status.recovery.title"),
+            copy(detail_key, count=outbox_count))
     errors = [issue for issue in degraded_issues if issue.severity == "error"]
     if errors:
-        return ("degraded", "One setup item needs attention", errors[0].detail)
+        return (
+            "degraded", copy("overview.status.degraded.title"),
+            errors[0].detail)
     if _status_contains(service_status, ("starting", "warming", "unknown")):
-        return ("starting", "Finishing local startup…",
-                "You can leave this window open; readiness updates automatically.")
-    return ("ready", "Ready when you are",
-            f"Hold {hotkey_label}, speak, then release to insert.")
+        return (
+            "starting", copy("overview.status.starting.title"),
+            copy("overview.status.starting.detail"))
+    return (
+        "ready", copy("overview.status.ready.title"),
+        copy("overview.status.ready.detail", hotkey=hotkey_label))
+
+
+def _localized_runtime_overview_copy(
+    value: Any, *, kind: str, locale: str,
+) -> str:
+    """Translate the small allowlist of fixed runtime copy shown in Overview."""
+
+    text = _clean_text(value, "")
+    candidates = {
+        "engine": ("overview.engine.warming",),
+        "outbox": (
+            "overview.outbox.summary.paste_attempted",
+            "overview.outbox.summary.not_pasted",
+        ),
+    }.get(kind, ())
+    key = next((
+        candidate for candidate in candidates
+        if text.casefold() == STRING_CATALOGS["en"][candidate].casefold()
+    ), None)
+    return localized_string(key, locale=locale) if key else text
 
 
 def normalize_snapshot(
@@ -967,8 +1075,11 @@ def normalize_snapshot(
     minutes_saved = _finite_number(source.get("minutes_saved"))
     capture_state = _clean_text(source.get("capture_state"), "Ready")
     paused = source.get("paused") is True
-    active_engine = _clean_text(
-        source.get("active_engine"), "Waiting for status")
+    active_engine = _localized_runtime_overview_copy(
+        source.get("active_engine"), kind="engine", locale=locale)
+    if not active_engine:
+        active_engine = localized_string(
+            "overview.engine.waiting", locale=locale)
     outbox_count = _nonnegative_int(source.get("outbox_count"))
     service_status = _clean_text(source.get("service_status"), "Unknown")
     microphone_status = _clean_text(
@@ -976,7 +1087,9 @@ def normalize_snapshot(
     accessibility_status = _clean_text(
         source.get("accessibility_status"), "Unknown")
     models = _normalize_models(source.get("models"))
-    hotkey_label = _clean_text(source.get("hotkey_label"), "Right Option")
+    hotkey_label = _clean_text(
+        source.get("hotkey_label"), localized_string(
+            "settings.mode.capture.shortcut", locale=locale))
     successful_dictation = (
         source.get("first_dictation_complete") is True
         or (last_word_count is not None and last_word_count > 0))
@@ -1007,6 +1120,7 @@ def normalize_snapshot(
         outbox_count=outbox_count,
         service_status=service_status,
         degraded_issues=degraded_issues,
+        locale=locale,
     )
     normalized_latency = max(0.0, latency) if latency is not None else None
     return GUIState(
@@ -1022,7 +1136,8 @@ def normalize_snapshot(
         words_today=_nonnegative_int(source.get("words_today")),
         minutes_saved=max(0.0, minutes_saved or 0.0),
         outbox_count=outbox_count,
-        outbox_summary=_clean_text(source.get("outbox_summary"), ""),
+        outbox_summary=_localized_runtime_overview_copy(
+            source.get("outbox_summary"), kind="outbox", locale=locale),
         regression_cases=_nonnegative_int(source.get("regression_cases")),
         regression_quarantined=_nonnegative_int(
             source.get("regression_quarantined")),
@@ -1104,7 +1219,8 @@ class WhisperFaceViewModel:
             )
         except Exception as error:
             self.state = replace(
-                self.state, notice=f"Status unavailable: {error}",
+                self.state, notice=self.localized(
+                    "overview.notice.status.error", error=error),
                 notice_level="error")
         return self.state
 
@@ -1370,6 +1486,7 @@ class WhisperFaceViewModel:
                 outbox_count=self.state.outbox_count,
                 service_status=self.state.service_status,
                 degraded_issues=self.state.degraded_issues,
+                locale=self.locale,
             )
             self.state = replace(
                 self.state,
@@ -1383,7 +1500,8 @@ class WhisperFaceViewModel:
             )
         except Exception as error:
             self.state = replace(
-                self.state, notice=f"Could not change capture state: {error}",
+                self.state, notice=self.localized(
+                    "overview.notice.capture.error", error=error),
                 notice_level="error")
         return self.state
 
@@ -1426,11 +1544,12 @@ class WhisperFaceViewModel:
             self.actions.copy_latest_outbox()
             self.state = replace(
                 self.state, outbox_count=max(0, self.state.outbox_count - 1),
-                notice="Latest recoverable dictation copied and dismissed",
+                notice=self.localized("overview.notice.outbox.copied"),
                 notice_level="success")
         except Exception as error:
             self.state = replace(
-                self.state, notice=f"Could not copy Voice Outbox: {error}",
+                self.state, notice=self.localized(
+                    "overview.notice.outbox.error", error=error),
                 notice_level="error")
         return self.state
 
@@ -1702,28 +1821,35 @@ if APPKIT_AVAILABLE:
 
         def _build_overview(self, page: Any) -> None:
             hero = _card(NSMakeRect(0, 224, 758, 178))
-            phase = _label("READY", NSMakeRect(24, 137, 320, 18),
-                           size=11, weight="bold", color=_ACCENT)
-            status = _label("Ready when you are", NSMakeRect(24, 92, 520, 42),
-                            size=32, weight="bold")
+            phase = _label(
+                self._l("overview.phase.ready"),
+                NSMakeRect(24, 137, 320, 18),
+                size=11, weight="bold", color=_ACCENT)
+            status = _label(
+                self._l("overview.status.ready.title"),
+                NSMakeRect(24, 92, 520, 42), size=32, weight="bold")
             detail = _label("", NSMakeRect(26, 67, 520, 20),
                             size=12, color=_SECONDARY)
             engine = _label("", NSMakeRect(26, 42, 500, 20),
                             size=13, color=_SECONDARY)
             outbox = _label(
-                "Voice Outbox: all clear", NSMakeRect(26, 16, 500, 20),
+                self._l("overview.outbox.empty"),
+                NSMakeRect(26, 16, 500, 20),
                 size=12, color=_SECONDARY)
             pause = _button(
-                "Pause", NSMakeRect(610, 89, 116, 38), self, "pauseChanged:",
-                help_text="Pause or resume the global dictation hotkey.")
+                self._l("overview.action.pause"),
+                NSMakeRect(610, 89, 116, 38), self, "pauseChanged:",
+                help_text=self._l("overview.action.pause.help"))
             fix = _button(
-                "Review Setup", NSMakeRect(590, 49, 136, 30),
+                self._l("overview.action.review"),
+                NSMakeRect(590, 49, 136, 30),
                 self, "reviewIssue:",
-                help_text="Show the most useful recovery guidance.")
+                help_text=self._l("overview.action.review.help"))
             copy_outbox = _button(
-                "Copy & Dismiss", NSMakeRect(590, 13, 136, 30),
+                self._l("overview.action.copy_outbox"),
+                NSMakeRect(590, 13, 136, 30),
                 self, "copyOutbox:",
-                help_text="Copy the latest recoverable dictation, then remove it from the Voice Outbox.")
+                help_text=self._l("overview.action.copy_outbox.help"))
             hero.addSubview_(phase)
             hero.addSubview_(status)
             hero.addSubview_(detail)
@@ -1742,10 +1868,12 @@ if APPKIT_AVAILABLE:
 
             onboarding = _card(NSMakeRect(0, 91, 758, 116))
             onboarding_progress = _label(
-                "SETUP", NSMakeRect(20, 82, 190, 18),
+                self._l("overview.onboarding.initial_progress"),
+                NSMakeRect(20, 82, 190, 18),
                 size=10, weight="bold", color=_ACCENT)
             onboarding_title = _label(
-                "Allow Mac permissions", NSMakeRect(20, 51, 500, 27),
+                self._l("onboarding.permissions.title"),
+                NSMakeRect(20, 51, 500, 27),
                 size=17, weight="bold")
             onboarding_detail = _label(
                 "", NSMakeRect(20, 22, 540, 24), size=11, color=_SECONDARY)
@@ -1768,15 +1896,18 @@ if APPKIT_AVAILABLE:
                 onboarding_action=onboarding_action,
             )
 
-            cards = (("Last dictation", "overview_last"),
-                     ("Words today", "overview_words"),
-                     ("Time saved", "overview_saved"))
-            for index, (heading, key) in enumerate(cards):
+            cards = (("overview.metric.last.heading", "overview_last"),
+                     ("overview.metric.words.heading", "overview_words"),
+                     ("overview.metric.saved.heading", "overview_saved"))
+            for index, (heading_key, key) in enumerate(cards):
                 card = _card(NSMakeRect(index * 253, 0, 239, 76))
-                card.addSubview_(_label(heading, NSMakeRect(16, 49, 200, 18),
-                                        size=11, color=_SECONDARY))
-                value = _label("—", NSMakeRect(16, 13, 205, 31),
-                               size=21, weight="bold")
+                card.addSubview_(_label(
+                    self._l(heading_key), NSMakeRect(16, 49, 200, 18),
+                    size=11, color=_SECONDARY))
+                value = _label(
+                    self._l("overview.metric.last.empty"),
+                    NSMakeRect(16, 13, 205, 31),
+                    size=21, weight="bold")
                 card.addSubview_(value)
                 page.addSubview_(card)
                 self.dynamic[key] = value
@@ -2147,69 +2278,92 @@ if APPKIT_AVAILABLE:
             selected = SECTIONS.index(state.section)
             self.section_control.setSelectedSegment_(selected)
 
-            phase_labels = {
-                "ready": "READY",
-                "recording": "RECORDING",
-                "processing": "PROCESSING",
-                "recovery": "RECOVERY AVAILABLE",
-                "degraded": "ACTION NEEDED",
-                "paused": "PAUSED",
-                "starting": "STARTING LOCALLY",
+            phase_keys = {
+                "ready": "overview.phase.ready",
+                "recording": "overview.phase.recording",
+                "processing": "overview.phase.processing",
+                "recovery": "overview.phase.recovery",
+                "degraded": "overview.phase.degraded",
+                "paused": "overview.phase.paused",
+                "starting": "overview.phase.starting",
             }
             self.dynamic["overview_phase"].setStringValue_(
-                phase_labels.get(state.status_phase, state.status_phase.upper()))
+                self._l(phase_keys[state.status_phase])
+                if state.status_phase in phase_keys
+                else state.status_phase.upper())
             self.dynamic["overview_status"].setStringValue_(state.status_title)
             self.dynamic["overview_detail"].setStringValue_(state.status_detail)
             self.dynamic["overview_engine"].setStringValue_(
-                f"Active engine: {state.active_engine}")
-            outbox = (f"Voice Outbox: {state.outbox_count} recoverable · "
-                      f"{state.outbox_summary}"
-                      if state.outbox_count else "Voice Outbox: all clear")
+                self._l(
+                    "overview.engine.active", engine=state.active_engine))
+            outbox = (
+                self._l(
+                    "overview.outbox.pending", count=state.outbox_count,
+                    summary=state.outbox_summary)
+                if state.outbox_count else self._l("overview.outbox.empty"))
             self.dynamic["overview_outbox"].setStringValue_(outbox)
-            for key, label in (
-                ("overview_phase", "Dictation phase"),
-                ("overview_status", "Dictation status"),
-                ("overview_detail", "Dictation status detail"),
-                ("overview_engine", "Active recognition engine"),
-                ("overview_outbox", "Voice Outbox status"),
+            for key, label_key in (
+                ("overview_phase", "overview.accessibility.phase"),
+                ("overview_status", "overview.accessibility.status"),
+                ("overview_detail", "overview.accessibility.detail"),
+                ("overview_engine", "overview.accessibility.engine"),
+                ("overview_outbox", "overview.accessibility.outbox"),
             ):
                 sync_accessibility(
                     self.dynamic[key],
                     str(self.dynamic[key].stringValue()),
-                    label=label,
+                    label=self._l(label_key),
                 )
             self.dynamic["copy_outbox_button"].setHidden_(
                 state.outbox_count == 0)
             self.dynamic["review_issue_button"].setHidden_(
                 not state.degraded_issues and (
                     state.onboarding_complete or state.onboarding_acknowledged))
-            pause_title = "Resume" if state.paused else "Pause"
+            pause_title = self._l(
+                "overview.action.resume" if state.paused
+                else "overview.action.pause")
             self.dynamic["pause_button"].setTitle_(pause_title)
             sync_accessibility(
                 self.dynamic["pause_button"],
-                "Dictation paused" if state.paused else "Dictation active",
-                label=f"{pause_title} dictation",
+                self._l(
+                    "overview.action.pause.state.paused" if state.paused
+                    else "overview.action.pause.state.active"),
+                label=self._l(
+                    "overview.action.pause.label", action=pause_title),
             )
             if state.last_latency_ms is None:
-                last = "—"
+                last = self._l("overview.metric.last.empty")
             else:
-                suffix = (f" · {state.last_word_count} words"
-                          if state.last_word_count is not None else "")
-                last = f"{state.last_latency_ms / 1000:.2f}s{suffix}"
+                suffix = ""
+                if state.last_word_count is not None:
+                    words_key = (
+                        "overview.metric.last.words.one"
+                        if state.last_word_count == 1
+                        else "overview.metric.last.words.many")
+                    suffix = self._l(
+                        words_key, count=state.last_word_count)
+                last = self._l(
+                    "overview.metric.last.value",
+                    seconds=f"{state.last_latency_ms / 1000:.2f}",
+                    words=suffix)
             self.dynamic["overview_last"].setStringValue_(last)
             self.dynamic["overview_words"].setStringValue_(
-                f"{state.words_today:,}")
+                self._l(
+                    "overview.metric.words.value",
+                    count=f"{state.words_today:,}"))
             self.dynamic["overview_saved"].setStringValue_(
-                f"{state.minutes_saved:.0f} min")
-            for key, label in (
-                ("overview_last", "Last dictation duration and word count"),
-                ("overview_words", "Words dictated today"),
-                ("overview_saved", "Estimated time saved today"),
+                self._l(
+                    "overview.metric.saved.value",
+                    minutes=f"{state.minutes_saved:.0f}"))
+            for key, label_key in (
+                ("overview_last", "overview.accessibility.last"),
+                ("overview_words", "overview.accessibility.words"),
+                ("overview_saved", "overview.accessibility.saved"),
             ):
                 sync_accessibility(
                     self.dynamic[key],
                     str(self.dynamic[key].stringValue()),
-                    label=label,
+                    label=self._l(label_key),
                 )
 
             completed = sum(
@@ -2235,15 +2389,18 @@ if APPKIT_AVAILABLE:
                         "onboarding.action.first_dictation"),
                 }.get(next_step.key, self._l("onboarding.action.continue"))
                 self.dynamic["onboarding_action"].setTitle_(action_title)
-                for key, label in (
-                    ("onboarding_progress", "First run setup progress"),
-                    ("onboarding_title", "Next setup step"),
-                    ("onboarding_detail", "Setup step detail"),
+                for key, label_key in (
+                    ("onboarding_progress",
+                     "overview.accessibility.onboarding.progress"),
+                    ("onboarding_title",
+                     "overview.accessibility.onboarding.title"),
+                    ("onboarding_detail",
+                     "overview.accessibility.onboarding.detail"),
                 ):
                     sync_accessibility(
                         self.dynamic[key],
                         str(self.dynamic[key].stringValue()),
-                        label=label,
+                        label=self._l(label_key),
                     )
                 sync_accessibility(
                     self.dynamic["onboarding_action"], next_step.status,
@@ -2944,6 +3101,34 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         controller.render()
         require(model.state.onboarding_complete, "onboarding completion")
         require(model.state.onboarding_acknowledged, "onboarding acknowledgement")
+        require(
+            str(controller.dynamic["overview_phase"].stringValue()) ==
+            localized_string("overview.phase.ready"),
+            "overview phase localization")
+        require(
+            str(controller.dynamic["overview_engine"].stringValue()) ==
+            localized_string("overview.engine.active", engine="Smoke ASR"),
+            "overview engine localization")
+        require(
+            str(controller.dynamic["overview_outbox"].stringValue()) ==
+            localized_string("overview.outbox.empty"),
+            "overview outbox localization")
+        require(
+            str(controller.dynamic["pause_button"].title()) ==
+            localized_string("overview.action.pause"),
+            "overview action localization")
+        require(
+            accessible_value(
+                controller.dynamic["overview_outbox"],
+                "accessibilityLabel") == localized_string(
+                    "overview.accessibility.outbox"),
+            "overview outbox accessibility")
+        require(
+            accessible_value(
+                controller.dynamic["pause_button"],
+                "accessibilityHelp") == localized_string(
+                    "overview.action.pause.help"),
+            "overview pause help")
         require(
             model.state.last_result.context_firewall_summary ==
             localized_string("results.firewall.quarantine.one"),

@@ -79,6 +79,17 @@ class SnapshotTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             localized_string("settings.personalize.snippets.detail")
         for key in (
+            "overview.phase.ready",
+            "overview.status.recording.detail",
+            "overview.status.recovery.detail.one",
+            "overview.engine.active",
+            "overview.outbox.pending",
+            "overview.outbox.summary.paste_attempted",
+            "overview.action.copy_outbox.help",
+            "overview.metric.last.words.many",
+            "overview.accessibility.outbox",
+            "overview.notice.outbox.copied",
+            "overview.notice.status.error",
             "onboarding.permissions.title",
             "onboarding.hotkey.title",
             "onboarding.models.title",
@@ -95,6 +106,51 @@ class SnapshotTests(unittest.TestCase):
         ):
             with self.subTest(key=key):
                 self.assertIn(key, STRING_CATALOGS["en"])
+
+    def test_overview_status_copy_uses_catalog_and_locale_fallback(self):
+        common = {
+            "service_status": "Running",
+            "microphone_status": "Ready",
+            "accessibility_status": "Granted",
+            "hotkey_label": "Right Option",
+            "models": [{"name": "Parakeet", "status": "Running"}],
+        }
+        listening = normalize_snapshot({
+            **common, "capture_state": "Listening",
+        }, locale="fr-CA")
+        self.assertEqual(
+            listening.status_title,
+            localized_string(
+                "overview.status.recording.title", locale="fr-CA"))
+        self.assertEqual(
+            listening.status_detail,
+            localized_string(
+                "overview.status.recording.detail", locale="fr-CA",
+                hotkey="Right Option"))
+
+        one = normalize_snapshot({**common, "outbox_count": 1})
+        many = normalize_snapshot({**common, "outbox_count": 2})
+        self.assertEqual(
+            one.status_detail,
+            localized_string("overview.status.recovery.detail.one", count=1))
+        self.assertEqual(
+            many.status_detail,
+            localized_string(
+                "overview.status.recovery.detail.many", count=2))
+
+        runtime_copy = normalize_snapshot({
+            **common,
+            "active_engine": "Warming up",
+            "outbox_count": 1,
+            "outbox_summary": "Paste may have landed — verify before reusing",
+        }, locale="fr-CA")
+        self.assertEqual(
+            runtime_copy.active_engine,
+            localized_string("overview.engine.warming", locale="fr-CA"))
+        self.assertEqual(
+            runtime_copy.outbox_summary,
+            localized_string(
+                "overview.outbox.summary.paste_attempted", locale="fr-CA"))
 
     def test_native_appkit_smoke_contract_is_headless_and_catalog_complete(self):
         contract = native_appkit_smoke_contract()
@@ -564,7 +620,11 @@ class ViewModelTests(unittest.TestCase):
 
     def test_privacy_and_pause_controls_are_callbacks(self):
         self.assertTrue(self.model.set_flight_recorder(True).flight_recorder)
-        self.assertTrue(self.model.set_paused(True).paused)
+        paused = self.model.set_paused(True)
+        self.assertTrue(paused.paused)
+        self.assertEqual(
+            paused.status_title,
+            localized_string("overview.status.paused.title"))
         self.assertFalse(self.model.set_paused(False).paused)
         self.assertIn(("flight", True), self.calls)
         self.assertIn(("pause",), self.calls)
@@ -575,6 +635,9 @@ class ViewModelTests(unittest.TestCase):
         self.model.open_source_and_license()
         self.model.open_local_license_notices()
         self.model.copy_latest_outbox()
+        self.assertEqual(
+            self.model.state.notice,
+            localized_string("overview.notice.outbox.copied"))
         state = self.model.rerun_verification()
         self.assertIn(("log",), self.calls)
         self.assertIn(("source",), self.calls)
@@ -605,7 +668,10 @@ class ViewModelTests(unittest.TestCase):
         state = model.refresh()
         self.assertEqual(state.face, "cat")
         self.assertEqual(state.active_engine, "Parakeet")
-        self.assertIn("service restarting", state.notice)
+        self.assertEqual(
+            state.notice,
+            localized_string(
+                "overview.notice.status.error", error="service restarting"))
 
     def test_facade_creation_does_not_show_a_window(self):
         gui = create_gui(self.actions)
