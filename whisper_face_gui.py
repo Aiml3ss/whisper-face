@@ -202,6 +202,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "overview.accessibility.onboarding.progress": "First run setup progress",
         "overview.accessibility.onboarding.title": "Next setup step",
         "overview.accessibility.onboarding.detail": "Setup step detail",
+        "overview.accessibility.onboarding.steps": "First run setup walkthrough",
+        "overview.accessibility.onboarding.step": "Setup step {step}: {status}",
         "overview.notice.outbox.copied": "Latest recoverable dictation copied and dismissed",
         "overview.notice.outbox.error": "Could not copy Voice Outbox: {error}",
         "overview.notice.capture.error": "Could not change capture state: {error}",
@@ -209,17 +211,22 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "onboarding.permissions.title": "Allow Mac permissions",
         "onboarding.permissions.detail": "Microphone captures speech; Accessibility safely inserts it into the field you chose.",
         "onboarding.hotkey.title": "Practice {hotkey}",
-        "onboarding.hotkey.detail": "Hold {hotkey} while speaking, then release. You can keep using the Mac normally.",
+        "onboarding.hotkey.detail": "Hold {hotkey}, speak, then release. This step completes only after Whisper Face observes capture.",
         "onboarding.models.title": "Confirm local models",
         "onboarding.models.detail": "At least one local recognition engine must be ready; fallbacks can finish warming in the background.",
         "onboarding.first_dictation.title": "Make your first dictation",
-        "onboarding.first_dictation.detail": "Speak one sentence in any text field. Whisper Face will keep the result recoverable if focus changes.",
+        "onboarding.first_dictation.detail": "Speak one sentence in a text field. If focus changes, recover it in Voice Outbox with Copy & Dismiss.",
         "onboarding.status.done": "Done",
         "onboarding.status.attention": "Needs attention",
         "onboarding.status.try": "Try it now",
         "onboarding.status.warming": "Warming up",
         "onboarding.status.turn": "Your turn",
         "onboarding.progress": "FIRST-RUN SETUP · {completed} OF {total} COMPLETE",
+        "onboarding.step.permissions": "1 Permissions",
+        "onboarding.step.hotkey": "2 Hotkey",
+        "onboarding.step.models": "3 Models",
+        "onboarding.step.first_dictation": "4 Dictate",
+        "onboarding.step.summary": "{step} · {status}",
         "onboarding.action.permissions": "Review Permissions",
         "onboarding.action.hotkey": "Show Practice",
         "onboarding.action.models": "View Models",
@@ -846,6 +853,8 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "overview.accessibility.onboarding.progress",
             "overview.accessibility.onboarding.title",
             "overview.accessibility.onboarding.detail",
+            "overview.accessibility.onboarding.steps",
+            "overview.accessibility.onboarding.step",
             "settings.accessibility.sections.label",
             "settings.accessibility.category.label",
             "settings.accessibility.face.label",
@@ -3908,20 +3917,23 @@ if APPKIT_AVAILABLE:
                                 review_issue_button=fix,
                                 copy_outbox_button=copy_outbox)
 
-            onboarding = _card(NSMakeRect(0, 91, 758, 116))
+            onboarding = _card(NSMakeRect(0, 84, 758, 138))
+            _accessible(
+                onboarding,
+                self._l("overview.accessibility.onboarding.steps"))
             onboarding_progress = _label(
                 self._l("overview.onboarding.initial_progress"),
-                NSMakeRect(20, 82, 190, 18),
+                NSMakeRect(20, 105, 280, 18),
                 size=10, weight="bold", color=_ACCENT)
             onboarding_title = _label(
                 self._l("onboarding.permissions.title"),
-                NSMakeRect(20, 51, 500, 27),
+                NSMakeRect(20, 74, 540, 27),
                 size=17, weight="bold")
             onboarding_detail = _label(
-                "", NSMakeRect(20, 22, 540, 24), size=11, color=_SECONDARY)
+                "", NSMakeRect(20, 48, 540, 22), size=11, color=_SECONDARY)
             onboarding_action = _button(
                 self._l("onboarding.action.continue"),
-                NSMakeRect(590, 40, 136, 36),
+                NSMakeRect(590, 68, 136, 36),
                 self, "continueSetup:",
                 help_text=self._l("onboarding.action.help"))
             onboarding_action.setKeyEquivalent_("\r")
@@ -3929,6 +3941,15 @@ if APPKIT_AVAILABLE:
             onboarding.addSubview_(onboarding_title)
             onboarding.addSubview_(onboarding_detail)
             onboarding.addSubview_(onboarding_action)
+            onboarding_steps: list[Any] = []
+            for index, step_key in enumerate((
+                    "permissions", "hotkey", "models", "first_dictation")):
+                step = _label(
+                    self._l(f"onboarding.step.{step_key}"),
+                    NSMakeRect(20 + index * 178, 17, 172, 20),
+                    size=10, weight="medium", color=_SECONDARY)
+                onboarding.addSubview_(step)
+                onboarding_steps.append(step)
             page.addSubview_(onboarding)
             self.dynamic.update(
                 onboarding_card=onboarding,
@@ -3936,6 +3957,7 @@ if APPKIT_AVAILABLE:
                 onboarding_title=onboarding_title,
                 onboarding_detail=onboarding_detail,
                 onboarding_action=onboarding_action,
+                onboarding_steps=tuple(onboarding_steps),
             )
 
             cards = (("overview.metric.last.heading", "overview_last"),
@@ -4589,6 +4611,25 @@ if APPKIT_AVAILABLE:
             )
             self.dynamic["onboarding_card"].setHidden_(
                 next_step is None or state.onboarding_acknowledged)
+            for control, step in zip(
+                    self.dynamic["onboarding_steps"], state.onboarding_steps):
+                step_label = self._l(f"onboarding.step.{step.key}")
+                summary = self._l(
+                    "onboarding.step.summary",
+                    step=step_label,
+                    status=step.status)
+                control.setStringValue_(summary)
+                control.setTextColor_(
+                    _ACCENT if step.complete
+                    else (_TEXT if step is next_step else _SECONDARY))
+                sync_accessibility(
+                    control,
+                    summary,
+                    label=self._l(
+                        "overview.accessibility.onboarding.step",
+                        step=step_label,
+                        status=step.status),
+                )
             if next_step is not None:
                 self.dynamic["onboarding_progress"].setStringValue_(
                     self._l(
@@ -6151,6 +6192,30 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             str(controller.dynamic["onboarding_action"].keyEquivalent()) ==
             "\r", "onboarding key equivalent")
         require(
+            accessible_value(
+                controller.dynamic["onboarding_card"],
+                "accessibilityLabel") == localized_string(
+                    "overview.accessibility.onboarding.steps"),
+            "onboarding walkthrough group accessibility")
+        initial_walkthrough = tuple(
+            str(control.stringValue())
+            for control in controller.dynamic["onboarding_steps"])
+        require(len(initial_walkthrough) == 4, "onboarding walkthrough steps")
+        require(
+            initial_walkthrough[0] == localized_string(
+                "onboarding.step.summary",
+                step=localized_string("onboarding.step.permissions"),
+                status=localized_string("onboarding.status.attention")),
+            "onboarding walkthrough permissions")
+        require(
+            accessible_value(
+                controller.dynamic["onboarding_steps"][0],
+                "accessibilityLabel") == localized_string(
+                    "overview.accessibility.onboarding.step",
+                    step=localized_string("onboarding.step.permissions"),
+                    status=localized_string("onboarding.status.attention")),
+            "onboarding walkthrough accessibility")
+        require(
             int(controller._configure_key_view_loop(model.state)) >= 3,
             "overview key-view loop")
         require(
@@ -6165,10 +6230,18 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             accessibility_status="Granted",
         )
         model.refresh()
+        controller.render()
         require(
             next(step for step in model.state.onboarding_steps
                  if not step.complete).key == "hotkey",
             "hotkey practice")
+        require(
+            str(controller.dynamic["onboarding_steps"][0].stringValue()) ==
+            localized_string(
+                "onboarding.step.summary",
+                step=localized_string("onboarding.step.permissions"),
+                status=localized_string("onboarding.status.done")),
+            "onboarding walkthrough evidence")
         runtime["capture_state"] = "Listening"
         model.refresh()
         require(

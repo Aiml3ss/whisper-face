@@ -317,6 +317,10 @@ class SnapshotTests(unittest.TestCase):
             "onboarding.models.title",
             "onboarding.first_dictation.title",
             "onboarding.progress",
+            "onboarding.step.permissions",
+            "onboarding.step.summary",
+            "overview.accessibility.onboarding.steps",
+            "overview.accessibility.onboarding.step",
             "settings.action.diagnostics",
             "results.title",
             "results.firewall.quarantine.one",
@@ -756,6 +760,25 @@ class SnapshotTests(unittest.TestCase):
         )
         runtime["last_word_count"] = 5
         self.assertTrue(model.refresh().onboarding_complete)
+
+    def test_onboarding_copy_explains_observed_practice_and_recovery(self):
+        state = normalize_snapshot({
+            "service_status": "Running",
+            "microphone_status": "Ready",
+            "accessibility_status": "Granted",
+            "hotkey_label": "Right Option",
+            "models": [{"name": "Parakeet", "status": "Running"}],
+        })
+        hotkey = next(
+            step for step in state.onboarding_steps if step.key == "hotkey")
+        self.assertFalse(hotkey.complete)
+        self.assertIn("observes capture", hotkey.detail)
+
+        first_dictation = next(
+            step for step in state.onboarding_steps
+            if step.key == "first_dictation")
+        self.assertIn("Voice Outbox", first_dictation.detail)
+        self.assertIn("Copy & Dismiss", first_dictation.detail)
 
     def test_status_presentation_covers_capture_processing_recovery_and_degraded(self):
         common = {

@@ -60,7 +60,9 @@ are never Supporter-only features.
   Diagnostics sections. It exposes live latency and usage—including
   Parakeet's own processing time when available—inspectable decision evidence,
   unified personalization/privacy controls, local model health, and one-click
-  installer verification without adding a browser runtime.
+  installer verification without adding a browser runtime. First run shows
+  Permissions, Hotkey, Models, and Dictate together with live evidence-backed
+  status; hotkey practice completes only after capture is actually observed.
 - **Transactional insertion + Voice Outbox (Mac)** — readable text fields are
   leased at key-down and revalidated before the single paste attempt. If focus,
   selection, or nearby text changed while recognition ran, Whisper Face does
