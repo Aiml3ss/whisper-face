@@ -336,6 +336,12 @@ from insertion_integrity import (  # noqa: E402
 from personal_regression import PersonalRegressionLab  # noqa: E402
 from acoustic_keyword_memory import AcousticKeywordMemory  # noqa: E402
 from acoustic_time_machine import AcousticTimeMachine  # noqa: E402
+from cleanup_circuit_breaker import CleanupCircuitBreaker  # noqa: E402
+from demonstration_drafts import (  # noqa: E402
+    DemonstrationAction,
+    DemonstrationDomain,
+    DemonstrationDraftStore,
+)
 from macos_point_and_speak_snapshot import (  # noqa: E402
     SnapshotState as PointAndSpeakSnapshotState,
     capture_frontmost_accessibility_targets,
@@ -454,6 +460,7 @@ TRANSCRIPTS_FILE = HERE / "transcripts.jsonl"   # local-only usage log
 LEARNED_FILE = HERE / "learned.json"            # mined term counts
 ACOUSTIC_KEYWORD_MEMORY_FILE = HERE / "acoustic_keyword_memory.json"
 VOICE_INBOX_FILE = HERE / "voice_inbox.json"
+DEMONSTRATION_DRAFTS_FILE = HERE / "demonstrations.json"
 
 MIN_SECONDS = 0.4
 TAIL_SECONDS = 0.30          # mic keeps running after release (usually free)
@@ -472,6 +479,7 @@ FAST_ACCEPT_CONFIDENCE = 0.70
 PARAKEET_ROUTE_CONFIDENCE = 0.84
 LLM_CLEANUP_TIMEOUT = (1, 4) # localhost connect/read deadline. Capture must
                              # fall back faithfully instead of blocking paste.
+LLM_CLEANUP_BREAKER = CleanupCircuitBreaker(cooldown_seconds=60.0)
 
 # Rolling ASR: while the key is held, segments ending in a solid pause are
 # transcribed in the background, so release only pays for the last few
@@ -935,6 +943,10 @@ VOICE_OBJECT_INBOX_STATE = {
     "inbox": None,
     "bridge": None,
 }
+DEMONSTRATION_DRAFTS_STATE = {
+    "lock": threading.RLock(),
+    "store": None,
+}
 
 
 def atomic_write_text(path: Path, text: str, mode: int = 0o600):
@@ -1226,6 +1238,127 @@ def purge_terminal_voice_object_drafts() -> int | None:
         return inbox.purge_terminal()
     except (OSError, TypeError, ValueError, OverflowError):
         return None
+
+
+def _demonstration_draft_store() -> DemonstrationDraftStore:
+    """Lazily open the private, inert demonstration store."""
+    with DEMONSTRATION_DRAFTS_STATE["lock"]:
+        store = DEMONSTRATION_DRAFTS_STATE["store"]
+        if store is None:
+            store = DemonstrationDraftStore(DEMONSTRATION_DRAFTS_FILE)
+            DEMONSTRATION_DRAFTS_STATE["store"] = store
+        return store
+
+
+def _demonstration_metadata(draft) -> dict:
+    """Project a draft to content-free native-GUI metadata."""
+    return {
+        "draft_id": draft.draft_id,
+        "sequence": draft.sequence,
+        "domain": draft.domain.value,
+        "state": draft.state.value,
+        "step_count": len(draft.steps),
+    }
+
+
+def inspect_demonstration_drafts() -> tuple[dict, ...]:
+    """Explicitly project demonstration metadata without returning step text."""
+    if not IS_MACOS:
+        return ()
+    with DEMONSTRATION_DRAFTS_STATE["lock"]:
+        if (DEMONSTRATION_DRAFTS_STATE["store"] is None
+                and not DEMONSTRATION_DRAFTS_FILE.is_file()):
+            return ()
+    try:
+        return tuple(
+            _demonstration_metadata(draft)
+            for draft in _demonstration_draft_store().drafts()
+        )
+    except (OSError, TypeError, ValueError, OverflowError):
+        return ()
+
+
+def create_demonstration_draft(domain: str) -> dict | None:
+    """Create one inert Mac draft with a runtime-generated opaque ID."""
+    if not IS_MACOS:
+        return None
+    try:
+        normalized_domain = DemonstrationDomain(domain)
+        store = _demonstration_draft_store()
+        existing_ids = {draft.draft_id for draft in store.drafts()}
+        for _attempt in range(8):
+            draft_id = f"demo-{os.urandom(16).hex()}"
+            if draft_id not in existing_ids:
+                store.begin(draft_id, normalized_domain)
+                return _demonstration_metadata(store.get(draft_id))
+    except (OSError, TypeError, ValueError, OverflowError):
+        return None
+    return None
+
+
+def reveal_demonstration_draft(draft_id: str) -> dict | None:
+    """Explicitly reveal one selected recipe; never interpret its steps."""
+    if not IS_MACOS:
+        return None
+    try:
+        draft = _demonstration_draft_store().preview(draft_id)
+        return {
+            "sequence": draft.sequence,
+            "domain": draft.domain.value,
+            "state": draft.state.value,
+            "steps": tuple({
+                "action": step.action.value,
+                "text": step.text,
+            } for step in draft.steps),
+        }
+    except (OSError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def record_demonstration_step(
+        draft_id: str, action: str, text: str) -> bool:
+    """Record one caller-described step without touching any application."""
+    if not IS_MACOS:
+        return False
+    try:
+        _demonstration_draft_store().record(
+            draft_id, DemonstrationAction(action), text)
+        return True
+    except (OSError, TypeError, ValueError, OverflowError):
+        return False
+
+
+def approve_demonstration_draft(draft_id: str) -> bool:
+    """Mark one non-empty recipe approved; approval remains inert."""
+    if not IS_MACOS:
+        return False
+    try:
+        _demonstration_draft_store().approve(draft_id)
+        return True
+    except (OSError, TypeError, ValueError, OverflowError):
+        return False
+
+
+def cancel_demonstration_draft(draft_id: str) -> bool:
+    """Roll one unapproved recipe and its private text out of storage."""
+    if not IS_MACOS:
+        return False
+    try:
+        _demonstration_draft_store().cancel(draft_id)
+        return True
+    except (OSError, TypeError, ValueError, OverflowError):
+        return False
+
+
+def delete_approved_demonstration_draft(draft_id: str) -> bool:
+    """Explicitly delete one approved inert recipe and its private text."""
+    if not IS_MACOS:
+        return False
+    try:
+        _demonstration_draft_store().delete_approved(draft_id)
+        return True
+    except (OSError, TypeError, ValueError, OverflowError):
+        return False
 
 
 def queue_voice_object_command(text: str, utterance_id: str) -> bool:
@@ -5926,6 +6059,13 @@ def llm_clean_with_edits(text: str, tone: str, mode: str = "capture",
         user = json.dumps({"nearby_context": context or "", "dictation": text})
     few_shot = STRUCTURED_FEW_SHOT if mode in {"capture", "code"} else []
     words = len(text.split()) + len((context or "").split())
+    fallback = (context if mode == "edit" and context is not None
+                else quick_clean(text))
+    admission = LLM_CLEANUP_BREAKER.acquire()
+    if not admission.allowed:
+        print(f"! LLM cleanup bypassed ({admission.state.value}); "
+              "pasting deterministic cleanup")
+        return fallback, []
     try:
         reply, done = ollama_chat(
             system, user, few_shot=few_shot,
@@ -5948,15 +6088,16 @@ def llm_clean_with_edits(text: str, tone: str, mode: str = "capture",
                 edits.append(CleanupEdit(kind, before, after))
         out = str(out).strip('"').strip()
     except Exception as e:
+        LLM_CLEANUP_BREAKER.record_transport_failure()
         print(f"! LLM cleanup failed ({e}); pasting quick-cleaned text")
-        return (context if mode == "edit" and context is not None
-                else quick_clean(text)), []
+        return fallback, []
+
+    LLM_CLEANUP_BREAKER.record_success()
 
     reject = _guard_cleaned_output(text, out, done, mode)
     if reject:
         print(f"! LLM output rejected ({reject}); pasting quick-cleaned text")
-        return (context if mode == "edit" and context is not None
-                else quick_clean(text)), []
+        return fallback, []
     return out, edits
 
 
@@ -7183,6 +7324,14 @@ def main():
             cancel_voice_object_draft=cancel_voice_object_draft,
             purge_terminal_voice_object_drafts=(
                 purge_terminal_voice_object_drafts),
+            inspect_demonstration_drafts=inspect_demonstration_drafts,
+            create_demonstration_draft=create_demonstration_draft,
+            reveal_demonstration_draft=reveal_demonstration_draft,
+            record_demonstration_step=record_demonstration_step,
+            approve_demonstration_draft=approve_demonstration_draft,
+            cancel_demonstration_draft=cancel_demonstration_draft,
+            delete_approved_demonstration_draft=(
+                delete_approved_demonstration_draft),
             play_retained_span=play_retained_consequence_span,
             clear_retained_spans=clear_retained_consequence_spans,
             set_app_tone=set_gui_app_tone,

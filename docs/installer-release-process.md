@@ -7,9 +7,10 @@ machine without maintaining a second copy of the application.
 ## Single source of truth
 
 `dictate.py`, `parrot_core.py`, `voice_compiler.py`,
-`insertion_integrity.py`, `personal_regression.py`, `whisper_face_gui.py`,
-`voice_objects.py`, `voice_object_command_parser.py`, `voice_inbox.py`, and
-`voice_object_inbox_bridge.py`,
+`insertion_integrity.py`, `personal_regression.py`,
+`cleanup_circuit_breaker.py`, `whisper_face_gui.py`, `voice_objects.py`,
+`voice_object_command_parser.py`, `voice_inbox.py`,
+`voice_object_inbox_bridge.py`, and `demonstration_drafts.py`,
 the PEP 723 dependency block, and `dictate.py.lock` are the runtime source of
 truth. The Mac LaunchAgent and
 Windows scheduled task execute those files from the checkout. Installers may
@@ -36,6 +37,7 @@ uv lock --check --script dictate.py
 uv run tests/test_parrot_core.py
 uv run tests/test_voice_compiler.py
 uv run tests/test_consequence_routing.py
+uv run tests/test_cleanup_circuit_breaker.py
 uv run tests/test_process_verifier.py
 uv run tests/test_prewarmed_verifier.py
 uv run tests/test_whisper_verifier_adapter.py
@@ -56,8 +58,11 @@ uv run tests/test_voice_input_protocol_transport.py
 uv run tests/test_macos_networkless_worker.py
 uv run tests/test_acoustic_keyword_memory.py
 uv run tests/test_acoustic_time_machine.py
+uv run tests/test_acoustic_calibration.py
+uv run tests/test_benchmark_acoustic_calibration.py
 uv run tests/test_delayed_cleanup_merge.py
 uv run tests/test_model_wallet.py
+uv run tests/test_model_wallet_shadow.py
 uv run tests/test_point_and_speak_resolver.py
 uv run tests/test_macos_point_and_speak_snapshot.py
 uv run tests/test_drop_to_target.py

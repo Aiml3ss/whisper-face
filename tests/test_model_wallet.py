@@ -113,7 +113,12 @@ class ModelWalletTests(unittest.TestCase):
         )
         wallet = ModelWallet([fallback, primary])
 
+        self.assertEqual(wallet.eligible_profiles(self.request()), (
+            PARAKEET_PROFILE,
+            WHISPER_LARGE_TURBO_PROFILE,
+        ))
         self.assertEqual(wallet.select(self.request()), PARAKEET_PROFILE)
+        self.assertEqual(calls, [])
         receipt = wallet.execute(self.request())
 
         self.assertEqual(receipt.result.text, "primary")

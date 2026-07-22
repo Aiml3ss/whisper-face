@@ -253,6 +253,13 @@ class SnapshotTests(unittest.TestCase):
                 "operation.voice_objects.reveal_failed",
                 "operation.voice_objects.transition_failed",
                 "operation.voice_objects.purge_failed",
+                "operation.demonstrations.inspect_failed",
+                "operation.demonstrations.create_failed",
+                "operation.demonstrations.reveal_failed",
+                "operation.demonstrations.record_failed",
+                "operation.demonstrations.approve_failed",
+                "operation.demonstrations.cancel_failed",
+                "operation.demonstrations.delete_failed",
                 "operation.log.open_failed",
                 "operation.support_snapshot.copy_failed",
                 "operation.source.open_failed",
@@ -790,6 +797,8 @@ class ViewModelTests(unittest.TestCase):
         self.keyword_reads = 0
         self.voice_draft_inspections = 0
         self.voice_draft_reveals = 0
+        self.demonstration_inspections = 0
+        self.demonstration_reveals = 0
         self.private_settings = {
             "app_tones": [{
                 "bundle": "com.example.mail", "name": "Mail", "tone": "auto"}],
@@ -860,6 +869,35 @@ class ViewModelTests(unittest.TestCase):
                 "content": "Title: private launch plan",
             }
 
+        def inspect_demonstrations():
+            self.demonstration_inspections += 1
+            return ({
+                "draft_id": "demo-" + "1" * 32,
+                "sequence": 3,
+                "domain": "mail",
+                "state": "recording",
+                "step_count": 1,
+            }, {
+                "draft_id": "demo-" + "4" * 32,
+                "sequence": 5,
+                "domain": "notes",
+                "state": "approved",
+                "step_count": 1,
+            },)
+
+        def reveal_demonstration(draft_id):
+            self.demonstration_reveals += 1
+            self.calls.append(("reveal_demonstration", draft_id))
+            return {
+                "sequence": 3,
+                "domain": "mail",
+                "state": "recording",
+                "steps": ({
+                    "action": "set_subject",
+                    "text": "Private demonstration subject",
+                },),
+            }
+
         self.actions = GUIActions(
             status_snapshot=lambda: dict(self.runtime),
             settings_snapshot=lambda: dict(self.private_settings),
@@ -875,6 +913,25 @@ class ViewModelTests(unittest.TestCase):
                 self.calls.append(("cancel_voice_draft", item_id)) or True,
             purge_terminal_voice_object_drafts=lambda:
                 self.calls.append(("purge_voice_drafts",)) or 2,
+            inspect_demonstration_drafts=inspect_demonstrations,
+            create_demonstration_draft=lambda domain: {
+                "draft_id": "demo-" + "2" * 32,
+                "sequence": 4,
+                "domain": domain,
+                "state": "recording",
+                "step_count": 0,
+            },
+            reveal_demonstration_draft=reveal_demonstration,
+            record_demonstration_step=lambda draft_id, action, text:
+                self.calls.append(
+                    ("record_demonstration", draft_id, action, text)) or True,
+            approve_demonstration_draft=lambda draft_id:
+                self.calls.append(("approve_demonstration", draft_id)) or True,
+            cancel_demonstration_draft=lambda draft_id:
+                self.calls.append(("cancel_demonstration", draft_id)) or True,
+            delete_approved_demonstration_draft=lambda draft_id:
+                self.calls.append(
+                    ("delete_approved_demonstration", draft_id)) or True,
             play_retained_span=lambda:
                 self.calls.append(("play_retained",)) or True,
             clear_retained_spans=clear_acoustic,
@@ -1020,6 +1077,75 @@ class ViewModelTests(unittest.TestCase):
 
         self.assertEqual(self.voice_draft_inspections, 0)
         self.assertEqual(self.voice_draft_reveals, 0)
+
+    def test_demonstration_content_is_lazy_redacted_and_actions_stay_inert(self):
+        self.model.refresh()
+        self.assertEqual(self.demonstration_inspections, 0)
+        self.assertEqual(self.demonstration_reveals, 0)
+        self.assertNotIn("Private demonstration subject", repr(self.model.state))
+
+        drafts = self.model.inspect_demonstration_drafts()
+        self.assertEqual(self.demonstration_inspections, 1)
+        self.assertEqual(self.demonstration_reveals, 0)
+        self.assertEqual(drafts[0].domain, "mail")
+        self.assertNotIn("demo-" + "1" * 32, repr(drafts[0]))
+        with self.assertRaisesRegex(ValueError, "record"):
+            self.model.record_demonstration_step(
+                drafts[0], action="set_subject", text="Not revealed")
+        self.assertEqual(self.model.state.notice_level, "error")
+        self.assertIn("Could not record", self.model.state.notice)
+
+        revealed = self.model.reveal_demonstration_draft(drafts[0])
+        self.assertEqual(self.demonstration_reveals, 1)
+        self.assertEqual(
+            revealed.steps[0].text, "Private demonstration subject")
+        self.assertNotIn("Private demonstration subject", repr(revealed))
+        self.assertNotIn("Private demonstration subject", repr(revealed.steps[0]))
+        self.assertNotIn("Private demonstration subject", repr(self.model.state))
+
+        with self.assertRaisesRegex(ValueError, "record"):
+            self.model.record_demonstration_step(
+                drafts[0], action="set_subject", text="")
+        self.assertEqual(self.model.state.notice_level, "error")
+        self.assertIn("Could not record", self.model.state.notice)
+
+        self.model.record_demonstration_step(
+            drafts[0], action="set_body", text="Manually described only")
+        self.assertIn((
+            "record_demonstration", "demo-" + "1" * 32,
+            "set_body", "Manually described only"), self.calls)
+        self.model.approve_demonstration_draft(drafts[0])
+        self.assertIn(
+            ("approve_demonstration", "demo-" + "1" * 32), self.calls)
+
+        drafts = self.model.inspect_demonstration_drafts()
+        self.model.cancel_demonstration_draft(drafts[0])
+        self.assertIn(
+            ("cancel_demonstration", "demo-" + "1" * 32), self.calls)
+        drafts = self.model.inspect_demonstration_drafts()
+        with self.assertRaisesRegex(ValueError, "delete"):
+            self.model.delete_approved_demonstration_draft(drafts[0])
+        self.model.delete_approved_demonstration_draft(drafts[1])
+        self.assertIn(
+            ("delete_approved_demonstration", "demo-" + "4" * 32),
+            self.calls)
+
+    def test_demonstration_runtime_allocates_id_and_view_model_rejects_forgery(self):
+        from whisper_face_gui import DemonstrationDraftMetadata
+
+        created = self.model.create_demonstration_draft("notes")
+        self.assertEqual(created.domain, "notes")
+        self.assertEqual(created.draft_id, "demo-" + "2" * 32)
+        forged = DemonstrationDraftMetadata(
+            "demo-" + "3" * 32, 9, "finder", "recording", 0)
+        with self.assertRaisesRegex(ValueError, "reveal"):
+            self.model.reveal_demonstration_draft(forged)
+        forged_approved = DemonstrationDraftMetadata(
+            "demo-" + "5" * 32, 10, "finder", "approved", 1)
+        with self.assertRaisesRegex(ValueError, "delete"):
+            self.model.delete_approved_demonstration_draft(forged_approved)
+        with self.assertRaisesRegex(ValueError, "create"):
+            self.model.create_demonstration_draft("calendar")
 
     def test_unified_settings_load_only_on_navigation_and_all_panes_work(self):
         self.assertEqual(self.model.state.settings.snippets, ())

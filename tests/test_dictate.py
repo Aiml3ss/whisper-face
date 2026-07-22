@@ -51,6 +51,7 @@ from acoustic_keyword_memory import (  # noqa: E402
     hash_app_scope,
 )
 from acoustic_time_machine import AcousticTimeMachine  # noqa: E402
+from cleanup_circuit_breaker import CleanupCircuitBreaker  # noqa: E402
 from insertion_integrity import (  # noqa: E402
     DestinationObservation,
     InsertionCoordinator,
@@ -1182,6 +1183,7 @@ class CleanupGuardTests(unittest.TestCase):
             },
             extra={
                 "CleanupEdit": object,
+                "LLM_CLEANUP_BREAKER": CleanupCircuitBreaker(),
                 "ollama_chat": fake_ollama_chat,
                 "quick_clean": lambda text: text,
                 "STRUCTURED_FEW_SHOT": [],
@@ -1217,6 +1219,7 @@ class CleanupGuardTests(unittest.TestCase):
             extra={
                 "CleanupEdit": lambda kind, before, after: SimpleNamespace(
                     kind=kind, before=before, after=after),
+                "LLM_CLEANUP_BREAKER": CleanupCircuitBreaker(),
                 "ollama_chat": fake_ollama_chat,
                 "quick_clean": lambda text: text,
                 "STRUCTURED_FEW_SHOT": [],
@@ -1228,6 +1231,43 @@ class CleanupGuardTests(unittest.TestCase):
 
         self.assertEqual(edits[0].kind, "semantic_cleanup")
         self.assertNotIn("secret", edits[0].kind)
+
+    def test_llm_cleanup_timeout_opens_circuit_for_consecutive_dictations(self):
+        calls = []
+        lines = []
+
+        def unavailable(*_args, **_kwargs):
+            calls.append(True)
+            raise TimeoutError("local cleanup deadline")
+
+        ns = load_definitions(
+            "_guard_cleaned_output", "llm_clean_with_edits",
+            assignments={
+                "BASE_PROMPT", "FEW_SHOT", "LLM_CLEANUP_TIMEOUT",
+                "MODE_INSTRUCTIONS", "REFUSAL_RE", "STRUCTURED_OUTPUT",
+            },
+            extra={
+                "CleanupEdit": object,
+                "LLM_CLEANUP_BREAKER": CleanupCircuitBreaker(
+                    cooldown_seconds=60),
+                "ollama_chat": unavailable,
+                "quick_clean": lambda text: f"fallback:{text}",
+                "STRUCTURED_FEW_SHOT": [],
+                "print": lines.append,
+            },
+        )
+
+        first = ns["llm_clean_with_edits"](
+            "first private dictation", "neutral")
+        second = ns["llm_clean_with_edits"](
+            "second private dictation", "neutral")
+
+        self.assertEqual(calls, [True])
+        self.assertEqual(first, ("fallback:first private dictation", []))
+        self.assertEqual(second, ("fallback:second private dictation", []))
+        self.assertTrue(any("bypassed (cooldown)" in line for line in lines))
+        self.assertFalse(any("second private dictation" in line
+                             for line in lines))
 
     def test_structured_output_guard_rejects_destructive_results(self):
         ns = load_definitions(

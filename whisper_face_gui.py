@@ -40,6 +40,17 @@ VOICE_DRAFT_DESTINATIONS = frozenset({
 VOICE_DRAFT_STATES = frozenset({"queued", "acknowledged", "cancelled"})
 VOICE_DRAFT_INSPECT_LIMIT = 256
 VOICE_DRAFT_CONTENT_LIMIT = 300_000
+DEMONSTRATION_DOMAINS = ("finder", "mail", "notes", "menu")
+DEMONSTRATION_STATES = frozenset({"recording", "approved"})
+DEMONSTRATION_ACTIONS = {
+    "finder": ("select_item", "create_folder", "rename_item"),
+    "mail": ("compose_message", "address_message", "set_subject", "set_body"),
+    "notes": ("create_note", "set_note_title", "set_note_body"),
+    "menu": ("open_menu", "choose_menu_item"),
+}
+DEMONSTRATION_INSPECT_LIMIT = 64
+DEMONSTRATION_STEP_LIMIT = 12
+DEMONSTRATION_TEXT_LIMIT = 512
 POINT_AND_SPEAK_MAX_PHRASE_CHARS = 96
 POINT_AND_SPEAK_ROLES = frozenset({
     "button", "checkbox", "link", "menu_item", "radio_button", "tab",
@@ -412,6 +423,10 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.privacy.voice_objects.status": "{status} · {count} local drafts queued",
         "settings.privacy.voice_objects.inspect": "Inspect",
         "settings.privacy.voice_objects.inspect.help": "Open the local Voice Inbox. Draft content stays hidden until you explicitly reveal a selected draft.",
+        "settings.privacy.demonstrations": "Demonstrations",
+        "settings.privacy.demonstrations.detail": "Manually author inert Finder, Mail, Notes, and menu recipes.",
+        "settings.privacy.demonstrations.author": "Author",
+        "settings.privacy.demonstrations.author.help": "Open the private demonstration editor. Step text stays hidden until you explicitly reveal or edit one selected recipe.",
         "settings.privacy.face": "Companion",
         "settings.face.parrot": "Parrot",
         "settings.face.fox": "Fox",
@@ -437,6 +452,12 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.accessibility.voice_objects.inspector": "Voice Inbox inspector",
         "settings.accessibility.voice_objects.chooser": "Queued draft metadata",
         "settings.accessibility.voice_objects.content": "Selected inert draft content",
+        "settings.accessibility.demonstrations.inspector": "Demonstration draft editor",
+        "settings.accessibility.demonstrations.chooser": "Demonstration metadata",
+        "settings.accessibility.demonstrations.domain": "New demonstration domain",
+        "settings.accessibility.demonstrations.action": "Demonstration step action",
+        "settings.accessibility.demonstrations.text": "Private demonstration step text",
+        "settings.accessibility.demonstrations.preview": "Selected inert demonstration recipe",
         "settings.accessibility.privacy_summary.label": "Privacy status",
         "settings.accessibility.diagnostics.help": "Open local service, permission, model, and installation diagnostics.",
         "settings.accessibility.tones_summary.label": "App tones summary",
@@ -499,6 +520,13 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "operation.voice_objects.reveal_failed": "Could not reveal the selected local draft.",
         "operation.voice_objects.transition_failed": "Could not update the selected local draft.",
         "operation.voice_objects.purge_failed": "Could not purge finished local drafts.",
+        "operation.demonstrations.inspect_failed": "Could not inspect local demonstration drafts.",
+        "operation.demonstrations.create_failed": "Could not create the local demonstration draft.",
+        "operation.demonstrations.reveal_failed": "Could not reveal the selected demonstration draft.",
+        "operation.demonstrations.record_failed": "Could not record that demonstration step.",
+        "operation.demonstrations.approve_failed": "Could not approve the selected demonstration draft.",
+        "operation.demonstrations.cancel_failed": "Could not cancel the selected demonstration draft.",
+        "operation.demonstrations.delete_failed": "Could not delete the selected approved demonstration recipe.",
         "operation.acoustic.play_failed": "Could not play retained audio: {error}",
         "operation.acoustic.clear_failed": "Could not clear retained audio: {error}",
         "operation.log.open_failed": "Could not open log: {error}",
@@ -524,6 +552,34 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.notice.voice_object_acknowledged": "Local draft acknowledged",
         "settings.notice.voice_object_cancelled": "Local draft cancelled",
         "settings.notice.voice_objects_purged": "Finished local drafts purged: {count}",
+        "settings.dialog.demonstrations.title": "Demonstration Drafts",
+        "settings.dialog.demonstrations.message": "Only content-free metadata is listed. Create a draft or explicitly Reveal/Edit one recipe. Approved recipes remain inert: nothing replays, automates, clicks, types, pastes, launches, or calls an app.",
+        "settings.dialog.demonstrations.empty": "No demonstration drafts are stored. Create one to describe an inert recipe.",
+        "settings.dialog.demonstrations.row": "Draft {sequence} · {domain} · {state} · {steps} steps",
+        "settings.dialog.demonstrations.new.title": "New Inert Demonstration",
+        "settings.dialog.demonstrations.new.message": "Choose a closed domain. Whisper Face generates the private opaque draft ID; no app is opened or observed.",
+        "settings.dialog.demonstrations.reveal.title": "Draft {sequence} · {domain}",
+        "settings.dialog.demonstrations.reveal.message": "Private described steps only. Editing records text in this local recipe; it does not replay or perform any step.",
+        "settings.dialog.demonstrations.preview.empty": "No steps recorded.",
+        "settings.dialog.demonstrations.step": "{index}. {action}: {text}",
+        "settings.dialog.demonstrations.record.title": "Record Described Step",
+        "settings.dialog.demonstrations.record.message": "Choose a domain-valid action and enter bounded private text. This stores a description only.",
+        "settings.dialog.demonstrations.approve.title": "Approve this inert recipe?",
+        "settings.dialog.demonstrations.approve.message": "Approval only marks Draft {sequence} approved. It does not replay, automate, click, type, paste, launch, or call any app.",
+        "settings.dialog.demonstrations.cancel.title": "Cancel and roll back this recipe?",
+        "settings.dialog.demonstrations.cancel.message": "This atomically removes Draft {sequence} and its private step text. Approved recipes cannot be cancelled.",
+        "settings.dialog.demonstrations.delete.title": "Delete this approved recipe?",
+        "settings.dialog.demonstrations.delete.message": "This atomically removes approved Draft {sequence} and its private step text. Nothing is replayed or performed.",
+        "settings.action.create_draft": "Create Draft",
+        "settings.action.reveal_edit": "Reveal/Edit",
+        "settings.action.record_step": "Record Step",
+        "settings.action.approve": "Approve",
+        "settings.action.delete_approved": "Delete Approved",
+        "settings.notice.demonstration_created": "Inert demonstration draft created",
+        "settings.notice.demonstration_step_recorded": "Described step recorded; nothing was performed",
+        "settings.notice.demonstration_approved": "Recipe approved and remains inert",
+        "settings.notice.demonstration_cancelled": "Demonstration draft rolled back",
+        "settings.notice.demonstration_deleted": "Approved demonstration recipe deleted",
         "diagnostics.notice.support_snapshot.copied": "Transcript-free support snapshot copied",
     },
 }
@@ -607,6 +663,13 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "acknowledge_voice_object_draft",
             "cancel_voice_object_draft",
             "purge_terminal_voice_object_drafts",
+            "inspect_demonstration_drafts",
+            "create_demonstration_draft",
+            "reveal_demonstration_draft",
+            "record_demonstration_step",
+            "approve_demonstration_draft",
+            "cancel_demonstration_draft",
+            "delete_approved_demonstration_draft",
             "play_retained_span",
             "clear_retained_spans",
             "preview_point_and_speak",
@@ -632,6 +695,12 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "settings.accessibility.voice_objects.inspector",
             "settings.accessibility.voice_objects.chooser",
             "settings.accessibility.voice_objects.content",
+            "settings.accessibility.demonstrations.inspector",
+            "settings.accessibility.demonstrations.chooser",
+            "settings.accessibility.demonstrations.domain",
+            "settings.accessibility.demonstrations.action",
+            "settings.accessibility.demonstrations.text",
+            "settings.accessibility.demonstrations.preview",
             "settings.dialog.tone.app.label",
             "settings.dialog.tone.choice.label",
             "settings.dialog.snippet.chooser.label",
@@ -680,6 +749,20 @@ class GUIActions:
         lambda _item_id: False)
     cancel_voice_object_draft: Callable[[str], bool] = lambda _item_id: False
     purge_terminal_voice_object_drafts: Callable[[], int | None] = lambda: None
+    inspect_demonstration_drafts: Callable[[], Sequence[Mapping[str, Any]]] = (
+        lambda: ())
+    create_demonstration_draft: Callable[[str], Mapping[str, Any] | None] = (
+        lambda _domain: None)
+    reveal_demonstration_draft: Callable[[str], Mapping[str, Any] | None] = (
+        lambda _draft_id: None)
+    record_demonstration_step: Callable[[str, str, str], bool] = (
+        lambda _draft_id, _action, _text: False)
+    approve_demonstration_draft: Callable[[str], bool] = (
+        lambda _draft_id: False)
+    cancel_demonstration_draft: Callable[[str], bool] = (
+        lambda _draft_id: False)
+    delete_approved_demonstration_draft: Callable[[str], bool] = (
+        lambda _draft_id: False)
     play_retained_span: Callable[[], bool] = lambda: False
     clear_retained_spans: Callable[[], None] = _noop
     set_app_tone: Callable[[str, str], None] = _noop
@@ -730,6 +813,35 @@ class RevealedVoiceDraft:
     destination: str
     state: str
     content: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class DemonstrationDraftMetadata:
+    """Content-free identity from an explicit demonstration inspection."""
+
+    draft_id: str = field(repr=False)
+    sequence: int
+    domain: str
+    state: str
+    step_count: int
+
+
+@dataclass(frozen=True)
+class DemonstrationStepPreview:
+    """One explicitly revealed private description, redacted from repr."""
+
+    action: str
+    text: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class RevealedDemonstrationDraft:
+    """Private recipe returned transiently only after Reveal/Edit."""
+
+    sequence: int
+    domain: str
+    state: str
+    steps: tuple[DemonstrationStepPreview, ...] = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -1800,6 +1912,8 @@ class WhisperFaceViewModel:
         self._onboarding_acknowledged = False
         self._hotkey_practiced = False
         self._inspected_voice_draft_ids: set[str] = set()
+        self._inspected_demonstration_ids: set[str] = set()
+        self._revealed_demonstration_ids: set[str] = set()
         self.refresh()
 
     def localized(self, key: str, **values: Any) -> str:
@@ -2334,6 +2448,261 @@ class WhisperFaceViewModel:
             self.state = replace(
                 self.state,
                 notice=self.localized("operation.voice_objects.purge_failed"),
+                notice_level="error",
+            )
+        return self.state
+
+    @staticmethod
+    def _demonstration_metadata(
+            raw: Any) -> DemonstrationDraftMetadata:
+        if not isinstance(raw, Mapping) or set(raw) != {
+                "draft_id", "sequence", "domain", "state", "step_count"}:
+            raise ValueError
+        draft_id = raw["draft_id"]
+        sequence = raw["sequence"]
+        domain = raw["domain"]
+        state = raw["state"]
+        step_count = raw["step_count"]
+        suffix = draft_id[5:] if isinstance(draft_id, str) else ""
+        if (not isinstance(draft_id, str) or len(draft_id) != 37
+                or not draft_id.startswith("demo-") or len(suffix) != 32
+                or any(character not in "0123456789abcdef"
+                       for character in suffix)
+                or not isinstance(sequence, int) or isinstance(sequence, bool)
+                or sequence < 1 or domain not in DEMONSTRATION_DOMAINS
+                or state not in DEMONSTRATION_STATES
+                or not isinstance(step_count, int)
+                or isinstance(step_count, bool)
+                or not 0 <= step_count <= DEMONSTRATION_STEP_LIMIT):
+            raise ValueError
+        return DemonstrationDraftMetadata(
+            draft_id, sequence, domain, state, step_count)
+
+    def inspect_demonstration_drafts(
+            self) -> tuple[DemonstrationDraftMetadata, ...]:
+        """List content-free metadata only after explicit authoring entry."""
+        try:
+            raw = self.actions.inspect_demonstration_drafts()
+            if (isinstance(raw, (str, bytes))
+                    or not isinstance(raw, Sequence)
+                    or len(raw) > DEMONSTRATION_INSPECT_LIMIT):
+                raise ValueError
+            drafts = [self._demonstration_metadata(item) for item in raw]
+            identifiers = {draft.draft_id for draft in drafts}
+            sequences = {draft.sequence for draft in drafts}
+            if len(identifiers) != len(drafts) or len(sequences) != len(drafts):
+                raise ValueError
+            drafts.sort(key=lambda item: item.sequence)
+            self._inspected_demonstration_ids = identifiers
+            self._revealed_demonstration_ids.clear()
+            return tuple(drafts)
+        except Exception:
+            self._inspected_demonstration_ids.clear()
+            self._revealed_demonstration_ids.clear()
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "operation.demonstrations.inspect_failed"),
+                notice_level="error",
+            )
+            raise ValueError(self.state.notice) from None
+
+    def create_demonstration_draft(
+            self, domain: str) -> DemonstrationDraftMetadata:
+        """Ask the runtime to allocate one opaque ID for a closed domain."""
+        normalized = str(domain).strip().casefold()
+        if normalized not in DEMONSTRATION_DOMAINS:
+            raise ValueError(self.localized(
+                "operation.demonstrations.create_failed"))
+        try:
+            draft = self._demonstration_metadata(
+                self.actions.create_demonstration_draft(normalized))
+            if (draft.domain != normalized or draft.state != "recording"
+                    or draft.step_count != 0
+                    or draft.draft_id in self._inspected_demonstration_ids):
+                raise ValueError
+            self._inspected_demonstration_ids.add(draft.draft_id)
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "settings.notice.demonstration_created"),
+                notice_level="success",
+            )
+            return draft
+        except Exception:
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "operation.demonstrations.create_failed"),
+                notice_level="error",
+            )
+            raise ValueError(self.state.notice) from None
+
+    def reveal_demonstration_draft(
+            self, draft: DemonstrationDraftMetadata,
+    ) -> RevealedDemonstrationDraft:
+        """Reveal private descriptions for one already inspected metadata row."""
+        if (not isinstance(draft, DemonstrationDraftMetadata)
+                or draft.draft_id not in self._inspected_demonstration_ids):
+            raise ValueError(self.localized(
+                "operation.demonstrations.reveal_failed"))
+        try:
+            raw = self.actions.reveal_demonstration_draft(draft.draft_id)
+            if not isinstance(raw, Mapping) or set(raw) != {
+                    "sequence", "domain", "state", "steps"}:
+                raise ValueError
+            steps_raw = raw["steps"]
+            if (raw["sequence"] != draft.sequence
+                    or raw["domain"] != draft.domain
+                    or raw["state"] not in DEMONSTRATION_STATES
+                    or isinstance(steps_raw, (str, bytes))
+                    or not isinstance(steps_raw, Sequence)
+                    or len(steps_raw) > DEMONSTRATION_STEP_LIMIT):
+                raise ValueError
+            steps = []
+            for item in steps_raw:
+                if (not isinstance(item, Mapping)
+                        or set(item) != {"action", "text"}
+                        or item["action"] not in DEMONSTRATION_ACTIONS[
+                            draft.domain]
+                        or not isinstance(item["text"], str)
+                        or not item["text"] or "\x00" in item["text"]
+                        or len(item["text"]) > DEMONSTRATION_TEXT_LIMIT):
+                    raise ValueError
+                steps.append(DemonstrationStepPreview(
+                    item["action"], item["text"]))
+            if len(steps) != draft.step_count:
+                raise ValueError
+            self._revealed_demonstration_ids.add(draft.draft_id)
+            return RevealedDemonstrationDraft(
+                draft.sequence, draft.domain, raw["state"], tuple(steps))
+        except Exception:
+            self._revealed_demonstration_ids.discard(draft.draft_id)
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "operation.demonstrations.reveal_failed"),
+                notice_level="error",
+            )
+            raise ValueError(self.state.notice) from None
+
+    def record_demonstration_step(
+            self, draft: DemonstrationDraftMetadata, *, action: str,
+            text: str) -> GUIState:
+        """Store one bounded description after explicit Reveal/Edit."""
+        if (not isinstance(draft, DemonstrationDraftMetadata)
+                or draft.draft_id not in self._revealed_demonstration_ids
+                or draft.state != "recording"
+                or action not in DEMONSTRATION_ACTIONS.get(draft.domain, ())
+                or not isinstance(text, str) or not text or "\x00" in text
+                or len(text) > DEMONSTRATION_TEXT_LIMIT):
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "operation.demonstrations.record_failed"),
+                notice_level="error",
+            )
+            raise ValueError(self.state.notice)
+        try:
+            if not self.actions.record_demonstration_step(
+                    draft.draft_id, action, text):
+                raise ValueError
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "settings.notice.demonstration_step_recorded"),
+                notice_level="success",
+            )
+        except Exception:
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "operation.demonstrations.record_failed"),
+                notice_level="error",
+            )
+        return self.state
+
+    def approve_demonstration_draft(
+            self, draft: DemonstrationDraftMetadata) -> GUIState:
+        """Explicitly approve a revealed recipe without execution authority."""
+        if (not isinstance(draft, DemonstrationDraftMetadata)
+                or draft.draft_id not in self._revealed_demonstration_ids
+                or draft.state != "recording" or draft.step_count < 1):
+            raise ValueError(self.localized(
+                "operation.demonstrations.approve_failed"))
+        try:
+            if not self.actions.approve_demonstration_draft(draft.draft_id):
+                raise ValueError
+            self._inspected_demonstration_ids.clear()
+            self._revealed_demonstration_ids.clear()
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "settings.notice.demonstration_approved"),
+                notice_level="success",
+            )
+        except Exception:
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "operation.demonstrations.approve_failed"),
+                notice_level="error",
+            )
+        return self.state
+
+    def cancel_demonstration_draft(
+            self, draft: DemonstrationDraftMetadata) -> GUIState:
+        """Explicitly roll back one inspected, unapproved recipe."""
+        if (not isinstance(draft, DemonstrationDraftMetadata)
+                or draft.draft_id not in self._inspected_demonstration_ids
+                or draft.state != "recording"):
+            raise ValueError(self.localized(
+                "operation.demonstrations.cancel_failed"))
+        try:
+            if not self.actions.cancel_demonstration_draft(draft.draft_id):
+                raise ValueError
+            self._inspected_demonstration_ids.clear()
+            self._revealed_demonstration_ids.clear()
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "settings.notice.demonstration_cancelled"),
+                notice_level="success",
+            )
+        except Exception:
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "operation.demonstrations.cancel_failed"),
+                notice_level="error",
+            )
+        return self.state
+
+    def delete_approved_demonstration_draft(
+            self, draft: DemonstrationDraftMetadata) -> GUIState:
+        """Explicitly remove one selected approved recipe and private text."""
+        if (not isinstance(draft, DemonstrationDraftMetadata)
+                or draft.draft_id not in self._inspected_demonstration_ids
+                or draft.state != "approved"):
+            raise ValueError(self.localized(
+                "operation.demonstrations.delete_failed"))
+        try:
+            if not self.actions.delete_approved_demonstration_draft(
+                    draft.draft_id):
+                raise ValueError
+            self._inspected_demonstration_ids.clear()
+            self._revealed_demonstration_ids.clear()
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "settings.notice.demonstration_deleted"),
+                notice_level="success",
+            )
+        except Exception:
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "operation.demonstrations.delete_failed"),
                 notice_level="error",
             )
         return self.state
@@ -3065,12 +3434,29 @@ if APPKIT_AVAILABLE:
                 self._l("settings.accessibility.voice_objects.inspector"),
                 self._l("settings.privacy.voice_objects.inspect.help"))
             privacy.addSubview_(inspect_voice_objects)
-            face_card = _card(NSMakeRect(0, 151, 758, 70))
+            privacy.addSubview_(_label(
+                self._l("settings.privacy.demonstrations"),
+                NSMakeRect(5, 204, 150, 20), size=12, weight="bold"))
+            privacy.addSubview_(_label(
+                self._l("settings.privacy.demonstrations.detail"),
+                NSMakeRect(155, 205, 355, 18), size=10, color=_SECONDARY))
+            author_demonstrations = _button(
+                self._l("settings.privacy.demonstrations.author"),
+                NSMakeRect(515, 197, 92, 30), self,
+                "authorDemonstrations:",
+                help_text=self._l(
+                    "settings.privacy.demonstrations.author.help"))
+            _accessible(
+                author_demonstrations,
+                self._l("settings.accessibility.demonstrations.inspector"),
+                self._l("settings.privacy.demonstrations.author.help"))
+            privacy.addSubview_(author_demonstrations)
+            face_card = _card(NSMakeRect(0, 132, 758, 60))
             face_card.addSubview_(_label(
                 self._l("settings.privacy.face"),
-                NSMakeRect(18, 45, 200, 20), size=13, weight="bold"))
+                NSMakeRect(18, 38, 200, 20), size=13, weight="bold"))
             picker = NSSegmentedControl.alloc().initWithFrame_(
-                NSMakeRect(18, 7, 720, 34))
+                NSMakeRect(18, 3, 720, 32))
             picker.setSegmentCount_(len(FACES))
             picker.setSegmentStyle_(NSSegmentStyleRounded)
             for index, face in enumerate(FACES):
@@ -3087,14 +3473,14 @@ if APPKIT_AVAILABLE:
             face_card.addSubview_(picker)
             privacy.addSubview_(face_card)
 
-            flight_card = _card(NSMakeRect(0, 81, 758, 60))
+            flight_card = _card(NSMakeRect(0, 70, 758, 54))
             flight_card.addSubview_(_label(
                 self._l("settings.privacy.flight"),
-                NSMakeRect(18, 34, 260, 22), size=13, weight="bold"))
+                NSMakeRect(18, 31, 260, 20), size=13, weight="bold"))
             flight_card.addSubview_(_label(
                 self._l("settings.privacy.flight.detail"),
-                NSMakeRect(18, 11, 535, 20), size=10, color=_SECONDARY))
-            flight = NSButton.alloc().initWithFrame_(NSMakeRect(625, 14, 110, 32))
+                NSMakeRect(18, 8, 535, 18), size=10, color=_SECONDARY))
+            flight = NSButton.alloc().initWithFrame_(NSMakeRect(625, 11, 110, 32))
             flight.setButtonType_(3)
             flight.setTitle_(self._l("settings.state.enabled"))
             flight.setTarget_(self)
@@ -3105,15 +3491,15 @@ if APPKIT_AVAILABLE:
                 self._l("settings.accessibility.flight.help"))
             flight_card.addSubview_(flight)
             privacy.addSubview_(flight_card)
-            acoustic_card = _card(NSMakeRect(0, 11, 758, 60))
+            acoustic_card = _card(NSMakeRect(0, 8, 758, 54))
             acoustic_card.addSubview_(_label(
                 self._l("settings.privacy.acoustic"),
-                NSMakeRect(18, 34, 280, 22), size=13, weight="bold"))
+                NSMakeRect(18, 31, 280, 20), size=13, weight="bold"))
             acoustic_card.addSubview_(_label(
                 self._l("settings.privacy.acoustic.detail"),
-                NSMakeRect(18, 11, 580, 20), size=10, color=_SECONDARY))
+                NSMakeRect(18, 8, 580, 18), size=10, color=_SECONDARY))
             acoustic = NSButton.alloc().initWithFrame_(
-                NSMakeRect(625, 14, 110, 32))
+                NSMakeRect(625, 11, 110, 32))
             acoustic.setButtonType_(3)
             acoustic.setTitle_(self._l("settings.state.enabled"))
             acoustic.setTarget_(self)
@@ -3126,7 +3512,7 @@ if APPKIT_AVAILABLE:
             privacy.addSubview_(acoustic_card)
             privacy_summary = _label(
                 self._l("settings.state.local_processing"),
-                NSMakeRect(5, 0, 580, 11),
+                NSMakeRect(615, 202, 123, 14),
                 size=11, weight="medium", color=_ACCENT)
             privacy.addSubview_(privacy_summary)
             diagnostics = _button(
@@ -3146,8 +3532,9 @@ if APPKIT_AVAILABLE:
                     "Modes": (),
                     "Personalize": tuple(personalize_key_views),
                     "Privacy": (
-                        voice_objects, inspect_voice_objects, picker, flight,
-                        acoustic, diagnostics),
+                        voice_objects, inspect_voice_objects,
+                        author_demonstrations, picker, flight, acoustic,
+                        diagnostics),
                 },
                 face_picker=picker,
                 flight_toggle=flight,
@@ -3155,6 +3542,7 @@ if APPKIT_AVAILABLE:
                 voice_object_commands_toggle=voice_objects,
                 voice_object_commands_status=voice_object_status,
                 voice_object_inspect_button=inspect_voice_objects,
+                demonstration_author_button=author_demonstrations,
                 privacy_summary=privacy_summary,
                 diagnostics_button=diagnostics,
             )
@@ -4091,6 +4479,193 @@ if APPKIT_AVAILABLE:
                 self.view_model.purge_terminal_voice_object_drafts()
             self.render()
 
+        def authorDemonstrations_(self, _sender: Any) -> None:
+            """Manually author descriptions; this method has no app-control API."""
+            try:
+                drafts = self.view_model.inspect_demonstration_drafts()
+            except ValueError:
+                self.render()
+                return
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(self._l(
+                "settings.dialog.demonstrations.title"))
+            alert.setInformativeText_(self._l(
+                "settings.dialog.demonstrations.message" if drafts else
+                "settings.dialog.demonstrations.empty"))
+            chooser = None
+            if drafts:
+                chooser = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                    NSMakeRect(0, 0, 540, 28), False)
+                chooser.addItemsWithTitles_([
+                    self._l(
+                        "settings.dialog.demonstrations.row",
+                        sequence=draft.sequence,
+                        domain=draft.domain.title(),
+                        state=draft.state.title(),
+                        steps=draft.step_count,
+                    )
+                    for draft in drafts
+                ])
+                _accessible(
+                    chooser,
+                    self._l(
+                        "settings.accessibility.demonstrations.chooser"),
+                    self._l("settings.dialog.demonstrations.message"))
+                alert.setAccessoryView_(chooser)
+            alert.addButtonWithTitle_(self._l(
+                "settings.action.create_draft"))
+            if drafts:
+                alert.addButtonWithTitle_(self._l(
+                    "settings.action.reveal_edit"))
+                alert.addButtonWithTitle_(self._l(
+                    "settings.action.cancel_draft"))
+                alert.addButtonWithTitle_(self._l(
+                    "settings.action.delete_approved"))
+            alert.addButtonWithTitle_(self._l("settings.action.done"))
+            response = alert.runModal()
+            if response == 1000:
+                create = NSAlert.alloc().init()
+                create.setMessageText_(self._l(
+                    "settings.dialog.demonstrations.new.title"))
+                create.setInformativeText_(self._l(
+                    "settings.dialog.demonstrations.new.message"))
+                domains = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                    NSMakeRect(0, 0, 360, 28), False)
+                domains.addItemsWithTitles_([
+                    domain.title() for domain in DEMONSTRATION_DOMAINS])
+                _accessible(
+                    domains,
+                    self._l("settings.accessibility.demonstrations.domain"),
+                    self._l("settings.dialog.demonstrations.new.message"))
+                create.setAccessoryView_(domains)
+                create.addButtonWithTitle_(self._l(
+                    "settings.action.create_draft"))
+                create.addButtonWithTitle_(self._l("settings.action.cancel"))
+                if create.runModal() == 1000:
+                    try:
+                        self.view_model.create_demonstration_draft(
+                            DEMONSTRATION_DOMAINS[
+                                domains.indexOfSelectedItem()])
+                    except ValueError:
+                        pass
+            elif drafts and response == 1001:
+                selected = drafts[chooser.indexOfSelectedItem()]
+                try:
+                    revealed = self.view_model.reveal_demonstration_draft(
+                        selected)
+                except ValueError:
+                    self.render()
+                    return
+                detail = NSAlert.alloc().init()
+                detail.setMessageText_(self._l(
+                    "settings.dialog.demonstrations.reveal.title",
+                    sequence=revealed.sequence,
+                    domain=revealed.domain.title()))
+                detail.setInformativeText_(self._l(
+                    "settings.dialog.demonstrations.reveal.message"))
+                accessory = NSView.alloc().initWithFrame_(
+                    NSMakeRect(0, 0, 560, 310))
+                preview_text = "\n".join(
+                    self._l(
+                        "settings.dialog.demonstrations.step",
+                        index=index,
+                        action=step.action.replace("_", " ").title(),
+                        text=step.text,
+                    )
+                    for index, step in enumerate(revealed.steps, 1)
+                ) or self._l(
+                    "settings.dialog.demonstrations.preview.empty")
+                scroll, preview = self._text_editor(
+                    NSMakeRect(0, 90, 560, 220), preview_text,
+                    label=self._l(
+                        "settings.accessibility.demonstrations.preview"),
+                    help_text=self._l(
+                        "settings.dialog.demonstrations.reveal.message"))
+                preview.setEditable_(False)
+                accessory.addSubview_(scroll)
+                action_picker = NSPopUpButton.alloc() \
+                    .initWithFrame_pullsDown_(
+                        NSMakeRect(0, 52, 220, 28), False)
+                actions = DEMONSTRATION_ACTIONS[revealed.domain]
+                action_picker.addItemsWithTitles_([
+                    action.replace("_", " ").title()
+                    for action in actions
+                ])
+                _accessible(
+                    action_picker,
+                    self._l("settings.accessibility.demonstrations.action"),
+                    self._l("settings.dialog.demonstrations.record.message"))
+                step_text = NSTextField.alloc().initWithFrame_(
+                    NSMakeRect(0, 12, 560, 28))
+                _accessible(
+                    step_text,
+                    self._l("settings.accessibility.demonstrations.text"),
+                    self._l("settings.dialog.demonstrations.record.message"))
+                if revealed.state == "recording":
+                    accessory.addSubview_(action_picker)
+                    accessory.addSubview_(step_text)
+                detail.setAccessoryView_(accessory)
+                if revealed.state == "recording":
+                    detail.addButtonWithTitle_(self._l(
+                        "settings.action.record_step"))
+                    if selected.step_count:
+                        detail.addButtonWithTitle_(self._l(
+                            "settings.action.approve"))
+                detail.addButtonWithTitle_(self._l("settings.action.done"))
+                detail_response = detail.runModal()
+                if revealed.state == "recording" and detail_response == 1000:
+                    try:
+                        self.view_model.record_demonstration_step(
+                            selected,
+                            action=actions[
+                                action_picker.indexOfSelectedItem()],
+                            text=str(step_text.stringValue()),
+                        )
+                    except ValueError:
+                        pass
+                elif (revealed.state == "recording"
+                      and selected.step_count
+                      and detail_response == 1001
+                      and self._confirm(
+                          self._l(
+                              "settings.dialog.demonstrations.approve.title"),
+                          self._l(
+                              "settings.dialog.demonstrations.approve.message",
+                              sequence=selected.sequence),
+                          self._l("settings.action.approve"))):
+                    try:
+                        self.view_model.approve_demonstration_draft(selected)
+                    except ValueError:
+                        pass
+            elif (drafts and response == 1002):
+                selected = drafts[chooser.indexOfSelectedItem()]
+                if (selected.state == "recording" and self._confirm(
+                        self._l(
+                            "settings.dialog.demonstrations.cancel.title"),
+                        self._l(
+                            "settings.dialog.demonstrations.cancel.message",
+                            sequence=selected.sequence),
+                        self._l("settings.action.cancel_draft"))):
+                    try:
+                        self.view_model.cancel_demonstration_draft(selected)
+                    except ValueError:
+                        pass
+            elif (drafts and response == 1003):
+                selected = drafts[chooser.indexOfSelectedItem()]
+                if (selected.state == "approved" and self._confirm(
+                        self._l(
+                            "settings.dialog.demonstrations.delete.title"),
+                        self._l(
+                            "settings.dialog.demonstrations.delete.message",
+                            sequence=selected.sequence),
+                        self._l("settings.action.delete_approved"))):
+                    try:
+                        self.view_model.delete_approved_demonstration_draft(
+                            selected)
+                    except ValueError:
+                        pass
+            self.render()
+
         def previewPointAndSpeak_(self, _sender: Any) -> None:
             """Collect a phrase, hide, then preview the newly focused app."""
 
@@ -4763,6 +5338,8 @@ __all__ = [
     "AppToneSetting",
     "CorrectionSetting",
     "DegradedIssue",
+    "DemonstrationDraftMetadata",
+    "DemonstrationStepPreview",
     "FACES",
     "GUIActions",
     "GUIState",
@@ -4773,6 +5350,7 @@ __all__ = [
     "PointAndSpeakPreview",
     "PointAndSpeakReceipt",
     "ResultInspection",
+    "RevealedDemonstrationDraft",
     "RevealedVoiceDraft",
     "SECTIONS",
     "SETTINGS_PANES",

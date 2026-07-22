@@ -437,10 +437,16 @@ class ModelWallet:
             ),
         ))
 
+    def eligible_profiles(
+            self, request: ModelRequest,
+    ) -> tuple[ProviderProfile, ...]:
+        """Return every eligible profile in deterministic, non-executing order."""
+        return tuple(provider.profile for provider, _evidence in self._eligible(request))
+
     def select(self, request: ModelRequest) -> ProviderProfile | None:
         """Select exactly one provider without starting a model attempt."""
-        eligible = self._eligible(request)
-        return eligible[0][0].profile if eligible else None
+        eligible = self.eligible_profiles(request)
+        return eligible[0] if eligible else None
 
     def execute(self, request: ModelRequest) -> WalletReceipt:
         """Run sequentially; only explicit failure receipts permit failover."""

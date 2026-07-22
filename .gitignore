@@ -3,6 +3,8 @@ transcripts.jsonl
 learned.json
 voice_inbox.json
 .voice_inbox.json.*.tmp
+demonstrations.json
+.demonstrations.json.*.tmp
 snippets.json
 tones.json
 preferences.json

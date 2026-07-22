@@ -70,9 +70,10 @@ function Test-Endpoint([string]$Uri) {
 $Required = @(
     "dictate.py", "dictate.py.lock", "parrot_core.py", "voice_compiler.py",
     "insertion_integrity.py", "personal_regression.py",
+    "cleanup_circuit_breaker.py",
     "acoustic_keyword_memory.py", "acoustic_time_machine.py",
     "voice_objects.py", "voice_object_command_parser.py", "voice_inbox.py",
-    "voice_object_inbox_bridge.py",
+    "voice_object_inbox_bridge.py", "demonstration_drafts.py",
     "point_and_speak_resolver.py", "macos_point_and_speak_snapshot.py",
     "whisper_face_gui.py",
     "snippets.template.json", "tones.template.json",
@@ -239,7 +240,7 @@ foreach ($DestinationName in $PrivateTemplates.Keys) {
     }
     & icacls $Destination /inheritance:r /grant:r "${env:USERNAME}:(F)" /Q | Out-Null
 }
-foreach ($PrivateStateName in @("voice_inbox.json")) {
+foreach ($PrivateStateName in @("voice_inbox.json", "demonstrations.json")) {
     $PrivateState = Join-Path $Repo $PrivateStateName
     if (Test-Path $PrivateState) {
         & icacls $PrivateState /inheritance:r /grant:r "${env:USERNAME}:(F)" /Q | Out-Null
