@@ -694,9 +694,18 @@ _RISK_MEASUREMENT_UNIT = (
     r"bytes?|kilobytes?|megabytes?|gigabytes?|terabytes?|"
     r"percent(?:age)?|degrees?(?:\s+(?:celsius|fahrenheit))?)"
 )
+# Keep abbreviations closed and omit ambiguous single-token forms such as
+# ``m``, ``s``, ``in``, and ``ft``.  The boundary below also prevents a known
+# abbreviation from matching the prefix of an identifier such as ``5mlpack``.
+_RISK_MEASUREMENT_ABBREVIATION = (
+    r"(?:mcg|[µμ]g|ug|mg|kg|oz|lbs?|"
+    r"ml|cl|dl|mm|cm|km|ms|secs?|mins?|hrs?|"
+    r"kb|mb|gb|tb|°[cf])"
+)
 _RISK_NUMBER_RE = re.compile(
     rf"(?<![\w@])(?:[+-]\s*)?\d[\d,]*(?:\.\d+)?%?"
-    rf"(?:\s+{_RISK_MEASUREMENT_UNIT})?(?!\w)",
+    rf"(?:(?:\s+{_RISK_MEASUREMENT_UNIT})|"
+    rf"(?:\s*{_RISK_MEASUREMENT_ABBREVIATION}))?(?!\w)",
     re.I,
 )
 _SPOKEN_CARDINAL = (
@@ -716,7 +725,8 @@ _RISK_SPOKEN_NUMBER_RE = re.compile(
     rf"\b(?:(?:minus|negative|plus|positive)[-\s]+)?"
     rf"(?:{_SPOKEN_CARDINAL}(?:[-\s]+(?:and\s+)?{_SPOKEN_CARDINAL})*"
     rf"(?:[-\s]+{_SPOKEN_ORDINAL})?|{_SPOKEN_ORDINAL})"
-    rf"(?:\s+{_RISK_MEASUREMENT_UNIT})?\b",
+    rf"(?:\s+(?:{_RISK_MEASUREMENT_UNIT}|"
+    rf"{_RISK_MEASUREMENT_ABBREVIATION}))?\b",
     re.I,
 )
 _RISK_RECIPIENT_RE = re.compile(

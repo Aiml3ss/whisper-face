@@ -1,4 +1,5 @@
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -26,14 +27,23 @@ class PublicScorecardTests(unittest.TestCase):
                 "drop_to_target",
             ],
         )
-        self.assertEqual(first["totals"], {
-            "suites": 5,
-            "cases": 63,
-            "passed": 63,
-            "failed": 0,
-            "critical_failures": 0,
-            "all_passed": True,
-        })
+        self.assertEqual(first["totals"]["suites"], len(first["suites"]))
+        self.assertEqual(first["totals"]["failed"], 0)
+        self.assertEqual(first["totals"]["critical_failures"], 0)
+        self.assertTrue(first["totals"]["all_passed"])
+
+    def test_roadmap_scorecard_total_matches_generated_evidence(self):
+        roadmap = (ROOT / "docs" / "development-65.md").read_text(
+            encoding="utf-8")
+        match = re.search(
+            r"\| 44 \|.*?transcript-free (\d+)/(\d+) report", roadmap)
+        self.assertIsNotNone(match)
+
+        totals = build_public_scorecard()["totals"]
+        self.assertEqual(
+            tuple(map(int, match.groups())),
+            (totals["passed"], totals["cases"]),
+        )
 
     def test_report_schema_is_closed_and_physical_claims_are_false(self):
         report = build_public_scorecard()
