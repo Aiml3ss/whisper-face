@@ -51,6 +51,8 @@ uv run tests/test_point_and_speak_resolver.py
 uv run tests/test_drop_to_target.py
 uv run tests/test_voice_objects.py
 uv run tests/test_voice_inbox.py
+uv run tests/test_competitor_benchmark.py
+uv run tests/test_public_scorecard.py
 uv run tests/test_personal_regression.py
 uv run tests/test_whisper_face_gui.py
 uv run --locked --script dictate.py --native-gui-smoke-test

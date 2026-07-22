@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "protocol_id": "voice-input-neutral-v1",
+  "evidence_scope": "neutral-user-task-protocol",
+  "product_results_included": false,
+  "measurement_fields": [
+    "completed",
+    "error_count",
+    "latency_ms",
+    "interaction_count"
+  ],
+  "measurement_definitions": {
+    "completed": "True only when the task completion rule is met before the observer ends the attempt; otherwise false.",
+    "error_count": "Count discrete wrong, missing, duplicated, or blocking outcomes against the task completion rule; an incomplete measured task must record at least one error.",
+    "latency_ms": "Monotonic wall-clock milliseconds from the observer's first user action in the written procedure until its completion rule is met or the measured attempt ends.",
+    "interaction_count": "Count intentional clicks, taps, or key gestures in the documented primary flow; permission approvals count, spoken words do not."
+  },
+  "tasks": [
+    {
+      "schema_version": 1,
+      "task_id": "fresh-install",
+      "category": "setup",
+      "title": "Install to first successful dictation",
+      "procedure": "On a supported clean machine, follow only the product's public primary installation path, grant requested permissions, and complete one dictation.",
+      "completion_rule": "Complete when intended text first appears in the target application without undocumented setup steps."
+    },
+    {
+      "schema_version": 1,
+      "task_id": "ready-from-launch",
+      "category": "readiness",
+      "title": "Reach ready state",
+      "procedure": "Launch the installed product and reach its documented ready-to-dictate state.",
+      "completion_rule": "Complete when the product visibly indicates that dictation can begin."
+    },
+    {
+      "schema_version": 1,
+      "task_id": "short-message",
+      "category": "dictation",
+      "title": "Enter a short message",
+      "procedure": "Dictate: Please send the revised agenda before lunch.",
+      "completion_rule": "Complete when the final target contains the intended sentence with equivalent capitalization and punctuation."
+    },
+    {
+      "schema_version": 1,
+      "task_id": "numbers-and-units",
+      "category": "dictation",
+      "title": "Enter numbers and units",
+      "procedure": "Dictate: Set the sample rate to 48 kilohertz and the buffer to 256 frames.",
+      "completion_rule": "Complete when both quantities, units, and their associations are correct in the final target."
+    },
+    {
+      "schema_version": 1,
+      "task_id": "spoken-correction",
+      "category": "correction",
+      "title": "Correct one dictated word",
+      "procedure": "Dictate a short sentence, then use the product's documented correction flow to replace one incorrect word.",
+      "completion_rule": "Complete when the intended replacement appears once and the surrounding sentence remains intact."
+    },
+    {
+      "schema_version": 1,
+      "task_id": "two-sentences",
+      "category": "dictation",
+      "title": "Enter two sentences",
+      "procedure": "Dictate: The prototype is ready for review. Please add comments by Friday.",
+      "completion_rule": "Complete when both intended sentences appear in order without duplicated or missing words."
+    }
+  ]
+}

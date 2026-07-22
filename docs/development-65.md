@@ -15,7 +15,7 @@ explicit Mac-first sequencing rather than dropping the item.
 | 5 | Result inspector for alternatives, anchors, edits, context, timing | complete | Transcript-free runtime projection and Results UI expose counts, anchors, canonical edit categories, context influence, confidence, and timing with privacy regressions |
 | 6 | VoiceOver, keyboard, contrast, reduced motion, localization readiness | complete | VoiceOver metadata, system colors, Reduce Motion, native Tab loops, key equivalents, Apple language fallback, and semantic English catalog ownership cover Overview, Settings, onboarding, Results, Models, Diagnostics, degraded/enum/accessibility copy, validation, operation failures, and verification states with a bounded inventory and native AppKit gate |
 | 7 | Clear non-blocking degraded-mode UX | complete | Blocking microphone/permission/service failures route to Action Needed while a failed fallback remains a non-blocking warning; GUI and AudioPool failure tests cover both |
-| 8 | Competitor task-based UX evaluation | queued | Reproducible task protocol and published measured results |
+| 8 | Competitor task-based UX evaluation | active | A neutral six-task protocol and offline evaluator strictly separate measured, unavailable, and claimed-only observations without rankings; no cross-product physical run has been recorded |
 | 9 | Representative speech/semantic-safety benchmark corpus | complete | `benchmarks/representative_dictation_cases.json` has 19 synthetic cases covering every declared risk dimension; acoustic labels remain explicit physical-recording requirements |
 | 10 | Correction Burden, zero-edit, routing, and latency dashboard | complete | Transcript-free `performance_lab.py evaluate` reports p50/p95/p99, burden, zero-edit, routing, coverage, and delivery with strict schema tests |
 | 11 | Apple Silicon and Windows hardware matrix | queued | Reproducible runs on representative real hardware |
@@ -51,10 +51,10 @@ explicit Mac-first sequencing rather than dropping the item.
 | 41 | Risk sonification/haptic feedback | queued | Isolated prototype and usability/error-rate evidence |
 | 42 | Privacy promise, threat model, security policy, disclosure route | complete | `PRIVACY.md`, `SECURITY.md`, and threat model document current local/LAN/release boundaries; GitHub private vulnerability reporting is enabled and tested live |
 | 43 | Trademark clearance and optional patent/prior-art decision | queued-external | Owner/counsel decision recorded without claiming legal advice |
-| 44 | Public reproducible benchmarks and model scorecard | active | CI artifacts and published methodology/results |
+| 44 | Public reproducible benchmarks and model scorecard | active | `public_scorecard.py` deterministically aggregates five checked-in synthetic suites into a transcript-free 62/62 report with zero critical failures and explicit zero physical apps/audio/model runs; physical results remain outstanding |
 | 45 | Architecture/interoperability/SDK/contributor/upgrade/rollback docs | active | Versioned docs tested against release paths |
 | 46 | Reproducible demonstration corpora | complete | Public synthetic corpus, deterministic compiler stress replay, privacy-safe observation schema, CLI instructions, and CI regressions are committed |
-| 47 | Honest competitor comparison pages | queued | Dated, sourced, reproducible task results |
+| 47 | Honest competitor comparison pages | active | The dated official-source comparison documents setup, privacy, pricing, and unknowns for Whisper Face, Wispr Flow, Superwhisper, MacWhisper, OpenWhispr, and Handy; it explicitly publishes no winner until reproducible physical task results exist |
 | 48 | Independently assignable GitHub implementation issues | complete | Vertical-slice issues [#6](https://github.com/Aiml3ss/whispering-parrot/issues/6) through [#19](https://github.com/Aiml3ss/whispering-parrot/issues/19) link the roadmap to acceptance criteria and dependencies |
 | 49 | Sponsors and voluntary Supporter experiment | queued | Public tiers/benefits with no core feature lock |
 | 50 | Concierge setup/migration offering | queued | Documented scope, privacy process, fulfillment path |
