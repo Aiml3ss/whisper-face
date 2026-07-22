@@ -119,11 +119,12 @@ are never Supporter-only features.
   current stack in a public accuracy/latency comparison. Rolling and
   speculative decodes now retain exact capture-sample bounds, including real
   silence gaps; malformed or overlapping timing evidence still fails closed.
-  A provider-neutral disposable-process boundary now supplies the hard timeout
-  and transcript-free result contract required by a future independent ASR
-  verifier; no live verifier model is enabled yet.
+  A provider-neutral disposable-process boundary and pinned local Whisper Tiny
+  adapter now supply hard timeouts and transcript-free results. The adapter
+  stays unwired until its cold-start latency and accuracy justify activation.
   After a successful ordinary Mac dictation, a Ping advises you to review
   consequence-sensitive text; it does not block insertion or verify the words.
+  The Results window repeats that guidance without exposing transcript text.
 - **Counterfactual Context Firewall** — every finalized, insertion-bound
   contextual/personalized compile is compared with a context-free shadow
   compile. Protected influence is quarantined in a transcript-free receipt;
@@ -411,6 +412,8 @@ local foundations: neither claims a shipped cross-process SDK, physical app
 adapter, anonymous user population, telemetry backend, or network service.
 See [architecture and interoperability](docs/architecture-and-interop.md) for
 the current process boundaries and the precise in-process protocol surface.
+A canonical, size-bounded JSON codec can round-trip those messages, but no
+socket, server, discovery layer, or public transport is shipped.
 
 `delayed_cleanup_merge.py` provides a pure three-way merge for cleanup that
 finishes after insertion. It proposes changes only where the original span and
