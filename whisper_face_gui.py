@@ -64,6 +64,123 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "onboarding.action.continue": "Continue Setup",
         "onboarding.action.help": "Open the next incomplete first-run setup step.",
         "onboarding.complete": "Setup is complete — Whisper Face is ready.",
+        "results.title": "Last Result",
+        "results.subtitle": "Inspectable evidence from this session — no transcript history.",
+        "results.summary.empty": "No dictation yet",
+        "results.summary.words": "{words} words",
+        "results.summary.timed": "{words} words in {seconds}s",
+        "results.engine.waiting": "Waiting for a result",
+        "results.engine.session": "{engine} · session-only evidence",
+        "results.mode.capture": "Capture",
+        "results.evidence.stable": "Stable prefix",
+        "results.evidence.anchors": "Protected anchors",
+        "results.evidence.decisions": "Compiler decisions",
+        "results.evidence.alternatives": "Alternatives",
+        "results.evidence.cleanup": "Cleanup edits",
+        "results.evidence.proof": "Proof review",
+        "results.context.unreported": "Context influence not reported by runtime",
+        "results.context.summary": "Context: {influence}",
+        "results.consequence.summary": "Consequence: {route} · {high} high-risk · {uncertain} uncertain{risks} · Re-listen: {relisten}",
+        "results.consequence.risk": "{category} {count}",
+        "results.consequence.risks": " · {risks}",
+        "results.route.standard": "Standard",
+        "results.route.protected": "Protected",
+        "results.route.review": "Review",
+        "results.route.verified": "Verified",
+        "results.route.unavailable": "Unavailable",
+        "results.risk.name": "name",
+        "results.risk.number": "number",
+        "results.risk.currency": "currency",
+        "results.risk.date": "date",
+        "results.risk.time": "time",
+        "results.risk.recipient": "recipient",
+        "results.risk.contact": "contact",
+        "results.risk.url": "URL",
+        "results.risk.path": "path",
+        "results.risk.command": "command",
+        "results.risk.action": "action",
+        "results.relisten.not-needed": "not needed",
+        "results.relisten.skipped": "skipped",
+        "results.relisten.confirmed": "confirmed",
+        "results.relisten.contradicted": "contradicted",
+        "results.relisten.timed-out": "timed out",
+        "results.relisten.inconclusive": "inconclusive",
+        "results.relisten.mixed": "mixed",
+        "results.relisten.unavailable": "unavailable",
+        "results.privacy": "Whisper Face exposes decision counts, not private transcript text, in this settings window.",
+        "results.value.words": "{count} words",
+        "results.value.confidence": " · {confidence} confidence",
+        "results.value.none_reported": "None reported",
+        "results.value.not_reported": "not reported",
+        "results.value.proof": "{accepted} accepted · {rejected} rejected",
+        "results.firewall.unavailable": "Context safety: no finalized shadow check is available yet.",
+        "results.firewall.no_effect": "Context safety: the shadow check found no context-driven change.",
+        "results.firewall.quarantine.one": "Context safety: the shadow check flagged 1 protected influence for quarantine review.",
+        "results.firewall.quarantine.many": "Context safety: the shadow check flagged {count} protected influences for quarantine review.",
+        "results.firewall.promotion.one": "Context safety: the shadow check found 1 non-protected influence for later evaluation.",
+        "results.firewall.promotion.many": "Context safety: the shadow check found {count} non-protected influences for later evaluation.",
+        "results.accessibility.summary": "Last result summary",
+        "results.accessibility.engine": "Last result engine",
+        "results.accessibility.mode": "Last result mode",
+        "results.accessibility.stable": "Stable prefix words",
+        "results.accessibility.anchors": "Protected anchors",
+        "results.accessibility.decisions": "Compiler decisions",
+        "results.accessibility.cleanup": "Cleanup edits",
+        "results.accessibility.proof": "Proof review",
+        "results.accessibility.alternatives": "Alternatives considered",
+        "results.accessibility.context": "Context influence",
+        "results.accessibility.firewall": "Context safety shadow receipt",
+        "results.accessibility.consequence": "Consequence decision receipt",
+        "models.title": "Your local voice stack",
+        "models.subtitle": "Fast recognition, accurate fallback, and private cleanup.",
+        "models.waiting": "Waiting for model status",
+        "models.unknown": "Unknown",
+        "models.waiting.detail": "Open this window after startup completes",
+        "models.guidance": "Models prepare locally and can finish in the background.",
+        "models.accessibility.name": "Model name",
+        "models.accessibility.detail": "{name} role and detail",
+        "models.accessibility.status": "{name} status",
+        "models.accessibility.guidance": "Model guidance",
+        "diagnostics.title": "Diagnostics",
+        "diagnostics.subtitle": "A quick health check when something does not feel right.",
+        "diagnostics.service": "Service",
+        "diagnostics.microphone": "Microphone",
+        "diagnostics.accessibility": "Accessibility",
+        "diagnostics.regression": "Personal Regression Lab",
+        "diagnostics.motion": "Motion",
+        "diagnostics.build": "Build",
+        "diagnostics.unknown": "Unknown",
+        "diagnostics.action.log": "Open Log",
+        "diagnostics.action.verify": "Run Verification",
+        "diagnostics.action.licenses": "License Notices",
+        "diagnostics.action.source": "Exact Source",
+        "diagnostics.verification.not_run": "Not run",
+        "diagnostics.ready": "Everything looks ready.",
+        "diagnostics.license": "AGPL-3.0-only · no warranty · corresponding source available",
+        "diagnostics.regression.cases": "{count} cases",
+        "diagnostics.regression.quarantined": " · {count} quarantined",
+        "diagnostics.motion.reduced": "Reduced motion",
+        "diagnostics.motion.standard": "Standard motion",
+        "diagnostics.issue": "{title}: {detail}",
+        "diagnostics.accessibility.service": "Service status",
+        "diagnostics.accessibility.microphone": "Microphone status",
+        "diagnostics.accessibility.permission": "Accessibility permission status",
+        "diagnostics.accessibility.regression": "Personal Regression Lab status",
+        "diagnostics.accessibility.motion": "Motion setting",
+        "diagnostics.accessibility.build": "Build version",
+        "diagnostics.accessibility.verification": "Verification result",
+        "diagnostics.accessibility.guidance": "Diagnostic guidance",
+        "diagnostics.accessibility.notice": "Whisper Face notice",
+        "issue.service.title": "The local service is not ready",
+        "issue.service.detail": "Run Verification for a repair path. Your settings and personal data stay on this Mac.",
+        "issue.microphone.title": "Microphone permission is needed",
+        "issue.microphone.detail": "Open System Settings › Privacy & Security › Microphone and enable Whisper Face. Other settings remain available.",
+        "issue.accessibility.title": "Safe insertion needs Accessibility permission",
+        "issue.accessibility.detail": "Open System Settings › Privacy & Security › Accessibility. Until then, recoverable text stays in the Voice Outbox.",
+        "issue.models.title": "Local recognition models are still unavailable",
+        "issue.models.detail": "Keep Whisper Face open while models finish preparing, then run Verification if their status does not change.",
+        "issue.fallback.title": "A fallback model needs attention",
+        "issue.fallback.detail": "Dictation can continue with a ready engine. Check: {models}.",
         "settings.title": "Settings",
         "settings.subtitle": "Modes, personal language, appearance, and privacy in one place.",
         "settings.pane.modes": "Modes",
@@ -257,6 +374,9 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "settings.dialog.vocabulary.terms",
             "settings.dialog.vocabulary.bans",
             "settings.dialog.correction.chooser.label",
+            "results.accessibility.firewall",
+            "models.accessibility.guidance",
+            "diagnostics.accessibility.verification",
         ),
         onboarding_steps=(
             "permissions", "hotkey", "models", "first_dictation"),
@@ -383,6 +503,8 @@ class ResultInspection:
     protected_anchor_count: int = 0
     alternatives_considered: int = 0
     context_influence: str = "Context influence not reported by runtime"
+    context_firewall_summary: str = (
+        "Context safety: no finalized shadow check is available yet.")
     consequence_summary: str = "Consequence: Standard · no protected spans"
 
 
@@ -610,31 +732,31 @@ def _build_degraded_issues(
     microphone_status: str,
     accessibility_status: str,
     models: Sequence[ModelStatus],
+    locale: str = "en",
 ) -> tuple[DegradedIssue, ...]:
+    def copy(key: str, **values: Any) -> str:
+        return localized_string(key, locale=locale, **values)
+
     issues: list[DegradedIssue] = []
     if _status_contains(service_status, (
             "failed", "stopped", "offline", "unavailable")):
         issues.append(DegradedIssue(
-            "service", "The local service is not ready",
-            "Run Verification for a repair path. Your settings and personal "
-            "data stay on this Mac."))
+            "service", copy("issue.service.title"),
+            copy("issue.service.detail")))
     if _status_contains(microphone_status, (
             "needs attention", "denied", "missing", "failed", "unavailable")):
         issues.append(DegradedIssue(
-            "microphone", "Microphone permission is needed",
-            "Open System Settings › Privacy & Security › Microphone and enable "
-            "Whisper Face. Other settings remain available."))
+            "microphone", copy("issue.microphone.title"),
+            copy("issue.microphone.detail")))
     if _status_contains(accessibility_status, (
             "needs attention", "denied", "not granted", "failed", "unavailable")):
         issues.append(DegradedIssue(
-            "accessibility", "Safe insertion needs Accessibility permission",
-            "Open System Settings › Privacy & Security › Accessibility. Until "
-            "then, recoverable text stays in the Voice Outbox."))
+            "accessibility", copy("issue.accessibility.title"),
+            copy("issue.accessibility.detail")))
     if models and not _models_ready(models):
         issues.append(DegradedIssue(
-            "models", "Local recognition models are still unavailable",
-            "Keep Whisper Face open while models finish preparing, then run "
-            "Verification if their status does not change.",
+            "models", copy("issue.models.title"),
+            copy("issue.models.detail"),
             route="Models",
         ))
     elif models:
@@ -642,12 +764,42 @@ def _build_degraded_issues(
             model.status, ("failed", "missing", "unavailable"))]
         if unavailable:
             issues.append(DegradedIssue(
-                "fallback", "A fallback model needs attention",
-                f"Dictation can continue with a ready engine. Check: "
-                f"{', '.join(unavailable)}.",
+                "fallback", copy("issue.fallback.title"),
+                copy("issue.fallback.detail", models=", ".join(unavailable)),
                 route="Models", severity="warning",
             ))
     return tuple(issues)
+
+
+def _context_firewall_summary(
+    source: Mapping[str, Any], *, available: bool, locale: str,
+) -> str:
+    """Translate only allowlisted aggregate receipt fields into plain copy."""
+
+    receipt = source.get("last_context_firewall")
+    if not available or not isinstance(receipt, Mapping) \
+            or receipt.get("mode") != "shadow-only":
+        return localized_string(
+            "results.firewall.unavailable", locale=locale)
+    disposition = str(receipt.get("disposition", "")).strip().casefold()
+    if disposition == "no-effect":
+        return localized_string("results.firewall.no_effect", locale=locale)
+    if disposition == "quarantine":
+        count = min(1000, max(
+            _nonnegative_int(receipt.get("quarantined")),
+            _nonnegative_int(receipt.get("protected_influences")),
+            1,
+        ))
+        key = ("results.firewall.quarantine.one" if count == 1
+               else "results.firewall.quarantine.many")
+        return localized_string(key, locale=locale, count=count)
+    if disposition == "promotion-candidate":
+        count = min(1000, max(
+            _nonnegative_int(receipt.get("promotion_candidates")), 1))
+        key = ("results.firewall.promotion.one" if count == 1
+               else "results.firewall.promotion.many")
+        return localized_string(key, locale=locale, count=count)
+    return localized_string("results.firewall.unavailable", locale=locale)
 
 
 def _build_result_inspection(
@@ -656,7 +808,11 @@ def _build_result_inspection(
     active_engine: str,
     latency_ms: float | None,
     word_count: int | None,
+    locale: str = "en",
 ) -> ResultInspection:
+    def copy(key: str, **values: Any) -> str:
+        return localized_string(key, locale=locale, **values)
+
     def sequence_items(key: str) -> tuple[str, ...]:
         value = source.get(key)
         if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
@@ -666,12 +822,14 @@ def _build_result_inspection(
 
     available = word_count is not None and word_count > 0
     if latency_ms is not None:
-        summary = f"{word_count or 0} words in {latency_ms / 1000:.2f}s"
+        summary = copy(
+            "results.summary.timed", words=word_count or 0,
+            seconds=f"{latency_ms / 1000:.2f}")
         available = True
     elif available:
-        summary = f"{word_count} words"
+        summary = copy("results.summary.words", words=word_count)
     else:
-        summary = "No dictation yet"
+        summary = copy("results.summary.empty")
     cleanup_edits = sequence_items("last_cleanup_edits")
     explicit_accepted = source.get("last_proof_edits_accepted")
     proof_edits_accepted = (
@@ -701,22 +859,24 @@ def _build_result_inspection(
         consequence_source.get("high_risks")))
     uncertain_risks = min(1000, _nonnegative_int(
         consequence_source.get("uncertain_risks")))
-    consequence_parts = [
-        f"Consequence: {route.replace('-', ' ').title()}",
-        f"{high_risks} high-risk",
-        f"{uncertain_risks} uncertain",
-    ]
+    risk_summary = ""
     if risk_counts:
-        consequence_parts.append(
-            ", ".join(f"{category} {count}"
-                      for category, count in risk_counts))
-    consequence_parts.append(
-        f"Re-listen: {relisten.replace('-', ' ')}")
+        risk_summary = copy(
+            "results.consequence.risks",
+            risks=", ".join(copy(
+                "results.consequence.risk",
+                category=copy(f"results.risk.{category}"), count=count)
+                for category, count in risk_counts),
+        )
+    raw_mode = _clean_text(source.get("last_mode"), "capture")
+    mode_key = raw_mode.strip().casefold()
+    mode = (copy(f"settings.mode.{mode_key}.name")
+            if mode_key in MODE_GUIDE else raw_mode)
     return ResultInspection(
         available=available,
         summary=summary,
-        engine=active_engine if available else "Waiting for a result",
-        mode=_clean_text(source.get("last_mode"), "Capture"),
+        engine=active_engine if available else copy("results.engine.waiting"),
+        mode=mode,
         stable_prefix_words=_nonnegative_int(
             source.get("last_stable_prefix_words")),
         compiler_decisions=_nonnegative_int(
@@ -735,8 +895,17 @@ def _build_result_inspection(
             source.get("last_alternatives_considered")),
         context_influence=_clean_text(
             source.get("last_context_influence"),
-            "Context influence not reported by runtime"),
-        consequence_summary=" · ".join(consequence_parts),
+            copy("results.context.unreported")),
+        context_firewall_summary=_context_firewall_summary(
+            source, available=available, locale=locale),
+        consequence_summary=copy(
+            "results.consequence.summary",
+            route=copy(f"results.route.{route}"),
+            high=high_risks,
+            uncertain=uncertain_risks,
+            risks=risk_summary,
+            relisten=copy(f"results.relisten.{relisten}"),
+        ),
     )
 
 
@@ -829,6 +998,7 @@ def normalize_snapshot(
         microphone_status=microphone_status,
         accessibility_status=accessibility_status,
         models=models,
+        locale=locale,
     )
     phase, status_title, status_detail = _status_presentation(
         capture_state=capture_state,
@@ -878,6 +1048,7 @@ def normalize_snapshot(
             active_engine=active_engine,
             latency_ms=normalized_latency,
             word_count=last_word_count,
+            locale=locale,
         ),
         verification=verification,
         notice=notice,
@@ -1612,21 +1783,21 @@ if APPKIT_AVAILABLE:
 
         def _build_results(self, page: Any) -> None:
             page.addSubview_(_label(
-                "Last Result", NSMakeRect(4, 351, 500, 32),
+                self._l("results.title"), NSMakeRect(4, 351, 500, 32),
                 size=22, weight="bold"))
             page.addSubview_(_label(
-                "Inspectable evidence from this session — no transcript history.",
+                self._l("results.subtitle"),
                 NSMakeRect(5, 326, 690, 20), size=13, color=_SECONDARY))
 
             summary_card = _card(NSMakeRect(0, 213, 758, 92))
             result_summary = _label(
-                "No dictation yet", NSMakeRect(20, 48, 430, 27),
+                self._l("results.summary.empty"), NSMakeRect(20, 48, 430, 27),
                 size=18, weight="bold")
             result_engine = _label(
-                "Waiting for a result", NSMakeRect(20, 21, 500, 20),
+                self._l("results.engine.waiting"), NSMakeRect(20, 21, 500, 20),
                 size=12, color=_SECONDARY)
             result_mode = _label(
-                "Capture", NSMakeRect(620, 42, 110, 22),
+                self._l("results.mode.capture"), NSMakeRect(620, 42, 110, 22),
                 size=12, weight="medium", color=_ACCENT)
             summary_card.addSubview_(result_summary)
             summary_card.addSubview_(result_engine)
@@ -1635,43 +1806,46 @@ if APPKIT_AVAILABLE:
 
             evidence_card = _card(NSMakeRect(0, 72, 758, 125))
             evidence_keys = (
-                ("Stable prefix", "result_stable"),
-                ("Protected anchors", "result_anchors"),
-                ("Compiler decisions", "result_decisions"),
-                ("Alternatives", "result_alternatives"),
-                ("Cleanup edits", "result_cleanup"),
-                ("Proof review", "result_proof"),
+                ("results.evidence.stable", "result_stable"),
+                ("results.evidence.anchors", "result_anchors"),
+                ("results.evidence.decisions", "result_decisions"),
+                ("results.evidence.alternatives", "result_alternatives"),
+                ("results.evidence.cleanup", "result_cleanup"),
+                ("results.evidence.proof", "result_proof"),
             )
-            for index, (heading, key) in enumerate(evidence_keys):
+            for index, (heading_key, key) in enumerate(evidence_keys):
                 x = 20 + (index % 2) * 370
                 y = 91 - (index // 2) * 35
                 evidence_card.addSubview_(_label(
-                    heading, NSMakeRect(x, y, 140, 18),
+                    self._l(heading_key), NSMakeRect(x, y, 140, 18),
                     size=11, color=_SECONDARY))
                 value = _label("—", NSMakeRect(x + 145, y, 190, 18),
                                size=12, weight="medium")
                 evidence_card.addSubview_(value)
                 self.dynamic[key] = value
             page.addSubview_(evidence_card)
+            firewall = _label(
+                self._l("results.firewall.unavailable"),
+                NSMakeRect(5, 51, 740, 17),
+                size=11, weight="medium", color=_ACCENT)
+            page.addSubview_(firewall)
             context = _label(
-                "Context influence not reported by runtime",
-                NSMakeRect(5, 44, 740, 20),
-                size=12, color=_SECONDARY)
+                self._l("results.context.unreported"),
+                NSMakeRect(5, 34, 740, 17),
+                size=11, color=_SECONDARY)
             page.addSubview_(context)
             consequence = _label(
-                "Consequence: Standard · no protected spans",
-                NSMakeRect(5, 22, 740, 20),
-                size=11, color=_SECONDARY)
+                "", NSMakeRect(5, 17, 740, 17), size=10, color=_SECONDARY)
             page.addSubview_(consequence)
             page.addSubview_(_label(
-                "Whisper Face exposes decision counts, not private transcript text, "
-                "in this settings window.",
-                NSMakeRect(5, 2, 740, 18), size=10, color=_SECONDARY))
+                self._l("results.privacy"),
+                NSMakeRect(5, 1, 740, 16), size=9, color=_SECONDARY))
             self.dynamic.update(
                 result_summary=result_summary,
                 result_engine=result_engine,
                 result_mode=result_mode,
                 result_context=context,
+                result_firewall=firewall,
                 result_consequence=consequence,
             )
 
@@ -1836,20 +2010,20 @@ if APPKIT_AVAILABLE:
             )
 
         def _build_models(self, page: Any) -> None:
-            page.addSubview_(_label("Your local voice stack",
+            page.addSubview_(_label(self._l("models.title"),
                                     NSMakeRect(4, 351, 500, 32),
                                     size=22, weight="bold"))
             page.addSubview_(_label(
-                "Fast recognition, accurate fallback, and private cleanup.",
+                self._l("models.subtitle"),
                 NSMakeRect(5, 326, 650, 20), size=13, color=_SECONDARY))
             rows = []
             for index in range(3):
                 row = _card(NSMakeRect(0, 220 - index * 88, 758, 72))
-                name = _label("Waiting for model status", NSMakeRect(20, 36, 430, 22),
+                name = _label(self._l("models.waiting"), NSMakeRect(20, 36, 430, 22),
                               size=14, weight="medium")
                 detail = _label("", NSMakeRect(20, 13, 530, 18),
                                 size=11, color=_SECONDARY)
-                status = _label("Unknown", NSMakeRect(610, 26, 120, 20),
+                status = _label(self._l("models.unknown"), NSMakeRect(610, 26, 120, 20),
                                 size=12, weight="medium", color=_ACCENT)
                 row.addSubview_(name)
                 row.addSubview_(detail)
@@ -1857,50 +2031,50 @@ if APPKIT_AVAILABLE:
                 page.addSubview_(row)
                 rows.append((row, name, detail, status))
             guidance = _label(
-                "Models prepare locally and can finish in the background.",
+                self._l("models.guidance"),
                 NSMakeRect(5, 25, 740, 22), size=11, color=_SECONDARY)
             page.addSubview_(guidance)
             self.dynamic.update(model_rows=rows, model_guidance=guidance)
 
         def _build_diagnostics(self, page: Any) -> None:
-            page.addSubview_(_label("Diagnostics",
+            page.addSubview_(_label(self._l("diagnostics.title"),
                                     NSMakeRect(4, 351, 500, 32),
                                     size=22, weight="bold"))
             page.addSubview_(_label(
-                "A quick health check when something does not feel right.",
+                self._l("diagnostics.subtitle"),
                 NSMakeRect(5, 326, 650, 20), size=13, color=_SECONDARY))
             card = _card(NSMakeRect(0, 137, 758, 161))
-            keys = (("Service", "diag_service"),
-                    ("Microphone", "diag_microphone"),
-                    ("Accessibility", "diag_accessibility"),
-                    ("Personal Regression Lab", "diag_regression"),
-                    ("Motion", "diag_motion"),
-                    ("Build", "diag_version"))
-            for index, (heading, key) in enumerate(keys):
+            keys = (("diagnostics.service", "diag_service"),
+                    ("diagnostics.microphone", "diag_microphone"),
+                    ("diagnostics.accessibility", "diag_accessibility"),
+                    ("diagnostics.regression", "diag_regression"),
+                    ("diagnostics.motion", "diag_motion"),
+                    ("diagnostics.build", "diag_version"))
+            for index, (heading_key, key) in enumerate(keys):
                 y = 133 - index * 23
-                card.addSubview_(_label(heading, NSMakeRect(20, y, 170, 19),
+                card.addSubview_(_label(self._l(heading_key), NSMakeRect(20, y, 170, 19),
                                         size=12, color=_SECONDARY))
-                value = _label("Unknown", NSMakeRect(185, y, 525, 19),
+                value = _label(self._l("diagnostics.unknown"), NSMakeRect(185, y, 525, 19),
                                size=12, weight="medium")
                 card.addSubview_(value)
                 self.dynamic[key] = value
             page.addSubview_(card)
-            open_log = _button("Open Log", NSMakeRect(0, 89, 120, 36),
+            open_log = _button(self._l("diagnostics.action.log"), NSMakeRect(0, 89, 120, 36),
                                self, "openLog:")
-            verify = _button("Run Verification", NSMakeRect(132, 89, 152, 36),
+            verify = _button(self._l("diagnostics.action.verify"), NSMakeRect(132, 89, 152, 36),
                              self, "verify:")
             verify.setKeyEquivalent_("r")
             verify.setKeyEquivalentModifierMask_(NSEventModifierFlagCommand)
             license_notices = _button(
-                "License Notices", NSMakeRect(296, 89, 138, 36),
+                self._l("diagnostics.action.licenses"), NSMakeRect(296, 89, 138, 36),
                 self, "openLicense:")
-            source = _button("Exact Source", NSMakeRect(446, 89, 120, 36),
+            source = _button(self._l("diagnostics.action.source"), NSMakeRect(446, 89, 120, 36),
                              self, "openSource:")
             progress = NSProgressIndicator.alloc().initWithFrame_(
                 NSMakeRect(580, 94, 20, 20))
             progress.setStyle_(1)
             progress.setDisplayedWhenStopped_(False)
-            verification = _label("Not run", NSMakeRect(608, 95, 140, 20),
+            verification = _label(self._l("diagnostics.verification.not_run"), NSMakeRect(608, 95, 140, 20),
                                   size=12, color=_SECONDARY)
             page.addSubview_(open_log)
             page.addSubview_(verify)
@@ -1909,11 +2083,11 @@ if APPKIT_AVAILABLE:
             page.addSubview_(progress)
             page.addSubview_(verification)
             guidance = _label(
-                "Everything looks ready.", NSMakeRect(5, 54, 740, 24),
+                self._l("diagnostics.ready"), NSMakeRect(5, 54, 740, 24),
                 size=11, color=_SECONDARY)
             page.addSubview_(guidance)
             page.addSubview_(_label(
-                "AGPL-3.0-only · no warranty · corresponding source available",
+                self._l("diagnostics.license"),
                 NSMakeRect(5, 24, 620, 20), size=11, color=_SECONDARY))
             self.dynamic.update(
                 open_log_button=open_log,
@@ -2079,49 +2253,60 @@ if APPKIT_AVAILABLE:
             result = state.last_result
             self.dynamic["result_summary"].setStringValue_(result.summary)
             self.dynamic["result_engine"].setStringValue_(
-                f"{result.engine} · session-only evidence")
+                self._l("results.engine.session", engine=result.engine))
             self.dynamic["result_mode"].setStringValue_(result.mode)
             self.dynamic["result_stable"].setStringValue_(
-                f"{result.stable_prefix_words} words")
+                self._l(
+                    "results.value.words", count=result.stable_prefix_words))
             self.dynamic["result_anchors"].setStringValue_(
                 str(result.protected_anchor_count))
             confidence = (
-                f" · {result.confidence:.0%} confidence"
+                self._l(
+                    "results.value.confidence",
+                    confidence=f"{result.confidence:.0%}")
                 if result.confidence is not None else "")
             self.dynamic["result_decisions"].setStringValue_(
                 f"{result.compiler_decisions}{confidence}")
             cleanup_kinds = ", ".join(dict.fromkeys(result.cleanup_edits))
             self.dynamic["result_cleanup"].setStringValue_(
-                cleanup_kinds or "None reported")
+                cleanup_kinds or self._l("results.value.none_reported"))
             rejected = (
                 str(result.proof_edits_rejected)
-                if result.proof_edits_rejected is not None else "not reported")
+                if result.proof_edits_rejected is not None else self._l(
+                    "results.value.not_reported"))
             self.dynamic["result_proof"].setStringValue_(
-                f"{result.proof_edits_accepted} accepted · "
-                f"{rejected} rejected")
+                self._l(
+                    "results.value.proof",
+                    accepted=result.proof_edits_accepted,
+                    rejected=rejected))
             self.dynamic["result_alternatives"].setStringValue_(
                 str(result.alternatives_considered))
             self.dynamic["result_context"].setStringValue_(
-                f"Context: {result.context_influence}")
+                self._l(
+                    "results.context.summary",
+                    influence=result.context_influence))
+            self.dynamic["result_firewall"].setStringValue_(
+                result.context_firewall_summary)
             self.dynamic["result_consequence"].setStringValue_(
                 result.consequence_summary)
-            for key, label in (
-                ("result_summary", "Last result summary"),
-                ("result_engine", "Last result engine"),
-                ("result_mode", "Last result mode"),
-                ("result_stable", "Stable prefix words"),
-                ("result_anchors", "Protected anchors"),
-                ("result_decisions", "Compiler decisions"),
-                ("result_cleanup", "Cleanup edits"),
-                ("result_proof", "Proof review"),
-                ("result_alternatives", "Alternatives considered"),
-                ("result_context", "Context influence"),
-                ("result_consequence", "Consequence decision receipt"),
+            for key, label_key in (
+                ("result_summary", "results.accessibility.summary"),
+                ("result_engine", "results.accessibility.engine"),
+                ("result_mode", "results.accessibility.mode"),
+                ("result_stable", "results.accessibility.stable"),
+                ("result_anchors", "results.accessibility.anchors"),
+                ("result_decisions", "results.accessibility.decisions"),
+                ("result_cleanup", "results.accessibility.cleanup"),
+                ("result_proof", "results.accessibility.proof"),
+                ("result_alternatives", "results.accessibility.alternatives"),
+                ("result_context", "results.accessibility.context"),
+                ("result_firewall", "results.accessibility.firewall"),
+                ("result_consequence", "results.accessibility.consequence"),
             ):
                 sync_accessibility(
                     self.dynamic[key],
                     str(self.dynamic[key].stringValue()),
-                    label=label,
+                    label=self._l(label_key),
                 )
             self.dynamic["settings_pane_control"].setSelectedSegment_(
                 SETTINGS_PANES.index(state.settings_pane))
@@ -2185,67 +2370,82 @@ if APPKIT_AVAILABLE:
                         " · ".join(part for part in (model.role, model.detail) if part))
                     status_label.setStringValue_(model.status)
                     sync_accessibility(
-                        name, model.name, label="Model name")
+                        name, model.name,
+                        label=self._l("models.accessibility.name"))
                     sync_accessibility(
                         detail, str(detail.stringValue()),
-                        label=f"{model.name} role and detail")
+                        label=self._l(
+                            "models.accessibility.detail", name=model.name))
                     sync_accessibility(
                         status_label, model.status,
-                        label=f"{model.name} status")
+                        label=self._l(
+                            "models.accessibility.status", name=model.name))
                     row.setHidden_(False)
                 else:
                     row.setHidden_(index > 0)
                     set_accessible_text(
-                        name, "Waiting for model status", label="Model name")
+                        name, self._l("models.waiting"),
+                        label=self._l("models.accessibility.name"))
                     set_accessible_text(
-                        detail, "Open this window after startup completes",
-                        label="Model role and detail")
+                        detail, self._l("models.waiting.detail"),
+                        label=self._l(
+                            "models.accessibility.detail",
+                            name=self._l("models.waiting")))
                     set_accessible_text(
-                        status_label, "Unknown", label="Model status")
+                        status_label, self._l("models.unknown"),
+                        label=self._l(
+                            "models.accessibility.status",
+                            name=self._l("models.waiting")))
             model_issue = next(
                 (issue for issue in state.degraded_issues
                  if issue.route == "Models"), None)
             self.dynamic["model_guidance"].setStringValue_(
                 model_issue.detail if model_issue else
-                "Models prepare locally and can finish in the background.")
+                self._l("models.guidance"))
             sync_accessibility(
                 self.dynamic["model_guidance"],
                 str(self.dynamic["model_guidance"].stringValue()),
-                label="Model guidance",
+                label=self._l("models.accessibility.guidance"),
             )
             self.dynamic["diag_service"].setStringValue_(state.service_status)
             self.dynamic["diag_microphone"].setStringValue_(state.microphone_status)
             self.dynamic["diag_accessibility"].setStringValue_(
                 state.accessibility_status)
-            regression = f"{state.regression_cases} cases"
+            regression = self._l(
+                "diagnostics.regression.cases", count=state.regression_cases)
             if state.regression_quarantined:
-                regression += f" · {state.regression_quarantined} quarantined"
+                regression += self._l(
+                    "diagnostics.regression.quarantined",
+                    count=state.regression_quarantined)
             self.dynamic["diag_regression"].setStringValue_(regression)
             self.dynamic["diag_motion"].setStringValue_(
-                "Reduced motion" if state.prefers_reduced_motion
-                else "Standard motion")
+                self._l("diagnostics.motion.reduced")
+                if state.prefers_reduced_motion else self._l(
+                    "diagnostics.motion.standard"))
             self.dynamic["diag_version"].setStringValue_(state.version)
             self.dynamic["verification"].setStringValue_(state.verification)
             first_issue = state.degraded_issues[0] if state.degraded_issues else None
             self.dynamic["diag_guidance"].setStringValue_(
-                f"{first_issue.title}: {first_issue.detail}"
-                if first_issue else "Everything looks ready.")
+                self._l(
+                    "diagnostics.issue", title=first_issue.title,
+                    detail=first_issue.detail)
+                if first_issue else self._l("diagnostics.ready"))
             self.dynamic["notice"].setStringValue_(state.notice)
-            for key, label in (
-                ("diag_service", "Service status"),
-                ("diag_microphone", "Microphone status"),
-                ("diag_accessibility", "Accessibility permission status"),
-                ("diag_regression", "Personal Regression Lab status"),
-                ("diag_motion", "Motion setting"),
-                ("diag_version", "Build version"),
-                ("verification", "Verification result"),
-                ("diag_guidance", "Diagnostic guidance"),
-                ("notice", "Whisper Face notice"),
+            for key, label_key in (
+                ("diag_service", "diagnostics.accessibility.service"),
+                ("diag_microphone", "diagnostics.accessibility.microphone"),
+                ("diag_accessibility", "diagnostics.accessibility.permission"),
+                ("diag_regression", "diagnostics.accessibility.regression"),
+                ("diag_motion", "diagnostics.accessibility.motion"),
+                ("diag_version", "diagnostics.accessibility.build"),
+                ("verification", "diagnostics.accessibility.verification"),
+                ("diag_guidance", "diagnostics.accessibility.guidance"),
+                ("notice", "diagnostics.accessibility.notice"),
             ):
                 sync_accessibility(
                     self.dynamic[key],
                     str(self.dynamic[key].stringValue()),
-                    label=label,
+                    label=self._l(label_key),
                 )
             notice_color = (
                 NSColor.systemRedColor() if state.notice_level == "error"
@@ -2590,6 +2790,13 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             "role": "Construction fixture",
             "status": "Not loaded",
         }],
+        "last_context_firewall": {
+            "mode": "shadow-only",
+            "disposition": "quarantine",
+            "protected_influences": 1,
+            "quarantined": 1,
+            "private_context": "must never reach the GUI",
+        },
     }
     private_settings: dict[str, Any] = {
         "app_tones": [
@@ -2737,6 +2944,13 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         controller.render()
         require(model.state.onboarding_complete, "onboarding completion")
         require(model.state.onboarding_acknowledged, "onboarding acknowledgement")
+        require(
+            model.state.last_result.context_firewall_summary ==
+            localized_string("results.firewall.quarantine.one"),
+            "context firewall receipt")
+        require(
+            "must never" not in repr(model.state.last_result),
+            "context firewall privacy")
 
         for index, section in enumerate(SECTIONS):
             controller.section_control.setSelectedSegment_(index)
@@ -2783,6 +2997,12 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                 "verify_button"].keyEquivalentModifierMask()) & int(
                     NSEventModifierFlagCommand),
             "verification command modifier")
+        require(
+            accessible_value(
+                controller.dynamic["result_firewall"],
+                "accessibilityLabel") == localized_string(
+                    "results.accessibility.firewall"),
+            "context firewall accessibility")
 
         require(
             accessible_value(controller.section_control,

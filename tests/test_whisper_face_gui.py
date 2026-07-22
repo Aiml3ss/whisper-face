@@ -85,6 +85,13 @@ class SnapshotTests(unittest.TestCase):
             "onboarding.first_dictation.title",
             "onboarding.progress",
             "settings.action.diagnostics",
+            "results.title",
+            "results.firewall.quarantine.one",
+            "results.accessibility.firewall",
+            "models.title",
+            "models.accessibility.guidance",
+            "diagnostics.title",
+            "diagnostics.accessibility.verification",
         ):
             with self.subTest(key=key):
                 self.assertIn(key, STRING_CATALOGS["en"])
@@ -290,6 +297,15 @@ class SnapshotTests(unittest.TestCase):
             "last_alternatives": ["private alternative text"],
             "last_compiler_details": ["private before → private after"],
             "last_context_influence": "Context helped resolve: personal vocabulary",
+            "last_context_firewall": {
+                "mode": "shadow-only",
+                "disposition": "quarantine",
+                "protected_influences": 3,
+                "quarantined": 2,
+                "reason_counts": {"private@example.com": 999},
+                "context": "Alice /Users/alice/secret",
+                "personal_prior": "private before → private after",
+            },
             "last_consequence": {
                 "route": "review",
                 "risk_counts": {"currency": 1, "private transcript": 999},
@@ -315,13 +331,41 @@ class SnapshotTests(unittest.TestCase):
             result.context_influence,
             "Context helped resolve: personal vocabulary")
         self.assertEqual(
+            result.context_firewall_summary,
+            "Context safety: the shadow check flagged 3 protected influences "
+            "for quarantine review.")
+        self.assertEqual(
             result.consequence_summary,
             "Consequence: Review · 1 high-risk · 1 uncertain · currency 1 · "
             "Re-listen: skipped")
         self.assertNotIn("private transcript", result.consequence_summary)
+        self.assertNotIn("private@example.com", repr(result))
+        self.assertNotIn("/Users/alice/secret", repr(result))
+        self.assertNotIn("private before", repr(result))
         self.assertFalse(hasattr(result, "transcript"))
         self.assertFalse(hasattr(result, "compiler_details"))
         self.assertTrue(state.prefers_reduced_motion)
+
+    def test_context_firewall_receipt_copy_is_bounded_and_truthful(self):
+        common = {"last_word_count": 4, "active_engine": "Parakeet"}
+        cases = (
+            ({"mode": "shadow-only", "disposition": "no-effect"},
+             "found no context-driven change"),
+            ({"mode": "shadow-only", "disposition": "promotion-candidate",
+              "promotion_candidates": 2},
+             "2 non-protected influences for later evaluation"),
+            ({"mode": "shadow-only", "disposition": "quarantine",
+              "quarantined": 999999},
+             "1000 protected influences for quarantine review"),
+            ({"mode": "unsupported", "disposition": "quarantine"},
+             "no finalized shadow check is available yet"),
+        )
+        for receipt, expected in cases:
+            with self.subTest(receipt=receipt):
+                state = normalize_snapshot({
+                    **common, "last_context_firewall": receipt,
+                }, locale="fr-CA")
+                self.assertIn(expected, state.last_result.context_firewall_summary)
 
 
 class ViewModelTests(unittest.TestCase):
