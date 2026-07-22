@@ -16,10 +16,10 @@ your private files before changing versions.
 3. Back up these private, gitignored files if they exist:
    `snippets.json`, `tones.json`, `preferences.json`,
    `acoustic_keyword_memory.json`, `dictionary.txt`, `transcripts.jsonl`,
-   `learned.json`, and `dictate.log`.
+   `learned.json`, `voice_inbox.json`, and `dictate.log`.
 
 Do not publish that backup: it can contain personal vocabulary, corrections,
-transcripts, and logs.
+transcripts, local drafts, and logs.
 
 ## Update the current checkout
 

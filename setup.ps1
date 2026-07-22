@@ -71,6 +71,8 @@ $Required = @(
     "dictate.py", "dictate.py.lock", "parrot_core.py", "voice_compiler.py",
     "insertion_integrity.py", "personal_regression.py",
     "acoustic_keyword_memory.py", "acoustic_time_machine.py",
+    "voice_objects.py", "voice_object_command_parser.py", "voice_inbox.py",
+    "voice_object_inbox_bridge.py",
     "whisper_face_gui.py",
     "snippets.template.json", "tones.template.json",
     "preferences.template.json", "acoustic_keyword_memory.template.json",
@@ -235,6 +237,12 @@ foreach ($DestinationName in $PrivateTemplates.Keys) {
         Copy-Item (Join-Path $Repo $PrivateTemplates[$DestinationName]) $Destination
     }
     & icacls $Destination /inheritance:r /grant:r "${env:USERNAME}:(F)" /Q | Out-Null
+}
+foreach ($PrivateStateName in @("voice_inbox.json")) {
+    $PrivateState = Join-Path $Repo $PrivateStateName
+    if (Test-Path $PrivateState) {
+        & icacls $PrivateState /inheritance:r /grant:r "${env:USERNAME}:(F)" /Q | Out-Null
+    }
 }
 
 Write-Step "installing the Windows login task"

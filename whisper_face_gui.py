@@ -173,17 +173,17 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "results.relisten.mixed": "mixed",
         "results.relisten.unavailable": "unavailable",
         "results.audio.off": "Acoustic replay is off",
-        "results.audio.empty": "No consequential span retained for this result",
-        "results.audio.available.one": "1 consequential span retained in RAM",
-        "results.audio.available.many": "{count} consequential spans retained in RAM",
+        "results.audio.empty": "No consequential span retained; expired audio is cleared automatically",
+        "results.audio.available.one": "1 consequential span retained in RAM for at most one minute",
+        "results.audio.available.many": "{count} consequential spans retained in RAM for at most one minute",
         "results.audio.play": "Play Span",
         "results.audio.clear": "Clear",
-        "results.audio.play.help": "Play one selected consequential span directly from memory; repeated presses move through the retained spans. No temporary file is created.",
+        "results.audio.play.help": "Play one selected consequential span directly from memory before its one-minute expiry; repeated presses move through retained spans. No temporary file is created.",
         "results.audio.clear.help": "Immediately forget every audio span retained for the latest result.",
         "results.audio.notice.played": "Playing the retained consequential span from memory",
         "results.audio.notice.cleared": "Retained consequential audio cleared",
         "results.audio.notice.unavailable": "No retained consequential span is available",
-        "results.privacy": "Audio replay is off by default. When enabled, only selected consequential spans from the latest result stay in RAM; they are never written, logged, or sent.",
+        "results.privacy": "Audio replay is off by default. Selected latest-result spans stay only in RAM and are wiped after one minute, on a new result, or when cleared; they are never written, logged, or sent.",
         "results.value.words": "{count} words",
         "results.value.confidence": " · {confidence} confidence",
         "results.value.none_reported": "None reported",
@@ -366,7 +366,10 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.privacy.flight": "Flight Recorder",
         "settings.privacy.flight.detail": "Keeps a rolling 20-second audio buffer in RAM only.",
         "settings.privacy.acoustic": "Acoustic Time Machine",
-        "settings.privacy.acoustic.detail": "Opt in to keep only selected consequential spans from the latest result in RAM.",
+        "settings.privacy.acoustic.detail": "Opt in to keep selected latest-result spans in RAM for at most one minute.",
+        "settings.privacy.voice_objects": "Voice Object Commands",
+        "settings.privacy.voice_objects.detail": "Exact task, email, and calendar commands queue inert local drafts instead of pasting.",
+        "settings.privacy.voice_objects.status": "{status} · {count} local drafts queued",
         "settings.privacy.face": "Companion",
         "settings.face.parrot": "Parrot",
         "settings.face.fox": "Fox",
@@ -386,7 +389,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.accessibility.flight.label": "Flight Recorder",
         "settings.accessibility.flight.help": "Toggle the rolling twenty second audio buffer held only in memory.",
         "settings.accessibility.acoustic.label": "Acoustic Time Machine",
-        "settings.accessibility.acoustic.help": "Opt in to selected consequential audio replay. Disabling immediately clears retained audio.",
+        "settings.accessibility.acoustic.help": "Opt in to selected consequential audio replay. Retained audio is wiped after one minute, and disabling clears it immediately.",
+        "settings.accessibility.voice_objects.label": "Voice Object Commands",
+        "settings.accessibility.voice_objects.help": "Opt in to exact spoken commands becoming inert local drafts. Nothing is sent or scheduled.",
         "settings.accessibility.privacy_summary.label": "Privacy status",
         "settings.accessibility.diagnostics.help": "Open local service, permission, model, and installation diagnostics.",
         "settings.accessibility.tones_summary.label": "App tones summary",
@@ -444,6 +449,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "operation.face.change_failed": "Could not change face: {error}",
         "operation.flight.update_failed": "Could not update Flight Recorder: {error}",
         "operation.acoustic.update_failed": "Could not update Acoustic Time Machine: {error}",
+        "operation.voice_objects.update_failed": "Could not update Voice Object Commands: {error}",
         "operation.acoustic.play_failed": "Could not play retained audio: {error}",
         "operation.acoustic.clear_failed": "Could not clear retained audio: {error}",
         "operation.log.open_failed": "Could not open log: {error}",
@@ -527,6 +533,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "choose_face",
             "set_flight_recorder",
             "set_acoustic_time_machine",
+            "set_voice_object_commands",
             "play_retained_span",
             "clear_retained_spans",
         ),
@@ -547,6 +554,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "settings.accessibility.face.label",
             "settings.accessibility.flight.label",
             "settings.accessibility.acoustic.label",
+            "settings.accessibility.voice_objects.label",
             "settings.dialog.tone.app.label",
             "settings.dialog.tone.choice.label",
             "settings.dialog.snippet.chooser.label",
@@ -585,6 +593,7 @@ class GUIActions:
     set_face: Callable[[str], None] = _noop
     set_flight_recorder: Callable[[bool], None] = _noop
     set_acoustic_time_machine: Callable[[bool], None] = _noop
+    set_voice_object_commands: Callable[[bool], None] = _noop
     play_retained_span: Callable[[], bool] = lambda: False
     clear_retained_spans: Callable[[], None] = _noop
     set_app_tone: Callable[[str, str], None] = _noop
@@ -734,6 +743,9 @@ class GUIState:
     flight_recorder: bool = False
     flight_state: str = localized_string("default.flight.off")
     acoustic_time_machine: bool = False
+    voice_object_commands: bool = False
+    voice_object_inbox_count: int = 0
+    voice_object_inbox_status: str = "Off"
     active_engine: str = localized_string("overview.engine.waiting")
     last_latency_ms: float | None = None
     last_word_count: int | None = None
@@ -1435,6 +1447,10 @@ def normalize_snapshot(
         active_engine = localized_string(
             "overview.engine.waiting", locale=locale)
     outbox_count = _nonnegative_int(source.get("outbox_count"))
+    voice_object_inbox_status = str(
+        source.get("voice_object_inbox_status", "Off")).strip().casefold()
+    if voice_object_inbox_status not in {"off", "ready", "unavailable"}:
+        voice_object_inbox_status = "unavailable"
     unknown_status = localized_string("default.status.unknown", locale=locale)
     service_status = _clean_text(source.get("service_status"), unknown_status)
     microphone_status = _clean_text(
@@ -1488,6 +1504,10 @@ def normalize_snapshot(
             source.get("flight_state"), localized_string(
                 "default.flight.off", locale=locale)),
         acoustic_time_machine=source.get("acoustic_time_machine") is True,
+        voice_object_commands=source.get("voice_object_commands") is True,
+        voice_object_inbox_count=_nonnegative_int(
+            source.get("voice_object_inbox_count")),
+        voice_object_inbox_status=voice_object_inbox_status.title(),
         active_engine=active_engine,
         last_latency_ms=normalized_latency,
         last_word_count=last_word_count,
@@ -1929,6 +1949,22 @@ class WhisperFaceViewModel:
             self.state = replace(
                 self.state, notice=self.localized(
                     "operation.acoustic.update_failed", error=error),
+                notice_level="error")
+        return self.state
+
+    def set_voice_object_commands(self, enabled: bool) -> GUIState:
+        desired = bool(enabled)
+        try:
+            self.actions.set_voice_object_commands(desired)
+            self.state = replace(
+                self.state, voice_object_commands=desired, notice="",
+                notice_level="info")
+            return self.refresh()
+        except Exception as error:
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "operation.voice_objects.update_failed", error=error),
                 notice_level="error")
         return self.state
 
@@ -2616,8 +2652,23 @@ if APPKIT_AVAILABLE:
 
             privacy = panes["Privacy"]
             privacy.addSubview_(_label(
-                self._l("settings.privacy.title"),
-                NSMakeRect(5, 238, 500, 22), size=14, weight="medium"))
+                self._l("settings.privacy.voice_objects"),
+                NSMakeRect(5, 238, 210, 22), size=13, weight="bold"))
+            voice_object_status = _label(
+                "", NSMakeRect(220, 240, 275, 18),
+                size=10, color=_SECONDARY)
+            voice_objects = NSButton.alloc().initWithFrame_(
+                NSMakeRect(500, 230, 88, 30))
+            voice_objects.setButtonType_(3)
+            voice_objects.setTitle_(self._l("settings.state.enabled"))
+            voice_objects.setTarget_(self)
+            voice_objects.setAction_("voiceObjectCommandsChanged:")
+            _accessible(
+                voice_objects,
+                self._l("settings.accessibility.voice_objects.label"),
+                self._l("settings.accessibility.voice_objects.help"))
+            privacy.addSubview_(voice_object_status)
+            privacy.addSubview_(voice_objects)
             face_card = _card(NSMakeRect(0, 151, 758, 70))
             face_card.addSubview_(_label(
                 self._l("settings.privacy.face"),
@@ -2698,11 +2749,13 @@ if APPKIT_AVAILABLE:
                 settings_key_views={
                     "Modes": (),
                     "Personalize": tuple(personalize_key_views),
-                    "Privacy": (picker, flight, acoustic, diagnostics),
+                    "Privacy": (voice_objects, picker, flight, acoustic, diagnostics),
                 },
                 face_picker=picker,
                 flight_toggle=flight,
                 acoustic_time_machine_toggle=acoustic,
+                voice_object_commands_toggle=voice_objects,
+                voice_object_commands_status=voice_object_status,
                 privacy_summary=privacy_summary,
                 diagnostics_button=diagnostics,
             )
@@ -3119,6 +3172,21 @@ if APPKIT_AVAILABLE:
                  if state.acoustic_time_machine else self._l(
                      "results.audio.off")),
                 label=self._l("settings.accessibility.acoustic.label"),
+            )
+            self.dynamic["voice_object_commands_toggle"].setState_(
+                NSControlStateValueOn if state.voice_object_commands
+                else NSControlStateValueOff)
+            voice_object_status = self._l(
+                "settings.privacy.voice_objects.status",
+                status=state.voice_object_inbox_status,
+                count=state.voice_object_inbox_count,
+            )
+            self.dynamic["voice_object_commands_status"].setStringValue_(
+                voice_object_status)
+            sync_accessibility(
+                self.dynamic["voice_object_commands_toggle"],
+                voice_object_status,
+                label=self._l("settings.accessibility.voice_objects.label"),
             )
             self.dynamic["privacy_summary"].setStringValue_(state.privacy_summary)
             sync_accessibility(
@@ -3539,6 +3607,11 @@ if APPKIT_AVAILABLE:
         def acousticTimeMachineChanged_(self, sender: Any) -> None:
             enabled = sender.state() == NSControlStateValueOn
             self.view_model.set_acoustic_time_machine(enabled)
+            self.render()
+
+        def voiceObjectCommandsChanged_(self, sender: Any) -> None:
+            enabled = sender.state() == NSControlStateValueOn
+            self.view_model.set_voice_object_commands(enabled)
             self.render()
 
         def playRetainedSpan_(self, _sender: Any) -> None:

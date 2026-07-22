@@ -131,7 +131,8 @@ render_plist() {
 required=(
     dictate.py dictate.py.lock parrot_core.py voice_compiler.py
     insertion_integrity.py personal_regression.py acoustic_keyword_memory.py
-    acoustic_time_machine.py
+    acoustic_time_machine.py voice_objects.py voice_object_command_parser.py
+    voice_inbox.py voice_object_inbox_bridge.py
     whisper_face_gui.py
     native/ParrotASRHelper/Package.swift
     native/ParrotASRHelper/Package.resolved
@@ -310,7 +311,7 @@ for name in snippets tones preferences acoustic_keyword_memory dictionary; do
     [ -f "$destination" ] || install -m 600 "$template" "$destination"
     chmod 600 "$destination"
 done
-for private_file in transcripts.jsonl learned.json dictate.log ollama.log \
+for private_file in transcripts.jsonl learned.json voice_inbox.json dictate.log ollama.log \
         .dictate.lock; do
     [ ! -e "$DIR/$private_file" ] || chmod 600 "$DIR/$private_file"
 done

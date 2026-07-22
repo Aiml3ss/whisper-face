@@ -7,8 +7,10 @@
 import os
 from pathlib import Path
 import sys
+from threading import Thread
 import time
 import unittest
+import weakref
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,6 +68,30 @@ def slow_factory():
     return FakeProvider()
 
 
+class RetentionProbeProvider:
+    def __init__(self):
+        self.collected = False
+
+    def __call__(self, request):
+        if request.expected == "arm":
+            request_ref = weakref.ref(request)
+
+            def probe():
+                time.sleep(0.05)
+                self.collected = request_ref() is None
+
+            Thread(target=probe, daemon=True).start()
+        return {
+            "outcome": "confirmed" if self.collected else "inconclusive",
+            "confidence": 1.0,
+            "engine": "fake-retention-probe",
+        }
+
+
+def retention_probe_factory():
+    return RetentionProbeProvider()
+
+
 class UnreadableAudio:
     def __len__(self):
         raise AssertionError("expired requests must not inspect audio")
@@ -104,6 +130,20 @@ class PrewarmedVerifierTests(unittest.TestCase):
         self.assertEqual(second.result.confidence, 0.2)
         self.assertFalse(hasattr(verifier, "requests"))
         self.assertFalse(hasattr(verifier, "results"))
+        verifier.close()
+
+    def test_idle_child_does_not_retain_the_previous_request(self):
+        verifier = PrewarmedVerifierSupervisor(retention_probe_factory)
+
+        verifier.verify(
+            [0.25], 16_000, "arm",
+            deadline_at=time.monotonic() + 2.0)
+        time.sleep(0.1)
+        receipt = verifier.verify(
+            [0.5], 16_000, "check",
+            deadline_at=time.monotonic() + 2.0)
+
+        self.assertEqual(receipt.result.outcome, "confirmed")
         verifier.close()
 
     def test_absolute_timeout_discards_child_and_next_call_restarts_lazily(self):

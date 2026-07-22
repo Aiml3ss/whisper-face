@@ -76,8 +76,8 @@ are never Supporter-only features.
 - **Acoustic Time Machine (experimental, Mac)** — opt in under Privacy to keep
   only the latest result's short, consequence-selected audio spans in RAM after
   insertion. Results can play those spans directly from memory or clear them
-  immediately; a new usable result replaces them, disabling wipes them, and no
-  replay file is written.
+  immediately; they self-delete after one minute, a new usable result replaces
+  them, disabling wipes them, and no replay file is written.
 - **Hold-to-talk anywhere** — hold Right Option, speak, release; text pastes
   into whatever app has focus, with a frosted HUD waveform while you talk.
   The microphone is pre-warmed at login and the start cue sounds only once
@@ -340,6 +340,15 @@ is correctly skipped.
 | "Formal tone, …" / "casual, …" / "verbatim: …" | that style, this once |
 | "insert my email" | your snippet from `snippets.json` |
 
+On macOS, **Voice Object Commands** is an off-by-default Privacy setting. When
+you explicitly enable it, only these exact lowercase forms bypass paste and
+queue an inert local draft in `voice_inbox.json`: `create task: <title>`,
+`draft email to <contact>: <body>`, and
+`create calendar event <ISO start>: <title>`. No draft is sent, scheduled, or
+opened in another app; all other speech follows the normal paste path.
+Turning the setting off stops new diversion but leaves already queued local
+drafts intact.
+
 The bundled `EDIT ME` values are setup placeholders. On Mac, insert one and
 replace the pasted placeholder in place within ten seconds; Whisper Face saves
 that exact replacement to `snippets.json`. You can also edit the private JSON file
@@ -351,8 +360,9 @@ On Windows, use **Right Alt** wherever the table says Right Option and the
 
 Everything personal stays in private, gitignored local files: `dictionary.txt`
 (your terms; `-word` bans one), `snippets.json`, `tones.json`, `preferences.json`,
-`transcripts.jsonl` (your history, trimmed to recent), and `learned.json`
-(mined vocabulary and fix rules). `acoustic_keyword_memory.json` stores bounded
+`transcripts.jsonl` (your history, trimmed to recent), `learned.json` (mined
+vocabulary and fix rules), and `voice_inbox.json` (only opt-in inert Voice
+Object drafts). `acoustic_keyword_memory.json` stores bounded
 keyword candidates, hashed app scopes, and evidence digests without raw audio,
 surrounding context, or transcript history.
 

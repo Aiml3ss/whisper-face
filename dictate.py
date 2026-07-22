@@ -336,6 +336,9 @@ from insertion_integrity import (  # noqa: E402
 from personal_regression import PersonalRegressionLab  # noqa: E402
 from acoustic_keyword_memory import AcousticKeywordMemory  # noqa: E402
 from acoustic_time_machine import AcousticTimeMachine  # noqa: E402
+from voice_inbox import InboxState, VoiceInbox  # noqa: E402
+from voice_object_command_parser import parse_command  # noqa: E402
+from voice_object_inbox_bridge import VoiceObjectInboxBridge  # noqa: E402
 
 if IS_MACOS:
     from whisper_face_gui import GUIActions, create_gui  # noqa: E402
@@ -436,6 +439,7 @@ DICTIONARY_FILE = HERE / "dictionary.txt"
 TRANSCRIPTS_FILE = HERE / "transcripts.jsonl"   # local-only usage log
 LEARNED_FILE = HERE / "learned.json"            # mined term counts
 ACOUSTIC_KEYWORD_MEMORY_FILE = HERE / "acoustic_keyword_memory.json"
+VOICE_INBOX_FILE = HERE / "voice_inbox.json"
 
 MIN_SECONDS = 0.4
 TAIL_SECONDS = 0.30          # mic keeps running after release (usually free)
@@ -894,19 +898,28 @@ INSERTION_COORDINATOR = InsertionCoordinator()
 # enforces the deadline internally and never retains its bounded audio input.
 # The pure consequence receipt still explains why a span was skipped.
 CONSEQUENCE_VERIFIER = None
+ACOUSTIC_TIME_MACHINE_TTL_SECONDS = 60.0
 
 APP_TONES = {"map": {}, "lock": threading.Lock()}
 PREFERENCES = {
     "flight_recorder": False,
     "acoustic_time_machine": False,
+    "voice_object_commands": False,
     "face": DEFAULT_FACE,
 }
 ACOUSTIC_TIME_MACHINE = AcousticTimeMachine()
 ACOUSTIC_TIME_MACHINE_STATE = {
     "span_ids": [],
     "play_index": 0,
+    "expires_at": None,
+    "expiry_timer": None,
     "lock": threading.RLock(),
     "sound": None,
+}
+VOICE_OBJECT_INBOX_STATE = {
+    "lock": threading.RLock(),
+    "inbox": None,
+    "bridge": None,
 }
 
 
@@ -997,6 +1010,10 @@ def load_preferences():
     # cannot activate audio retention or playback on Windows.
     PREFERENCES["acoustic_time_machine"] = bool(
         IS_MACOS and loaded.get("acoustic_time_machine") is True)
+    # Voice Object drafts are a Mac-only, explicit opt-in. A shared private
+    # preferences file cannot activate command diversion on Windows.
+    PREFERENCES["voice_object_commands"] = bool(
+        IS_MACOS and loaded.get("voice_object_commands") is True)
     PREFERENCES["face"] = normalize_face(loaded.get("face"))
     if PREFERENCES["acoustic_time_machine"]:
         ACOUSTIC_TIME_MACHINE.enable()
@@ -1009,10 +1026,100 @@ def save_preferences():
         "flight_recorder": bool(PREFERENCES["flight_recorder"]),
         "acoustic_time_machine": bool(
             IS_MACOS and PREFERENCES["acoustic_time_machine"]),
+        "voice_object_commands": bool(
+            IS_MACOS and PREFERENCES["voice_object_commands"]),
         "face": current_face(),
     }
     atomic_write_text(
         PREFERENCES_FILE, json.dumps(snapshot, indent=2) + "\n")
+
+
+def set_voice_object_commands_enabled(enabled: bool) -> None:
+    """Persist the Mac-only command-diversion opt-in."""
+    desired = bool(enabled) and IS_MACOS
+    PREFERENCES["voice_object_commands"] = desired
+    if not desired:
+        # Durable drafts remain visible by count, but disabling releases their
+        # decoded payloads and bridge from process memory immediately.
+        with VOICE_OBJECT_INBOX_STATE["lock"]:
+            VOICE_OBJECT_INBOX_STATE["inbox"] = None
+            VOICE_OBJECT_INBOX_STATE["bridge"] = None
+    save_preferences()
+
+
+def _voice_object_inbox_bridge() -> VoiceObjectInboxBridge:
+    """Create the private local draft store lazily, only after opt-in."""
+    with VOICE_OBJECT_INBOX_STATE["lock"]:
+        bridge = VOICE_OBJECT_INBOX_STATE["bridge"]
+        if bridge is None:
+            inbox = VoiceInbox(VOICE_INBOX_FILE)
+            bridge = VoiceObjectInboxBridge(inbox)
+            VOICE_OBJECT_INBOX_STATE["inbox"] = inbox
+            VOICE_OBJECT_INBOX_STATE["bridge"] = bridge
+        return bridge
+
+
+def _existing_voice_object_inbox_queued_count() -> int:
+    """Read an existing inbox for status without creating or writing one."""
+    with VOICE_OBJECT_INBOX_STATE["lock"]:
+        inbox = VOICE_OBJECT_INBOX_STATE["inbox"]
+        if inbox is None:
+            if not VOICE_INBOX_FILE.is_file():
+                return 0
+            inbox = VoiceInbox(VOICE_INBOX_FILE)
+            if PREFERENCES["voice_object_commands"]:
+                VOICE_OBJECT_INBOX_STATE["inbox"] = inbox
+                VOICE_OBJECT_INBOX_STATE["bridge"] = VoiceObjectInboxBridge(
+                    inbox)
+        return len(inbox.items(state=InboxState.QUEUED))
+
+
+def voice_object_inbox_status() -> dict:
+    """Return content-free Voice Object draft state for the native GUI."""
+    if not IS_MACOS:
+        return {"enabled": False, "queued_count": 0, "status": "Unavailable"}
+    if not PREFERENCES["voice_object_commands"]:
+        try:
+            queued_count = _existing_voice_object_inbox_queued_count()
+        except (OSError, ValueError, OverflowError):
+            return {"enabled": False, "queued_count": 0, "status": "Unavailable"}
+        return {"enabled": False, "queued_count": queued_count, "status": "Off"}
+    try:
+        _voice_object_inbox_bridge()
+        queued_count = _existing_voice_object_inbox_queued_count()
+        return {
+            "enabled": True,
+            "queued_count": queued_count,
+            "status": "Ready",
+        }
+    except (OSError, ValueError, OverflowError):
+        return {"enabled": True, "queued_count": 0, "status": "Unavailable"}
+
+
+def queue_voice_object_command(text: str, utterance_id: str) -> bool:
+    """Queue one exact Voice Object command, with no execution or fallback.
+
+    A parser rejection or local-store failure is intentionally indistinguishable
+    to the caller: the normal finalized-dictation insertion path remains the
+    safe fallback.  The stable recorder ID makes a retry idempotent.
+    """
+    if not (IS_MACOS and PREFERENCES["voice_object_commands"]):
+        return False
+    try:
+        result = parse_command(text, object_id=utterance_id)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if result.projection is None:
+        return False
+    try:
+        _voice_object_inbox_bridge().enqueue(
+            f"voice-object:{utterance_id}",
+            result.projection,
+            source_id=f"utterance:{utterance_id}",
+        )
+    except (OSError, TypeError, ValueError, OverflowError):
+        return False
+    return True
 
 
 def app_tone_override(bundle: str) -> str | None:
@@ -3171,6 +3278,7 @@ def runtime_status_snapshot() -> dict:
     outbox = INSERTION_COORDINATOR.recoverable()
     acoustic_keywords = acoustic_keyword_memory_status_snapshot()
     acoustic_replay = acoustic_time_machine_status_snapshot()
+    voice_object_inbox = voice_object_inbox_status()
     outbox_summary = ""
     if outbox:
         latest = outbox[-1].receipt
@@ -3186,6 +3294,9 @@ def runtime_status_snapshot() -> dict:
         "flight_state": flight_state,
         "acoustic_time_machine": acoustic_replay["enabled"],
         "retained_consequence_spans": acoustic_replay["retained_spans"],
+        "voice_object_commands": voice_object_inbox["enabled"],
+        "voice_object_inbox_count": voice_object_inbox["queued_count"],
+        "voice_object_inbox_status": voice_object_inbox["status"],
         "active_engine": engine,
         "last_latency_ms": (
             float(PIPELINE_STATE["last_release_s"]) * 1000
@@ -4218,19 +4329,42 @@ def runtime_consequence_evidence(
     return max(0.0, time.perf_counter() - started)
 
 
+def _clear_retained_consequence_spans_locked() -> None:
+    """Clear all retention state while its runtime lock is held."""
+    timer = ACOUSTIC_TIME_MACHINE_STATE.get("expiry_timer")
+    if timer is not None:
+        try:
+            timer.cancel()
+        except Exception:
+            pass
+    sound = ACOUSTIC_TIME_MACHINE_STATE.get("sound")
+    if sound is not None:
+        try:
+            sound.stop()
+        except Exception:
+            pass
+    ACOUSTIC_TIME_MACHINE_STATE["sound"] = None
+    ACOUSTIC_TIME_MACHINE_STATE["span_ids"] = []
+    ACOUSTIC_TIME_MACHINE_STATE["play_index"] = 0
+    ACOUSTIC_TIME_MACHINE_STATE["expires_at"] = None
+    ACOUSTIC_TIME_MACHINE_STATE["expiry_timer"] = None
+    ACOUSTIC_TIME_MACHINE.clear()
+
+
 def clear_retained_consequence_spans() -> None:
-    """Forget every replay span and stop holding a playback object."""
+    """Forget replay spans, expiry state, and any playback object."""
     with ACOUSTIC_TIME_MACHINE_STATE["lock"]:
-        sound = ACOUSTIC_TIME_MACHINE_STATE.get("sound")
-        if sound is not None:
-            try:
-                sound.stop()
-            except Exception:
-                pass
-        ACOUSTIC_TIME_MACHINE_STATE["sound"] = None
-        ACOUSTIC_TIME_MACHINE_STATE["span_ids"] = []
-        ACOUSTIC_TIME_MACHINE_STATE["play_index"] = 0
-        ACOUSTIC_TIME_MACHINE.clear()
+        _clear_retained_consequence_spans_locked()
+
+
+def expire_retained_consequence_spans(*, clock=time.monotonic) -> bool:
+    """Wipe expired samples using a monotonic, content-independent deadline."""
+    with ACOUSTIC_TIME_MACHINE_STATE["lock"]:
+        expires_at = ACOUSTIC_TIME_MACHINE_STATE.get("expires_at")
+        if expires_at is None or clock() < expires_at:
+            return False
+        _clear_retained_consequence_spans_locked()
+        return True
 
 
 def set_acoustic_time_machine_enabled(enabled: bool) -> None:
@@ -4245,48 +4379,68 @@ def set_acoustic_time_machine_enabled(enabled: bool) -> None:
     save_preferences()
 
 
-def retain_consequence_microspans(audio, plan, *, sample_rate: int) -> int:
+def retain_consequence_microspans(
+        audio, plan, *, sample_rate: int, clock=time.monotonic,
+        timer_factory=threading.Timer) -> int:
     """Replace replay state with exact selected spans from one completed take.
 
     Disabled mode returns before inspecting ``audio``. Retention is best effort:
     malformed or unavailable capture data leaves an empty latest-result buffer.
     """
-    clear_retained_consequence_spans()
-    if not (IS_MACOS and ACOUSTIC_TIME_MACHINE.enabled):
-        return 0
-    requests = getattr(plan, "relisten_requests", ()) if plan is not None else ()
-    if sample_rate != SAMPLE_RATE or not requests:
-        return 0
-    try:
-        sample_count = len(audio)
-    except Exception:
-        return 0
-    stored_ids: list[str] = []
-    for request in requests:
-        try:
-            start = max(0, int(math.floor(float(request.start) * sample_rate)))
-            end = min(
-                sample_count,
-                int(math.ceil(float(request.end) * sample_rate)),
-            )
-            if start >= end:
-                continue
-            # The store owns the sole retained copy; no full utterance enters
-            # the Acoustic Time Machine.
-            result = ACOUSTIC_TIME_MACHINE.store(
-                audio[start:end], sample_rate_hz=sample_rate)
-            if result.span_id is not None:
-                stored_ids.append(result.span_id)
-        except Exception:
-            continue
     with ACOUSTIC_TIME_MACHINE_STATE["lock"]:
+        _clear_retained_consequence_spans_locked()
+        if not (IS_MACOS and ACOUSTIC_TIME_MACHINE.enabled):
+            return 0
+        requests = getattr(
+            plan, "relisten_requests", ()) if plan is not None else ()
+        if sample_rate != SAMPLE_RATE or not requests:
+            return 0
+        try:
+            sample_count = len(audio)
+        except Exception:
+            return 0
+        stored_ids: list[str] = []
+        for request in requests:
+            try:
+                start = max(
+                    0, int(math.floor(float(request.start) * sample_rate)))
+                end = min(
+                    sample_count,
+                    int(math.ceil(float(request.end) * sample_rate)),
+                )
+                if start >= end:
+                    continue
+                # The store owns the sole retained copy; no full utterance
+                # enters the Acoustic Time Machine.
+                result = ACOUSTIC_TIME_MACHINE.store(
+                    audio[start:end], sample_rate_hz=sample_rate)
+                if result.span_id is not None:
+                    stored_ids.append(result.span_id)
+            except Exception:
+                continue
         ACOUSTIC_TIME_MACHINE_STATE["span_ids"] = stored_ids
         ACOUSTIC_TIME_MACHINE_STATE["play_index"] = 0
+        if stored_ids:
+            try:
+                ACOUSTIC_TIME_MACHINE_STATE["expires_at"] = (
+                    clock() + ACOUSTIC_TIME_MACHINE_TTL_SECONDS)
+                if timer_factory is not None:
+                    timer = timer_factory(
+                        ACOUSTIC_TIME_MACHINE_TTL_SECONDS,
+                        expire_retained_consequence_spans,
+                    )
+                    timer.daemon = True
+                    ACOUSTIC_TIME_MACHINE_STATE["expiry_timer"] = timer
+                    timer.start()
+            except Exception:
+                _clear_retained_consequence_spans_locked()
+                return 0
     return len(stored_ids)
 
 
-def acoustic_time_machine_status_snapshot() -> dict:
+def acoustic_time_machine_status_snapshot(*, clock=time.monotonic) -> dict:
     """Expose only fixed playback availability; never handles or audio."""
+    expire_retained_consequence_spans(clock=clock)
     with ACOUSTIC_TIME_MACHINE_STATE["lock"]:
         count = len(ACOUSTIC_TIME_MACHINE_STATE["span_ids"])
     return {
@@ -4309,9 +4463,11 @@ def _retained_span_wav_bytes(samples, *, sample_rate: int) -> bytes:
     return header + payload
 
 
-def play_retained_consequence_span() -> bool:
+def play_retained_consequence_span(*, clock=time.monotonic) -> bool:
     """Play the first latest-result span through NSSound without a file."""
     if not (IS_MACOS and ACOUSTIC_TIME_MACHINE.enabled):
+        return False
+    if expire_retained_consequence_spans(clock=clock):
         return False
     with ACOUSTIC_TIME_MACHINE_STATE["lock"]:
         span_ids = tuple(ACOUSTIC_TIME_MACHINE_STATE["span_ids"])
@@ -4329,6 +4485,17 @@ def play_retained_consequence_span() -> bool:
     if sound is None:
         return False
     with ACOUSTIC_TIME_MACHINE_STATE["lock"]:
+        # Construction above is deliberately in-memory but can overlap the
+        # expiry callback or a new result. Validate the exact generation and
+        # deadline while holding the same lock used by clear/expiry, then
+        # start playback before releasing it.
+        current_ids = tuple(ACOUSTIC_TIME_MACHINE_STATE["span_ids"])
+        expires_at = ACOUSTIC_TIME_MACHINE_STATE.get("expires_at")
+        if current_ids != span_ids or expires_at is None:
+            return False
+        if clock() >= expires_at:
+            _clear_retained_consequence_spans_locked()
+            return False
         previous = ACOUSTIC_TIME_MACHINE_STATE.get("sound")
         if previous is not None:
             try:
@@ -4337,7 +4504,13 @@ def play_retained_consequence_span() -> bool:
                 pass
         ACOUSTIC_TIME_MACHINE_STATE["sound"] = sound
         ACOUSTIC_TIME_MACHINE_STATE["play_index"] = (index + 1) % len(span_ids)
-    return bool(sound.play())
+        try:
+            played = bool(sound.play())
+        except Exception:
+            played = False
+        if not played:
+            ACOUSTIC_TIME_MACHINE_STATE["sound"] = None
+        return played
 
 
 def consequence_state_snapshot() -> dict:
@@ -6236,6 +6409,17 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 play("Funk")
             return
 
+        # This opt-in intercept is deliberately before cleanup, LLM routing,
+        # snippet handling, transcript logging, and insertion. Only the closed
+        # parser grammar can queue an inert local draft; every miss continues
+        # through the ordinary paste path below without a behavioral change.
+        if rec.mode == "capture" and queue_voice_object_command(
+                recognized_raw, rec.utterance_id):
+            CAPTION["text"] = "Voice Object draft queued locally"
+            print("[voice-objects] local draft queued")
+            play("Pop")
+            return
+
         hit = match_snippet(raw)
         if hit is not None:
             name, snippet = hit
@@ -6768,6 +6952,7 @@ def main():
             set_face=STATUS["bar"].set_face_choice,
             set_flight_recorder=STATUS["bar"].set_flight_enabled,
             set_acoustic_time_machine=set_acoustic_time_machine_enabled,
+            set_voice_object_commands=set_voice_object_commands_enabled,
             play_retained_span=play_retained_consequence_span,
             clear_retained_spans=clear_retained_consequence_spans,
             set_app_tone=set_gui_app_tone,
