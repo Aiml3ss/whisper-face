@@ -144,10 +144,12 @@ class RepositoryGovernanceTests(unittest.TestCase):
             "docs/architecture-and-interop.md", readme)
         self.assertIn("in-process conformance contract", architecture)
         self.assertIn(
-            "does **not** currently ship a cross-process SDK", architecture)
+            "does **not** currently ship a public cross-process SDK",
+            architecture)
         self.assertIn("public ABI", architecture)
         self.assertIn("voice_input_protocol_wire.py", architecture)
-        self.assertIn("transport-neutral codec only", architecture)
+        self.assertIn("bounded POSIX transport is a local test", architecture)
+        self.assertIn("voice_input_protocol_transport.py", architecture)
         self.assertIn("uv run tests/test_voice_input_protocol.py", contributing)
         self.assertIn(
             "Both installers must execute the current checkout", contributing)

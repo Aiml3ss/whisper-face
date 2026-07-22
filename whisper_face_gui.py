@@ -33,6 +33,12 @@ CONSEQUENCE_RELISTEN_STATUSES = frozenset({
     "not-needed", "skipped", "confirmed", "contradicted", "timed-out",
     "inconclusive", "mixed", "unavailable",
 })
+VOICE_DRAFT_DESTINATIONS = frozenset({
+    "plain_text", "email_draft", "task", "calendar_draft", "unavailable",
+})
+VOICE_DRAFT_STATES = frozenset({"queued", "acknowledged", "cancelled"})
+VOICE_DRAFT_INSPECT_LIMIT = 256
+VOICE_DRAFT_CONTENT_LIMIT = 300_000
 
 # Stable semantic keys are intentionally separate from AppKit. Additional
 # catalogs can be added without rewriting view logic or persistence schemas.
@@ -370,6 +376,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.privacy.voice_objects": "Voice Object Commands",
         "settings.privacy.voice_objects.detail": "Exact task, email, and calendar commands queue inert local drafts instead of pasting.",
         "settings.privacy.voice_objects.status": "{status} · {count} local drafts queued",
+        "settings.privacy.voice_objects.inspect": "Inspect",
+        "settings.privacy.voice_objects.inspect.help": "Open the local Voice Inbox. Draft content stays hidden until you explicitly reveal a selected draft.",
         "settings.privacy.face": "Companion",
         "settings.face.parrot": "Parrot",
         "settings.face.fox": "Fox",
@@ -392,6 +400,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.accessibility.acoustic.help": "Opt in to selected consequential audio replay. Retained audio is wiped after one minute, and disabling clears it immediately.",
         "settings.accessibility.voice_objects.label": "Voice Object Commands",
         "settings.accessibility.voice_objects.help": "Opt in to exact spoken commands becoming inert local drafts. Nothing is sent or scheduled.",
+        "settings.accessibility.voice_objects.inspector": "Voice Inbox inspector",
+        "settings.accessibility.voice_objects.chooser": "Queued draft metadata",
+        "settings.accessibility.voice_objects.content": "Selected inert draft content",
         "settings.accessibility.privacy_summary.label": "Privacy status",
         "settings.accessibility.diagnostics.help": "Open local service, permission, model, and installation diagnostics.",
         "settings.accessibility.tones_summary.label": "App tones summary",
@@ -450,12 +461,35 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "operation.flight.update_failed": "Could not update Flight Recorder: {error}",
         "operation.acoustic.update_failed": "Could not update Acoustic Time Machine: {error}",
         "operation.voice_objects.update_failed": "Could not update Voice Object Commands: {error}",
+        "operation.voice_objects.inspect_failed": "Could not inspect local Voice Object drafts.",
+        "operation.voice_objects.reveal_failed": "Could not reveal the selected local draft.",
+        "operation.voice_objects.transition_failed": "Could not update the selected local draft.",
+        "operation.voice_objects.purge_failed": "Could not purge finished local drafts.",
         "operation.acoustic.play_failed": "Could not play retained audio: {error}",
         "operation.acoustic.clear_failed": "Could not clear retained audio: {error}",
         "operation.log.open_failed": "Could not open log: {error}",
         "operation.support_snapshot.copy_failed": "Could not copy support snapshot: {error}",
         "operation.source.open_failed": "Could not open source and license: {error}",
         "operation.licenses.open_failed": "Could not open local license notices: {error}",
+        "settings.dialog.voice_objects.title": "Voice Inbox",
+        "settings.dialog.voice_objects.message": "Only bounded draft metadata is listed. Select Reveal to read one draft. Nothing here sends, schedules, launches, executes, or copies a draft.",
+        "settings.dialog.voice_objects.empty": "No local Voice Object drafts are stored.",
+        "settings.dialog.voice_objects.row": "Draft {sequence} · {destination} · {state}",
+        "settings.dialog.voice_objects.reveal.title": "Draft {sequence} · {destination}",
+        "settings.dialog.voice_objects.reveal.message": "Inert local content only. Nothing is sent, scheduled, launched, executed, or copied.",
+        "settings.dialog.voice_objects.ack.title": "Acknowledge this draft?",
+        "settings.dialog.voice_objects.ack.message": "This marks Draft {sequence} finished without sending or executing it.",
+        "settings.dialog.voice_objects.cancel.title": "Cancel this draft?",
+        "settings.dialog.voice_objects.cancel.message": "This marks Draft {sequence} cancelled without sending or executing it.",
+        "settings.dialog.voice_objects.purge.title": "Purge finished drafts?",
+        "settings.dialog.voice_objects.purge.message": "Permanently remove acknowledged and cancelled local drafts. Queued drafts remain.",
+        "settings.action.reveal": "Reveal",
+        "settings.action.acknowledge": "Acknowledge",
+        "settings.action.cancel_draft": "Cancel Draft",
+        "settings.action.purge_finished": "Purge Finished",
+        "settings.notice.voice_object_acknowledged": "Local draft acknowledged",
+        "settings.notice.voice_object_cancelled": "Local draft cancelled",
+        "settings.notice.voice_objects_purged": "Finished local drafts purged: {count}",
         "diagnostics.notice.support_snapshot.copied": "Transcript-free support snapshot copied",
     },
 }
@@ -534,6 +568,11 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "set_flight_recorder",
             "set_acoustic_time_machine",
             "set_voice_object_commands",
+            "inspect_voice_object_drafts",
+            "reveal_voice_object_draft",
+            "acknowledge_voice_object_draft",
+            "cancel_voice_object_draft",
+            "purge_terminal_voice_object_drafts",
             "play_retained_span",
             "clear_retained_spans",
         ),
@@ -555,6 +594,9 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "settings.accessibility.flight.label",
             "settings.accessibility.acoustic.label",
             "settings.accessibility.voice_objects.label",
+            "settings.accessibility.voice_objects.inspector",
+            "settings.accessibility.voice_objects.chooser",
+            "settings.accessibility.voice_objects.content",
             "settings.dialog.tone.app.label",
             "settings.dialog.tone.choice.label",
             "settings.dialog.snippet.chooser.label",
@@ -594,6 +636,14 @@ class GUIActions:
     set_flight_recorder: Callable[[bool], None] = _noop
     set_acoustic_time_machine: Callable[[bool], None] = _noop
     set_voice_object_commands: Callable[[bool], None] = _noop
+    inspect_voice_object_drafts: Callable[[], Sequence[Mapping[str, Any]]] = (
+        lambda: ())
+    reveal_voice_object_draft: Callable[[str], Mapping[str, Any] | None] = (
+        lambda _item_id: None)
+    acknowledge_voice_object_draft: Callable[[str], bool] = (
+        lambda _item_id: False)
+    cancel_voice_object_draft: Callable[[str], bool] = lambda _item_id: False
+    purge_terminal_voice_object_drafts: Callable[[], int | None] = lambda: None
     play_retained_span: Callable[[], bool] = lambda: False
     clear_retained_spans: Callable[[], None] = _noop
     set_app_tone: Callable[[str, str], None] = _noop
@@ -622,6 +672,26 @@ class ModelStatus:
     role: str = ""
     status: str = localized_string("default.status.unknown")
     detail: str = ""
+
+
+@dataclass(frozen=True)
+class VoiceDraftMetadata:
+    """Content-free identity used only during an explicit inspector session."""
+
+    item_id: str = field(repr=False)
+    sequence: int
+    destination: str
+    state: str
+
+
+@dataclass(frozen=True)
+class RevealedVoiceDraft:
+    """Private content returned transiently after an explicit reveal action."""
+
+    sequence: int
+    destination: str
+    state: str
+    content: str = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -1566,6 +1636,7 @@ class WhisperFaceViewModel:
         self.state = GUIState()
         self._onboarding_acknowledged = False
         self._hotkey_practiced = False
+        self._inspected_voice_draft_ids: set[str] = set()
         self.refresh()
 
     def localized(self, key: str, **values: Any) -> str:
@@ -1966,6 +2037,142 @@ class WhisperFaceViewModel:
                 notice=self.localized(
                     "operation.voice_objects.update_failed", error=error),
                 notice_level="error")
+        return self.state
+
+    def inspect_voice_object_drafts(self) -> tuple[VoiceDraftMetadata, ...]:
+        """Load content-free metadata only after an explicit inspector action."""
+        try:
+            raw = self.actions.inspect_voice_object_drafts()
+            if (isinstance(raw, (str, bytes))
+                    or not isinstance(raw, Sequence)
+                    or len(raw) > VOICE_DRAFT_INSPECT_LIMIT):
+                raise ValueError
+            drafts: list[VoiceDraftMetadata] = []
+            identifiers: set[str] = set()
+            sequences: set[int] = set()
+            for item in raw:
+                if not isinstance(item, Mapping) or set(item) != {
+                        "item_id", "sequence", "destination", "state"}:
+                    raise ValueError
+                item_id = item["item_id"]
+                sequence = item["sequence"]
+                destination = item["destination"]
+                state = item["state"]
+                if (not isinstance(item_id, str) or not item_id
+                        or len(item_id) > 128
+                        or any(not (character.isalnum()
+                                   or character in "._:-")
+                               for character in item_id)
+                        or item_id in identifiers
+                        or not isinstance(sequence, int)
+                        or isinstance(sequence, bool) or sequence < 1
+                        or sequence in sequences
+                        or destination not in VOICE_DRAFT_DESTINATIONS
+                        or state not in VOICE_DRAFT_STATES):
+                    raise ValueError
+                identifiers.add(item_id)
+                sequences.add(sequence)
+                drafts.append(VoiceDraftMetadata(
+                    item_id, sequence, destination, state))
+            drafts.sort(key=lambda item: item.sequence)
+            self._inspected_voice_draft_ids = identifiers
+            return tuple(drafts)
+        except Exception:
+            self._inspected_voice_draft_ids.clear()
+            self.state = replace(
+                self.state,
+                notice=self.localized("operation.voice_objects.inspect_failed"),
+                notice_level="error",
+            )
+            raise ValueError(self.state.notice) from None
+
+    def reveal_voice_object_draft(
+            self, draft: VoiceDraftMetadata) -> RevealedVoiceDraft:
+        """Reveal content transiently for one metadata row already inspected."""
+        if (not isinstance(draft, VoiceDraftMetadata)
+                or draft.item_id not in self._inspected_voice_draft_ids):
+            raise ValueError(self.localized(
+                "operation.voice_objects.reveal_failed"))
+        try:
+            raw = self.actions.reveal_voice_object_draft(draft.item_id)
+            if not isinstance(raw, Mapping) or set(raw) != {
+                    "sequence", "destination", "state", "content"}:
+                raise ValueError
+            sequence = raw["sequence"]
+            destination = raw["destination"]
+            state = raw["state"]
+            content = raw["content"]
+            if (sequence != draft.sequence
+                    or destination != draft.destination
+                    or state not in VOICE_DRAFT_STATES
+                    or not isinstance(content, str)
+                    or not content or "\x00" in content
+                    or len(content) > VOICE_DRAFT_CONTENT_LIMIT):
+                raise ValueError
+            return RevealedVoiceDraft(
+                sequence, destination, state, content)
+        except Exception:
+            self.state = replace(
+                self.state,
+                notice=self.localized("operation.voice_objects.reveal_failed"),
+                notice_level="error",
+            )
+            raise ValueError(self.state.notice) from None
+
+    def transition_voice_object_draft(
+            self, draft: VoiceDraftMetadata, *, target: str) -> GUIState:
+        """Apply one explicit inert terminal transition to an inspected draft."""
+        if (not isinstance(draft, VoiceDraftMetadata)
+                or draft.item_id not in self._inspected_voice_draft_ids
+                or target not in {"acknowledged", "cancelled"}):
+            raise ValueError(self.localized(
+                "operation.voice_objects.transition_failed"))
+        action = (self.actions.acknowledge_voice_object_draft
+                  if target == "acknowledged"
+                  else self.actions.cancel_voice_object_draft)
+        try:
+            if not action(draft.item_id):
+                raise ValueError
+            self._inspected_voice_draft_ids.clear()
+            self.refresh()
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "settings.notice.voice_object_acknowledged"
+                    if target == "acknowledged" else
+                    "settings.notice.voice_object_cancelled"),
+                notice_level="success",
+            )
+        except Exception:
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "operation.voice_objects.transition_failed"),
+                notice_level="error",
+            )
+        return self.state
+
+    def purge_terminal_voice_object_drafts(self) -> GUIState:
+        """Purge only finished drafts after an explicit inspector action."""
+        try:
+            removed = self.actions.purge_terminal_voice_object_drafts()
+            if (not isinstance(removed, int) or isinstance(removed, bool)
+                    or removed < 0):
+                raise ValueError
+            self._inspected_voice_draft_ids.clear()
+            self.refresh()
+            self.state = replace(
+                self.state,
+                notice=self.localized(
+                    "settings.notice.voice_objects_purged", count=removed),
+                notice_level="success",
+            )
+        except Exception:
+            self.state = replace(
+                self.state,
+                notice=self.localized("operation.voice_objects.purge_failed"),
+                notice_level="error",
+            )
         return self.state
 
     def play_retained_span(self) -> GUIState:
@@ -2655,10 +2862,10 @@ if APPKIT_AVAILABLE:
                 self._l("settings.privacy.voice_objects"),
                 NSMakeRect(5, 238, 210, 22), size=13, weight="bold"))
             voice_object_status = _label(
-                "", NSMakeRect(220, 240, 275, 18),
+                "", NSMakeRect(220, 240, 195, 18),
                 size=10, color=_SECONDARY)
             voice_objects = NSButton.alloc().initWithFrame_(
-                NSMakeRect(500, 230, 88, 30))
+                NSMakeRect(420, 230, 88, 30))
             voice_objects.setButtonType_(3)
             voice_objects.setTitle_(self._l("settings.state.enabled"))
             voice_objects.setTarget_(self)
@@ -2669,6 +2876,16 @@ if APPKIT_AVAILABLE:
                 self._l("settings.accessibility.voice_objects.help"))
             privacy.addSubview_(voice_object_status)
             privacy.addSubview_(voice_objects)
+            inspect_voice_objects = _button(
+                self._l("settings.privacy.voice_objects.inspect"),
+                NSMakeRect(515, 230, 92, 30), self, "inspectVoiceObjects:",
+                help_text=self._l(
+                    "settings.privacy.voice_objects.inspect.help"))
+            _accessible(
+                inspect_voice_objects,
+                self._l("settings.accessibility.voice_objects.inspector"),
+                self._l("settings.privacy.voice_objects.inspect.help"))
+            privacy.addSubview_(inspect_voice_objects)
             face_card = _card(NSMakeRect(0, 151, 758, 70))
             face_card.addSubview_(_label(
                 self._l("settings.privacy.face"),
@@ -2735,7 +2952,7 @@ if APPKIT_AVAILABLE:
             privacy.addSubview_(privacy_summary)
             diagnostics = _button(
                 self._l("settings.action.diagnostics"),
-                NSMakeRect(600, 230, 138, 30), self, "openDiagnostics:",
+                NSMakeRect(615, 230, 123, 30), self, "openDiagnostics:",
                 help_text=self._l(
                     "settings.accessibility.diagnostics.help"))
             diagnostics.setKeyEquivalent_("d")
@@ -2749,13 +2966,16 @@ if APPKIT_AVAILABLE:
                 settings_key_views={
                     "Modes": (),
                     "Personalize": tuple(personalize_key_views),
-                    "Privacy": (voice_objects, picker, flight, acoustic, diagnostics),
+                    "Privacy": (
+                        voice_objects, inspect_voice_objects, picker, flight,
+                        acoustic, diagnostics),
                 },
                 face_picker=picker,
                 flight_toggle=flight,
                 acoustic_time_machine_toggle=acoustic,
                 voice_object_commands_toggle=voice_objects,
                 voice_object_commands_status=voice_object_status,
+                voice_object_inspect_button=inspect_voice_objects,
                 privacy_summary=privacy_summary,
                 diagnostics_button=diagnostics,
             )
@@ -3591,6 +3811,99 @@ if APPKIT_AVAILABLE:
                 self.view_model.forget_all_acoustic_keywords()
             self.render()
 
+        def inspectVoiceObjects_(self, _sender: Any) -> None:
+            try:
+                drafts = self.view_model.inspect_voice_object_drafts()
+            except ValueError:
+                self.render()
+                return
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(self._l(
+                "settings.dialog.voice_objects.title"))
+            alert.setInformativeText_(self._l(
+                "settings.dialog.voice_objects.message" if drafts else
+                "settings.dialog.voice_objects.empty"))
+            chooser = None
+            if drafts:
+                chooser = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                    NSMakeRect(0, 0, 520, 28), False)
+                chooser.addItemsWithTitles_([
+                    self._l(
+                        "settings.dialog.voice_objects.row",
+                        sequence=item.sequence,
+                        destination=item.destination.replace(
+                            "_", " ").title(),
+                        state=item.state.title(),
+                    )
+                    for item in drafts
+                ])
+                _accessible(
+                    chooser,
+                    self._l(
+                        "settings.accessibility.voice_objects.chooser"),
+                    self._l(
+                        "settings.dialog.voice_objects.message"))
+                alert.setAccessoryView_(chooser)
+                alert.addButtonWithTitle_(self._l("settings.action.reveal"))
+                alert.addButtonWithTitle_(self._l(
+                    "settings.action.acknowledge"))
+                alert.addButtonWithTitle_(self._l(
+                    "settings.action.cancel_draft"))
+                alert.addButtonWithTitle_(self._l(
+                    "settings.action.purge_finished"))
+            alert.addButtonWithTitle_(self._l("settings.action.done"))
+            response = alert.runModal()
+            if not drafts:
+                return
+            selected = drafts[chooser.indexOfSelectedItem()]
+            if response == 1000:
+                try:
+                    revealed = self.view_model.reveal_voice_object_draft(
+                        selected)
+                except ValueError:
+                    self.render()
+                    return
+                detail = NSAlert.alloc().init()
+                detail.setMessageText_(self._l(
+                    "settings.dialog.voice_objects.reveal.title",
+                    sequence=revealed.sequence,
+                    destination=revealed.destination.replace(
+                        "_", " ").title()))
+                detail.setInformativeText_(self._l(
+                    "settings.dialog.voice_objects.reveal.message"))
+                scroll, editor = self._text_editor(
+                    NSMakeRect(0, 0, 540, 220), revealed.content,
+                    label=self._l(
+                        "settings.accessibility.voice_objects.content"),
+                    help_text=self._l(
+                        "settings.dialog.voice_objects.reveal.message"))
+                editor.setEditable_(False)
+                detail.setAccessoryView_(scroll)
+                detail.addButtonWithTitle_(self._l("settings.action.done"))
+                detail.runModal()
+            elif response == 1001 and self._confirm(
+                    self._l("settings.dialog.voice_objects.ack.title"),
+                    self._l(
+                        "settings.dialog.voice_objects.ack.message",
+                        sequence=selected.sequence),
+                    self._l("settings.action.acknowledge")):
+                self.view_model.transition_voice_object_draft(
+                    selected, target="acknowledged")
+            elif response == 1002 and self._confirm(
+                    self._l("settings.dialog.voice_objects.cancel.title"),
+                    self._l(
+                        "settings.dialog.voice_objects.cancel.message",
+                        sequence=selected.sequence),
+                    self._l("settings.action.cancel_draft")):
+                self.view_model.transition_voice_object_draft(
+                    selected, target="cancelled")
+            elif response == 1003 and self._confirm(
+                    self._l("settings.dialog.voice_objects.purge.title"),
+                    self._l("settings.dialog.voice_objects.purge.message"),
+                    self._l("settings.action.purge_finished")):
+                self.view_model.purge_terminal_voice_object_drafts()
+            self.render()
+
         def sectionChanged_(self, sender: Any) -> None:
             self.view_model.select_section(SECTIONS[sender.selectedSegment()])
             self.render()
@@ -4160,12 +4473,14 @@ __all__ = [
     "NativeAppKitSmokeContract",
     "OnboardingStep",
     "ResultInspection",
+    "RevealedVoiceDraft",
     "SECTIONS",
     "SETTINGS_PANES",
     "STRING_CATALOGS",
     "SUPPORTED_LOCALES",
     "SnippetSetting",
     "UnifiedSettings",
+    "VoiceDraftMetadata",
     "WhisperFaceGUI",
     "WhisperFaceViewModel",
     "create_gui",

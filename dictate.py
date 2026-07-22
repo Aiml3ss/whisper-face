@@ -339,6 +339,12 @@ from acoustic_time_machine import AcousticTimeMachine  # noqa: E402
 from voice_inbox import InboxState, VoiceInbox  # noqa: E402
 from voice_object_command_parser import parse_command  # noqa: E402
 from voice_object_inbox_bridge import VoiceObjectInboxBridge  # noqa: E402
+from voice_objects import (  # noqa: E402
+    CalendarDraft,
+    EmailDraft,
+    PlainTextDraft,
+    TaskDraft,
+)
 
 if IS_MACOS:
     from whisper_face_gui import GUIActions, create_gui  # noqa: E402
@@ -1094,6 +1100,124 @@ def voice_object_inbox_status() -> dict:
         }
     except (OSError, ValueError, OverflowError):
         return {"enabled": True, "queued_count": 0, "status": "Unavailable"}
+
+
+def inspect_voice_object_drafts() -> tuple[dict, ...]:
+    """Explicitly list bounded, content-free local draft metadata."""
+    if not IS_MACOS:
+        return ()
+    with VOICE_OBJECT_INBOX_STATE["lock"]:
+        if (VOICE_OBJECT_INBOX_STATE["inbox"] is None
+                and not VOICE_INBOX_FILE.is_file()):
+            return ()
+    try:
+        bridge = _voice_object_inbox_bridge()
+        with VOICE_OBJECT_INBOX_STATE["lock"]:
+            inbox = VOICE_OBJECT_INBOX_STATE["inbox"]
+            items = inbox.items()
+        metadata = []
+        for item in items[:256]:
+            try:
+                destination = bridge.read(item.item_id).destination.value
+            except (OSError, TypeError, ValueError, OverflowError):
+                destination = "unavailable"
+            metadata.append({
+                "item_id": item.item_id,
+                "sequence": item.sequence,
+                "destination": destination,
+                "state": item.state.value,
+            })
+        return tuple(metadata)
+    except (OSError, TypeError, ValueError, OverflowError):
+        return ()
+
+
+def _voice_object_draft_content(draft) -> str:
+    """Format one explicitly revealed inert draft without taking an action."""
+    if isinstance(draft, PlainTextDraft):
+        return draft.text
+    if isinstance(draft, EmailDraft):
+        recipients = ", ".join(draft.recipients)
+        subject = draft.subject or ""
+        return f"To: {recipients}\nSubject: {subject}\n\n{draft.body}"
+    if isinstance(draft, TaskDraft):
+        parts = [f"Title: {draft.title}"]
+        if draft.notes is not None:
+            parts.append(f"Notes: {draft.notes}")
+        if draft.due_at is not None:
+            parts.append(f"Due: {draft.due_at}")
+        return "\n".join(parts)
+    if isinstance(draft, CalendarDraft):
+        parts = [f"Title: {draft.title}", f"Starts: {draft.start_at}"]
+        if draft.end_at is not None:
+            parts.append(f"Ends: {draft.end_at}")
+        if draft.attendees:
+            parts.append("Attendees: " + ", ".join(draft.attendees))
+        if draft.notes is not None:
+            parts.append(f"Notes: {draft.notes}")
+        return "\n".join(parts)
+    raise ValueError("unsupported Voice Object draft")
+
+
+def reveal_voice_object_draft(item_id: str) -> dict | None:
+    """Explicitly reveal one selected local draft to the native inspector."""
+    if not IS_MACOS:
+        return None
+    try:
+        revealed = _voice_object_inbox_bridge().read(item_id)
+        return {
+            "sequence": revealed.sequence,
+            "destination": revealed.destination.value,
+            "state": revealed.state.value,
+            "content": _voice_object_draft_content(revealed.draft),
+        }
+    except (OSError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def acknowledge_voice_object_draft(item_id: str) -> bool:
+    """Explicitly acknowledge one draft without executing or exporting it."""
+    if not IS_MACOS:
+        return False
+    try:
+        _voice_object_inbox_bridge()
+        with VOICE_OBJECT_INBOX_STATE["lock"]:
+            inbox = VOICE_OBJECT_INBOX_STATE["inbox"]
+        inbox.ack(item_id)
+        return True
+    except (OSError, TypeError, ValueError, OverflowError):
+        return False
+
+
+def cancel_voice_object_draft(item_id: str) -> bool:
+    """Explicitly cancel one draft without executing or exporting it."""
+    if not IS_MACOS:
+        return False
+    try:
+        _voice_object_inbox_bridge()
+        with VOICE_OBJECT_INBOX_STATE["lock"]:
+            inbox = VOICE_OBJECT_INBOX_STATE["inbox"]
+        inbox.cancel(item_id)
+        return True
+    except (OSError, TypeError, ValueError, OverflowError):
+        return False
+
+
+def purge_terminal_voice_object_drafts() -> int | None:
+    """Explicitly purge acknowledged/cancelled drafts; queued drafts remain."""
+    if not IS_MACOS:
+        return None
+    try:
+        with VOICE_OBJECT_INBOX_STATE["lock"]:
+            if (VOICE_OBJECT_INBOX_STATE["inbox"] is None
+                    and not VOICE_INBOX_FILE.is_file()):
+                return 0
+        _voice_object_inbox_bridge()
+        with VOICE_OBJECT_INBOX_STATE["lock"]:
+            inbox = VOICE_OBJECT_INBOX_STATE["inbox"]
+        return inbox.purge_terminal()
+    except (OSError, TypeError, ValueError, OverflowError):
+        return None
 
 
 def queue_voice_object_command(text: str, utterance_id: str) -> bool:
@@ -6953,6 +7077,12 @@ def main():
             set_flight_recorder=STATUS["bar"].set_flight_enabled,
             set_acoustic_time_machine=set_acoustic_time_machine_enabled,
             set_voice_object_commands=set_voice_object_commands_enabled,
+            inspect_voice_object_drafts=inspect_voice_object_drafts,
+            reveal_voice_object_draft=reveal_voice_object_draft,
+            acknowledge_voice_object_draft=acknowledge_voice_object_draft,
+            cancel_voice_object_draft=cancel_voice_object_draft,
+            purge_terminal_voice_object_drafts=(
+                purge_terminal_voice_object_drafts),
             play_retained_span=play_retained_consequence_span,
             clear_retained_spans=clear_retained_consequence_spans,
             set_app_tone=set_gui_app_tone,

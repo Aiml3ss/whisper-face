@@ -264,6 +264,49 @@ class PrewarmedVerifierTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "closed"):
             self.verify(verifier)
 
+    def test_close_allows_graceful_child_teardown_before_hard_stop(self):
+        events = []
+
+        class FakeConnection:
+            def send(self, message):
+                events.append(("send", message))
+
+            def close(self):
+                events.append(("connection-close", None))
+
+        class FakeProcess:
+            pid = 42
+
+            def __init__(self):
+                self.alive = True
+
+            def is_alive(self):
+                return self.alive
+
+            def join(self, timeout=None):
+                events.append(("join", timeout))
+                self.alive = False
+
+            def terminate(self):
+                raise AssertionError("graceful close must precede terminate")
+
+            def close(self):
+                events.append(("process-close", None))
+
+        verifier = PrewarmedVerifierSupervisor(fake_provider_factory)
+        verifier._connection = FakeConnection()
+        verifier._process = FakeProcess()
+
+        verifier.close()
+
+        self.assertEqual(events, [
+            ("send", ("close",)),
+            ("join", 0.5),
+            ("connection-close", None),
+            ("join", None),
+            ("process-close", None),
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()

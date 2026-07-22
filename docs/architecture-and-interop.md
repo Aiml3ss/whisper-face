@@ -70,15 +70,23 @@ uv run tests/test_voice_input_protocol.py
 
 `voice_input_protocol_wire.py` supplies deterministic, canonical UTF-8 JSON
 encoding for one validated message with a strict frame-size limit. It delegates
-all message and payload validation to the protocol contract. It is a
-transport-neutral codec only: it opens no socket, starts no server or process,
-and stores no message.
+all message and payload validation to the protocol contract.
+
+[`voice_input_protocol_transport.py`](../voice_input_protocol_transport.py)
+adds a deliberately narrow POSIX local transport around that existing codec.
+It uses a Unix-domain stream socket with a 0600 filesystem endpoint, one
+length-bounded canonical request and one response per connection, explicit
+deadlines, sequential handling, and same-UID peer checks when the platform
+exposes peer credentials. Malformed frames, deadline expiry, peer mismatch,
+and handler failure close the connection without a payload-bearing error or
+logging. The server has no background loop and removes only the socket path it
+created on explicit shutdown. It is not wired to dictation.
 
 ## What remains outstanding
 
-This repository does **not** currently ship a cross-process SDK, public ABI,
-transport, network service, or physical-app adapter suite. The in-process v1
-contract and JSON codec are foundations for future interoperability work, not
-a stability or compatibility promise to external clients. Any such surface
-needs its own transport, versioning, security/privacy model, adapter evidence,
-and release commitment before it can be described as public.
+This repository does **not** currently ship a public cross-process SDK, public ABI,
+network service, XPC endpoint, sandbox integration, Windows transport,
+or physical-app adapter suite. The bounded POSIX transport is a local test
+foundation, not a stability or compatibility promise to external clients. Any
+such surface needs its own versioning, security/privacy model, adapter
+evidence, and release commitment before it can be described as public.

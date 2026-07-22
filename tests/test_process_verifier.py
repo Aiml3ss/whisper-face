@@ -161,6 +161,84 @@ class ProcessVerifierTests(unittest.TestCase):
                 self.assertEqual(
                     receipt.refusal, RefusalReason.MALFORMED_RESULT)
 
+    def test_received_result_allows_graceful_exit_before_terminate(self):
+        events = []
+
+        class FakeProcess:
+            def __init__(self):
+                self.alive = True
+
+            def is_alive(self):
+                return self.alive
+
+            def join(self, timeout=None):
+                events.append(("join", timeout))
+                self.alive = False
+
+            def terminate(self):
+                raise AssertionError("completed child must exit gracefully")
+
+        ProcessIsolatedVerifier._stop(
+            FakeProcess(), graceful_result=True)
+
+        self.assertEqual(events, [("join", 0.25)])
+
+    def test_disposable_process_handle_is_closed_after_verification(self):
+        events = []
+
+        class FakeConnection:
+            def close(self):
+                events.append("connection-close")
+
+            def poll(self, _remaining):
+                return True
+
+            def recv(self):
+                return {
+                    "outcome": "confirmed",
+                    "confidence": 1.0,
+                    "engine": "fake",
+                }
+
+        class FakeSender:
+            def close(self):
+                events.append("sender-close")
+
+        class FakeProcess:
+            pid = 42
+
+            def start(self):
+                events.append("start")
+
+            def is_alive(self):
+                return False
+
+            def join(self, _timeout=None):
+                events.append("join")
+
+            def close(self):
+                events.append("process-close")
+
+        class FakeContext:
+            def Pipe(self, duplex=False):
+                self.duplex = duplex
+                return FakeConnection(), FakeSender()
+
+            def Process(self, **_kwargs):
+                return FakeProcess()
+
+        verifier = ProcessIsolatedVerifier(
+            confirming_worker, context=FakeContext())
+
+        receipt = verifier.verify(
+            [0.0], 16_000, "private",
+            deadline_at=time.monotonic() + 1.0)
+
+        self.assertTrue(receipt.accepted)
+        self.assertEqual(events[-3:], [
+            "connection-close", "join", "process-close",
+        ])
+
 
 class _ConstantWorker:
     def __init__(self, payload):
