@@ -54,6 +54,21 @@ LIST_INTENT_RE = re.compile(
     r")",
     re.I,
 )
+NUMBERED_LIST_MARKER_RE = re.compile(
+    r"\bhere(?:['’]s|\s+is)\s+"
+    r"(one|two|three|four|five|six|seven|eight|nine|ten)\b",
+    re.I,
+)
+LIST_SIGNAL_RE = re.compile(
+    r"\b(?:feedback|ideas|items|list|listing|points|things)\b",
+    re.I,
+)
+LIST_NUMBER = {
+    word: index for index, word in enumerate((
+        "one", "two", "three", "four", "five",
+        "six", "seven", "eight", "nine", "ten",
+    ), start=1)
+}
 
 
 @dataclass(frozen=True)
@@ -181,6 +196,42 @@ def correction_similarity(old: str, new: str) -> float:
     return max(spelling, phonetic * 0.9)
 
 
+def _format_numbered_list_markers(text: str) -> str | None:
+    """Format explicit "here's one / here's two" speech without an LLM."""
+    if "\n- " in text:
+        return None
+    markers = list(NUMBERED_LIST_MARKER_RE.finditer(text))
+    if len(markers) < 2:
+        return None
+    numbers = [LIST_NUMBER[match.group(1).casefold()] for match in markers]
+    if numbers != list(range(1, len(markers) + 1)):
+        return None
+    header = re.sub(
+        r"[\s,;:–—-]+$", "", text[:markers[0].start()]).strip()
+    if not header or not LIST_SIGNAL_RE.search(header):
+        return None
+
+    items: list[str] = []
+    for index, marker in enumerate(markers):
+        end = markers[index + 1].start() \
+            if index + 1 < len(markers) else len(text)
+        item = text[marker.start():end]
+        if index + 1 < len(markers):
+            item = re.sub(
+                r"[\s,;:–—-]+(?:and\s+)?$", "", item, flags=re.I)
+        item = item.strip(" \t,;:–—-")
+        if not item:
+            return None
+        item = item[:1].upper() + item[1:]
+        if item[-1] not in ".!?…":
+            item += "."
+        items.append(item)
+
+    if header[-1] not in ".!?…:":
+        header += ":"
+    return header + "\n" + "\n".join(f"- {item}" for item in items)
+
+
 def compile_cleanup(raw: str) -> CleanupPlan:
     """Compile safe spoken transformations into explicit, reversible edits."""
     text = raw.strip()
@@ -229,13 +280,21 @@ def compile_cleanup(raw: str) -> CleanupPlan:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
     text = re.sub(r"\s+([,.;:!?])", r"\1", text).strip()
-    needs_semantic = bool(LIST_INTENT_RE.search(text) or re.search(
-        r"\b(?:first|second|third|lastly)\b|"
-        r"\b(?:two|three|four|five) (?:things|points|items|ideas)\b|"
-        r"\b(?:you know|I mean)\b",
-        text,
-        re.I,
-    ))
+    deterministic_list = _format_numbered_list_markers(text)
+    if deterministic_list is not None:
+        before = text
+        text = deterministic_list
+        edits.append(CleanupEdit("spoken_enumeration", before, text))
+    needs_semantic = bool(re.search(r"\b(?:you know|I mean)\b", text, re.I))
+    if deterministic_list is None:
+        needs_semantic = needs_semantic or bool(
+            LIST_INTENT_RE.search(text) or re.search(
+                r"\b(?:first|second|third|lastly)\b|"
+                r"\b(?:two|three|four|five) "
+                r"(?:things|points|items|ideas)\b",
+                text,
+                re.I,
+            ))
     return CleanupPlan(text=text, edits=edits,
                        needs_semantic_cleanup=needs_semantic)
 
