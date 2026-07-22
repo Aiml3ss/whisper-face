@@ -288,6 +288,9 @@ Click the selected animal in the menu bar and choose **Open Whisper Face…**.
 The menu bar remains the fastest everyday control, while the window provides a
 clear home for setup health, privacy controls, model status, character choice,
 and Voice Outbox recovery. Closing the window does not stop dictation.
+Diagnostics can copy a fixed support snapshot containing only categorized
+health/model state and numeric result aggregates; it excludes dictation text,
+context, paths, logs, personal language data, and machine identifiers.
 
 ### Matching another Mac
 
@@ -424,43 +427,26 @@ idempotent receipts. A real platform destination adapter is still required
 before runtime activation.
 
 `voice_objects.py`, `voice_inbox.py`, and `drop_to_target.py` define inert,
-local foundations for the next interaction layer. They can prepare typed
-drafts, hold explicitly deferred payloads, and make a synthetic target decision;
-they have no live destination or agent execution integration.
+local foundations for the next interaction layer. Typed drafts can now enter
+the local inbox through canonical closed-schema JSON and explicit-read decoding,
+but there is still no live destination, automatic dispatch, or agent execution.
+
+`acoustic_time_machine.py` is a default-off, RAM-only buffer foundation for at
+most eight 2.4-second microspans and ten seconds total. It has explicit
+read/consume/delete/clear operations and retains nothing while disabled; no
+runtime capture or replay UI is enabled yet.
 
 ## Verify
 
-Run the fast regression suite after changing the pipeline:
+Run the focused test for the area you changed. The complete release checklist
+lives in one place—[the installer release process](docs/installer-release-process.md)—so
+the required Mac and Windows commands do not drift across documents. Typical
+focused commands are:
 
 ```sh
-uv run tests/test_parrot_core.py
-uv run tests/test_voice_compiler.py
-uv run tests/test_consequence_routing.py
-uv run tests/test_benchmark_voice_compiler.py
-uv run tests/test_benchmark_consequence_routing.py
-uv run tests/test_benchmark_asr.py
-uv run tests/test_performance_lab.py
 uv run tests/test_dictate.py
-uv run tests/test_gui_settings_runtime.py
-uv run tests/test_insertion_integrity.py
-uv run tests/test_benchmark_insertion_reliability.py
-uv run tests/test_compatibility_fingerprint.py
-uv run tests/test_voice_input_protocol.py
-uv run tests/test_acoustic_keyword_memory.py
-uv run tests/test_delayed_cleanup_merge.py
-uv run tests/test_model_wallet.py
-uv run tests/test_point_and_speak_resolver.py
-uv run tests/test_drop_to_target.py
-uv run tests/test_voice_objects.py
-uv run tests/test_voice_inbox.py
-uv run tests/test_competitor_benchmark.py
-uv run tests/test_public_scorecard.py
-uv run tests/test_personal_regression.py
 uv run tests/test_whisper_face_gui.py
-uv run --locked --script dictate.py --native-gui-smoke-test
 uv run tests/test_installers.py
-uv run tests/test_repository_governance.py
-uv run tests/test_macos_distribution.py
 ```
 
 ## Distribution, privacy, and security

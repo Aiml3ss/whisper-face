@@ -2194,6 +2194,35 @@ class InsertionAdapterTests(unittest.TestCase):
             ns["copy_latest_outbox"]()
         self.assertEqual(acknowledgements, [])
 
+    def test_support_snapshot_uses_standard_clipboard_and_rejects_empty_payload(self):
+        copied = []
+
+        class Pasteboard:
+            def clearContents(self):
+                copied.append(("cleared",))
+
+            def setString_forType_(self, value, kind):
+                copied.append((value, kind))
+                return True
+
+        ns = load_definitions(
+            "copy_support_snapshot",
+            extra={
+                "NSPasteboard": SimpleNamespace(
+                    generalPasteboard=lambda: Pasteboard()),
+                "NSPasteboardTypeString": "public.utf8-plain-text",
+            },
+        )
+
+        ns["copy_support_snapshot"]('{"schema_version": 1}')
+
+        self.assertEqual(copied, [
+            ("cleared",),
+            ('{"schema_version": 1}', "public.utf8-plain-text"),
+        ])
+        with self.assertRaisesRegex(ValueError, "empty"):
+            ns["copy_support_snapshot"]("  ")
+
 
 class PersonalPriorIntegrationTests(unittest.TestCase):
     def test_unpromoted_case_does_not_disable_established_legacy_fix(self):

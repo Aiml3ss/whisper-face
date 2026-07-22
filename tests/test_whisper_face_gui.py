@@ -5,6 +5,7 @@
 # ///
 """Headless tests for the Whisper Face native-window state seam."""
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -32,6 +33,7 @@ from whisper_face_gui import (
     run_native_appkit_smoke,
     resolve_locale,
     set_accessible_text,
+    support_snapshot_text,
     sync_accessibility,
     tone_for_app_index,
 )
@@ -196,6 +198,7 @@ class SnapshotTests(unittest.TestCase):
                 "operation.face.change_failed",
                 "operation.flight.update_failed",
                 "operation.log.open_failed",
+                "operation.support_snapshot.copy_failed",
                 "operation.source.open_failed",
                 "operation.licenses.open_failed",
             },
@@ -325,6 +328,79 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(state.regression_cases, 7)
         self.assertEqual(state.regression_quarantined, 1)
         self.assertEqual(state.models[0].name, "Parakeet Unified")
+
+    def test_support_snapshot_is_deterministic_and_strictly_transcript_free(self):
+        state = normalize_snapshot({
+            "service_status": "Running",
+            "microphone_status": "Ready",
+            "accessibility_status": "Granted",
+            "version": "Local checkout",
+            "models": [
+                {"name": "Whisper", "status": "Installed"},
+                {"name": "Parakeet", "status": "Running"},
+            ],
+            "active_engine": "Parakeet",
+            "last_latency_ms": 123.4,
+            "last_word_count": 7,
+            "last_confidence": 0.75,
+            "last_mode": "compose",
+            "last_stable_prefix_words": 3,
+            "last_compiler_decisions": 4,
+            "last_protected_anchors": 2,
+            "last_alternatives_considered": 1,
+            "last_cleanup_edits": ["private rewrite", "another edit"],
+            "last_proof_edits_accepted": 1,
+            "last_proof_edits_rejected": 2,
+            "transcript": "private dictation",
+            "selection": "private selection",
+            "context": "private context",
+            "log_path": "/Users/example/private.log",
+            "dictionary": ["private dictionary"],
+            "snippets": ["private snippet"],
+            "corrections": ["private correction"],
+            "machine_identifier": "private machine",
+        })
+
+        first = support_snapshot_text(state)
+        second = support_snapshot_text(state)
+        payload = json.loads(first)
+
+        self.assertEqual(first, second)
+        self.assertEqual(payload["kind"], "whisper-face/support-snapshot")
+        self.assertEqual(payload["models"], [
+            {"family": "parakeet", "status": "running"},
+            {"family": "whisper", "status": "installed"},
+        ])
+        self.assertEqual(payload["last_result"]["cleanup_edits_count"], 2)
+        self.assertNotIn("cleanup_edits", payload["last_result"])
+        self.assertEqual(set(payload), {
+            "kind", "schema_version", "health", "permissions", "build",
+            "models", "last_result",
+        })
+        for private_value in (
+                "private dictation", "private selection", "private context",
+                "/Users/example/private.log", "private dictionary",
+                "private snippet", "private correction", "private machine",
+                "private rewrite", "another edit"):
+            self.assertNotIn(private_value, first)
+
+        poisoned = support_snapshot_text(normalize_snapshot({
+            "service_status": "private service transcript",
+            "microphone_status": "private microphone path",
+            "accessibility_status": "private permission detail",
+            "version": "private machine identifier",
+            "models": [{
+                "name": "private model label",
+                "status": "private model status",
+            }],
+            "active_engine": "private engine",
+            "last_word_count": 1,
+            "last_mode": "private mode",
+        }))
+        self.assertNotIn("private", poisoned)
+        self.assertEqual(json.loads(poisoned)["models"], [
+            {"family": "unknown", "status": "unknown"},
+        ])
 
     def test_malformed_snapshot_gets_safe_truthful_defaults(self):
         state = normalize_snapshot({
@@ -673,6 +749,8 @@ class ViewModelTests(unittest.TestCase):
             pause=pause,
             resume=resume,
             open_log=lambda: self.calls.append(("log",)),
+            copy_support_snapshot=lambda payload:
+                self.calls.append(("support_snapshot", payload)),
             open_source_and_license=lambda: self.calls.append(("source",)),
             open_local_license_notices=lambda: self.calls.append(("license",)),
             copy_latest_outbox=lambda: self.calls.append(("outbox",)),
@@ -827,6 +905,7 @@ class ViewModelTests(unittest.TestCase):
 
     def test_diagnostics_actions_report_results(self):
         self.model.open_log()
+        snapshot_state = self.model.copy_support_snapshot()
         self.model.open_source_and_license()
         self.model.open_local_license_notices()
         self.model.copy_latest_outbox()
@@ -835,10 +914,30 @@ class ViewModelTests(unittest.TestCase):
             localized_string("overview.notice.outbox.copied"))
         state = self.model.rerun_verification()
         self.assertIn(("log",), self.calls)
+        support_payload = next(
+            call[1] for call in self.calls if call[0] == "support_snapshot")
+        self.assertEqual(
+            json.loads(support_payload)["kind"],
+            "whisper-face/support-snapshot")
+        self.assertEqual(
+            snapshot_state.notice,
+            localized_string("diagnostics.notice.support_snapshot.copied"))
         self.assertIn(("source",), self.calls)
         self.assertIn(("license",), self.calls)
         self.assertIn(("outbox",), self.calls)
         self.assertEqual(state.verification, "Mac installation verified")
+
+    def test_support_snapshot_failure_becomes_user_visible_notice(self):
+        def fail(_payload):
+            raise RuntimeError("clipboard unavailable")
+
+        model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {}, copy_support_snapshot=fail))
+
+        state = model.copy_support_snapshot()
+
+        self.assertEqual(state.notice_level, "error")
+        self.assertIn("clipboard unavailable", state.notice)
 
     def test_callback_failure_becomes_user_visible_notice(self):
         def fail(_face):

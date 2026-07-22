@@ -3248,6 +3248,16 @@ def copy_latest_outbox():
         recoverable[-1].receipt.utterance_id)
 
 
+def copy_support_snapshot(payload: str) -> None:
+    """Copy the GUI's already allowlisted diagnostic support projection."""
+    if not isinstance(payload, str) or not payload.strip():
+        raise ValueError("support snapshot payload is empty")
+    pb = NSPasteboard.generalPasteboard()
+    pb.clearContents()
+    if not pb.setString_forType_(payload, NSPasteboardTypeString):
+        raise RuntimeError("macOS clipboard rejected the support snapshot")
+
+
 def merge_learned_state(base: dict, mined: dict, latest: dict) -> dict:
     """Apply mining deltas to the newest state without erasing corrections.
 
@@ -6602,6 +6612,7 @@ def main():
             resume=lambda: STATUS["bar"].set_paused(False),
             open_log=lambda: subprocess.Popen(
                 ["open", str(HERE / "dictate.log")]),
+            copy_support_snapshot=copy_support_snapshot,
             open_source_and_license=lambda: subprocess.Popen(
                 ["open", source_metadata()["source"]]),
             open_local_license_notices=lambda: subprocess.Popen(
