@@ -150,7 +150,8 @@ class SnippetPersistenceTests(unittest.TestCase):
         saved = json.loads(self.path.read_text())
         self.assertEqual(saved, {
             "signature": "Cheers", "address": "123 Main Street"})
-        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
         self.assertFalse(any(path.name.startswith(".snippets.json.")
                              for path in self.path.parent.iterdir()))
 
@@ -224,7 +225,8 @@ class VocabularyPersistenceTests(unittest.TestCase):
             self.assertIn(marker + "\nAuto Learned\n", saved)
             self.assertNotIn("Old term", saved)
             self.assertEqual(refreshes, [True])
-            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
     def test_ambiguous_or_oversized_vocabulary_is_rejected_before_write(self):
         with tempfile.TemporaryDirectory() as directory:

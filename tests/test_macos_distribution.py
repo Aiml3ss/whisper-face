@@ -195,6 +195,10 @@ class MacDistributionContractTests(unittest.TestCase):
             check=check,
         )
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "macOS package timestamp normalization is not a Windows contract",
+    )
     def test_package_tree_receipt_is_deterministic_and_detects_tampering(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "Whisper Face 1.2.3"
