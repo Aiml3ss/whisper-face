@@ -692,6 +692,12 @@ class CleanupGuardTests(unittest.TestCase):
             "- This is great.\n"
             "- This is not so great.",
         )
+        mixed = "Two things. One test. Second, test."
+        self.assertFalse(ns["needs_llm_cleanup"](mixed, None, False))
+        self.assertEqual(
+            ns["quick_clean"](mixed),
+            "Two things:\n- Test.\n- Test.",
+        )
 
     def test_llm_cleanup_has_a_short_read_deadline(self):
         seen = {}

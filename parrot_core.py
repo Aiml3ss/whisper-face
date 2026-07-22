@@ -54,14 +54,17 @@ LIST_INTENT_RE = re.compile(
     r")",
     re.I,
 )
+LIST_MARKER_PATTERN = (
+    r"one|first|two|second|three|third|four|fourth|five|fifth|"
+    r"six|sixth|seven|seventh|eight|eighth|nine|ninth|ten|tenth"
+)
 NUMBERED_LIST_MARKER_RE = re.compile(
-    r"\bhere(?:['’]s|\s+is)\s+"
-    r"(one|two|three|four|five|six|seven|eight|nine|ten)\b",
+    r"\bhere(?:['’]s|\s+is)\s+(" + LIST_MARKER_PATTERN + r")\b",
     re.I,
 )
 PLAIN_NUMBERED_LIST_MARKER_RE = re.compile(
-    r"(^|[.!?:;,])\s*(?:and\s+)?"
-    r"(one|two|three|four|five|six|seven|eight|nine|ten)\b"
+    r"([.!?:;,])\s*(?:and\s+)?"
+    r"(" + LIST_MARKER_PATTERN + r")\b"
     r"(?:\s*[,;:–—-]\s*|\s+)",
     re.I,
 )
@@ -77,10 +80,14 @@ LIST_SIGNAL_RE = re.compile(
     re.I,
 )
 LIST_NUMBER = {
-    word: index for index, word in enumerate((
-        "one", "two", "three", "four", "five",
-        "six", "seven", "eight", "nine", "ten",
+    word: index
+    for index, pair in enumerate((
+        ("one", "first"), ("two", "second"), ("three", "third"),
+        ("four", "fourth"), ("five", "fifth"), ("six", "sixth"),
+        ("seven", "seventh"), ("eight", "eighth"),
+        ("nine", "ninth"), ("ten", "tenth"),
     ), start=1)
+    for word in pair
 }
 
 
