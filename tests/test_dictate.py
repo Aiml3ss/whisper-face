@@ -98,6 +98,21 @@ def load_definitions(*names, assignments=(), extra=None):
     return namespace
 
 
+class DictationSuccessSoundTests(unittest.TestCase):
+    def test_mac_review_route_uses_advisory_ping(self):
+        select = load_definitions(
+            "dictation_success_sound")["dictation_success_sound"]
+
+        self.assertEqual(select("review", is_macos=True), "Ping")
+
+    def test_other_routes_and_windows_keep_standard_success_sound(self):
+        select = load_definitions(
+            "dictation_success_sound")["dictation_success_sound"]
+
+        self.assertEqual(select("standard", is_macos=True), "Pop")
+        self.assertEqual(select("review", is_macos=False), "Pop")
+
+
 class FakeStream:
     def __init__(self, **kwargs):
         self.callback = kwargs["callback"]
