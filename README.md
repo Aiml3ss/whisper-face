@@ -70,7 +70,9 @@ are never Supporter-only features.
   RAM-only recoverable outbox. Apps that hide their text still bind the
   insertion to the original application/focused element and surface delivery
   as unverified instead of training from an assumption; if macOS cannot identify any focused
-  element at all, the insertion fails closed into the outbox.
+  element at all, the insertion fails closed into the outbox. The count-only
+  **Voice Outbox** menu entry routes directly to Overview; only the existing
+  explicit **Copy & Dismiss** control can recover content.
 - **Flight Recorder (experimental)** — enable its menu-bar toggle, speak
   naturally, then tap Right Option afterward. Whisper Face finds and pastes the
   latest utterance from a 20-second RAM-only buffer. Holding Right Option still
@@ -95,7 +97,9 @@ are never Supporter-only features.
   an end pause. Clear speech can paste immediately; uncertain English is
   verified by a warm native Parakeet Unified helper, with Whisper
   large-v3-turbo retained as the independent fallback. Audio reaches the
-  helper through a RAM-only pipe. Windows retains the Tiny → Turbo cascade.
+  helper through a RAM-only pipe. Startup and duration-aware request deadlines
+  terminate a wedged helper, fall back to Turbo, and allow a lazy restart on
+  the next utterance. Windows retains the Tiny → Turbo cascade.
 - **Offline runtime model resolution** — the one-click installer downloads both
   pinned MLX snapshots up front. Dictation then resolves only the installed
   local paths and memoizes them, so a release never waits on Hugging Face or
@@ -280,6 +284,10 @@ must be re-audited if it moves.
 ## Install
 
 Clone or download the repository, then use the one-click launcher for your OS:
+
+Copy or extract the complete source folder to a writable local directory first;
+do not run the installer from a read-only mounted DMG or protected folder. Both
+installers check this before downloads or service changes.
 
 - **Mac:** double-click `Install.command`.
 - **Windows:** double-click `Install.cmd`.

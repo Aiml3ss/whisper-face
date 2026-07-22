@@ -125,6 +125,33 @@ function Set-PrivateFile([string]$Path) {
     }
 }
 
+function Confirm-WritableCheckout {
+    $Proof = Join-Path $Repo (".whisper-face-write-" +
+        [Guid]::NewGuid().ToString("N"))
+    $Created = $false
+    $Failure = $null
+    try {
+        $Stream = [IO.File]::Open(
+            $Proof, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write,
+            [IO.FileShare]::None)
+        $Created = $true
+        $Stream.Dispose()
+        Set-PrivateFile $Proof
+    } catch {
+        $Failure = $_
+    }
+    if ($Created) {
+        try {
+            Remove-Item -LiteralPath $Proof -Force -ErrorAction Stop
+        } catch {
+            if ($null -eq $Failure) { $Failure = $_ }
+        }
+    }
+    if ($null -ne $Failure) {
+        throw "checkout is not writable; copy or extract Whisper Face to a writable local folder, then rerun Install.cmd"
+    }
+}
+
 $Required = @(
     "dictate.py", "dictate.py.lock", "parrot_core.py", "voice_compiler.py",
     "insertion_integrity.py", "personal_regression.py",
@@ -311,6 +338,7 @@ $Drive = [IO.DriveInfo]::new((Get-Item $Repo).PSDrive.Root)
 if ($Drive.AvailableFreeSpace -lt (8 * 1024 * 1024 * 1024)) {
     throw "At least 8 GB of free disk space is required"
 }
+Confirm-WritableCheckout
 
 Get-InstalledTools
 if (-not $Uv) {

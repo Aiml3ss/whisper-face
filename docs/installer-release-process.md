@@ -132,6 +132,12 @@ repair the platform-native current-user-only protection. Mac rejects symbolic
 links; Windows rejects reparse points. Read-only verification fails when an
 expected log is missing or no longer has that private posture.
 
+Before a normal install performs downloads or service changes, each platform
+creates, privately protects, and removes one unpredictable proof file inside
+the checkout. A read-only mounted image or protected extraction therefore fails
+immediately with copy/extract guidance; `--verify` remains read-only and skips
+this mutation probe.
+
 For dependency, service, model, preload, or permission changes, also rerun the
 full one-click installer on an appropriate clean or disposable machine before
 calling the release fully cross-platform verified.

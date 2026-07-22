@@ -60,6 +60,7 @@ class InsertionIntegrityTests(unittest.TestCase):
         self.assertEqual(receipt.state, ReceiptState.CONFLICT)
         self.assertEqual(receipt.reason, ReceiptReason.FOCUS_DRIFT)
         self.assertFalse(receipt.paste_attempted)
+        self.assertEqual(coordinator.recoverable_count(), 1)
         self.assertEqual(coordinator.recoverable()[0].text, "Ship it")
 
     def test_selection_drift_conflicts_without_attempting_a_paste(self):
