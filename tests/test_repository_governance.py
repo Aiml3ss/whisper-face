@@ -110,6 +110,31 @@ class RepositoryGovernanceTests(unittest.TestCase):
         self.assertIn("commercial terms", readme.lower())
         self.assertIn("Earlier published commits remain MIT-licensed", readme)
 
+    def test_free_core_support_and_concierge_pilot_are_honest(self):
+        readme = self.read("README.md")
+        support = " ".join(self.read("SUPPORT.md").lower().split())
+        interest_form = self.read(
+            ".github/ISSUE_TEMPLATE/supporter-concierge-interest.yml"
+        ).lower()
+
+        self.assertIn("[support and setup pilot](support.md)", readme.lower())
+        for promise in (
+            "no account or word cap",
+            "never paywalled",
+            "no payment account is connected",
+            "stated interest only",
+            "not revenue, conversion, or willingness-to-pay evidence",
+            "do not include private data in the public issue",
+        ):
+            self.assertIn(promise, support)
+        self.assertIn("nonbinding", interest_form)
+        self.assertIn("do not include", interest_form)
+        for forbidden_field in (
+            "id: email", "id: phone", "id: transcript", "id: audio",
+            "id: logs", "id: credentials", "id: payment",
+        ):
+            self.assertNotIn(forbidden_field, interest_form)
+
 
 if __name__ == "__main__":
     unittest.main()

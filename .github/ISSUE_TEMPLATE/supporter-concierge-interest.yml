@@ -1,0 +1,48 @@
+name: Supporter or Mac concierge interest
+description: Share nonbinding interest without posting private information
+title: "[Interest]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This public form records nonbinding stated interest only. No payment account or paid service is active.
+
+        Do not include credentials, contact details, payment data, audio, transcripts, snippets, logs, file contents, or other private information.
+  - type: dropdown
+    id: interest
+    attributes:
+      label: What are you interested in?
+      options:
+        - One-time voluntary project support
+        - Recurring voluntary project support
+        - A limited Mac setup concierge pilot
+        - Public project updates only
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Apple Silicon Mac
+        - Windows x64
+        - Not sure yet
+    validations:
+      required: true
+  - type: textarea
+    id: general_goal
+    attributes:
+      label: General goal
+      description: Describe the outcome at a high level. Do not include private data or machine details.
+      placeholder: I want a simpler way to verify a local install on my Mac.
+    validations:
+      required: true
+  - type: checkboxes
+    id: acknowledgement
+    attributes:
+      label: Public and nonbinding acknowledgement
+      options:
+        - label: I understand this is a public, nonbinding interest response and not a purchase, booking, SLA, or promise of availability.
+          required: true
