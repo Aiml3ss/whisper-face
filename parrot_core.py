@@ -59,8 +59,21 @@ NUMBERED_LIST_MARKER_RE = re.compile(
     r"(one|two|three|four|five|six|seven|eight|nine|ten)\b",
     re.I,
 )
+PLAIN_NUMBERED_LIST_MARKER_RE = re.compile(
+    r"(^|[.!?:;,])\s*(?:and\s+)?"
+    r"(one|two|three|four|five|six|seven|eight|nine|ten)\b"
+    r"(?:\s*[,;:–—-]\s*|\s+)",
+    re.I,
+)
 LIST_SIGNAL_RE = re.compile(
-    r"\b(?:feedback|ideas|items|list|listing|points|things)\b",
+    r"(?:"
+    r"\b(?:here(?:['’]s|\s+is|\s+are)|these\s+are|my)\b.*"
+    r"\b(?:feedback\s+)?(?:ideas|items|points|things)|"
+    r"\b(?:make|create|start|write|format)\s+(?:a|the|this)\s+list|"
+    r"\b(?:so\s+)?listing|"
+    r"\b(?:two|three|four|five|six|seven|eight|nine|ten)\s+"
+    r"(?:ideas|items|points|things)"
+    r")\s*$",
     re.I,
 )
 LIST_NUMBER = {
@@ -197,25 +210,34 @@ def correction_similarity(old: str, new: str) -> float:
 
 
 def _format_numbered_list_markers(text: str) -> str | None:
-    """Format explicit "here's one / here's two" speech without an LLM."""
+    """Format explicit numbered-item speech without an LLM."""
     if "\n- " in text:
         return None
-    markers = list(NUMBERED_LIST_MARKER_RE.finditer(text))
+    markers = [
+        (match, match.group(1), match.start())
+        for match in NUMBERED_LIST_MARKER_RE.finditer(text)
+    ]
+    if len(markers) < 2:
+        markers = [
+            (match, match.group(2), match.end())
+            for match in PLAIN_NUMBERED_LIST_MARKER_RE.finditer(text)
+        ]
     if len(markers) < 2:
         return None
-    numbers = [LIST_NUMBER[match.group(1).casefold()] for match in markers]
+    numbers = [LIST_NUMBER[number.casefold()]
+               for _match, number, _item_start in markers]
     if numbers != list(range(1, len(markers) + 1)):
         return None
     header = re.sub(
-        r"[\s,;:–—-]+$", "", text[:markers[0].start()]).strip()
+        r"[\s,;:.!?–—-]+$", "", text[:markers[0][0].start()]).strip()
     if not header or not LIST_SIGNAL_RE.search(header):
         return None
 
     items: list[str] = []
-    for index, marker in enumerate(markers):
-        end = markers[index + 1].start() \
+    for index, (_marker, _number, item_start) in enumerate(markers):
+        end = markers[index + 1][0].start() \
             if index + 1 < len(markers) else len(text)
-        item = text[marker.start():end]
+        item = text[item_start:end]
         if index + 1 < len(markers):
             item = re.sub(
                 r"[\s,;:–—-]+(?:and\s+)?$", "", item, flags=re.I)
