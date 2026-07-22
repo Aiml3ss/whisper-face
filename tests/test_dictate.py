@@ -118,6 +118,40 @@ def load_definitions(*names, assignments=(), extra=None):
     return namespace
 
 
+class RoutineLogPrivacyTests(unittest.TestCase):
+    def test_routine_logs_do_not_interpolate_private_user_values(self):
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        for forbidden in (
+            "[tones] {bundle}",
+            "forgot correction: {removed.get",
+            "candidates: {pretty}",
+            "saving {name!r}",
+            "snippet {name!r}",
+            "snippet updated: {name!r}",
+            "forgot snippet edit: {name!r}",
+            "edits to {name!r}",
+            "correction observed: {term!r}",
+            "prior quarantined: {old!r}",
+            "fix rule active: {old!r}",
+            "{text[:70]}",
+            "snippet:{name}",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, source)
+        for expected in (
+            "[tones] app preference updated",
+            "[learn] correction forgotten",
+            "[learn] correction observed for dictionary",
+            "[learn] app prior quarantined",
+            "[learn] global prior quarantined",
+            "[learn] fix rule active",
+            'f"{len(text.split())} words]"',
+            "[release {release_total:.2f}s | snippet |",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, source)
+
+
 class GuiLauncherActivationTests(unittest.TestCase):
     def namespace(self, cleanups):
         return load_definitions(
@@ -878,6 +912,88 @@ class VoiceObjectDraftCopyRuntimeTests(unittest.TestCase):
         self.assertFalse(action_names & {
             "print", "open", "subprocess", "Popen", "NSURL", "NSWorkspace",
             "EventKit", "requests", "socket",
+        })
+
+
+class VoiceObjectDraftClearRuntimeTests(unittest.TestCase):
+    @staticmethod
+    def functions(adapter, *, is_macos=True, enabled=True):
+        namespace = load_definitions(
+            "issue_voice_object_clear_clipboard_nonce",
+            "clear_voice_object_draft_clipboard",
+            extra={
+                "IS_MACOS": is_macos,
+                "PREFERENCES": {"voice_object_commands": enabled},
+                "VOICE_DRAFT_CLIPBOARD_ADAPTER": adapter,
+            },
+        )
+        return (
+            namespace["issue_voice_object_clear_clipboard_nonce"],
+            namespace["clear_voice_object_draft_clipboard"],
+        )
+
+    def test_clear_uses_only_adapter_capability_and_closed_receipt(self):
+        calls = []
+
+        class Adapter:
+            def issue_clear_nonce(self):
+                calls.append(("issue",))
+                return "clear_session_nonce_123456"
+
+            def clear(self, nonce):
+                calls.append(("clear", nonce))
+                return SimpleNamespace(to_mapping=lambda: {
+                    "schema_version": 1,
+                    "state": "cleared",
+                    "attempted": True,
+                })
+
+        issue, clear = self.functions(Adapter())
+        nonce = issue()
+        result = clear(nonce)
+
+        self.assertEqual(calls, [
+            ("issue",), ("clear", "clear_session_nonce_123456")])
+        self.assertEqual(result, {
+            "schema_version": 1, "state": "cleared", "attempted": True})
+        self.assertEqual(set(result), {"schema_version", "state", "attempted"})
+
+    def test_clear_is_unavailable_off_mac_or_when_disabled(self):
+        class Adapter:
+            def issue_clear_nonce(self):
+                raise AssertionError("adapter must remain untouched")
+
+            def clear(self, _nonce):
+                raise AssertionError("adapter must remain untouched")
+
+        for is_macos, enabled in ((False, True), (True, False)):
+            with self.subTest(is_macos=is_macos, enabled=enabled):
+                issue, clear = self.functions(
+                    Adapter(), is_macos=is_macos, enabled=enabled)
+                self.assertEqual(issue(), "")
+                self.assertEqual(clear("n" * 32), {
+                    "schema_version": 1,
+                    "state": "unavailable",
+                    "attempted": False,
+                })
+
+    def test_clear_is_absent_from_status_and_has_no_queue_or_external_calls(self):
+        status = next(
+            node for node in TREE.body if isinstance(node, ast.FunctionDef)
+            and node.name == "runtime_status_snapshot")
+        action = next(
+            node for node in TREE.body if isinstance(node, ast.FunctionDef)
+            and node.name == "clear_voice_object_draft_clipboard")
+        status_names = {
+            node.id for node in ast.walk(status) if isinstance(node, ast.Name)
+        }
+        action_names = {
+            node.id for node in ast.walk(action) if isinstance(node, ast.Name)
+        }
+        self.assertNotIn("clear_voice_object_draft_clipboard", status_names)
+        self.assertFalse(action_names & {
+            "print", "open", "subprocess", "Popen", "NSURL", "NSWorkspace",
+            "EventKit", "requests", "socket", "_voice_object_inbox_bridge",
         })
 
 

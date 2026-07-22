@@ -1059,7 +1059,7 @@ def set_app_tone(bundle: str, tone: str | None):
             APP_TONES["map"][bundle] = tone
         snapshot = dict(APP_TONES["map"])
     atomic_write_text(TONES_FILE, json.dumps(snapshot, indent=2) + "\n")
-    print(f"[tones] {bundle} -> {tone or 'auto'}")
+    print("[tones] app preference updated")
 
 
 def normalize_face(value) -> str:
@@ -1318,6 +1318,22 @@ def copy_voice_object_draft(
         ).to_mapping()
     except (OSError, TypeError, ValueError, OverflowError):
         return reject()
+
+
+def issue_voice_object_clear_clipboard_nonce() -> str:
+    """Issue a capability only for an explicit clear-after-copy action."""
+
+    if not (IS_MACOS and PREFERENCES["voice_object_commands"]):
+        return ""
+    return VOICE_DRAFT_CLIPBOARD_ADAPTER.issue_clear_nonce()
+
+
+def clear_voice_object_draft_clipboard(nonce: str) -> dict:
+    """Clear only the unchanged clipboard write owned by the draft adapter."""
+
+    if not (IS_MACOS and PREFERENCES["voice_object_commands"]):
+        return {"schema_version": 1, "state": "unavailable", "attempted": False}
+    return VOICE_DRAFT_CLIPBOARD_ADAPTER.clear(nonce).to_mapping()
 
 
 def acknowledge_voice_object_draft(item_id: str) -> bool:
@@ -4007,8 +4023,7 @@ def forget_gui_correction(key: str):
         state["history"] = state["history"][-100:]
         save_learned(state)
     refresh_glossary()
-    print(f"[learn] forgot correction: {removed.get('from')} -> "
-          f"{removed.get('to')}")
+    print("[learn] correction forgotten")
 
 
 def runtime_status_snapshot() -> dict:
@@ -4840,8 +4855,8 @@ def learn_pass():
         save_learned(state)
         terms = refresh_glossary()
     if added:
-        pretty = ", ".join(f"{t}({c})" for t, c in added[:8])
-        print(f"[learn] candidates: {pretty} | active glossary: {len(terms)} terms")
+        print(f"[learn] {len(added)} candidates added | "
+              f"active glossary: {len(terms)} terms")
 
 
 def learn_scheduler():
@@ -5875,11 +5890,12 @@ def save_snippet_edit(name: str, old: str, new: str, bundle: str) -> bool:
     with SNIPPETS_LOCK:
         try:
             snippets = json.loads(SNIPPETS_FILE.read_text())
-        except Exception as e:
-            print(f"! snippets.json unreadable while saving {name!r}: {e}")
+        except Exception as error:
+            print("! snippets.json unreadable while saving edit "
+                  f"({type(error).__name__})")
             return False
         if not isinstance(snippets, dict) or snippets.get(name) != old:
-            print(f"! snippet {name!r} changed before its edit could be saved")
+            print("! snippet changed before its edit could be saved")
             return False
         snippets[name] = new
         atomic_write_text(SNIPPETS_FILE, json.dumps(snippets, indent=2) + "\n")
@@ -5903,7 +5919,7 @@ def save_snippet_edit(name: str, old: str, new: str, bundle: str) -> bool:
             })
             state["history"] = state["history"][-100:]
             save_learned(state)
-    print(f"[learn] snippet updated: {name!r}")
+    print("[learn] snippet updated")
     return True
 
 
@@ -5929,7 +5945,7 @@ def forget_snippet_edit(name: str) -> bool:
             })
             state["history"] = state["history"][-100:]
             save_learned(state)
-    print(f"[learn] forgot snippet edit: {name!r}")
+    print("[learn] snippet edit forgotten")
     return True
 
 
@@ -6543,7 +6559,7 @@ def paste_snippet_and_watch(name: str, snippet: str, bundle: str, mode: str,
                 and integrity.state != ReceiptState.VERIFIED):
             return None
     if receipt is None:
-        print(f"! [snippet] cannot observe edits to {name!r} in this field")
+        print("! [snippet] cannot observe edits in this field")
         return None
     if starter is None:
         threading.Thread(
@@ -6607,7 +6623,7 @@ def learn_from_corrections(receipt: PasteReceipt | None):
                     and state["counts"].get(term, 0) < PROMOTE_MIN_COUNT:
                 state["counts"][term] = PROMOTE_MIN_COUNT
                 changed = True
-                print(f"[learn] correction observed: {term!r} -> dictionary")
+                print("[learn] correction observed for dictionary")
             # fix rule: the same old->new correction seen twice becomes a
             # deterministic post-ASR replacement
             key = old.casefold()
@@ -6639,13 +6655,11 @@ def learn_from_corrections(receipt: PasteReceipt | None):
                 result = regression.propose(
                     old, term, app=receipt.bundle)
                 if not result.passed:
-                    print(f"[learn] app prior quarantined: {old!r} -> "
-                          f"{term!r}")
+                    print("[learn] app prior quarantined")
             if confusion["n"] >= PERSONAL_GLOBAL_MIN_COUNT:
                 result = regression.propose(old, term)
                 if not result.passed:
-                    print(f"[learn] global prior quarantined: {old!r} -> "
-                          f"{term!r}")
+                    print("[learn] global prior quarantined")
             state["regression_lab"] = regression.to_dict()
             state["history"].append({
                 "ts": time.time(),
@@ -6657,7 +6671,7 @@ def learn_from_corrections(receipt: PasteReceipt | None):
             })
             state["history"] = state["history"][-100:]
             if fix["n"] == PERSONAL_GLOBAL_MIN_COUNT:
-                print(f"[learn] fix rule active: {old!r} -> {term!r}")
+                print("[learn] fix rule active")
             if isinstance(event_id, str) and event_id:
                 accepted_keywords.append(
                     (term, f"{event_id}:{correction_index}"))
@@ -7260,7 +7274,8 @@ class PhoneHandler(BaseHTTPRequestHandler):
             text = phone_clean(raw)
 
             print(f"[{time.time() - t0:.2f}s | phone | "
-                  f"{len(audio) / SAMPLE_RATE:.1f}s audio] {text[:70]}")
+                  f"{len(audio) / SAMPLE_RATE:.1f}s audio | "
+                  f"{len(text.split())} words]")
             if fmt == b"text":
                 self._reply(200, text.encode(), "text/plain; charset=utf-8")
             else:
@@ -7810,7 +7825,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             else:
                 play("Pop")
             release_total = time.perf_counter() - released_at
-            print(f"[release {release_total:.2f}s | snippet:{name} | "
+            print(f"[release {release_total:.2f}s | snippet | "
                   f"asr {t_asr:.2f}s]")
             return
 
@@ -8335,6 +8350,10 @@ def main():
             compose_voice_object_email=compose_voice_object_email,
             issue_voice_object_copy_nonce=issue_voice_object_copy_nonce,
             copy_voice_object_draft=copy_voice_object_draft,
+            issue_voice_object_clear_clipboard_nonce=(
+                issue_voice_object_clear_clipboard_nonce),
+            clear_voice_object_draft_clipboard=(
+                clear_voice_object_draft_clipboard),
             acknowledge_voice_object_draft=acknowledge_voice_object_draft,
             cancel_voice_object_draft=cancel_voice_object_draft,
             purge_terminal_voice_object_drafts=(

@@ -31,6 +31,7 @@ from whisper_face_gui import (
     localized_string,
     native_appkit_smoke_contract,
     normalize_email_compose_receipt,
+    normalize_voice_draft_clear_receipt,
     normalize_voice_draft_copy_receipt,
     normalize_point_and_speak_action,
     normalize_acoustic_keyword_inspection,
@@ -58,6 +59,14 @@ class SnapshotTests(unittest.TestCase):
 
     @staticmethod
     def voice_draft_copy_receipt(*, state="copied", attempted=True):
+        return {
+            "schema_version": 1,
+            "state": state,
+            "attempted": attempted,
+        }
+
+    @staticmethod
+    def voice_draft_clear_receipt(*, state="cleared", attempted=True):
         return {
             "schema_version": 1,
             "state": state,
@@ -224,6 +233,28 @@ class SnapshotTests(unittest.TestCase):
             normalize_voice_draft_copy_receipt(
                 self.voice_draft_copy_receipt(
                     state="copied", attempted=False))
+
+    def test_voice_draft_clear_receipt_rejects_payload_and_identity(self):
+        receipt = normalize_voice_draft_clear_receipt(
+            self.voice_draft_clear_receipt())
+        self.assertEqual(receipt.state, "cleared")
+        self.assertTrue(receipt.attempted)
+
+        for key in ("content", "content_hash", "item_id", "change_count"):
+            raw = self.voice_draft_clear_receipt()
+            raw[key] = "Project Bluebird"
+            with self.subTest(key=key), self.assertRaisesRegex(
+                    ValueError, "malformed"):
+                normalize_voice_draft_clear_receipt(raw)
+
+        for state, attempted in (
+                ("cleared", False), ("changed", True),
+                ("unavailable", True), ("failed", False)):
+            with self.subTest(state=state, attempted=attempted), \
+                    self.assertRaisesRegex(ValueError, "malformed"):
+                normalize_voice_draft_clear_receipt(
+                    self.voice_draft_clear_receipt(
+                        state=state, attempted=attempted))
 
     def test_drop_target_preview_projection_is_strict_transient_and_inert(self):
         preview = normalize_drop_target_preview(self.drop_preview())
@@ -418,6 +449,7 @@ class SnapshotTests(unittest.TestCase):
                 "operation.voice_objects.purge_failed",
                 "operation.voice_objects.compose_failed",
                 "operation.voice_objects.copy_failed",
+                "operation.voice_objects.clear_failed",
                 "operation.demonstrations.inspect_failed",
                 "operation.demonstrations.create_failed",
                 "operation.demonstrations.reveal_failed",
@@ -528,6 +560,10 @@ class SnapshotTests(unittest.TestCase):
         self.assertIn("preview_drop_to_target", contract.model_actions)
         self.assertIn("issue_voice_object_copy_nonce", contract.model_actions)
         self.assertIn("copy_voice_object_draft", contract.model_actions)
+        self.assertIn(
+            "issue_voice_object_clear_clipboard_nonce", contract.model_actions)
+        self.assertIn(
+            "clear_voice_object_draft_clipboard", contract.model_actions)
         self.assertIn(
             "click_risky_action_confirmation", contract.model_actions)
         for key in contract.accessibility_catalog_keys:
@@ -1633,6 +1669,99 @@ class ViewModelTests(unittest.TestCase):
             model.copy_voice_object_draft(task).state, "unavailable")
         self.assertEqual(len(calls), 2)
 
+    def test_task_copy_offers_one_explicit_content_free_clear(self):
+        calls = []
+        secret = "Title: Project Bluebird\nNotes: Private launch 8492"
+        model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {},
+            inspect_voice_object_drafts=lambda: ({
+                "item_id": "voice-object:task-1",
+                "sequence": 9,
+                "destination": "task",
+                "state": "queued",
+            },),
+            reveal_voice_object_draft=lambda _item_id: {
+                "sequence": 9,
+                "destination": "task",
+                "state": "queued",
+                "content": secret,
+            },
+            issue_voice_object_copy_nonce=lambda: "copy_nonce_1234567890",
+            copy_voice_object_draft=lambda *_args:
+                SnapshotTests.voice_draft_copy_receipt(),
+            issue_voice_object_clear_clipboard_nonce=lambda:
+                calls.append(("issue_clear",)) or "clear_nonce_123456789",
+            clear_voice_object_draft_clipboard=lambda nonce:
+                calls.append(("clear", nonce)) or
+                SnapshotTests.voice_draft_clear_receipt(),
+            acknowledge_voice_object_draft=lambda _item_id:
+                (_ for _ in ()).throw(AssertionError("queue must stay queued")),
+            cancel_voice_object_draft=lambda _item_id:
+                (_ for _ in ()).throw(AssertionError("queue must stay queued")),
+        ))
+
+        task = model.inspect_voice_object_drafts()[0]
+        model.reveal_voice_object_draft(task)
+        copied = model.copy_voice_object_draft(task)
+        cleared = model.clear_voice_object_draft_clipboard()
+        replay = model.clear_voice_object_draft_clipboard()
+
+        self.assertEqual(copied.state, "copied")
+        self.assertEqual(cleared.state, "cleared")
+        self.assertTrue(cleared.attempted)
+        self.assertEqual(replay.state, "unavailable")
+        self.assertEqual(calls, [
+            ("issue_clear",), ("clear", "clear_nonce_123456789")])
+        self.assertEqual(task.state, "queued")
+        self.assertNotIn(secret, repr(cleared))
+        self.assertNotIn(secret, repr(model.state))
+
+    def test_task_copy_clear_changed_and_failure_are_closed(self):
+        def make_model(clear_action):
+            return WhisperFaceViewModel(GUIActions(
+                status_snapshot=lambda: {},
+                inspect_voice_object_drafts=lambda: ({
+                    "item_id": "voice-object:task-1",
+                    "sequence": 9,
+                    "destination": "task",
+                    "state": "queued",
+                },),
+                reveal_voice_object_draft=lambda _item_id: {
+                    "sequence": 9,
+                    "destination": "task",
+                    "state": "queued",
+                    "content": "Private draft",
+                },
+                issue_voice_object_copy_nonce=lambda: "copy_nonce_1234567890",
+                copy_voice_object_draft=lambda *_args:
+                    SnapshotTests.voice_draft_copy_receipt(),
+                issue_voice_object_clear_clipboard_nonce=lambda:
+                    "clear_nonce_123456789",
+                clear_voice_object_draft_clipboard=clear_action,
+            ))
+
+        changed = make_model(lambda _nonce:
+                             SnapshotTests.voice_draft_clear_receipt(
+                                 state="changed", attempted=False))
+        changed_draft = changed.inspect_voice_object_drafts()[0]
+        changed.reveal_voice_object_draft(changed_draft)
+        changed.copy_voice_object_draft(changed_draft)
+        changed_receipt = changed.clear_voice_object_draft_clipboard()
+
+        failed = make_model(lambda _nonce: (_ for _ in ()).throw(
+            RuntimeError("clipboard unavailable")))
+        failed_draft = failed.inspect_voice_object_drafts()[0]
+        failed.reveal_voice_object_draft(failed_draft)
+        failed.copy_voice_object_draft(failed_draft)
+        failed_receipt = failed.clear_voice_object_draft_clipboard()
+
+        self.assertEqual(changed_receipt.state, "changed")
+        self.assertFalse(changed_receipt.attempted)
+        self.assertEqual(changed_draft.state, "queued")
+        self.assertEqual(failed_receipt.state, "unavailable")
+        self.assertEqual(failed.state.notice_level, "error")
+        self.assertNotIn("clipboard unavailable", failed.state.notice)
+
     def test_voice_draft_copy_is_task_calendar_queued_only(self):
         calls = []
         for destination, state, expected_calls in (
@@ -1687,6 +1816,17 @@ class ViewModelTests(unittest.TestCase):
         self.assertIn(
             "after confirmation",
             localized_string("settings.accessibility.voice_objects.copy"))
+        clear_receipt = localized_string(
+            "settings.dialog.voice_objects.clear.receipt",
+            state="changed", attempted="no")
+        self.assertIn("never read or retained clipboard content", clear_receipt)
+        self.assertIn("remains in Voice Inbox", clear_receipt)
+        self.assertIn(
+            "only if", localized_string(
+                "settings.accessibility.voice_objects.clear_clipboard"))
+        self.assertFalse(any(
+            "clear" in equivalent
+            for equivalent in native_appkit_smoke_contract().key_equivalents))
 
     def test_demonstration_content_is_lazy_redacted_and_actions_stay_inert(self):
         self.model.refresh()

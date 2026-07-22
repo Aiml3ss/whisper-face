@@ -44,6 +44,9 @@ EMAIL_COMPOSE_STATES = frozenset({
 VOICE_DRAFT_COPY_STATES = frozenset({
     "copied", "unavailable", "invalid", "failed",
 })
+VOICE_DRAFT_CLEAR_STATES = frozenset({
+    "cleared", "changed", "unavailable", "failed",
+})
 VOICE_DRAFT_INSPECT_LIMIT = 256
 VOICE_DRAFT_CONTENT_LIMIT = 300_000
 DEMONSTRATION_DOMAINS = ("finder", "mail", "notes", "menu")
@@ -594,6 +597,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.accessibility.voice_objects.chooser": "Queued draft metadata",
         "settings.accessibility.voice_objects.content": "Selected inert draft content",
         "settings.accessibility.voice_objects.copy": "Copy the revealed task or calendar draft after confirmation",
+        "settings.accessibility.voice_objects.clear_clipboard": "Clear the copied draft only if the Mac clipboard is still unchanged",
         "settings.accessibility.demonstrations.inspector": "Demonstration draft editor",
         "settings.accessibility.demonstrations.chooser": "Demonstration metadata",
         "settings.accessibility.demonstrations.domain": "New demonstration domain",
@@ -673,6 +677,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "operation.voice_objects.purge_failed": "Could not purge finished local drafts.",
         "operation.voice_objects.compose_failed": "Could not request the email compose draft.",
         "operation.voice_objects.copy_failed": "Could not copy the selected task or calendar draft.",
+        "operation.voice_objects.clear_failed": "Could not clear the copied draft from the Mac clipboard.",
         "operation.demonstrations.inspect_failed": "Could not inspect local demonstration drafts.",
         "operation.demonstrations.create_failed": "Could not create the local demonstration draft.",
         "operation.demonstrations.reveal_failed": "Could not reveal the selected demonstration draft.",
@@ -708,7 +713,12 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.dialog.voice_objects.copy.result.unavailable": "Clipboard copy unavailable",
         "settings.dialog.voice_objects.copy.result.invalid": "Draft changed or was rejected",
         "settings.dialog.voice_objects.copy.result.failed": "Clipboard copy failed",
-        "settings.dialog.voice_objects.copy.receipt": "Content-free receipt: state {state}; clipboard write attempted {attempted}. The queued draft remains in Voice Inbox.",
+        "settings.dialog.voice_objects.copy.receipt": "Content-free receipt: state {state}; clipboard write attempted {attempted}. The queued draft remains in Voice Inbox. After a successful copy, Clear Clipboard is available while this app still owns the unchanged clipboard write.",
+        "settings.dialog.voice_objects.clear.result.cleared": "Copied draft cleared from the Mac clipboard",
+        "settings.dialog.voice_objects.clear.result.changed": "Clipboard changed — nothing was cleared",
+        "settings.dialog.voice_objects.clear.result.unavailable": "Clipboard clear unavailable",
+        "settings.dialog.voice_objects.clear.result.failed": "Clipboard clear failed",
+        "settings.dialog.voice_objects.clear.receipt": "Content-free receipt: state {state}; clipboard clear attempted {attempted}. Whisper Face never read or retained clipboard content, and the queued draft remains in Voice Inbox.",
         "settings.dialog.voice_objects.ack.title": "Acknowledge this draft?",
         "settings.dialog.voice_objects.ack.message": "This marks Draft {sequence} finished without sending or executing it.",
         "settings.dialog.voice_objects.cancel.title": "Cancel this draft?",
@@ -718,6 +728,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.action.reveal": "Reveal",
         "settings.action.compose_email": "Open Compose Draft…",
         "settings.action.copy_draft": "Copy Draft…",
+        "settings.action.clear_clipboard": "Clear Clipboard",
         "settings.action.acknowledge": "Acknowledge",
         "settings.action.cancel_draft": "Cancel Draft",
         "settings.action.purge_finished": "Purge Finished",
@@ -836,6 +847,8 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "compose_voice_object_email",
             "issue_voice_object_copy_nonce",
             "copy_voice_object_draft",
+            "issue_voice_object_clear_clipboard_nonce",
+            "clear_voice_object_draft_clipboard",
             "acknowledge_voice_object_draft",
             "cancel_voice_object_draft",
             "purge_terminal_voice_object_drafts",
@@ -880,6 +893,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "settings.accessibility.voice_objects.chooser",
             "settings.accessibility.voice_objects.content",
             "settings.accessibility.voice_objects.copy",
+            "settings.accessibility.voice_objects.clear_clipboard",
             "settings.accessibility.demonstrations.inspector",
             "settings.accessibility.demonstrations.chooser",
             "settings.accessibility.demonstrations.domain",
@@ -947,6 +961,10 @@ class GUIActions:
     copy_voice_object_draft: Callable[
         [str, str, str], Mapping[str, Any]
     ] = lambda _nonce, _item_id, _destination: {}
+    issue_voice_object_clear_clipboard_nonce: Callable[[], str] = lambda: ""
+    clear_voice_object_draft_clipboard: Callable[
+        [str], Mapping[str, Any]
+    ] = lambda _nonce: {}
     acknowledge_voice_object_draft: Callable[[str], bool] = (
         lambda _item_id: False)
     cancel_voice_object_draft: Callable[[str], bool] = lambda _item_id: False
@@ -1043,6 +1061,14 @@ class VoiceDraftCopyReceipt:
     attempted: bool
 
 
+@dataclass(frozen=True)
+class VoiceDraftClearReceipt:
+    """Content-free terminal evidence for one explicit clipboard clear."""
+
+    state: str
+    attempted: bool
+
+
 def normalize_email_compose_receipt(
     snapshot: Mapping[str, Any] | None,
 ) -> EmailComposeReceipt:
@@ -1074,6 +1100,23 @@ def normalize_voice_draft_copy_receipt(
             snapshot["attempted"]):
         raise ValueError("Voice draft copy receipt is malformed")
     return VoiceDraftCopyReceipt(
+        state=snapshot["state"], attempted=snapshot["attempted"])
+
+
+def normalize_voice_draft_clear_receipt(
+    snapshot: Mapping[str, Any] | None,
+) -> VoiceDraftClearReceipt:
+    """Validate closed clear evidence without accepting clipboard content."""
+
+    if (not isinstance(snapshot, Mapping) or set(snapshot) != {
+            "schema_version", "state", "attempted"}
+            or snapshot.get("schema_version") != 1
+            or snapshot.get("state") not in VOICE_DRAFT_CLEAR_STATES
+            or not isinstance(snapshot.get("attempted"), bool)
+            or (snapshot["state"] in {"cleared", "failed"}) !=
+            snapshot["attempted"]):
+        raise ValueError("Voice draft clear receipt is malformed")
+    return VoiceDraftClearReceipt(
         state=snapshot["state"], attempted=snapshot["attempted"])
 
 
@@ -2568,6 +2611,7 @@ class WhisperFaceViewModel:
         self._hotkey_practiced = False
         self._inspected_voice_draft_ids: set[str] = set()
         self._revealed_voice_draft_ids: set[str] = set()
+        self._voice_draft_clipboard_clear_available = False
         self._inspected_demonstration_ids: set[str] = set()
         self._revealed_demonstration_ids: set[str] = set()
         self.refresh()
@@ -3141,6 +3185,7 @@ class WhisperFaceViewModel:
                 or draft.destination not in {"task", "calendar_draft"}
                 or draft.state != "queued"):
             return unavailable
+        self._voice_draft_clipboard_clear_available = False
         try:
             nonce = self.actions.issue_voice_object_copy_nonce()
             if (not isinstance(nonce, str) or not 16 <= len(nonce) <= 96
@@ -3152,6 +3197,8 @@ class WhisperFaceViewModel:
                     nonce, draft.item_id, draft.destination))
             self._inspected_voice_draft_ids.clear()
             self._revealed_voice_draft_ids.clear()
+            self._voice_draft_clipboard_clear_available = (
+                receipt.state == "copied")
             return receipt
         except Exception:
             self._inspected_voice_draft_ids.clear()
@@ -3159,6 +3206,29 @@ class WhisperFaceViewModel:
             self.state = replace(
                 self.state,
                 notice=self.localized("operation.voice_objects.copy_failed"),
+                notice_level="error",
+            )
+            return unavailable
+
+    def clear_voice_object_draft_clipboard(self) -> VoiceDraftClearReceipt:
+        """Clear the last owned copy after a distinct explicit GUI action."""
+
+        unavailable = VoiceDraftClearReceipt("unavailable", False)
+        if not self._voice_draft_clipboard_clear_available:
+            return unavailable
+        self._voice_draft_clipboard_clear_available = False
+        try:
+            nonce = self.actions.issue_voice_object_clear_clipboard_nonce()
+            if (not isinstance(nonce, str) or not 16 <= len(nonce) <= 96
+                    or any(not (character.isalnum() or character in "-_")
+                           for character in nonce)):
+                raise ValueError
+            return normalize_voice_draft_clear_receipt(
+                self.actions.clear_voice_object_draft_clipboard(nonce))
+        except Exception:
+            self.state = replace(
+                self.state,
+                notice=self.localized("operation.voice_objects.clear_failed"),
                 notice_level="error",
             )
             return unavailable
@@ -5478,7 +5548,34 @@ if APPKIT_AVAILABLE:
                             "point_and_speak.result.no")))
                     result.addButtonWithTitle_(self._l(
                         "settings.action.done"))
-                    result.runModal()
+                    if receipt.state == "copied":
+                        clear_button = result.addButtonWithTitle_(self._l(
+                            "settings.action.clear_clipboard"))
+                        _accessible(
+                            clear_button,
+                            self._l("settings.action.clear_clipboard"),
+                            self._l(
+                                "settings.accessibility.voice_objects."
+                                "clear_clipboard"))
+                    result_response = result.runModal()
+                    if receipt.state == "copied" and result_response == 1001:
+                        clear_receipt = (
+                            self.view_model
+                            .clear_voice_object_draft_clipboard())
+                        clear_result = NSAlert.alloc().init()
+                        clear_result.setMessageText_(self._l(
+                            "settings.dialog.voice_objects.clear.result."
+                            f"{clear_receipt.state}"))
+                        clear_result.setInformativeText_(self._l(
+                            "settings.dialog.voice_objects.clear.receipt",
+                            state=clear_receipt.state.replace("_", " "),
+                            attempted=self._l(
+                                "point_and_speak.result.yes" if
+                                clear_receipt.attempted else
+                                "point_and_speak.result.no")))
+                        clear_result.addButtonWithTitle_(self._l(
+                            "settings.action.done"))
+                        clear_result.runModal()
             elif response == 1001 and self._confirm(
                     self._l("settings.dialog.voice_objects.ack.title"),
                     self._l(
