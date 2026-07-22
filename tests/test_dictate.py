@@ -59,6 +59,18 @@ from insertion_integrity import (  # noqa: E402
     ReadbackResult,
     ReceiptState,
 )
+from model_wallet import (  # noqa: E402
+    MAX_LATENCY_BOUND_MS,
+    Capability,
+    ModelRequest,
+    ReadinessState,
+    WHISPER_LARGE_TURBO_PROFILE,
+    WHISPER_TINY_PROFILE,
+)
+from model_wallet_shadow import (  # noqa: E402
+    RuntimeModelEvidence,
+    assess_model_wallet,
+)
 
 TREE = ast.parse((ROOT / "dictate.py").read_text(encoding="utf-8"))
 
@@ -113,6 +125,106 @@ class DictationSuccessSoundTests(unittest.TestCase):
 
         self.assertEqual(select("standard", is_macos=True), "Pop")
         self.assertEqual(select("review", is_macos=False), "Pop")
+
+
+class ModelWalletShadowRuntimeStatusTests(unittest.TestCase):
+    def snapshot(self, *, is_macos=True, resolved=()):
+        function = load_definitions(
+            "model_wallet_shadow_status_snapshot",
+            extra={
+                "IS_MACOS": is_macos,
+                "ASR_MODEL_PATHS": {repository: f"/resolved/{index}"
+                                    for index, repository
+                                    in enumerate(resolved)},
+                "FAST_WHISPER_REPO": "mlx-community/whisper-tiny",
+                "WHISPER_REPO": "mlx-community/whisper-large-v3-turbo",
+                "WHISPER_TINY_PROFILE": WHISPER_TINY_PROFILE,
+                "WHISPER_LARGE_TURBO_PROFILE":
+                    WHISPER_LARGE_TURBO_PROFILE,
+                "RuntimeModelEvidence": RuntimeModelEvidence,
+                "ReadinessState": ReadinessState,
+                "Capability": Capability,
+                "ModelRequest": ModelRequest,
+                "MAX_LATENCY_BOUND_MS": MAX_LATENCY_BOUND_MS,
+                "assess_model_wallet": assess_model_wallet,
+            },
+        )["model_wallet_shadow_status_snapshot"]
+        return function()
+
+    def test_resolved_whisper_pins_do_not_overclaim_readiness(self):
+        snapshot = self.snapshot(resolved=(
+            "mlx-community/whisper-tiny",
+            "mlx-community/whisper-large-v3-turbo",
+        ))
+        encoded = json.dumps(snapshot, sort_keys=True)
+
+        self.assertEqual(snapshot["mode"], "shadow-only")
+        self.assertFalse(snapshot["attempted"])
+        self.assertEqual(
+            {item["capability"] for item in snapshot["capabilities"]},
+            {"fast_asr", "final_asr", "cleanup"},
+        )
+        self.assertTrue(all(
+            item["fail_closed"] and not item["attempted"]
+            and item["selected_provider_id"] is None
+            and item["advisory_order"] == []
+            for item in snapshot["capabilities"]
+        ))
+        states = {
+            (item["capability"], provider["provider_id"]):
+                provider["eligibility"]
+            for item in snapshot["capabilities"]
+            for provider in item["providers"]
+        }
+        self.assertEqual(
+            states[("fast_asr", WHISPER_TINY_PROFILE.provider_id)],
+            "not_ready",
+        )
+        self.assertEqual(
+            states[("final_asr", WHISPER_LARGE_TURBO_PROFILE.provider_id)],
+            "not_ready",
+        )
+        self.assertNotIn("transcript", encoded.casefold())
+        self.assertNotIn("/resolved/", encoded)
+
+    def test_non_mac_or_unresolved_pins_fail_closed_as_missing_runtime_evidence(self):
+        snapshot = self.snapshot(is_macos=False, resolved=(
+            "mlx-community/whisper-tiny",
+        ))
+        supported = [
+            provider["eligibility"]
+            for item in snapshot["capabilities"]
+            for provider in item["providers"]
+            if provider["eligibility"] != "unsupported_capability"
+        ]
+
+        self.assertTrue(supported)
+        self.assertEqual(set(supported), {"missing_runtime_evidence"})
+
+    def test_routine_status_wires_only_the_non_executing_projection(self):
+        status = next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "runtime_status_snapshot"
+        )
+        status_names = {
+            node.id for node in ast.walk(status) if isinstance(node, ast.Name)
+        }
+        self.assertIn("model_wallet_shadow_status_snapshot", status_names)
+
+        projection = next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "model_wallet_shadow_status_snapshot"
+        )
+        projection_names = {
+            node.id for node in ast.walk(projection)
+            if isinstance(node, ast.Name)
+        }
+        self.assertFalse(projection_names & {
+            "transcribe", "transcribe_detailed", "ollama_chat",
+            "resolve_asr_model", "windows_whisper_model", "PARAKEET",
+        })
 
 
 class PointAndSpeakPreviewRuntimeTests(unittest.TestCase):

@@ -337,6 +337,18 @@ from personal_regression import PersonalRegressionLab  # noqa: E402
 from acoustic_keyword_memory import AcousticKeywordMemory  # noqa: E402
 from acoustic_time_machine import AcousticTimeMachine  # noqa: E402
 from cleanup_circuit_breaker import CleanupCircuitBreaker  # noqa: E402
+from model_wallet import (  # noqa: E402
+    MAX_LATENCY_BOUND_MS,
+    Capability,
+    ModelRequest,
+    ReadinessState,
+    WHISPER_LARGE_TURBO_PROFILE,
+    WHISPER_TINY_PROFILE,
+)
+from model_wallet_shadow import (  # noqa: E402
+    RuntimeModelEvidence,
+    assess_model_wallet,
+)
 from demonstration_drafts import (  # noqa: E402
     DemonstrationAction,
     DemonstrationDomain,
@@ -3658,6 +3670,7 @@ def runtime_status_snapshot() -> dict:
         "microphone_status": AUDIO_POOL.readiness(),
         "accessibility_status": accessibility,
         "version": "Local checkout",
+        "model_wallet_shadow": model_wallet_shadow_status_snapshot(),
         "models": [
             {
                 "name": "Parakeet Unified 0.6B",
@@ -3679,6 +3692,60 @@ def runtime_status_snapshot() -> dict:
                 "detail": "Skipped for deterministic fast-path speech",
             },
         ],
+    }
+
+
+def model_wallet_shadow_status_snapshot() -> dict:
+    """Project exact known pins into a closed, non-executing advisory.
+
+    A resolved MLX path is the only current runtime signal that binds a
+    Whisper profile to its immutable revision. Resolution alone is not a
+    readiness attestation, so the observation remains RESOLVED. Parakeet's
+    helper readiness and Ollama's health state do not attest the exact pinned
+    model revision, so they are deliberately omitted. The runtime has no
+    conservative quality floor or latency upper bound, therefore it supplies
+    no capability evidence and every supported capability remains fail-closed.
+    """
+    observations = []
+    if IS_MACOS:
+        for profile, repository in (
+            (WHISPER_TINY_PROFILE, FAST_WHISPER_REPO),
+            (WHISPER_LARGE_TURBO_PROFILE, WHISPER_REPO),
+        ):
+            if repository in ASR_MODEL_PATHS:
+                observations.append(RuntimeModelEvidence(
+                    profile.provider_id,
+                    ReadinessState.RESOLVED,
+                    revision_verified=True,
+                ))
+
+    capability_receipts = []
+    for capability in Capability:
+        receipt = assess_model_wallet(ModelRequest(
+            f"runtime-shadow-{capability.value.replace('_', '-')}",
+            capability,
+            MAX_LATENCY_BOUND_MS,
+            0,
+        ), observations)
+        capability_receipts.append({
+            "capability": receipt.capability.value,
+            "providers": [
+                {
+                    "provider_id": provider.provider_id,
+                    "eligibility": provider.eligibility.value,
+                }
+                for provider in receipt.providers
+            ],
+            "advisory_order": list(receipt.advisory_order),
+            "selected_provider_id": receipt.selected_provider_id,
+            "fail_closed": receipt.fail_closed,
+            "attempted": receipt.attempted,
+        })
+    return {
+        "schema_version": 1,
+        "mode": "shadow-only",
+        "capabilities": capability_receipts,
+        "attempted": False,
     }
 
 

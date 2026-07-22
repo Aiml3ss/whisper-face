@@ -123,9 +123,11 @@ def load_cases(path: Path = DEFAULT_CASES) -> tuple[dict[str, Any], ...]:
         raise ValueError("unsupported cleanup latency corpus")
     seen: set[str] = set()
     for case in cases:
-        if (not isinstance(case, dict) or set(case) != {"id", "raw", "must_contain", "must_not_contain"}
+        if (not isinstance(case, dict) or set(case) != {"id", "raw", "candidate", "must_contain", "must_not_contain"}
                 or not isinstance(case["id"], str) or not case["id"]
                 or not isinstance(case["raw"], str) or not case["raw"] or len(case["raw"]) > 1000
+                or not isinstance(case["candidate"], str) or not case["candidate"]
+                or len(case["candidate"]) > 1000
                 or not all(isinstance(item, str) for item in case["must_contain"])
                 or not all(isinstance(item, str) for item in case["must_not_contain"])
                 or case["id"] in seen):

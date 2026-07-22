@@ -76,6 +76,27 @@ POINT_AND_SPEAK_EVIDENCE = frozenset({
     "exact", "normalized", "token", "role", "selection", "focus",
     "ordinal", "spatial",
 })
+MODEL_WALLET_CAPABILITIES = frozenset({
+    "fast_asr", "final_asr", "cleanup",
+})
+MODEL_WALLET_PROVIDER_IDS = frozenset({
+    "local.parakeet-coreml",
+    "local.whisper-tiny-mlx",
+    "local.whisper-large-v3-turbo-mlx",
+    "local.qwen3.5-4b-ollama",
+})
+MODEL_WALLET_SUPPORTED_PROVIDERS = {
+    "fast_asr": frozenset({"local.whisper-tiny-mlx"}),
+    "final_asr": frozenset({
+        "local.parakeet-coreml",
+        "local.whisper-large-v3-turbo-mlx",
+    }),
+    "cleanup": frozenset({"local.qwen3.5-4b-ollama"}),
+}
+MODEL_WALLET_ELIGIBILITIES = frozenset({
+    "eligible", "unsupported_capability", "missing_runtime_evidence",
+    "not_ready", "missing_capability_evidence", "outside_request_bounds",
+})
 
 # Stable semantic keys are intentionally separate from AppKit. Additional
 # catalogs can be added without rewriting view logic or persistence schemas.
@@ -258,10 +279,13 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "models.unknown": "Unknown",
         "models.waiting.detail": "Open this window after startup completes",
         "models.guidance": "Models prepare locally and can finish in the background.",
+        "models.wallet.unavailable": "Model wallet shadow advisory only · No model execution or routing · Unavailable: exact runtime or bounded capability evidence is missing.",
+        "models.wallet.informational": "Model wallet shadow advisory only · No model execution or routing · Eligible ordering is informational.",
         "models.accessibility.name": "Model name",
         "models.accessibility.detail": "{name} role and detail",
         "models.accessibility.status": "{name} status",
         "models.accessibility.guidance": "Model guidance",
+        "models.accessibility.wallet": "Model wallet shadow advisory; no execution or routing",
         "diagnostics.title": "Diagnostics",
         "diagnostics.subtitle": "A quick health check when something does not feel right.",
         "diagnostics.service": "Service",
@@ -759,6 +783,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "results.accessibility.firewall",
             "results.accessibility.audio",
             "models.accessibility.guidance",
+            "models.accessibility.wallet",
             "diagnostics.accessibility.verification",
             "point_and_speak.dialog.input.label",
         ),
@@ -1062,6 +1087,8 @@ class GUIState:
     accessibility_status: str = localized_string("default.status.unknown")
     version: str = localized_string("default.build.development")
     models: tuple[ModelStatus, ...] = field(default_factory=tuple)
+    model_wallet_advisory: str = localized_string(
+        "models.wallet.unavailable")
     hotkey_label: str = localized_string("settings.mode.capture.shortcut")
     prefers_reduced_motion: bool = False
     onboarding_steps: tuple[OnboardingStep, ...] = field(default_factory=tuple)
@@ -1210,6 +1237,84 @@ def _normalize_models(
                 item.strip(), status=localized_string(
                     "default.status.unknown", locale=locale)))
     return tuple(models)
+
+
+def _model_wallet_advisory_copy(value: Any, *, locale: str = "en") -> str:
+    """Validate the closed receipt and return fixed, content-free UI copy."""
+    unavailable = localized_string("models.wallet.unavailable", locale=locale)
+    if not isinstance(value, Mapping) or set(value) != {
+            "schema_version", "mode", "capabilities", "attempted"}:
+        return unavailable
+    if (value.get("schema_version") != 1
+            or value.get("mode") != "shadow-only"
+            or value.get("attempted") is not False):
+        return unavailable
+    capabilities = value.get("capabilities")
+    if (isinstance(capabilities, (str, bytes))
+            or not isinstance(capabilities, Sequence)
+            or len(capabilities) != len(MODEL_WALLET_CAPABILITIES)):
+        return unavailable
+    seen = set()
+    any_fail_closed = False
+    for receipt in capabilities:
+        if not isinstance(receipt, Mapping) or set(receipt) != {
+                "capability", "providers", "advisory_order",
+                "selected_provider_id", "fail_closed", "attempted"}:
+            return unavailable
+        capability = receipt.get("capability")
+        providers = receipt.get("providers")
+        order = receipt.get("advisory_order")
+        selected = receipt.get("selected_provider_id")
+        fail_closed = receipt.get("fail_closed")
+        if (not isinstance(capability, str)
+                or capability not in MODEL_WALLET_CAPABILITIES
+                or capability in seen
+                or receipt.get("attempted") is not False
+                or not isinstance(fail_closed, bool)
+                or isinstance(providers, (str, bytes))
+                or not isinstance(providers, Sequence)
+                or isinstance(order, (str, bytes))
+                or not isinstance(order, Sequence)):
+            return unavailable
+        seen.add(capability)
+        provider_ids = []
+        eligible_ids = []
+        for provider in providers:
+            if not isinstance(provider, Mapping) or set(provider) != {
+                    "provider_id", "eligibility"}:
+                return unavailable
+            provider_id = provider.get("provider_id")
+            eligibility = provider.get("eligibility")
+            if (not isinstance(provider_id, str)
+                    or provider_id not in MODEL_WALLET_PROVIDER_IDS
+                    or provider_id in provider_ids
+                    or not isinstance(eligibility, str)
+                    or eligibility not in MODEL_WALLET_ELIGIBILITIES):
+                return unavailable
+            supported = (
+                provider_id in MODEL_WALLET_SUPPORTED_PROVIDERS[capability])
+            if ((eligibility == "unsupported_capability")
+                    != (not supported)):
+                return unavailable
+            provider_ids.append(provider_id)
+            if eligibility == "eligible":
+                eligible_ids.append(provider_id)
+        if (set(provider_ids) != MODEL_WALLET_PROVIDER_IDS
+                or any(not isinstance(item, str) for item in order)
+                or any(item not in eligible_ids for item in order)
+                or len(set(order)) != len(order)
+                or set(order) != set(eligible_ids)
+                or selected != (order[0] if order else None)
+                or fail_closed != (not order)):
+            return unavailable
+        any_fail_closed = any_fail_closed or fail_closed
+    if seen != MODEL_WALLET_CAPABILITIES:
+        return unavailable
+    return localized_string(
+        "models.wallet.unavailable" if any_fail_closed
+        else "models.wallet.informational",
+        locale=locale,
+    )
 
 
 def _text_items(value: Any, *, maximum: int = 500) -> tuple[str, ...]:
@@ -1865,6 +1970,8 @@ def normalize_snapshot(
     accessibility_status = _clean_text(
         source.get("accessibility_status"), unknown_status)
     models = _normalize_models(source.get("models"), locale=locale)
+    model_wallet_advisory = _model_wallet_advisory_copy(
+        source.get("model_wallet_shadow"), locale=locale)
     hotkey_label = _clean_text(
         source.get("hotkey_label"), localized_string(
             "settings.mode.capture.shortcut", locale=locale))
@@ -1938,6 +2045,7 @@ def normalize_snapshot(
             source.get("version"), localized_string(
                 "default.build.development", locale=locale)),
         models=models,
+        model_wallet_advisory=model_wallet_advisory,
         hotkey_label=hotkey_label,
         prefers_reduced_motion=(
             source.get("prefers_reduced_motion") is True),
@@ -3706,6 +3814,12 @@ if APPKIT_AVAILABLE:
             page.addSubview_(_label(
                 self._l("models.subtitle"),
                 NSMakeRect(5, 326, 650, 20), size=13, color=_SECONDARY))
+            advisory = _label(
+                self._l("models.wallet.unavailable"),
+                NSMakeRect(5, 298, 740, 20), size=11, color=_SECONDARY,
+                accessibility_label=self._l(
+                    "models.accessibility.wallet"))
+            page.addSubview_(advisory)
             rows = []
             for index in range(3):
                 row = _card(NSMakeRect(0, 220 - index * 88, 758, 72))
@@ -3724,7 +3838,11 @@ if APPKIT_AVAILABLE:
                 self._l("models.guidance"),
                 NSMakeRect(5, 25, 740, 22), size=11, color=_SECONDARY)
             page.addSubview_(guidance)
-            self.dynamic.update(model_rows=rows, model_guidance=guidance)
+            self.dynamic.update(
+                model_rows=rows,
+                model_wallet_advisory=advisory,
+                model_guidance=guidance,
+            )
 
         def _build_diagnostics(self, page: Any) -> None:
             page.addSubview_(_label(self._l("diagnostics.title"),
@@ -4206,6 +4324,11 @@ if APPKIT_AVAILABLE:
                         label=self._l(
                             "models.accessibility.status",
                             name=self._l("models.waiting")))
+            set_accessible_text(
+                self.dynamic["model_wallet_advisory"],
+                state.model_wallet_advisory,
+                label=self._l("models.accessibility.wallet"),
+            )
             model_issue = next(
                 (issue for issue in state.degraded_issues
                  if issue.route == "Models"), None)

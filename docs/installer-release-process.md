@@ -8,7 +8,8 @@ machine without maintaining a second copy of the application.
 
 `dictate.py`, `parrot_core.py`, `voice_compiler.py`,
 `insertion_integrity.py`, `personal_regression.py`,
-`cleanup_circuit_breaker.py`, `whisper_face_gui.py`, `voice_objects.py`,
+`cleanup_circuit_breaker.py`, `model_wallet.py`, `model_wallet_shadow.py`,
+`whisper_face_gui.py`, `voice_objects.py`,
 `voice_object_command_parser.py`, `voice_inbox.py`,
 `voice_object_inbox_bridge.py`, `demonstration_drafts.py`, and
 `risky_action_confirmation.py`,
@@ -47,6 +48,8 @@ uv run tests/test_benchmark_relisten_activation.py
 uv run tests/test_benchmark_voice_compiler.py
 uv run tests/test_benchmark_consequence_routing.py
 uv run tests/test_benchmark_cleanup_latency.py
+uv run tests/test_cleanup_proof_recovery.py
+uv run tests/test_benchmark_cleanup_proof_recovery.py
 uv run tests/test_benchmark_asr.py
 uv run tests/test_performance_lab.py
 uv run tests/test_dictate.py
@@ -68,6 +71,7 @@ uv run tests/test_model_wallet.py
 uv run tests/test_model_wallet_shadow.py
 uv run tests/test_point_and_speak_resolver.py
 uv run tests/test_macos_point_and_speak_snapshot.py
+uv run tests/test_macos_drop_to_target_snapshot.py
 uv run tests/test_drop_to_target.py
 uv run tests/test_voice_objects.py
 uv run tests/test_voice_object_command_parser.py
