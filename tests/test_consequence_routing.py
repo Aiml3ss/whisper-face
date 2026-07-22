@@ -162,6 +162,62 @@ class ConsequenceClassifierTests(unittest.TestCase):
         )
         self.assertIn("hypothesis-disagreement", numbers[0].uncertainty)
 
+    def test_spoken_decimal_and_fraction_with_units_are_one_claim(self):
+        cases = (
+            (
+                "Set the dose to two point five milligrams",
+                "Set the dose to two point five milliliters",
+                "two point five milligrams",
+            ),
+            (
+                "Wait one and a half hours",
+                "Wait one and a half minutes",
+                "one and a half hours",
+            ),
+        )
+        for text, alternative, expected in cases:
+            with self.subTest(text=text):
+                plan = build_consequence_plan(timed_voice(
+                    text,
+                    confidence=0.93,
+                    alternative=alternative,
+                ), audio_duration=8.0)
+
+                numbers = [risk for risk in plan.risks
+                           if risk.category == "number"]
+                self.assertEqual(len(numbers), 1)
+                self.assertEqual(
+                    text[numbers[0].char_start:numbers[0].char_end],
+                    expected,
+                )
+                self.assertIn(
+                    "hypothesis-disagreement", numbers[0].uncertainty)
+                self.assertEqual(len(plan.relisten_requests), 1)
+
+    def test_spoken_decimal_and_fraction_grammar_is_closed(self):
+        cases = (
+            ("I have one point to make", "one"),
+            ("Follow two point five guidelines", None),
+            ("Wait one and a third hours", None),
+            ("Wait one and a halfhearted hours", None),
+        )
+        for text, expected in cases:
+            with self.subTest(text=text):
+                plan = build_consequence_plan(
+                    timed_voice(text, confidence=0.95),
+                    audio_duration=8.0,
+                )
+                spans = {
+                    text[risk.char_start:risk.char_end]
+                    for risk in plan.risks if risk.category == "number"
+                }
+                if expected is not None:
+                    self.assertIn(expected, spans)
+                self.assertNotIn("one point", spans)
+                self.assertNotIn("two point five guidelines", spans)
+                self.assertNotIn("one and a third hours", spans)
+                self.assertNotIn("one and a halfhearted hours", spans)
+
     def test_number_and_common_abbreviated_unit_are_one_claim(self):
         cases = (
             ("Set the dose to 5 mg", "Set the dose to 5 mL", "5 mg"),

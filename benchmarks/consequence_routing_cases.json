@@ -122,6 +122,30 @@
       }
     },
     {
+      "id": "spoken-decimal-unit-disagreement",
+      "text": "Set the dose to two point five milligrams",
+      "alternative": "Set the dose to two point five milliliters",
+      "confidence": 0.93,
+      "audio_duration": 8.0,
+      "expect": {
+        "categories": ["number"],
+        "route": "review",
+        "relisten_min": 1
+      }
+    },
+    {
+      "id": "spoken-fraction-unit-disagreement",
+      "text": "Wait one and a half hours",
+      "alternative": "Wait one and a half minutes",
+      "confidence": 0.93,
+      "audio_duration": 8.0,
+      "expect": {
+        "categories": ["number"],
+        "route": "review",
+        "relisten_min": 1
+      }
+    },
+    {
       "id": "phone-contact",
       "text": "Call +1 (415) 555-0199",
       "confidence": 0.63,

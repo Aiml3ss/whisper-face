@@ -1,10 +1,11 @@
 """Content-free circuit breaker for deadline-bound local cleanup calls.
 
 The breaker owns no transcript, prompt, model output, exception, or provider
-handle.  After one transport failure it bypasses cleanup during a short
+handle. After a transport failure it bypasses cleanup during a bounded
 cooldown so consecutive dictations can take the deterministic fallback without
-repeatedly paying the full local-model timeout.  Exactly one probe is admitted
-after the cooldown.
+repeatedly paying the full local-model timeout. Repeated failures double the
+cooldown up to five minutes; one successful probe resets it. Exactly one probe
+is admitted after each cooldown.
 """
 
 from __future__ import annotations
@@ -61,6 +62,7 @@ class CleanupCircuitBreaker:
         self._lock = Lock()
         self._blocked_until = 0.0
         self._in_flight = False
+        self._next_cooldown_seconds = self._cooldown_seconds
 
     def acquire(self) -> AdmissionReceipt:
         """Admit one call, or return immediately with a bypass reason."""
@@ -82,13 +84,18 @@ class CleanupCircuitBreaker:
             self._require_in_flight()
             self._in_flight = False
             self._blocked_until = 0.0
+            self._next_cooldown_seconds = self._cooldown_seconds
 
     def record_transport_failure(self) -> None:
         """Open the cooldown after a timeout or local-service failure."""
         with self._lock:
             self._require_in_flight()
             self._in_flight = False
-            self._blocked_until = self._clock() + self._cooldown_seconds
+            self._blocked_until = self._clock() + self._next_cooldown_seconds
+            self._next_cooldown_seconds = min(
+                MAX_COOLDOWN_SECONDS,
+                self._next_cooldown_seconds * 2.0,
+            )
 
     def release(self) -> None:
         """Release a call rejected above the transport layer without opening."""

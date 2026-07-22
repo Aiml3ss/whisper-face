@@ -63,6 +63,24 @@ class CleanupCircuitBreakerTests(unittest.TestCase):
         self.assertTrue(self.breaker.acquire().allowed)
         self.breaker.record_success()
 
+    def test_repeated_transport_failures_back_off_but_success_resets(self):
+        expected_cooldowns = (60, 120, 240, 300)
+
+        for seconds in expected_cooldowns:
+            with self.subTest(seconds=seconds):
+                self.assertTrue(self.breaker.acquire().allowed)
+                self.breaker.record_transport_failure()
+                receipt = self.breaker.acquire()
+                self.assertEqual(receipt.state, AdmissionState.COOLDOWN)
+                self.assertEqual(receipt.retry_after_ms, seconds * 1_000)
+                self.clock.now += seconds
+
+        self.assertTrue(self.breaker.acquire().allowed)
+        self.breaker.record_success()
+        self.assertTrue(self.breaker.acquire().allowed)
+        self.breaker.record_transport_failure()
+        self.assertEqual(self.breaker.acquire().retry_after_ms, 60_000)
+
     def test_invalid_configuration_and_transition_fail_closed(self):
         for value in (False, 0, 301, float("nan")):
             with self.subTest(value=value):
