@@ -40,6 +40,8 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_gui_settings_runtime.py",
             "uv run tests/test_insertion_integrity.py",
             "uv run tests/test_benchmark_insertion_reliability.py",
+            "uv run tests/test_compatibility_fingerprint.py",
+            "uv run tests/test_voice_input_protocol.py",
             "uv run tests/test_personal_regression.py",
             "uv run tests/test_whisper_face_gui.py",
             "uv run --locked --script dictate.py --native-gui-smoke-test",

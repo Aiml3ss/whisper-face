@@ -110,8 +110,9 @@ profiles.
 - **Counterfactual Context Firewall** — every finalized, insertion-bound
   contextual/personalized compile is compared with a context-free shadow
   compile. Protected influence is quarantined in a transcript-free receipt;
-  benign influence is only a shadow promotion candidate. The comparison cannot
-  change the text, cleanup, insertion, or model route.
+  benign influence is only a shadow promotion candidate. Results explains the
+  bounded receipt without exposing context or transcript text. The comparison
+  cannot change the text, cleanup, insertion, or model route.
 - **Six explicit voice modes** — modifier keys turn the same Right Option
   gesture into faithful capture, polished composition, context-aware reply,
   selected-text editing, spoken-code compilation, or a small allowlist of
@@ -347,6 +348,13 @@ delay fault injection. It checks at-most-once platform paste attempts and
 stable terminal receipts, while explicitly reporting zero real apps tested and
 making no 50-app or four-nines claim.
 
+`voice_input_protocol.py` defines the strict versioned proposal, stable-prefix,
+final-text, commit, acknowledgement, and cancellation contract used by five
+synthetic capability profiles. `compatibility_fingerprint.py` can build a
+bounded, text-free minimum-count aggregate only after explicit opt-in. Both are
+local foundations: neither claims a shipped cross-process SDK, physical app
+adapter, anonymous user population, telemetry backend, or network service.
+
 ## Verify
 
 Run the fast regression suite after changing the pipeline:
@@ -363,6 +371,8 @@ uv run tests/test_dictate.py
 uv run tests/test_gui_settings_runtime.py
 uv run tests/test_insertion_integrity.py
 uv run tests/test_benchmark_insertion_reliability.py
+uv run tests/test_compatibility_fingerprint.py
+uv run tests/test_voice_input_protocol.py
 uv run tests/test_personal_regression.py
 uv run tests/test_whisper_face_gui.py
 uv run --locked --script dictate.py --native-gui-smoke-test
