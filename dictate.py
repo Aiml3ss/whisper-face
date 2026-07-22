@@ -2551,6 +2551,7 @@ class Recorder:
         self._cut_frame_idx = 0
         self.speculative_future = None
         self.speculative_start = 0
+        self.speculative_end = 0
         self.speculative_invalid = False
 
     def start(self, press_at=None):
@@ -2563,6 +2564,7 @@ class Recorder:
         self._cut_frame_idx = 0
         self.speculative_future = None
         self.speculative_start = 0
+        self.speculative_end = 0
         self.speculative_invalid = False
         self.audio_status = []
         self.captured_via_flight = False
@@ -2594,6 +2596,7 @@ class Recorder:
         self._cut_frame_idx = 0
         self.speculative_future = None
         self.speculative_start = 0
+        self.speculative_end = 0
         self.speculative_invalid = False
         self.recording = False
         self.source = "flight"
@@ -2607,6 +2610,8 @@ class Recorder:
         if (self.speculative_invalid and self.speculative_future is not None
                 and self.speculative_future.done()):
             self.speculative_future = None
+            self.speculative_start = 0
+            self.speculative_end = 0
             self.speculative_invalid = False
         n = len(indata)
         self.total_samples += n
@@ -2623,6 +2628,8 @@ class Recorder:
             if self.speculative_future is not None:
                 if self.speculative_future.cancel():
                     self.speculative_future = None
+                    self.speculative_start = 0
+                    self.speculative_end = 0
                     self.speculative_invalid = False
                 else:
                     self.speculative_invalid = True
@@ -2638,6 +2645,7 @@ class Recorder:
             frames_for_speculation = tuple(
                 self.frames[self._cut_frame_idx:])
             self.speculative_start = self.cut_samples
+            self.speculative_end = self.total_samples
             self.speculative_invalid = False
             self.speculative_future = CHUNK_PREP_POOL.submit(
                 _speculative_frames,
@@ -2653,19 +2661,26 @@ class Recorder:
                     self.speculative_invalid,
                     self.speculative_start,
                     self.cut_samples):
-                fut = self.speculative_future
+                decode_future = self.speculative_future
+                decode_start = self.speculative_start
+                decode_end = self.speculative_end
             else:
                 frames_for_chunk = tuple(self.frames[self._cut_frame_idx:])
-                fut = CHUNK_PREP_POOL.submit(
+                decode_future = CHUNK_PREP_POOL.submit(
                     _transcribe_frames, frames_for_chunk, self.prompt)
+                decode_start = self.cut_samples
+                decode_end = self.total_samples
             # Only compiler-approved stable text reaches the HUD. Provisional
             # text is never typed into the focused application.
-            fut.add_done_callback(
+            decode_future.add_done_callback(
                 lambda done, terms=tuple(self.context_terms),
                 bundle=self.bundle_at_press, pack=self.context_pack:
                     _caption_add(done, terms, bundle, pack))
-            self.chunks.append(fut)
+            self.chunks.append(BoundedRecognitionFuture(
+                decode_future, decode_start, decode_end))
             self.speculative_future = None
+            self.speculative_start = 0
+            self.speculative_end = 0
             self.speculative_invalid = False
             self._cut_frame_idx = len(self.frames)
             self.cut_samples = self.total_samples
@@ -5712,40 +5727,93 @@ def release_should_wait_for_tail(rec: Recorder) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class BoundedRecognitionFuture:
+    """A decode future plus the exact capture samples it owns."""
+    future: object
+    start_sample: int
+    end_sample: int
+
+
 def assemble_raw(chunk_futs: list, pre_future,
                  rem_full: np.ndarray, prompt=None) -> Recognition:
     """Join rolling chunks and exactly one remainder decode."""
-    def harvest(fut, parts, confidences, alternatives):
-        nonlocal elapsed, timing_reliable
+    def harvest(scheduled, parts, confidences, alternatives):
+        nonlocal elapsed, timing_reliable, last_bound_end_sample
+        fut = getattr(scheduled, "future", scheduled)
+        start_sample = getattr(scheduled, "start_sample", None)
+        end_sample = getattr(scheduled, "end_sample", None)
+        has_bounds = start_sample is not None or end_sample is not None
+        bounds_valid = (
+            isinstance(start_sample, int)
+            and not isinstance(start_sample, bool)
+            and isinstance(end_sample, int)
+            and not isinstance(end_sample, bool)
+            and 0 <= start_sample < end_sample
+            and start_sample >= last_bound_end_sample
+        )
+        if bounds_valid:
+            elapsed = max(elapsed, end_sample / SAMPLE_RATE)
+            last_bound_end_sample = end_sample
         try:
             result = fut.result()
         except Exception as e:
-            # Without the failed chunk's absolute source bounds, every later
-            # relative word timestamp becomes unsafe for selective audio
-            # replay. Keep the surviving text but downgrade all assembled
-            # timing evidence below after harvesting completes.
+            # Legacy futures have no source bounds, so a missing chunk makes
+            # their later relative offsets unsafe. Bound-carrying futures do
+            # not contaminate independent evidence from later source ranges.
             timing_reliable = False
             print(f"! chunk decode failed: {e}")
             return
         if isinstance(result, str):
             result = Recognition(result)
-        offset = elapsed
+        normalized_words = []
+        word_times_valid = True
+        for word in result.words:
+            try:
+                word_start = float(word.start)
+                word_end = float(word.end)
+            except (TypeError, ValueError):
+                word_start = word_end = 0.0
+                word_times_valid = False
+            normalized_words.append((word, word_start, word_end))
         duration = max(
             float(result.audio_duration or 0.0),
-            max((word.end for word in result.words), default=0.0),
+            max((end for _word, _start, end in normalized_words),
+                default=0.0),
         )
-        elapsed += duration
+        if bounds_valid:
+            offset = start_sample / SAMPLE_RATE
+            span_duration = (end_sample - start_sample) / SAMPLE_RATE
+            word_cursor = 0.0
+            words_valid = word_times_valid
+            for _word, start, end in normalized_words:
+                finite = (
+                    start == start and end == end
+                    and abs(start) != float("inf")
+                    and abs(end) != float("inf")
+                )
+                if (not finite or start < word_cursor or start >= end
+                        or end > span_duration):
+                    words_valid = False
+                    break
+                word_cursor = end
+        else:
+            offset = elapsed
+            words_valid = False if has_bounds else timing_reliable
+            elapsed += duration
         t = result.text.strip()
         if t and not is_hallucination(t):
             parts.append(t)
             confidences.append(result.confidence)
-            words.extend(RecognitionWord(
-                word.text,
-                word.start + offset,
-                word.end + offset,
-                word.confidence,
-                word.timing,
-            ) for word in result.words)
+            for word, start, end in normalized_words:
+                words.append(RecognitionWord(
+                    word.text,
+                    start + offset,
+                    end + offset,
+                    word.confidence,
+                    word.timing if words_valid else "segment",
+                ))
+                word_has_bounds.append(has_bounds)
             if result.engine:
                 engines.append(result.engine)
             verifications.append(result.verified)
@@ -5753,12 +5821,11 @@ def assemble_raw(chunk_futs: list, pre_future,
                 alternatives.append(result.alternative)
 
     parts, confidences, alternatives, engines, verifications = [], [], [], [], []
-    # Rolling/speculative futures currently carry decoder-relative duration,
-    # not absolute capture sample bounds. Even successful multi-chunk offsets
-    # can drift across the silence between a speculative snapshot and its cut.
-    # Preserve the text path but permit native re-listen timing only for the
-    # single-remainder case until each future owns absolute source bounds.
-    words, elapsed = [], 0.0
+    # Current rolling/speculative futures carry capture bounds, preserving
+    # silence gaps in native timing. Bare futures remain supported for older
+    # callers, but multi-part legacy timing fails closed to segment evidence.
+    words, word_has_bounds, elapsed = [], [], 0.0
+    last_bound_end_sample = 0
     timing_reliable = not bool(chunk_futs)
     for f in chunk_futs:
         harvest(f, parts, confidences, alternatives)
@@ -5774,9 +5841,11 @@ def assemble_raw(chunk_futs: list, pre_future,
             alternatives,
         )
     if not timing_reliable:
-        words = [RecognitionWord(
-            word.text, word.start, word.end, word.confidence, "segment")
-            for word in words]
+        words = [
+            word if has_bounds else RecognitionWord(
+                word.text, word.start, word.end, word.confidence, "segment")
+            for word, has_bounds in zip(words, word_has_bounds)
+        ]
     return Recognition(
         text=" ".join(parts).strip(),
         confidence=min(confidences) if confidences else 0.0,
@@ -5807,26 +5876,49 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                     rec.speculative_invalid,
                     rec.speculative_start,
                     cut):
-                pre_future = rec.speculative_future
+                pre_future = BoundedRecognitionFuture(
+                    rec.speculative_future,
+                    rec.speculative_start,
+                    rec.speculative_end,
+                )
+            else:
+                rem = full_audio[cut:]
+                if (len(rem) / SAMPLE_RATE >= 0.25
+                        and peak_rms(rem) >= GATE_PEAK_RMS):
+                    pre_future = BoundedRecognitionFuture(
+                        ASR_POOL.submit(
+                            transcribe_detailed, rem, rec.prompt),
+                        cut,
+                        cut + len(rem),
+                    )
         else:
-            # Speech already ended: start ASR immediately and close the mic.
-            main_audio = rec.snapshot()
+            # Speech already ended. Quiesce the callback before reading the
+            # chunk/cut plan so one final callback cannot add an overlapping
+            # rolling chunk after the remainder boundary was captured.
+            full_audio = rec.stop()
             cut = rec.cut_samples
             chunk_futs = list(rec.chunks)
-            rem = main_audio[cut:]
+            rem = full_audio[cut:]
             if can_reuse_speculation(
                     rec.speculative_future is not None,
                     rec.speculative_invalid,
                     rec.speculative_start,
                     cut):
-                pre_future = rec.speculative_future
+                pre_future = BoundedRecognitionFuture(
+                    rec.speculative_future,
+                    rec.speculative_start,
+                    rec.speculative_end,
+                )
             else:
-                pre_future = ASR_POOL.submit(
-                    transcribe_detailed, rem, rec.prompt) \
-                    if (len(rem) / SAMPLE_RATE >= (
-                            MIN_SECONDS if not chunk_futs else 0.25)
-                        and peak_rms(rem) >= GATE_PEAK_RMS) else None
-            full_audio = rec.stop()
+                if (len(rem) / SAMPLE_RATE >= (
+                        MIN_SECONDS if not chunk_futs else 0.25)
+                        and peak_rms(rem) >= GATE_PEAK_RMS):
+                    pre_future = BoundedRecognitionFuture(
+                        ASR_POOL.submit(
+                            transcribe_detailed, rem, rec.prompt),
+                        cut,
+                        cut + len(rem),
+                    )
         capture_done_at = time.perf_counter()
 
         duration, peak = audio_gate_measurements(full_audio)
