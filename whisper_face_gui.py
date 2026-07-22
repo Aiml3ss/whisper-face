@@ -10,6 +10,7 @@ its behavior can be tested without displaying a window.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+import json
 import math
 import threading
 from typing import Any, Callable, Mapping, Sequence
@@ -216,6 +217,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "diagnostics.build": "Build",
         "diagnostics.unknown": "Unknown",
         "diagnostics.action.log": "Open Log",
+        "diagnostics.action.copy_support": "Copy Support Snapshot",
+        "diagnostics.action.copy_support.help": "Copy a transcript-free support summary with health, permissions, build, model status, and aggregate last-result counts. It never includes dictation text, selections, context, paths, logs, or personal language data.",
         "diagnostics.action.verify": "Run Verification",
         "diagnostics.action.licenses": "License Notices",
         "diagnostics.action.source": "Exact Source",
@@ -425,8 +428,10 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "operation.face.change_failed": "Could not change face: {error}",
         "operation.flight.update_failed": "Could not update Flight Recorder: {error}",
         "operation.log.open_failed": "Could not open log: {error}",
+        "operation.support_snapshot.copy_failed": "Could not copy support snapshot: {error}",
         "operation.source.open_failed": "Could not open source and license: {error}",
         "operation.licenses.open_failed": "Could not open local license notices: {error}",
+        "diagnostics.notice.support_snapshot.copied": "Transcript-free support snapshot copied",
     },
 }
 SUPPORTED_LOCALES = tuple(STRING_CATALOGS)
@@ -568,6 +573,7 @@ class GUIActions:
     pause: Callable[[], None] = _noop
     resume: Callable[[], None] = _noop
     open_log: Callable[[], None] = _noop
+    copy_support_snapshot: Callable[[str], None] = _noop
     open_source_and_license: Callable[[], None] = _noop
     open_local_license_notices: Callable[[], None] = _noop
     copy_latest_outbox: Callable[[], None] = _noop
@@ -730,6 +736,95 @@ class GUIState:
     notice_level: str = "info"
     settings_pane: str = "Modes"
     settings: UnifiedSettings = field(default_factory=UnifiedSettings)
+
+
+def _support_status(value: object) -> str:
+    """Collapse runtime display copy into a fixed non-content status."""
+    normalized = str(value).strip().casefold()
+    return {
+        "running": "running",
+        "ready": "ready",
+        "granted": "granted",
+        "installed": "installed",
+        "starting": "starting",
+        "checking": "checking",
+        "unavailable": "unavailable",
+        "unknown": "unknown",
+    }.get(normalized, "unknown")
+
+
+def _support_model_family(value: object) -> str:
+    """Classify a known local model without copying its display label."""
+    normalized = str(value).strip().casefold()
+    for marker, family in (
+        ("parakeet", "parakeet"),
+        ("whisper", "whisper"),
+        ("qwen", "qwen"),
+    ):
+        if marker in normalized:
+            return family
+    return "unknown"
+
+
+def _support_mode(value: object) -> str:
+    normalized = str(value).strip().casefold()
+    return normalized if normalized in {
+        "capture", "compose", "edit", "reply", "command", "code",
+    } else "unknown"
+
+
+def support_snapshot_text(state: GUIState) -> str:
+    """Serialize only the fixed, transcript-free support allowlist.
+
+    The native clipboard callback receives this completed payload, rather than
+    a runtime snapshot, so private dictionaries, logs, text, and contextual
+    capture data never cross the GUI integration boundary.
+    """
+    result = state.last_result
+    payload = {
+        "kind": "whisper-face/support-snapshot",
+        "schema_version": 1,
+        "health": {
+            "service_status": _support_status(state.service_status),
+            "microphone_status": _support_status(state.microphone_status),
+        },
+        "permissions": {
+            "accessibility_status": _support_status(
+                state.accessibility_status),
+        },
+        "build": (
+            "local-checkout"
+            if state.version.strip().casefold() == "local checkout"
+            else "unknown"),
+        "models": [
+            {
+                "family": _support_model_family(model.name),
+                "status": _support_status(model.status),
+            }
+            for model in sorted(
+                state.models,
+                key=lambda model: (
+                    _support_model_family(model.name),
+                    _support_status(model.status),
+                ))
+        ],
+        "last_result": {
+            "available": result.available,
+            "engine": _support_model_family(result.engine),
+            "mode": _support_mode(result.mode),
+            "latency_ms": state.last_latency_ms,
+            "word_count": state.last_word_count,
+            "confidence": result.confidence,
+            "stable_prefix_words": result.stable_prefix_words,
+            "compiler_decisions": result.compiler_decisions,
+            "protected_anchor_count": result.protected_anchor_count,
+            "alternatives_considered": result.alternatives_considered,
+            "cleanup_edits_count": len(result.cleanup_edits),
+            "proof_edits_accepted": result.proof_edits_accepted,
+            "proof_edits_rejected": result.proof_edits_rejected,
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
 
 
 def _clean_text(value: Any, default: str) -> str:
@@ -1833,6 +1928,21 @@ class WhisperFaceViewModel:
                 notice_level="error")
         return self.state
 
+    def copy_support_snapshot(self) -> GUIState:
+        """Copy the fixed public diagnostic projection through the injected seam."""
+        try:
+            self.actions.copy_support_snapshot(support_snapshot_text(self.state))
+            self.state = replace(
+                self.state,
+                notice=self.localized("diagnostics.notice.support_snapshot.copied"),
+                notice_level="success")
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.support_snapshot.copy_failed", error=error),
+                notice_level="error")
+        return self.state
+
     def open_source_and_license(self) -> GUIState:
         try:
             self.actions.open_source_and_license()
@@ -2135,6 +2245,7 @@ if APPKIT_AVAILABLE:
                 "Models": (),
                 "Diagnostics": (
                     self.dynamic["open_log_button"],
+                    self.dynamic["copy_support_snapshot_button"],
                     self.dynamic["verify_button"],
                     self.dynamic["license_button"],
                     self.dynamic["source_button"],
@@ -2526,36 +2637,41 @@ if APPKIT_AVAILABLE:
             page.addSubview_(card)
             open_log = _button(self._l("diagnostics.action.log"), NSMakeRect(0, 89, 120, 36),
                                self, "openLog:")
-            verify = _button(self._l("diagnostics.action.verify"), NSMakeRect(132, 89, 152, 36),
+            copy_support_snapshot = _button(
+                self._l("diagnostics.action.copy_support"),
+                NSMakeRect(132, 89, 180, 36), self, "copySupportSnapshot:",
+                help_text=self._l("diagnostics.action.copy_support.help"))
+            verify = _button(self._l("diagnostics.action.verify"), NSMakeRect(324, 89, 152, 36),
                              self, "verify:")
             verify.setKeyEquivalent_("r")
             verify.setKeyEquivalentModifierMask_(NSEventModifierFlagCommand)
             license_notices = _button(
-                self._l("diagnostics.action.licenses"), NSMakeRect(296, 89, 138, 36),
+                self._l("diagnostics.action.licenses"), NSMakeRect(488, 89, 138, 36),
                 self, "openLicense:")
-            source = _button(self._l("diagnostics.action.source"), NSMakeRect(446, 89, 120, 36),
+            source = _button(self._l("diagnostics.action.source"), NSMakeRect(638, 89, 120, 36),
                              self, "openSource:")
-            progress = NSProgressIndicator.alloc().initWithFrame_(
-                NSMakeRect(580, 94, 20, 20))
+            progress = NSProgressIndicator.alloc().initWithFrame_(NSMakeRect(5, 59, 20, 20))
             progress.setStyle_(1)
             progress.setDisplayedWhenStopped_(False)
-            verification = _label(self._l("diagnostics.verification.not_run"), NSMakeRect(608, 95, 140, 20),
+            verification = _label(self._l("diagnostics.verification.not_run"), NSMakeRect(32, 59, 710, 20),
                                   size=12, color=_SECONDARY)
             page.addSubview_(open_log)
+            page.addSubview_(copy_support_snapshot)
             page.addSubview_(verify)
             page.addSubview_(license_notices)
             page.addSubview_(source)
             page.addSubview_(progress)
             page.addSubview_(verification)
             guidance = _label(
-                self._l("diagnostics.ready"), NSMakeRect(5, 54, 740, 24),
+                self._l("diagnostics.ready"), NSMakeRect(5, 36, 740, 18),
                 size=11, color=_SECONDARY)
             page.addSubview_(guidance)
             page.addSubview_(_label(
                 self._l("diagnostics.license"),
-                NSMakeRect(5, 24, 620, 20), size=11, color=_SECONDARY))
+                NSMakeRect(5, 12, 620, 18), size=11, color=_SECONDARY))
             self.dynamic.update(
                 open_log_button=open_log,
+                copy_support_snapshot_button=copy_support_snapshot,
                 verify_button=verify,
                 license_button=license_notices,
                 source_button=source,
@@ -3294,6 +3410,10 @@ if APPKIT_AVAILABLE:
             self.view_model.open_log()
             self.render()
 
+        def copySupportSnapshot_(self, _sender: Any) -> None:
+            self.view_model.copy_support_snapshot()
+            self.render()
+
         def openSource_(self, _sender: Any) -> None:
             self.view_model.open_source_and_license()
             self.render()
@@ -3821,5 +3941,6 @@ __all__ = [
     "normalize_settings",
     "run_native_appkit_smoke",
     "resolve_locale",
+    "support_snapshot_text",
     "tone_for_app_index",
 ]
