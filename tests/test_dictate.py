@@ -1436,6 +1436,7 @@ class ParakeetClientTests(unittest.TestCase):
         self.assertEqual(len(payload), 8 + 2 * 4)
         self.assertAlmostEqual(requests[1][1], 3.0, places=4)
 
+    @unittest.skipIf(os.name == "nt", "select() cannot wait on Windows pipes")
     def test_bounded_helper_exchange_times_out_without_a_response(self):
         input_read, input_write = os.pipe()
         output_read, output_write = os.pipe()
@@ -1463,6 +1464,7 @@ class ParakeetClientTests(unittest.TestCase):
             os.close(input_read)
             os.close(output_write)
 
+    @unittest.skipIf(os.name == "nt", "select() cannot wait on Windows pipes")
     def test_bounded_helper_exchange_handles_framed_pipe_io(self):
         input_read, input_write = os.pipe()
         output_read, output_write = os.pipe()
@@ -1504,6 +1506,7 @@ class ParakeetClientTests(unittest.TestCase):
         self.assertEqual(response, {"ok": True, "text": "yes"})
         self.assertEqual(bytes(received), struct.pack("<Q", 1) + b"data")
 
+    @unittest.skipIf(os.name == "nt", "select() cannot wait on Windows pipes")
     def test_bounded_helper_exchange_times_out_on_blocked_write(self):
         input_read, input_write = os.pipe()
         output_read, output_write = os.pipe()
