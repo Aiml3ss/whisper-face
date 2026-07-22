@@ -128,6 +128,7 @@ class Recognition:
     engine: str = ""
     words: tuple[RecognitionWord, ...] = ()
     audio_duration: float = 0.0
+    native_processing_s: float | None = None
 
 
 def _interesting_token(token: str) -> bool:

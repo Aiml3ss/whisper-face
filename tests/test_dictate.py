@@ -157,6 +157,37 @@ class ParakeetClientTests(unittest.TestCase):
         self.assertEqual(struct.unpack("<Q", payload[:8])[0], 2)
         self.assertEqual(len(payload), 8 + 2 * 4)
 
+    def test_parakeet_processing_time_reaches_recognition_evidence(self):
+        ns = load_definitions(
+            "transcribe_detailed",
+            extra={
+                "np": np,
+                "GLOSS": {"lock": threading.Lock(), "prompt": None},
+                "IS_MACOS": True,
+                "WHISPER_REPO": "large",
+                "FAST_WHISPER_REPO": "tiny",
+                "PARAKEET_ENABLED": True,
+                "PARAKEET": SimpleNamespace(
+                    transcribe=lambda _audio: ("hello", 0.125)),
+                "PARAKEET_ROUTE_CONFIDENCE": 0.9,
+                "SAMPLE_RATE": 16_000,
+                "Recognition": Recognition,
+            },
+        )
+
+        result = ns["transcribe_detailed"](
+            np.ones(1_600, dtype=np.float32), model_repo="large")
+
+        self.assertEqual(result.text, "hello")
+        self.assertEqual(result.engine, "parakeet-unified")
+        self.assertEqual(result.native_processing_s, 0.125)
+
+        ns["PARAKEET"] = SimpleNamespace(
+            transcribe=lambda _audio: ("hello", float("nan")))
+        invalid = ns["transcribe_detailed"](
+            np.ones(1_600, dtype=np.float32), model_repo="large")
+        self.assertIsNone(invalid.native_processing_s)
+
 
 class FacePreferenceTests(unittest.TestCase):
     def test_face_choice_persists_and_unknown_values_fall_back(self):
@@ -2308,16 +2339,21 @@ class ReleasePlanTests(unittest.TestCase):
         bounded = ns["BoundedRecognitionFuture"]
         first = Recognition(
             "hello", engine="tiny", audio_duration=1.0,
+            native_processing_s=0.1,
             words=(RecognitionWord("hello", 0.2, 0.5, 0.9),),
         )
         second = Recognition(
             "world", engine="turbo", audio_duration=1.0,
+            native_processing_s=0.2,
             words=(RecognitionWord("world", 0.1, 0.4, 0.8),),
         )
+        empty = Recognition(
+            "", audio_duration=0.5, native_processing_s=0.05)
 
         result = ns["assemble_raw"]([
             bounded(Future(first), 0, 16_000),
             bounded(Future(second), 32_000, 48_000),
+            bounded(Future(empty), 48_000, 56_000),
         ], None, [], None)
 
         self.assertEqual(result.text, "hello world")
@@ -2325,7 +2361,8 @@ class ReleasePlanTests(unittest.TestCase):
             "native", "native"])
         self.assertAlmostEqual(result.words[0].start, 0.2)
         self.assertAlmostEqual(result.words[1].start, 2.1)
-        self.assertAlmostEqual(result.audio_duration, 3.0)
+        self.assertAlmostEqual(result.audio_duration, 3.5)
+        self.assertAlmostEqual(result.native_processing_s, 0.35)
 
     def test_invalid_capture_bounds_fail_closed_without_losing_text(self):
         class Future:

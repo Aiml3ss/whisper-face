@@ -191,7 +191,12 @@ class CorrectionTests(unittest.TestCase):
 
 class RecognitionTests(unittest.TestCase):
     def test_recognition_retains_its_engine(self):
-        self.assertEqual(Recognition("hello", engine="tiny").engine, "tiny")
+        recognition = Recognition(
+            "hello", engine="parakeet-unified", native_processing_s=0.02)
+
+        self.assertEqual(recognition.engine, "parakeet-unified")
+        self.assertEqual(recognition.native_processing_s, 0.02)
+        self.assertIsNone(Recognition("hello").native_processing_s)
 
     def test_recognition_retains_word_evidence(self):
         words = recognition_words_from_segments([{
