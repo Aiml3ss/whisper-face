@@ -172,24 +172,28 @@ are never Supporter-only features.
   is killed, ambiguous silence/noise/quiet speech or near-saturation headroom
   stays insufficient, reverb is explicitly unavailable, and no recommendation
   affects the runtime yet.
-- **Read-only Point-and-Speak preview (Mac)** — from Diagnostics, explicitly
-  enter a bounded target phrase to preview the focused app. Whisper Face reads
-  only bounded Accessibility names, roles, geometry, visibility, enablement,
-  focus, and selection metadata; strict confidence/margin gates either show
-  one selected name and role or fail closed with a content-free receipt. The
-  preview never clicks, focuses, types, pastes, executes an Accessibility
-  action, reads values/document text, or enters routine status and support
-  snapshots. Its 17-case synthetic corpus has zero wrong-target resolutions;
-  no physical-app accuracy or write claim is made.
+- **Explicit Point-and-Speak button action (Mac)** — from Diagnostics, enter a
+  bounded target phrase for a read-only preview of the focused app. Whisper Face
+  reads only bounded Accessibility names, roles, geometry, visibility,
+  enablement, focus, and selection metadata; strict confidence/margin gates
+  either show one selected name and role or fail closed. Only after a separate
+  **Press once** confirmation does it take a fresh snapshot and allow one
+  `AXPress` on a strongly named button, with a session-issued nonce and exact
+  app/window/element recheck immediately before the action. Drift, replay,
+  expiry, weak evidence, unsupported roles, and action failure all do nothing.
+  Phrases, names, target identifiers, and native identities remain transient;
+  routine status and support snapshots receive only content-free evidence. The
+  17-case resolver corpus has zero synthetic wrong-target resolutions, but no
+  physical-app accuracy claim is made.
 - **Provider-neutral model wallet foundation** — immutable Parakeet, Whisper
   Tiny, Whisper large-v3-turbo, and Qwen profiles expose capabilities,
   readiness, and bounded evidence through one in-process policy. Failover is
   sequential and requires an explicit typed failure receipt. A transcript-free
   shadow adapter now reports current-pin eligibility and deterministic advisory
-  order without executing a model. The Mac runtime projects only exact local
-  Whisper pin-resolution evidence into that adapter without treating resolution
-  as readiness, and the native Models pane labels the result as a shadow
-  advisory with no execution or routing. Because the runtime exposes
+  order without executing a model. Warmup caches bounded exact-pin evidence for
+  all four providers and separately records process-local warm-path observations;
+  neither is treated as current runtime readiness. The native Models pane labels
+  both as a shadow advisory with no execution or routing. Because the runtime exposes
   no conservative capability bounds, the current advisory stays fail-closed as
   missing evidence; live routing is intentionally not wired.
   `uv run model_readiness_evidence.py --format json` can also inspect all four
@@ -292,10 +296,11 @@ The launcher detects the OS. A Windows Git Bash or WSL invocation of
 4. Creates private configuration files without overwriting existing ones.
 5. Installs and validates the tuned Ollama and dictation login services
    (`launchd` on Mac, Task Scheduler on Windows).
-6. On Mac, creates and verifies `~/Applications/Whisper Face.app`, a tiny
-   unsigned checkout-backed launcher bundle. It contains no copied runtime,
-   models, or private state; opening it only validates and starts the existing
-   `launchd` service. A signed compiled app remains future release work.
+6. On Mac, compiles and verifies `~/Applications/Whisper Face.app`, a tiny
+   unsigned arm64 AppKit launcher bound to the exact checkout revision. It
+   contains no copied runtime, models, or private state; opening it validates
+   and starts the existing `launchd` service and can activate a runtime-owned
+   window. Signing and notarization remain release work.
 
 Homebrew's official installer may pause once to explain its changes and ask
 for your macOS password. Model downloads are several gigabytes, so the first

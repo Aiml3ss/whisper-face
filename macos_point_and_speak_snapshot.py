@@ -10,11 +10,13 @@ action surface.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import math
 import sys
 from typing import Any, Protocol
+
+from point_and_speak_transaction import TargetLease
 
 
 MAX_OBSERVED_ELEMENTS = 2_048
@@ -60,6 +62,13 @@ class AccessibilityTargetCapture:
 
     targets: tuple[Mapping[str, Any], ...]
     receipt: SnapshotReceipt
+    _reader: object | None = field(default=None, repr=False, compare=False)
+    _application: object | None = field(default=None, repr=False, compare=False)
+    _focused_window: object | None = field(default=None, repr=False, compare=False)
+    _elements: tuple[object, ...] = field(
+        default_factory=tuple, repr=False, compare=False)
+    _target_windows: tuple[object | None, ...] = field(
+        default_factory=tuple, repr=False, compare=False)
 
 
 class AccessibilityReader(Protocol):
@@ -128,6 +137,43 @@ def _children(reader: AccessibilityReader, element: object) -> Sequence[object] 
     return value
 
 
+def _project_target(
+    reader: AccessibilityReader, element: object, target_id: str,
+) -> Mapping[str, Any] | None:
+    role_value = _attribute(reader, element, "role")
+    role = _ROLE_MAP.get(role_value) if isinstance(role_value, str) else None
+    if role is None:
+        return None
+    title = _safe_name(_attribute(reader, element, "title"))
+    label = _safe_name(_attribute(reader, element, "description"))
+    geometry = _plain_geometry(_geometry(reader, element))
+    hidden = _attribute(reader, element, "hidden")
+    enabled = _attribute(reader, element, "enabled")
+    if (not (title.strip() or label.strip()) or geometry is None
+            or not isinstance(hidden, bool) or not isinstance(enabled, bool)):
+        return None
+    x, y, width, height = geometry
+    focused = _attribute(reader, element, "focused") is True
+    selected = _attribute(reader, element, "selected")
+    selection = (
+        "selected" if selected is True
+        else "unselected" if selected is False
+        else "not_applicable"
+    )
+    return {
+        "schema_version": 1,
+        "target_id": target_id,
+        "role": role,
+        "title": title,
+        "label": label,
+        "geometry": {"x": x, "y": y, "width": width, "height": height},
+        "visible": not hidden,
+        "enabled": enabled,
+        "focused": focused and not hidden,
+        "selection": selection,
+    }
+
+
 def capture_accessibility_targets(
     reader: AccessibilityReader,
 ) -> AccessibilityTargetCapture:
@@ -148,8 +194,11 @@ def capture_accessibility_targets(
         return AccessibilityTargetCapture((), SnapshotReceipt(
             SnapshotState.UNAVAILABLE, 0, 0, 0, False))
 
+    focused_window = _attribute(reader, root, "focused_window")
     stack: list[tuple[object, int]] = [(root, 0)]
     targets: list[Mapping[str, Any]] = []
+    elements: list[object] = []
+    target_windows: list[object | None] = []
     observed = skipped = 0
     truncated = False
     seen: set[int] = set()
@@ -165,44 +214,17 @@ def capture_accessibility_targets(
         seen.add(element_identity)
         observed += 1
 
-        role_value = _attribute(reader, element, "role")
-        role = _ROLE_MAP.get(role_value) if isinstance(role_value, str) else None
-        if role is not None:
-            title = _safe_name(_attribute(reader, element, "title"))
-            label = _safe_name(_attribute(reader, element, "description"))
-            geometry = _plain_geometry(_geometry(reader, element))
-            hidden = _attribute(reader, element, "hidden")
-            enabled = _attribute(reader, element, "enabled")
-            if ((title.strip() or label.strip()) and geometry is not None
-                    and isinstance(hidden, bool) and isinstance(enabled, bool)):
-                x, y, width, height = geometry
-                focused = _attribute(reader, element, "focused") is True
-                selected = _attribute(reader, element, "selected")
-                selection = (
-                    "selected" if selected is True
-                    else "unselected" if selected is False
-                    else "not_applicable"
-                )
-                targets.append({
-                    "schema_version": 1,
-                    "target_id": f"ax-{len(targets):04x}",
-                    "role": role,
-                    "title": title,
-                    "label": label,
-                    "geometry": {
-                        "x": x, "y": y, "width": width, "height": height,
-                    },
-                    "visible": not hidden,
-                    "enabled": enabled,
-                    "focused": focused and not hidden,
-                    "selection": selection,
-                })
-                if len(targets) >= MAX_TARGETS:
-                    children = _children(reader, element)
-                    truncated = bool(stack) or bool(children)
-                    break
-            else:
-                skipped += 1
+        target = _project_target(reader, element, f"ax-{len(targets):04x}")
+        if target is not None:
+            targets.append(target)
+            elements.append(element)
+            target_windows.append(_attribute(reader, element, "window"))
+            if len(targets) >= MAX_TARGETS:
+                children = _children(reader, element)
+                truncated = bool(stack) or bool(children)
+                break
+        elif _attribute(reader, element, "role") in _ROLE_MAP:
+            skipped += 1
 
         children = _children(reader, element)
         if depth >= MAX_DEPTH:
@@ -227,11 +249,84 @@ def capture_accessibility_targets(
         skipped_elements=skipped,
         truncated=truncated,
     )
-    return AccessibilityTargetCapture(tuple(targets), receipt)
+    return AccessibilityTargetCapture(
+        tuple(targets), receipt, reader, root, focused_window,
+        tuple(elements), tuple(target_windows))
+
+
+def prepare_point_and_speak_press_lease(
+    capture: AccessibilityTargetCapture,
+    target_id: str,
+    *,
+    created_at: float,
+) -> TargetLease | None:
+    """Bind one resolved button to exact app/window/element evidence."""
+
+    matches = [
+        index for index, target in enumerate(capture.targets)
+        if target.get("target_id") == target_id
+    ]
+    if len(matches) != 1:
+        return None
+    index = matches[0]
+    target = capture.targets[index]
+    if target.get("role") != "button" or index >= len(capture._elements) \
+            or index >= len(capture._target_windows):
+        return None
+    reader = capture._reader
+    application = capture._application
+    focused_window = capture._focused_window
+    element = capture._elements[index]
+    target_window = capture._target_windows[index]
+    same_element = getattr(reader, "same_element", None)
+    press = getattr(reader, "press", None)
+    if (reader is None or application is None or focused_window is None
+            or target_window is None or not callable(same_element)
+            or not callable(press)):
+        return None
+    try:
+        if same_element(target_window, focused_window) is not True:
+            return None
+    except Exception:
+        return None
+
+    bound_target = dict(target)
+
+    def recheck(_evidence: object) -> bool:
+        try:
+            if reader.trusted() is not True:
+                return False
+            current_application = reader.root()
+            if same_element(current_application, application) is not True:
+                return False
+            current_window = reader.attribute(
+                current_application, "focused_window")
+            if same_element(current_window, focused_window) is not True:
+                return False
+            current_target_window = reader.attribute(element, "window")
+            if same_element(current_target_window, focused_window) is not True:
+                return False
+            return _project_target(reader, element, target_id) == bound_target
+        except Exception:
+            return False
+
+    def execute(_evidence: object) -> bool:
+        try:
+            return press(element) is True
+        except Exception:
+            return False
+
+    return TargetLease(
+        created_at=created_at,
+        role="button",
+        evidence=element,
+        recheck=recheck,
+        execute=execute,
+    )
 
 
 class SystemMacAccessibilityReader:
-    """Narrow read-only adapter over macOS ApplicationServices."""
+    """Bounded Mac adapter; capture is read-only and action is AXPress-only."""
 
     _ATTRIBUTE_NAMES = {
         "role": "AXRole",
@@ -242,6 +337,8 @@ class SystemMacAccessibilityReader:
         "focused": "AXFocused",
         "selected": "AXSelected",
         "children": "AXChildren",
+        "focused_window": "AXFocusedWindow",
+        "window": "AXWindow",
     }
 
     def __init__(self) -> None:
@@ -289,6 +386,21 @@ class SystemMacAccessibilityReader:
             float(position.x), float(position.y),
             float(size.width), float(size.height),
         )
+
+    def same_element(self, left: object, right: object) -> bool:
+        if left is None or right is None:
+            return False
+        try:
+            return bool(self.services.CFEqual(left, right))
+        except Exception:
+            return left == right
+
+    def press(self, element: object) -> bool:
+        try:
+            return self.services.AXUIElementPerformAction(
+                element, "AXPress") == 0
+        except Exception:
+            return False
 
     def _ax_value(self, element: object, attribute: str, value_type: int):
         try:

@@ -26,12 +26,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from cleanup_proof_recovery import recover_cleanup_proof
+from parrot_core import compile_cleanup
 from voice_compiler import EditProposal, VoiceCompiler
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_CASES = HERE / "benchmarks" / "cleanup_latency_cases.json"
 OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
-REPORT_SCHEMA_VERSION = 3
+REPORT_SCHEMA_VERSION = 4
 CURRENT_TOKEN_BUDGET = "max(160, int(words * 4.0) + 64)"
 RISK_LABELS = frozenset({
     "acronyms", "code", "dates", "false_starts", "fillers", "layout",
@@ -334,9 +335,21 @@ def build_report(cases: tuple[dict[str, Any], ...], results: list[dict[str, Any]
         "parse_failed", "timeout", "transport_failed",
     ))
     faster_safe = [result["id"] for result in results if result["id"] != "current" and safe(result) and safe(baseline) and result["latency_ms"]["p95"] < baseline["latency_ms"]["p95"]]
+    qwen_routed = [case for case in cases
+                   if compile_cleanup(case["raw"]).needs_semantic_cleanup]
+    qwen_risks = {
+        risk: sum(risk in case["risks"] for case in qwen_routed)
+        for risk in sorted({risk for case in qwen_routed
+                            for risk in case["risks"]})
+    }
     return {"schema_version": REPORT_SCHEMA_VERSION, "scope": "opt-in-local-synthetic-cleanup-prompt-lab",
             "privacy": "checked-in-synthetic-only-aggregate-report", "runtime_authority": "none", "model": MODEL,
             "cases": len(cases), "read_timeout_seconds": read_timeout, "results": results,
+            "deterministic_routing": {
+                "fast_path_cases": len(cases) - len(qwen_routed),
+                "qwen_routed_cases": len(qwen_routed),
+                "qwen_routed_risk_counts": qwen_risks,
+            },
             "claim": {"faster_safe_variants": faster_safe, "runtime_change_recommended": False,
                       "reason": "lab evidence only; runtime prompt remains unchanged"}}
 

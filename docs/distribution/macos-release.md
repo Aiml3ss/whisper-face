@@ -25,14 +25,19 @@ The ZIP expands to a writable folder directly.
 
 On a full Mac install, `setup.sh` creates `~/Applications/Whisper Face.app` as
 a checkout-backed Mac launcher app bundle. It contains only `Info.plist`, a
-shell launcher, and the installed checkout path/revision; it does not copy
-`dictate.py`, its lockfile, models, private state, or any second source tree.
-Opening it validates that the LaunchAgent still names the same checkout and
-asks `launchd` to start that existing service. It does not activate or claim to
-show the main GUI; the checkout-backed menu-bar service continues to own its UI,
-which the user opens from that menu. Rerunning the installer reproducibly
-replaces an app owned by this launcher contract and `./setup.sh --verify`
-rejects a missing, modified, redirected, or stale bundle.
+minimal compiled Swift/AppKit launcher, and the installed checkout path/revision;
+it does not copy `dictate.py`, its lockfile, models, private state, or any second
+source tree. `setup.sh` builds the arm64 Mach-O executable with the system
+`swiftc` supplied by the already-required Xcode Command Line Tools. Opening it
+validates the bound full Git revision and LaunchAgent working directory, asks
+`launchd` to start that existing runtime entrypoint, and uses AppKit to activate
+a runtime-owned window if one is already open. It never constructs a second
+settings GUI; the checkout-backed menu-bar service continues to own its UI.
+Rerunning the installer reproducibly replaces an app owned by this launcher
+contract and `./setup.sh --verify` recompiles the fixed source contract to
+reject a missing, modified, redirected, stale, script-backed, or unexpected
+binary, then executes its no-action `--verify` mode to prove the Mach-O can
+load and validate the installed checkout without kickstarting `launchd`.
 
 This locally generated launcher is unsigned. It is a convenience entry point,
 not the signed/notarized release artifact, and macOS permissions continue to

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import plistlib
 import re
@@ -23,32 +24,110 @@ EXPECTED_FILES = {
     "Contents/Info.plist",
     f"Contents/MacOS/{EXECUTABLE}",
     "Contents/Resources/checkout-path",
+    "Contents/Resources/launcher-source-sha256",
     "Contents/Resources/source-revision",
 }
-LAUNCHER = r'''#!/bin/bash
-set -euo pipefail
+LEGACY_EXPECTED_FILES = EXPECTED_FILES - {
+    "Contents/Resources/launcher-source-sha256"
+}
+SWIFT_SOURCE = r'''import AppKit
+import Foundation
 
-resources="$(cd "$(dirname "$0")/../Resources" && pwd)"
-checkout="$(/bin/cat "$resources/checkout-path")"
-launch_agent="$HOME/Library/LaunchAgents/com.berg.dictate.plist"
-domain="gui/$(/usr/bin/id -u)/com.berg.dictate"
-
-fail_launcher() {
-    /usr/bin/osascript \
-        -e 'display alert "Whisper Face could not start" message "Run Install.command again from the installed checkout, then retry." as critical' \
-        >/dev/null 2>&1 || true
-    exit 1
+enum LauncherFailure: Error {
+    case invalidInstallation
 }
 
-[[ -d "$checkout" && -f "$checkout/dictate.py" && -f "$checkout/setup.sh" ]] \
-    || fail_launcher
-[[ -f "$launch_agent" ]] || fail_launcher
-configured_checkout="$(
-    /usr/libexec/PlistBuddy -c 'Print :WorkingDirectory' "$launch_agent" 2>/dev/null
-)" \
-    || fail_launcher
-[[ "$configured_checkout" == "$checkout" ]] || fail_launcher
-/bin/launchctl kickstart "$domain" >/dev/null 2>&1 || fail_launcher
+func readBoundValue(_ name: String, resources: URL) throws -> String {
+    let value = try String(
+        contentsOf: resources.appendingPathComponent(name), encoding: .utf8
+    ).trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !value.isEmpty, !value.contains("\n"), !value.contains("\r") else {
+        throw LauncherFailure.invalidInstallation
+    }
+    return value
+}
+
+func run(_ executable: String, _ arguments: [String]) throws -> (Int32, String) {
+    let process = Process()
+    let output = Pipe()
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = arguments
+    process.standardOutput = output
+    process.standardError = FileHandle.nullDevice
+    try process.run()
+    process.waitUntilExit()
+    let data = output.fileHandleForReading.readDataToEndOfFile()
+    return (process.terminationStatus, String(decoding: data, as: UTF8.self))
+}
+
+func launchExistingRuntime(start: Bool) throws {
+    guard let resources = Bundle.main.resourceURL else {
+        throw LauncherFailure.invalidInstallation
+    }
+    let checkout = try readBoundValue("checkout-path", resources: resources)
+    let revision = try readBoundValue("source-revision", resources: resources)
+    guard revision.range(of: "^[0-9a-f]{40}$", options: .regularExpression) != nil else {
+        throw LauncherFailure.invalidInstallation
+    }
+    let files = FileManager.default
+    guard files.fileExists(atPath: checkout + "/dictate.py"),
+          files.fileExists(atPath: checkout + "/setup.sh") else {
+        throw LauncherFailure.invalidInstallation
+    }
+    let git = try run("/usr/bin/git", ["-C", checkout, "rev-parse", "HEAD"])
+    guard git.0 == 0, git.1.trimmingCharacters(in: .whitespacesAndNewlines) == revision else {
+        throw LauncherFailure.invalidInstallation
+    }
+    let agent = files.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/LaunchAgents/com.berg.dictate.plist")
+    let plistData = try Data(contentsOf: agent)
+    guard let plist = try PropertyListSerialization.propertyList(
+        from: plistData, options: [], format: nil
+    ) as? [String: Any], plist["WorkingDirectory"] as? String == checkout else {
+        throw LauncherFailure.invalidInstallation
+    }
+    if !start {
+        return
+    }
+    let domain = "gui/\(getuid())/com.berg.dictate"
+    let kickstart = try run("/bin/launchctl", ["kickstart", domain])
+    guard kickstart.0 == 0 else {
+        throw LauncherFailure.invalidInstallation
+    }
+
+    // Bring forward an existing runtime-owned window when one is already open.
+    // The launcher never constructs a second settings UI or embeds runtime code.
+    for _ in 0..<10 {
+        let state = try run("/bin/launchctl", ["print", domain])
+        if let match = state.1.range(of: #"pid = ([0-9]+)"#, options: .regularExpression),
+           let pid = Int32(state.1[match].split(separator: " ").last ?? "") {
+            NSRunningApplication(processIdentifier: pid)?.activate(
+                options: [.activateAllWindows, .activateIgnoringOtherApps]
+            )
+            break
+        }
+        Thread.sleep(forTimeInterval: 0.05)
+    }
+}
+
+@main
+struct WhisperFaceLauncher {
+    static func main() {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        do {
+            let verifyOnly = CommandLine.arguments.dropFirst() == ["--verify"]
+            try launchExistingRuntime(start: !verifyOnly)
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Whisper Face could not start"
+            alert.informativeText = "Run Install.command again from the installed checkout, then retry."
+            alert.alertStyle = .critical
+            alert.runModal()
+            exit(1)
+        }
+    }
+}
 '''
 
 
@@ -85,13 +164,49 @@ def _revision(checkout: Path) -> str:
     return result
 
 
-def _paths(app: Path) -> tuple[Path, Path, Path, Path]:
+def _paths(app: Path) -> tuple[Path, Path, Path, Path, Path]:
     return (
         app / "Contents" / "Info.plist",
         app / "Contents" / "MacOS" / EXECUTABLE,
         app / "Contents" / "Resources" / "checkout-path",
+        app / "Contents" / "Resources" / "launcher-source-sha256",
         app / "Contents" / "Resources" / "source-revision",
     )
+
+
+def _source_digest() -> str:
+    return hashlib.sha256(SWIFT_SOURCE.encode("utf-8")).hexdigest()
+
+
+def _compile_launcher(destination: Path) -> None:
+    swiftc = shutil.which("swiftc")
+    if swiftc is None:
+        raise LauncherError("swiftc is required to build the Mac launcher")
+    source = destination.parent / ".WhisperFaceLauncher.swift"
+    source.write_text(SWIFT_SOURCE, encoding="utf-8")
+    try:
+        subprocess.run(
+            [
+                swiftc,
+                "-parse-as-library",
+                "-module-name", "WhisperFaceLauncher",
+                "-target", "arm64-apple-macos14.0",
+                "-O",
+                "-whole-module-optimization",
+                "-framework", "AppKit",
+                "-o", str(destination),
+                str(source),
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        detail = getattr(exc, "stderr", "") or "Swift compiler failed"
+        raise LauncherError(detail.strip()) from exc
+    finally:
+        source.unlink(missing_ok=True)
+    os.chmod(destination, 0o755)
 
 
 def create_app(app: Path, checkout: Path) -> None:
@@ -103,7 +218,9 @@ def create_app(app: Path, checkout: Path) -> None:
     staging_root = Path(tempfile.mkdtemp(prefix=f".{app.name}.", dir=app.parent))
     staging = staging_root / app.name
     try:
-        info, executable, checkout_path, revision_path = _paths(staging)
+        info, executable, checkout_path, source_hash_path, revision_path = _paths(
+            staging
+        )
         executable.parent.mkdir(parents=True)
         checkout_path.parent.mkdir(parents=True)
         plist = {
@@ -118,8 +235,9 @@ def create_app(app: Path, checkout: Path) -> None:
             "LSUIElement": True,
         }
         _atomic_write(info, plistlib.dumps(plist, sort_keys=True), 0o644)
-        _atomic_write(executable, LAUNCHER.encode("utf-8"), 0o755)
+        _compile_launcher(executable)
         _atomic_write(checkout_path, f"{checkout}\n".encode("utf-8"), 0o644)
+        _atomic_write(source_hash_path, f"{_source_digest()}\n".encode("ascii"), 0o644)
         _atomic_write(revision_path, f"{revision}\n".encode("ascii"), 0o644)
         verify_app(staging, checkout)
         if app.exists():
@@ -150,9 +268,9 @@ def verify_owned_app(app: Path) -> None:
         for path in app.rglob("*")
         if path.is_file() or path.is_symlink()
     }
-    if actual != EXPECTED_FILES:
+    if actual not in (EXPECTED_FILES, LEGACY_EXPECTED_FILES):
         raise LauncherError("existing launcher contains unexpected files")
-    info, executable, checkout_path, revision_path = _paths(app)
+    info, executable, checkout_path, _source_hash_path, revision_path = _paths(app)
     try:
         plist = plistlib.loads(info.read_bytes())
     except (OSError, plistlib.InvalidFileException) as exc:
@@ -179,6 +297,7 @@ def verify_app(
     *,
     require_checkout_binding: bool = True,
     require_current_revision: bool = True,
+    verify_installed_runtime: bool = False,
 ) -> None:
     app = app.expanduser().resolve()
     checkout = checkout.resolve()
@@ -191,7 +310,7 @@ def verify_app(
     }
     if actual != EXPECTED_FILES:
         raise LauncherError("launcher app contains missing or unexpected files")
-    info, executable, checkout_path, revision_path = _paths(app)
+    info, executable, checkout_path, source_hash_path, revision_path = _paths(app)
     try:
         plist = plistlib.loads(info.read_bytes())
     except (OSError, plistlib.InvalidFileException) as exc:
@@ -209,10 +328,24 @@ def verify_app(
     }
     if plist != expected_plist:
         raise LauncherError("launcher Info.plist contract mismatch")
-    if executable.read_text(encoding="utf-8") != LAUNCHER:
-        raise LauncherError("launcher executable content mismatch")
+    if source_hash_path.read_text(encoding="ascii").strip() != _source_digest():
+        raise LauncherError("launcher source contract mismatch")
     if not executable.stat().st_mode & stat.S_IXUSR:
         raise LauncherError("launcher executable is not executable")
+    if executable.read_bytes()[:4] != b"\xcf\xfa\xed\xfe":
+        raise LauncherError("launcher executable is not an arm64 Mach-O binary")
+    with tempfile.TemporaryDirectory(prefix="whisper-face-launcher-verify.") as directory:
+        expected_executable = Path(directory) / EXECUTABLE
+        _compile_launcher(expected_executable)
+        if executable.read_bytes() != expected_executable.read_bytes():
+            raise LauncherError("launcher compiled binary mismatch")
+    if verify_installed_runtime:
+        try:
+            subprocess.run(
+                [str(executable), "--verify"], capture_output=True, check=True
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise LauncherError("compiled launcher runtime verification failed") from exc
     recorded_checkout = checkout_path.read_text(encoding="utf-8").strip()
     if not Path(recorded_checkout).is_absolute() or "\n" in recorded_checkout:
         raise LauncherError("launcher checkout binding is invalid")
@@ -233,6 +366,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("command", choices=("create", "verify"))
     parser.add_argument("--app", required=True)
     parser.add_argument("--checkout", required=True)
+    parser.add_argument("--installed-runtime", action="store_true")
     return parser
 
 
@@ -243,7 +377,11 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.app).expanduser().parent.mkdir(parents=True, exist_ok=True)
             create_app(Path(args.app), Path(args.checkout))
         else:
-            verify_app(Path(args.app), Path(args.checkout))
+            verify_app(
+                Path(args.app),
+                Path(args.checkout),
+                verify_installed_runtime=args.installed_runtime,
+            )
     except (LauncherError, OSError) as exc:
         print(f"macOS launcher error: {exc}", file=sys.stderr)
         return 2

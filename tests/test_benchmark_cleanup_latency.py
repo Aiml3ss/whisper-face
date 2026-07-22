@@ -61,10 +61,20 @@ class CleanupLatencyBenchmarkTests(unittest.TestCase):
         current = self._result(cases)
         report = build_report(cases, [current, {**current, "id": "lean-three-shot",
                                                 "latency_ms": {"p50": 70.0, "p95": 80.0, "max": 90.0}}], read_timeout=4.0)
-        self.assertEqual(report["schema_version"], 3)
+        self.assertEqual(report["schema_version"], 4)
         self.assertEqual(report["model"], MODEL)
         self.assertEqual(report["runtime_authority"], "none")
         self.assertFalse(report["claim"]["runtime_change_recommended"])
+        self.assertEqual(report["deterministic_routing"], {
+            "fast_path_cases": 29,
+            "qwen_routed_cases": 1,
+            "qwen_routed_risk_counts": {
+                "dates": 1,
+                "fillers": 1,
+                "meaningful_filler": 1,
+                "numbers": 1,
+            },
+        })
         encoded = json.dumps(report)
         for case in cases:
             self.assertNotIn(case["raw"], encoded)

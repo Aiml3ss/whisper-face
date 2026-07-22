@@ -62,9 +62,23 @@ class CleanupCompilerTests(unittest.TestCase):
             "Keep this sentence. remove this part scratch that use this instead")
         self.assertEqual(plan.text, "Keep this sentence. use this instead")
 
+    def test_scratch_that_preserves_a_repeated_boundary_and_factual_prefix(self):
+        plan = compile_cleanup(
+            "tell Morgan the migration starts at six scratch that at seven")
+        self.assertEqual(
+            plan.text, "tell Morgan the migration starts at seven")
+        self.assertFalse(plan.needs_semantic_cleanup)
+
+    def test_ambiguous_scratch_that_preserves_source_and_fails_closed(self):
+        raw = "move the meeting Tuesday scratch that Wednesday"
+        plan = compile_cleanup(raw)
+        self.assertEqual(plan.text, raw)
+        self.assertNotIn("scratch_that", plan.edit_kinds)
+        self.assertTrue(plan.needs_semantic_cleanup)
+
     def test_enumeration_requests_semantic_cleanup(self):
         self.assertTrue(compile_cleanup(
-            "three things first speed second trust third privacy"
+            "three things first speed second trust"
         ).needs_semantic_cleanup)
 
     def test_single_ordinal_in_ordinary_prose_stays_deterministic(self):
@@ -107,6 +121,63 @@ class CleanupCompilerTests(unittest.TestCase):
         )
         self.assertIn("spoken_enumeration", plan.edit_kinds)
         self.assertFalse(plan.needs_semantic_cleanup)
+
+    def test_exact_counted_inline_list_formats_without_semantic_cleanup(self):
+        plan = compile_cleanup(
+            "three items first freeze API v4 second cap spend at $900 "
+            "and third email QA")
+        self.assertEqual(
+            plan.text,
+            "three items:\n"
+            "- Freeze API v4.\n"
+            "- Cap spend at $900.\n"
+            "- Email QA.",
+        )
+        self.assertFalse(plan.needs_semantic_cleanup)
+
+    def test_counted_inline_list_requires_exact_count_and_sequence(self):
+        for spoken in (
+            "three items first preserve names and second preserve dates",
+            "two things second skip the first marker",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken)
+                self.assertTrue(plan.needs_semantic_cleanup)
+
+    def test_counted_inline_list_preserves_names_urls_code_and_numbers(self):
+        plan = compile_cleanup(
+            "two things first notify Morgan at https://example.com/api "
+            "and second set RETRY_COUNT to 3")
+        self.assertEqual(
+            plan.text,
+            "two things:\n"
+            "- Notify Morgan at https://example.com/api.\n"
+            "- Set RETRY_COUNT to 3.",
+        )
+        for anchor in (
+                "Morgan", "https://example.com/api", "RETRY_COUNT", "3"):
+            self.assertIn(anchor, plan.text)
+        self.assertFalse(plan.needs_semantic_cleanup)
+
+    def test_spoken_structure_does_not_become_an_ordinal_list_request(self):
+        plan = compile_cleanup(
+            "first line is approved new line second line needs revision")
+        self.assertEqual(
+            plan.text, "first line is approved\nsecond line needs revision")
+        self.assertFalse(plan.needs_semantic_cleanup)
+
+    def test_literal_ambiguous_filler_phrases_are_preserved_without_qwen(self):
+        for spoken in (
+            "the phrase you know appears in the customer quote",
+            "the phrase I mean should remain in the quotation",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken)
+                self.assertFalse(plan.needs_semantic_cleanup)
+        self.assertTrue(compile_cleanup(
+            "check the logs you know before deploy").needs_semantic_cleanup)
 
     def test_plain_numbered_feedback_items_become_bullets(self):
         plan = compile_cleanup(

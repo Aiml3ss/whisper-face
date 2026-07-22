@@ -236,11 +236,11 @@ class MacDistributionContractTests(unittest.TestCase):
             self.assertEqual(tampered.returncode, 2)
             self.assertIn("tree digest mismatch", tampered.stderr)
 
-    @unittest.skipIf(
-        os.name == "nt",
-        "checkout-backed Mac launcher bundle is not a Windows contract",
+    @unittest.skipUnless(
+        sys.platform == "darwin",
+        "compiled AppKit launcher bundle requires macOS",
     )
-    def test_unsigned_launcher_app_is_reproducible_and_checkout_backed(self):
+    def test_compiled_launcher_app_is_reproducible_and_checkout_backed(self):
         with tempfile.TemporaryDirectory() as directory:
             app = Path(directory) / "Whisper Face.app"
             command = [
@@ -259,6 +259,9 @@ class MacDistributionContractTests(unittest.TestCase):
             }
             self.assertEqual(first, second)
             self.assertNotIn("dictate.py", {path.name for path in app.rglob("*")})
+            executable = app / "Contents/MacOS/Whisper Face"
+            self.assertEqual(executable.read_bytes()[:4], b"\xcf\xfa\xed\xfe")
+            self.assertFalse(executable.read_bytes().startswith(b"#!"))
             plist = plistlib.loads((app / "Contents/Info.plist").read_bytes())
             self.assertEqual(plist["CFBundlePackageType"], "APPL")
             self.assertEqual(
