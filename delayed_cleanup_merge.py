@@ -15,6 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from enum import Enum
+from threading import Lock
+from typing import Callable
 
 
 class DelayedMergeReason(str, Enum):
@@ -54,6 +56,182 @@ class DelayedMergeReceipt:
     @property
     def changed(self) -> bool:
         return self.applied_count > 0
+
+
+class DelayedApplyOutcome(str, Enum):
+    """Fixed outcomes from the transactional destination boundary."""
+
+    APPLIED = "applied"
+    UNREADABLE_TARGET = "unreadable_target"
+    FOCUS_DRIFT = "focus_drift"
+    REVISION_DRIFT = "revision_drift"
+    TEXT_DRIFT = "text_drift"
+    AMBIGUOUS_MERGE = "ambiguous_merge"
+    NO_SAFE_CHANGES = "no_safe_changes"
+    COMPARE_AND_SWAP_REJECTED = "compare_and_swap_rejected"
+    ADAPTER_EXCEPTION = "adapter_exception"
+    PROPOSAL_IN_FLIGHT = "proposal_in_flight"
+
+
+@dataclass(frozen=True)
+class DestinationSnapshot:
+    """Exact adapter-provided state for one focused destination."""
+
+    destination_id: str
+    revision: str
+    text: str
+    focused: bool = True
+
+
+@dataclass(frozen=True)
+class DelayedApplyReceipt:
+    """Content-free, fixed-shape evidence for one apply attempt."""
+
+    outcome: DelayedApplyOutcome
+    applied: bool
+    merge_applied_count: int = 0
+    merge_rejected_count: int = 0
+
+
+_AMBIGUOUS_MERGE_REASONS = frozenset({
+    DelayedMergeReason.AMBIGUOUS_ANCHOR,
+    DelayedMergeReason.DESTINATION_REORDERED,
+    DelayedMergeReason.DESTINATION_OVERLAP,
+    DelayedMergeReason.INSUFFICIENT_ANCHOR,
+})
+
+
+class DelayedCleanupTransactionAdapter:
+    """Apply a delayed merge through an injected compare-and-swap boundary.
+
+    ``read_snapshot`` must read the current focused destination without using
+    the clipboard. ``apply_if_unchanged`` must atomically verify every field
+    in the supplied snapshot before applying the replacement, and must leave
+    the destination unchanged when it returns ``False`` or raises. This class
+    does not read or write any application itself and makes no live-runtime
+    claim.
+
+    Proposal IDs are single-use for the lifetime of this adapter. A completed
+    duplicate returns the original receipt without invoking either callback;
+    a concurrent or re-entrant duplicate fails closed as in flight.
+    """
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._in_flight: set[str] = set()
+        self._receipts: dict[str, DelayedApplyReceipt] = {}
+
+    @staticmethod
+    def _valid_snapshot(value: object) -> bool:
+        return (
+            isinstance(value, DestinationSnapshot)
+            and isinstance(value.destination_id, str)
+            and bool(value.destination_id)
+            and isinstance(value.revision, str)
+            and bool(value.revision)
+            and isinstance(value.text, str)
+            and isinstance(value.focused, bool)
+        )
+
+    def apply(
+            self,
+            proposal_id: str,
+            original: str,
+            proposal: str,
+            read_snapshot: Callable[[], DestinationSnapshot | None],
+            apply_if_unchanged: Callable[
+                [DestinationSnapshot, str], bool],
+    ) -> DelayedApplyReceipt:
+        """Merge and conditionally apply one uniquely identified proposal."""
+        if not isinstance(proposal_id, str) or not proposal_id:
+            raise ValueError("proposal_id must be a non-empty string")
+        if not isinstance(original, str) or not isinstance(proposal, str):
+            raise TypeError("original and proposal must be strings")
+        if not callable(read_snapshot) or not callable(apply_if_unchanged):
+            raise TypeError("destination callbacks must be callable")
+
+        with self._lock:
+            completed = self._receipts.get(proposal_id)
+            if completed is not None:
+                return completed
+            if proposal_id in self._in_flight:
+                return DelayedApplyReceipt(
+                    DelayedApplyOutcome.PROPOSAL_IN_FLIGHT, False)
+            self._in_flight.add(proposal_id)
+
+        try:
+            receipt = self._apply_once(
+                original, proposal, read_snapshot, apply_if_unchanged)
+        except Exception:
+            # Adapters are an external trust boundary. Their exception text is
+            # deliberately not reflected into the fixed receipt.
+            receipt = DelayedApplyReceipt(
+                DelayedApplyOutcome.ADAPTER_EXCEPTION, False)
+        with self._lock:
+            # Only this call can finalize the ID: concurrent duplicates return
+            # while it is present in ``_in_flight``.
+            self._in_flight.remove(proposal_id)
+            self._receipts[proposal_id] = receipt
+        return receipt
+
+    def _apply_once(
+            self,
+            original: str,
+            proposal: str,
+            read_snapshot: Callable[[], DestinationSnapshot | None],
+            apply_if_unchanged: Callable[
+                [DestinationSnapshot, str], bool],
+    ) -> DelayedApplyReceipt:
+        captured = read_snapshot()
+        if not self._valid_snapshot(captured):
+            return DelayedApplyReceipt(
+                DelayedApplyOutcome.UNREADABLE_TARGET, False)
+        assert isinstance(captured, DestinationSnapshot)
+        if not captured.focused:
+            return DelayedApplyReceipt(
+                DelayedApplyOutcome.FOCUS_DRIFT, False)
+
+        merged = merge_delayed_cleanup(original, proposal, captured.text)
+        counts = {
+            "merge_applied_count": merged.applied_count,
+            "merge_rejected_count": merged.rejected_count,
+        }
+        if any(decision.reason in _AMBIGUOUS_MERGE_REASONS
+               for decision in merged.decisions):
+            return DelayedApplyReceipt(
+                DelayedApplyOutcome.AMBIGUOUS_MERGE, False, **counts)
+        if not merged.changed or merged.merged_text == captured.text:
+            return DelayedApplyReceipt(
+                DelayedApplyOutcome.NO_SAFE_CHANGES, False, **counts)
+
+        current = read_snapshot()
+        if not self._valid_snapshot(current):
+            return DelayedApplyReceipt(
+                DelayedApplyOutcome.UNREADABLE_TARGET, False, **counts)
+        assert isinstance(current, DestinationSnapshot)
+        if (not current.focused
+                or current.destination_id != captured.destination_id):
+            return DelayedApplyReceipt(
+                DelayedApplyOutcome.FOCUS_DRIFT, False, **counts)
+        if current.revision != captured.revision:
+            return DelayedApplyReceipt(
+                DelayedApplyOutcome.REVISION_DRIFT, False, **counts)
+        if current.text != captured.text:
+            return DelayedApplyReceipt(
+                DelayedApplyOutcome.TEXT_DRIFT, False, **counts)
+
+        # This injected callback is the only apply path. It receives the fresh
+        # snapshot so its implementation can atomically compare identity,
+        # revision, and text before writing.
+        applied = apply_if_unchanged(current, merged.merged_text)
+        if applied is not True:
+            return DelayedApplyReceipt(
+                DelayedApplyOutcome.COMPARE_AND_SWAP_REJECTED,
+                False,
+                **counts,
+            )
+        return DelayedApplyReceipt(
+            DelayedApplyOutcome.APPLIED, True, **counts)
 
 
 @dataclass(frozen=True)

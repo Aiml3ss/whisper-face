@@ -69,9 +69,11 @@ function Test-Endpoint([string]$Uri) {
 
 $Required = @(
     "dictate.py", "dictate.py.lock", "parrot_core.py", "voice_compiler.py",
-    "insertion_integrity.py", "personal_regression.py", "whisper_face_gui.py",
+    "insertion_integrity.py", "personal_regression.py",
+    "acoustic_keyword_memory.py", "whisper_face_gui.py",
     "snippets.template.json", "tones.template.json",
-    "preferences.template.json", "dictionary.template.txt",
+    "preferences.template.json", "acoustic_keyword_memory.template.json",
+    "dictionary.template.txt",
     "icons\faces\parrot-idle.svg", "icons\faces\parrot-talk.svg",
     "icons\faces\fox-idle.svg", "icons\faces\fox-talk.svg",
     "icons\faces\owl-idle.svg", "icons\faces\owl-talk.svg",
@@ -223,6 +225,7 @@ $PrivateTemplates = @{
     "snippets.json" = "snippets.template.json"
     "tones.json" = "tones.template.json"
     "preferences.json" = "preferences.template.json"
+    "acoustic_keyword_memory.json" = "acoustic_keyword_memory.template.json"
     "dictionary.txt" = "dictionary.template.txt"
 }
 foreach ($DestinationName in $PrivateTemplates.Keys) {
