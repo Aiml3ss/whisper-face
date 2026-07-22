@@ -4,6 +4,7 @@
 # ///
 
 import json
+import http.client
 import sys
 import unittest
 from pathlib import Path
@@ -13,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 from benchmark_cleanup_latency import (  # noqa: E402
     MODEL, RISK_LABELS, TransportTimeout, VARIANTS, _semantic_failure,
-    build_report, load_cases, run_variant,
+    _variant_comparison, build_report, load_cases, run_variant,
 )
 
 
@@ -33,6 +34,7 @@ class CleanupLatencyBenchmarkTests(unittest.TestCase):
     def _result(cases, **changes):
         result = {
             "id": "current", "few_shot_pairs": 4, "token_budget": "x",
+            "read_timeout_seconds": 4.0,
             "cases": len(cases), "accepted": len(cases),
             "baseline_accepted": len(cases),
             "recovered_accepted": len(cases),
@@ -52,6 +54,7 @@ class CleanupLatencyBenchmarkTests(unittest.TestCase):
                 "p50": 0.1, "p95": 0.2, "max": 0.3,
             },
             "latency_ms": {"p50": 100.0, "p95": 120.0, "max": 130.0},
+            "_case_outcomes": tuple("both_accepted" for _case in cases),
         }
         result.update(changes)
         return result
@@ -61,10 +64,11 @@ class CleanupLatencyBenchmarkTests(unittest.TestCase):
         current = self._result(cases)
         report = build_report(cases, [current, {**current, "id": "lean-three-shot",
                                                 "latency_ms": {"p50": 70.0, "p95": 80.0, "max": 90.0}}], read_timeout=4.0)
-        self.assertEqual(report["schema_version"], 4)
+        self.assertEqual(report["schema_version"], 5)
         self.assertEqual(report["model"], MODEL)
         self.assertEqual(report["runtime_authority"], "none")
         self.assertFalse(report["claim"]["runtime_change_recommended"])
+        self.assertNotIn("_case_outcomes", json.dumps(report))
         self.assertEqual(report["deterministic_routing"], {
             "fast_path_cases": 29,
             "qwen_routed_cases": 1,
@@ -80,6 +84,40 @@ class CleanupLatencyBenchmarkTests(unittest.TestCase):
             self.assertNotIn(case["raw"], encoded)
             self.assertNotIn(case["candidate"], encoded)
             self.assertNotIn(case["id"], encoded)
+
+    def test_paired_variant_comparison_requires_quality_and_latency(self):
+        cases = load_cases()
+        baseline = self._result(cases)
+        faster = self._result(
+            cases, id="candidate",
+            latency_ms={"p50": 70.0, "p95": 90.0, "max": 95.0})
+        comparison = _variant_comparison(baseline, faster)
+        self.assertEqual(comparison["baseline_losses"], 0)
+        self.assertEqual(comparison["new_semantic_failures"], 0)
+        self.assertEqual(comparison["new_unavailable_failures"], 0)
+        self.assertTrue(comparison["runtime_change_eligible"])
+
+        regressed = self._result(
+            cases, id="regressed",
+            latency_ms={"p50": 70.0, "p95": 90.0, "max": 95.0},
+            _case_outcomes=(
+                "semantic_failed", *baseline["_case_outcomes"][1:]))
+        comparison = _variant_comparison(baseline, regressed)
+        self.assertEqual(comparison["baseline_losses"], 1)
+        self.assertEqual(comparison["new_semantic_failures"], 1)
+        self.assertFalse(comparison["runtime_change_eligible"])
+
+    def test_variant_deadlines_are_bounded_by_the_cli_cap(self):
+        seen = []
+
+        def timeout(*_args, **kwargs):
+            seen.append(kwargs["timeout"])
+            raise TransportTimeout()
+
+        case = load_cases()[:1]
+        run_variant(VARIANTS[1], case, post=timeout)
+        run_variant(VARIANTS[1], case, post=timeout, read_timeout=3.0)
+        self.assertEqual(seen, [(1, 3.5), (1, 3.0)])
 
     def test_corpus_has_explicit_golden_constraints_and_risk_coverage(self):
         cases = load_cases()
@@ -112,6 +150,15 @@ class CleanupLatencyBenchmarkTests(unittest.TestCase):
         result = run_variant(VARIANTS[0], load_cases()[:1], post=malformed)
         self.assertEqual(result["parse_failed"], 1)
         self.assertEqual(result["transport_failed"], 0)
+
+    def test_disconnected_local_response_is_counted_as_transport(self):
+        def disconnected(*_args, **_kwargs):
+            raise http.client.RemoteDisconnected()
+
+        result = run_variant(
+            VARIANTS[0], load_cases()[:1], post=disconnected)
+        self.assertEqual(result["transport_failed"], 1)
+        self.assertEqual(result["parse_failed"], 0)
 
     def test_guard_rejection_is_never_offered_to_recovery(self):
         case = load_cases()[0]

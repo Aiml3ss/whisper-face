@@ -31,8 +31,20 @@ source tree. `setup.sh` builds the arm64 Mach-O executable with the system
 `swiftc` supplied by the already-required Xcode Command Line Tools. Opening it
 validates the bound full Git revision and LaunchAgent working directory, asks
 `launchd` to start that existing runtime entrypoint, and uses AppKit to activate
-a runtime-owned window if one is already open. It never constructs a second
-settings GUI; the checkout-backed menu-bar service continues to own its UI.
+a runtime-owned window. The running service exposes one same-user `0600` Unix
+socket whose name binds the launchd PID and full source revision. After
+validating the same revision and exact LaunchAgent working directory, the
+launcher retries that endpoint for at most five seconds and sends one fixed byte;
+the service schedules its existing `show()` method on the AppKit main thread.
+There is no transcript, text, path, command, or general message payload, and a
+missing endpoint safely becomes a no-op rather than starting another Python
+runtime; reopening the app is the explicit retry. Each service start removes
+only owned socket files matching the exact
+launcher pattern whose recorded PID no longer exists; regular files, foreign
+owners, live PIDs, and unrelated paths are untouched. Accepted peers have a
+short read timeout so an idle same-user client cannot block later launches. It
+never constructs a second settings GUI; the checkout-backed menu-bar service
+continues to own its UI.
 Rerunning the installer reproducibly replaces an app owned by this launcher
 contract and `./setup.sh --verify` recompiles the fixed source contract to
 reject a missing, modified, redirected, stale, script-backed, or unexpected
