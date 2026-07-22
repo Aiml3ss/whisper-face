@@ -10,6 +10,7 @@ logic can run in under a second without loading either model.
 """
 
 import ast
+import ctypes
 import io
 import json
 import os
@@ -760,6 +761,126 @@ class VoiceObjectEmailComposeRuntimeTests(unittest.TestCase):
             "print", "open", "subprocess", "Popen", "NSURL", "NSWorkspace"})
 
 
+class VoiceObjectDraftCopyRuntimeTests(unittest.TestCase):
+    @staticmethod
+    def function(revealed, adapter, *, is_macos=True, enabled=True, reads=None):
+        queued = object()
+        task_destination = SimpleNamespace(value="task")
+        calendar_destination = SimpleNamespace(value="calendar_draft")
+
+        class TaskDraft:
+            pass
+
+        class CalendarDraft:
+            pass
+
+        def bridge():
+            return SimpleNamespace(read=lambda item_id: (
+                reads.append(item_id) if reads is not None else None)
+                or revealed)
+
+        namespace = load_definitions(
+            "copy_voice_object_draft",
+            extra={
+                "IS_MACOS": is_macos,
+                "PREFERENCES": {"voice_object_commands": enabled},
+                "VOICE_DRAFT_CLIPBOARD_ADAPTER": adapter,
+                "_voice_object_inbox_bridge": bridge,
+                "_voice_object_draft_content": lambda _draft:
+                    "Title: Project Bluebird\nNotes: Private launch 8492",
+                "InboxState": SimpleNamespace(QUEUED=queued),
+                "Destination": SimpleNamespace(
+                    TASK=task_destination,
+                    CALENDAR_DRAFT=calendar_destination),
+                "TaskDraft": TaskDraft,
+                "CalendarDraft": CalendarDraft,
+            },
+        )
+        return (namespace["copy_voice_object_draft"], TaskDraft,
+                CalendarDraft, queued, task_destination,
+                calendar_destination)
+
+    def test_fresh_task_reread_copies_only_to_adapter_and_keeps_receipt_closed(self):
+        calls = []
+
+        class Adapter:
+            def copy(self, nonce, *, content):
+                calls.append((nonce, content))
+                return SimpleNamespace(to_mapping=lambda: {
+                    "schema_version": 1,
+                    "state": "copied",
+                    "attempted": True,
+                })
+
+        reads = []
+        placeholder = SimpleNamespace()
+        function, TaskDraft, _CalendarDraft, queued, task, _calendar = \
+            self.function(placeholder, Adapter(), reads=reads)
+        placeholder.state = queued
+        placeholder.destination = task
+        placeholder.draft = TaskDraft()
+
+        result = function("n" * 32, "voice-object:task-1", "task")
+
+        self.assertEqual(reads, ["voice-object:task-1"])
+        self.assertEqual(calls, [(
+            "n" * 32,
+            "Title: Project Bluebird\nNotes: Private launch 8492",
+        )])
+        self.assertEqual(result, {
+            "schema_version": 1, "state": "copied", "attempted": True})
+        self.assertNotIn("Bluebird", json.dumps(result))
+
+    def test_destination_or_state_drift_consumes_nonce_without_private_content(self):
+        calls = []
+
+        class Adapter:
+            def copy(self, nonce, *, content):
+                calls.append((nonce, content))
+                return SimpleNamespace(to_mapping=lambda: {
+                    "schema_version": 1,
+                    "state": "invalid",
+                    "attempted": False,
+                })
+
+        placeholder = SimpleNamespace()
+        function, TaskDraft, _CalendarDraft, queued, task, calendar = \
+            self.function(placeholder, Adapter())
+        placeholder.state = queued
+        placeholder.destination = calendar
+        placeholder.draft = TaskDraft()
+
+        result = function("n" * 32, "voice-object:task-1", "task")
+
+        self.assertEqual(result["state"], "invalid")
+        self.assertEqual(calls, [("n" * 32, "")])
+        disabled, *_ = self.function(
+            placeholder, Adapter(), enabled=False)
+        self.assertEqual(
+            disabled("n" * 32, "voice-object:task-1", "task")["state"],
+            "unavailable")
+        self.assertEqual(len(calls), 1)
+
+    def test_copy_is_absent_from_status_and_has_no_external_action_calls(self):
+        status = next(
+            node for node in TREE.body if isinstance(node, ast.FunctionDef)
+            and node.name == "runtime_status_snapshot")
+        action = next(
+            node for node in TREE.body if isinstance(node, ast.FunctionDef)
+            and node.name == "copy_voice_object_draft")
+        status_names = {
+            node.id for node in ast.walk(status) if isinstance(node, ast.Name)
+        }
+        action_names = {
+            node.id for node in ast.walk(action) if isinstance(node, ast.Name)
+        }
+        self.assertNotIn("copy_voice_object_draft", status_names)
+        self.assertFalse(action_names & {
+            "print", "open", "subprocess", "Popen", "NSURL", "NSWorkspace",
+            "EventKit", "requests", "socket",
+        })
+
+
 class DropTargetPreviewRuntimeTests(unittest.TestCase):
     @staticmethod
     def namespace(
@@ -1314,6 +1435,14 @@ class AcousticKeywordMemoryRuntimeTests(unittest.TestCase):
 
 
 class AudioPoolTests(unittest.TestCase):
+    @staticmethod
+    def namespace():
+        return load_definitions(
+            "AudioSlot", "AudioPool",
+            assignments={"SAMPLE_RATE"},
+            extra={"sd": SimpleNamespace(InputStream=FakeStream)},
+        )
+
     def test_streams_are_preopened_and_reused(self):
         streams = []
 
@@ -1356,9 +1485,11 @@ class AudioPoolTests(unittest.TestCase):
         )
         pool = ns["AudioPool"](size=2, stream_factory=denied)
 
-        with self.assertRaises(RuntimeError):
+        with self.assertRaisesRegex(
+                RuntimeError, "microphone stream unavailable") as raised:
             pool.warm()
 
+        self.assertNotIn("private device detail", str(raised.exception))
         self.assertEqual(pool.readiness(), "Unavailable")
         self.assertEqual(pool.slots, [])
         self.assertEqual(pool.warm_error, "RuntimeError")
@@ -1381,10 +1512,242 @@ class AudioPoolTests(unittest.TestCase):
         pool = ns["AudioPool"](size=1, stream_factory=factory)
         pool.warm()
 
-        with self.assertRaises(RuntimeError):
+        with self.assertRaisesRegex(
+                RuntimeError, "microphone stream unavailable"):
             pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
 
         self.assertEqual(pool.readiness(), "Unavailable")
+
+    def test_idle_device_switch_closes_stale_slots_and_lazily_reopens(self):
+        streams = []
+
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        pool = self.namespace()["AudioPool"](
+            size=2, stream_factory=factory)
+        pool.warm()
+        original = tuple(streams)
+
+        pool.invalidate()
+        pool.invalidate()
+
+        self.assertEqual(pool.readiness(), "Starting")
+        self.assertEqual(pool.slots, [])
+        self.assertTrue(all(stream.closed for stream in original))
+        self.assertEqual(len(streams), 2)
+
+        slot = pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+        self.assertEqual(len(streams), 4)
+        self.assertNotIn(slot.stream, original)
+        pool.release(slot)
+
+    def test_active_capture_finishes_before_stale_pool_is_replaced(self):
+        streams = []
+
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        pool = self.namespace()["AudioPool"](
+            size=2, stream_factory=factory)
+        received = []
+        recorder = SimpleNamespace(
+            _callback=lambda indata, *_args: received.append(indata.copy()))
+        slot = pool.acquire(recorder)
+        original = tuple(streams)
+
+        pool.invalidate()
+        slot.stream.callback(
+            np.ones((4, 1), dtype=np.float32), 4, None, None)
+
+        self.assertEqual(len(received), 1)
+        self.assertTrue(pool.recovery_pending)
+        self.assertFalse(any(stream.closed for stream in original))
+        with self.assertRaisesRegex(RuntimeError, "recovery pending"):
+            pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+        self.assertEqual(len(streams), 2)
+
+        pool.release(slot)
+        self.assertTrue(all(stream.closed for stream in original))
+        self.assertEqual(pool.slots, [])
+        replacement = pool.acquire(
+            SimpleNamespace(_callback=lambda *_args: None))
+        self.assertEqual(len(streams), 4)
+        pool.release(replacement)
+
+    def test_reopen_failure_stays_closed_and_next_keypress_can_retry(self):
+        streams = []
+        fail = {"on": False}
+
+        def factory(**kwargs):
+            if fail["on"]:
+                raise RuntimeError("private device detail")
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        pool = self.namespace()["AudioPool"](
+            size=1, stream_factory=factory)
+        pool.warm()
+        pool.invalidate()
+        fail["on"] = True
+
+        with self.assertRaises(RuntimeError):
+            pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+
+        self.assertEqual(pool.slots, [])
+        self.assertEqual(pool.readiness(), "Unavailable")
+        fail["on"] = False
+        slot = pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+        self.assertEqual(pool.readiness(), "Ready")
+        self.assertEqual(len(streams), 2)
+        pool.release(slot)
+
+    def test_stop_failure_never_reuses_slot_and_preserves_other_active_take(self):
+        class FailingStopStream(FakeStream):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.fail_stop = False
+
+            def stop(self):
+                super().stop()
+                if self.fail_stop:
+                    raise RuntimeError("private device detail")
+
+        streams = []
+
+        def factory(**kwargs):
+            stream = FailingStopStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        pool = self.namespace()["AudioPool"](
+            size=2, stream_factory=factory)
+        first = pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+        second = pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+        original = tuple(streams)
+        first.stream.fail_stop = True
+
+        with self.assertRaisesRegex(
+                RuntimeError, "microphone stream stop failed") as raised:
+            pool.release(first)
+
+        self.assertNotIn("private device detail", str(raised.exception))
+        self.assertTrue(pool.recovery_pending)
+        self.assertFalse(any(stream.closed for stream in original))
+        with self.assertRaisesRegex(RuntimeError, "recovery pending"):
+            pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+
+        pool.release(second)
+        self.assertTrue(all(stream.closed for stream in original))
+        replacement = pool.acquire(
+            SimpleNamespace(_callback=lambda *_args: None))
+        self.assertNotIn(replacement.stream, original)
+        pool.release(replacement)
+
+
+class MacAudioRecoveryNotificationTests(unittest.TestCase):
+    class NativeCall:
+        def __init__(self, status=0):
+            self.status = status
+            self.argtypes = None
+            self.restype = None
+
+        def __call__(self, *_args):
+            return self.status
+
+    def test_failed_native_removal_retains_callback_until_retry_succeeds(self):
+        library = SimpleNamespace(
+            AudioObjectAddPropertyListener=self.NativeCall(),
+            AudioObjectRemovePropertyListener=self.NativeCall(status=1),
+        )
+        ns = load_definitions(
+            "_AudioObjectPropertyAddress", "_CoreAudioDefaultInputListener",
+            extra={"ctypes": ctypes},
+        )
+        listener = ns["_CoreAudioDefaultInputListener"](library=library)
+        listener.start(lambda: None)
+        callback = listener.callback
+
+        with self.assertRaisesRegex(
+                RuntimeError, "CoreAudio notification removal failed"):
+            listener.close()
+
+        self.assertTrue(listener.started)
+        self.assertIs(listener.callback, callback)
+        library.AudioObjectRemovePropertyListener.status = 0
+        listener.close()
+        self.assertFalse(listener.started)
+        self.assertIsNone(listener.callback)
+
+    class CoreAudio:
+        def __init__(self):
+            self.callback = None
+            self.closed = 0
+
+        def start(self, callback):
+            self.callback = callback
+
+        def emit_default_input_change(self):
+            self.callback()
+
+        def close(self):
+            self.closed += 1
+
+    class WorkspaceCenter:
+        def __init__(self):
+            self.block = None
+            self.removed = []
+
+        def addObserverForName_object_queue_usingBlock_(
+                self, _name, _object, _queue, block):
+            self.block = block
+            return "wake-token"
+
+        def emit_wake(self):
+            self.block(None)
+
+        def removeObserver_(self, token):
+            self.removed.append(token)
+
+    def test_default_device_and_wake_events_are_content_free_and_coalesced(self):
+        core = self.CoreAudio()
+        center = self.WorkspaceCenter()
+        invalidations = []
+        ns = load_definitions(
+            "MacAudioRecoveryNotifications",
+            extra={
+                "IS_MACOS": True,
+                "NSWorkspace": SimpleNamespace(),
+                "NSWorkspaceDidWakeNotification": "wake",
+                "_CoreAudioDefaultInputListener": SimpleNamespace,
+                "threading": threading,
+                "time": time,
+            },
+        )
+        recovery = ns["MacAudioRecoveryNotifications"](
+            lambda: invalidations.append("invalidated"),
+            core_audio=core,
+            workspace_center=center,
+            wake_name="wake",
+        )
+        recovery.start()
+
+        core.emit_default_input_change()
+        self.assertTrue(recovery.wait_for_idle())
+        center.emit_wake()
+        self.assertTrue(recovery.wait_for_idle())
+
+        self.assertEqual(invalidations, ["invalidated", "invalidated"])
+        recovery.close()
+        core.emit_default_input_change()
+        self.assertEqual(invalidations, ["invalidated", "invalidated"])
+        self.assertEqual(core.closed, 1)
+        self.assertEqual(center.removed, ["wake-token"])
 
 
 class PerformanceTraceTests(unittest.TestCase):

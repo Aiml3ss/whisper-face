@@ -686,8 +686,19 @@ _RISK_TIME_RE = re.compile(
     r"(?:1[0-2]|0?[1-9])\s*[ap]\.?m\.?)\b",
     re.I,
 )
+_RISK_MEASUREMENT_UNIT = (
+    r"(?:milliseconds?|seconds?|minutes?|hours?|"
+    r"milligrams?|grams?|kilograms?|ounces?|pounds?|"
+    r"millilit(?:er|re)s?|lit(?:er|re)s?|"
+    r"millimeters?|centimeters?|meters?|kilometers?|inches?|feet|miles?|"
+    r"bytes?|kilobytes?|megabytes?|gigabytes?|terabytes?|"
+    r"percent(?:age)?|degrees?(?:\s+(?:celsius|fahrenheit))?)"
+)
 _RISK_NUMBER_RE = re.compile(
-    r"(?<![\w@])(?:[+-]\s*)?\d[\d,]*(?:\.\d+)?%?(?!\w)")
+    rf"(?<![\w@])(?:[+-]\s*)?\d[\d,]*(?:\.\d+)?%?"
+    rf"(?:\s+{_RISK_MEASUREMENT_UNIT})?(?!\w)",
+    re.I,
+)
 _SPOKEN_CARDINAL = (
     r"(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|"
     r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
@@ -704,7 +715,8 @@ _SPOKEN_ORDINAL = (
 _RISK_SPOKEN_NUMBER_RE = re.compile(
     rf"\b(?:(?:minus|negative|plus|positive)[-\s]+)?"
     rf"(?:{_SPOKEN_CARDINAL}(?:[-\s]+(?:and\s+)?{_SPOKEN_CARDINAL})*"
-    rf"(?:[-\s]+{_SPOKEN_ORDINAL})?|{_SPOKEN_ORDINAL})\b",
+    rf"(?:[-\s]+{_SPOKEN_ORDINAL})?|{_SPOKEN_ORDINAL})"
+    rf"(?:\s+{_RISK_MEASUREMENT_UNIT})?\b",
     re.I,
 )
 _RISK_RECIPIENT_RE = re.compile(

@@ -146,6 +146,22 @@ class ConsequenceClassifierTests(unittest.TestCase):
         self.assertEqual(numbers[0].word_end - numbers[0].word_start, 2)
         self.assertIn("hypothesis-disagreement", numbers[0].uncertainty)
 
+    def test_number_and_common_unit_are_one_consequential_claim(self):
+        text = "Set the dose to 5 milligrams"
+        plan = build_consequence_plan(timed_voice(
+            text,
+            confidence=0.93,
+            alternative="Set the dose to 5 milliliters",
+        ), audio_duration=8.0)
+
+        numbers = [risk for risk in plan.risks if risk.category == "number"]
+        self.assertEqual(len(numbers), 1)
+        self.assertEqual(
+            text[numbers[0].char_start:numbers[0].char_end],
+            "5 milligrams",
+        )
+        self.assertIn("hypothesis-disagreement", numbers[0].uncertainty)
+
     def test_consequential_punctuation_disagreements_are_not_collapsed(self):
         pairs = (
             ("Charge $1.20", "Charge $120", "currency"),

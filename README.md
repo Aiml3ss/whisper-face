@@ -419,10 +419,13 @@ drafts intact.
 
 Choose **Inspect** beside Voice Object Commands to open the local Voice Inbox.
 The first view lists only bounded draft number, type, and state. Draft text is
-read only after you explicitly choose **Reveal**. You can acknowledge or cancel
-a selected draft and purge acknowledged/cancelled drafts; queued drafts are not
-purged. The inspector never sends, schedules, launches, executes, or copies a
-draft, and it remains available when command diversion is turned off.
+read only after you explicitly choose **Reveal**. A revealed queued task or
+calendar draft can be copied to the Mac clipboard only after a second explicit
+confirmation; a revealed queued email can similarly request the native Mail
+compose sheet, but neither path sends or schedules anything. You can acknowledge
+or cancel a selected draft and purge acknowledged/cancelled drafts; queued drafts
+are not purged. The inspector never pastes, sends, schedules, or executes a draft,
+and it remains available when command diversion is turned off.
 
 The Mac Privacy pane's **Risk confirmation (inert)** row is a safety ceremony,
 not an agent-action launcher. Choose one of four closed risk classes and select

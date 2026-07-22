@@ -75,6 +75,7 @@ $Required = @(
     "acoustic_keyword_memory.py", "acoustic_time_machine.py",
     "voice_objects.py", "voice_object_command_parser.py", "voice_inbox.py",
     "voice_object_inbox_bridge.py", "macos_email_compose.py",
+    "macos_voice_draft_clipboard.py",
     "demonstration_drafts.py",
     "risky_action_confirmation.py",
     "point_and_speak_resolver.py", "point_and_speak_transaction.py",

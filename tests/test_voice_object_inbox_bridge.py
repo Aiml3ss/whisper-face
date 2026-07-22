@@ -36,6 +36,10 @@ from macos_email_compose import (  # noqa: E402
     ComposeState,
     MacEmailComposeAdapter,
 )
+from macos_voice_draft_clipboard import (  # noqa: E402
+    CopyState,
+    MacVoiceDraftClipboardAdapter,
+)
 
 
 def projected_task(title: str = "Send release notes"):
@@ -133,6 +137,48 @@ class VoiceObjectInboxBridgeTests(unittest.TestCase):
         self.assertFalse(any((arbitrary.attempted, old.attempted,
                               off_main.attempted, invalid.attempted)))
 
+    def test_native_draft_clipboard_is_one_shot_and_receipt_is_content_free(self):
+        writes = []
+        adapter = MacVoiceDraftClipboardAdapter(
+            writer=lambda content: writes.append(content) or True,
+            main_thread_check=lambda: True)
+        nonce = adapter.issue_nonce()
+        secret = "Title: Project Bluebird\nNotes: Private launch 8492"
+
+        receipt = adapter.copy(nonce, content=secret)
+        replay = adapter.copy(nonce, content="Different private draft")
+
+        self.assertEqual(receipt.state, CopyState.COPIED)
+        self.assertIs(replay, receipt)
+        self.assertEqual(writes, [secret])
+        encoded = json.dumps(receipt.to_mapping(), sort_keys=True)
+        self.assertNotIn("Bluebird", encoded)
+        self.assertNotIn("8492", encoded)
+        self.assertNotIn(secret, repr(adapter.__dict__))
+
+    def test_draft_clipboard_rejects_invalid_non_main_and_writer_failure(self):
+        calls = []
+        off_main = MacVoiceDraftClipboardAdapter(
+            writer=lambda content: calls.append(content) or True,
+            main_thread_check=lambda: False)
+        off_main_receipt = off_main.copy(
+            off_main.issue_nonce(), content="Title: Valid")
+        invalid = MacVoiceDraftClipboardAdapter(
+            writer=lambda content: calls.append(content) or True,
+            main_thread_check=lambda: True)
+        invalid_receipt = invalid.copy(invalid.issue_nonce(), content="")
+        failed = MacVoiceDraftClipboardAdapter(
+            writer=lambda content: calls.append(content) or False,
+            main_thread_check=lambda: True)
+        failed_receipt = failed.copy(
+            failed.issue_nonce(), content="Title: Still queued")
+
+        self.assertEqual(off_main_receipt.state, CopyState.UNAVAILABLE)
+        self.assertEqual(invalid_receipt.state, CopyState.INVALID)
+        self.assertEqual(failed_receipt.state, CopyState.FAILED)
+        self.assertEqual(calls, ["Title: Still queued"])
+        self.assertTrue(failed_receipt.attempted)
+
     def test_native_adapter_has_no_send_url_process_or_persistence_surface(self):
         tree = ast.parse((ROOT / "macos_email_compose.py").read_text(
             encoding="utf-8"))
@@ -151,6 +197,26 @@ class VoiceObjectInboxBridgeTests(unittest.TestCase):
             {attribute for attribute in attributes
              if attribute.endswith("WithItems_")},
             set())
+
+        clipboard_tree = ast.parse(
+            (ROOT / "macos_voice_draft_clipboard.py").read_text(
+                encoding="utf-8"))
+        clipboard_names = {
+            node.id for node in ast.walk(clipboard_tree)
+            if isinstance(node, ast.Name)
+        }
+        clipboard_attributes = {
+            node.attr for node in ast.walk(clipboard_tree)
+            if isinstance(node, ast.Attribute)
+        }
+        self.assertFalse(clipboard_names & {
+            "subprocess", "Popen", "open", "NSURL", "NSWorkspace",
+            "requests", "socket", "EventKit",
+        })
+        self.assertFalse(clipboard_attributes & {
+            "performWithItems_", "launchApplication_", "openURL_",
+            "postKeyboardEvent_keyCode_character_", "setValue_forAttribute_",
+        })
 
     def test_projection_is_canonical_and_decoded_only_by_explicit_read(self):
         projection = projected_task()

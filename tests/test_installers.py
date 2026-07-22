@@ -221,7 +221,7 @@ class InstallerContractTests(unittest.TestCase):
         for runtime_module in (
                 "voice_objects.py", "voice_object_command_parser.py",
                 "voice_inbox.py", "voice_object_inbox_bridge.py",
-                "macos_email_compose.py",
+                "macos_email_compose.py", "macos_voice_draft_clipboard.py",
                 "demonstration_drafts.py"):
             with self.subTest(runtime_module=runtime_module):
                 self.assertIn(runtime_module, self.shell)
