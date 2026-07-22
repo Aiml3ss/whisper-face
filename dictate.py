@@ -238,6 +238,7 @@ if IS_MACOS:
         NSPasteboardItem,
         NSPasteboardTypeString,
         NSScreen,
+        NSSound,
         NSStatusBar,
         NSStatusWindowLevel,
         NSVariableStatusItemLength,
@@ -250,7 +251,7 @@ if IS_MACOS:
         NSWorkspace,
     )
     from Foundation import (
-        NSAttributedString, NSMakeRect, NSMakeSize, NSObject, NSTimer,
+        NSAttributedString, NSData, NSMakeRect, NSMakeSize, NSObject, NSTimer,
     )
     from PyObjCTools import AppHelper
 else:
@@ -321,8 +322,9 @@ from voice_compiler import (  # noqa: E402
     VoiceIR,
     WordEvidence,
     analyze_prosody,
-    consequence_receipt,
+    build_consequence_plan,
     context_firewall_receipt,
+    execute_consequence_plan,
 )
 from insertion_integrity import (  # noqa: E402
     DestinationObservation,
@@ -333,6 +335,7 @@ from insertion_integrity import (  # noqa: E402
 )
 from personal_regression import PersonalRegressionLab  # noqa: E402
 from acoustic_keyword_memory import AcousticKeywordMemory  # noqa: E402
+from acoustic_time_machine import AcousticTimeMachine  # noqa: E402
 
 if IS_MACOS:
     from whisper_face_gui import GUIActions, create_gui  # noqa: E402
@@ -893,7 +896,18 @@ INSERTION_COORDINATOR = InsertionCoordinator()
 CONSEQUENCE_VERIFIER = None
 
 APP_TONES = {"map": {}, "lock": threading.Lock()}
-PREFERENCES = {"flight_recorder": False, "face": DEFAULT_FACE}
+PREFERENCES = {
+    "flight_recorder": False,
+    "acoustic_time_machine": False,
+    "face": DEFAULT_FACE,
+}
+ACOUSTIC_TIME_MACHINE = AcousticTimeMachine()
+ACOUSTIC_TIME_MACHINE_STATE = {
+    "span_ids": [],
+    "play_index": 0,
+    "lock": threading.RLock(),
+    "sound": None,
+}
 
 
 def atomic_write_text(path: Path, text: str, mode: int = 0o600):
@@ -979,12 +993,22 @@ def load_preferences():
         loaded = {}
     PREFERENCES["flight_recorder"] = bool(
         loaded.get("flight_recorder") is True)
+    # Acoustic replay is intentionally Mac-only. A shared preferences file
+    # cannot activate audio retention or playback on Windows.
+    PREFERENCES["acoustic_time_machine"] = bool(
+        IS_MACOS and loaded.get("acoustic_time_machine") is True)
     PREFERENCES["face"] = normalize_face(loaded.get("face"))
+    if PREFERENCES["acoustic_time_machine"]:
+        ACOUSTIC_TIME_MACHINE.enable()
+    else:
+        ACOUSTIC_TIME_MACHINE.disable()
 
 
 def save_preferences():
     snapshot = {
         "flight_recorder": bool(PREFERENCES["flight_recorder"]),
+        "acoustic_time_machine": bool(
+            IS_MACOS and PREFERENCES["acoustic_time_machine"]),
         "face": current_face(),
     }
     atomic_write_text(
@@ -3146,6 +3170,7 @@ def runtime_status_snapshot() -> dict:
         flight_state = "Off"
     outbox = INSERTION_COORDINATOR.recoverable()
     acoustic_keywords = acoustic_keyword_memory_status_snapshot()
+    acoustic_replay = acoustic_time_machine_status_snapshot()
     outbox_summary = ""
     if outbox:
         latest = outbox[-1].receipt
@@ -3159,6 +3184,8 @@ def runtime_status_snapshot() -> dict:
         "face": current_face(),
         "flight_recorder": flight_active,
         "flight_state": flight_state,
+        "acoustic_time_machine": acoustic_replay["enabled"],
+        "retained_consequence_spans": acoustic_replay["retained_spans"],
         "active_engine": engine,
         "last_latency_ms": (
             float(PIPELINE_STATE["last_release_s"]) * 1000
@@ -4165,21 +4192,152 @@ def store_consequence_receipt(receipt) -> dict:
 
 def runtime_consequence_evidence(
         voice: VoiceIR, audio, *, sample_rate: int, audio_duration: float,
-        verifier=None, evaluator=None) -> float:
+        verifier=None, evaluator=None, plan_sink=None) -> float:
     """Evaluate evidence without allowing a receipt failure to lose dictation."""
     started = time.perf_counter()
     try:
-        receipt = (evaluator or consequence_receipt)(
-            voice,
-            audio=audio,
-            sample_rate=sample_rate,
-            audio_duration=audio_duration,
-            verifier=verifier,
-        )
+        if evaluator is not None:
+            receipt = evaluator(
+                voice,
+                audio=audio,
+                sample_rate=sample_rate,
+                audio_duration=audio_duration,
+                verifier=verifier,
+            )
+        else:
+            plan = build_consequence_plan(
+                voice, audio_duration=audio_duration)
+            if plan_sink is not None:
+                plan_sink(plan)
+            receipt = execute_consequence_plan(
+                voice, plan, audio=audio, sample_rate=sample_rate,
+                verifier=verifier)
     except Exception:
         receipt = None
     store_consequence_receipt(receipt)
     return max(0.0, time.perf_counter() - started)
+
+
+def clear_retained_consequence_spans() -> None:
+    """Forget every replay span and stop holding a playback object."""
+    with ACOUSTIC_TIME_MACHINE_STATE["lock"]:
+        sound = ACOUSTIC_TIME_MACHINE_STATE.get("sound")
+        if sound is not None:
+            try:
+                sound.stop()
+            except Exception:
+                pass
+        ACOUSTIC_TIME_MACHINE_STATE["sound"] = None
+        ACOUSTIC_TIME_MACHINE_STATE["span_ids"] = []
+        ACOUSTIC_TIME_MACHINE_STATE["play_index"] = 0
+        ACOUSTIC_TIME_MACHINE.clear()
+
+
+def set_acoustic_time_machine_enabled(enabled: bool) -> None:
+    """Persist the Mac-only opt-in and clear audio immediately on disable."""
+    desired = bool(enabled) and IS_MACOS
+    PREFERENCES["acoustic_time_machine"] = desired
+    if desired:
+        ACOUSTIC_TIME_MACHINE.enable()
+    else:
+        clear_retained_consequence_spans()
+        ACOUSTIC_TIME_MACHINE.disable()
+    save_preferences()
+
+
+def retain_consequence_microspans(audio, plan, *, sample_rate: int) -> int:
+    """Replace replay state with exact selected spans from one completed take.
+
+    Disabled mode returns before inspecting ``audio``. Retention is best effort:
+    malformed or unavailable capture data leaves an empty latest-result buffer.
+    """
+    clear_retained_consequence_spans()
+    if not (IS_MACOS and ACOUSTIC_TIME_MACHINE.enabled):
+        return 0
+    requests = getattr(plan, "relisten_requests", ()) if plan is not None else ()
+    if sample_rate != SAMPLE_RATE or not requests:
+        return 0
+    try:
+        sample_count = len(audio)
+    except Exception:
+        return 0
+    stored_ids: list[str] = []
+    for request in requests:
+        try:
+            start = max(0, int(math.floor(float(request.start) * sample_rate)))
+            end = min(
+                sample_count,
+                int(math.ceil(float(request.end) * sample_rate)),
+            )
+            if start >= end:
+                continue
+            # The store owns the sole retained copy; no full utterance enters
+            # the Acoustic Time Machine.
+            result = ACOUSTIC_TIME_MACHINE.store(
+                audio[start:end], sample_rate_hz=sample_rate)
+            if result.span_id is not None:
+                stored_ids.append(result.span_id)
+        except Exception:
+            continue
+    with ACOUSTIC_TIME_MACHINE_STATE["lock"]:
+        ACOUSTIC_TIME_MACHINE_STATE["span_ids"] = stored_ids
+        ACOUSTIC_TIME_MACHINE_STATE["play_index"] = 0
+    return len(stored_ids)
+
+
+def acoustic_time_machine_status_snapshot() -> dict:
+    """Expose only fixed playback availability; never handles or audio."""
+    with ACOUSTIC_TIME_MACHINE_STATE["lock"]:
+        count = len(ACOUSTIC_TIME_MACHINE_STATE["span_ids"])
+    return {
+        "enabled": bool(
+            IS_MACOS and PREFERENCES["acoustic_time_machine"]
+            and ACOUSTIC_TIME_MACHINE.enabled),
+        "retained_spans": min(2, max(0, count)),
+    }
+
+
+def _retained_span_wav_bytes(samples, *, sample_rate: int) -> bytes:
+    """Encode one bounded mono slice as a WAV held only in process memory."""
+    pcm = np.clip(np.asarray(samples, dtype=np.float32), -1.0, 1.0)
+    payload = np.rint(pcm * 32767.0).astype("<i2", copy=False).tobytes()
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF", 36 + len(payload), b"WAVE", b"fmt ", 16, 1, 1,
+        sample_rate, sample_rate * 2, 2, 16, b"data", len(payload),
+    )
+    return header + payload
+
+
+def play_retained_consequence_span() -> bool:
+    """Play the first latest-result span through NSSound without a file."""
+    if not (IS_MACOS and ACOUSTIC_TIME_MACHINE.enabled):
+        return False
+    with ACOUSTIC_TIME_MACHINE_STATE["lock"]:
+        span_ids = tuple(ACOUSTIC_TIME_MACHINE_STATE["span_ids"])
+        index = int(ACOUSTIC_TIME_MACHINE_STATE.get("play_index", 0))
+    if not span_ids:
+        return False
+    index %= len(span_ids)
+    result = ACOUSTIC_TIME_MACHINE.read(span_ids[index])
+    if result.audio is None:
+        return False
+    wav = _retained_span_wav_bytes(
+        result.audio.samples, sample_rate=result.audio.sample_rate_hz)
+    data = NSData.dataWithBytes_length_(wav, len(wav))
+    sound = NSSound.alloc().initWithData_(data)
+    if sound is None:
+        return False
+    with ACOUSTIC_TIME_MACHINE_STATE["lock"]:
+        previous = ACOUSTIC_TIME_MACHINE_STATE.get("sound")
+        if previous is not None:
+            try:
+                previous.stop()
+            except Exception:
+                pass
+        ACOUSTIC_TIME_MACHINE_STATE["sound"] = sound
+        ACOUSTIC_TIME_MACHINE_STATE["play_index"] = (index + 1) % len(span_ids)
+    return bool(sound.play())
 
 
 def consequence_state_snapshot() -> dict:
@@ -6001,6 +6159,9 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
 
         bundle = rec.bundle_at_press or frontmost_bundle()
         recognized_raw = raw
+        # A new usable result supersedes the previous result's replay audio.
+        # This is content-free and does not inspect the current utterance.
+        clear_retained_consequence_spans()
         compiler_started_at = time.perf_counter()
         voice_ir, compiler_result = compile_voice_evidence(
             recognition,
@@ -6015,12 +6176,14 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         # Evidence-only in this slice: the receipt never changes recognition,
         # cleanup, insertion, or model routing. With no strict local verifier
         # installed, uncertain timed spans are honestly recorded as skipped.
+        consequence_plans = []
         t_consequence = runtime_consequence_evidence(
             voice_ir,
             full_audio,
             sample_rate=SAMPLE_RATE,
             audio_duration=duration,
             verifier=CONSEQUENCE_VERIFIER,
+            plan_sink=consequence_plans.append,
         )
         # A context-free compilation is observed in shadow only. Its receipt
         # cannot replace this active result or affect downstream routing.
@@ -6228,6 +6391,13 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             if learn_correction else None
         integrity_receipt = commit_insertion(
             rec, text, bundle, insertion_target)
+        # Insertion is already terminal before any audio is copied. Playback
+        # retention is strictly optional and failures cannot affect the paste.
+        retain_consequence_microspans(
+            full_audio,
+            consequence_plans[0] if consequence_plans else None,
+            sample_rate=SAMPLE_RATE,
+        )
         verified = (integrity_receipt is None
                     or integrity_receipt.state == ReceiptState.VERIFIED)
         attempted = (integrity_receipt is None
@@ -6597,6 +6767,9 @@ def main():
             settings_snapshot=gui_settings_snapshot,
             set_face=STATUS["bar"].set_face_choice,
             set_flight_recorder=STATUS["bar"].set_flight_enabled,
+            set_acoustic_time_machine=set_acoustic_time_machine_enabled,
+            play_retained_span=play_retained_consequence_span,
+            clear_retained_spans=clear_retained_consequence_spans,
             set_app_tone=set_gui_app_tone,
             save_snippet=save_gui_snippet,
             delete_snippet=delete_gui_snippet,

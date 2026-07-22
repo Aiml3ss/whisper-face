@@ -70,7 +70,8 @@ function Test-Endpoint([string]$Uri) {
 $Required = @(
     "dictate.py", "dictate.py.lock", "parrot_core.py", "voice_compiler.py",
     "insertion_integrity.py", "personal_regression.py",
-    "acoustic_keyword_memory.py", "whisper_face_gui.py",
+    "acoustic_keyword_memory.py", "acoustic_time_machine.py",
+    "whisper_face_gui.py",
     "snippets.template.json", "tones.template.json",
     "preferences.template.json", "acoustic_keyword_memory.template.json",
     "dictionary.template.txt",

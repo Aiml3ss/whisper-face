@@ -33,6 +33,7 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_voice_compiler.py",
             "uv run tests/test_consequence_routing.py",
             "uv run tests/test_process_verifier.py",
+            "uv run tests/test_prewarmed_verifier.py",
             "uv run tests/test_whisper_verifier_adapter.py",
             "uv run tests/test_benchmark_voice_compiler.py",
             "uv run tests/test_benchmark_consequence_routing.py",
@@ -52,6 +53,7 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_point_and_speak_resolver.py",
             "uv run tests/test_drop_to_target.py",
             "uv run tests/test_voice_objects.py",
+            "uv run tests/test_voice_object_command_parser.py",
             "uv run tests/test_voice_inbox.py",
             "uv run tests/test_voice_object_inbox_bridge.py",
             "uv run tests/test_competitor_benchmark.py",
@@ -94,6 +96,7 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn("voice_compiler.py", installer)
                 self.assertIn("insertion_integrity.py", installer)
                 self.assertIn("personal_regression.py", installer)
+                self.assertIn("acoustic_time_machine.py", installer)
                 self.assertIn("whisper_face_gui.py", installer)
                 self.assertIn("dictate.py.lock", installer)
                 self.assertIn("--preload-models", installer)
@@ -156,6 +159,7 @@ class InstallerContractTests(unittest.TestCase):
         template = (ROOT / "preferences.template.json").read_text(
             encoding="utf-8")
         self.assertIn('"face": "parrot"', template)
+        self.assertIn('"acoustic_time_machine": false', template)
         for face in ("parrot", "fox", "owl", "cat", "bear"):
             for frame in ("idle", "talk"):
                 relative = f"icons/faces/{face}-{frame}.svg"

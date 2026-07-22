@@ -73,6 +73,11 @@ are never Supporter-only features.
   naturally, then tap Right Option afterward. Whisper Face finds and pastes the
   latest utterance from a 20-second RAM-only buffer. Holding Right Option still
   performs normal push-to-talk.
+- **Acoustic Time Machine (experimental, Mac)** — opt in under Privacy to keep
+  only the latest result's short, consequence-selected audio spans in RAM after
+  insertion. Results can play those spans directly from memory or clear them
+  immediately; a new usable result replaces them, disabling wipes them, and no
+  replay file is written.
 - **Hold-to-talk anywhere** — hold Right Option, speak, release; text pastes
   into whatever app has focus, with a frosted HUD waveform while you talk.
   The microphone is pre-warmed at login and the start cue sounds only once

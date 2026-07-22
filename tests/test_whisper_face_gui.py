@@ -197,6 +197,9 @@ class SnapshotTests(unittest.TestCase):
                 "operation.keyword.forget_failed",
                 "operation.face.change_failed",
                 "operation.flight.update_failed",
+                "operation.acoustic.update_failed",
+                "operation.acoustic.play_failed",
+                "operation.acoustic.clear_failed",
                 "operation.log.open_failed",
                 "operation.support_snapshot.copy_failed",
                 "operation.source.open_failed",
@@ -709,6 +712,16 @@ class ViewModelTests(unittest.TestCase):
             self.calls.append(("flight", enabled))
             self.runtime["flight_recorder"] = enabled
 
+        def set_acoustic(enabled):
+            self.calls.append(("acoustic", enabled))
+            self.runtime["acoustic_time_machine"] = enabled
+            if not enabled:
+                self.runtime["retained_consequence_spans"] = 0
+
+        def clear_acoustic():
+            self.calls.append(("clear_retained",))
+            self.runtime["retained_consequence_spans"] = 0
+
         def pause():
             self.calls.append(("pause",))
             self.runtime["paused"] = True
@@ -726,6 +739,10 @@ class ViewModelTests(unittest.TestCase):
             settings_snapshot=lambda: dict(self.private_settings),
             set_face=set_face,
             set_flight_recorder=set_flight,
+            set_acoustic_time_machine=set_acoustic,
+            play_retained_span=lambda:
+                self.calls.append(("play_retained",)) or True,
+            clear_retained_spans=clear_acoustic,
             set_app_tone=lambda bundle, tone:
                 self.calls.append(("tone", bundle, tone)),
             save_snippet=lambda name, expected, text:
@@ -764,6 +781,27 @@ class ViewModelTests(unittest.TestCase):
             self.assertEqual(self.model.select_section(section).section, section)
         with self.assertRaises(ValueError):
             self.model.select_section("Billing")
+
+    def test_acoustic_replay_preference_and_result_actions_use_callbacks(self):
+        self.runtime.update(
+            acoustic_time_machine=True,
+            retained_consequence_spans=1,
+            last_word_count=4,
+        )
+        state = self.model.refresh()
+        self.assertTrue(state.acoustic_time_machine)
+        self.assertTrue(state.last_result.acoustic_replay_enabled)
+        self.assertEqual(state.last_result.retained_span_count, 1)
+
+        self.model.play_retained_span()
+        self.model.clear_retained_spans()
+        self.assertEqual(self.model.state.last_result.retained_span_count, 0)
+        self.model.set_acoustic_time_machine(False)
+
+        self.assertIn(("play_retained",), self.calls)
+        self.assertIn(("clear_retained",), self.calls)
+        self.assertIn(("acoustic", False), self.calls)
+        self.assertFalse(self.model.state.acoustic_time_machine)
 
     def test_unified_settings_load_only_on_navigation_and_all_panes_work(self):
         self.assertEqual(self.model.state.settings.snippets, ())
