@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "description": "Versioned model-selection evidence. Values come from the documented 100-utterance Mac ASR bakeoff; absent resource measurements remain null until measured.",
+  "evidence": {
+    "scope": "Mac ASR runtime candidates only",
+    "benchmark": "benchmarks/ASR_BAKEOFF.md",
+    "dataset": "LibriSpeech test-clean",
+    "selection": "100 deterministic evenly spaced utterances",
+    "measured_on": "2026-07-21",
+    "hardware": "Apple M4 Pro MacBook Pro",
+    "runtime_configuration": "dictate.py ASR constants and benchmark_asr.py MLX_MODELS",
+    "provenance_verified_on": "2026-07-21",
+    "repository_head_check": "Hugging Face model API main SHA compared with immutable revision API response",
+    "local_cache_check": "Both MLX Hugging Face cache refs matched their runtime pins; dictate.py --verify-parakeet-model verified every required installed Parakeet asset against its pinned revision metadata.",
+    "metric_verification": "Scorecard values exactly match benchmarks/ASR_BAKEOFF.md. Raw JSONL and summary artifacts were not present in the repository or /tmp/parrot-asr-results during this audit, so the run could not be independently recalculated."
+  },
+  "criteria": [
+    {"metric": "wer_pct", "dimension": "quality", "direction": "min", "weight": 0.25, "required": true},
+    {"metric": "exact_pct", "dimension": "quality", "direction": "max", "weight": 0.1, "required": true},
+    {"metric": "utterance_p90_wer_pct", "dimension": "quality", "direction": "min", "weight": 0.15, "required": true},
+    {"metric": "proc_p95_s", "dimension": "latency", "direction": "min", "weight": 0.15, "required": true},
+    {"metric": "rtfx", "dimension": "throughput", "direction": "max", "weight": 0.15, "required": true},
+    {"metric": "peak_memory_mb", "dimension": "memory", "direction": "min", "weight": 0.075, "required": false},
+    {"metric": "energy_j_per_audio_minute", "dimension": "energy", "direction": "min", "weight": 0.075, "required": false},
+    {"metric": "startup_ms", "dimension": "startup", "direction": "min", "weight": 0.05, "required": false}
+  ],
+  "candidates": [
+    {
+      "model_id": "mlx-community/whisper-tiny",
+      "benchmark_engine": "mlx-tiny",
+      "runtime_role": "Mac speculative ASR",
+      "revision": "78c52ab98ca87f570bc57ad852e15ef7060f9f76",
+      "repository_head": "78c52ab98ca87f570bc57ad852e15ef7060f9f76",
+      "pinned_is_current_head": true,
+      "model_card_url": "https://huggingface.co/mlx-community/whisper-tiny",
+      "revision_api_url": "https://huggingface.co/api/models/mlx-community/whisper-tiny/revision/78c52ab98ca87f570bc57ad852e15ef7060f9f76",
+      "upstream_model_id": null,
+      "provenance": "The conversion card says it was converted from `tiny` with ml-explore/mlx-examples, but does not identify a content-addressed upstream artifact.",
+      "artifact_license": "not-declared",
+      "upstream_license": "MIT",
+      "license": "Conversion artifact license not declared; the OpenAI Whisper repository states its code and model weights are MIT.",
+      "license_status": "review-required",
+      "metrics": {
+        "wer_pct": 7.01,
+        "exact_pct": 42.0,
+        "utterance_p90_wer_pct": 23.27,
+        "proc_p95_s": 0.121,
+        "rtfx": 120.38,
+        "peak_memory_mb": null,
+        "energy_j_per_audio_minute": null,
+        "startup_ms": null
+      }
+    },
+    {
+      "model_id": "mlx-community/whisper-large-v3-turbo",
+      "benchmark_engine": "mlx-turbo",
+      "runtime_role": "Mac fallback ASR",
+      "revision": "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb",
+      "repository_head": "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb",
+      "pinned_is_current_head": true,
+      "model_card_url": "https://huggingface.co/mlx-community/whisper-large-v3-turbo",
+      "revision_api_url": "https://huggingface.co/api/models/mlx-community/whisper-large-v3-turbo/revision/a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb",
+      "upstream_model_id": null,
+      "provenance": "The conversion card says it was converted from `large-v3-turbo`, but does not identify a content-addressed upstream artifact.",
+      "artifact_license": "not-declared",
+      "upstream_license": "MIT",
+      "license": "Conversion artifact license not declared; the OpenAI Whisper repository states its code and model weights are MIT.",
+      "license_status": "review-required",
+      "metrics": {
+        "wer_pct": 1.717,
+        "exact_pct": 79.0,
+        "utterance_p90_wer_pct": 5.9,
+        "proc_p95_s": 3.218,
+        "rtfx": 4.41,
+        "peak_memory_mb": null,
+        "energy_j_per_audio_minute": null,
+        "startup_ms": null
+      }
+    },
+    {
+      "model_id": "FluidInference/parakeet-unified-en-0.6b-coreml",
+      "benchmark_engine": "parakeet-unified",
+      "runtime_role": "Mac primary final ASR",
+      "revision": "4252711f6f060f9a2f91e5f081a806d7f45eebd8",
+      "repository_head": "4252711f6f060f9a2f91e5f081a806d7f45eebd8",
+      "pinned_is_current_head": true,
+      "model_card_url": "https://huggingface.co/FluidInference/parakeet-unified-en-0.6b-coreml",
+      "revision_api_url": "https://huggingface.co/api/models/FluidInference/parakeet-unified-en-0.6b-coreml/revision/4252711f6f060f9a2f91e5f081a806d7f45eebd8",
+      "upstream_model_id": null,
+      "declared_upstream_models": [
+        "README front matter: nvidia/parakeet-tdt-0.6b-v2",
+        "metadata.json model_id: nvidia/parakeet-unified-en-0.6b"
+      ],
+      "provenance": "Conflict at the exact pinned revision: README front matter declares nvidia/parakeet-tdt-0.6b-v2, while metadata.json declares nvidia/parakeet-unified-en-0.6b. The architecture and unified offline/streaming description align with the latter. Upstream identity is unresolved pending publisher clarification.",
+      "artifact_license": "CC-BY-4.0",
+      "upstream_license": "conflicting: CC-BY-4.0 for the README-declared v2 base; NVIDIA Open Model License for the metadata-declared unified base",
+      "license": "The FluidInference artifact card declares CC-BY-4.0, but its two conflicting upstream declarations point to models under different licenses.",
+      "license_status": "review-required",
+      "metrics": {
+        "wer_pct": 1.24,
+        "exact_pct": 80.0,
+        "utterance_p90_wer_pct": 3.96,
+        "proc_p95_s": 0.144,
+        "rtfx": 113.28,
+        "peak_memory_mb": null,
+        "energy_j_per_audio_minute": null,
+        "startup_ms": null
+      }
+    }
+  ]
+}

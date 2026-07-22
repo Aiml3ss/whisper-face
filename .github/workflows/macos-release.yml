@@ -1,0 +1,272 @@
+name: macOS release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: SemVer for an unsigned or signed preview
+        required: true
+        type: string
+      revision:
+        description: Full commit or ref to package
+        required: false
+        default: main
+        type: string
+      signed_preview:
+        description: Sign and notarize this preview without publishing
+        required: true
+        default: false
+        type: boolean
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package-macos:
+    runs-on: macos-14
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      revision: ${{ steps.release.outputs.revision }}
+    steps:
+      - name: Check out the exact release revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.revision || github.sha }}
+          fetch-depth: 0
+
+      - name: Resolve release inputs
+        id: release
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          REQUESTED_SIGNED_PREVIEW: ${{ inputs.signed_preview }}
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            should_sign=true
+          else
+            version="$REQUESTED_VERSION"
+            should_sign="$REQUESTED_SIGNED_PREVIEW"
+          fi
+          [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)([-+][0-9A-Za-z.-]+)?$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "should_sign=$should_sign" >> "$GITHUB_OUTPUT"
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Validate trusted signing revision
+        if: steps.release.outputs.should_sign == 'true'
+        shell: bash
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          head_revision="$(git rev-parse HEAD)"
+          main_revision="$(git rev-parse refs/remotes/origin/main)"
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$head_revision" == "$main_revision" ]] || {
+              echo "Signed previews must package the exact current origin/main." >&2
+              exit 1
+            }
+          else
+            git merge-base --is-ancestor "$head_revision" "$main_revision" || {
+              echo "Release tag must identify a commit reachable from main." >&2
+              exit 1
+            }
+            [[ "$(git rev-list -n 1 "$GITHUB_REF_NAME")" == "$head_revision" ]] || {
+              echo "Release tag and checked-out revision do not match." >&2
+              exit 1
+            }
+          fi
+
+      - name: Install uv for release gates
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: Run repository release gates
+        shell: bash
+        run: |
+          uv lock --check --script dictate.py
+          uv run tests/test_parrot_core.py
+          uv run tests/test_voice_compiler.py
+          uv run tests/test_benchmark_voice_compiler.py
+          uv run tests/test_benchmark_asr.py
+          uv run tests/test_performance_lab.py
+          uv run tests/test_dictate.py
+          uv run tests/test_insertion_integrity.py
+          uv run tests/test_personal_regression.py
+          uv run tests/test_whisper_face_gui.py
+          uv run tests/test_installers.py
+          uv run tests/test_repository_governance.py
+          uv run tests/test_macos_distribution.py
+
+      - name: Confirm trusted signing worktree remains pristine
+        if: steps.release.outputs.should_sign == 'true'
+        shell: bash
+        run: |
+          git diff --quiet
+          git diff --cached --quiet
+          [[ -z "$(git ls-files --others --exclude-standard)" ]] || {
+            echo "Release gates left unexpected untracked files in the signing checkout." >&2
+            exit 1
+          }
+
+      - name: Require complete production credentials
+        if: steps.release.outputs.should_sign == 'true'
+        env:
+          APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_DEVELOPER_ID_APPLICATION: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        shell: bash
+        run: |
+          required=(
+            APPLE_DEVELOPER_ID_P12_BASE64
+            APPLE_DEVELOPER_ID_P12_PASSWORD
+            APPLE_DEVELOPER_ID_APPLICATION
+            APPLE_ID
+            APPLE_TEAM_ID
+            APPLE_APP_SPECIFIC_PASSWORD
+          )
+          for name in "${required[@]}"; do
+            [[ -n "${!name:-}" ]] || {
+              echo "Missing required release secret: $name" >&2
+              exit 1
+            }
+          done
+
+      - name: Import Developer ID certificate
+        if: steps.release.outputs.should_sign == 'true'
+        env:
+          APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          RELEASE_KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          certificate="$RUNNER_TEMP/whisper-face-release.p12"
+          keychain="$RUNNER_TEMP/whisper-face-release.keychain-db"
+          printf '%s' "$APPLE_DEVELOPER_ID_P12_BASE64" | base64 --decode > "$certificate"
+          security create-keychain -p "$RELEASE_KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$RELEASE_KEYCHAIN_PASSWORD" "$keychain"
+          security import "$certificate" -k "$keychain" \
+            -P "$APPLE_DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$RELEASE_KEYCHAIN_PASSWORD" "$keychain"
+          security list-keychains -d user -s "$keychain"
+
+      - name: Build unsigned preview artifacts
+        if: steps.release.outputs.should_sign != 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          SOURCE_REVISION: ${{ steps.release.outputs.revision }}
+        shell: bash
+        run: |
+          scripts/package_macos.sh \
+            --version "$RELEASE_VERSION" \
+            --revision "$SOURCE_REVISION" \
+            --output-dir "$GITHUB_WORKSPACE/dist" \
+            --channel preview
+
+      - name: Build signed release artifacts
+        if: steps.release.outputs.should_sign == 'true'
+        env:
+          APPLE_DEVELOPER_ID_APPLICATION: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          SOURCE_REVISION: ${{ steps.release.outputs.revision }}
+        shell: bash
+        run: |
+          args=(
+            --version "$RELEASE_VERSION"
+            --revision "$SOURCE_REVISION"
+            --output-dir "$GITHUB_WORKSPACE/dist"
+            --sign
+            --notarize
+          )
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            args+=(--channel preview)
+          else
+            previous_tag="$(git tag --merged HEAD --list 'v*.*.*' \
+              --sort=-version:refname \
+              | grep -Fvx "$GITHUB_REF_NAME" | head -n 1 || true)"
+            if [[ -n "$previous_tag" ]]; then
+              previous_version="${previous_tag#v}"
+              previous_revision="$(git rev-list -n 1 "$previous_tag")"
+              args+=(
+                --previous-version "$previous_version"
+                --previous-revision "$previous_revision"
+                --previous-manifest-url \
+                "https://github.com/${GITHUB_REPOSITORY}/releases/download/${previous_tag}/update-manifest.json"
+              )
+            fi
+          fi
+          scripts/package_macos.sh "${args[@]}"
+
+      - name: Verify release artifacts
+        shell: bash
+        run: |
+          python3 scripts/release_manifest.py verify \
+            --manifest dist/update-manifest.json --artifact-dir dist
+          (cd dist && shasum -a 256 -c SHA256SUMS)
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: WhisperFace-${{ steps.release.outputs.version }}-macOS
+          path: |
+            dist/WhisperFace-*-source.zip
+            dist/WhisperFace-*-macOS-arm64.dmg
+            dist/update-manifest.json
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove release credentials
+        if: always()
+        shell: bash
+        run: |
+          keychain="$RUNNER_TEMP/whisper-face-release.keychain-db"
+          security delete-keychain "$keychain" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/whisper-face-release.p12"
+
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package-macos
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download verified release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: WhisperFace-${{ needs.package-macos.outputs.version }}-macOS
+          path: dist
+
+      - name: Publish tagged release without Apple credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.package-macos.outputs.version }}
+          SOURCE_REVISION: ${{ needs.package-macos.outputs.revision }}
+        shell: bash
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            dist/WhisperFace-*-source.zip \
+            dist/WhisperFace-*-macOS-arm64.dmg \
+            dist/update-manifest.json \
+            dist/SHA256SUMS \
+            --verify-tag \
+            --title "Whisper Face $RELEASE_VERSION" \
+            --notes "Signed and notarized Mac release from $SOURCE_REVISION. Verify SHA256SUMS before installation; exact corresponding source is included and linked by update-manifest.json."

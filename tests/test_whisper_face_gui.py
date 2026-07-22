@@ -20,6 +20,8 @@ from whisper_face_gui import (
     WhisperFaceViewModel,
     create_gui,
     normalize_snapshot,
+    set_accessible_text,
+    sync_accessibility,
 )
 
 
@@ -68,8 +70,157 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(state.models, ())
         self.assertEqual(state.active_engine, "Waiting for status")
 
+    def test_first_run_checklist_uses_real_permission_model_and_result_state(self):
+        state = normalize_snapshot({
+            "service_status": "Running",
+            "microphone_status": "Ready",
+            "accessibility_status": "Granted",
+            "hotkey_label": "Right Option",
+            "models": [{"name": "Parakeet", "status": "Running"}],
+            "last_word_count": 7,
+        })
+        self.assertTrue(state.onboarding_complete)
+        self.assertEqual(
+            [step.key for step in state.onboarding_steps],
+            ["permissions", "hotkey", "models", "first_dictation"],
+        )
+        self.assertTrue(all(step.complete for step in state.onboarding_steps))
+
+        first_run = normalize_snapshot({
+            "service_status": "Starting",
+            "microphone_status": "Needs attention",
+            "accessibility_status": "Needs attention",
+            "models": [{"name": "Parakeet", "status": "Preparing"}],
+        })
+        self.assertFalse(first_run.onboarding_complete)
+        self.assertEqual(first_run.onboarding_steps[0].key, "permissions")
+        self.assertEqual(first_run.onboarding_steps[0].status, "Needs attention")
+
+    def test_status_presentation_covers_capture_processing_recovery_and_degraded(self):
+        common = {
+            "service_status": "Running",
+            "microphone_status": "Ready",
+            "accessibility_status": "Granted",
+            "models": [{"name": "Parakeet", "status": "Running"}],
+        }
+        listening = normalize_snapshot({**common, "capture_state": "Listening"})
+        self.assertEqual(listening.status_phase, "recording")
+        self.assertIn("release", listening.status_detail.casefold())
+
+        processing = normalize_snapshot({**common, "capture_state": "Processing"})
+        self.assertEqual(processing.status_phase, "processing")
+        self.assertIn("protecting names and numbers", processing.status_detail)
+
+        recovery = normalize_snapshot({**common, "outbox_count": 2})
+        self.assertEqual(recovery.status_phase, "recovery")
+        self.assertIn("2 dictations", recovery.status_detail)
+
+        degraded = normalize_snapshot({
+            **common,
+            "accessibility_status": "Needs attention",
+        })
+        self.assertEqual(degraded.status_phase, "degraded")
+        self.assertEqual(degraded.degraded_issues[0].key, "accessibility")
+        self.assertIn("Voice Outbox", degraded.degraded_issues[0].detail)
+
+        microphone_failed = normalize_snapshot({
+            **common,
+            "microphone_status": "Unavailable",
+        })
+        self.assertEqual(microphone_failed.status_phase, "degraded")
+        self.assertEqual(microphone_failed.degraded_issues[0].key, "microphone")
+        self.assertNotIn("not blocked", microphone_failed.status_title.casefold())
+
+    def test_ready_fallback_remains_usable_while_warning_is_explained(self):
+        state = normalize_snapshot({
+            "service_status": "Running",
+            "microphone_status": "Ready",
+            "accessibility_status": "Granted",
+            "models": [
+                {"name": "Parakeet", "status": "Running"},
+                {"name": "Whisper fallback", "status": "Unavailable"},
+            ],
+        })
+        self.assertEqual(state.status_phase, "ready")
+        self.assertEqual(len(state.degraded_issues), 1)
+        self.assertEqual(state.degraded_issues[0].severity, "warning")
+        self.assertIn("continue", state.degraded_issues[0].detail)
+
+    def test_result_inspector_is_evidence_only_and_honors_reduced_motion(self):
+        self.assertIsNone(normalize_snapshot({
+            "last_confidence": 1.0,
+        }).last_result.confidence)
+        state = normalize_snapshot({
+            "service_status": "Running",
+            "active_engine": "Parakeet Unified",
+            "last_latency_ms": 842,
+            "last_word_count": 12,
+            "last_mode": "Capture",
+            "last_stable_prefix_words": 9,
+            "last_confidence": 0.91,
+            "last_compiler_decisions": 4,
+            "last_cleanup_edits": ["proof:filler", "punctuation"],
+            "last_proof_edits_accepted": 2,
+            "last_proof_edits_rejected": 1,
+            "last_protected_anchors": 3,
+            "last_alternatives_considered": 2,
+            "last_alternatives": ["private alternative text"],
+            "last_compiler_details": ["private before → private after"],
+            "last_context_influence": "Context helped resolve: personal vocabulary",
+            "prefers_reduced_motion": True,
+            "transcript": "must not be projected into GUIState",
+        })
+        result = state.last_result
+        self.assertTrue(result.available)
+        self.assertEqual(result.summary, "12 words in 0.84s")
+        self.assertEqual(result.stable_prefix_words, 9)
+        self.assertEqual(result.confidence, 0.91)
+        self.assertEqual(result.compiler_decisions, 4)
+        self.assertEqual(result.proof_edits_accepted, 2)
+        self.assertEqual(result.proof_edits_rejected, 1)
+        self.assertEqual(result.cleanup_edits, ("proof:filler", "punctuation"))
+        self.assertEqual(result.protected_anchor_count, 3)
+        self.assertEqual(result.alternatives_considered, 2)
+        self.assertEqual(
+            result.context_influence,
+            "Context helped resolve: personal vocabulary")
+        self.assertFalse(hasattr(result, "transcript"))
+        self.assertFalse(hasattr(result, "compiler_details"))
+        self.assertTrue(state.prefers_reduced_motion)
+
 
 class ViewModelTests(unittest.TestCase):
+    def test_dynamic_accessibility_updates_label_and_value_together(self):
+        class FakeControl:
+            def setStringValue_(self, value):
+                self.visual = value
+
+            def setAccessibilityLabel_(self, value):
+                self.label = value
+
+            def setAccessibilityValue_(self, value):
+                self.value = value
+
+        control = FakeControl()
+
+        sync_accessibility(
+            control, "Dictation paused", label="Resume dictation")
+
+        self.assertEqual(control.label, "Resume dictation")
+        self.assertEqual(control.value, "Dictation paused")
+
+        set_accessible_text(
+            control, "Running…", label="Verification result")
+        self.assertEqual(control.visual, "Running…")
+        self.assertEqual(control.label, "Verification result")
+        self.assertEqual(control.value, "Running…")
+
+        set_accessible_text(
+            control, "Waiting for model status", label="Model name")
+        self.assertEqual(control.visual, "Waiting for model status")
+        self.assertEqual(control.label, "Model name")
+        self.assertEqual(control.value, "Waiting for model status")
+
     def setUp(self):
         self.runtime = {
             "face": "parrot",
@@ -172,6 +323,30 @@ class ViewModelTests(unittest.TestCase):
         gui = create_gui(self.actions)
         self.assertIs(gui.view_model.actions, self.actions)
         self.assertIsNone(gui._controller)
+
+    def test_onboarding_and_degraded_guidance_routes_without_blocking(self):
+        runtime = {
+            "service_status": "Running",
+            "microphone_status": "Needs attention",
+            "accessibility_status": "Needs attention",
+            "models": [{"name": "Parakeet", "status": "Preparing"}],
+        }
+        model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: runtime))
+        state = model.show_next_onboarding_step()
+        self.assertEqual(state.section, "Diagnostics")
+        self.assertEqual(state.notice_level, "info")
+        self.assertIn("Microphone captures speech", state.notice)
+
+        state = model.show_issue()
+        self.assertEqual(state.section, "Diagnostics")
+        self.assertEqual(state.notice_level, "error")
+        self.assertIn("Microphone", state.notice)
+
+    def test_completed_onboarding_acknowledgement_survives_refresh(self):
+        self.assertFalse(self.model.state.onboarding_acknowledged)
+        self.model.acknowledge_onboarding()
+        self.assertTrue(self.model.refresh().onboarding_acknowledged)
 
 
 if __name__ == "__main__":

@@ -35,7 +35,7 @@ PEP 723 dependency block changes.
 | Component | Pinned version/revision | License | How used |
 |---|---|---|---|
 | FluidAudio | 0.15.5 / `19600a485baa4998812e4654b70d2bab8f2c9949` | Apache-2.0 | Swift package compiled locally into the Mac helper. [Source and license](https://github.com/FluidInference/FluidAudio) |
-| Parakeet Unified 0.6B Core ML | `4252711f6f060f9a2f91e5f081a806d7f45eebd8` | CC-BY-4.0 | Model downloaded at install time from [`FluidInference/parakeet-unified-en-0.6b-coreml`](https://huggingface.co/FluidInference/parakeet-unified-en-0.6b-coreml). Attribution: NVIDIA Parakeet Unified conversion published by FluidInference. |
+| Parakeet Unified 0.6B Core ML | `4252711f6f060f9a2f91e5f081a806d7f45eebd8` | **Review required: conflicting upstream metadata** | Model downloaded at install time from [`FluidInference/parakeet-unified-en-0.6b-coreml`](https://huggingface.co/FluidInference/parakeet-unified-en-0.6b-coreml). At this exact revision, the repository card/API declares CC-BY-4.0 and names `nvidia/parakeet-tdt-0.6b-v2` as its base; the shipped `metadata.json` and `config.json` instead identify `nvidia/parakeet-unified-en-0.6b`, whose upstream repository declares the NVIDIA Open Model License. Do not treat the conversion as unambiguously CC-BY-4.0 or redistribute it in a binary/commercial package until FluidInference or NVIDIA reconciles the artifact provenance and governing terms. |
 
 The helper receives audio through a RAM-only local pipe. Neither model weights
 nor FluidAudio source are committed to this repository.
@@ -64,11 +64,25 @@ hash the local manifest and reject any unreviewed change.
 | uv | Official installer or `astral-sh.uv` via winget | Apache-2.0 OR MIT; used to create the locked environment. |
 | Swift toolchain | Apple Command Line Tools | Apple toolchain terms; used locally to compile the helper. |
 
+## Release automation actions
+
+The macOS release workflow executes these actions on GitHub-hosted runners.
+They are pinned to full commit IDs so a moving major-version tag cannot silently
+change code that handles release artifacts or precedes signing steps.
+
+| Component | Pinned revision | License | How used |
+|---|---|---|---|
+| `actions/checkout` v6 | `d23441a48e516b6c34aea4fa41551a30e30af803` | MIT | Checks out the selected exact source revision with a read-only token. |
+| `astral-sh/setup-uv` v8.1.0 | `08807647e7069bb48b6ef5acd8ec9567f424441b` | MIT | Installs uv for repository release gates. |
+| `actions/upload-artifact` v7 | `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` | MIT | Transfers verified assets out of the read-only packaging job. |
+| `actions/download-artifact` v8 | `3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c` | MIT | Retrieves verified assets in the isolated release-publishing job. |
+
 ## Binary distribution warning
 
 Before distributing a signed, notarized, self-contained binary or hardware
 image, generate an SBOM from the exact artifact, include all required license
 texts and attribution, and have counsel review the LGPL/GPL, Apache notice,
-CC-BY attribution, model-conversion provenance, and FFmpeg configuration. A
+Parakeet license/provenance conflict, other model attribution, and FFmpeg
+configuration. A
 source checkout plus download orchestrator is not the same compliance surface
 as a bundled application.
