@@ -393,7 +393,7 @@ from point_and_speak_transaction import (  # noqa: E402
 from risky_action_confirmation import (  # noqa: E402
     InertRiskyActionConfirmationRuntime,
 )
-from voice_inbox import InboxState, VoiceInbox  # noqa: E402
+from voice_inbox import InboxState, MAX_ITEMS, VoiceInbox  # noqa: E402
 from voice_object_command_parser import parse_command  # noqa: E402
 from voice_object_inbox_bridge import VoiceObjectInboxBridge  # noqa: E402
 from voice_objects import (  # noqa: E402
@@ -1184,6 +1184,15 @@ def voice_object_inbox_status() -> dict:
         }
     except (OSError, ValueError, OverflowError):
         return {"enabled": True, "queued_count": 0, "status": "Unavailable"}
+
+
+def voice_inbox_menu_title(status) -> str:
+    """Render only the bounded queued count for the recovery menu entry."""
+    count = status.get("queued_count", 0) if isinstance(status, dict) else 0
+    if not isinstance(count, int) or isinstance(count, bool):
+        count = 0
+    count = min(max(count, 0), MAX_ITEMS)
+    return "Voice Inbox" if count == 0 else f"Voice Inbox — {count} queued"
 
 
 def inspect_voice_object_drafts() -> tuple[dict, ...]:
@@ -2274,6 +2283,8 @@ class StatusBar(NSObject):
         self.modes_root = mk("Voice Modes", None)
         self.modes_menu = NSMenu.alloc().init()
         self.modes_root.setSubmenu_(self.modes_menu)
+        self.voice_inbox_item = mk("Voice Inbox", "openVoiceInbox:")
+        self.voice_inbox_item.setEnabled_(False)
         for title in (
                 "Right Option — Capture",
                 "Shift + Right Option — Compose",
@@ -2294,6 +2305,7 @@ class StatusBar(NSObject):
         menu.addItem_(self.faces_root)
         menu.addItem_(self.tones_root)
         menu.addItem_(self.learning_root)
+        menu.addItem_(self.voice_inbox_item)
         menu.addItem_(self.recognition_root)
         menu.addItem_(self.modes_root)
         menu.addItem_(self.flight_item)
@@ -2346,6 +2358,12 @@ class StatusBar(NSObject):
             self._refresh_face_icon()
 
     def menuWillOpen_(self, menu):
+        try:
+            self.voice_inbox_item.setTitle_(voice_inbox_menu_title(
+                voice_object_inbox_status()))
+        except Exception:
+            self.voice_inbox_item.setTitle_("Voice Inbox")
+        self.voice_inbox_item.setEnabled_(self.gui is not None)
         try:
             s1, s2 = usage_stats()
             self.stat1.setTitle_(s1)
@@ -2611,6 +2629,11 @@ class StatusBar(NSObject):
     def openGUI_(self, sender):
         if self.gui is not None:
             self.gui.show()
+
+    def openVoiceInbox_(self, sender):
+        """Open the existing explicit inspector; it remains metadata-first."""
+        if self.gui is not None:
+            self.gui.show_voice_inbox()
 
     def quitApp_(self, sender):
         # Clean exit(0): launchd's SuccessfulExit=false means no respawn
