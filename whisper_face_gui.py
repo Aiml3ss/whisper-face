@@ -4673,6 +4673,15 @@ if APPKIT_AVAILABLE:
                     2.0, self, "refreshTimer:", None, True)
 
         @objc.python_method
+        def show_voice_inbox(self) -> None:
+            """Open the existing metadata-only Voice Inbox inspector."""
+            self.show()
+            self.view_model.select_section("Settings")
+            self.view_model.select_settings_pane("Privacy")
+            self.render()
+            self.inspectVoiceObjects_(None)
+
+        @objc.python_method
         def _configure_key_view_loop(self, state: GUIState) -> int:
             """Make Tab order explicit while leaving arrows to native controls."""
 
@@ -6852,6 +6861,15 @@ class WhisperFaceGUI:
             self._controller = WhisperFaceWindowController.alloc() \
                 .initWithViewModel_(self.view_model)
         self._controller.show()
+
+    def show_voice_inbox(self) -> None:
+        """Show the native Voice Inbox entry without revealing a draft."""
+        if not APPKIT_AVAILABLE:
+            raise RuntimeError("The Whisper Face window requires macOS AppKit")
+        if self._controller is None:
+            self._controller = WhisperFaceWindowController.alloc() \
+                .initWithViewModel_(self.view_model)
+        self._controller.show_voice_inbox()
 
 
 def create_gui(actions: GUIActions, *, locale: str = "en") -> WhisperFaceGUI:

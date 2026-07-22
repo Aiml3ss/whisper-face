@@ -9,6 +9,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -46,6 +47,7 @@ from whisper_face_gui import (
     sync_accessibility,
     tone_for_app_index,
 )
+import whisper_face_gui as gui_module
 
 
 class SnapshotTests(unittest.TestCase):
@@ -2147,6 +2149,31 @@ class ViewModelTests(unittest.TestCase):
         gui = create_gui(self.actions)
         self.assertIs(gui.view_model.actions, self.actions)
         self.assertIsNone(gui._controller)
+
+    def test_voice_inbox_facade_delegates_to_the_native_metadata_entry(self):
+        calls = []
+
+        class FakeController:
+            @classmethod
+            def alloc(cls):
+                return cls()
+
+            def initWithViewModel_(self, view_model):
+                calls.append(("init", view_model))
+                return self
+
+            def show_voice_inbox(self):
+                calls.append(("show_voice_inbox",))
+
+        gui = create_gui(self.actions)
+        with patch.object(gui_module, "APPKIT_AVAILABLE", True), patch.object(
+                gui_module, "WhisperFaceWindowController", FakeController,
+                create=True):
+            gui.show_voice_inbox()
+
+        self.assertIs(calls[0][1], gui.view_model)
+        self.assertEqual(calls[1:], [("show_voice_inbox",)])
+        self.assertIsInstance(gui._controller, FakeController)
 
     def test_onboarding_and_degraded_guidance_routes_without_blocking(self):
         runtime = {

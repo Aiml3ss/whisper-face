@@ -427,9 +427,11 @@ opened in another app; all other speech follows the normal paste path.
 Turning the setting off stops new diversion but leaves already queued local
 drafts intact.
 
-Choose **Inspect** beside Voice Object Commands to open the local Voice Inbox.
-The first view lists only bounded draft number, type, and state. Draft text is
-read only after you explicitly choose **Reveal**. A revealed queued task or
+Choose the always-available **Voice Inbox** menu-bar entry for the shortest
+route to the local inspector; its title adds only the bounded queued count.
+You can also choose **Inspect** beside Voice Object Commands in Privacy. The
+first view lists only bounded draft number, type, and state. Draft text is read
+only after you explicitly choose **Reveal**. A revealed queued task or
 calendar draft can be copied to the Mac clipboard only after a second explicit
 confirmation; a revealed queued email can similarly request the native Mail
 compose sheet, but neither path sends or schedules anything. You can acknowledge

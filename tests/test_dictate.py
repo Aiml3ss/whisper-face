@@ -1174,6 +1174,68 @@ class RecognitionMenuTitleTests(unittest.TestCase):
         self.assertEqual(title(None), "Last Recognition")
 
 
+class VoiceInboxMenuTests(unittest.TestCase):
+    def test_menu_title_is_count_only_and_bounded_by_inbox_capacity(self):
+        title = load_definitions(
+            "voice_inbox_menu_title",
+            extra={"MAX_ITEMS": 256},
+        )["voice_inbox_menu_title"]
+
+        self.assertEqual(title({"queued_count": 0}), "Voice Inbox")
+        self.assertEqual(title({"queued_count": 3}),
+                         "Voice Inbox — 3 queued")
+        self.assertEqual(title({"queued_count": 1000}),
+                         "Voice Inbox — 256 queued")
+        self.assertEqual(title({"queued_count": -2}), "Voice Inbox")
+        self.assertEqual(title({"queued_count": True}), "Voice Inbox")
+        self.assertEqual(title({"queued_count": "private draft"}),
+                         "Voice Inbox")
+
+    def test_menu_delegates_to_gui_without_reading_or_acting_on_drafts(self):
+        status_bar = next(
+            node for node in TREE.body
+            if isinstance(node, ast.ClassDef) and node.name == "StatusBar")
+        methods = {
+            node.name: node for node in status_bar.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        opener = methods["openVoiceInbox_"]
+        opener_names = {
+            node.id for node in ast.walk(opener) if isinstance(node, ast.Name)
+        }
+        opener_attributes = {
+            node.attr for node in ast.walk(opener)
+            if isinstance(node, ast.Attribute)
+        }
+        self.assertEqual(opener_names & {
+            "inspect_voice_object_drafts", "_voice_object_inbox_bridge",
+            "VoiceInbox", "copy_voice_object_draft",
+            "compose_voice_object_email",
+        }, set())
+        self.assertIn("show_voice_inbox", opener_attributes)
+
+        menu_refresh = methods["menuWillOpen_"]
+        refresh_names = {
+            node.id for node in ast.walk(menu_refresh)
+            if isinstance(node, ast.Name)
+        }
+        self.assertIn("voice_object_inbox_status", refresh_names)
+        self.assertIn("voice_inbox_menu_title", refresh_names)
+
+        init_source = ast.unparse(methods["init"])
+        self.assertIn(
+            "self.voice_inbox_item.setEnabled_(False)", init_source)
+        refresh_tries = [
+            node for node in menu_refresh.body if isinstance(node, ast.Try)
+        ]
+        self.assertGreaterEqual(len(refresh_tries), 2)
+        inbox_refresh = ast.unparse(refresh_tries[0])
+        other_refresh = ast.unparse(refresh_tries[1])
+        self.assertIn("voice_object_inbox_status", inbox_refresh)
+        self.assertNotIn("rebuild_faces", inbox_refresh)
+        self.assertIn("rebuild_faces", other_refresh)
+
+
 class FakeStream:
     def __init__(self, **kwargs):
         self.callback = kwargs["callback"]
