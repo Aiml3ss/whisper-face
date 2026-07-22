@@ -8,7 +8,7 @@
     "selection": "100 deterministic evenly spaced utterances",
     "measured_on": "2026-07-21",
     "hardware": "Apple M4 Pro MacBook Pro",
-    "runtime_configuration": "dictate.py ASR constants and benchmark_asr.py MLX_MODELS",
+    "runtime_configuration": "dictate.py ASR constants; benchmark_asr.py resolves each exact model_id and revision from this scorecard",
     "provenance_verified_on": "2026-07-21",
     "repository_head_check": "Hugging Face model API main SHA compared with immutable revision API response",
     "local_cache_check": "Both MLX Hugging Face cache refs matched their runtime pins; dictate.py --verify-parakeet-model verified every required installed Parakeet asset against its pinned revision metadata.",
@@ -34,6 +34,7 @@
       "pinned_is_current_head": true,
       "model_card_url": "https://huggingface.co/mlx-community/whisper-tiny",
       "revision_api_url": "https://huggingface.co/api/models/mlx-community/whisper-tiny/revision/78c52ab98ca87f570bc57ad852e15ef7060f9f76",
+      "expected_hub_metadata": {"license": null, "base_models": []},
       "upstream_model_id": null,
       "provenance": "The conversion card says it was converted from `tiny` with ml-explore/mlx-examples, but does not identify a content-addressed upstream artifact.",
       "artifact_license": "not-declared",
@@ -60,6 +61,7 @@
       "pinned_is_current_head": true,
       "model_card_url": "https://huggingface.co/mlx-community/whisper-large-v3-turbo",
       "revision_api_url": "https://huggingface.co/api/models/mlx-community/whisper-large-v3-turbo/revision/a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb",
+      "expected_hub_metadata": {"license": null, "base_models": []},
       "upstream_model_id": null,
       "provenance": "The conversion card says it was converted from `large-v3-turbo`, but does not identify a content-addressed upstream artifact.",
       "artifact_license": "not-declared",
@@ -86,6 +88,10 @@
       "pinned_is_current_head": true,
       "model_card_url": "https://huggingface.co/FluidInference/parakeet-unified-en-0.6b-coreml",
       "revision_api_url": "https://huggingface.co/api/models/FluidInference/parakeet-unified-en-0.6b-coreml/revision/4252711f6f060f9a2f91e5f081a806d7f45eebd8",
+      "expected_hub_metadata": {
+        "license": "cc-by-4.0",
+        "base_models": ["nvidia/parakeet-tdt-0.6b-v2"]
+      },
       "upstream_model_id": null,
       "declared_upstream_models": [
         "README front matter: nvidia/parakeet-tdt-0.6b-v2",

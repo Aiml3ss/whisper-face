@@ -341,6 +341,36 @@ WHISPER_REPO = (
     "mlx-community/whisper-large-v3-turbo" if IS_MACOS else "turbo"
 )
 FAST_WHISPER_REPO = "mlx-community/whisper-tiny" if IS_MACOS else "tiny"
+PERFORMANCE_TRACE_PREFIX = "[trace] "
+PERFORMANCE_TRACE_SCHEMA_VERSION = 1
+# Trace payloads are deliberately numeric and closed-schema. They are safe to
+# aggregate without retaining transcripts, application identifiers, paths, or
+# exception text from a private dictation session.
+PERFORMANCE_TRACE_SCHEMAS = {
+    "warmup_audio_pool": ("duration_ms", "success"),
+    "warmup_asr_tiny": ("duration_ms", "success"),
+    "warmup_asr_final": ("duration_ms", "success"),
+    "warmup_ollama": ("duration_ms", "success"),
+    "warmup_total": ("duration_ms", "success"),
+    "utterance_acoustic": (
+        "adaptive_threshold",
+        "clipped_ratio",
+        "derived_gain_factor",
+        "duration_ms",
+        "frame_rms_p20",
+        "frame_rms_p50",
+        "frame_rms_p95",
+        "nonfinite_ratio",
+        "peak_amplitude",
+        "peak_rms",
+        "rms",
+        "sample_count",
+        "sample_rate_hz",
+        "silence_ratio",
+        "trailing_silence_ms",
+        "voiced_fraction",
+    ),
+}
 ASR_MODEL_REVISIONS = {
     "mlx-community/whisper-tiny":
         "78c52ab98ca87f570bc57ad852e15ef7060f9f76",
@@ -715,6 +745,11 @@ LEARN_LOCK = threading.Lock()
 # Serializes snippet edits learned by overlapping correction observers.
 SNIPPETS_LOCK = threading.Lock()
 
+# Serializes manual vocabulary edits against the learning loop's managed
+# auto-learned section. Reentrant because a validated UI save immediately
+# refreshes the active glossary through the same file contract.
+DICTIONARY_LOCK = threading.RLock()
+
 # The active pynput listener, replaceable by the watchdog if it dies.
 LISTENER = {"l": None, "make": None}
 
@@ -741,6 +776,57 @@ PIPELINE_STATE = {
     "cleanup_status": "Checking",
 }
 
+
+def emit_performance_trace(event: str, metrics: dict) -> bool:
+    """Print one versioned, closed-schema numeric performance trace.
+
+    Invalid events are dropped instead of being partially serialized. This
+    fail-closed contract prevents a future caller from accidentally adding
+    transcript text or other private session metadata to the trace stream.
+    """
+    try:
+        if not isinstance(event, str):
+            return False
+        schema = PERFORMANCE_TRACE_SCHEMAS.get(event)
+        if schema is None or not isinstance(metrics, dict) \
+                or set(metrics) != set(schema):
+            return False
+        payload = {"event": event, "schema_version":
+                   PERFORMANCE_TRACE_SCHEMA_VERSION}
+        for key in schema:
+            value = metrics[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return False
+            normalized = float(value)
+            if not math.isfinite(normalized) or normalized < 0.0:
+                return False
+            if key == "success" and normalized not in (0.0, 1.0):
+                return False
+            payload[key] = round(normalized, 4)
+        print(PERFORMANCE_TRACE_PREFIX + json.dumps(
+            payload, sort_keys=True, separators=(",", ":")))
+        return True
+    except Exception:
+        # Telemetry is strictly best-effort. A closed output stream, malformed
+        # numeric object, or serialization fault must never mask useful work.
+        return False
+
+
+def trace_operation(event: str, operation, clock=None):
+    """Run an operation and emit its duration and binary success state."""
+    now = clock or time.perf_counter
+    started_at = now()
+    success = 0.0
+    try:
+        result = operation()
+        success = 1.0
+        return result
+    finally:
+        emit_performance_trace(event, {
+            "duration_ms": max(0.0, (now() - started_at) * 1000.0),
+            "success": success,
+        })
+
 VOICE_COMPILER = VoiceCompiler()
 CONTEXT_ROUTER = ContextRouter()
 INSERTION_COORDINATOR = InsertionCoordinator()
@@ -754,7 +840,12 @@ def atomic_write_text(path: Path, text: str, mode: int = 0o600):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        os.fchmod(fd, mode)
+        # os.fchmod was unavailable on Windows before Python 3.13. POSIX keeps
+        # the strict 0600 descriptor mode; older Windows runtimes still retain
+        # crash-safe replacement instead of failing every private-state write.
+        descriptor_chmod = getattr(os, "fchmod", None)
+        if descriptor_chmod is not None:
+            descriptor_chmod(fd, mode)
         with os.fdopen(fd, "w") as f:
             fd = -1
             f.write(text)
@@ -1744,30 +1835,10 @@ class StatusBar(NSObject):
 
     def forgetCorrection_(self, sender):
         key = str(sender.representedObject())
-        with LEARN_LOCK:
-            state = load_learned()
-            removed = state.get("confusions", {}).pop(key, None)
-            if removed is None:
-                return
-            old = str(removed.get("from", "")).casefold()
-            fix = state.get("fixes", {}).get(old)
-            if fix and str(fix.get("to", "")).casefold() == str(
-                    removed.get("to", "")).casefold():
-                state["fixes"].pop(old, None)
-            regression = personal_regression_lab(state)
-            regression.forget(old)
-            for app in removed.get("apps", {}):
-                regression.forget(old, app=str(app))
-            state["regression_lab"] = regression.to_dict()
-            state["history"].append({
-                "ts": time.time(), "kind": "forgotten",
-                "from": removed.get("from"), "to": removed.get("to"),
-            })
-            state["history"] = state["history"][-100:]
-            save_learned(state)
-            refresh_glossary()
-        print(f"[learn] forgot correction: {removed.get('from')} -> "
-              f"{removed.get('to')}")
+        try:
+            forget_gui_correction(key)
+        except KeyError:
+            return
         self.rebuild_learning()
 
     def forgetSnippetEdit_(self, sender):
@@ -2532,22 +2603,23 @@ class Recorder:
 def parse_dictionary():
     """Returns (manual_terms, banned_lowercase). Only reads above AUTO_MARKER
     for manual terms; '-term' lines are permanent bans."""
-    manual, banned = [], set()
-    if not DICTIONARY_FILE.exists():
+    with DICTIONARY_LOCK:
+        manual, banned = [], set()
+        if not DICTIONARY_FILE.exists():
+            return manual, banned
+        in_auto = False
+        for line in DICTIONARY_FILE.read_text().splitlines():
+            t = line.strip()
+            if t == AUTO_MARKER:
+                in_auto = True
+                continue
+            if not t or t.startswith("#"):
+                continue
+            if t.startswith("-"):
+                banned.add(t[1:].strip().casefold())
+            elif not in_auto:
+                manual.append(t)
         return manual, banned
-    in_auto = False
-    for line in DICTIONARY_FILE.read_text().splitlines():
-        t = line.strip()
-        if t == AUTO_MARKER:
-            in_auto = True
-            continue
-        if not t or t.startswith("#"):
-            continue
-        if t.startswith("-"):
-            banned.add(t[1:].strip().casefold())
-        elif not in_auto:
-            manual.append(t)
-    return manual, banned
 
 
 def load_learned() -> dict:
@@ -2598,6 +2670,214 @@ def personal_regression_lab(state: dict | None = None) \
             source.get("regression_lab", {}))
     except Exception:
         return PersonalRegressionLab()
+
+
+GUI_TONES = {"auto", "casual", "formal", "code", "verbatim", "default"}
+
+
+def _json_object(path: Path, *, label: str) -> dict:
+    """Read one user-editable JSON object without silently erasing damage."""
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text())
+    except Exception as error:
+        raise ValueError(f"{label} is not valid JSON") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must contain a JSON object")
+    return value
+
+
+def _validated_gui_terms(values, *, label: str) -> list[str]:
+    if isinstance(values, (str, bytes)):
+        raise ValueError(f"{label} must be a list")
+    try:
+        candidates = list(values)
+    except TypeError as error:
+        raise ValueError(f"{label} must be a list") from error
+    if len(candidates) > 500:
+        raise ValueError(f"{label} supports at most 500 terms")
+    result, seen = [], set()
+    for raw in candidates:
+        value = str(raw).strip()
+        folded = value.casefold()
+        if not value:
+            continue
+        if len(value) > 80 or "\n" in value or "\r" in value:
+            raise ValueError(f"{label} terms must be 80 characters or fewer")
+        if value.startswith(("-", "#")):
+            raise ValueError(
+                f"{label} terms cannot start with reserved '-' or '#'")
+        if folded not in seen:
+            result.append(value)
+            seen.add(folded)
+    return result
+
+
+def gui_settings_snapshot() -> dict:
+    """Private personalization projection loaded only by the Settings page."""
+    def safe_count(value) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
+    with APP_TONES["lock"]:
+        tone_map = dict(APP_TONES["map"])
+    bundles = list(dict.fromkeys(recent_dictation_apps() + list(tone_map)))
+    app_tones = [{
+        "bundle": bundle,
+        "name": app_display_name(bundle),
+        "tone": (tone_map.get(bundle)
+                 if tone_map.get(bundle) in GUI_TONES else "auto"),
+    } for bundle in bundles[:100] if isinstance(bundle, str) and bundle]
+
+    with SNIPPETS_LOCK:
+        snippets_object = _json_object(SNIPPETS_FILE, label="snippets.json")
+        snippets = [{"name": name, "text": text}
+                    for name, text in sorted(snippets_object.items())
+                    if isinstance(name, str) and isinstance(text, str)]
+    with DICTIONARY_LOCK:
+        manual, banned = parse_dictionary()
+    with LEARN_LOCK:
+        learned = load_learned()
+    corrections = []
+    for key, info in learned.get("confusions", {}).items():
+        if not isinstance(key, str) or not isinstance(info, dict):
+            continue
+        source = info.get("from")
+        target = info.get("to")
+        if isinstance(source, str) and source and isinstance(target, str) and target:
+            corrections.append({
+                "key": key, "source": source, "target": target,
+                "count": safe_count(info.get("n")),
+                "kind": "correction",
+            })
+    for name, info in learned.get("snippet_edits", {}).items():
+        if not isinstance(name, str) or not isinstance(info, dict):
+            continue
+        target = info.get("to")
+        if isinstance(target, str) and target:
+            corrections.append({
+                "key": name, "source": f"Snippet: {name}",
+                "target": target, "count": safe_count(info.get("n")),
+                "kind": "snippet",
+            })
+    corrections.sort(key=lambda item: (-item["count"], item["source"].casefold()))
+    return {
+        "app_tones": app_tones,
+        "snippets": snippets,
+        "manual_vocabulary": manual,
+        "banned_vocabulary": sorted(banned),
+        "corrections": corrections,
+    }
+
+
+def set_gui_app_tone(bundle: str, tone: str):
+    app_id = str(bundle).strip()
+    normalized = str(tone).strip().casefold()
+    if (not app_id or len(app_id) > 255
+            or any(character.isspace() for character in app_id)):
+        raise ValueError("app identifier must be a non-empty bundle ID")
+    if normalized not in GUI_TONES:
+        raise ValueError(f"unsupported tone: {tone}")
+    set_app_tone(app_id, None if normalized == "auto" else normalized)
+
+
+def save_gui_snippet(name: str, expected_original: str | None, text: str):
+    snippet_name = str(name).strip()
+    value = str(text)
+    if expected_original is not None and not isinstance(expected_original, str):
+        raise ValueError("expected snippet text must be a string or null")
+    if (not snippet_name or len(snippet_name) > 80
+            or "\n" in snippet_name or "\r" in snippet_name):
+        raise ValueError("snippet name must be 1–80 characters on one line")
+    if not value.strip() or len(value) > 4000:
+        raise ValueError("snippet text must be 1–4000 characters")
+
+    def normalized_key(candidate: str) -> str:
+        return re.sub(r"[^a-z0-9 ]", "", candidate.casefold()).strip()
+
+    with SNIPPETS_LOCK:
+        snippets = _json_object(SNIPPETS_FILE, label="snippets.json")
+        if expected_original is None:
+            if snippet_name in snippets:
+                raise RuntimeError(
+                    "snippet changed since the editor was opened")
+        elif snippets.get(snippet_name) != expected_original:
+            raise RuntimeError(
+                "snippet changed since the editor was opened")
+        collision = next((existing for existing in snippets
+                          if normalized_key(str(existing)) == normalized_key(snippet_name)
+                          and existing != snippet_name), None)
+        if collision is not None:
+            raise ValueError(f"snippet name conflicts with {collision!r}")
+        snippets[snippet_name] = value
+        atomic_write_text(SNIPPETS_FILE, json.dumps(snippets, indent=2) + "\n")
+
+
+def delete_gui_snippet(name: str, expected_original: str):
+    snippet_name = str(name).strip()
+    if not snippet_name:
+        raise ValueError("snippet name is required")
+    if not isinstance(expected_original, str):
+        raise ValueError("expected snippet text must be a string")
+    with SNIPPETS_LOCK:
+        snippets = _json_object(SNIPPETS_FILE, label="snippets.json")
+        if snippets.get(snippet_name) != expected_original:
+            raise RuntimeError(
+                "snippet changed since the editor was opened")
+        snippets.pop(snippet_name)
+        atomic_write_text(SNIPPETS_FILE, json.dumps(snippets, indent=2) + "\n")
+
+
+def save_gui_vocabulary(manual_values, banned_values):
+    manual = _validated_gui_terms(manual_values, label="preferred vocabulary")
+    banned = _validated_gui_terms(banned_values, label="excluded vocabulary")
+    if {item.casefold() for item in manual} & {item.casefold() for item in banned}:
+        raise ValueError("a vocabulary term cannot also be excluded")
+    with DICTIONARY_LOCK:
+        existing = DICTIONARY_FILE.read_text() if DICTIONARY_FILE.exists() else ""
+        before, marker, after = existing.partition(AUTO_MARKER)
+        comments = [line.rstrip() for line in before.splitlines()
+                    if line.strip().startswith("#")]
+        if not comments:
+            comments = ["# One term per line. Lines starting with - are bans."]
+        manual_lines = comments + manual + [f"-{item}" for item in banned]
+        body = "\n".join(manual_lines).rstrip() + "\n\n" + AUTO_MARKER + "\n"
+        if marker:
+            body += after.lstrip("\n")
+        atomic_write_text(DICTIONARY_FILE, body)
+        refresh_glossary()
+
+
+def forget_gui_correction(key: str):
+    """Forget one learned mapping without touching explicit dictionary terms."""
+    correction_key = str(key)
+    with LEARN_LOCK:
+        state = load_learned()
+        removed = state.get("confusions", {}).pop(correction_key, None)
+        if not isinstance(removed, dict):
+            raise KeyError("unknown learned correction")
+        old = str(removed.get("from", "")).casefold()
+        replacement = str(removed.get("to", "")).casefold()
+        fix = state.get("fixes", {}).get(old)
+        if isinstance(fix, dict) and str(fix.get("to", "")).casefold() == replacement:
+            state["fixes"].pop(old, None)
+        regression = personal_regression_lab(state)
+        regression.forget(old)
+        for app in removed.get("apps", {}):
+            regression.forget(old, app=str(app))
+        state["regression_lab"] = regression.to_dict()
+        state["history"].append({
+            "ts": time.time(), "kind": "forgotten",
+            "from": removed.get("from"), "to": removed.get("to"),
+        })
+        state["history"] = state["history"][-100:]
+        save_learned(state)
+    refresh_glossary()
+    print(f"[learn] forgot correction: {removed.get('from')} -> "
+          f"{removed.get('to')}")
 
 
 def runtime_status_snapshot() -> dict:
@@ -2764,14 +3044,15 @@ def merge_learned_state(base: dict, mined: dict, latest: dict) -> dict:
 
 def write_auto_section(promoted: list[str]):
     """Rewrite dictionary.txt keeping the manual section untouched."""
-    if DICTIONARY_FILE.exists():
-        text = DICTIONARY_FILE.read_text()
-        manual_part = text.split(AUTO_MARKER)[0].rstrip("\n")
-    else:
-        manual_part = "# One term per line. Lines starting with - are bans."
-    body = manual_part + "\n\n" + AUTO_MARKER + "\n"
-    body += "\n".join(promoted) + ("\n" if promoted else "")
-    atomic_write_text(DICTIONARY_FILE, body)
+    with DICTIONARY_LOCK:
+        if DICTIONARY_FILE.exists():
+            text = DICTIONARY_FILE.read_text()
+            manual_part = text.split(AUTO_MARKER)[0].rstrip("\n")
+        else:
+            manual_part = "# One term per line. Lines starting with - are bans."
+        body = manual_part + "\n\n" + AUTO_MARKER + "\n"
+        body += "\n".join(promoted) + ("\n" if promoted else "")
+        atomic_write_text(DICTIONARY_FILE, body)
 
 
 def refresh_glossary():
@@ -4369,6 +4650,125 @@ def peak_rms(audio: np.ndarray, win: int = SAMPLE_RATE // 10) -> float:
     return float(np.sqrt((chunks ** 2).mean(axis=1)).max())
 
 
+def acoustic_statistics(
+        audio: np.ndarray, sample_rate: int = SAMPLE_RATE,
+        known_peak_rms: float | None = None) -> dict[str, float]:
+    """Return privacy-safe numeric signal health for one captured utterance."""
+    samples = np.asarray(audio, dtype=np.float64).reshape(-1)
+    count = samples.size
+    rate = float(sample_rate)
+    if not math.isfinite(rate) or rate <= 0.0:
+        rate = 0.0
+    if count == 0:
+        return {
+            "adaptive_threshold": 0.0,
+            "clipped_ratio": 0.0,
+            "derived_gain_factor": 1.0,
+            "duration_ms": 0.0,
+            "frame_rms_p20": 0.0,
+            "frame_rms_p50": 0.0,
+            "frame_rms_p95": 0.0,
+            "nonfinite_ratio": 0.0,
+            "peak_amplitude": 0.0,
+            "peak_rms": 0.0,
+            "rms": 0.0,
+            "sample_count": 0.0,
+            "sample_rate_hz": rate,
+            "silence_ratio": 0.0,
+            "trailing_silence_ms": 0.0,
+            "voiced_fraction": 0.0,
+        }
+
+    finite = np.isfinite(samples)
+    # Invalid samples contribute zero energy. Clipping to float32's finite
+    # range also keeps squared-energy calculations finite for malformed input.
+    limit = float(np.finfo(np.float32).max)
+    safe = np.clip(np.where(finite, samples, 0.0), -limit, limit)
+    absolute = np.abs(safe)
+    rms = float(np.sqrt(np.mean(safe ** 2)))
+    window = max(1, int(rate // 10)) if rate else max(1, count)
+    try:
+        observed_peak_rms = float(known_peak_rms) \
+            if known_peak_rms is not None else None
+    except (TypeError, ValueError, OverflowError):
+        observed_peak_rms = None
+    if observed_peak_rms is not None and (
+            not math.isfinite(observed_peak_rms) or observed_peak_rms < 0.0):
+        observed_peak_rms = None
+
+    # Twenty-millisecond RMS frames preserve time-local signal shape without
+    # retaining recoverable audio. The final partial frame is measured at its
+    # actual length rather than padded with artificial silence.
+    frame_size = max(1, int(round(rate * 0.02))) if rate else max(1, count)
+    full_frame_count = count // frame_size
+    frame_rms = np.sqrt(np.mean(
+        safe[:full_frame_count * frame_size].reshape(
+            full_frame_count, frame_size) ** 2,
+        axis=1,
+    )) if full_frame_count else np.empty(0, dtype=np.float64)
+    if full_frame_count * frame_size < count:
+        final_rms = np.sqrt(np.mean(
+            safe[full_frame_count * frame_size:] ** 2))
+        frame_rms = np.append(frame_rms, final_rms)
+    p20, p50, p95 = (
+        float(value) for value in np.percentile(frame_rms, (20, 50, 95)))
+
+    # A conservative noise-relative threshold and gain recommendation are
+    # observations for future tuning only. Neither affects capture or ASR.
+    adaptive_threshold = min(0.1, max(SILENCE_RMS, p20 * 2.5))
+    voiced_fraction = float(np.mean(frame_rms >= adaptive_threshold))
+    above_threshold = np.flatnonzero(absolute >= adaptive_threshold)
+    trailing_samples = count if not above_threshold.size \
+        else count - int(above_threshold[-1]) - 1
+    trailing_silence_ms = float(trailing_samples / rate * 1000.0) \
+        if rate else 0.0
+    derived_gain_factor = min(8.0, max(1.0, 0.08 / max(p95, 1e-12)))
+    return {
+        "adaptive_threshold": float(adaptive_threshold),
+        "clipped_ratio": float(np.mean(absolute >= 0.99)),
+        "derived_gain_factor": float(derived_gain_factor),
+        "duration_ms": float(count / rate * 1000.0) if rate else 0.0,
+        "frame_rms_p20": p20,
+        "frame_rms_p50": p50,
+        "frame_rms_p95": p95,
+        "nonfinite_ratio": float(np.mean(~finite)),
+        "peak_amplitude": float(np.max(absolute)),
+        "peak_rms": (observed_peak_rms if observed_peak_rms is not None
+                     else peak_rms(safe, win=window)),
+        "rms": rms,
+        "sample_count": float(count),
+        "sample_rate_hz": rate,
+        "silence_ratio": float(np.mean(finite & (absolute < SILENCE_RMS))),
+        "trailing_silence_ms": trailing_silence_ms,
+        "voiced_fraction": voiced_fraction,
+    }
+
+
+def emit_acoustic_trace(
+        audio: np.ndarray, known_peak_rms: float | None = None) -> bool:
+    """Emit signal-health diagnostics without affecting dictation behavior."""
+    try:
+        return emit_performance_trace(
+            "utterance_acoustic",
+            acoustic_statistics(audio, known_peak_rms=known_peak_rms),
+        )
+    except Exception:
+        return False
+
+
+def audio_gate_measurements(audio: np.ndarray) -> tuple[float, float]:
+    """Return the original duration/peak gate, with best-effort diagnostics."""
+    duration = len(audio) / SAMPLE_RATE
+    peak = peak_rms(audio) if duration >= MIN_SECONDS else 0.0
+    try:
+        emit_acoustic_trace(
+            audio, known_peak_rms=peak if duration >= MIN_SECONDS else None)
+    except Exception:
+        # Keep this boundary defensive even if a future trace helper regresses.
+        pass
+    return duration, peak
+
+
 def collapse_repeats(text: str) -> tuple[str, bool]:
     """Collapse runs of one token repeated 3+ times — the signature of an ASR
     decode loop, never of real speech ("no no" survives, "Unraid" x40 does
@@ -4966,11 +5366,10 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             full_audio = rec.stop()
         capture_done_at = time.perf_counter()
 
-        duration = len(full_audio) / SAMPLE_RATE
+        duration, peak = audio_gate_measurements(full_audio)
         if duration < MIN_SECONDS:
             print(f"[dropped] too short ({duration:.2f}s)")
             return
-        peak = peak_rms(full_audio)
         if peak < GATE_PEAK_RMS:
             # ~0.000000 here means the mic delivered pure silence (device or
             # permission problem), not just quiet speech.
@@ -5317,30 +5716,48 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
 
 
 def warmup():
-    route = "Parakeet Unified + Whisper fallback" \
-        if PARAKEET_ENABLED and PARAKEET_HELPER.is_file() \
-        else "Whisper Tiny + large-v3-turbo"
-    print(f"Warming up {route} cascade...")
-    # Through the pool, so a dictation fired mid-warmup can't race model load.
-    ASR_POOL.submit(
-        transcribe_detailed,
-        np.zeros(SAMPLE_RATE // 2, dtype=np.float32),
-        None,
-        False,
-        FAST_WHISPER_REPO,
-    ).result()
-    ASR_POOL.submit(transcribe, np.zeros(SAMPLE_RATE // 2,
-                                         dtype=np.float32)).result()
+    started_at = time.perf_counter()
+    all_ready = 1.0
     try:
-        ollama_chat(None, "hi", num_predict=1)
-        PIPELINE_STATE["cleanup_status"] = "Ready"
-    except Exception as e:
-        PIPELINE_STATE["cleanup_status"] = "Unavailable"
-        print(f"! Ollama warmup failed: {e}")
-        print("  Is Ollama running, and has qwen3.5:4b been pulled?")
-    print("Ready (phone endpoint only)." if SERVER_ONLY else
-          f"Ready. Hold {'RIGHT OPTION' if IS_MACOS else 'RIGHT ALT'} and "
-          "speak; release to paste. Ctrl-C quits.")
+        route = "Parakeet Unified + Whisper fallback" \
+            if PARAKEET_ENABLED and PARAKEET_HELPER.is_file() \
+            else "Whisper Tiny + large-v3-turbo"
+        print(f"Warming up {route} cascade...")
+        # Through the pool, so a dictation fired mid-warmup can't race load.
+        trace_operation("warmup_asr_tiny", lambda: ASR_POOL.submit(
+            transcribe_detailed,
+            np.zeros(SAMPLE_RATE // 2, dtype=np.float32),
+            None,
+            False,
+            FAST_WHISPER_REPO,
+        ).result())
+        trace_operation("warmup_asr_final", lambda: ASR_POOL.submit(
+            transcribe,
+            np.zeros(SAMPLE_RATE // 2, dtype=np.float32),
+        ).result())
+        try:
+            trace_operation(
+                "warmup_ollama",
+                lambda: ollama_chat(None, "hi", num_predict=1),
+            )
+            PIPELINE_STATE["cleanup_status"] = "Ready"
+        except Exception as e:
+            all_ready = 0.0
+            PIPELINE_STATE["cleanup_status"] = "Unavailable"
+            print(f"! Ollama warmup failed: {e}")
+            print("  Is Ollama running, and has qwen3.5:4b been pulled?")
+        print("Ready (phone endpoint only)." if SERVER_ONLY else
+              f"Ready. Hold {'RIGHT OPTION' if IS_MACOS else 'RIGHT ALT'} and "
+              "speak; release to paste. Ctrl-C quits.")
+    except Exception:
+        all_ready = 0.0
+        raise
+    finally:
+        emit_performance_trace("warmup_total", {
+            "duration_ms": max(
+                0.0, (time.perf_counter() - started_at) * 1000.0),
+            "success": all_ready,
+        })
 
 
 def preload_model_files():
@@ -5480,7 +5897,7 @@ def main():
     # deliberately pays CoreAudio's cold-start cost at launch, never after the
     # user has heard the recording cue and begun speaking.
     try:
-        AUDIO_POOL.warm()
+        trace_operation("warmup_audio_pool", AUDIO_POOL.warm)
     except Exception as e:
         print(f"! Microphone unavailable: {e}")
         if IS_MACOS:
@@ -5507,8 +5924,15 @@ def main():
     if IS_MACOS:
         STATUS["bar"].gui = create_gui(GUIActions(
             status_snapshot=runtime_status_snapshot,
+            settings_snapshot=gui_settings_snapshot,
             set_face=STATUS["bar"].set_face_choice,
             set_flight_recorder=STATUS["bar"].set_flight_enabled,
+            set_app_tone=set_gui_app_tone,
+            save_snippet=save_gui_snippet,
+            delete_snippet=delete_gui_snippet,
+            save_vocabulary=save_gui_vocabulary,
+            forget_correction=forget_gui_correction,
+            forget_snippet_edit=forget_snippet_edit,
             pause=lambda: STATUS["bar"].set_paused(True),
             resume=lambda: STATUS["bar"].set_paused(False),
             open_log=lambda: subprocess.Popen(

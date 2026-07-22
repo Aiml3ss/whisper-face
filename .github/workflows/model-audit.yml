@@ -1,0 +1,42 @@
+name: Model source audit
+
+on:
+  schedule:
+    - cron: '17 15 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: model-source-audit
+  cancel-in-progress: false
+
+jobs:
+  audit-public-model-metadata:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out reviewed model evidence
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Audit immutable revisions and public metadata
+        id: audit
+        continue-on-error: true
+        run: >-
+          python3 performance_lab.py audit-models
+          --format json
+          --output "$RUNNER_TEMP/model-audit.json"
+
+      - name: Preserve audit evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: model-source-audit-${{ github.run_id }}
+          path: ${{ runner.temp }}/model-audit.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Propagate audit failure after evidence upload
+        if: steps.audit.outcome == 'failure'
+        run: exit 1

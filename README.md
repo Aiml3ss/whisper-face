@@ -313,6 +313,12 @@ Run `uv run benchmark_asr.py` with a local LibriSpeech `test-clean` directory
 for an apples-to-apples Mac engine comparison. Downloaded audio and generated
 hypotheses stay outside the repository; see `benchmarks/ASR_BAKEOFF.md`.
 
+Runtime startup and acoustic-health traces can be reduced to numeric
+aggregates with `uv run performance_lab.py traces --trace-log dictate.log`.
+The trace command ignores ordinary log lines, rejects any non-allowlisted or
+non-numeric trace field, and never includes raw lines, input paths, app
+identifiers, or transcript text in its table or JSON output.
+
 ## Verify
 
 Run the fast regression suite after changing the pipeline:
@@ -324,6 +330,7 @@ uv run tests/test_benchmark_voice_compiler.py
 uv run tests/test_benchmark_asr.py
 uv run tests/test_performance_lab.py
 uv run tests/test_dictate.py
+uv run tests/test_gui_settings_runtime.py
 uv run tests/test_insertion_integrity.py
 uv run tests/test_personal_regression.py
 uv run tests/test_whisper_face_gui.py

@@ -277,6 +277,263 @@ class AudioPoolTests(unittest.TestCase):
         self.assertEqual(pool.readiness(), "Unavailable")
 
 
+class PerformanceTraceTests(unittest.TestCase):
+    def test_trace_emitter_accepts_only_fixed_finite_numeric_schemas(self):
+        lines = []
+        ns = load_definitions(
+            "emit_performance_trace",
+            assignments={
+                "PERFORMANCE_TRACE_PREFIX",
+                "PERFORMANCE_TRACE_SCHEMA_VERSION",
+                "PERFORMANCE_TRACE_SCHEMAS",
+            },
+            extra={"math": __import__("math"), "print": lines.append},
+        )
+        emit = ns["emit_performance_trace"]
+
+        self.assertTrue(emit(
+            "warmup_asr_tiny", {"duration_ms": 12.34567, "success": 1}))
+        payload = json.loads(lines.pop().removeprefix("[trace] "))
+        self.assertEqual(payload, {
+            "duration_ms": 12.3457,
+            "event": "warmup_asr_tiny",
+            "schema_version": 1,
+            "success": 1.0,
+        })
+
+        self.assertFalse(emit(
+            "warmup_asr_tiny",
+            {"duration_ms": 1, "success": 1, "transcript": "private"},
+        ))
+        self.assertFalse(emit(
+            "warmup_asr_tiny", {"duration_ms": float("nan"), "success": 1}))
+        self.assertFalse(emit(
+            "arbitrary-event", {"duration_ms": 1, "success": 1}))
+        self.assertFalse(emit(
+            ["warmup_asr_tiny"], {"duration_ms": 1, "success": 1}))
+        self.assertEqual(lines, [])
+
+    def test_trace_output_failure_never_masks_the_wrapped_operation(self):
+        def output_failed(_line):
+            raise OSError("stdout closed")
+
+        clock_values = iter((1.0, 1.01))
+        ns = load_definitions(
+            "emit_performance_trace", "trace_operation",
+            assignments={
+                "PERFORMANCE_TRACE_PREFIX",
+                "PERFORMANCE_TRACE_SCHEMA_VERSION",
+                "PERFORMANCE_TRACE_SCHEMAS",
+            },
+            extra={
+                "math": __import__("math"),
+                "print": output_failed,
+                "time": SimpleNamespace(
+                    perf_counter=lambda: next(clock_values)),
+            },
+        )
+
+        self.assertFalse(ns["emit_performance_trace"](
+            "warmup_asr_tiny", {"duration_ms": 1, "success": 1}))
+        self.assertEqual(
+            ns["trace_operation"]("warmup_asr_tiny", lambda: "ready"),
+            "ready",
+        )
+
+    def test_acoustic_trace_failure_preserves_original_gate_measurements(self):
+        ns = load_definitions(
+            "peak_rms",
+            "emit_performance_trace",
+            "emit_acoustic_trace",
+            "audio_gate_measurements",
+            assignments={
+                "MIN_SECONDS",
+                "PERFORMANCE_TRACE_PREFIX",
+                "PERFORMANCE_TRACE_SCHEMA_VERSION",
+                "PERFORMANCE_TRACE_SCHEMAS",
+                "SAMPLE_RATE",
+            },
+            extra={
+                "math": __import__("math"),
+                "np": np,
+                "print": lambda _line: None,
+            },
+        )
+        audio = np.full(16_000, 0.04, dtype=np.float32)
+
+        def statistics_failed(*_args, **_kwargs):
+            raise RuntimeError("diagnostics failed")
+
+        ns["acoustic_statistics"] = statistics_failed
+        duration, peak = ns["audio_gate_measurements"](audio)
+
+        self.assertEqual(duration, len(audio) / 16_000)
+        self.assertAlmostEqual(peak, ns["peak_rms"](audio))
+
+    def test_acoustic_statistics_are_finite_and_content_free(self):
+        ns = load_definitions(
+            "peak_rms", "acoustic_statistics",
+            assignments={"SAMPLE_RATE", "SILENCE_RMS"},
+            extra={"math": __import__("math"), "np": np},
+        )
+        stats = ns["acoustic_statistics"](np.array([
+            0.0, np.nan, np.inf, -np.inf, 1.2, -0.5,
+        ], dtype=np.float32), sample_rate=6)
+
+        self.assertEqual(set(stats), {
+            "adaptive_threshold",
+            "clipped_ratio",
+            "derived_gain_factor",
+            "duration_ms",
+            "frame_rms_p20",
+            "frame_rms_p50",
+            "frame_rms_p95",
+            "nonfinite_ratio",
+            "peak_amplitude",
+            "peak_rms",
+            "rms",
+            "sample_count",
+            "sample_rate_hz",
+            "silence_ratio",
+            "trailing_silence_ms",
+            "voiced_fraction",
+        })
+        self.assertEqual(stats["sample_count"], 6.0)
+        self.assertEqual(stats["duration_ms"], 1000.0)
+        self.assertAlmostEqual(stats["nonfinite_ratio"], 0.5)
+        self.assertTrue(all(
+            isinstance(value, float) and np.isfinite(value)
+            for value in stats.values()))
+        self.assertEqual(
+            ns["acoustic_statistics"](np.array([], dtype=np.float32), 16_000),
+            {
+                "adaptive_threshold": 0.0,
+                "clipped_ratio": 0.0,
+                "derived_gain_factor": 1.0,
+                "duration_ms": 0.0,
+                "frame_rms_p20": 0.0,
+                "frame_rms_p50": 0.0,
+                "frame_rms_p95": 0.0,
+                "nonfinite_ratio": 0.0,
+                "peak_amplitude": 0.0,
+                "peak_rms": 0.0,
+                "rms": 0.0,
+                "sample_count": 0.0,
+                "sample_rate_hz": 16000.0,
+                "silence_ratio": 0.0,
+                "trailing_silence_ms": 0.0,
+                "voiced_fraction": 0.0,
+            },
+        )
+
+    def test_acoustic_statistics_distinguish_quiet_noisy_and_clipped_audio(self):
+        ns = load_definitions(
+            "peak_rms", "acoustic_statistics",
+            assignments={"SAMPLE_RATE", "SILENCE_RMS"},
+            extra={"math": __import__("math"), "np": np},
+        )
+        measure = ns["acoustic_statistics"]
+        sample_rate = 1_000
+        phase = np.arange(sample_rate, dtype=np.float64)
+        quiet = measure(0.004 * np.sin(2 * np.pi * phase / 20), sample_rate)
+        noisy = measure(np.tile(
+            np.concatenate((np.full(20, 0.01), np.full(20, 0.04))),
+            25,
+        ), sample_rate)
+        clipped = measure(np.ones(sample_rate, dtype=np.float64), sample_rate)
+
+        self.assertEqual(quiet["derived_gain_factor"], 8.0)
+        self.assertEqual(quiet["voiced_fraction"], 0.0)
+        self.assertGreater(noisy["frame_rms_p95"], noisy["frame_rms_p20"])
+        self.assertGreater(noisy["adaptive_threshold"], 0.008)
+        self.assertAlmostEqual(noisy["voiced_fraction"], 0.5)
+        self.assertEqual(clipped["clipped_ratio"], 1.0)
+        self.assertEqual(clipped["derived_gain_factor"], 1.0)
+        self.assertEqual(clipped["voiced_fraction"], 1.0)
+
+    def test_acoustic_statistics_measure_trailing_silence(self):
+        ns = load_definitions(
+            "peak_rms", "acoustic_statistics",
+            assignments={"SAMPLE_RATE", "SILENCE_RMS"},
+            extra={"math": __import__("math"), "np": np},
+        )
+        audio = np.concatenate((
+            np.full(100, 0.1, dtype=np.float64),
+            np.zeros(200, dtype=np.float64),
+        ))
+        stats = ns["acoustic_statistics"](audio, sample_rate=1_000)
+
+        self.assertEqual(stats["trailing_silence_ms"], 200.0)
+        self.assertAlmostEqual(stats["voiced_fraction"], 1.0 / 3.0)
+        self.assertEqual(stats["frame_rms_p20"], 0.0)
+        self.assertEqual(stats["frame_rms_p50"], 0.0)
+        self.assertAlmostEqual(stats["frame_rms_p95"], 0.1)
+
+    def test_warmup_emits_deterministic_stage_and_total_traces(self):
+        lines = []
+        clock_values = iter((
+            0.0,
+            0.01, 0.03,
+            0.03, 0.08,
+            0.08, 0.10,
+            0.11,
+        ))
+
+        class ImmediatePool:
+            @staticmethod
+            def submit(function, *args):
+                return SimpleNamespace(result=lambda: function(*args))
+
+        ns = load_definitions(
+            "emit_performance_trace", "trace_operation", "warmup",
+            assignments={
+                "FAST_WHISPER_REPO",
+                "PERFORMANCE_TRACE_PREFIX",
+                "PERFORMANCE_TRACE_SCHEMA_VERSION",
+                "PERFORMANCE_TRACE_SCHEMAS",
+                "SAMPLE_RATE",
+            },
+            extra={
+                "ASR_POOL": ImmediatePool(),
+                "PARAKEET_ENABLED": False,
+                "PARAKEET_HELPER": SimpleNamespace(is_file=lambda: False),
+                "PIPELINE_STATE": {"cleanup_status": "Checking"},
+                "SERVER_ONLY": False,
+                "IS_MACOS": True,
+                "np": SimpleNamespace(
+                    float32="float32", zeros=lambda _size, dtype: []),
+                "ollama_chat": lambda *_args, **_kwargs: ("ok", "stop"),
+                "transcribe": lambda *_args: "",
+                "transcribe_detailed": lambda *_args: SimpleNamespace(text=""),
+                "time": SimpleNamespace(
+                    perf_counter=lambda: next(clock_values)),
+                "math": __import__("math"),
+                "print": lines.append,
+            },
+        )
+
+        ns["warmup"]()
+
+        traces = [
+            json.loads(line.removeprefix("[trace] "))
+            for line in lines if line.startswith("[trace] ")
+        ]
+        self.assertEqual(
+            [trace["event"] for trace in traces],
+            [
+                "warmup_asr_tiny",
+                "warmup_asr_final",
+                "warmup_ollama",
+                "warmup_total",
+            ],
+        )
+        self.assertEqual(
+            [trace["duration_ms"] for trace in traces],
+            [20.0, 50.0, 20.0, 110.0],
+        )
+        self.assertTrue(all(trace["success"] == 1.0 for trace in traces))
+
+
 class FlightRecorderTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

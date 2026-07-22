@@ -11,18 +11,18 @@ explicit Mac-first sequencing rather than dropping the item.
 | 1 | Signed/notarized Mac app, package, checksums, rollback, safe updater | active | Reproducible package; unsigned local path; signed CI release; notarization and update verification |
 | 2 | Permission/model/hotkey/first-dictation onboarding | active | Native flow plus state and UI tests; fresh-Mac walkthrough |
 | 3 | Confidence/Stable Prefix/processing/recovery HUD | complete | Native Overview states consume runtime capture/confidence/prefix/outbox evidence; 15 GUI tests and an AppKit construction/render pass cover all phases |
-| 4 | Unified settings for modes, tones, snippets, vocabulary, corrections, privacy, diagnostics | active | Editable controls, persistence, and regression tests |
+| 4 | Unified settings for modes, tones, snippets, vocabulary, corrections, privacy, diagnostics | active | Native Settings panes now cover the existing controls with validation and atomic persistence; automated native AppKit interaction/render coverage and final diagnostics integration remain required |
 | 5 | Result inspector for alternatives, anchors, edits, context, timing | complete | Transcript-free runtime projection and Results UI expose counts, anchors, canonical edit categories, context influence, confidence, and timing with privacy regressions |
-| 6 | VoiceOver, keyboard, contrast, reduced motion, localization readiness | active | Accessibility metadata, keyboard QA, and reduced-motion behavior |
+| 6 | VoiceOver, keyboard, contrast, reduced motion, localization readiness | active | VoiceOver metadata, system colors, Reduce Motion behavior, and the initial English semantic string catalog exist; automated native keyboard/AppKit coverage and full visible-copy localization remain required |
 | 7 | Clear non-blocking degraded-mode UX | complete | Blocking microphone/permission/service failures route to Action Needed while a failed fallback remains a non-blocking warning; GUI and AudioPool failure tests cover both |
 | 8 | Competitor task-based UX evaluation | queued | Reproducible task protocol and published measured results |
 | 9 | Representative speech/semantic-safety benchmark corpus | complete | `benchmarks/representative_dictation_cases.json` has 19 synthetic cases covering every declared risk dimension; acoustic labels remain explicit physical-recording requirements |
 | 10 | Correction Burden, zero-edit, routing, and latency dashboard | complete | Transcript-free `performance_lab.py evaluate` reports p50/p95/p99, burden, zero-edit, routing, coverage, and delivery with strict schema tests |
 | 11 | Apple Silicon and Windows hardware matrix | queued | Reproducible runs on representative real hardware |
-| 12 | Scheduled model scorecard and reevaluation cadence | active | Machine-readable scorecard, generator, and scheduled workflow |
+| 12 | Scheduled model scorecard and reevaluation cadence | complete | Weekly/manual read-only model audit checks immutable revisions and public provenance, uploads transcript-free evidence before failing on drift, and live-checks all three reviewed pins |
 | 13 | Non-flaky warm-path latency budgets in CI | complete | Versioned minimum-sample/p95 compiler budget runs on Windows CI; physical latency claims are explicitly excluded |
-| 14 | End-to-end component prewarming/cold-start elimination | queued | Startup trace and warm/cold budgets for every hot-path component |
-| 15 | Automatic gain/noise/reverb/VAD/end-of-speech calibration | queued | Calibrator, audio fixtures, and device validation |
+| 14 | End-to-end component prewarming/cold-start elimination | active | Closed numeric traces now cover audio pool, Tiny, final ASR, Ollama, and total warmup; cold-path budgets and physical-device elimination evidence remain |
+| 15 | Automatic gain/noise/reverb/VAD/end-of-speech calibration | active | Measurement-only acoustic telemetry covers RMS distribution, clipping, nonfinite samples, voicing, adaptive threshold, trailing silence, and bounded gain observation; behavior tuning and device validation remain |
 | 16 | Long/back-to-back/sleep-wake/device-switch/restart stress coverage | active | Automated harness plus live Mac evidence |
 | 17 | Explainable Last Recognition disagreements and rejections | queued | Decision receipt rendered in menu and window |
 | 18 | Selective Re-listen of uncertain spans | queued | Timed-span rerun path with accuracy/latency comparison |

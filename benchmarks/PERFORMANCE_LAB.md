@@ -75,11 +75,62 @@ Generate the current evidence-based ranking:
 uv run performance_lab.py scorecard
 ```
 
+The ASR bakeoff consumes the same scorecard as its source of truth. Every MLX
+snapshot download supplies both the repository ID and immutable revision, and
+the raw records and summary separate the requested model identity from the
+identity actually resolved by the executor. Before launching Whisper Face's
+shipping Parakeet helper, the harness requires every required Core ML asset to
+have a Hugging Face sidecar naming the reviewed scorecard SHA. A mismatch or
+missing asset aborts the run before the helper starts. Sidecars do not attest
+the asset bytes, executable, or model actually loaded by FluidAudio, so helper
+runs set both `resolved_model_*` fields to `null` and use
+`unverified-helper-runtime-unattested`. The matching sidecar preflight is
+recorded separately. The summary also records SHA-256 hashes of
+`benchmark_asr.py` and `model_scorecard.json`, the Git revision when available,
+and the concrete executor.
+
+The optional independent `macparakeet-cli` accepts only its own named model
+selector, not a repository SHA. Its records therefore preserve the scorecard
+target as `requested_model_*` but set `resolved_model_id` and
+`resolved_model_revision` to `null`, with `model_revision_status` equal to
+`unverified-external-executor`. Such a run is useful for research comparison,
+but is not evidence for the scorecard revision.
+
+The external CLI has a 30-minute process deadline. The shipping helper has
+separate startup and per-sample response deadlines, a 64 KiB maximum JSON
+response, and bounded close/terminate/kill cleanup. A timeout aborts the run;
+partial results are never presented as a completed bakeoff.
+
 The scorecard normalizes quality, latency, and throughput within the compared
 cohort. Licensing is an independent eligibility gate. Missing memory, energy,
 and startup measurements remain visibly unmeasured and are excluded from the
 score rather than guessed. Update `model_scorecard.json` only from a preserved,
 documented benchmark run.
+
+### Scheduled public-source audit
+
+The read-only `Model source audit` workflow runs weekly and can be started
+manually. It compares each reviewed repository head, immutable revision,
+declared license, and declared base-model metadata with the public Hugging Face
+API:
+
+```sh
+uv run performance_lab.py audit-models \
+  --format json \
+  --output /tmp/whisper-face-model-audit.json
+```
+
+Exit status `0` means the reviewed public metadata is unchanged, `1` means
+upstream drift was detected, and `2` means the check could not complete. The
+workflow uploads the JSON evidence before propagating either failure. Reports
+contain public model IDs, revisions, license/base-model metadata, status codes,
+and exception types only; exception messages and model-card prose are excluded.
+
+`review-required` is the current reviewed licensing state and does not itself
+fail this audit. A failure means the reviewed facts changed or could not be
+checked. The job does not download model weights, benchmark quality or speed,
+change a runtime pin, update the scorecard, or make a release recommendation.
+Those remain explicit review and bakeoff decisions.
 
 ### Provenance and currentness audit
 
@@ -113,8 +164,10 @@ the publisher clarifies which upstream model and terms apply.
 
 Current-head checks used each repository's Hugging Face model API and immutable
 revision endpoint. The two installed MLX cache refs matched the pins, and
-`dictate.py --verify-parakeet-model` verified the installed Parakeet asset
-metadata. Quality and latency numbers exactly match `ASR_BAKEOFF.md`, but raw
+`dictate.py --verify-parakeet-model` confirmed that the installed Parakeet
+sidecars name the reviewed revision; it did not attest asset contents or the
+runtime-loaded model. Quality and latency numbers exactly match
+`ASR_BAKEOFF.md`, but raw
 JSONL/summary artifacts from that run are not committed and were not present in
 `/tmp/parrot-asr-results` during the audit. The scorecard therefore records
 those metrics as documented-run evidence, not independently recalculated raw
