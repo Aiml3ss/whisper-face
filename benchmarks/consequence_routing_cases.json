@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "privacy": "synthetic-text-only",
+  "cases": [
+    {
+      "id": "benign-prose",
+      "text": "This is ordinary prose with no risky payload",
+      "confidence": 0.96,
+      "audio_duration": 8.0,
+      "expect": {"categories": [], "route": "standard"}
+    },
+    {
+      "id": "protected-currency",
+      "text": "The approved amount is $1,250",
+      "confidence": 0.96,
+      "audio_duration": 8.0,
+      "expect": {"categories": ["currency"], "route": "protected"}
+    },
+    {
+      "id": "disputed-recipient-name",
+      "text": "Please email Alice Smith tomorrow",
+      "alternative": "Please email Alice Smyth tomorrow",
+      "confidence": 0.93,
+      "audio_duration": 8.0,
+      "expect": {
+        "categories": ["action", "name", "recipient"],
+        "route": "review",
+        "relisten_min": 1
+      }
+    },
+    {
+      "id": "imprecise-date-time",
+      "text": "Schedule July 21 at 3:30 PM",
+      "confidence": 0.62,
+      "timing": "segment",
+      "audio_duration": 8.0,
+      "expect": {
+        "categories": ["action", "date", "time"],
+        "route": "review",
+        "skip_reason": "timing-unavailable"
+      }
+    },
+    {
+      "id": "full-utterance-url",
+      "text": "https://example.com/pay",
+      "confidence": 0.61,
+      "audio_duration": 1.0,
+      "word_start": 0.0,
+      "word_end": 1.0,
+      "expect": {
+        "categories": ["url"],
+        "excluded_categories": ["path"],
+        "route": "review",
+        "skip_reason": "span-not-micro"
+      }
+    },
+    {
+      "id": "recipient-contact",
+      "text": "Send to Alice Smith and email alice@example.com",
+      "confidence": 0.65,
+      "audio_duration": 10.0,
+      "expect": {
+        "categories": ["action", "name", "recipient", "contact"],
+        "route": "review"
+      }
+    },
+    {
+      "id": "path-with-identifier",
+      "text": "Open /tmp/invoice-2042",
+      "confidence": 0.95,
+      "audio_duration": 5.0,
+      "expect": {
+        "categories": ["action", "path"],
+        "excluded_categories": ["number"],
+        "route": "protected"
+      }
+    },
+    {
+      "id": "explicit-command",
+      "text": "git status",
+      "confidence": 0.65,
+      "mode": "command",
+      "audio_duration": 4.0,
+      "expect": {"categories": ["command"], "route": "review"}
+    },
+    {
+      "id": "action-statement-not-imperative",
+      "text": "I will delete the draft tomorrow",
+      "confidence": 0.95,
+      "audio_duration": 7.0,
+      "expect": {"categories": [], "route": "standard"}
+    },
+    {
+      "id": "spoken-and-digit-numbers",
+      "text": "Order 2042 needs two hundred units",
+      "confidence": 0.66,
+      "audio_duration": 8.0,
+      "expect": {"categories": ["number"], "route": "review"}
+    },
+    {
+      "id": "phone-contact",
+      "text": "Call +1 (415) 555-0199",
+      "confidence": 0.63,
+      "audio_duration": 7.0,
+      "expect": {"categories": ["action", "contact"], "route": "review"}
+    },
+    {
+      "id": "context-backed-name",
+      "text": "Use Qwen here",
+      "confidence": 0.92,
+      "audio_duration": 5.0,
+      "context": [{"text": "Qwen", "weight": 4.0, "source": "document"}],
+      "expect": {"categories": ["action", "name"], "route": "protected"}
+    }
+  ]
+}

@@ -320,6 +320,7 @@ from voice_compiler import (  # noqa: E402
     VoiceIR,
     WordEvidence,
     analyze_prosody,
+    consequence_receipt,
 )
 from insertion_integrity import (  # noqa: E402
     DestinationObservation,
@@ -371,6 +372,23 @@ PERFORMANCE_TRACE_SCHEMAS = {
         "voiced_fraction",
     ),
 }
+CONSEQUENCE_RISK_IDS = frozenset({
+    "name", "number", "currency", "date", "time", "recipient", "contact",
+    "url", "path", "command", "action",
+})
+CONSEQUENCE_SKIP_IDS = frozenset({
+    "timing-unavailable", "span-not-micro", "selection-limit",
+    "overlapping-span", "verifier-unavailable", "unsafe-verifier-contract",
+    "audio-unavailable", "deadline-expired", "verifier-error",
+    "invalid-verifier-result", "verifier-not-independent", "receipt-error",
+})
+CONSEQUENCE_ROUTE_IDS = frozenset({
+    "standard", "protected", "review", "verified", "unavailable",
+})
+CONSEQUENCE_RELISTEN_IDS = frozenset({
+    "not-needed", "skipped", "confirmed", "contradicted", "timed-out",
+    "inconclusive", "mixed", "unavailable",
+})
 ASR_MODEL_REVISIONS = {
     "mlx-community/whisper-tiny":
         "78c52ab98ca87f570bc57ad852e15ef7060f9f76",
@@ -769,6 +787,17 @@ PIPELINE_STATE = {
     "last_proof_edits_accepted": 0,
     "last_proof_edits_rejected": 0,
     "last_context_influence": "No context influence reported",
+    "last_consequence_route": "standard",
+    "last_risk_counts": {},
+    "last_high_risks": 0,
+    "last_uncertain_risks": 0,
+    "last_relisten_status": "not-needed",
+    "last_relisten_selected": 0,
+    "last_relisten_attempted": 0,
+    "last_relisten_confirmed": 0,
+    "last_relisten_contradicted": 0,
+    "last_relisten_inconclusive": 0,
+    "last_relisten_skipped": {},
     "last_asr_engine": "",
     "last_release_s": None,
     "last_word_count": None,
@@ -830,6 +859,10 @@ def trace_operation(event: str, operation, clock=None):
 VOICE_COMPILER = VoiceCompiler()
 CONTEXT_ROUTER = ContextRouter()
 INSERTION_COORDINATOR = InsertionCoordinator()
+# Selective re-listen is fail-closed until a local adapter can attest that it
+# enforces the deadline internally and never retains its bounded audio input.
+# The pure consequence receipt still explains why a span was skipped.
+CONSEQUENCE_VERIFIER = None
 
 APP_TONES = {"map": {}, "lock": threading.Lock()}
 PREFERENCES = {"flight_recorder": False, "face": DEFAULT_FACE}
@@ -1861,6 +1894,42 @@ class StatusBar(NSObject):
             None, "")
         compiler_summary.setEnabled_(False)
         self.recognition_menu.addItem_(compiler_summary)
+        consequence = consequence_state_snapshot()
+        consequence_summary = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Consequence: "
+            f"{consequence['route'].replace('-', ' ').title()} · "
+            f"{consequence['high_risks']} high-risk · "
+            f"{consequence['uncertain_risks']} uncertain",
+            None, "")
+        consequence_summary.setEnabled_(False)
+        self.recognition_menu.addItem_(consequence_summary)
+        if consequence["risk_counts"]:
+            risk_summary = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Risk spans: " + " · ".join(
+                    f"{category} {count}"
+                    for category, count in sorted(
+                        consequence["risk_counts"].items())),
+                None, "")
+            risk_summary.setEnabled_(False)
+            self.recognition_menu.addItem_(risk_summary)
+        relisten_summary = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Re-listen: "
+            f"{consequence['relisten_status'].replace('-', ' ')} · "
+            f"{consequence['relisten_confirmed']}/"
+            f"{consequence['relisten_attempted']} confirmed · "
+            f"{consequence['relisten_contradicted']} contradicted",
+            None, "")
+        relisten_summary.setEnabled_(False)
+        self.recognition_menu.addItem_(relisten_summary)
+        if consequence["relisten_skipped"]:
+            skipped_summary = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Skipped: " + " · ".join(
+                    f"{reason} {count}"
+                    for reason, count in sorted(
+                        consequence["relisten_skipped"].items())),
+                None, "")
+            skipped_summary.setEnabled_(False)
+            self.recognition_menu.addItem_(skipped_summary)
         for detail in PIPELINE_STATE["last_compiler_details"][:6]:
             item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                 f"  {detail}", None, "")
@@ -2954,6 +3023,7 @@ def runtime_status_snapshot() -> dict:
             "last_proof_edits_rejected"],
         "last_context_influence": PIPELINE_STATE[
             "last_context_influence"],
+        "last_consequence": consequence_state_snapshot(),
         "prefers_reduced_motion": mac_prefers_reduced_motion(),
         "words_today": words,
         "minutes_saved": saved,
@@ -3819,6 +3889,112 @@ def compile_voice_evidence(recognition: Recognition,
         finalized=finalized,
     )
     return voice, VOICE_COMPILER.compile(voice)
+
+
+def _consequence_count(value) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return min(1000, max(0, value))
+
+
+def store_consequence_receipt(receipt) -> dict:
+    """Project one receipt into fixed, transcript-free aggregate state."""
+    try:
+        if receipt is None:
+            raise ValueError("receipt unavailable")
+        route = getattr(receipt, "route", "unavailable")
+        if route not in CONSEQUENCE_ROUTE_IDS:
+            route = "unavailable"
+        relisten_status = getattr(
+            receipt, "relisten_status", "unavailable")
+        if relisten_status not in CONSEQUENCE_RELISTEN_IDS:
+            relisten_status = "unavailable"
+        risk_counts = {
+            str(category): _consequence_count(count)
+            for category, count in getattr(receipt, "risk_counts", ())
+            if category in CONSEQUENCE_RISK_IDS
+            and _consequence_count(count) > 0
+        }
+        skipped = {
+            str(reason): _consequence_count(count)
+            for reason, count in getattr(receipt, "relisten_skipped", ())
+            if reason in CONSEQUENCE_SKIP_IDS
+            and _consequence_count(count) > 0
+        }
+        values = {
+            "last_consequence_route": route,
+            "last_risk_counts": risk_counts,
+            "last_high_risks": _consequence_count(getattr(
+                receipt, "high_risks", 0)),
+            "last_uncertain_risks": _consequence_count(getattr(
+                receipt, "uncertain_risks", 0)),
+            "last_relisten_status": relisten_status,
+            "last_relisten_selected": _consequence_count(getattr(
+                receipt, "relisten_selected", 0)),
+            "last_relisten_attempted": _consequence_count(getattr(
+                receipt, "relisten_attempted", 0)),
+            "last_relisten_confirmed": _consequence_count(getattr(
+                receipt, "relisten_confirmed", 0)),
+            "last_relisten_contradicted": _consequence_count(getattr(
+                receipt, "relisten_contradicted", 0)),
+            "last_relisten_inconclusive": _consequence_count(getattr(
+                receipt, "relisten_inconclusive", 0)),
+            "last_relisten_skipped": skipped,
+        }
+    except Exception:
+        values = {
+            "last_consequence_route": "unavailable",
+            "last_risk_counts": {},
+            "last_high_risks": 0,
+            "last_uncertain_risks": 0,
+            "last_relisten_status": "unavailable",
+            "last_relisten_selected": 0,
+            "last_relisten_attempted": 0,
+            "last_relisten_confirmed": 0,
+            "last_relisten_contradicted": 0,
+            "last_relisten_inconclusive": 0,
+            "last_relisten_skipped": {"receipt-error": 1},
+        }
+    PIPELINE_STATE.update(values)
+    return values
+
+
+def runtime_consequence_evidence(
+        voice: VoiceIR, audio, *, sample_rate: int, audio_duration: float,
+        verifier=None, evaluator=None) -> float:
+    """Evaluate evidence without allowing a receipt failure to lose dictation."""
+    started = time.perf_counter()
+    try:
+        receipt = (evaluator or consequence_receipt)(
+            voice,
+            audio=audio,
+            sample_rate=sample_rate,
+            audio_duration=audio_duration,
+            verifier=verifier,
+        )
+    except Exception:
+        receipt = None
+    store_consequence_receipt(receipt)
+    return max(0.0, time.perf_counter() - started)
+
+
+def consequence_state_snapshot() -> dict:
+    """Copy the fixed allowlisted consequence aggregates for UI/telemetry."""
+    return {
+        "route": PIPELINE_STATE["last_consequence_route"],
+        "risk_counts": dict(PIPELINE_STATE["last_risk_counts"]),
+        "high_risks": PIPELINE_STATE["last_high_risks"],
+        "uncertain_risks": PIPELINE_STATE["last_uncertain_risks"],
+        "relisten_status": PIPELINE_STATE["last_relisten_status"],
+        "relisten_selected": PIPELINE_STATE["last_relisten_selected"],
+        "relisten_attempted": PIPELINE_STATE["last_relisten_attempted"],
+        "relisten_confirmed": PIPELINE_STATE["last_relisten_confirmed"],
+        "relisten_contradicted": PIPELINE_STATE[
+            "last_relisten_contradicted"],
+        "relisten_inconclusive": PIPELINE_STATE[
+            "last_relisten_inconclusive"],
+        "relisten_skipped": dict(PIPELINE_STATE["last_relisten_skipped"]),
+    }
 
 
 def match_snippet(raw: str) -> tuple[str, str] | None:
@@ -5268,10 +5444,15 @@ def assemble_raw(chunk_futs: list, pre_future,
                  rem_full: np.ndarray, prompt=None) -> Recognition:
     """Join rolling chunks and exactly one remainder decode."""
     def harvest(fut, parts, confidences, alternatives):
-        nonlocal elapsed
+        nonlocal elapsed, timing_reliable
         try:
             result = fut.result()
         except Exception as e:
+            # Without the failed chunk's absolute source bounds, every later
+            # relative word timestamp becomes unsafe for selective audio
+            # replay. Keep the surviving text but downgrade all assembled
+            # timing evidence below after harvesting completes.
+            timing_reliable = False
             print(f"! chunk decode failed: {e}")
             return
         if isinstance(result, str):
@@ -5300,7 +5481,13 @@ def assemble_raw(chunk_futs: list, pre_future,
                 alternatives.append(result.alternative)
 
     parts, confidences, alternatives, engines, verifications = [], [], [], [], []
+    # Rolling/speculative futures currently carry decoder-relative duration,
+    # not absolute capture sample bounds. Even successful multi-chunk offsets
+    # can drift across the silence between a speculative snapshot and its cut.
+    # Preserve the text path but permit native re-listen timing only for the
+    # single-remainder case until each future owns absolute source bounds.
     words, elapsed = [], 0.0
+    timing_reliable = not bool(chunk_futs)
     for f in chunk_futs:
         harvest(f, parts, confidences, alternatives)
     if pre_future is not None:
@@ -5314,6 +5501,10 @@ def assemble_raw(chunk_futs: list, pre_future,
             confidences,
             alternatives,
         )
+    if not timing_reliable:
+        words = [RecognitionWord(
+            word.text, word.start, word.end, word.confidence, "segment")
+            for word in words]
     return Recognition(
         text=" ".join(parts).strip(),
         confidence=min(confidences) if confidences else 0.0,
@@ -5409,6 +5600,16 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             context_pack=rec.context_pack,
         )
         t_compile = time.perf_counter() - compiler_started_at
+        # Evidence-only in this slice: the receipt never changes recognition,
+        # cleanup, insertion, or model routing. With no strict local verifier
+        # installed, uncertain timed spans are honestly recorded as skipped.
+        t_consequence = runtime_consequence_evidence(
+            voice_ir,
+            full_audio,
+            sample_rate=SAMPLE_RATE,
+            audio_duration=duration,
+            verifier=CONSEQUENCE_VERIFIER,
+        )
         raw = compiler_result.text
         alternatives = []
         if recognition.alternative:
@@ -5654,11 +5855,14 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         PIPELINE_STATE["last_asr_engine"] = recognition.engine or "unknown"
         PIPELINE_STATE["last_release_s"] = release_total
         PIPELINE_STATE["last_word_count"] = len(text.split())
+        consequence_metrics = consequence_state_snapshot()
         print(f"[release {release_total:.2f}s | press {press_total:.2f}s | "
               f"{path} | ready {audio_ready:.2f}s | tail {tail_wait:.2f}s | "
               f"asr {t_asr:.2f}s/{recognition.engine or 'unknown'}"
               f"@{compiler_result.confidence:.0%} | "
               f"compile {t_compile:.3f}s/{len(compiler_result.decisions)}d | "
+              f"risk {t_consequence:.3f}s/"
+              f"{consequence_metrics['route']} | "
               f"clean {t_clean:.2f}s | "
               f"{len(text.split())} words]")
         append_transcript(recognized_raw, text, bundle, path, metrics={
@@ -5668,6 +5872,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "tail_s": round(tail_wait, 4),
             "asr_s": round(t_asr, 4),
             "compiler_s": round(t_compile, 4),
+            "consequence_s": round(t_consequence, 4),
             "cleanup_s": round(t_clean, 4),
             "asr_engine": recognition.engine or "unknown",
             "confidence": round(compiler_result.confidence, 4),
@@ -5679,6 +5884,20 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "protected_anchors": len(compiler_result.anchors),
             "stable_prefix_words": len(
                 compiler_result.stable_prefix.split()),
+            "consequence_route": consequence_metrics["route"],
+            "consequence_risk_counts": consequence_metrics["risk_counts"],
+            "consequence_high_risks": consequence_metrics["high_risks"],
+            "consequence_uncertain_risks": consequence_metrics[
+                "uncertain_risks"],
+            "relisten_status": consequence_metrics["relisten_status"],
+            "relisten_selected": consequence_metrics["relisten_selected"],
+            "relisten_attempted": consequence_metrics["relisten_attempted"],
+            "relisten_confirmed": consequence_metrics["relisten_confirmed"],
+            "relisten_contradicted": consequence_metrics[
+                "relisten_contradicted"],
+            "relisten_inconclusive": consequence_metrics[
+                "relisten_inconclusive"],
+            "relisten_skipped": consequence_metrics["relisten_skipped"],
             "proof_edits_accepted": sum(
                 1 for edit in proof_edits if edit.accepted),
             "proof_edits_rejected": sum(
@@ -6089,6 +6308,21 @@ def main():
 if __name__ == "__main__":
     if "--platform-smoke-test" in sys.argv:
         platform_smoke_test()
+    elif "--native-gui-smoke-test" in sys.argv:
+        if not IS_MACOS:
+            print("Whisper Face native GUI smoke skipped on non-macOS.")
+        else:
+            try:
+                from whisper_face_gui import run_native_appkit_smoke
+
+                result = run_native_appkit_smoke()
+            except Exception:
+                print("Whisper Face native GUI smoke failed.", file=sys.stderr)
+                raise SystemExit(1)
+            print(
+                "Whisper Face native GUI smoke passed: "
+                f"{result['sections']} sections, "
+                f"{result['settings_panes']} settings panes.")
     elif "--preload-models" in sys.argv:
         preload_model_files()
     elif "--preload-parakeet-model" in sys.argv:

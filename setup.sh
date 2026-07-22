@@ -57,6 +57,35 @@ step() {
     echo "== $*"
 }
 
+run_with_timeout() {
+    # macOS does not ship GNU timeout. Bound verification without adding one.
+    local timeout_seconds="$1"
+    shift
+    local command_pid elapsed child_pids
+    "$@" &
+    command_pid=$!
+    elapsed=0
+    while kill -0 "$command_pid" 2>/dev/null; do
+        if [ "$elapsed" -ge "$timeout_seconds" ]; then
+            child_pids="$(pgrep -P "$command_pid" 2>/dev/null || true)"
+            if [ -n "$child_pids" ]; then
+                kill -TERM $child_pids 2>/dev/null || true
+            fi
+            kill -TERM "$command_pid" 2>/dev/null || true
+            sleep 1
+            if [ -n "$child_pids" ]; then
+                kill -KILL $child_pids 2>/dev/null || true
+            fi
+            kill -KILL "$command_pid" 2>/dev/null || true
+            wait "$command_pid" 2>/dev/null || true
+            return 124
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    wait "$command_pid"
+}
+
 escape_sed_replacement() {
     printf '%s' "$1" | sed 's/[&|\\]/\\&/g'
 }
@@ -149,6 +178,11 @@ verify_install() {
     plutil -lint "$dictate_plist" "$ollama_plist" >/dev/null
     "$uv_bin" lock --check --script "$DIR/dictate.py" >/dev/null
     "$uv_bin" sync --locked --script "$DIR/dictate.py" --check >/dev/null
+    if [ "$MODE" = "full" ]; then
+        run_with_timeout 30 "$uv_bin" run --locked \
+            --script "$DIR/dictate.py" --native-gui-smoke-test >/dev/null \
+            || fail "native AppKit construction smoke test failed or timed out"
+    fi
     "$uv_bin" run --locked --script "$DIR/dictate.py" \
         --verify-parakeet-model >/dev/null \
         || fail "Parakeet Unified model revision verification failed"

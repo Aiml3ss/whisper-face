@@ -1,0 +1,46 @@
+name: Performance lifecycle simulation
+
+on:
+  schedule:
+    - cron: '41 15 * * 3'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-lifecycle-simulation
+  cancel-in-progress: false
+
+jobs:
+  deterministic-adapter-simulation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out lifecycle harness
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Run performance lab tests
+        run: python3 tests/test_performance_lab.py
+
+      - name: Generate simulation-only lifecycle evidence
+        id: lifecycle
+        continue-on-error: true
+        run: >-
+          python3 performance_lab.py lifecycle
+          --iterations 25
+          --format json
+          > "$RUNNER_TEMP/lifecycle-simulation.json"
+
+      - name: Preserve simulation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: performance-lifecycle-${{ github.run_id }}
+          path: ${{ runner.temp }}/lifecycle-simulation.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Propagate simulation failure after evidence upload
+        if: steps.lifecycle.outcome == 'failure'
+        run: exit 1
