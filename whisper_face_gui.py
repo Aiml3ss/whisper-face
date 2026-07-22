@@ -4682,6 +4682,13 @@ if APPKIT_AVAILABLE:
             self.inspectVoiceObjects_(None)
 
         @objc.python_method
+        def show_results(self) -> None:
+            """Open the existing transcript-free Last Result inspector."""
+            self.show()
+            self.view_model.select_section("Results")
+            self.render()
+
+        @objc.python_method
         def _configure_key_view_loop(self, state: GUIState) -> int:
             """Make Tab order explicit while leaving arrows to native controls."""
 
@@ -6870,6 +6877,15 @@ class WhisperFaceGUI:
             self._controller = WhisperFaceWindowController.alloc() \
                 .initWithViewModel_(self.view_model)
         self._controller.show_voice_inbox()
+
+    def show_results(self) -> None:
+        """Show the existing transcript-free Last Result inspector."""
+        if not APPKIT_AVAILABLE:
+            raise RuntimeError("The Whisper Face window requires macOS AppKit")
+        if self._controller is None:
+            self._controller = WhisperFaceWindowController.alloc() \
+                .initWithViewModel_(self.view_model)
+        self._controller.show_results()
 
 
 def create_gui(actions: GUIActions, *, locale: str = "en") -> WhisperFaceGUI:

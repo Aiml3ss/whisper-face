@@ -152,6 +152,56 @@ class RoutineLogPrivacyTests(unittest.TestCase):
                 self.assertIn(expected, source)
 
 
+class PhoneEndpointBindingTests(unittest.TestCase):
+    def test_only_explicit_server_mode_binds_beyond_loopback(self):
+        bind_host = load_definitions("phone_bind_host")["phone_bind_host"]
+
+        self.assertEqual(bind_host(False), "127.0.0.1")
+        self.assertEqual(bind_host(True), "0.0.0.0")
+        for invalid in (None, 0, 1, "server-only", object()):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(TypeError):
+                    bind_host(invalid)
+
+    def test_server_uses_localhost_for_desktop_and_lan_for_headless(self):
+        for server_only, expected_bind, expected_display in (
+                (False, "127.0.0.1", "127.0.0.1"),
+                (True, "0.0.0.0", "192.0.2.10")):
+            with self.subTest(server_only=server_only):
+                calls = []
+
+                class FakeServer:
+                    def __init__(self, address, handler):
+                        calls.append(("bind", address, handler))
+
+                    def serve_forever(self):
+                        calls.append(("serve",))
+
+                namespace = load_definitions(
+                    "phone_bind_host", "phone_server",
+                    extra={
+                        "SERVER_ONLY": server_only,
+                        "PHONE_PORT": 8787,
+                        "PhoneHandler": object(),
+                        "ThreadingHTTPServer": FakeServer,
+                        "lan_ip": lambda: "192.0.2.10",
+                    },
+                )
+                output = io.StringIO()
+                original_stdout = sys.stdout
+                try:
+                    sys.stdout = output
+                    namespace["phone_server"]()
+                finally:
+                    sys.stdout = original_stdout
+
+                self.assertEqual(
+                    calls[0][1], (expected_bind, 8787))
+                self.assertEqual(calls[-1], ("serve",))
+                self.assertIn(
+                    f"http://{expected_display}:8787/", output.getvalue())
+
+
 class GuiLauncherActivationTests(unittest.TestCase):
     def namespace(self, cleanups):
         return load_definitions(
@@ -1172,6 +1222,32 @@ class RecognitionMenuTitleTests(unittest.TestCase):
         self.assertEqual(title("Review"), "Last Recognition")
         self.assertEqual(title("review-needed"), "Last Recognition")
         self.assertEqual(title(None), "Last Recognition")
+
+    def test_last_result_shortcut_only_delegates_to_existing_gui(self):
+        status_bar = next(
+            node for node in TREE.body
+            if isinstance(node, ast.ClassDef) and node.name == "StatusBar")
+        methods = {
+            node.name: node for node in status_bar.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        rebuild_source = ast.unparse(methods["rebuild_recognition"])
+        self.assertIn("Open Last Result…", rebuild_source)
+        self.assertIn("openResults:", rebuild_source)
+
+        opener = methods["openResults_"]
+        attributes = {
+            node.attr for node in ast.walk(opener)
+            if isinstance(node, ast.Attribute)
+        }
+        names = {
+            node.id for node in ast.walk(opener) if isinstance(node, ast.Name)
+        }
+        self.assertIn("show_results", attributes)
+        self.assertFalse(names & {
+            "paste_text", "copy_voice_object_draft", "PhoneHandler",
+            "recognize", "transcribe", "compile_cleanup",
+        })
 
 
 class VoiceInboxMenuTests(unittest.TestCase):

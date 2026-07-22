@@ -2175,6 +2175,31 @@ class ViewModelTests(unittest.TestCase):
         self.assertEqual(calls[1:], [("show_voice_inbox",)])
         self.assertIsInstance(gui._controller, FakeController)
 
+    def test_results_facade_delegates_to_the_native_inspector(self):
+        calls = []
+
+        class FakeController:
+            @classmethod
+            def alloc(cls):
+                return cls()
+
+            def initWithViewModel_(self, view_model):
+                calls.append(("init", view_model))
+                return self
+
+            def show_results(self):
+                calls.append(("show_results",))
+
+        gui = create_gui(self.actions)
+        with patch.object(gui_module, "APPKIT_AVAILABLE", True), patch.object(
+                gui_module, "WhisperFaceWindowController", FakeController,
+                create=True):
+            gui.show_results()
+
+        self.assertIs(calls[0][1], gui.view_model)
+        self.assertEqual(calls[1:], [("show_results",)])
+        self.assertIsInstance(gui._controller, FakeController)
+
     def test_onboarding_and_degraded_guidance_routes_without_blocking(self):
         runtime = {
             "service_status": "Running",

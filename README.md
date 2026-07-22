@@ -254,9 +254,10 @@ are never Supporter-only features.
   corrections; Windows adds character, pause, Flight Recorder, logs, and quit.
 - **Experimental phone compatibility endpoint** — an OpenAI-compatible
   `/v1/audio/transcriptions` endpoint (port 8787) can support self-hosted
-  clients such as [Diction](https://diction.one). Native iPhone work is
-  deliberately deferred while the Mac experience is brought to product
-  quality.
+  clients such as [Diction](https://diction.one). Ordinary desktop mode binds
+  it to loopback; only an explicit `--server-only` install binds the trusted
+  LAN. Native iPhone work is deliberately deferred while the Mac experience
+  is brought to product quality.
 - **Always on** — installed as launch agents: starts at login, restarts on
   crash, keeps its models warm so the first dictation after a break is never
   slow.
@@ -337,7 +338,8 @@ While either evidenced permission is incomplete, Overview and Diagnostics show
 an accessible **Open System Settings** recovery action. It opens the generic
 macOS settings app, never changes a permission, and refreshes the displayed
 evidence while the Whisper Face window remains open.
-Allow the firewall prompt if you want the iPhone endpoint.
+Only an explicit headless `--server-only` install needs trusted-LAN/firewall
+access for the experimental compatibility endpoint.
 
 Windows may show standard package-install prompts. Enable **Microphone access**
 under Settings → Privacy & security if it is disabled. The Windows backend
@@ -362,8 +364,9 @@ definition and requires its exact digest receipt plus an exact match between
 the launchd PID and the endpoint's unique listener PID. Windows verifies its
 scheduled task's current-user principal, sole action, private launcher receipt,
 and exact current-checkout launcher before checking endpoint health and model
-presence. Its independently managed Ollama process does not currently provide
-the same task-to-listener identity binding.
+presence. Both platforms also verify that runtime logs exist with the expected
+user-private posture. Windows' independently managed Ollama process does not
+currently provide the same task-to-listener identity binding.
 
 ### Native Mac window
 
@@ -371,6 +374,8 @@ Click the selected animal in the menu bar and choose **Open Whisper Face…**.
 The menu bar remains the fastest everyday control, while the window provides a
 clear home for setup health, privacy controls, model status, character choice,
 and Voice Outbox recovery. Closing the window does not stop dictation.
+The **Last Recognition** submenu ends with **Open Last Result…** for a direct
+route to the existing transcript-free Results inspector.
 Diagnostics can copy a fixed support snapshot containing only categorized
 health/model state and numeric result aggregates; it excludes dictation text,
 context, paths, logs, personal language data, and machine identifiers.
@@ -394,7 +399,9 @@ the old transcript history.
 ```
 
 No hotkey, no HUD, no permission prompts—just the compatibility endpoint and
-the learning loop. This is not the planned native iPhone experience.
+the learning loop. This explicit mode binds port 8787 to reachable interfaces;
+use only a trusted LAN and firewall, and never forward it to the internet. This
+is not the planned native iPhone experience.
 Verify that headless installation later with `./setup.sh --server-only --verify`;
 the runtime/model/service checks still run while the AppKit construction gate
 is correctly skipped.

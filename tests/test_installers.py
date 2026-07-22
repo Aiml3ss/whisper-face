@@ -187,6 +187,42 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn("--verify-ollama-model", installer)
                 self.assertIn("show", installer)
 
+    def test_runtime_logs_are_private_before_services_can_write_them(self):
+        mac_provision = self.shell.index('provision_private_log "$dictate_log"')
+        mac_ollama = self.shell.index(
+            'step "configuring the tuned local Ollama service"')
+        mac_dictation = self.shell.index('step "installing the login LaunchAgent"')
+        self.assertLess(mac_provision, mac_ollama)
+        self.assertLess(mac_provision, mac_dictation)
+        for required in (
+            'private_log_is_valid() {',
+            '[ ! -L "$path" ]',
+            "stat -f '%Lp'",
+            'chmod 600 "$path"',
+            'private_log_is_valid "$private_log"',
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, self.shell)
+
+        windows_provision = self.powershell.index(
+            'foreach ($PrivateLog in @($Log, $OllamaLog, $OllamaErrorLog)) {\n    Set-PrivateFile $PrivateLog')
+        windows_ollama = self.powershell.index(
+            'Start-Process -FilePath $Ollama -ArgumentList "serve"')
+        self.assertLess(windows_provision, windows_ollama)
+        for required in (
+            'function Test-PrivateFile',
+            'function Set-PrivateFile',
+            'Get-ChildItem -Force -LiteralPath $Parent -ErrorAction Stop',
+            'SetAccessRuleProtection($true, $false)',
+            'SetOwner($CurrentSid)',
+            'FileSystemRights]::FullControl',
+            'Test-PrivateFile $PrivateLog',
+            '$OllamaLog = Join-Path $Repo "ollama.log"',
+            '$OllamaErrorLog = Join-Path $Repo "ollama-error.log"',
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, self.powershell)
+
     def test_mac_ollama_identity_helper_fails_closed(self):
         helper_start = self.shell.index("ollama_listener_pid()")
         helper_end = self.shell.index("reload_agent()", helper_start)
@@ -263,20 +299,25 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn("--verify", installer)
                 self.assertIn("--verify-ollama-model", installer)
 
-    def test_windows_precreates_private_runtime_log_with_user_only_acl(self):
-        private_start = self.powershell.index(
-            'Write-Step "creating private per-machine files')
-        task_start = self.powershell.index(
-            'Write-Step "installing the Windows login task"')
-        private = self.powershell[private_start:task_start]
-        self.assertIn('New-Item -ItemType File -Path $Log -Force', private)
-        self.assertIn(
-            '& icacls $Log /inheritance:r /grant:r '
-            '"${env:USERNAME}:(F)" /Q',
-            private,
-        )
-        self.assertIn(
-            'throw "could not apply the private runtime log ACL"', private)
+    def test_windows_precreates_private_runtime_logs_with_verified_acl(self):
+        provision = self.powershell.index(
+            'foreach ($PrivateLog in @($Log, $OllamaLog, $OllamaErrorLog)) {\n'
+            '    Set-PrivateFile $PrivateLog')
+        start = self.powershell.index(
+            'Start-Process -FilePath $Ollama -ArgumentList "serve"')
+        self.assertLess(provision, start)
+        for required in (
+            'New-Item -ItemType File -Path $Path -Force',
+            'Get-ChildItem -Force -LiteralPath $Parent -ErrorAction Stop',
+            'SetAccessRuleProtection($true, $false)',
+            'SetOwner($CurrentSid)',
+            'throw "could not apply a private runtime log ACL: $Path"',
+            'if (-not (Test-PrivateFile $PrivateLog))',
+            '$OllamaLog = Join-Path $Repo "ollama.log"',
+            '$OllamaErrorLog = Join-Path $Repo "ollama-error.log"',
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, self.powershell)
 
     def test_windows_verify_binds_login_task_to_its_current_checkout(self):
         helper_start = self.powershell.index("function Confirm-TaskLauncherBinding")

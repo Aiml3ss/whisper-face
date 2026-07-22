@@ -67,6 +67,64 @@ function Test-Endpoint([string]$Uri) {
     }
 }
 
+function Test-PrivateFile([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    try {
+        $Item = Get-Item -Force -LiteralPath $Path
+        if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            return $false
+        }
+        $CurrentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $Acl = Get-Acl -LiteralPath $Path
+        $Owner = ([Security.Principal.NTAccount]$Acl.Owner).Translate(
+            [Security.Principal.SecurityIdentifier])
+        $Rules = @($Acl.Access)
+        if (-not $Acl.AreAccessRulesProtected -or
+                $Owner.Value -ne $CurrentSid.Value -or $Rules.Count -ne 1) {
+            return $false
+        }
+        $Rule = $Rules[0]
+        $Identity = $Rule.IdentityReference.Translate(
+            [Security.Principal.SecurityIdentifier])
+        return $Rule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and
+            $Rule.FileSystemRights -eq [System.Security.AccessControl.FileSystemRights]::FullControl -and
+            -not $Rule.IsInherited -and $Identity.Value -eq $CurrentSid.Value
+    } catch {
+        return $false
+    }
+}
+
+function Set-PrivateFile([string]$Path) {
+    $Parent = Split-Path -Parent $Path
+    $Leaf = Split-Path -Leaf $Path
+    $Item = Get-ChildItem -Force -LiteralPath $Parent -ErrorAction Stop |
+        Where-Object { $_.Name -ieq $Leaf } | Select-Object -First 1
+    if ($null -ne $Item) {
+        if (-not $Item.PSIsContainer -and
+                (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0)) {
+            # Preserve existing content; only repair its ownership and ACL.
+        } else {
+            throw "private runtime log is not a regular file: $Path"
+        }
+    } else {
+        New-Item -ItemType File -Path $Path -Force | Out-Null
+    }
+    $CurrentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $Acl = Get-Acl -LiteralPath $Path
+    $Acl.SetAccessRuleProtection($true, $false)
+    foreach ($Rule in @($Acl.Access)) {
+        [void]$Acl.RemoveAccessRuleAll($Rule)
+    }
+    $Acl.SetOwner($CurrentSid)
+    $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $CurrentSid, [System.Security.AccessControl.FileSystemRights]::FullControl,
+        [System.Security.AccessControl.AccessControlType]::Allow)))
+    Set-Acl -LiteralPath $Path -AclObject $Acl
+    if (-not (Test-PrivateFile $Path)) {
+        throw "could not apply a private runtime log ACL: $Path"
+    }
+}
+
 $Required = @(
     "dictate.py", "dictate.py.lock", "parrot_core.py", "voice_compiler.py",
     "insertion_integrity.py", "personal_regression.py",
@@ -115,6 +173,8 @@ $LauncherDir = Join-Path $Repo ".windows"
 $Launcher = Join-Path $LauncherDir "launch.ps1"
 $LauncherReceipt = Join-Path $LauncherDir "launch.sha256"
 $Log = Join-Path $Repo "dictate.log"
+$OllamaLog = Join-Path $Repo "ollama.log"
+$OllamaErrorLog = Join-Path $Repo "ollama-error.log"
 
 function Get-InstalledTools {
     Refresh-ProcessPath
@@ -211,6 +271,11 @@ function Confirm-Installation {
     if (-not $Uv) { throw "uv is not installed" }
     if (-not $Ffmpeg) { throw "ffmpeg is not installed" }
     if (-not $Ollama) { throw "Ollama is not installed" }
+    foreach ($PrivateLog in @($Log, $OllamaLog, $OllamaErrorLog)) {
+        if (-not (Test-PrivateFile $PrivateLog)) {
+            throw "private runtime log is missing or has an unsafe ACL"
+        }
+    }
     Confirm-TaskLauncherBinding
     $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
     if ($Task.State -ne "Running") {
@@ -272,11 +337,14 @@ if (-not $Uv -or -not $Ffmpeg -or -not $Ollama) {
 }
 
 Write-Step "starting the local Ollama service"
+foreach ($PrivateLog in @($Log, $OllamaLog, $OllamaErrorLog)) {
+    Set-PrivateFile $PrivateLog
+}
 if (-not (Test-Endpoint "http://127.0.0.1:11434/api/tags")) {
     Start-Process -FilePath $Ollama -ArgumentList "serve" `
         -WindowStyle Hidden `
-        -RedirectStandardOutput (Join-Path $Repo "ollama.log") `
-        -RedirectStandardError (Join-Path $Repo "ollama-error.log")
+        -RedirectStandardOutput $OllamaLog `
+        -RedirectStandardError $OllamaErrorLog
 }
 $OllamaReady = $false
 for ($Attempt = 0; $Attempt -lt 60; $Attempt++) {
@@ -328,14 +396,6 @@ foreach ($PrivateStateName in @("voice_inbox.json", "demonstrations.json")) {
         & icacls $PrivateState /inheritance:r /grant:r "${env:USERNAME}:(F)" /Q | Out-Null
     }
 }
-if (-not (Test-Path $Log)) {
-    New-Item -ItemType File -Path $Log -Force | Out-Null
-}
-& icacls $Log /inheritance:r /grant:r "${env:USERNAME}:(F)" /Q | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    throw "could not apply the private runtime log ACL"
-}
-
 Write-Step "installing the Windows login task"
 New-Item -ItemType Directory -Force -Path $LauncherDir | Out-Null
 $ExtraArgument = if ($Mode -eq "server-only") { " --server-only" } else { "" }

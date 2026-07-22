@@ -24,13 +24,15 @@ microphone -> local ASR -> VoiceIR/Compiler -> local Ollama -> insertion lease
     + RAM audio    + model files   + context        + localhost    + target app
 
 release producer -> Git commit -> signed/notarized artifact -> local installer
-phone/LAN client ---------------------------------> port 8787 endpoint
+local client ----------------------------> desktop loopback port 8787 endpoint
+phone/LAN client ------------------------> explicit server-only port 8787
 ```
 
 The operating system permission system, installed user account, local model
 processes, source checkout, and target applications are separate principals.
-Loopback reduces exposure but does not make a process trustworthy. The current
-port 8787 endpoint is a larger boundary because it binds to network interfaces.
+Loopback reduces exposure but does not make a process trustworthy. Ordinary
+desktop mode keeps port 8787 on loopback; only explicit `--server-only` mode
+widens that boundary to reachable network interfaces.
 
 ## In-scope adversaries and failures
 
@@ -40,7 +42,8 @@ port 8787 endpoint is a larger boundary because it binds to network interfaces.
   insertion;
 - another local process reading private files, impersonating Ollama, changing a
   model, or calling the transcription endpoint;
-- another reachable LAN device sending audio or exhausting the endpoint;
+- in explicit `--server-only` mode, another reachable LAN device sending audio
+  or exhausting the endpoint;
 - a compromised dependency, model host, release artifact, mirror, or update
   manifest;
 - accidental developer release from a dirty tree or an ambiguous source tag;
@@ -61,7 +64,7 @@ application alone can prevent. They remain important deployment risks.
 | Model drift | Whisper, Parakeet, FluidAudio, and Qwen artifacts/revisions are pinned and verified. | Upstream package installers and first download remain supply-chain dependencies. |
 | Release substitution | Exact Git archive, SHA-256 manifest, SHA256SUMS, Apple Developer ID signature, notarization, and stapling for public Mac releases. | The update manifest is not yet independently threshold-signed. |
 | Source/license mismatch | Artifact includes exact corresponding source and notices; manifest binds its full revision and source URLs. | A distributor can violate policy; recipients can compare the digest and source. |
-| LAN endpoint abuse | Intended for a trusted local network; source and license endpoints disclose the running revision. | Port 8787 is unauthenticated and not safe to expose to the internet. |
+| LAN endpoint abuse | Desktop mode is loopback-only. Explicit `--server-only` is intended for a trusted local network; source and license endpoints disclose the running revision. | The headless port 8787 endpoint is unauthenticated and not safe to expose to the internet. |
 
 ## Security invariants
 
