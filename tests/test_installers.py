@@ -142,6 +142,8 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn("risky_action_confirmation.py", installer)
                 self.assertIn("point_and_speak_resolver.py", installer)
                 self.assertIn("macos_point_and_speak_snapshot.py", installer)
+                self.assertIn("macos_drop_to_target_snapshot.py", installer)
+                self.assertIn("drop_to_target.py", installer)
                 self.assertIn("whisper_face_gui.py", installer)
                 self.assertIn("dictate.py.lock", installer)
                 self.assertIn("--preload-models", installer)

@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_TOOL = ROOT / "scripts" / "release_manifest.py"
 PACKAGE_SCRIPT = ROOT / "scripts" / "package_macos.sh"
+PACKAGE_VERIFIER = ROOT / "scripts" / "verify_macos_package.py"
 REVISION = "1" * 40
 PREVIOUS_REVISION = "2" * 40
 
@@ -185,14 +186,62 @@ class MacDistributionContractTests(unittest.TestCase):
     def read(self, relative: str) -> str:
         return (ROOT / relative).read_text(encoding="utf-8")
 
+    def run_package_verifier(self, *arguments: str, check: bool = True):
+        return subprocess.run(
+            [sys.executable, str(PACKAGE_VERIFIER), *arguments],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=check,
+        )
+
+    def test_package_tree_receipt_is_deterministic_and_detects_tampering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Whisper Face 1.2.3"
+            nested = root / "source"
+            nested.mkdir(parents=True)
+            executable = nested / "Install.command"
+            executable.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            data = nested / "payload.txt"
+            data.write_text("exact source\n", encoding="utf-8")
+            arguments = (
+                "stamp", "--root", str(root), "--version", "1.2.3",
+                "--revision", REVISION, "--source-date-epoch", "1700000000",
+            )
+            self.run_package_verifier(*arguments)
+            first = (root / "PACKAGE-CONTENTS.json").read_bytes()
+            self.run_package_verifier(*arguments)
+            self.assertEqual(first, (root / "PACKAGE-CONTENTS.json").read_bytes())
+            receipt = json.loads(first)
+            self.assertEqual(receipt["source_revision"], REVISION)
+            self.assertEqual(receipt["source_date_epoch"], 1700000000)
+            self.assertEqual(int(data.stat().st_mtime), 1700000000)
+            self.run_package_verifier(
+                "verify-tree", "--root", str(root), "--version", "1.2.3",
+                "--revision", REVISION,
+            )
+
+            data.write_text("tampered\n", encoding="utf-8")
+            tampered = self.run_package_verifier(
+                "verify-tree", "--root", str(root), "--version", "1.2.3",
+                "--revision", REVISION, check=False,
+            )
+            self.assertEqual(tampered.returncode, 2)
+            self.assertIn("tree digest mismatch", tampered.stderr)
+
     def test_packager_exports_one_exact_source_and_applies_apple_trust(self):
         script = self.read("scripts/package_macos.sh")
         for expected in (
             "git -C \"$REPO_DIR\" archive \"$FULL_REVISION\"",
             "fetch -q --depth 1",
+            "config core.logAllRefUpdates false",
             "packaged checkout lost its immutable source revision",
             "https://github.com/Aiml3ss/whispering-parrot.git",
             "RELEASE-METADATA.json",
+            "SOURCE_DATE_EPOCH",
+            "verify_macos_package.py\" stamp",
+            "verify_macos_package.py\" verify-artifacts",
             "hdiutil create",
             "codesign --verify --strict",
             "xcrun notarytool submit",
@@ -207,6 +256,8 @@ class MacDistributionContractTests(unittest.TestCase):
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, script)
+        self.assertIn("PACKAGE-CONTENTS.json", self.read(
+            "scripts/verify_macos_package.py"))
         # Native Windows may expose a ``bash.exe`` WSL launcher even when no
         # Linux distribution is installed.  Keep the package-contract checks
         # platform independent, and run the shell parser everywhere Bash is a
@@ -222,6 +273,7 @@ class MacDistributionContractTests(unittest.TestCase):
             "APPLE_APP_SPECIFIC_PASSWORD",
             "uv lock --check --script dictate.py",
             "uv run tests/test_macos_distribution.py",
+            "verify_macos_package.py verify-artifacts",
             "--sign",
             "--notarize",
             "shasum -a 256 -c SHA256SUMS",

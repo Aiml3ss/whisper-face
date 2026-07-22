@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 from whisper_face_gui import (
     APPKIT_AVAILABLE,
     AcousticKeywordCandidate,
+    DROP_TARGET_MAX_PHRASE_CHARS,
     FACES,
     GUIActions,
     POINT_AND_SPEAK_MAX_PHRASE_CHARS,
@@ -30,6 +31,7 @@ from whisper_face_gui import (
     localized_string,
     native_appkit_smoke_contract,
     normalize_acoustic_keyword_inspection,
+    normalize_drop_target_preview,
     normalize_point_and_speak_preview,
     normalize_snapshot,
     normalize_settings,
@@ -43,6 +45,39 @@ from whisper_face_gui import (
 
 
 class SnapshotTests(unittest.TestCase):
+    @staticmethod
+    def drop_preview(
+        *, state="resolved", name="Team Inbox", role="AXGroup",
+        capture_state="captured",
+    ):
+        captured = capture_state == "captured"
+        return {
+            "schema_version": 1,
+            "state": state,
+            "accessibility_name": name,
+            "role": role if state == "resolved" else "",
+            "declared_role": role,
+            "source_kind": "file_reference",
+            "effect": "copy",
+            "receipt": {
+                "schema_version": 1,
+                "capture_state": capture_state,
+                "observed_elements": 8 if captured else 0,
+                "emitted_targets": 2 if captured else 0,
+                "skipped_elements": 1 if captured else 0,
+                "truncated": False,
+                "observed_targets": 2 if captured else 0,
+                "eligible_targets": 1 if captured else 0,
+                "contradiction_count": 0,
+                "evidence": ["exact_name", "source_compatible",
+                             "effect_compatible"] if captured else [],
+                "confidence_bucket": "very_high" if captured else "none",
+                "margin_bucket": "wide" if captured else "none",
+                "capability_basis": "caller_declared_role_policy",
+                "execution": "none",
+            },
+        }
+
     @staticmethod
     def point_preview(
         *, state="resolved", name="Save Changes", role="button",
@@ -88,6 +123,28 @@ class SnapshotTests(unittest.TestCase):
             state="ambiguous", name="Secret target", role="button")
         with self.assertRaisesRegex(ValueError, "malformed"):
             normalize_point_and_speak_preview(malformed)
+
+    def test_drop_target_preview_projection_is_strict_transient_and_inert(self):
+        preview = normalize_drop_target_preview(self.drop_preview())
+
+        self.assertEqual(preview.state, "resolved")
+        self.assertEqual(preview.accessibility_name, "Team Inbox")
+        self.assertEqual(preview.declared_role, "AXGroup")
+        self.assertEqual(preview.receipt.execution, "none")
+        self.assertEqual(
+            preview.receipt.capability_basis,
+            "caller_declared_role_policy")
+        self.assertNotIn("Team Inbox", repr(preview))
+
+        malformed = self.drop_preview()
+        malformed["target_id"] = "private-identifier"
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            normalize_drop_target_preview(malformed)
+
+        malformed = self.drop_preview()
+        malformed["receipt"]["execution"] = "drop"
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            normalize_drop_target_preview(malformed)
 
     @staticmethod
     def keyword_export(keyword="Qwen"):
@@ -359,6 +416,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertIn("select_section", contract.model_actions)
         self.assertIn("forget_snippet", contract.model_actions)
         self.assertIn("preview_point_and_speak", contract.model_actions)
+        self.assertIn("preview_drop_to_target", contract.model_actions)
         self.assertIn(
             "click_risky_action_confirmation", contract.model_actions)
         for key in contract.accessibility_catalog_keys:
@@ -821,6 +879,61 @@ class ViewModelTests(unittest.TestCase):
                 self.assertEqual(preview.state, state)
                 self.assertEqual(preview.accessibility_name, "")
                 self.assertEqual(preview.role, "")
+
+    def test_drop_target_preview_is_explicit_inert_and_never_enters_state(self):
+        calls = []
+        private_name = "Project Bluebird Team Inbox"
+        model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {},
+            preview_drop_to_target=lambda phrase, role, source, effect: (
+                calls.append((phrase, role, source, effect))
+                or SnapshotTests.drop_preview(name=private_name)),
+        ))
+
+        preview = model.preview_drop_to_target(
+            "team inbox", "AXGroup", "file_reference", "copy")
+
+        self.assertEqual(calls, [(
+            "team inbox", "AXGroup", "file_reference", "copy")])
+        self.assertEqual(preview.accessibility_name, private_name)
+        self.assertEqual(preview.receipt.execution, "none")
+        self.assertNotIn(private_name, repr(model.state))
+        self.assertNotIn(private_name, support_snapshot_text(model.state))
+        self.assertNotIn(private_name, repr(preview))
+        for invalid in ("", "line\nbreak", "x" * (
+                DROP_TARGET_MAX_PHRASE_CHARS + 1)):
+            with self.subTest(invalid_length=len(invalid)):
+                with self.assertRaisesRegex(ValueError, "between 1"):
+                    model.preview_drop_to_target(
+                        invalid, "AXGroup", "file_reference", "copy")
+        with self.assertRaisesRegex(ValueError, "capability"):
+            model.preview_drop_to_target(
+                "inbox", "AXButton", "file_reference", "copy")
+        self.assertEqual(len(calls), 1)
+
+    def test_drop_target_permission_and_malformed_execution_fail_closed(self):
+        denied = SnapshotTests.drop_preview(
+            state="permission_denied", name="", role="AXGroup",
+            capture_state="permission_denied")
+        model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {},
+            preview_drop_to_target=lambda *_args: denied,
+        ))
+        preview = model.preview_drop_to_target(
+            "inbox", "AXGroup", "file_reference", "copy")
+        self.assertEqual(preview.state, "permission_denied")
+        self.assertEqual(preview.accessibility_name, "")
+
+        poisoned = SnapshotTests.drop_preview()
+        poisoned["receipt"]["execution"] = "drop"
+        model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {},
+            preview_drop_to_target=lambda *_args: poisoned,
+        ))
+        preview = model.preview_drop_to_target(
+            "inbox", "AXGroup", "file_reference", "copy")
+        self.assertEqual(preview.state, "unavailable")
+        self.assertEqual(preview.accessibility_name, "")
 
     def test_dynamic_accessibility_updates_label_and_value_together(self):
         class FakeControl:

@@ -76,6 +76,31 @@ POINT_AND_SPEAK_EVIDENCE = frozenset({
     "exact", "normalized", "token", "role", "selection", "focus",
     "ordinal", "spatial",
 })
+DROP_TARGET_MAX_PHRASE_CHARS = 96
+DROP_TARGET_ROLES = (
+    "AXGroup", "AXImage", "AXList", "AXScrollArea",
+)
+DROP_TARGET_ROLE_LABELS = (
+    "Group", "Image", "List", "Scroll area",
+)
+DROP_TARGET_SOURCE_KINDS = (
+    "file_reference", "image_reference", "text_selection", "url_reference",
+)
+DROP_TARGET_SOURCE_LABELS = (
+    "File reference", "Image reference", "Text selection", "URL reference",
+)
+DROP_TARGET_EFFECTS = ("copy", "link", "move")
+DROP_TARGET_EFFECT_LABELS = ("Copy", "Link", "Move")
+DROP_TARGET_STATES = frozenset({
+    "resolved", "ambiguous", "unavailable", "permission_denied",
+})
+DROP_TARGET_CAPTURE_STATES = frozenset({
+    "captured", "unavailable", "permission_denied",
+})
+DROP_TARGET_EVIDENCE = frozenset({
+    "exact_name", "normalized_name", "token_name", "source_compatible",
+    "effect_compatible", "constraint_conflict",
+})
 MODEL_WALLET_CAPABILITIES = frozenset({
     "fast_asr", "final_asr", "cleanup",
 })
@@ -301,6 +326,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "diagnostics.action.verify": "Run Verification",
         "diagnostics.action.point_and_speak": "Preview Point-and-Speak…",
         "diagnostics.action.point_and_speak.help": "Enter a short target phrase for a read-only preview. Whisper Face briefly hides, reads only bounded Accessibility names and metadata from the focused app, and never clicks, focuses, types, pastes, or runs an action.",
+        "diagnostics.action.drop_target": "Preview Drop Target…",
+        "diagnostics.action.drop_target.help": "Declare a hypothetical target role, source kind, and effect for a read-only preview. Whisper Face reads bounded Accessibility capability evidence and never drags, drops, clicks, focuses, pastes, or performs an AX action.",
         "diagnostics.action.licenses": "License Notices",
         "diagnostics.action.source": "Exact Source",
         "diagnostics.verification.not_run": "Not run",
@@ -340,6 +367,29 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "point_and_speak.result.yes": "yes",
         "point_and_speak.result.no": "no",
         "point_and_speak.validation.phrase": "Enter one target phrase between 1 and {limit} characters.",
+        "drop_target.dialog.title": "Preview Drop-to-Target",
+        "drop_target.dialog.message": "Enter a target phrase and explicitly declare the role, source kind, and effect to test. Accessibility cannot prove those source/effect semantics. After you choose Preview, Whisper Face briefly hides and performs read-only capture only—never a drag, drop, write, or Accessibility action.",
+        "drop_target.dialog.input.label": "Drop target phrase",
+        "drop_target.dialog.input.help": "Describe one potential target by its bounded accessible name.",
+        "drop_target.dialog.role.label": "Declared target role",
+        "drop_target.dialog.role.help": "A hypothetical caller policy, not a capability inferred or proven by macOS.",
+        "drop_target.dialog.source.label": "Hypothetical source kind",
+        "drop_target.dialog.source.help": "A content-free source category only; no file, image, selection, URL, path, or payload is read.",
+        "drop_target.dialog.effect.label": "Hypothetical effect",
+        "drop_target.dialog.effect.help": "The effect to evaluate; this preview never executes it.",
+        "drop_target.action.preview": "Preview",
+        "drop_target.action.cancel": "Cancel",
+        "drop_target.result.title.resolved": "Hypothetical target resolved",
+        "drop_target.result.title.ambiguous": "Hypothetical target is ambiguous",
+        "drop_target.result.title.unavailable": "No eligible target available",
+        "drop_target.result.title.permission_denied": "Accessibility permission is needed",
+        "drop_target.result.selection": "Transient Accessibility name: {name}\nDeclared role: {role}\nHypothetical source/effect: {source} / {effect}\n\n{receipt}",
+        "drop_target.result.policy": "Declared role: {role}\nHypothetical source/effect: {source} / {effect}\n\n{receipt}",
+        "drop_target.result.receipt": "Read-only, no-execution receipt: capture {capture}; capability basis {basis}; {observed} elements observed; {emitted} policy-matching targets emitted; {eligible} operationally eligible; {contradictions} contradictions; confidence {confidence}; margin {margin}; evidence {evidence}; truncated {truncated}; execution {execution}.",
+        "drop_target.result.none": "none",
+        "drop_target.result.yes": "yes",
+        "drop_target.result.no": "no",
+        "drop_target.validation.phrase": "Enter one target phrase between 1 and {limit} characters.",
         "issue.service.title": "The local service is not ready",
         "issue.service.detail": "Run Verification for a repair path. Your settings and personal data stay on this Mac.",
         "issue.microphone.title": "Microphone permission is needed",
@@ -738,6 +788,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "play_retained_span",
             "clear_retained_spans",
             "preview_point_and_speak",
+            "preview_drop_to_target",
         ),
         accessibility_catalog_keys=(
             "overview.accessibility.phase",
@@ -786,6 +837,10 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "models.accessibility.wallet",
             "diagnostics.accessibility.verification",
             "point_and_speak.dialog.input.label",
+            "drop_target.dialog.input.label",
+            "drop_target.dialog.role.label",
+            "drop_target.dialog.source.label",
+            "drop_target.dialog.effect.label",
         ),
         onboarding_steps=(
             "permissions", "hotkey", "models", "first_dictation"),
@@ -859,6 +914,9 @@ class GUIActions:
     copy_latest_outbox: Callable[[], None] = _noop
     preview_point_and_speak: Callable[[str], Mapping[str, Any]] = (
         lambda _phrase: {})
+    preview_drop_to_target: Callable[
+        [str, str, str, str], Mapping[str, Any]
+    ] = lambda _phrase, _role, _source_kind, _effect: {}
     rerun_verification: Callable[[], Any] = _noop
 
 
@@ -987,6 +1045,40 @@ class PointAndSpeakPreview:
     role: str = ""
     receipt: PointAndSpeakReceipt = field(default_factory=lambda:
         PointAndSpeakReceipt(
+            "unavailable", 0, 0, 0, False, 0, 0, 0))
+
+
+@dataclass(frozen=True)
+class DropTargetReceipt:
+    """Content-free capability and decision evidence for one preview."""
+
+    capture_state: str
+    observed_elements: int
+    emitted_targets: int
+    skipped_elements: int
+    truncated: bool
+    observed_targets: int
+    eligible_targets: int
+    contradiction_count: int
+    evidence: tuple[str, ...] = field(default_factory=tuple)
+    confidence_bucket: str = "none"
+    margin_bucket: str = "none"
+    capability_basis: str = "caller_declared_role_policy"
+    execution: str = "none"
+
+
+@dataclass(frozen=True, repr=False)
+class DropTargetPreview:
+    """Transient inert result; accessible target text is never GUI state."""
+
+    state: str
+    accessibility_name: str = field(default="", repr=False)
+    role: str = ""
+    declared_role: str = ""
+    source_kind: str = ""
+    effect: str = ""
+    receipt: DropTargetReceipt = field(default_factory=lambda:
+        DropTargetReceipt(
             "unavailable", 0, 0, 0, False, 0, 0, 0))
 
 
@@ -1424,6 +1516,108 @@ def normalize_point_and_speak_preview(
             evidence=tuple(evidence),
             confidence_bucket=raw_receipt["confidence_bucket"],
             margin_bucket=raw_receipt["margin_bucket"],
+        ),
+    )
+
+
+def normalize_drop_target_preview(
+    snapshot: Mapping[str, Any] | None,
+) -> DropTargetPreview:
+    """Validate the closed, transient, no-execution target projection."""
+
+    if not isinstance(snapshot, Mapping) or set(snapshot) != {
+            "schema_version", "state", "accessibility_name", "role",
+            "declared_role", "source_kind", "effect", "receipt",
+            } or snapshot.get("schema_version") != 1:
+        raise ValueError("Drop-to-Target preview is malformed")
+    state = snapshot.get("state")
+    name = snapshot.get("accessibility_name")
+    role = snapshot.get("role")
+    declared_role = snapshot.get("declared_role")
+    source_kind = snapshot.get("source_kind")
+    effect = snapshot.get("effect")
+    raw = snapshot.get("receipt")
+    if (state not in DROP_TARGET_STATES
+            or not isinstance(name, str) or len(name) > 128
+            or any(ord(character) < 32 for character in name)
+            or not isinstance(role, str)
+            or declared_role not in DROP_TARGET_ROLES
+            or source_kind not in DROP_TARGET_SOURCE_KINDS
+            or effect not in DROP_TARGET_EFFECTS
+            or not isinstance(raw, Mapping)
+            or set(raw) != {
+                "schema_version", "capture_state", "observed_elements",
+                "emitted_targets", "skipped_elements", "truncated",
+                "observed_targets", "eligible_targets",
+                "contradiction_count", "evidence", "confidence_bucket",
+                "margin_bucket", "capability_basis", "execution",
+            }
+            or raw.get("schema_version") != 1):
+        raise ValueError("Drop-to-Target preview is malformed")
+    integer_keys = (
+        "observed_elements", "emitted_targets", "skipped_elements",
+        "observed_targets", "eligible_targets", "contradiction_count",
+    )
+    if any(not isinstance(raw.get(key), int)
+           or isinstance(raw.get(key), bool)
+           or not 0 <= raw[key] <= 1_024 for key in integer_keys):
+        raise ValueError("Drop-to-Target preview is malformed")
+    evidence = raw.get("evidence")
+    if (not isinstance(raw.get("truncated"), bool)
+            or raw.get("capture_state") not in DROP_TARGET_CAPTURE_STATES
+            or not isinstance(evidence, Sequence)
+            or isinstance(evidence, (str, bytes))
+            or len(evidence) > len(DROP_TARGET_EVIDENCE)
+            or len(set(evidence)) != len(evidence)
+            or any(item not in DROP_TARGET_EVIDENCE for item in evidence)
+            or raw.get("confidence_bucket") not in {
+                "none", "below_threshold", "high", "very_high"}
+            or raw.get("margin_bucket") not in {
+                "none", "narrow", "sufficient", "wide"}
+            or raw.get("capability_basis") !=
+            "caller_declared_role_policy"
+            or raw.get("execution") != "none"
+            or raw["emitted_targets"] > 128
+            or raw["observed_targets"] != raw["emitted_targets"]
+            or raw["eligible_targets"] > raw["observed_targets"]):
+        raise ValueError("Drop-to-Target preview is malformed")
+    capture_state = raw["capture_state"]
+    if capture_state != "captured" and (
+            state != capture_state
+            or any(raw[key] != 0 for key in integer_keys)
+            or raw["truncated"] or evidence
+            or raw["confidence_bucket"] != "none"
+            or raw["margin_bucket"] != "none"):
+        raise ValueError("Drop-to-Target preview is malformed")
+    if state == "resolved":
+        if (capture_state != "captured" or not name.strip()
+                or role != declared_role):
+            raise ValueError("Drop-to-Target preview is malformed")
+    elif name or role:
+        raise ValueError("Drop-to-Target preview is malformed")
+    if state == "permission_denied" and capture_state != "permission_denied":
+        raise ValueError("Drop-to-Target preview is malformed")
+    return DropTargetPreview(
+        state=state,
+        accessibility_name=name.strip(),
+        role=role,
+        declared_role=declared_role,
+        source_kind=source_kind,
+        effect=effect,
+        receipt=DropTargetReceipt(
+            capture_state=capture_state,
+            observed_elements=raw["observed_elements"],
+            emitted_targets=raw["emitted_targets"],
+            skipped_elements=raw["skipped_elements"],
+            truncated=raw["truncated"],
+            observed_targets=raw["observed_targets"],
+            eligible_targets=raw["eligible_targets"],
+            contradiction_count=raw["contradiction_count"],
+            evidence=tuple(evidence),
+            confidence_bucket=raw["confidence_bucket"],
+            margin_bucket=raw["margin_bucket"],
+            capability_basis=raw["capability_basis"],
+            execution=raw["execution"],
         ),
     )
 
@@ -3029,6 +3223,28 @@ class WhisperFaceViewModel:
         except Exception:
             return PointAndSpeakPreview(state="unavailable")
 
+    def preview_drop_to_target(
+        self, phrase: str, role: str, source_kind: str, effect: str,
+    ) -> DropTargetPreview:
+        """Run one explicit inert preview without retaining target text."""
+
+        if (not isinstance(phrase, str) or not phrase.strip()
+                or len(phrase) > DROP_TARGET_MAX_PHRASE_CHARS
+                or any(ord(character) < 32 for character in phrase)):
+            raise ValueError(self.localized(
+                "drop_target.validation.phrase",
+                limit=DROP_TARGET_MAX_PHRASE_CHARS))
+        if (role not in DROP_TARGET_ROLES
+                or source_kind not in DROP_TARGET_SOURCE_KINDS
+                or effect not in DROP_TARGET_EFFECTS):
+            raise ValueError("Invalid Drop-to-Target capability declaration")
+        try:
+            return normalize_drop_target_preview(
+                self.actions.preview_drop_to_target(
+                    phrase, role, source_kind, effect))
+        except Exception:
+            return DropTargetPreview(state="unavailable")
+
     def open_source_and_license(self) -> GUIState:
         try:
             self.actions.open_source_and_license()
@@ -3334,6 +3550,7 @@ if APPKIT_AVAILABLE:
                 "Models": (),
                 "Diagnostics": (
                     self.dynamic["point_and_speak_button"],
+                    self.dynamic["drop_target_button"],
                     self.dynamic["open_log_button"],
                     self.dynamic["copy_support_snapshot_button"],
                     self.dynamic["verify_button"],
@@ -3850,11 +4067,18 @@ if APPKIT_AVAILABLE:
                                     size=22, weight="bold"))
             point_and_speak = _button(
                 self._l("diagnostics.action.point_and_speak"),
-                NSMakeRect(530, 350, 228, 34), self,
+                NSMakeRect(292, 350, 226, 34), self,
                 "previewPointAndSpeak:",
                 help_text=self._l(
                     "diagnostics.action.point_and_speak.help"))
             page.addSubview_(point_and_speak)
+            drop_target = _button(
+                self._l("diagnostics.action.drop_target"),
+                NSMakeRect(530, 350, 228, 34), self,
+                "previewDropTarget:",
+                help_text=self._l(
+                    "diagnostics.action.drop_target.help"))
+            page.addSubview_(drop_target)
             page.addSubview_(_label(
                 self._l("diagnostics.subtitle"),
                 NSMakeRect(5, 326, 650, 20), size=13, color=_SECONDARY))
@@ -3910,6 +4134,7 @@ if APPKIT_AVAILABLE:
                 NSMakeRect(5, 12, 620, 18), size=11, color=_SECONDARY))
             self.dynamic.update(
                 point_and_speak_button=point_and_speak,
+                drop_target_button=drop_target,
                 open_log_button=open_log,
                 copy_support_snapshot_button=copy_support_snapshot,
                 verify_button=verify,
@@ -5065,6 +5290,147 @@ if APPKIT_AVAILABLE:
                 "settings.action.done"))
             result_alert.runModal()
 
+        def previewDropTarget_(self, _sender: Any) -> None:
+            """Collect an explicit hypothetical policy, then capture read-only."""
+
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(self._l("drop_target.dialog.title"))
+            alert.setInformativeText_(self._l("drop_target.dialog.message"))
+            form = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 520, 150))
+            phrase = NSTextField.alloc().initWithFrame_(
+                NSMakeRect(175, 118, 345, 26))
+            phrase.setUsesSingleLineMode_(True)
+            form.addSubview_(_label(
+                self._l("drop_target.dialog.input.label"),
+                NSMakeRect(0, 122, 165, 18), size=12))
+            _accessible(
+                phrase, self._l("drop_target.dialog.input.label"),
+                self._l("drop_target.dialog.input.help"))
+            form.addSubview_(phrase)
+
+            role = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                NSMakeRect(175, 82, 345, 26), False)
+            role.addItemsWithTitles_(list(DROP_TARGET_ROLE_LABELS))
+            form.addSubview_(_label(
+                self._l("drop_target.dialog.role.label"),
+                NSMakeRect(0, 86, 165, 18), size=12))
+            _accessible(
+                role, self._l("drop_target.dialog.role.label"),
+                self._l("drop_target.dialog.role.help"))
+            form.addSubview_(role)
+
+            source = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                NSMakeRect(175, 46, 345, 26), False)
+            source.addItemsWithTitles_(list(DROP_TARGET_SOURCE_LABELS))
+            form.addSubview_(_label(
+                self._l("drop_target.dialog.source.label"),
+                NSMakeRect(0, 50, 165, 18), size=12))
+            _accessible(
+                source, self._l("drop_target.dialog.source.label"),
+                self._l("drop_target.dialog.source.help"))
+            form.addSubview_(source)
+
+            effect = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                NSMakeRect(175, 10, 345, 26), False)
+            effect.addItemsWithTitles_(list(DROP_TARGET_EFFECT_LABELS))
+            form.addSubview_(_label(
+                self._l("drop_target.dialog.effect.label"),
+                NSMakeRect(0, 14, 165, 18), size=12))
+            _accessible(
+                effect, self._l("drop_target.dialog.effect.label"),
+                self._l("drop_target.dialog.effect.help"))
+            form.addSubview_(effect)
+            alert.setAccessoryView_(form)
+            alert.addButtonWithTitle_(self._l("drop_target.action.preview"))
+            cancel = alert.addButtonWithTitle_(self._l(
+                "drop_target.action.cancel"))
+            cancel.setKeyEquivalent_("\x1b")
+            alert.window().setInitialFirstResponder_(phrase)
+            if alert.runModal() != 1000:
+                return
+            target_phrase = str(phrase.stringValue())
+            if (not target_phrase.strip()
+                    or len(target_phrase) > DROP_TARGET_MAX_PHRASE_CHARS
+                    or any(ord(character) < 32
+                           for character in target_phrase)):
+                invalid = NSAlert.alloc().init()
+                invalid.setMessageText_(self._l("drop_target.dialog.title"))
+                invalid.setInformativeText_(self._l(
+                    "drop_target.validation.phrase",
+                    limit=DROP_TARGET_MAX_PHRASE_CHARS))
+                invalid.addButtonWithTitle_(self._l("settings.action.done"))
+                invalid.runModal()
+                return
+            declared_role = DROP_TARGET_ROLES[role.indexOfSelectedItem()]
+            source_kind = DROP_TARGET_SOURCE_KINDS[
+                source.indexOfSelectedItem()]
+            selected_effect = DROP_TARGET_EFFECTS[
+                effect.indexOfSelectedItem()]
+
+            self.window.orderOut_(None)
+            NSApplication.sharedApplication().hide_(None)
+
+            def run() -> None:
+                time.sleep(0.2)
+                result = self.view_model.preview_drop_to_target(
+                    target_phrase, declared_role, source_kind,
+                    selected_effect)
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "dropTargetFinished:", result, False)
+
+            threading.Thread(
+                target=run, name="whisper-face-drop-target-preview",
+                daemon=True).start()
+
+        def dropTargetFinished_(self, result: Any) -> None:
+            app = NSApplication.sharedApplication()
+            app.unhide_(None)
+            self.window.makeKeyAndOrderFront_(None)
+            app.activateIgnoringOtherApps_(True)
+            receipt = result.receipt
+            evidence = ", ".join(receipt.evidence) or self._l(
+                "drop_target.result.none")
+            receipt_text = self._l(
+                "drop_target.result.receipt",
+                capture=receipt.capture_state.replace("_", " "),
+                basis=receipt.capability_basis.replace("_", " "),
+                observed=receipt.observed_elements,
+                emitted=receipt.emitted_targets,
+                eligible=receipt.eligible_targets,
+                contradictions=receipt.contradiction_count,
+                confidence=receipt.confidence_bucket.replace("_", " "),
+                margin=receipt.margin_bucket.replace("_", " "),
+                evidence=evidence,
+                truncated=self._l(
+                    "drop_target.result.yes" if receipt.truncated else
+                    "drop_target.result.no"),
+                execution=receipt.execution,
+            )
+            detail = self._l(
+                "drop_target.result.policy",
+                role=(result.declared_role or self._l(
+                    "drop_target.result.none")),
+                source=(result.source_kind or self._l(
+                    "drop_target.result.none")).replace("_", " "),
+                effect=result.effect or self._l("drop_target.result.none"),
+                receipt=receipt_text,
+            )
+            if result.state == "resolved":
+                detail = self._l(
+                    "drop_target.result.selection",
+                    name=result.accessibility_name,
+                    role=result.declared_role,
+                    source=result.source_kind.replace("_", " "),
+                    effect=result.effect,
+                    receipt=receipt_text,
+                )
+            result_alert = NSAlert.alloc().init()
+            result_alert.setMessageText_(self._l(
+                f"drop_target.result.title.{result.state}"))
+            result_alert.setInformativeText_(detail)
+            result_alert.addButtonWithTitle_(self._l("settings.action.done"))
+            result_alert.runModal()
+
         def sectionChanged_(self, sender: Any) -> None:
             self.view_model.select_section(SECTIONS[sender.selectedSegment()])
             self.render()
@@ -5568,6 +5934,16 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                     "diagnostics.action.point_and_speak.help"),
             "Point-and-Speak preview accessibility")
         require(
+            str(controller.dynamic["drop_target_button"].action()) ==
+            "previewDropTarget:",
+            "Drop-to-Target preview action")
+        require(
+            accessible_value(
+                controller.dynamic["drop_target_button"],
+                "accessibilityHelp") == localized_string(
+                    "diagnostics.action.drop_target.help"),
+            "Drop-to-Target preview accessibility")
+        require(
             controller.section_control.nextKeyView() ==
             controller.dynamic["point_and_speak_button"],
             "Point-and-Speak preview Tab order")
@@ -5725,6 +6101,9 @@ __all__ = [
     "AcousticKeywordInspection",
     "AppToneSetting",
     "CorrectionSetting",
+    "DROP_TARGET_MAX_PHRASE_CHARS",
+    "DropTargetPreview",
+    "DropTargetReceipt",
     "DegradedIssue",
     "DemonstrationDraftMetadata",
     "DemonstrationStepPreview",
@@ -5755,6 +6134,7 @@ __all__ = [
     "normalize_snapshot",
     "normalize_acoustic_keyword_inspection",
     "normalize_point_and_speak_preview",
+    "normalize_drop_target_preview",
     "normalize_settings",
     "run_native_appkit_smoke",
     "resolve_locale",
