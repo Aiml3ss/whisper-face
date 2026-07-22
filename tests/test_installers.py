@@ -180,6 +180,28 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn(
             "setup.ps1", (ROOT / "Install.cmd").read_text(encoding="utf-8"))
 
+    def test_update_and_rollback_guide_uses_supported_install_paths(self):
+        guide = (
+            ROOT / "docs" / "distribution" / "update-and-rollback.md"
+        ).read_text(encoding="utf-8")
+        for expected in (
+            "Install.command",
+            "Install.cmd",
+            "./setup.sh --verify",
+            ".\\setup.ps1 --verify",
+            "git switch --detach <known-good-commit>",
+            "snippets.json",
+            "tones.json",
+            "preferences.json",
+            "acoustic_keyword_memory.json",
+            "dictionary.txt",
+            "transcripts.jsonl",
+            "learned.json",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, guide)
+        self.assertIn("Never use `git reset --hard`", guide)
+
     def test_windows_installer_covers_the_complete_stack(self):
         for expected in (
             "astral-sh.uv", "Gyan.FFmpeg", "Ollama.Ollama",
