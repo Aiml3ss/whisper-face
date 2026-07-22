@@ -15,6 +15,7 @@ import io
 import json
 import os
 import re
+import select
 import socket
 import stat
 import struct
@@ -1306,10 +1307,57 @@ class VoiceInboxMenuTests(unittest.TestCase):
         ]
         self.assertGreaterEqual(len(refresh_tries), 2)
         inbox_refresh = ast.unparse(refresh_tries[0])
-        other_refresh = ast.unparse(refresh_tries[1])
+        other_refresh = next(
+            ast.unparse(node) for node in refresh_tries
+            if "rebuild_faces" in ast.unparse(node))
         self.assertIn("voice_object_inbox_status", inbox_refresh)
         self.assertNotIn("rebuild_faces", inbox_refresh)
         self.assertIn("rebuild_faces", other_refresh)
+
+
+class VoiceOutboxMenuTests(unittest.TestCase):
+    def test_menu_title_is_count_only_and_bounded(self):
+        title = load_definitions(
+            "voice_outbox_menu_title",
+            extra={"VOICE_OUTBOX_MAX_ITEMS": 20},
+        )["voice_outbox_menu_title"]
+
+        self.assertEqual(title(0), "Voice Outbox")
+        self.assertEqual(title(3), "Voice Outbox — 3 recoverable")
+        self.assertEqual(title(1000), "Voice Outbox — 20 recoverable")
+        for invalid in (-2, True, "private dictation", None):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(title(invalid), "Voice Outbox")
+
+    def test_menu_only_routes_to_existing_recovery_surface(self):
+        status_bar = next(
+            node for node in TREE.body
+            if isinstance(node, ast.ClassDef) and node.name == "StatusBar")
+        methods = {
+            node.name: node for node in status_bar.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        opener = methods["openVoiceOutbox_"]
+        attributes = {
+            node.attr for node in ast.walk(opener)
+            if isinstance(node, ast.Attribute)
+        }
+        names = {
+            node.id for node in ast.walk(opener) if isinstance(node, ast.Name)
+        }
+        self.assertIn("show_outbox", attributes)
+        self.assertFalse(names & {
+            "copy_latest_outbox", "acknowledge_recoverable", "paste_text",
+            "type_text", "INSERTION_COORDINATOR",
+        })
+
+        init_source = ast.unparse(methods["init"])
+        self.assertIn("self.voice_outbox_item.setEnabled_(False)", init_source)
+        refresh_source = ast.unparse(methods["menuWillOpen_"])
+        self.assertIn("INSERTION_COORDINATOR.recoverable_count()",
+                      refresh_source)
+        self.assertNotIn("INSERTION_COORDINATOR.recoverable()",
+                         refresh_source)
 
 
 class FakeStream:
@@ -1345,7 +1393,17 @@ class ParakeetClientTests(unittest.TestCase):
             def terminate(self):
                 self.terminated = True
 
+            def wait(self, timeout=None):
+                return 0
+
         process = FakeProcess()
+        requests = []
+
+        def exchange(_process, chunks, *, timeout):
+            requests.append((tuple(bytes(chunk) for chunk in chunks), timeout))
+            return ({"ready": True, "load_s": 0.1} if not chunks else
+                    {"ok": True, "text": "hello", "processing_s": 0.02})
+
         with tempfile.TemporaryDirectory() as directory:
             helper = Path(directory) / "parrot-asr-helper"
             helper.write_bytes(b"helper")
@@ -1360,18 +1418,187 @@ class ParakeetClientTests(unittest.TestCase):
                     "struct": struct,
                     "json": json,
                     "np": np,
+                    "PARAKEET_STARTUP_TIMEOUT": 10.0,
+                    "PARAKEET_MIN_REQUEST_TIMEOUT": 3.0,
+                    "PARAKEET_MAX_REQUEST_TIMEOUT": 10.0,
                     "PARAKEET_PROFILE": PARAKEET_PROFILE,
                     "mark_model_warm_path_observed": lambda _provider: True,
                 },
             )
             client = ns["ParakeetClient"](
-                helper=helper, process_factory=lambda *_args, **_kwargs: process)
+                helper=helper, process_factory=lambda *_args, **_kwargs: process,
+                exchange=exchange)
             result = client.transcribe(np.array([0.25, -0.5], dtype=np.float32))
 
         self.assertEqual(result, ("hello", 0.02))
-        payload = process.stdin.getvalue()
+        payload = b"".join(requests[1][0])
         self.assertEqual(struct.unpack("<Q", payload[:8])[0], 2)
         self.assertEqual(len(payload), 8 + 2 * 4)
+        self.assertAlmostEqual(requests[1][1], 3.0, places=4)
+
+    def test_bounded_helper_exchange_times_out_without_a_response(self):
+        input_read, input_write = os.pipe()
+        output_read, output_write = os.pipe()
+        process = SimpleNamespace(
+            stdin=os.fdopen(input_write, "wb", buffering=0),
+            stdout=os.fdopen(output_read, "rb", buffering=0),
+        )
+        try:
+            exchange = load_definitions(
+                "bounded_helper_exchange",
+                extra={
+                    "PARAKEET_MAX_RESPONSE_BYTES": 64 * 1024,
+                    "PARAKEET_MAX_REQUEST_TIMEOUT": 60.0,
+                    "json": json,
+                    "os": os,
+                    "select": select,
+                    "time": time,
+                },
+            )["bounded_helper_exchange"]
+            with self.assertRaisesRegex(TimeoutError, "response timed out"):
+                exchange(process, (), timeout=0.01)
+        finally:
+            process.stdin.close()
+            process.stdout.close()
+            os.close(input_read)
+            os.close(output_write)
+
+    def test_bounded_helper_exchange_handles_framed_pipe_io(self):
+        input_read, input_write = os.pipe()
+        output_read, output_write = os.pipe()
+        process = SimpleNamespace(
+            stdin=os.fdopen(input_write, "wb", buffering=0),
+            stdout=os.fdopen(output_read, "rb", buffering=0),
+        )
+        received = bytearray()
+
+        def helper():
+            while len(received) < 12:
+                received.extend(os.read(input_read, 3))
+            os.write(output_write, b'{"ok":true,')
+            os.write(output_write, b'"text":"yes"}\n')
+
+        worker = threading.Thread(target=helper)
+        worker.start()
+        try:
+            exchange = load_definitions(
+                "bounded_helper_exchange",
+                extra={
+                    "PARAKEET_MAX_RESPONSE_BYTES": 64 * 1024,
+                    "PARAKEET_MAX_REQUEST_TIMEOUT": 60.0,
+                    "json": json,
+                    "os": os,
+                    "select": select,
+                    "time": time,
+                },
+            )["bounded_helper_exchange"]
+            response = exchange(
+                process, (struct.pack("<Q", 1), b"data"), timeout=1.0)
+        finally:
+            worker.join(timeout=1.0)
+            process.stdin.close()
+            process.stdout.close()
+            os.close(input_read)
+            os.close(output_write)
+
+        self.assertEqual(response, {"ok": True, "text": "yes"})
+        self.assertEqual(bytes(received), struct.pack("<Q", 1) + b"data")
+
+    def test_bounded_helper_exchange_times_out_on_blocked_write(self):
+        input_read, input_write = os.pipe()
+        output_read, output_write = os.pipe()
+        process = SimpleNamespace(
+            stdin=os.fdopen(input_write, "wb", buffering=0),
+            stdout=os.fdopen(output_read, "rb", buffering=0),
+        )
+        try:
+            exchange = load_definitions(
+                "bounded_helper_exchange",
+                extra={
+                    "PARAKEET_MAX_RESPONSE_BYTES": 64 * 1024,
+                    "PARAKEET_MAX_REQUEST_TIMEOUT": 60.0,
+                    "json": json,
+                    "os": os,
+                    "select": select,
+                    "time": time,
+                },
+            )["bounded_helper_exchange"]
+            with self.assertRaisesRegex(TimeoutError, "write timed out"):
+                exchange(process, (b"x" * 1_000_000,), timeout=0.01)
+        finally:
+            process.stdin.close()
+            process.stdout.close()
+            os.close(input_read)
+            os.close(output_write)
+
+    def test_timeout_closes_child_and_next_call_restarts_lazily(self):
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = io.BytesIO()
+                self.stdout = io.BytesIO()
+                self.terminated = False
+                self.killed = False
+                self.wait_calls = 0
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                self.terminated = True
+
+            def wait(self, timeout=None):
+                self.wait_calls += 1
+                if self.wait_calls == 1:
+                    raise TimeoutError("helper did not exit")
+                return 0
+
+            def kill(self):
+                self.killed = True
+
+        first_process = FakeProcess()
+        processes = [first_process, FakeProcess()]
+        calls = []
+
+        def exchange(process, chunks, *, timeout):
+            calls.append((process, bool(chunks), timeout))
+            if not chunks:
+                return {"ready": True, "load_s": 0.1}
+            if process is first_process:
+                raise TimeoutError("helper response timed out")
+            return {"ok": True, "text": "recovered", "processing_s": 0.1}
+
+        with tempfile.TemporaryDirectory() as directory:
+            helper = Path(directory) / "parrot-asr-helper"
+            helper.write_bytes(b"helper")
+            ns = load_definitions(
+                "ParakeetClient",
+                extra={
+                    "PARAKEET_HELPER": helper,
+                    "PARAKEET_ENABLED": True,
+                    "Path": Path,
+                    "subprocess": subprocess,
+                    "threading": threading,
+                    "struct": struct,
+                    "np": np,
+                    "PARAKEET_STARTUP_TIMEOUT": 10.0,
+                    "PARAKEET_MIN_REQUEST_TIMEOUT": 3.0,
+                    "PARAKEET_MAX_REQUEST_TIMEOUT": 10.0,
+                    "PARAKEET_PROFILE": PARAKEET_PROFILE,
+                    "mark_model_warm_path_observed": lambda _provider: True,
+                },
+            )
+            client = ns["ParakeetClient"](
+                helper=helper,
+                process_factory=lambda *_args, **_kwargs: processes.pop(0),
+                exchange=exchange)
+            first = client.transcribe(np.ones(160, dtype=np.float32))
+            second = client.transcribe(np.ones(160, dtype=np.float32))
+
+        self.assertIsNone(first)
+        self.assertEqual(second, ("recovered", 0.1))
+        self.assertTrue(first_process.terminated)
+        self.assertTrue(first_process.killed)
+        self.assertEqual(first_process.wait_calls, 2)
 
     def test_parakeet_processing_time_reaches_recognition_evidence(self):
         ns = load_definitions(

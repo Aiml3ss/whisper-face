@@ -4689,6 +4689,13 @@ if APPKIT_AVAILABLE:
             self.render()
 
         @objc.python_method
+        def show_outbox(self) -> None:
+            """Route to existing recovery controls without acting on a draft."""
+            self.show()
+            self.view_model.select_section("Overview")
+            self.render()
+
+        @objc.python_method
         def _configure_key_view_loop(self, state: GUIState) -> int:
             """Make Tab order explicit while leaving arrows to native controls."""
 
@@ -6886,6 +6893,15 @@ class WhisperFaceGUI:
             self._controller = WhisperFaceWindowController.alloc() \
                 .initWithViewModel_(self.view_model)
         self._controller.show_results()
+
+    def show_outbox(self) -> None:
+        """Show existing Voice Outbox recovery controls without acting."""
+        if not APPKIT_AVAILABLE:
+            raise RuntimeError("The Whisper Face window requires macOS AppKit")
+        if self._controller is None:
+            self._controller = WhisperFaceWindowController.alloc() \
+                .initWithViewModel_(self.view_model)
+        self._controller.show_outbox()
 
 
 def create_gui(actions: GUIActions, *, locale: str = "en") -> WhisperFaceGUI:

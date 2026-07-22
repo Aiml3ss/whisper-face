@@ -193,6 +193,7 @@ import math
 import os
 import queue
 import re
+import select
 import socket
 import stat
 import struct
@@ -536,6 +537,11 @@ FAST_ACCEPT_CONFIDENCE = 0.70
 # its current offline API. This is a routing prior, deliberately below a very
 # confident Whisper hypothesis; actual disagreements remain inspectable.
 PARAKEET_ROUTE_CONFIDENCE = 0.84
+PARAKEET_STARTUP_TIMEOUT = 10.0
+PARAKEET_MIN_REQUEST_TIMEOUT = 3.0
+PARAKEET_MAX_REQUEST_TIMEOUT = 10.0
+PARAKEET_MAX_RESPONSE_BYTES = 64 * 1024
+VOICE_OUTBOX_MAX_ITEMS = 20
 LLM_CLEANUP_TIMEOUT = (1, 4) # localhost connect/read deadline. Capture must
                              # fall back faithfully instead of blocking paste.
 LLM_CLEANUP_BREAKER = CleanupCircuitBreaker(cooldown_seconds=60.0)
@@ -978,7 +984,8 @@ def trace_operation(event: str, operation, clock=None):
 
 VOICE_COMPILER = VoiceCompiler()
 CONTEXT_ROUTER = ContextRouter()
-INSERTION_COORDINATOR = InsertionCoordinator()
+INSERTION_COORDINATOR = InsertionCoordinator(
+    max_recoverable=VOICE_OUTBOX_MAX_ITEMS)
 # Selective re-listen is fail-closed until a local adapter can attest that it
 # enforces the deadline internally and never retains its bounded audio input.
 # The pure consequence receipt still explains why a span was skipped.
@@ -1194,6 +1201,15 @@ def voice_inbox_menu_title(status) -> str:
         count = 0
     count = min(max(count, 0), MAX_ITEMS)
     return "Voice Inbox" if count == 0 else f"Voice Inbox — {count} queued"
+
+
+def voice_outbox_menu_title(count) -> str:
+    """Render only the bounded recoverable count for the outbox shortcut."""
+    if not isinstance(count, int) or isinstance(count, bool):
+        count = 0
+    count = min(max(count, 0), VOICE_OUTBOX_MAX_ITEMS)
+    return ("Voice Outbox" if count == 0 else
+            f"Voice Outbox — {count} recoverable")
 
 
 def inspect_voice_object_drafts() -> tuple[dict, ...]:
@@ -2286,6 +2302,8 @@ class StatusBar(NSObject):
         self.modes_root.setSubmenu_(self.modes_menu)
         self.voice_inbox_item = mk("Voice Inbox", "openVoiceInbox:")
         self.voice_inbox_item.setEnabled_(False)
+        self.voice_outbox_item = mk("Voice Outbox", "openVoiceOutbox:")
+        self.voice_outbox_item.setEnabled_(False)
         for title in (
                 "Right Option — Capture",
                 "Shift + Right Option — Compose",
@@ -2307,6 +2325,7 @@ class StatusBar(NSObject):
         menu.addItem_(self.tones_root)
         menu.addItem_(self.learning_root)
         menu.addItem_(self.voice_inbox_item)
+        menu.addItem_(self.voice_outbox_item)
         menu.addItem_(self.recognition_root)
         menu.addItem_(self.modes_root)
         menu.addItem_(self.flight_item)
@@ -2365,6 +2384,12 @@ class StatusBar(NSObject):
         except Exception:
             self.voice_inbox_item.setTitle_("Voice Inbox")
         self.voice_inbox_item.setEnabled_(self.gui is not None)
+        try:
+            self.voice_outbox_item.setTitle_(voice_outbox_menu_title(
+                INSERTION_COORDINATOR.recoverable_count()))
+        except Exception:
+            self.voice_outbox_item.setTitle_("Voice Outbox")
+        self.voice_outbox_item.setEnabled_(self.gui is not None)
         try:
             s1, s2 = usage_stats()
             self.stat1.setTitle_(s1)
@@ -2641,6 +2666,11 @@ class StatusBar(NSObject):
         """Open the existing explicit inspector; it remains metadata-first."""
         if self.gui is not None:
             self.gui.show_voice_inbox()
+
+    def openVoiceOutbox_(self, sender):
+        """Route to recovery controls without reading or acting on payloads."""
+        if self.gui is not None:
+            self.gui.show_outbox()
 
     def openResults_(self, sender):
         """Open the existing transcript-free result inspector."""
@@ -5095,6 +5125,67 @@ def ensure_event_permissions():
 # ------------------------- native Mac ASR helper -------------------------
 
 
+def bounded_helper_exchange(
+        process, chunks, *, timeout: float,
+        maximum_bytes: int = PARAKEET_MAX_RESPONSE_BYTES) -> dict:
+    """Write one request and read one bounded JSON line before a deadline."""
+    if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+            or not 0 < float(timeout) <= PARAKEET_MAX_REQUEST_TIMEOUT):
+        raise ValueError("helper timeout is outside the runtime bound")
+    deadline = time.monotonic() + float(timeout)
+    input_fd = process.stdin.fileno()
+    output_fd = process.stdout.fileno()
+    os.set_blocking(input_fd, False)
+    os.set_blocking(output_fd, False)
+    pending = [memoryview(chunk).cast("B") for chunk in chunks if len(chunk)]
+    while pending:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("helper request write timed out")
+        _, writable, _ = select.select([], [input_fd], [], remaining)
+        if not writable:
+            raise TimeoutError("helper request write timed out")
+        try:
+            written = os.write(input_fd, pending[0])
+        except BlockingIOError:
+            continue
+        if written <= 0:
+            raise RuntimeError("helper request pipe closed")
+        pending[0] = pending[0][written:]
+        if not pending[0]:
+            pending.pop(0)
+
+    response = bytearray()
+    while True:
+        newline = response.find(b"\n")
+        if newline >= 0:
+            if newline > maximum_bytes:
+                raise RuntimeError("helper response exceeded size limit")
+            try:
+                value = json.loads(bytes(response[:newline]).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise RuntimeError("helper returned invalid JSON") from error
+            if not isinstance(value, dict):
+                raise RuntimeError("helper response must be a JSON object")
+            return value
+        if len(response) > maximum_bytes:
+            raise RuntimeError("helper response exceeded size limit")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("helper response timed out")
+        readable, _, _ = select.select([output_fd], [], [], remaining)
+        if not readable:
+            raise TimeoutError("helper response timed out")
+        try:
+            chunk = os.read(output_fd, min(
+                4096, maximum_bytes + 1 - len(response)))
+        except BlockingIOError:
+            continue
+        if not chunk:
+            raise RuntimeError("helper closed before returning a response")
+        response.extend(chunk)
+
+
 class ParakeetClient:
     """Persistent, RAM-only bridge to the native FluidAudio helper.
 
@@ -5104,9 +5195,11 @@ class ParakeetClient:
     existing Whisper Turbo path remains the faithful fallback.
     """
 
-    def __init__(self, helper=PARAKEET_HELPER, process_factory=None):
+    def __init__(self, helper=PARAKEET_HELPER, process_factory=None,
+                 exchange=None):
         self.helper = Path(helper)
         self.process_factory = process_factory or subprocess.Popen
+        self.exchange = exchange or bounded_helper_exchange
         self.process = None
         self.lock = threading.Lock()
 
@@ -5123,6 +5216,17 @@ class ParakeetClient:
             process.terminate()
         except Exception:
             pass
+        try:
+            process.wait(timeout=0.25)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+            try:
+                process.wait(timeout=0.25)
+            except Exception:
+                pass
 
     def _start(self):
         if self.process is not None and self.process.poll() is None:
@@ -5137,16 +5241,16 @@ class ParakeetClient:
             stderr=None,
             bufsize=0,
         )
-        ready = process.stdout.readline()
+        self.process = process
         try:
-            status = json.loads(ready.decode("utf-8"))
+            status = self.exchange(
+                process, (), timeout=PARAKEET_STARTUP_TIMEOUT)
         except Exception:
-            process.terminate()
+            self._close()
             return None
         if not status.get("ready"):
-            process.terminate()
+            self._close()
             return None
-        self.process = process
         mark_model_warm_path_observed(PARAKEET_PROFILE.provider_id)
         print(f"[asr] Parakeet Unified ready in "
               f"{float(status.get('load_s', 0.0)):.2f}s")
@@ -5159,11 +5263,12 @@ class ParakeetClient:
             if process is None:
                 return None
             try:
-                process.stdin.write(struct.pack("<Q", len(payload)))
-                process.stdin.write(memoryview(payload).cast("B"))
-                process.stdin.flush()
-                response = json.loads(
-                    process.stdout.readline().decode("utf-8"))
+                duration = len(payload) / 16_000
+                timeout = min(PARAKEET_MAX_REQUEST_TIMEOUT, max(
+                    PARAKEET_MIN_REQUEST_TIMEOUT, duration * 0.25 + 3.0))
+                response = self.exchange(process, (
+                    struct.pack("<Q", len(payload)), payload),
+                    timeout=timeout)
                 if not response.get("ok"):
                     raise RuntimeError(str(response.get("error", "ASR error")))
                 return (str(response.get("text", "")).strip(),

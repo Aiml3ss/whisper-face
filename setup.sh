@@ -76,6 +76,19 @@ provision_private_log() {
         || fail "private runtime log permissions could not be verified: $path"
 }
 
+confirm_writable_checkout() {
+    if ! (
+        umask 077
+        proof="$(mktemp "$DIR/.whisper-face-write.XXXXXXXX")" || exit 1
+        trap 'rm -f -- "$proof"' EXIT
+        [ "$(stat -f '%Lp' "$proof")" = "600" ] || exit 1
+        rm -f -- "$proof" || exit 1
+        trap - EXIT
+    ); then
+        fail "checkout is not writable; copy or extract Whisper Face to a writable local folder, then rerun Install.command"
+    fi
+}
+
 step() {
     echo
     echo "== $*"
@@ -345,6 +358,8 @@ available_kb="$(df -Pk "$DIR" | awk 'NR == 2 {print $4}')"
 if [ "${available_kb:-0}" -lt 8388608 ]; then
     fail "at least 8 GB of free disk space is required"
 fi
+
+confirm_writable_checkout
 
 # Create and lock logs before either service can create them with a default
 # mode. Existing logs are retained; rerunning setup repairs their mode.

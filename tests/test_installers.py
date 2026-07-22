@@ -223,6 +223,40 @@ class InstallerContractTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, self.powershell)
 
+    def test_installers_fail_before_side_effects_for_read_only_checkouts(self):
+        mac_probe = self.shell.index("confirm_writable_checkout()")
+        mac_call = self.shell.index("confirm_writable_checkout\n", mac_probe)
+        mac_homebrew = self.shell.index("installing Homebrew")
+        mac_ollama = self.shell.index(
+            'step "configuring the tuned local Ollama service"')
+        self.assertLess(mac_call, mac_homebrew)
+        self.assertLess(mac_call, mac_ollama)
+        for required in (
+            'mktemp "$DIR/.whisper-face-write.XXXXXXXX"',
+            "umask 077",
+            "trap 'rm -f -- \"$proof\"' EXIT",
+            'checkout is not writable; copy or extract Whisper Face',
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, self.shell)
+
+        windows_probe = self.powershell.index("function Confirm-WritableCheckout")
+        windows_call = self.powershell.index("Confirm-WritableCheckout", windows_probe + 1)
+        windows_winget = self.powershell.index('Write-Step "installing uv"')
+        windows_ollama = self.powershell.index(
+            'Write-Step "starting the local Ollama service"')
+        self.assertLess(windows_call, windows_winget)
+        self.assertLess(windows_call, windows_ollama)
+        for required in (
+            '[Guid]::NewGuid().ToString("N")',
+            '[IO.FileMode]::CreateNew',
+            'Set-PrivateFile $Proof',
+            'Remove-Item -LiteralPath $Proof -Force -ErrorAction Stop',
+            'checkout is not writable; copy or extract Whisper Face',
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, self.powershell)
+
     def test_mac_ollama_identity_helper_fails_closed(self):
         helper_start = self.shell.index("ollama_listener_pid()")
         helper_end = self.shell.index("reload_agent()", helper_start)

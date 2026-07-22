@@ -2200,6 +2200,31 @@ class ViewModelTests(unittest.TestCase):
         self.assertEqual(calls[1:], [("show_results",)])
         self.assertIsInstance(gui._controller, FakeController)
 
+    def test_outbox_facade_delegates_without_recovery_action(self):
+        calls = []
+
+        class FakeController:
+            @classmethod
+            def alloc(cls):
+                return cls()
+
+            def initWithViewModel_(self, view_model):
+                calls.append(("init", view_model))
+                return self
+
+            def show_outbox(self):
+                calls.append(("show_outbox",))
+
+        gui = create_gui(self.actions)
+        with patch.object(gui_module, "APPKIT_AVAILABLE", True), patch.object(
+                gui_module, "WhisperFaceWindowController", FakeController,
+                create=True):
+            gui.show_outbox()
+
+        self.assertIs(calls[0][1], gui.view_model)
+        self.assertEqual(calls[1:], [("show_outbox",)])
+        self.assertIsInstance(gui._controller, FakeController)
+
     def test_onboarding_and_degraded_guidance_routes_without_blocking(self):
         runtime = {
             "service_status": "Running",

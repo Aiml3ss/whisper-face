@@ -260,6 +260,15 @@ class InsertionCoordinator:
                     and entry.receipt.state != ReceiptState.VERIFIED)
             )
 
+    def recoverable_count(self) -> int:
+        """Count recovery entries without constructing payload-bearing items."""
+        with self._lock:
+            return sum(
+                1 for entry in self._entries.values()
+                if (entry.terminal and not entry.in_flight
+                    and entry.receipt.state != ReceiptState.VERIFIED)
+            )
+
     def acknowledge(self, utterance_id: str) -> bool:
         """Dismiss one recoverable payload while retaining bounded dedupe."""
         with self._lock:
