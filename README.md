@@ -129,6 +129,11 @@ profiles.
   correction activates after two confirmations in the same app or three
   globally, and every learned mapping can be inspected or forgotten from the
   menu.
+- **Acoustic keyword memory foundation** — a strict local store can count
+  unique observations and explicit confirmations for hard names without raw
+  audio, transcript history, or unhashed app identifiers. It is exportable and
+  forgettable, but it deliberately has no recognition authority until a later
+  inspected runtime/UI integration earns it.
 - **Personal Regression Lab** — confirmed correction mappings are evaluated
   against a private, deterministic suite of the user's exact corrected spans.
   Conflicting candidates are quarantined instead of silently becoming a bad
@@ -355,6 +360,12 @@ bounded, text-free minimum-count aggregate only after explicit opt-in. Both are
 local foundations: neither claims a shipped cross-process SDK, physical app
 adapter, anonymous user population, telemetry backend, or network service.
 
+`delayed_cleanup_merge.py` provides a pure three-way merge for cleanup that
+finishes after insertion. It proposes changes only where the original span and
+unique boundary anchors remain untouched, rejects ambiguous or reordered text,
+and returns an explainable candidate without reading or writing any app. A
+transactional destination adapter is still required before runtime activation.
+
 ## Verify
 
 Run the fast regression suite after changing the pipeline:
@@ -373,6 +384,8 @@ uv run tests/test_insertion_integrity.py
 uv run tests/test_benchmark_insertion_reliability.py
 uv run tests/test_compatibility_fingerprint.py
 uv run tests/test_voice_input_protocol.py
+uv run tests/test_acoustic_keyword_memory.py
+uv run tests/test_delayed_cleanup_merge.py
 uv run tests/test_personal_regression.py
 uv run tests/test_whisper_face_gui.py
 uv run --locked --script dictate.py --native-gui-smoke-test
