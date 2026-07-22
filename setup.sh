@@ -139,6 +139,7 @@ required=(
     point_and_speak_resolver.py macos_point_and_speak_snapshot.py
     macos_drop_to_target_snapshot.py drop_to_target.py
     whisper_face_gui.py
+    scripts/macos_launcher_app.py
     native/ParrotASRHelper/Package.swift
     native/ParrotASRHelper/Package.resolved
     native/ParrotASRHelper/Sources/parrot-asr-helper/main.swift
@@ -167,6 +168,7 @@ fi
 launch_dir="$HOME/Library/LaunchAgents"
 dictate_plist="$launch_dir/com.berg.dictate.plist"
 ollama_plist="$launch_dir/com.berg.ollama.plist"
+launcher_app="$HOME/Applications/Whisper Face.app"
 parakeet_helper="$DIR/.models/bin/parrot-asr-helper"
 
 verify_install() {
@@ -184,6 +186,11 @@ verify_install() {
     [ -f "$dictate_plist" ] || fail "dictation LaunchAgent is missing"
     [ -f "$ollama_plist" ] || fail "Ollama LaunchAgent is missing"
     plutil -lint "$dictate_plist" "$ollama_plist" >/dev/null
+    if [ "$MODE" = "full" ]; then
+        python3 "$DIR/scripts/macos_launcher_app.py" verify \
+            --app "$launcher_app" --checkout "$DIR" >/dev/null \
+            || fail "Whisper Face launcher app is missing or stale"
+    fi
     "$uv_bin" lock --check --script "$DIR/dictate.py" >/dev/null
     "$uv_bin" sync --locked --script "$DIR/dictate.py" --check >/dev/null
     if [ "$MODE" = "full" ]; then
@@ -334,6 +341,12 @@ render_plist com.berg.dictate.plist.template "$dictate_plist" \
     -e "s|__DIR__|$escaped_dir|g" \
     -e "$extra_sed"
 
+if [ "$MODE" = "full" ]; then
+    step "installing the checkout-backed Whisper Face app launcher"
+    python3 "$DIR/scripts/macos_launcher_app.py" create \
+        --app "$launcher_app" --checkout "$DIR"
+fi
+
 log_start=1
 if [ -f "$DIR/dictate.log" ]; then
     log_start=$(( $(wc -l < "$DIR/dictate.log") + 1 ))
@@ -380,6 +393,7 @@ if [ "$MODE" = "full" ]; then
     echo "== Hold Right Option, speak, and release to paste."
     echo "== Flight Recorder defaults off on a fresh install; an existing"
     echo "== preference is preserved. Toggle it from the Whisper Face menu."
+    echo "== Launcher: $launcher_app"
 else
     echo "== server-only installation is ready."
 fi

@@ -6,6 +6,7 @@
 import hashlib
 import json
 import os
+import plistlib
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_TOOL = ROOT / "scripts" / "release_manifest.py"
 PACKAGE_SCRIPT = ROOT / "scripts" / "package_macos.sh"
 PACKAGE_VERIFIER = ROOT / "scripts" / "verify_macos_package.py"
+LAUNCHER_TOOL = ROOT / "scripts" / "macos_launcher_app.py"
 REVISION = "1" * 40
 PREVIOUS_REVISION = "2" * 40
 
@@ -233,6 +235,56 @@ class MacDistributionContractTests(unittest.TestCase):
             )
             self.assertEqual(tampered.returncode, 2)
             self.assertIn("tree digest mismatch", tampered.stderr)
+
+    @unittest.skipIf(
+        os.name == "nt",
+        "checkout-backed Mac launcher bundle is not a Windows contract",
+    )
+    def test_unsigned_launcher_app_is_reproducible_and_checkout_backed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / "Whisper Face.app"
+            command = [
+                sys.executable, str(LAUNCHER_TOOL), "create",
+                "--app", str(app), "--checkout", str(ROOT),
+            ]
+            subprocess.run(command, cwd=ROOT, check=True, capture_output=True)
+            first = {
+                path.relative_to(app).as_posix(): path.read_bytes()
+                for path in app.rglob("*") if path.is_file()
+            }
+            subprocess.run(command, cwd=ROOT, check=True, capture_output=True)
+            second = {
+                path.relative_to(app).as_posix(): path.read_bytes()
+                for path in app.rglob("*") if path.is_file()
+            }
+            self.assertEqual(first, second)
+            self.assertNotIn("dictate.py", {path.name for path in app.rglob("*")})
+            plist = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+            self.assertEqual(plist["CFBundlePackageType"], "APPL")
+            self.assertEqual(
+                (app / "Contents/Resources/checkout-path").read_text().strip(),
+                str(ROOT),
+            )
+            verification = subprocess.run(
+                [
+                    sys.executable, str(LAUNCHER_TOOL), "verify",
+                    "--app", str(app), "--checkout", str(ROOT),
+                ],
+                cwd=ROOT, text=True, capture_output=True,
+            )
+            self.assertEqual(verification.returncode, 0, verification.stderr)
+
+            (app / "Contents/Resources/checkout-path").write_text(
+                "/tmp/not-the-checkout\n", encoding="utf-8")
+            rejected = subprocess.run(
+                [
+                    sys.executable, str(LAUNCHER_TOOL), "verify",
+                    "--app", str(app), "--checkout", str(ROOT),
+                ],
+                cwd=ROOT, text=True, capture_output=True,
+            )
+            self.assertEqual(rejected.returncode, 2)
+            self.assertIn("different checkout", rejected.stderr)
 
     def test_packager_exports_one_exact_source_and_applies_apple_trust(self):
         script = self.read("scripts/package_macos.sh")

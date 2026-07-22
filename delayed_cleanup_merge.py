@@ -12,7 +12,7 @@ reordered destination text fail closed.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from enum import Enum
 from threading import Lock
@@ -79,7 +79,7 @@ class DestinationSnapshot:
 
     destination_id: str
     revision: str
-    text: str
+    text: str = field(repr=False)
     focused: bool = True
 
 

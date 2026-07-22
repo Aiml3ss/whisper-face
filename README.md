@@ -192,6 +192,10 @@ are never Supporter-only features.
   advisory with no execution or routing. Because the runtime exposes
   no conservative capability bounds, the current advisory stays fail-closed as
   missing evidence; live routing is intentionally not wired.
+  `uv run model_readiness_evidence.py --format json` can also inspect all four
+  local pin locations without downloading or executing a provider. On this Mac
+  every pin resolves exactly, but filesystem evidence is deliberately capped
+  at `resolved`: readiness, capability bounds, and routing authority stay false.
 - **Networkless worker experiment (Mac)** — an opt-in, one-shot local worker
   proves OS-enforced denial of IP bind and outbound connection while retaining
   one private, bounded Unix-socket exchange. It accepts no transcript-bearing
@@ -288,6 +292,10 @@ The launcher detects the OS. A Windows Git Bash or WSL invocation of
 4. Creates private configuration files without overwriting existing ones.
 5. Installs and validates the tuned Ollama and dictation login services
    (`launchd` on Mac, Task Scheduler on Windows).
+6. On Mac, creates and verifies `~/Applications/Whisper Face.app`, a tiny
+   unsigned checkout-backed launcher bundle. It contains no copied runtime,
+   models, or private state; opening it only validates and starts the existing
+   `launchd` service. A signed compiled app remains future release work.
 
 Homebrew's official installer may pause once to explain its changes and ask
 for your macOS password. Model downloads are several gigabytes, so the first
@@ -533,8 +541,12 @@ finishes after insertion. It proposes changes only where the original span and
 unique boundary anchors remain untouched, rejects ambiguous or reordered text,
 and returns an explainable candidate. Its callback boundary requires two exact
 destination snapshots and a final atomic compare-and-swap, with content-free
-idempotent receipts. A real platform destination adapter is still required
-before runtime activation.
+idempotent receipts. A standalone Mac adapter can now read one focused,
+enabled text destination into transient exact text/selection plus keyed
+memory-only identity and revision tokens; private text is redacted from repr
+and receipts. It has no write callback, Accessibility action, clipboard,
+runtime, GUI, log, or persistence surface, so a real atomic destination writer
+and runtime evidence are still required before activation.
 
 `voice_objects.py`, `voice_inbox.py`, and `drop_to_target.py` define inert,
 local foundations for the next interaction layer. Typed drafts can now enter

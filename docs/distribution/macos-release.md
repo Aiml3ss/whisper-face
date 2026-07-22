@@ -23,6 +23,24 @@ The disk image and ZIP contain the same exact source. A DMG user must copy its
 source folder to a writable local folder before clicking `Install.command`.
 The ZIP expands to a writable folder directly.
 
+On a full Mac install, `setup.sh` creates `~/Applications/Whisper Face.app` as
+a checkout-backed Mac launcher app bundle. It contains only `Info.plist`, a
+shell launcher, and the installed checkout path/revision; it does not copy
+`dictate.py`, its lockfile, models, private state, or any second source tree.
+Opening it validates that the LaunchAgent still names the same checkout and
+asks `launchd` to start that existing service. It does not activate or claim to
+show the main GUI; the checkout-backed menu-bar service continues to own its UI,
+which the user opens from that menu. Rerunning the installer reproducibly
+replaces an app owned by this launcher contract and `./setup.sh --verify`
+rejects a missing, modified, redirected, or stale bundle.
+
+This locally generated launcher is unsigned. It is a convenience entry point,
+not the signed/notarized release artifact, and macOS permissions continue to
+belong to the checkout-backed Python service. The release workflow makes no
+signature or notarization claim for this app; shipping a compiled,
+Developer-ID-signed app remains separate work requiring Apple credentials and
+a permission migration plan.
+
 `scripts/package_macos.sh` normalizes the staged tree to the selected commit's
 timestamp, stamps its logical-tree digest, then reopens both containers and
 verifies their receipts, tracked Git contents, shallow revision, public origin,

@@ -66,8 +66,10 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_acoustic_calibration.py",
             "uv run tests/test_benchmark_acoustic_calibration.py",
             "uv run tests/test_delayed_cleanup_merge.py",
+            "uv run tests/test_macos_delayed_cleanup_destination.py",
             "uv run tests/test_model_wallet.py",
             "uv run tests/test_model_wallet_shadow.py",
+            "uv run tests/test_model_readiness_evidence.py",
             "uv run tests/test_point_and_speak_resolver.py",
             "uv run tests/test_macos_point_and_speak_snapshot.py",
             "uv run tests/test_macos_drop_to_target_snapshot.py",
@@ -100,10 +102,12 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_cleanup_proof_recovery.py",
             "uv run tests/test_benchmark_cleanup_proof_recovery.py",
             "uv run tests/test_macos_drop_to_target_snapshot.py",
+            "uv run tests/test_macos_delayed_cleanup_destination.py",
             "uv run tests/test_acoustic_keyword_bias_evaluation.py",
             "uv run tests/test_acoustic_calibration.py",
             "uv run tests/test_benchmark_acoustic_calibration.py",
             "uv run tests/test_model_wallet_shadow.py",
+            "uv run tests/test_model_readiness_evidence.py",
             "uv run tests/test_demonstration_drafts.py",
         ):
             with self.subTest(batch_gate=batch_gate):
@@ -252,6 +256,24 @@ class InstallerContractTests(unittest.TestCase):
             "setup.sh", (ROOT / "Install.command").read_text(encoding="utf-8"))
         self.assertIn(
             "setup.ps1", (ROOT / "Install.cmd").read_text(encoding="utf-8"))
+
+    def test_mac_installs_verified_checkout_backed_launcher_app_only(self):
+        launcher_tool = (
+            ROOT / "scripts" / "macos_launcher_app.py"
+        ).read_text(encoding="utf-8")
+        for expected in (
+            "scripts/macos_launcher_app.py",
+            'launcher_app="$HOME/Applications/Whisper Face.app"',
+            'macos_launcher_app.py" create',
+            'macos_launcher_app.py" verify',
+            '--checkout "$DIR"',
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, self.shell)
+        self.assertNotIn("macos_launcher_app.py", self.powershell)
+        self.assertIn('"CFBundlePackageType": "APPL"', launcher_tool)
+        self.assertIn("launcher must not embed runtime source", launcher_tool)
+        self.assertNotIn("dictate.py\n", launcher_tool)
 
     def test_update_and_rollback_guide_uses_supported_install_paths(self):
         guide = (
