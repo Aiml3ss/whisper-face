@@ -119,6 +119,8 @@ are never Supporter-only features.
   current stack in a public accuracy/latency comparison. Rolling and
   speculative decodes now retain exact capture-sample bounds, including real
   silence gaps; malformed or overlapping timing evidence still fails closed.
+  After a successful ordinary Mac dictation, a Ping advises you to review
+  consequence-sensitive text; it does not block insertion or verify the words.
 - **Counterfactual Context Firewall** — every finalized, insertion-bound
   contextual/personalized compile is compared with a context-free shadow
   compile. Protected influence is quarantined in a transcript-free receipt;

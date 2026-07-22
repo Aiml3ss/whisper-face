@@ -3543,6 +3543,11 @@ def play(sound: str):
     )
 
 
+def dictation_success_sound(consequence_route: str, *, is_macos: bool) -> str:
+    """Choose an advisory completion cue for ordinary dictation only."""
+    return "Ping" if is_macos and consequence_route == "review" else "Pop"
+
+
 def frontmost_bundle() -> str:
     if IS_WINDOWS:
         title = windows_foreground_title()
@@ -6210,7 +6215,10 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         attempted = (integrity_receipt is None
                      or integrity_receipt.paste_attempted)
         if verified:
-            play("Pop")
+            play(dictation_success_sound(
+                PIPELINE_STATE["last_consequence_route"],
+                is_macos=IS_MACOS,
+            ))
         elif attempted:
             CAPTION["text"] = (
                 "Paste unverified — check target; saved in Voice Outbox")

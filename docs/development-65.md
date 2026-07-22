@@ -48,7 +48,7 @@ explicit Mac-first sequencing rather than dropping the item.
 | 38 | Agent Voice Inbox | active | A strict local queue preserves opaque source provenance and exact payloads through atomic, idempotent queued/acknowledged/cancelled transitions with content-free receipts; no local-agent adapter or execution authority exists |
 | 39 | Voice-plus-click confirmation for risky agent actions | queued | Risk policy, explicit confirmation, audit receipt |
 | 40 | Teach-by-demonstration workflows | queued | Finder/Mail/Notes/menu vertical slices with preview/rollback |
-| 41 | Risk sonification/haptic feedback | queued | Isolated prototype and usability/error-rate evidence |
+| 41 | Risk sonification/haptic feedback | active | A successful ordinary Mac dictation uses an asynchronous Ping when its consequence receipt routes to review; this is advisory only, while other success remains Pop and insertion failure/outbox remains Funk. Usability and error-rate evidence are still outstanding |
 | 42 | Privacy promise, threat model, security policy, disclosure route | complete | `PRIVACY.md`, `SECURITY.md`, and threat model document current local/LAN/release boundaries; GitHub private vulnerability reporting is enabled and tested live |
 | 43 | Trademark clearance and optional patent/prior-art decision | queued-external | Owner/counsel decision recorded without claiming legal advice |
 | 44 | Public reproducible benchmarks and model scorecard | active | `public_scorecard.py` deterministically aggregates five checked-in synthetic suites into a transcript-free 62/62 report with zero critical failures and explicit zero physical apps/audio/model runs; physical results remain outstanding |
