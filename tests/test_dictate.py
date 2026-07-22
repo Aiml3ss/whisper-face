@@ -194,6 +194,14 @@ class FacePreferenceTests(unittest.TestCase):
             ("parrot", "fox", "owl", "cat", "bear"),
         )
 
+    def test_reduce_motion_freezes_hud_audio_animation(self):
+        ns = load_definitions(
+            "hud_level_step", assignments={"LEVEL_SMOOTH"})
+
+        self.assertEqual(ns["hud_level_step"](0.9, 0.7, "recording", True), 0.0)
+        self.assertGreater(
+            ns["hud_level_step"](0.9, 0.0, "recording", False), 0.0)
+
 
 class AudioPoolTests(unittest.TestCase):
     def test_streams_are_preopened_and_reused(self):
@@ -210,7 +218,9 @@ class AudioPoolTests(unittest.TestCase):
             extra={"sd": SimpleNamespace(InputStream=factory)},
         )
         pool = ns["AudioPool"](size=2, stream_factory=factory)
+        self.assertEqual(pool.readiness(), "Starting")
         pool.warm()
+        self.assertEqual(pool.readiness(), "Ready")
         self.assertEqual(len(streams), 2)
         self.assertEqual([s.starts for s in streams], [1, 1])
 
@@ -224,6 +234,47 @@ class AudioPoolTests(unittest.TestCase):
         self.assertIs(reused, slot)
         self.assertEqual(len(streams), 2)
         self.assertEqual(streams[0].starts, 3)
+
+    def test_failed_microphone_warmup_is_reported_as_unavailable(self):
+        def denied(**_kwargs):
+            raise RuntimeError("private device detail")
+
+        ns = load_definitions(
+            "AudioSlot", "AudioPool",
+            assignments={"SAMPLE_RATE"},
+            extra={"sd": SimpleNamespace(InputStream=denied)},
+        )
+        pool = ns["AudioPool"](size=2, stream_factory=denied)
+
+        with self.assertRaises(RuntimeError):
+            pool.warm()
+
+        self.assertEqual(pool.readiness(), "Unavailable")
+        self.assertEqual(pool.slots, [])
+        self.assertEqual(pool.warm_error, "RuntimeError")
+
+    def test_runtime_microphone_start_failure_changes_readiness(self):
+        class FailsAfterWarmup(FakeStream):
+            def start(self):
+                super().start()
+                if self.starts > 1:
+                    raise RuntimeError("device disappeared")
+
+        def factory(**kwargs):
+            return FailsAfterWarmup(**kwargs)
+
+        ns = load_definitions(
+            "AudioSlot", "AudioPool",
+            assignments={"SAMPLE_RATE"},
+            extra={"sd": SimpleNamespace(InputStream=factory)},
+        )
+        pool = ns["AudioPool"](size=1, stream_factory=factory)
+        pool.warm()
+
+        with self.assertRaises(RuntimeError):
+            pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+
+        self.assertEqual(pool.readiness(), "Unavailable")
 
 
 class FlightRecorderTests(unittest.TestCase):
@@ -379,6 +430,42 @@ class CleanupGuardTests(unittest.TestCase):
         self.assertEqual(cleaned, "Ready.")
         self.assertEqual(edits, [])
         self.assertEqual(seen["timeout"], (1, 4))
+
+    def test_llm_edit_kind_is_canonicalized_before_status_projection(self):
+        private_kind = "customer said secret launch phrase"
+
+        def fake_ollama_chat(*_args, **_kwargs):
+            return json.dumps({
+                "text": "Ready.",
+                "edits": [{
+                    "kind": private_kind,
+                    "before": "Ready",
+                    "after": "Ready.",
+                }],
+            }), "stop"
+
+        ns = load_definitions(
+            "canonical_llm_edit_kind", "_guard_cleaned_output",
+            "llm_clean_with_edits",
+            assignments={
+                "BASE_PROMPT", "FEW_SHOT", "LLM_CLEANUP_TIMEOUT",
+                "LLM_EDIT_KINDS", "MODE_INSTRUCTIONS", "REFUSAL_RE",
+                "STRUCTURED_OUTPUT",
+            },
+            extra={
+                "CleanupEdit": lambda kind, before, after: SimpleNamespace(
+                    kind=kind, before=before, after=after),
+                "ollama_chat": fake_ollama_chat,
+                "quick_clean": lambda text: text,
+                "STRUCTURED_FEW_SHOT": [],
+            },
+        )
+
+        _cleaned, edits = ns["llm_clean_with_edits"](
+            "Ready", "Keep the tone neutral.")
+
+        self.assertEqual(edits[0].kind, "semantic_cleanup")
+        self.assertNotIn("secret", edits[0].kind)
 
     def test_structured_output_guard_rejects_destructive_results(self):
         ns = load_definitions(
@@ -933,36 +1020,34 @@ class LearningTests(unittest.TestCase):
         self.assertEqual(merged["fixes"], latest["fixes"])
         self.assertEqual(merged["processed"], 10)
 
+    def test_vocabulary_mining_excludes_unverified_and_outbox_text(self):
+        ns = load_definitions("parse_texts", extra={"json": json})
+        lines = [
+            json.dumps({
+                "clean": "verified phrase",
+                "path": "fast",
+                "metrics": {"insertion_verified": True},
+            }),
+            json.dumps({
+                "clean": "private unverified phrase",
+                "path": "fast",
+                "metrics": {"insertion_verified": False},
+            }),
+            json.dumps({
+                "clean": "legacy outbox phrase",
+                "path": "outbox/fast",
+            }),
+            json.dumps({"clean": "legacy verified phrase", "path": "fast"}),
+        ]
+
+        self.assertEqual(ns["parse_texts"](lines), [
+            "verified phrase",
+            "legacy verified phrase",
+        ])
+
 
 class InsertionAdapterTests(unittest.TestCase):
-    def test_no_ax_element_lease_accepts_the_same_frontmost_window(self):
-        window_destination = "com.openai.codex:62318:48436"
-        ns = load_definitions(
-            "focus_destination_id", "opaque_focus_context",
-            "capture_insertion_lease", "destination_observation",
-            extra={
-                "FocusSnapshot": object,
-                "InsertionLease": InsertionLease,
-                "DestinationObservation": DestinationObservation,
-                "frontmost_window_destination":
-                    lambda _bundle: window_destination,
-            },
-        )
-        lease = ns["capture_insertion_lease"](
-            None, "com.openai.codex", "utterance-1")
-
-        observation = ns["destination_observation"](
-            None, "com.openai.codex", lease, None, "com.openai.codex")
-
-        self.assertTrue(lease.opaque)
-        self.assertEqual(observation.destination_id, lease.destination_id)
-        self.assertEqual(
-            observation.surrounding_fingerprint,
-            lease.surrounding_fingerprint,
-        )
-
-    def test_no_ax_element_runtime_pastes_once_in_the_same_window(self):
-        window_destination = "com.openai.codex:62318:48436"
+    def test_no_ax_element_fails_closed_instead_of_pasting_by_window(self):
         coordinator = InsertionCoordinator()
         pasted = []
         pipeline = {}
@@ -977,8 +1062,8 @@ class InsertionAdapterTests(unittest.TestCase):
                 "INSERTION_COORDINATOR": coordinator,
                 "ReadbackResult": ReadbackResult,
                 "ReceiptState": ReceiptState,
-                "frontmost_window_destination":
-                    lambda _bundle: window_destination,
+                "frontmost_window_destination": lambda _bundle: None,
+                "user_input_signature": lambda: None,
                 "frontmost_bundle": lambda: "com.openai.codex",
                 "paste": pasted.append,
                 "PIPELINE_STATE": pipeline,
@@ -991,39 +1076,216 @@ class InsertionAdapterTests(unittest.TestCase):
             insertion_receipt=None,
             focus_at_press=None,
             bundle_at_press="com.openai.codex",
+            input_signature_at_press="10:20:30:40:50",
         )
 
         receipt = ns["commit_insertion"](
-            rec, "Works in ChatGPT", "com.openai.codex", None)
+            rec, "Keep this recoverable", "com.openai.codex", None)
 
-        self.assertEqual(pasted, ["Works in ChatGPT"])
-        self.assertTrue(receipt.paste_attempted)
+        self.assertEqual(pasted, [])
+        self.assertFalse(receipt.paste_attempted)
         self.assertEqual(receipt.state, ReceiptState.UNVERIFIABLE)
         self.assertEqual(pipeline["last_insertion_state"], "unverifiable")
+        self.assertEqual(len(coordinator.recoverable()), 1)
 
-    def test_no_ax_element_lease_rejects_a_different_frontmost_window(self):
-        destinations = iter((
-            "com.openai.codex:62318:48436",
-            "com.openai.codex:62318:99999",
-        ))
+    def test_reviewed_opaque_editor_pastes_when_window_and_input_are_stable(self):
+        coordinator = InsertionCoordinator()
+        pasted = []
+        pipeline = {}
+        destination = "com.openai.codex:42:7"
         ns = load_definitions(
             "focus_destination_id", "opaque_focus_context",
-            "capture_insertion_lease", "destination_observation",
+            "capture_insertion_lease", "seal_opaque_window_lease",
+            "destination_observation", "commit_insertion",
             extra={
                 "FocusSnapshot": object,
                 "InsertionLease": InsertionLease,
                 "DestinationObservation": DestinationObservation,
-                "frontmost_window_destination": lambda _bundle:
-                    next(destinations),
+                "INSERTION_COORDINATOR": coordinator,
+                "ReadbackResult": ReadbackResult,
+                "ReceiptState": ReceiptState,
+                "frontmost_window_destination": lambda _bundle: destination,
+                "user_input_signature": lambda: "10:20:30:40:50",
+                "frontmost_bundle": lambda: "com.openai.codex",
+                "paste": pasted.append,
+                "PIPELINE_STATE": pipeline,
             },
         )
-        lease = ns["capture_insertion_lease"](
-            None, "com.openai.codex", "utterance-1")
+        rec = SimpleNamespace(
+            insertion_lease=ns["capture_insertion_lease"](
+                None, "com.openai.codex", "opaque-1"),
+            insertion_receipt=None,
+            focus_at_press=None,
+            bundle_at_press="com.openai.codex",
+            input_signature_at_press="10:20:30:40:50",
+        )
+        ns["seal_opaque_window_lease"](rec)
 
-        observation = ns["destination_observation"](
-            None, "com.openai.codex", lease, None, "com.openai.codex")
+        receipt = ns["commit_insertion"](
+            rec, "Paste once", "com.openai.codex", None)
 
-        self.assertNotEqual(observation.destination_id, lease.destination_id)
+        self.assertEqual(pasted, ["Paste once"])
+        self.assertTrue(receipt.paste_attempted)
+        self.assertEqual(receipt.state, ReceiptState.UNVERIFIABLE)
+
+    def test_reviewed_opaque_editor_rejects_input_during_processing(self):
+        coordinator = InsertionCoordinator()
+        pasted = []
+        destination = "com.openai.codex:42:7"
+        signatures = iter(("10:20:30:40:50", "11:20:30:40:50"))
+        ns = load_definitions(
+            "focus_destination_id", "opaque_focus_context",
+            "capture_insertion_lease", "seal_opaque_window_lease",
+            "destination_observation", "commit_insertion",
+            extra={
+                "FocusSnapshot": object,
+                "InsertionLease": InsertionLease,
+                "DestinationObservation": DestinationObservation,
+                "INSERTION_COORDINATOR": coordinator,
+                "ReadbackResult": ReadbackResult,
+                "ReceiptState": ReceiptState,
+                "frontmost_window_destination": lambda _bundle: destination,
+                "user_input_signature": lambda: next(signatures),
+                "frontmost_bundle": lambda: "com.openai.codex",
+                "paste": pasted.append,
+                "PIPELINE_STATE": {},
+            },
+        )
+        rec = SimpleNamespace(
+            insertion_lease=ns["capture_insertion_lease"](
+                None, "com.openai.codex", "opaque-1"),
+            insertion_receipt=None,
+            focus_at_press=None,
+            bundle_at_press="com.openai.codex",
+            input_signature_at_press="10:20:30:40:50",
+        )
+        ns["seal_opaque_window_lease"](rec)
+
+        receipt = ns["commit_insertion"](
+            rec, "Do not misdirect", "com.openai.codex", None)
+
+        self.assertEqual(pasted, [])
+        self.assertFalse(receipt.paste_attempted)
+        self.assertEqual(receipt.state, ReceiptState.CONFLICT)
+        self.assertEqual(len(coordinator.recoverable()), 1)
+
+    def test_reviewed_opaque_editor_rejects_window_drift(self):
+        coordinator = InsertionCoordinator()
+        pasted = []
+        destinations = iter((
+            "com.openai.codex:42:7",
+            "com.openai.codex:42:7",
+            "com.openai.codex:42:99",
+        ))
+        ns = load_definitions(
+            "focus_destination_id", "opaque_focus_context",
+            "capture_insertion_lease", "seal_opaque_window_lease",
+            "destination_observation", "commit_insertion",
+            extra={
+                "FocusSnapshot": object,
+                "InsertionLease": InsertionLease,
+                "DestinationObservation": DestinationObservation,
+                "INSERTION_COORDINATOR": coordinator,
+                "ReadbackResult": ReadbackResult,
+                "ReceiptState": ReceiptState,
+                "frontmost_window_destination": lambda _bundle:
+                    next(destinations),
+                "user_input_signature": lambda: "10:20:30:40:50",
+                "frontmost_bundle": lambda: "com.openai.codex",
+                "paste": pasted.append,
+                "PIPELINE_STATE": {},
+            },
+        )
+        rec = SimpleNamespace(
+            insertion_lease=ns["capture_insertion_lease"](
+                None, "com.openai.codex", "opaque-1"),
+            insertion_receipt=None,
+            focus_at_press=None,
+            bundle_at_press="com.openai.codex",
+            input_signature_at_press="10:20:30:40:50",
+        )
+        ns["seal_opaque_window_lease"](rec)
+
+        receipt = ns["commit_insertion"](
+            rec, "Do not misdirect", "com.openai.codex", None)
+
+        self.assertEqual(pasted, [])
+        self.assertFalse(receipt.paste_attempted)
+        self.assertEqual(receipt.state, ReceiptState.CONFLICT)
+
+    def test_reviewed_opaque_editor_rejects_input_during_the_hold(self):
+        coordinator = InsertionCoordinator()
+        pasted = []
+        destination = "com.openai.codex:42:7"
+        signatures = iter(("11:20:30:40:50", "11:20:30:40:50"))
+        ns = load_definitions(
+            "focus_destination_id", "opaque_focus_context",
+            "capture_insertion_lease", "seal_opaque_window_lease",
+            "destination_observation", "commit_insertion",
+            extra={
+                "FocusSnapshot": object,
+                "InsertionLease": InsertionLease,
+                "DestinationObservation": DestinationObservation,
+                "INSERTION_COORDINATOR": coordinator,
+                "ReadbackResult": ReadbackResult,
+                "ReceiptState": ReceiptState,
+                "frontmost_window_destination": lambda _bundle: destination,
+                "user_input_signature": lambda: next(signatures),
+                "frontmost_bundle": lambda: "com.openai.codex",
+                "paste": pasted.append,
+                "PIPELINE_STATE": {},
+            },
+        )
+        rec = SimpleNamespace(
+            insertion_lease=ns["capture_insertion_lease"](
+                None, "com.openai.codex", "opaque-1"),
+            insertion_receipt=None,
+            focus_at_press=None,
+            bundle_at_press="com.openai.codex",
+            input_signature_at_press="10:20:30:40:50",
+        )
+        ns["seal_opaque_window_lease"](rec)
+
+        receipt = ns["commit_insertion"](
+            rec, "Do not misdirect", "com.openai.codex", None)
+
+        self.assertEqual(pasted, [])
+        self.assertFalse(receipt.paste_attempted)
+        self.assertEqual(receipt.state, ReceiptState.CONFLICT)
+
+    def test_opaque_compatibility_allowlist_rejects_unknown_apps(self):
+        ns = load_definitions(
+            "frontmost_window_destination",
+            assignments={"OPAQUE_WINDOW_COMPAT_BUNDLES"},
+            extra={"IS_MACOS": True},
+        )
+
+        self.assertIsNone(ns["frontmost_window_destination"](
+            "com.example.unknown-editor"))
+
+    def test_opaque_resolution_does_not_wait_for_missing_ax(self):
+        calls = []
+        rec = SimpleNamespace(
+            insertion_lease=InsertionLease.capture_opaque(
+                "opaque-1", "com.openai.codex:42:7", "sealed"),
+            focus_at_press=None,
+            bundle_at_press="com.openai.codex",
+        )
+        ns = load_definitions(
+            "resolve_insertion_target",
+            extra={
+                "FocusSnapshot": object,
+                "focused_snapshot": lambda: calls.append("read") or None,
+                "frontmost_bundle": lambda: "com.openai.codex",
+                "time": SimpleNamespace(
+                    monotonic=lambda: 0.0,
+                    sleep=lambda _delay: calls.append("sleep"),
+                ),
+            },
+        )
+
+        self.assertIsNone(ns["resolve_insertion_target"](rec))
+        self.assertEqual(calls, ["read"])
 
     def test_release_retries_a_transient_unreadable_ax_target(self):
         original_element = object()
@@ -1234,8 +1496,8 @@ class InsertionAdapterTests(unittest.TestCase):
                 "FocusSnapshot": object,
                 "InsertionLease": InsertionLease,
                 "DestinationObservation": DestinationObservation,
-                "frontmost_window_destination":
-                    lambda bundle: f"{bundle}:window",
+                "frontmost_window_destination": lambda _bundle: None,
+                "user_input_signature": lambda: None,
             },
         )
         lease = ns["capture_insertion_lease"](

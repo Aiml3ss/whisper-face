@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "privacy": "synthetic-text-only",
+  "description": "Synthetic text and scenario labels for Whisper Face dictation evaluation. It contains no recordings or personal dictation.",
+  "required_dimensions": [
+    "names",
+    "numbers",
+    "dates",
+    "urls",
+    "code",
+    "commands",
+    "corrections",
+    "accent",
+    "noise",
+    "quiet_speech",
+    "acronyms",
+    "paths",
+    "email",
+    "false_starts"
+  ],
+  "cases": [
+    {
+      "id": "name-multilingual",
+      "reference": "Email Siobhan O'Rourke and José Muñoz about the Qwen review.",
+      "dimensions": ["names", "email"],
+      "scenario": {"environment": "office", "delivery": "conversational", "risk": "proper-noun"}
+    },
+    {
+      "id": "currency-and-decimal",
+      "reference": "Set the approved budget to $2,042.76, not $2,042.67.",
+      "dimensions": ["numbers", "corrections"],
+      "scenario": {"environment": "quiet", "delivery": "careful", "risk": "numeric-anchor"}
+    },
+    {
+      "id": "date-time-zone",
+      "reference": "Schedule it for Tuesday, March 17, 2026 at 3:45 p.m. Pacific.",
+      "dimensions": ["dates", "numbers"],
+      "scenario": {"environment": "office", "delivery": "conversational", "risk": "calendar-anchor"}
+    },
+    {
+      "id": "url-with-path",
+      "reference": "Open https://docs.example.com/v2/setup?mode=local and read section four.",
+      "dimensions": ["urls", "numbers", "paths"],
+      "scenario": {"environment": "quiet", "delivery": "spelled-components", "risk": "url-anchor"}
+    },
+    {
+      "id": "python-identifier",
+      "reference": "Rename parse result to parse underscore result and return None when item count equals zero.",
+      "dimensions": ["code", "numbers"],
+      "scenario": {"environment": "office", "delivery": "developer", "risk": "identifier"}
+    },
+    {
+      "id": "terminal-command",
+      "reference": "Run git status dash dash short, then uv run tests slash test underscore dictate dot py.",
+      "dimensions": ["commands", "code", "paths"],
+      "scenario": {"environment": "quiet", "delivery": "developer", "risk": "command"}
+    },
+    {
+      "id": "bounded-self-correction",
+      "reference": "Send it Thursday—actually, make that Friday morning.",
+      "dimensions": ["corrections", "dates"],
+      "scenario": {"environment": "office", "delivery": "self-correcting", "risk": "meaning-change"}
+    },
+    {
+      "id": "accent-variation-indian-english",
+      "reference": "Please route the Kubernetes alert to Arundhati after the deployment.",
+      "dimensions": ["accent", "names", "code"],
+      "scenario": {"environment": "quiet", "delivery": "natural", "evaluation_profile": "Indian English recording required", "risk": "proper-noun"}
+    },
+    {
+      "id": "accent-variation-scottish-english",
+      "reference": "The Glasgow office needs thirty-three replacement adapters.",
+      "dimensions": ["accent", "numbers"],
+      "scenario": {"environment": "quiet", "delivery": "natural", "evaluation_profile": "Scottish English recording required", "risk": "numeric-anchor"}
+    },
+    {
+      "id": "cafe-background",
+      "reference": "Draft a concise reply confirming the revised launch window.",
+      "dimensions": ["noise"],
+      "scenario": {"environment": "cafe-babble", "delivery": "conversational", "evaluation_profile": "licensed noise mix required", "risk": "general"}
+    },
+    {
+      "id": "keyboard-background",
+      "reference": "Add a follow-up task for Morgan to verify the checksum.",
+      "dimensions": ["noise", "names", "commands"],
+      "scenario": {"environment": "keyboard-noise", "delivery": "conversational", "evaluation_profile": "licensed noise mix required", "risk": "proper-noun"}
+    },
+    {
+      "id": "quiet-speaker",
+      "reference": "Remind me to submit the reimbursement form tomorrow.",
+      "dimensions": ["quiet_speech", "dates"],
+      "scenario": {"environment": "quiet", "delivery": "low-amplitude", "evaluation_profile": "physical microphone recording required", "risk": "general"}
+    },
+    {
+      "id": "acronym-sequence",
+      "reference": "The API uses OAuth, JSON, and TLS version 1.3.",
+      "dimensions": ["acronyms", "code", "numbers"],
+      "scenario": {"environment": "office", "delivery": "developer", "risk": "acronym-anchor"}
+    },
+    {
+      "id": "filesystem-path",
+      "reference": "Save the report under slash Users slash shared slash Q3 Forecast dot csv.",
+      "dimensions": ["paths", "code", "numbers"],
+      "scenario": {"environment": "quiet", "delivery": "spelled-components", "risk": "path-anchor"}
+    },
+    {
+      "id": "email-address",
+      "reference": "Send the invite to release dot team plus mac at example dot org.",
+      "dimensions": ["email", "urls"],
+      "scenario": {"environment": "office", "delivery": "spelled-components", "risk": "recipient"}
+    },
+    {
+      "id": "false-start-restart",
+      "reference": "We should deploy—no, let me restart. We should stage the release after tests pass.",
+      "dimensions": ["false_starts", "corrections", "commands"],
+      "scenario": {"environment": "office", "delivery": "false-start", "risk": "meaning-change"}
+    },
+    {
+      "id": "serial-and-phone",
+      "reference": "The serial number is A7C-9041 and the callback number ends in 0186.",
+      "dimensions": ["numbers", "acronyms"],
+      "scenario": {"environment": "quiet", "delivery": "careful", "risk": "numeric-anchor"}
+    },
+    {
+      "id": "swift-symbols",
+      "reference": "In VoiceIR dot compile, guard that hypotheses dot isEmpty is false.",
+      "dimensions": ["code", "commands", "acronyms"],
+      "scenario": {"environment": "office", "delivery": "developer", "risk": "identifier"}
+    },
+    {
+      "id": "long-form-release-brief",
+      "reference": "Here is the release brief for Tuesday, March 17. First, Morgan will verify build 2042 and publish the checksum. Second, José will review the migration notes and confirm that https://status.example.com is ready. Third, the Mac team will run the full test suite and record every failure without paraphrasing names, numbers, commands, or paths. If the first validation fails—actually, let me correct that—if any validation fails, stop the release, preserve the logs, and open a blocking issue. Do not retry an ambiguous insertion. After all checks pass, send the final notice to release dot team at example dot org and archive the temporary artifacts.",
+      "dimensions": ["names", "numbers", "dates", "urls", "commands", "corrections", "email", "false_starts"],
+      "scenario": {"environment": "office", "delivery": "long-form", "risk": "mixed-anchors"}
+    }
+  ]
+}

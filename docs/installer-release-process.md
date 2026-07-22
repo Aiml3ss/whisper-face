@@ -35,12 +35,14 @@ uv run tests/test_parrot_core.py
 uv run tests/test_voice_compiler.py
 uv run tests/test_benchmark_voice_compiler.py
 uv run tests/test_benchmark_asr.py
+uv run tests/test_performance_lab.py
 uv run tests/test_dictate.py
 uv run tests/test_insertion_integrity.py
 uv run tests/test_personal_regression.py
 uv run tests/test_whisper_face_gui.py
 uv run tests/test_installers.py
 uv run tests/test_repository_governance.py
+uv run tests/test_macos_distribution.py
 ```
 
 Run the live verification available on the current platform:
@@ -71,6 +73,8 @@ A change is distributable only when all of the following are true:
 - The service has been restarted when validating a local runtime change.
 - The distribution branch contains the commits before another machine is told
   to clone or install them.
+- Mac release artifacts pass `tests/test_macos_distribution.py`, identify one
+  full source revision, and follow `docs/distribution/macos-release.md`.
 
 ## Handoff format
 

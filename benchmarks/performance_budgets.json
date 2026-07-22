@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "ci_warm_path": {
+      "description": "Deterministic, platform-independent Voice Compiler tail-latency release gate. The threshold is deliberately tolerant of shared CI runners while still catching hangs and order-of-magnitude regressions.",
+      "checks": [
+        {
+          "id": "compiler-p95",
+          "metric": "latency_ms.compiler.p95",
+          "samples_metric": "latency_ms.compiler.samples",
+          "minimum_samples": 30,
+          "operator": "<=",
+          "threshold": 50.0,
+          "unit": "ms"
+        }
+      ]
+    },
+    "product_quality": {
+      "description": "Aspirational release scorecard for representative, safely observed outcomes. It is not a CI gate until the minimum physical-audio sample set exists.",
+      "checks": [
+        {
+          "id": "end-to-end-p95",
+          "metric": "latency_ms.end_to_end.p95",
+          "samples_metric": "latency_ms.end_to_end.samples",
+          "minimum_samples": 100,
+          "operator": "<=",
+          "threshold": 2000.0,
+          "unit": "ms"
+        },
+        {
+          "id": "cleanup-p95",
+          "metric": "latency_ms.cleanup.p95",
+          "samples_metric": "latency_ms.cleanup.samples",
+          "minimum_samples": 100,
+          "operator": "<=",
+          "threshold": 500.0,
+          "unit": "ms"
+        },
+        {
+          "id": "zero-edit-rate",
+          "metric": "zero_edit.rate",
+          "samples_metric": "zero_edit.samples",
+          "minimum_samples": 100,
+          "operator": ">=",
+          "threshold": 0.9,
+          "unit": "fraction"
+        },
+        {
+          "id": "correction-burden",
+          "metric": "correction_burden.characters_per_100_words",
+          "samples_metric": "correction_burden.samples",
+          "minimum_samples": 100,
+          "operator": "<=",
+          "threshold": 5.0,
+          "unit": "characters-per-100-words"
+        },
+        {
+          "id": "route-quality",
+          "metric": "route_quality.rate",
+          "samples_metric": "route_quality.samples",
+          "minimum_samples": 100,
+          "operator": ">=",
+          "threshold": 0.95,
+          "unit": "fraction"
+        },
+        {
+          "id": "verified-delivery",
+          "metric": "verified_delivery.rate",
+          "samples_metric": "verified_delivery.samples",
+          "minimum_samples": 100,
+          "operator": ">=",
+          "threshold": 0.99,
+          "unit": "fraction"
+        }
+      ]
+    }
+  }
+}

@@ -322,13 +322,28 @@ uv run tests/test_parrot_core.py
 uv run tests/test_voice_compiler.py
 uv run tests/test_benchmark_voice_compiler.py
 uv run tests/test_benchmark_asr.py
+uv run tests/test_performance_lab.py
 uv run tests/test_dictate.py
 uv run tests/test_insertion_integrity.py
 uv run tests/test_personal_regression.py
 uv run tests/test_whisper_face_gui.py
 uv run tests/test_installers.py
 uv run tests/test_repository_governance.py
+uv run tests/test_macos_distribution.py
 ```
+
+## Distribution, privacy, and security
+
+Public Mac releases are built from one exact Git revision with the same
+`Install.command` used in a checkout. The release pipeline emits an unsigned
+local preview or, when Apple credentials are supplied, a signed, notarized, and
+stapled disk image together with a source ZIP, update/rollback manifest, and
+SHA-256 checksums. See the [Mac release runbook](docs/distribution/macos-release.md).
+
+Whisper Face's user-facing data commitments are in the
+[privacy promise](PRIVACY.md). Security boundaries and private vulnerability
+reporting are documented in the [threat model](docs/security/threat-model.md)
+and [security policy](SECURITY.md).
 
 ## License
 
