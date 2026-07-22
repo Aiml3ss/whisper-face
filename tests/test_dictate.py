@@ -861,6 +861,22 @@ class CleanupGuardTests(unittest.TestCase):
         self.assertGreater(len(raw.split()), 40)
         self.assertFalse(ns["needs_llm_cleanup"](raw, None, False))
 
+    def test_single_ordinal_prose_stays_fast_in_capture_and_code_modes(self):
+        ns = load_definitions(
+            "needs_llm_cleanup",
+            extra={"compile_cleanup": compile_cleanup},
+        )
+        raw = (
+            "The second thing regarding the audio is that the microphone "
+            "should remain warm between dictations."
+        )
+        plan = compile_cleanup(raw)
+
+        for mode in ("capture", "code"):
+            with self.subTest(mode=mode):
+                self.assertFalse(ns["needs_llm_cleanup"](
+                    raw, None, False, mode, plan))
+
     def test_numbered_marker_list_stays_on_the_fast_path(self):
         ns = load_definitions(
             "quick_clean", "needs_llm_cleanup",
@@ -1024,11 +1040,29 @@ class CleanupGuardTests(unittest.TestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
-    def test_model_repository_is_resolved_only_once_per_process(self):
+    def test_mlx_progress_uses_thread_lock_not_multiprocessing_semaphore(self):
+        received = []
+
+        class FakeProgress:
+            @classmethod
+            def set_lock(cls, lock):
+                received.append(lock)
+
+        ns = load_definitions(
+            "configure_mlx_progress_lock",
+            extra={"threading": threading},
+        )
+        ns["configure_mlx_progress_lock"](
+            SimpleNamespace(tqdm=FakeProgress))
+
+        self.assertEqual(len(received), 1)
+        self.assertEqual(type(received[0]), type(threading.RLock()))
+
+    def test_runtime_model_resolution_is_local_only_and_memoized(self):
         downloads = []
 
-        def download(repo_id, revision=None):
-            downloads.append((repo_id, revision))
+        def download(repo_id, revision=None, local_files_only=None):
+            downloads.append((repo_id, revision, local_files_only))
             return f"/models/{repo_id.replace('/', '--')}"
 
         ns = load_definitions(
@@ -1043,7 +1077,29 @@ class ConfigurationTests(unittest.TestCase):
         second = ns["resolve_asr_model"]("org/tiny", downloader=download)
         self.assertEqual(first, "/models/org--tiny")
         self.assertEqual(second, first)
-        self.assertEqual(downloads, [("org/tiny", None)])
+        self.assertEqual(downloads, [("org/tiny", None, True)])
+
+    def test_installer_model_resolution_explicitly_allows_downloads(self):
+        downloads = []
+
+        def download(repo_id, revision=None, local_files_only=None):
+            downloads.append((repo_id, revision, local_files_only))
+            return f"/models/{repo_id.replace('/', '--')}"
+
+        ns = load_definitions(
+            "resolve_asr_model",
+            assignments={
+                "ASR_MODEL_PATHS", "ASR_MODEL_PATHS_LOCK",
+                "ASR_MODEL_REVISIONS",
+            },
+            extra={"IS_MACOS": True},
+        )
+
+        resolved = ns["resolve_asr_model"](
+            "org/turbo", downloader=download, local_files_only=False)
+
+        self.assertEqual(resolved, "/models/org--turbo")
+        self.assertEqual(downloads, [("org/turbo", None, False)])
 
     def test_production_asr_repositories_have_immutable_revisions(self):
         ns = load_definitions(
