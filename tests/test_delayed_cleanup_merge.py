@@ -16,6 +16,14 @@ from delayed_cleanup_merge import (
 
 
 class DelayedCleanupMergeTests(unittest.TestCase):
+    def test_destination_snapshot_repr_redacts_private_text(self):
+        snapshot = DestinationSnapshot(
+            "opaque-destination", "opaque-revision",
+            "Project Bluebird private destination")
+
+        self.assertNotIn("Project Bluebird", repr(snapshot))
+        self.assertEqual(snapshot.text, "Project Bluebird private destination")
+
     def test_applies_cleanup_when_destination_is_unchanged(self):
         receipt = merge_delayed_cleanup(
             "We should uh ship Friday.",

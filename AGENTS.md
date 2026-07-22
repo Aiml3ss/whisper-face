@@ -56,8 +56,10 @@ arguments:
    uv run tests/test_acoustic_calibration.py
    uv run tests/test_benchmark_acoustic_calibration.py
    uv run tests/test_delayed_cleanup_merge.py
+   uv run tests/test_macos_delayed_cleanup_destination.py
    uv run tests/test_model_wallet.py
    uv run tests/test_model_wallet_shadow.py
+   uv run tests/test_model_readiness_evidence.py
    uv run tests/test_point_and_speak_resolver.py
    uv run tests/test_macos_point_and_speak_snapshot.py
    uv run tests/test_macos_drop_to_target_snapshot.py
