@@ -139,7 +139,7 @@ class InstallerContractTests(unittest.TestCase):
         configuration_start = self.shell.index(
             'step "configuring the tuned local Ollama service"')
         branch_start = self.shell.index(
-            'if [ -f "$ollama_plist" ]', configuration_start)
+            'if ollama_service_identity_is_valid ', configuration_start)
         branch_end = self.shell.index('echo -n "== waiting for Ollama"')
         branch = self.shell[branch_start:branch_end]
         preamble = self.shell[configuration_start:branch_start]
@@ -147,11 +147,9 @@ class InstallerContractTests(unittest.TestCase):
             'render_plist com.berg.ollama.plist.template '
             '"$desired_ollama_plist"', preamble)
         for required in (
-            'cmp -s "$desired_ollama_plist" "$ollama_plist"',
-            '[ "$installed_ollama_digest" = "$desired_ollama_digest" ]',
-            "agent_is_running com.berg.ollama",
-            '[ "$running_ollama_pid" = "$listening_ollama_pid" ]',
-            "http://127.0.0.1:11434/api/tags",
+            'ollama_service_identity_is_valid "$desired_ollama_plist"',
+            '"$ollama_plist" "$ollama_service_receipt"',
+            '"$desired_ollama_digest"',
             'mv -f "$desired_ollama_plist" "$ollama_plist"',
         ):
             with self.subTest(required=required):
@@ -175,9 +173,9 @@ class InstallerContractTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, postamble)
 
-        # Windows already has the equivalent warm-service behavior: it starts
-        # Ollama only when the endpoint is absent. Both platforms still verify
-        # the pinned manifest and installed tag after taking the fast path.
+        # Windows has a health-based warm-service path, but its detached Ollama
+        # process is not owned by the Whisper Face scheduled task. Do not claim
+        # the launchd-equivalent loaded-service identity guarantee there.
         start = self.powershell.index(
             'Start-Process -FilePath $Ollama -ArgumentList "serve"')
         self.assertIn(
@@ -188,6 +186,55 @@ class InstallerContractTests(unittest.TestCase):
             with self.subTest(installer="manifest verification"):
                 self.assertIn("--verify-ollama-model", installer)
                 self.assertIn("show", installer)
+
+    def test_mac_ollama_identity_helper_fails_closed(self):
+        helper_start = self.shell.index("ollama_listener_pid()")
+        helper_end = self.shell.index("reload_agent()", helper_start)
+        helpers = self.shell[helper_start:helper_end]
+        for required in (
+            "*$'\\n'*) return 1",
+            '[ "${#digest}" -eq 64 ]',
+            '*[!0-9a-f]*) return 1',
+            '[ -f "$receipt" ] || return 1',
+            'wc -c < "$receipt"',
+            '[ "$receipt_size" = "65" ]',
+            'valid_sha256_digest "$receipt_digest"',
+            '[ "$receipt_digest" = "$desired_digest" ]',
+            'cmp -s "$desired_plist" "$installed_plist"',
+            'agent_is_running com.berg.ollama',
+            '[ "$running_pid" = "$listening_pid" ]',
+            'http://127.0.0.1:11434/api/tags',
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, helpers)
+
+    def test_mac_verify_reconstructs_identity_without_mutating_install(self):
+        verify_start = self.shell.index("verify_install()")
+        verify_end = self.shell.index(
+            'if [ "$VERIFY_ONLY" -eq 1 ]', verify_start)
+        verify = self.shell[verify_start:verify_end]
+        for required in (
+            'render_plist "$DIR/com.berg.ollama.plist.template"',
+            "printf -v verify_cleanup 'rm -f -- %q'",
+            'trap "$verify_cleanup" EXIT',
+            'shasum -a 256 "$verify_ollama_plist"',
+            'ollama_service_identity_is_valid "$verify_ollama_plist"',
+            '"$ollama_plist" "$ollama_service_receipt"',
+            'fail "Ollama LaunchAgent configuration or process identity is stale"',
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, verify)
+        self.assertGreaterEqual(verify.count("trap - EXIT"), 2)
+        for forbidden in (
+            "reload_agent",
+            "launchctl bootstrap",
+            "launchctl kickstart",
+            'mv -f "$verify_ollama_plist" "$ollama_plist"',
+            'mv -f "$receipt_temporary"',
+            'services stop ollama',
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, verify)
 
     def test_both_installers_use_current_runtime_and_preload_contract(self):
         for name, installer in (
@@ -215,6 +262,21 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn("--preload-models", installer)
                 self.assertIn("--verify", installer)
                 self.assertIn("--verify-ollama-model", installer)
+
+    def test_windows_precreates_private_runtime_log_with_user_only_acl(self):
+        private_start = self.powershell.index(
+            'Write-Step "creating private per-machine files')
+        task_start = self.powershell.index(
+            'Write-Step "installing the Windows login task"')
+        private = self.powershell[private_start:task_start]
+        self.assertIn('New-Item -ItemType File -Path $Log -Force', private)
+        self.assertIn(
+            '& icacls $Log /inheritance:r /grant:r '
+            '"${env:USERNAME}:(F)" /Q',
+            private,
+        )
+        self.assertIn(
+            'throw "could not apply the private runtime log ACL"', private)
 
     def test_shell_dispatches_windows_before_mac_only_work(self):
         dispatch = self.shell.index("MINGW*|MSYS*|CYGWIN*")

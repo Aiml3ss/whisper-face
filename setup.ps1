@@ -252,6 +252,13 @@ foreach ($PrivateStateName in @("voice_inbox.json", "demonstrations.json")) {
         & icacls $PrivateState /inheritance:r /grant:r "${env:USERNAME}:(F)" /Q | Out-Null
     }
 }
+if (-not (Test-Path $Log)) {
+    New-Item -ItemType File -Path $Log -Force | Out-Null
+}
+& icacls $Log /inheritance:r /grant:r "${env:USERNAME}:(F)" /Q | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "could not apply the private runtime log ACL"
+}
 
 Write-Step "installing the Windows login task"
 New-Item -ItemType Directory -Force -Path $LauncherDir | Out-Null

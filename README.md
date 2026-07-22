@@ -353,7 +353,12 @@ After granting permissions, verify the complete installation at any time:
 
 This checks the dependency lock, platform login service, Qwen model, both
 Whisper caches, and the process health endpoint without changing the
-installation.
+installation. On Mac it also freshly reconstructs the expected Ollama service
+definition and requires its exact digest receipt plus an exact match between
+the launchd PID and the endpoint's unique listener PID. Windows verifies its
+scheduled task, endpoint health, and model presence; its independently managed
+Ollama process does not currently provide the same task-to-listener identity
+binding.
 
 ### Native Mac window
 
@@ -424,8 +429,13 @@ calendar draft can be copied to the Mac clipboard only after a second explicit
 confirmation; a revealed queued email can similarly request the native Mail
 compose sheet, but neither path sends or schedules anything. You can acknowledge
 or cancel a selected draft and purge acknowledged/cancelled drafts; queued drafts
-are not purged. The inspector never pastes, sends, schedules, or executes a draft,
-and it remains available when command diversion is turned off.
+are not purged. After a successful task/calendar copy, a separate **Clear
+Clipboard** action makes a best-effort change-count check and does nothing when
+an intervening clipboard change is already visible. macOS provides no atomic
+compare-and-clear, so an external change in the microscopic interval between
+that check and clear can still race. The
+inspector never reads clipboard content, pastes, sends, schedules, or executes a
+draft, and it remains available when command diversion is turned off.
 
 The Mac Privacy pane's **Risk confirmation (inert)** row is a safety ceremony,
 not an agent-action launcher. Choose one of four closed risk classes and select

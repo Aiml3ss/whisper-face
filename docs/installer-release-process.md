@@ -111,8 +111,12 @@ loading user files, starting runtime services, or persisting defaults.
 Windows setup must never execute AppKit.
 Headless Mac endpoints use `./setup.sh --server-only --verify`; that mode skips
 the AppKit construction check while still verifying the locked runtime,
-models, services, and health endpoint. Release CI always runs the separately
-bounded native GUI smoke on a windowed macOS runner.
+models, services, and health endpoint. Mac verification freshly renders the
+desired Ollama plist into a temporary file and requires an exact installed
+plist match, a strict SHA-256 last-load receipt, a running launchd agent, and
+equality between its PID and the unique listener PID. It does not reload,
+kickstart, rewrite, or repair the installation. Release CI always runs the
+separately bounded native GUI smoke on a windowed macOS runner.
 
 For dependency, service, model, preload, or permission changes, also rerun the
 full one-click installer on an appropriate clean or disposable machine before
@@ -128,10 +132,13 @@ successfully, and that launchd process owns the healthy local endpoint. A
 missing receipt forces one conservative reload; the receipt is written only
 after the loaded-process identity and health checks pass.
 Windows likewise starts Ollama only when that local endpoint is unavailable.
-Either platform still verifies the pinned Qwen manifest and installed model;
-the fast path does not skip environment, model, helper, launcher, service, or
-final health verification. Any macOS plist drift or health failure atomically
-installs the newly rendered plist and follows the normal service reload path.
+Its detached Ollama process is not owned by the Whisper Face scheduled task,
+so Windows verification currently proves endpoint health and model presence,
+not the stronger launchd PID-to-listener identity binding. Either platform
+still verifies the pinned Qwen manifest and installed model; the fast path does
+not skip environment, model, helper, launcher, service, or final health
+verification. Any macOS plist drift or health failure atomically installs the
+newly rendered plist and follows the normal service reload path.
 
 ## Definition of done
 

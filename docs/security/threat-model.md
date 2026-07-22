@@ -84,7 +84,8 @@ application alone can prevent. They remain important deployment risks.
 - sandbox model and capture work into least-privilege processes;
 - add independent update-manifest signing and key-rotation/revocation policy;
 - publish repeatable dependency/model provenance attestations;
-- add automated privacy regression tests for log redaction and network egress;
+- add automated privacy regression tests for network egress beyond the existing
+  routine-log redaction contract;
 - commission an external review of capture lifecycle and insertion adapters.
 
 Report possible invariant violations privately through [SECURITY.md](../../SECURITY.md).

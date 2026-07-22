@@ -110,6 +110,45 @@ ollama_listener_pid() {
     printf '%s\n' "$pids"
 }
 
+valid_sha256_digest() {
+    local digest="$1"
+    [ "${#digest}" -eq 64 ] || return 1
+    case "$digest" in
+        *[!0-9a-f]*) return 1 ;;
+    esac
+}
+
+ollama_process_identity_is_valid() {
+    local running_pid listening_pid
+    agent_is_running com.berg.ollama || return 1
+    running_pid="$(agent_pid com.berg.ollama || true)"
+    listening_pid="$(ollama_listener_pid || true)"
+    [ -n "$running_pid" ] || return 1
+    [ "$running_pid" = "$listening_pid" ] || return 1
+    curl -fsS --max-time 1 http://127.0.0.1:11434/api/tags \
+        >/dev/null 2>&1
+}
+
+ollama_service_identity_is_valid() {
+    # $1 = freshly rendered desired plist, $2 = installed plist,
+    # $3 = last-successful-load receipt, $4 = desired plist digest.
+    local desired_plist="$1"
+    local installed_plist="$2"
+    local receipt="$3"
+    local desired_digest="$4"
+    local receipt_digest receipt_size
+    [ -f "$desired_plist" ] && [ -f "$installed_plist" ] \
+        && [ -f "$receipt" ] || return 1
+    valid_sha256_digest "$desired_digest" || return 1
+    receipt_size="$(wc -c < "$receipt" | tr -d '[:space:]')"
+    [ "$receipt_size" = "65" ] || return 1
+    IFS= read -r receipt_digest < "$receipt" || return 1
+    valid_sha256_digest "$receipt_digest" || return 1
+    [ "$receipt_digest" = "$desired_digest" ] || return 1
+    cmp -s "$desired_plist" "$installed_plist" || return 1
+    ollama_process_identity_is_valid
+}
+
 reload_agent() {
     # $1 = label, $2 = plist. Wait out launchd's asynchronous bootout.
     local label="$1"
@@ -195,7 +234,9 @@ parakeet_helper="$DIR/.models/bin/parrot-asr-helper"
 
 verify_install() {
     step "verifying installation"
-    local uv_bin ollama_bin
+    local uv_bin ollama_bin verify_ollama_plist verify_ollama_digest
+    local verify_cleanup
+    local escaped_verify_ollama escaped_verify_dir
     uv_bin="$(command -v uv 2>/dev/null || true)"
     ollama_bin="$(command -v ollama 2>/dev/null || true)"
     [ -n "$uv_bin" ] || fail "uv is not installed"
@@ -210,6 +251,27 @@ verify_install() {
     [ -f "$dictate_plist" ] || fail "dictation LaunchAgent is missing"
     [ -f "$ollama_plist" ] || fail "Ollama LaunchAgent is missing"
     plutil -lint "$dictate_plist" "$ollama_plist" >/dev/null
+    escaped_verify_ollama="$(escape_sed_replacement "$ollama_bin")"
+    escaped_verify_dir="$(escape_sed_replacement "$DIR")"
+    verify_ollama_plist="$(mktemp \
+        "${TMPDIR:-/tmp}/whisper-face-ollama-verify.XXXXXX")"
+    printf -v verify_cleanup 'rm -f -- %q' "$verify_ollama_plist"
+    trap "$verify_cleanup" EXIT
+    render_plist "$DIR/com.berg.ollama.plist.template" \
+        "$verify_ollama_plist" \
+        -e "s|__OLLAMA__|$escaped_verify_ollama|g" \
+        -e "s|__DIR__|$escaped_verify_dir|g"
+    verify_ollama_digest="$(shasum -a 256 "$verify_ollama_plist" \
+        | awk '{print $1}')"
+    if ! ollama_service_identity_is_valid "$verify_ollama_plist" \
+            "$ollama_plist" "$ollama_service_receipt" \
+            "$verify_ollama_digest"; then
+        rm -f "$verify_ollama_plist"
+        trap - EXIT
+        fail "Ollama LaunchAgent configuration or process identity is stale"
+    fi
+    rm -f "$verify_ollama_plist"
+    trap - EXIT
     if [ "$MODE" = "full" ]; then
         python3 "$DIR/scripts/macos_launcher_app.py" verify \
             --app "$launcher_app" --checkout "$DIR" \
@@ -309,23 +371,15 @@ render_plist com.berg.ollama.plist.template "$desired_ollama_plist" \
     -e "s|__DIR__|$escaped_dir|g"
 desired_ollama_digest="$(shasum -a 256 "$desired_ollama_plist" \
     | awk '{print $1}')"
-installed_ollama_digest="$(cat "$ollama_service_receipt" 2>/dev/null || true)"
-running_ollama_pid="$(agent_pid com.berg.ollama || true)"
-listening_ollama_pid="$(ollama_listener_pid || true)"
 
 # A warm update normally leaves Ollama's exact service definition running.
 # Keep that process and its loaded model hot only when the freshly rendered
 # plist is byte-identical, a prior successful reload receipt binds its digest,
 # and the running launchd PID owns the healthy endpoint. Any missing evidence,
 # drift, stopped agent, or failed health probe takes the replace/reload path.
-if [ -f "$ollama_plist" ] \
-        && cmp -s "$desired_ollama_plist" "$ollama_plist" \
-        && [ "$installed_ollama_digest" = "$desired_ollama_digest" ] \
-        && agent_is_running com.berg.ollama \
-        && [ -n "$running_ollama_pid" ] \
-        && [ "$running_ollama_pid" = "$listening_ollama_pid" ] \
-        && curl -fsS --max-time 1 http://127.0.0.1:11434/api/tags \
-            >/dev/null 2>&1; then
+if ollama_service_identity_is_valid "$desired_ollama_plist" \
+        "$ollama_plist" "$ollama_service_receipt" \
+        "$desired_ollama_digest"; then
     rm -f "$desired_ollama_plist"
     echo "== reusing healthy Ollama service (configuration unchanged)"
 else
@@ -350,10 +404,7 @@ echo
 [ "$ollama_ready" -eq 1 ] \
     || fail "Ollama did not become ready; inspect $DIR/ollama.log"
 
-running_ollama_pid="$(agent_pid com.berg.ollama || true)"
-listening_ollama_pid="$(ollama_listener_pid || true)"
-[ -n "$running_ollama_pid" ] \
-    && [ "$running_ollama_pid" = "$listening_ollama_pid" ] \
+ollama_process_identity_is_valid \
     || fail "Ollama service identity could not be verified"
 install -d -m 700 "$service_receipt_dir"
 receipt_temporary="${ollama_service_receipt}.tmp.$$"
