@@ -135,6 +135,21 @@ class RepositoryGovernanceTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden_field, interest_form)
 
+    def test_architecture_docs_preserve_in_process_protocol_boundary(self):
+        readme = self.read("README.md")
+        architecture = self.read("docs/architecture-and-interop.md")
+        contributing = self.read("CONTRIBUTING.md")
+
+        self.assertIn(
+            "docs/architecture-and-interop.md", readme)
+        self.assertIn("in-process conformance contract", architecture)
+        self.assertIn(
+            "does **not** currently ship a cross-process SDK", architecture)
+        self.assertIn("public ABI", architecture)
+        self.assertIn("uv run tests/test_voice_input_protocol.py", contributing)
+        self.assertIn(
+            "Both installers must execute the current checkout", contributing)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1923,6 +1923,8 @@ class StatusBar(NSObject):
         compiler_summary.setEnabled_(False)
         self.recognition_menu.addItem_(compiler_summary)
         consequence = consequence_state_snapshot()
+        self.recognition_root.setTitle_(
+            recognition_root_title(consequence["route"]))
         consequence_summary = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "Consequence: "
             f"{consequence['route'].replace('-', ' ').title()} · "
@@ -3546,6 +3548,12 @@ def play(sound: str):
 def dictation_success_sound(consequence_route: str, *, is_macos: bool) -> str:
     """Choose an advisory completion cue for ordinary dictation only."""
     return "Ping" if is_macos and consequence_route == "review" else "Pop"
+
+
+def recognition_root_title(consequence_route: object) -> str:
+    """Label the latest recognition as reviewable only for that exact route."""
+    return "Last Recognition — Review" if consequence_route == "review" \
+        else "Last Recognition"
 
 
 def frontmost_bundle() -> str:
