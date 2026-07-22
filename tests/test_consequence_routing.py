@@ -162,6 +162,54 @@ class ConsequenceClassifierTests(unittest.TestCase):
         )
         self.assertIn("hypothesis-disagreement", numbers[0].uncertainty)
 
+    def test_number_and_common_abbreviated_unit_are_one_claim(self):
+        cases = (
+            ("Set the dose to 5 mg", "Set the dose to 5 mL", "5 mg"),
+            ("Set the dose to 5mg", "Set the dose to 5mL", "5mg"),
+            ("Set the dose to five mg", "Set the dose to five mL", "five mg"),
+        )
+        for text, alternative, expected in cases:
+            with self.subTest(text=text):
+                plan = build_consequence_plan(timed_voice(
+                    text,
+                    confidence=0.93,
+                    alternative=alternative,
+                ), audio_duration=8.0)
+
+                numbers = [risk for risk in plan.risks
+                           if risk.category == "number"]
+                self.assertEqual(len(numbers), 1)
+                self.assertEqual(
+                    text[numbers[0].char_start:numbers[0].char_end],
+                    expected,
+                )
+                self.assertIn(
+                    "hypothesis-disagreement", numbers[0].uncertainty)
+                self.assertEqual(len(plan.relisten_requests), 1)
+
+    def test_abbreviated_unit_matching_is_closed_and_word_bounded(self):
+        cases = (
+            ("Choose 5 methods", "5"),
+            ("Choose 5 in the list", "5"),
+            ("Use version 5mlpack", None),
+        )
+        for text, expected in cases:
+            with self.subTest(text=text):
+                plan = build_consequence_plan(
+                    timed_voice(text, confidence=0.95),
+                    audio_duration=8.0,
+                )
+                numbers = [risk for risk in plan.risks
+                           if risk.category == "number"]
+                if expected is None:
+                    self.assertEqual(numbers, [])
+                else:
+                    self.assertEqual(len(numbers), 1)
+                    self.assertEqual(
+                        text[numbers[0].char_start:numbers[0].char_end],
+                        expected,
+                    )
+
     def test_consequential_punctuation_disagreements_are_not_collapsed(self):
         pairs = (
             ("Charge $1.20", "Charge $120", "currency"),

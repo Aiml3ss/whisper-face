@@ -2825,15 +2825,18 @@ def extract_recent_utterance(
 class FlightRecorder:
     """Opt-in continuous capture with a bounded, RAM-only audio deque."""
 
-    def __init__(self, seconds=FLIGHT_BUFFER_SECONDS, stream_factory=None):
+    def __init__(self, seconds=FLIGHT_BUFFER_SECONDS, stream_factory=None,
+                 restore_allowed=None):
         self.max_samples = int(seconds * SAMPLE_RATE)
         self.stream_factory = stream_factory
+        self.restore_allowed = restore_allowed or (lambda: True)
         self.frames = deque()
         self.total_samples = 0
         self.stream = None
         self.target = None
         self.lock = threading.Lock()
         self.init_lock = threading.Lock()
+        self.recovery_pending = False
 
     def is_enabled(self):
         with self.lock:
@@ -2854,59 +2857,111 @@ class FlightRecorder:
         if target is not None:
             target._callback(indata, frames, time_info, status)
 
+    def _enable_locked(self):
+        """Open the current default input while ``init_lock`` is held."""
+        with self.lock:
+            if self.stream is not None:
+                return
+        factory = self.stream_factory or sd.InputStream
+        stream = factory(
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype="float32",
+            callback=self._callback,
+        )
+        with self.lock:
+            self.frames.clear()
+            self.total_samples = 0
+            self.stream = stream
+        try:
+            stream.start()
+        except Exception:
+            with self.lock:
+                self.stream = None
+            try:
+                stream.close()
+            except Exception:
+                pass
+            raise
+
+    @staticmethod
+    def _close_stream(stream, *, report=False):
+        if stream is None:
+            return
+        try:
+            stream.stop()
+        except Exception as error:
+            if report:
+                print(f"! Flight Recorder stream stop failed: {error}")
+        finally:
+            try:
+                stream.close()
+            except Exception as error:
+                if report:
+                    print(f"! Flight Recorder stream close failed: {error}")
+
+    def _recover_locked(self):
+        """Replace an idle stale stream without exposing device details."""
+        with self.lock:
+            if self.target is not None:
+                self.recovery_pending = True
+                return
+            stream, self.stream = self.stream, None
+            self.frames.clear()
+            self.total_samples = 0
+            self.recovery_pending = False
+        self._close_stream(stream)
+        try:
+            should_restore = bool(self.restore_allowed())
+        except Exception:
+            should_restore = False
+        if not should_restore:
+            return
+        try:
+            self._enable_locked()
+        except Exception:
+            # A later native event can retry. Recovery never logs device
+            # details or disrupts the rest of the audio path.
+            pass
+
     def enable(self):
         if self.is_enabled():
             return
         with self.init_lock:
-            if self.is_enabled():
-                return
-            factory = self.stream_factory or sd.InputStream
-            stream = factory(
-                samplerate=SAMPLE_RATE,
-                channels=1,
-                dtype="float32",
-                callback=self._callback,
-            )
-            with self.lock:
-                self.frames.clear()
-                self.total_samples = 0
-                self.stream = stream
-            try:
-                stream.start()
-            except Exception:
-                with self.lock:
-                    self.stream = None
-                stream.close()
-                raise
+            self._enable_locked()
 
     def disable(self):
-        with self.lock:
-            stream, self.stream = self.stream, None
-            self.target = None
-            self.frames.clear()
-            self.total_samples = 0
-        if stream is not None:
-            try:
-                stream.stop()
-            except Exception as e:
-                print(f"! Flight Recorder stream stop failed: {e}")
-            finally:
-                try:
-                    stream.close()
-                except Exception as e:
-                    print(f"! Flight Recorder stream close failed: {e}")
+        with self.init_lock:
+            with self.lock:
+                stream, self.stream = self.stream, None
+                self.target = None
+                self.frames.clear()
+                self.total_samples = 0
+                self.recovery_pending = False
+            self._close_stream(stream, report=True)
+
+    def invalidate(self):
+        """Recover the default input without cutting off an attached take."""
+        with self.init_lock:
+            self._recover_locked()
 
     def attach(self, recorder) -> bool:
-        with self.lock:
-            if self.stream is None or self.target is not None:
-                return False
-            self.target = recorder
-            return True
+        with self.init_lock:
+            with self.lock:
+                if self.stream is None or self.target is not None:
+                    return False
+                self.target = recorder
+                return True
 
     def detach(self, recorder):
-        with self.lock:
-            if self.target is recorder:
+        with self.init_lock:
+            with self.lock:
+                if self.target is not recorder:
+                    return
                 self.target = None
+                should_recover = self.recovery_pending
+            if should_recover:
+                self._recover_locked()
 
     def clear(self):
         with self.lock:
@@ -2922,7 +2977,17 @@ class FlightRecorder:
         return extract_recent_utterance(np.concatenate(frames).reshape(-1))
 
 
-FLIGHT = FlightRecorder()
+FLIGHT = FlightRecorder(restore_allowed=lambda: (
+    bool(PREFERENCES.get("flight_recorder", False)) and not PAUSED["on"]))
+
+
+def _capture_retrospective_flight_tap(recorder) -> np.ndarray:
+    """Snapshot pre-press RAM audio before detach can trigger recovery."""
+    buffered = FLIGHT.extract_before(recorder.press_at)
+    recorder.source = "flight"
+    recorder.stop()
+    FLIGHT.clear()
+    return buffered
 
 
 class AudioSlot:
@@ -3307,8 +3372,19 @@ class MacAudioRecoveryNotifications:
 
 
 AUDIO_POOL = AudioPool(size=2)
+
+
+def _invalidate_default_audio_inputs():
+    """Refresh every stream bound to the prior macOS default input."""
+    try:
+        AUDIO_POOL.invalidate()
+    finally:
+        FLIGHT.invalidate()
+
+
 AUDIO_RECOVERY = (
-    MacAudioRecoveryNotifications(AUDIO_POOL.invalidate) if IS_MACOS else None)
+    MacAudioRecoveryNotifications(_invalidate_default_audio_inputs)
+    if IS_MACOS else None)
 
 
 def _transcribe_frames(frames, prompt=None) -> Recognition:
@@ -8374,10 +8450,7 @@ def main():
                         # Preserve the rolling buffer while detaching the tap's
                         # tiny live take, then select speech ending before the
                         # key went down so the cue itself cannot be captured.
-                        rec.source = "flight"
-                        rec.stop()
-                        buffered = FLIGHT.extract_before(rec.press_at)
-                        FLIGHT.clear()
+                        buffered = _capture_retrospective_flight_tap(rec)
                         if len(buffered) < MIN_SECONDS * SAMPLE_RATE:
                             print("[flight] no recent utterance found")
                             play("Funk")

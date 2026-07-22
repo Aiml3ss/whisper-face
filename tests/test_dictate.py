@@ -1714,6 +1714,22 @@ class MacAudioRecoveryNotificationTests(unittest.TestCase):
         def removeObserver_(self, token):
             self.removed.append(token)
 
+    def test_runtime_invalidation_covers_pool_and_flight_recorder(self):
+        calls = []
+        ns = load_definitions(
+            "_invalidate_default_audio_inputs",
+            extra={
+                "AUDIO_POOL": SimpleNamespace(
+                    invalidate=lambda: calls.append("pool")),
+                "FLIGHT": SimpleNamespace(
+                    invalidate=lambda: calls.append("flight")),
+            },
+        )
+
+        ns["_invalidate_default_audio_inputs"]()
+
+        self.assertEqual(calls, ["pool", "flight"])
+
     def test_default_device_and_wake_events_are_content_free_and_coalesced(self):
         core = self.CoreAudio()
         center = self.WorkspaceCenter()
@@ -2088,6 +2104,195 @@ class FlightRecorderTests(unittest.TestCase):
         self.assertEqual(flight.total_samples, 0)
         self.assertEqual(len(flight.frames), 0)
         self.assertTrue(streams[0].closed)
+
+    @staticmethod
+    def recorder_namespace():
+        return load_definitions(
+            "FlightRecorder",
+            assignments={"SAMPLE_RATE", "FLIGHT_BUFFER_SECONDS"},
+            extra={
+                "deque": __import__("collections").deque,
+                "np": np,
+                "sd": SimpleNamespace(InputStream=FakeStream),
+                "threading": threading,
+                "time": time,
+            },
+        )
+
+    def test_idle_default_input_change_replaces_the_continuous_stream(self):
+        streams = []
+
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        flight = self.recorder_namespace()["FlightRecorder"](
+            stream_factory=factory)
+        flight.enable()
+        original = streams[0]
+
+        flight.invalidate()
+
+        self.assertTrue(original.closed)
+        self.assertEqual(original.stops, 1)
+        self.assertEqual(len(streams), 2)
+        self.assertIs(flight.stream, streams[1])
+        self.assertEqual(streams[1].starts, 1)
+
+    def test_active_take_defers_recovery_and_coalesces_repeated_events(self):
+        streams = []
+
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        flight = self.recorder_namespace()["FlightRecorder"](
+            stream_factory=factory)
+        flight.enable()
+        received = []
+        recorder = SimpleNamespace(
+            _callback=lambda indata, *_args: received.append(indata.copy()))
+        self.assertTrue(flight.attach(recorder))
+        original = streams[0]
+
+        flight.invalidate()
+        flight.invalidate()
+        original.callback(
+            np.ones((4, 1), dtype=np.float32), 4, None, None)
+
+        self.assertTrue(flight.recovery_pending)
+        self.assertFalse(original.closed)
+        self.assertEqual(len(streams), 1)
+        self.assertEqual(len(received), 1)
+
+        flight.detach(recorder)
+
+        self.assertFalse(flight.recovery_pending)
+        self.assertTrue(original.closed)
+        self.assertEqual(len(streams), 2)
+        self.assertIs(flight.stream, streams[1])
+
+    def test_recovery_failure_retries_and_feature_off_stays_closed(self):
+        streams = []
+        state = {"allowed": True, "fail": False}
+
+        def factory(**kwargs):
+            if state["fail"]:
+                raise RuntimeError("private device detail")
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        flight = self.recorder_namespace()["FlightRecorder"](
+            stream_factory=factory,
+            restore_allowed=lambda: state["allowed"],
+        )
+        flight.enable()
+        original = streams[0]
+        state["fail"] = True
+
+        flight.invalidate()
+
+        self.assertTrue(original.closed)
+        self.assertIsNone(flight.stream)
+        state["fail"] = False
+        flight.invalidate()
+        self.assertEqual(len(streams), 2)
+        self.assertIs(flight.stream, streams[1])
+
+        state["allowed"] = False
+        flight.invalidate()
+
+        self.assertTrue(streams[1].closed)
+        self.assertIsNone(flight.stream)
+        self.assertEqual(len(streams), 2)
+
+    def test_attach_waits_for_reopen_and_falls_back_when_start_fails(self):
+        reopen_started = threading.Event()
+        allow_failure = threading.Event()
+        streams = []
+
+        class ReopenStream(FakeStream):
+            def start(self):
+                super().start()
+                if len(streams) > 1:
+                    reopen_started.set()
+                    allow_failure.wait(1.0)
+                    raise RuntimeError("private device detail")
+
+        def factory(**kwargs):
+            stream = ReopenStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        flight = self.recorder_namespace()["FlightRecorder"](
+            stream_factory=factory)
+        flight.enable()
+        recovery = threading.Thread(target=flight.invalidate)
+        recovery.start()
+        self.assertTrue(reopen_started.wait(1.0))
+
+        result = []
+        attach_done = threading.Event()
+
+        def attach():
+            result.append(flight.attach(SimpleNamespace()))
+            attach_done.set()
+
+        attempt = threading.Thread(target=attach)
+        attempt.start()
+        self.assertFalse(attach_done.wait(0.05))
+        allow_failure.set()
+        recovery.join(1.0)
+        attempt.join(1.0)
+
+        self.assertFalse(recovery.is_alive())
+        self.assertFalse(attempt.is_alive())
+        self.assertEqual(result, [False])
+        self.assertIsNone(flight.stream)
+
+    def test_pending_recovery_cannot_clear_retrospective_tap_snapshot(self):
+        buffered = np.ones(int(0.8 * 16_000), dtype=np.float32)
+        calls = []
+
+        class PendingRecoveryFlight:
+            def __init__(self):
+                self.frames = buffered
+
+            def extract_before(self, before_at):
+                calls.append(("extract", before_at))
+                return self.frames.copy()
+
+            def clear(self):
+                calls.append(("clear",))
+                self.frames = np.zeros(0, dtype=np.float32)
+
+        flight = PendingRecoveryFlight()
+
+        class Recorder:
+            press_at = 42.0
+            source = "hold"
+
+            def stop(self):
+                calls.append(("stop",))
+                # Detach would run pending recovery and clear the real Flight
+                # Recorder's frames at this point.
+                flight.clear()
+
+        ns = load_definitions(
+            "_capture_retrospective_flight_tap",
+            extra={"FLIGHT": flight, "np": np},
+        )
+        recorder = Recorder()
+
+        result = ns["_capture_retrospective_flight_tap"](recorder)
+
+        self.assertEqual(calls[0], ("extract", 42.0))
+        self.assertEqual(calls[1:], [("stop",), ("clear",), ("clear",)])
+        self.assertEqual(recorder.source, "flight")
+        np.testing.assert_array_equal(result, buffered)
 
 
 class CleanupGuardTests(unittest.TestCase):
