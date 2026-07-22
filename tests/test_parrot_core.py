@@ -124,6 +124,18 @@ class CleanupCompilerTests(unittest.TestCase):
         )
         self.assertFalse(plan.needs_semantic_cleanup)
 
+    def test_plain_numbered_list_accepts_mixed_cardinal_ordinals(self):
+        plan = compile_cleanup("Two things. One test. Second, test.")
+
+        self.assertEqual(
+            plan.text,
+            "Two things:\n"
+            "- Test.\n"
+            "- Test.",
+        )
+        self.assertIn("spoken_enumeration", plan.edit_kinds)
+        self.assertFalse(plan.needs_semantic_cleanup)
+
     def test_repeated_number_words_without_list_intent_stay_as_prose(self):
         for spoken in (
             "Here's one reason I stayed, and here's two tickets tomorrow",
