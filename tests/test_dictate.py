@@ -662,6 +662,26 @@ class CleanupGuardTests(unittest.TestCase):
         self.assertGreater(len(raw.split()), 40)
         self.assertFalse(ns["needs_llm_cleanup"](raw, None, False))
 
+    def test_numbered_marker_list_stays_on_the_fast_path(self):
+        ns = load_definitions(
+            "quick_clean", "needs_llm_cleanup",
+            extra={"compile_cleanup": compile_cleanup},
+        )
+        raw = (
+            "The two things and feedback still does not list out items here, "
+            "right? So listing, here's one as a test, and here's two as a "
+            "test."
+        )
+
+        self.assertFalse(ns["needs_llm_cleanup"](raw, None, False))
+        self.assertEqual(
+            ns["quick_clean"](raw),
+            "The two things and feedback still does not list out items here, "
+            "right? So listing:\n"
+            "- Here's one as a test.\n"
+            "- Here's two as a test.",
+        )
+
     def test_llm_cleanup_has_a_short_read_deadline(self):
         seen = {}
 

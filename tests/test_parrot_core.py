@@ -79,6 +79,33 @@ class CleanupCompilerTests(unittest.TestCase):
                 self.assertTrue(
                     compile_cleanup(spoken).needs_semantic_cleanup)
 
+    def test_repeated_numbered_markers_format_without_semantic_cleanup(self):
+        spoken = (
+            "The two things and feedback still does not list out items here, "
+            "right? So listing, here's one as a test, and here's two as a "
+            "test."
+        )
+
+        plan = compile_cleanup(spoken)
+
+        self.assertEqual(
+            plan.text,
+            "The two things and feedback still does not list out items here, "
+            "right? So listing:\n"
+            "- Here's one as a test.\n"
+            "- Here's two as a test.",
+        )
+        self.assertIn("spoken_enumeration", plan.edit_kinds)
+        self.assertFalse(plan.needs_semantic_cleanup)
+
+    def test_repeated_number_words_without_list_intent_stay_as_prose(self):
+        spoken = "Here's one reason I stayed, and here's two tickets tomorrow"
+
+        plan = compile_cleanup(spoken)
+
+        self.assertEqual(plan.text, spoken)
+        self.assertNotIn("spoken_enumeration", plan.edit_kinds)
+
     def test_ordinary_reference_to_a_list_stays_on_the_fast_path(self):
         self.assertFalse(compile_cleanup(
             "I sent the contractor a list of ideas yesterday"
