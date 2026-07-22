@@ -107,6 +107,11 @@ profiles.
   intentionally disabled until a killable process-isolated verifier beats the
   current stack in a public accuracy/latency comparison; rolling-chunk timing
   is conservatively ineligible until it carries absolute capture bounds.
+- **Counterfactual Context Firewall** — every finalized, insertion-bound
+  contextual/personalized compile is compared with a context-free shadow
+  compile. Protected influence is quarantined in a transcript-free receipt;
+  benign influence is only a shadow promotion candidate. The comparison cannot
+  change the text, cleanup, insertion, or model route.
 - **Six explicit voice modes** — modifier keys turn the same Right Option
   gesture into faithful capture, polished composition, context-aware reply,
   selected-text editing, spoken-code compilation, or a small allowlist of
@@ -336,6 +341,12 @@ consequence corpus. Its closed artifact explicitly says that no audio,
 verifier, runtime ASR backend, or physical device was exercised, and its 5 ms
 gate uses the worst per-case p95 rather than corpus-average throughput.
 
+Run `uv run benchmark_insertion_reliability.py` for deterministic focus,
+typing, duplicate-callback, destination-relaunch, clipboard, readback, and
+delay fault injection. It checks at-most-once platform paste attempts and
+stable terminal receipts, while explicitly reporting zero real apps tested and
+making no 50-app or four-nines claim.
+
 ## Verify
 
 Run the fast regression suite after changing the pipeline:
@@ -351,6 +362,7 @@ uv run tests/test_performance_lab.py
 uv run tests/test_dictate.py
 uv run tests/test_gui_settings_runtime.py
 uv run tests/test_insertion_integrity.py
+uv run tests/test_benchmark_insertion_reliability.py
 uv run tests/test_personal_regression.py
 uv run tests/test_whisper_face_gui.py
 uv run --locked --script dictate.py --native-gui-smoke-test

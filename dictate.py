@@ -321,6 +321,7 @@ from voice_compiler import (  # noqa: E402
     WordEvidence,
     analyze_prosody,
     consequence_receipt,
+    context_firewall_receipt,
 )
 from insertion_integrity import (  # noqa: E402
     DestinationObservation,
@@ -388,6 +389,15 @@ CONSEQUENCE_ROUTE_IDS = frozenset({
 CONSEQUENCE_RELISTEN_IDS = frozenset({
     "not-needed", "skipped", "confirmed", "contradicted", "timed-out",
     "inconclusive", "mixed", "unavailable",
+})
+CONTEXT_FIREWALL_MODE_IDS = frozenset({"shadow-only", "unavailable"})
+CONTEXT_FIREWALL_DISPOSITION_IDS = frozenset({
+    "no-effect", "promotion-candidate", "quarantine", "unavailable",
+})
+CONTEXT_FIREWALL_REASON_IDS = frozenset({
+    "context-protected", "context-unprotected",
+    "personal-prior-protected", "personal-prior-unprotected",
+    "no-influence", "receipt-error",
 })
 ASR_MODEL_REVISIONS = {
     "mlx-community/whisper-tiny":
@@ -798,6 +808,17 @@ PIPELINE_STATE = {
     "last_relisten_contradicted": 0,
     "last_relisten_inconclusive": 0,
     "last_relisten_skipped": {},
+    "last_context_firewall_mode": "shadow-only",
+    "last_context_firewall_disposition": "no-effect",
+    "last_context_firewall_changed": False,
+    "last_context_firewall_risky_spans": 0,
+    "last_context_firewall_influences": 0,
+    "last_context_firewall_context_influences": 0,
+    "last_context_firewall_prior_influences": 0,
+    "last_context_firewall_protected_influences": 0,
+    "last_context_firewall_promotion_candidates": 0,
+    "last_context_firewall_quarantined": 0,
+    "last_context_firewall_reasons": {},
     "last_asr_engine": "",
     "last_release_s": None,
     "last_word_count": None,
@@ -3024,6 +3045,7 @@ def runtime_status_snapshot() -> dict:
         "last_context_influence": PIPELINE_STATE[
             "last_context_influence"],
         "last_consequence": consequence_state_snapshot(),
+        "last_context_firewall": context_firewall_state_snapshot(),
         "prefers_reduced_motion": mac_prefers_reduced_motion(),
         "words_today": words,
         "minutes_saved": saved,
@@ -3994,6 +4016,104 @@ def consequence_state_snapshot() -> dict:
         "relisten_inconclusive": PIPELINE_STATE[
             "last_relisten_inconclusive"],
         "relisten_skipped": dict(PIPELINE_STATE["last_relisten_skipped"]),
+    }
+
+
+def store_context_firewall_receipt(receipt) -> dict:
+    """Project a shadow comparison into fixed transcript-free aggregates."""
+    try:
+        if receipt is None:
+            raise ValueError("receipt unavailable")
+        mode = getattr(receipt, "mode", "unavailable")
+        if mode not in CONTEXT_FIREWALL_MODE_IDS:
+            mode = "unavailable"
+        disposition = getattr(receipt, "disposition", "unavailable")
+        if disposition not in CONTEXT_FIREWALL_DISPOSITION_IDS:
+            disposition = "unavailable"
+        reasons = {
+            str(reason): _consequence_count(count)
+            for reason, count in getattr(receipt, "reason_counts", ())
+            if reason in CONTEXT_FIREWALL_REASON_IDS
+            and _consequence_count(count) > 0
+        }
+        changed = getattr(receipt, "counterfactual_changed", False)
+        if not isinstance(changed, bool):
+            changed = False
+        values = {
+            "last_context_firewall_mode": mode,
+            "last_context_firewall_disposition": disposition,
+            "last_context_firewall_changed": changed,
+            "last_context_firewall_risky_spans": _consequence_count(getattr(
+                receipt, "risky_spans", 0)),
+            "last_context_firewall_influences": _consequence_count(getattr(
+                receipt, "influence_count", 0)),
+            "last_context_firewall_context_influences": _consequence_count(
+                getattr(receipt, "context_influences", 0)),
+            "last_context_firewall_prior_influences": _consequence_count(
+                getattr(receipt, "personal_prior_influences", 0)),
+            "last_context_firewall_protected_influences": _consequence_count(
+                getattr(receipt, "protected_influences", 0)),
+            "last_context_firewall_promotion_candidates": _consequence_count(
+                getattr(receipt, "promotion_candidates", 0)),
+            "last_context_firewall_quarantined": _consequence_count(getattr(
+                receipt, "quarantined", 0)),
+            "last_context_firewall_reasons": reasons,
+        }
+    except Exception:
+        values = {
+            "last_context_firewall_mode": "unavailable",
+            "last_context_firewall_disposition": "unavailable",
+            "last_context_firewall_changed": False,
+            "last_context_firewall_risky_spans": 0,
+            "last_context_firewall_influences": 0,
+            "last_context_firewall_context_influences": 0,
+            "last_context_firewall_prior_influences": 0,
+            "last_context_firewall_protected_influences": 0,
+            "last_context_firewall_promotion_candidates": 0,
+            "last_context_firewall_quarantined": 0,
+            "last_context_firewall_reasons": {"receipt-error": 1},
+        }
+    PIPELINE_STATE.update(values)
+    return values
+
+
+def runtime_context_firewall_evidence(
+        voice: VoiceIR, compiled, *, evaluator=None) -> float:
+    """Run the counterfactual in shadow mode without affecting live output."""
+    started = time.perf_counter()
+    try:
+        receipt = (evaluator or context_firewall_receipt)(
+            voice, compiled=compiled)
+    except Exception:
+        receipt = None
+    store_context_firewall_receipt(receipt)
+    return max(0.0, time.perf_counter() - started)
+
+
+def context_firewall_state_snapshot() -> dict:
+    """Copy only the allowlisted shadow disposition and bounded counts."""
+    return {
+        "mode": PIPELINE_STATE["last_context_firewall_mode"],
+        "disposition": PIPELINE_STATE[
+            "last_context_firewall_disposition"],
+        "counterfactual_changed": PIPELINE_STATE[
+            "last_context_firewall_changed"],
+        "risky_spans": PIPELINE_STATE[
+            "last_context_firewall_risky_spans"],
+        "influences": PIPELINE_STATE[
+            "last_context_firewall_influences"],
+        "context_influences": PIPELINE_STATE[
+            "last_context_firewall_context_influences"],
+        "personal_prior_influences": PIPELINE_STATE[
+            "last_context_firewall_prior_influences"],
+        "protected_influences": PIPELINE_STATE[
+            "last_context_firewall_protected_influences"],
+        "promotion_candidates": PIPELINE_STATE[
+            "last_context_firewall_promotion_candidates"],
+        "quarantined": PIPELINE_STATE[
+            "last_context_firewall_quarantined"],
+        "reason_counts": dict(PIPELINE_STATE[
+            "last_context_firewall_reasons"]),
     }
 
 
@@ -5610,6 +5730,10 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             audio_duration=duration,
             verifier=CONSEQUENCE_VERIFIER,
         )
+        # A context-free compilation is observed in shadow only. Its receipt
+        # cannot replace this active result or affect downstream routing.
+        t_context_firewall = runtime_context_firewall_evidence(
+            voice_ir, compiler_result)
         raw = compiler_result.text
         alternatives = []
         if recognition.alternative:
@@ -5856,6 +5980,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         PIPELINE_STATE["last_release_s"] = release_total
         PIPELINE_STATE["last_word_count"] = len(text.split())
         consequence_metrics = consequence_state_snapshot()
+        context_firewall_metrics = context_firewall_state_snapshot()
         print(f"[release {release_total:.2f}s | press {press_total:.2f}s | "
               f"{path} | ready {audio_ready:.2f}s | tail {tail_wait:.2f}s | "
               f"asr {t_asr:.2f}s/{recognition.engine or 'unknown'}"
@@ -5863,6 +5988,8 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
               f"compile {t_compile:.3f}s/{len(compiler_result.decisions)}d | "
               f"risk {t_consequence:.3f}s/"
               f"{consequence_metrics['route']} | "
+              f"context {t_context_firewall:.3f}s/"
+              f"{context_firewall_metrics['disposition']} | "
               f"clean {t_clean:.2f}s | "
               f"{len(text.split())} words]")
         append_transcript(recognized_raw, text, bundle, path, metrics={
@@ -5873,6 +6000,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "asr_s": round(t_asr, 4),
             "compiler_s": round(t_compile, 4),
             "consequence_s": round(t_consequence, 4),
+            "context_firewall_s": round(t_context_firewall, 4),
             "cleanup_s": round(t_clean, 4),
             "asr_engine": recognition.engine or "unknown",
             "confidence": round(compiler_result.confidence, 4),
@@ -5898,6 +6026,27 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "relisten_inconclusive": consequence_metrics[
                 "relisten_inconclusive"],
             "relisten_skipped": consequence_metrics["relisten_skipped"],
+            "context_firewall_mode": context_firewall_metrics["mode"],
+            "context_firewall_disposition": context_firewall_metrics[
+                "disposition"],
+            "context_firewall_changed": context_firewall_metrics[
+                "counterfactual_changed"],
+            "context_firewall_risky_spans": context_firewall_metrics[
+                "risky_spans"],
+            "context_firewall_influences": context_firewall_metrics[
+                "influences"],
+            "context_firewall_context_influences": context_firewall_metrics[
+                "context_influences"],
+            "context_firewall_prior_influences": context_firewall_metrics[
+                "personal_prior_influences"],
+            "context_firewall_protected_influences":
+                context_firewall_metrics["protected_influences"],
+            "context_firewall_promotion_candidates":
+                context_firewall_metrics["promotion_candidates"],
+            "context_firewall_quarantined": context_firewall_metrics[
+                "quarantined"],
+            "context_firewall_reasons": context_firewall_metrics[
+                "reason_counts"],
             "proof_edits_accepted": sum(
                 1 for edit in proof_edits if edit.accepted),
             "proof_edits_rejected": sum(

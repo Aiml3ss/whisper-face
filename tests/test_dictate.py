@@ -2279,5 +2279,93 @@ class ConsequenceRuntimeProjectionTests(unittest.TestCase):
             ns["consequence_state_snapshot"]()["route"], "review")
 
 
+class ContextFirewallRuntimeProjectionTests(unittest.TestCase):
+    def _namespace(self):
+        pipeline = {}
+        ns = load_definitions(
+            "_consequence_count",
+            "store_context_firewall_receipt",
+            "runtime_context_firewall_evidence",
+            "context_firewall_state_snapshot",
+            extra={
+                "time": time,
+                "PIPELINE_STATE": pipeline,
+                "CONTEXT_FIREWALL_MODE_IDS": frozenset({
+                    "shadow-only", "unavailable",
+                }),
+                "CONTEXT_FIREWALL_DISPOSITION_IDS": frozenset({
+                    "no-effect", "promotion-candidate", "quarantine",
+                    "unavailable",
+                }),
+                "CONTEXT_FIREWALL_REASON_IDS": frozenset({
+                    "context-protected", "context-unprotected",
+                    "personal-prior-protected",
+                    "personal-prior-unprotected", "no-influence",
+                    "receipt-error",
+                }),
+                "context_firewall_receipt":
+                    lambda *_args, **_kwargs: None,
+            },
+        )
+        return ns, pipeline
+
+    @staticmethod
+    def _receipt(**overrides):
+        values = {
+            "mode": "shadow-only",
+            "disposition": "quarantine",
+            "counterfactual_changed": True,
+            "risky_spans": 2,
+            "influence_count": 1,
+            "context_influences": 1,
+            "personal_prior_influences": 0,
+            "protected_influences": 1,
+            "promotion_candidates": 0,
+            "quarantined": 1,
+            "reason_counts": (("context-protected", 1),),
+        }
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def test_projection_drops_private_and_unknown_fields(self):
+        ns, _pipeline = self._namespace()
+        private = "Alice private@example.com /Users/alice/secret"
+        ns["store_context_firewall_receipt"](self._receipt(
+            mode=private,
+            disposition=private,
+            reason_counts=(("context-protected", 1), (private, 99)),
+            secret_transcript=private,
+        ))
+        snapshot = ns["context_firewall_state_snapshot"]()
+        encoded = json.dumps(snapshot, sort_keys=True)
+        self.assertNotIn(private, encoded)
+        self.assertEqual(snapshot["mode"], "unavailable")
+        self.assertEqual(snapshot["disposition"], "unavailable")
+        self.assertEqual(
+            snapshot["reason_counts"], {"context-protected": 1})
+
+    def test_failure_is_fail_open_and_does_not_mutate_active_objects(self):
+        ns, _pipeline = self._namespace()
+        voice = object()
+        active_compiled = object()
+        private = "private transcript and /Users/private/path"
+        seen = []
+
+        def fail(received_voice, *, compiled):
+            seen.append((received_voice is voice,
+                         compiled is active_compiled))
+            raise RuntimeError(private)
+
+        elapsed = ns["runtime_context_firewall_evidence"](
+            voice, active_compiled, evaluator=fail)
+        snapshot = ns["context_firewall_state_snapshot"]()
+        self.assertGreaterEqual(elapsed, 0.0)
+        self.assertEqual(seen, [(True, True)])
+        self.assertEqual(snapshot["mode"], "unavailable")
+        self.assertEqual(snapshot["disposition"], "unavailable")
+        self.assertEqual(snapshot["reason_counts"], {"receipt-error": 1})
+        self.assertNotIn(private, json.dumps(snapshot))
+
+
 if __name__ == "__main__":
     unittest.main()

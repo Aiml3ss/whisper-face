@@ -440,6 +440,28 @@ class ConsequenceReceipt:
 
 
 @dataclass(frozen=True)
+class ContextFirewallReceipt:
+    """Transcript-free shadow comparison for contextual influence.
+
+    The receipt is deliberately aggregate-only. It can explain whether
+    context or a Personal Prior would affect protected evidence without
+    exposing the source span, replacement text, application, or context pack.
+    """
+
+    mode: str
+    disposition: str
+    counterfactual_changed: bool
+    risky_spans: int
+    influence_count: int
+    context_influences: int
+    personal_prior_influences: int
+    protected_influences: int
+    promotion_candidates: int
+    quarantined: int
+    reason_counts: tuple[tuple[str, int], ...] = ()
+
+
+@dataclass(frozen=True)
 class _Token:
     text: str
     start: int
@@ -1418,6 +1440,96 @@ class VoiceCompiler:
             return ""
         end = _tokens(voice.hypotheses[0].text)[len(safe) - 1].end
         return voice.hypotheses[0].text[:end].rstrip()
+
+
+def context_firewall_receipt(
+        voice: VoiceIR, *, compiled: CompileResult | None = None,
+        compiler: VoiceCompiler | None = None) -> ContextFirewallReceipt:
+    """Compare active compilation with a context-free shadow baseline.
+
+    This function cannot promote, quarantine, or route anything. The active
+    result is accepted only as an input to the comparison, and the baseline is
+    compiled from a copy of VoiceIR with both Context Candidates and Personal
+    Priors removed. Only fixed aggregate evidence leaves this boundary.
+    """
+    worker = compiler or VoiceCompiler()
+    active = compiled or worker.compile(voice)
+    baseline_voice = replace(
+        voice, context=ContextPack(), personal_priors=())
+    baseline = worker.compile(baseline_voice)
+    changed = active.text != baseline.text
+
+    source_decisions = tuple(
+        decision for decision in active.decisions
+        if decision.reason == "personal-prior"
+        or decision.reason.startswith("context:")
+    ) if changed else ()
+    primary_text = voice.hypotheses[0].text
+    primary_tokens = _tokens(primary_text)
+    plan = build_consequence_plan(voice)
+    risk_ranges = tuple(
+        (risk.char_start, risk.char_end) for risk in plan.risks)
+    anchor_keys = {
+        _norm(anchor)
+        for anchor in protected_anchors(
+            primary_text, voice.context.candidates)
+        if _norm(anchor)
+    }
+
+    def is_protected(decision: Decision) -> bool:
+        before_key = _norm(decision.before)
+        matching = tuple(
+            token for token in primary_tokens
+            if _norm(token.text) == before_key)
+        if any(any(_overlaps(
+                (token.start, token.end), risk_range)
+                   for risk_range in risk_ranges)
+               for token in matching):
+            return True
+        if before_key and before_key in anchor_keys:
+            return True
+        # A contextual replacement that introduces a new factual/code-shaped
+        # anchor is consequential even when the original acoustic token was
+        # ordinary. Keep that candidate in shadow quarantine as well.
+        return bool(protected_anchors(decision.after))
+
+    reasons: dict[str, int] = {}
+    context_count = prior_count = protected_count = 0
+    for decision in source_decisions:
+        source = "personal-prior" \
+            if decision.reason == "personal-prior" else "context"
+        if source == "context":
+            context_count += 1
+        else:
+            prior_count += 1
+        protected = is_protected(decision)
+        protected_count += int(protected)
+        reason = f"{source}-{'protected' if protected else 'unprotected'}"
+        reasons[reason] = reasons.get(reason, 0) + 1
+
+    influence_count = len(source_decisions)
+    quarantined = protected_count
+    promotion_candidates = max(0, influence_count - protected_count)
+    if quarantined:
+        disposition = "quarantine"
+    elif promotion_candidates:
+        disposition = "promotion-candidate"
+    else:
+        disposition = "no-effect"
+        reasons["no-influence"] = 1
+    return ContextFirewallReceipt(
+        mode="shadow-only",
+        disposition=disposition,
+        counterfactual_changed=changed,
+        risky_spans=len(plan.risks),
+        influence_count=influence_count,
+        context_influences=context_count,
+        personal_prior_influences=prior_count,
+        protected_influences=protected_count,
+        promotion_candidates=promotion_candidates,
+        quarantined=quarantined,
+        reason_counts=tuple(sorted(reasons.items())),
+    )
 
 
 def analyze_prosody(samples: Sequence[float], sample_rate: int = 16_000,
