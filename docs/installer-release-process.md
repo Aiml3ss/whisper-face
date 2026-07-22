@@ -118,6 +118,21 @@ For dependency, service, model, preload, or permission changes, also rerun the
 full one-click installer on an appropriate clean or disposable machine before
 calling the release fully cross-platform verified.
 
+## Warm reruns
+
+An already-provisioned update may retain a running Ollama process so its loaded
+model stays warm. On macOS this fast path is allowed only when a newly rendered
+service plist is byte-identical to the installed plist, launchd reports the
+agent running, a private atomic receipt matches the digest last loaded
+successfully, and that launchd process owns the healthy local endpoint. A
+missing receipt forces one conservative reload; the receipt is written only
+after the loaded-process identity and health checks pass.
+Windows likewise starts Ollama only when that local endpoint is unavailable.
+Either platform still verifies the pinned Qwen manifest and installed model;
+the fast path does not skip environment, model, helper, launcher, service, or
+final health verification. Any macOS plist drift or health failure atomically
+installs the newly rendered plist and follows the normal service reload path.
+
 ## Definition of done
 
 A change is distributable only when all of the following are true:

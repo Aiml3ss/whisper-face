@@ -133,6 +133,62 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn(model, self.shell)
         self.assertIn(model, self.powershell)
 
+    def test_warm_rerun_reuses_only_an_exact_healthy_ollama_service(self):
+        # macOS renders the desired plist on every run and may retain the warm
+        # process only when config, launchd state, and health all agree.
+        configuration_start = self.shell.index(
+            'step "configuring the tuned local Ollama service"')
+        branch_start = self.shell.index(
+            'if [ -f "$ollama_plist" ]', configuration_start)
+        branch_end = self.shell.index('echo -n "== waiting for Ollama"')
+        branch = self.shell[branch_start:branch_end]
+        preamble = self.shell[configuration_start:branch_start]
+        self.assertIn(
+            'render_plist com.berg.ollama.plist.template '
+            '"$desired_ollama_plist"', preamble)
+        for required in (
+            'cmp -s "$desired_ollama_plist" "$ollama_plist"',
+            '[ "$installed_ollama_digest" = "$desired_ollama_digest" ]',
+            "agent_is_running com.berg.ollama",
+            '[ "$running_ollama_pid" = "$listening_ollama_pid" ]',
+            "http://127.0.0.1:11434/api/tags",
+            'mv -f "$desired_ollama_plist" "$ollama_plist"',
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, branch)
+        reuse = branch.index(
+            "reusing healthy Ollama service (configuration unchanged)")
+        stop = branch.index('"$BREW" services stop ollama')
+        reload = branch.index('reload_agent com.berg.ollama "$ollama_plist"')
+        self.assertLess(reuse, stop)
+        self.assertLess(stop, reload)
+        self.assertNotIn(
+            '"$BREW" services stop ollama', self.shell[:branch_start])
+        postamble = self.shell[branch_end:]
+        self.assertIn('ollama-service.sha256', self.shell)
+        for required in (
+            'install -d -m 700 "$service_receipt_dir"',
+            'chmod 600 "$receipt_temporary"',
+            'mv -f "$receipt_temporary" "$ollama_service_receipt"',
+            'fail "Ollama service identity could not be verified"',
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, postamble)
+
+        # Windows already has the equivalent warm-service behavior: it starts
+        # Ollama only when the endpoint is absent. Both platforms still verify
+        # the pinned manifest and installed tag after taking the fast path.
+        start = self.powershell.index(
+            'Start-Process -FilePath $Ollama -ArgumentList "serve"')
+        self.assertIn(
+            'if (-not (Test-Endpoint "http://127.0.0.1:11434/api/tags"))',
+            self.powershell[:start],
+        )
+        for installer in (self.shell, self.powershell):
+            with self.subTest(installer="manifest verification"):
+                self.assertIn("--verify-ollama-model", installer)
+                self.assertIn("show", installer)
+
     def test_both_installers_use_current_runtime_and_preload_contract(self):
         for name, installer in (
             ("shell", self.shell), ("powershell", self.powershell)

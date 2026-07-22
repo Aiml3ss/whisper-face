@@ -721,12 +721,32 @@ _SPOKEN_ORDINAL = (
     r"thirtieth|fortieth|fiftieth|sixtieth|seventieth|eightieth|"
     r"ninetieth|hundredth|thousandth|millionth)"
 )
+_SPOKEN_CARDINAL_SEQUENCE = (
+    rf"{_SPOKEN_CARDINAL}"
+    rf"(?:[-\s]+(?:and\s+)?{_SPOKEN_CARDINAL})*"
+)
+_SPOKEN_DECIMAL_DIGIT = (
+    r"(?:zero|one|two|three|four|five|six|seven|eight|nine)"
+)
+# Keep compound decimal/fraction claims narrow: they only become one protected
+# span when followed by a known measurement unit. This avoids treating prose
+# such as "one point to make" as a decimal while keeping the changed unit
+# inside the consequential claim.
+_SPOKEN_COMPOUND_WITH_UNIT = (
+    rf"(?:{_SPOKEN_CARDINAL_SEQUENCE}\s+point"
+    rf"(?:\s+{_SPOKEN_DECIMAL_DIGIT})+|"
+    rf"{_SPOKEN_CARDINAL_SEQUENCE}\s+and\s+(?:a|one)\s+"
+    rf"(?:half|quarter))"
+    rf"\s+(?:{_RISK_MEASUREMENT_UNIT}|"
+    rf"{_RISK_MEASUREMENT_ABBREVIATION})"
+)
 _RISK_SPOKEN_NUMBER_RE = re.compile(
     rf"\b(?:(?:minus|negative|plus|positive)[-\s]+)?"
-    rf"(?:{_SPOKEN_CARDINAL}(?:[-\s]+(?:and\s+)?{_SPOKEN_CARDINAL})*"
+    rf"(?:{_SPOKEN_COMPOUND_WITH_UNIT}|"
+    rf"(?:{_SPOKEN_CARDINAL_SEQUENCE}"
     rf"(?:[-\s]+{_SPOKEN_ORDINAL})?|{_SPOKEN_ORDINAL})"
     rf"(?:\s+(?:{_RISK_MEASUREMENT_UNIT}|"
-    rf"{_RISK_MEASUREMENT_ABBREVIATION}))?\b",
+    rf"{_RISK_MEASUREMENT_ABBREVIATION}))?)\b",
     re.I,
 )
 _RISK_RECIPIENT_RE = re.compile(
