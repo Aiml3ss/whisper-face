@@ -492,6 +492,13 @@ class SnapshotTests(unittest.TestCase):
         receipt = {
             "schema_version": 1,
             "mode": "shadow-only",
+            "pins": [{
+                "provider_id": provider_id,
+                "resolution_state": "resolved",
+                "warm_path_observed": index < 2,
+                "revision_verified": True,
+                "capability_bounds_attested": False,
+            } for index, provider_id in enumerate(provider_ids)],
             "capabilities": capabilities,
             "attempted": False,
         }
@@ -500,13 +507,16 @@ class SnapshotTests(unittest.TestCase):
 
         self.assertEqual(
             state.model_wallet_advisory,
-            localized_string("models.wallet.unavailable"),
+            localized_string(
+                "models.wallet.evidence", resolved=4, warm=2),
         )
         self.assertIn("shadow advisory only",
                       state.model_wallet_advisory.casefold())
         self.assertIn("No model execution or routing",
                       state.model_wallet_advisory)
-        self.assertIn("Unavailable", state.model_wallet_advisory)
+        self.assertIn("Exact files resolved 4/4", state.model_wallet_advisory)
+        self.assertIn("Runtime readiness attested 0/4",
+                      state.model_wallet_advisory)
 
         poisoned = dict(receipt, transcript="Private Project Bluebird")
         poisoned_state = normalize_snapshot({

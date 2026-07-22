@@ -79,6 +79,7 @@ arguments:
    uv run tests/test_installers.py
    uv run tests/test_repository_governance.py
    uv run tests/test_macos_distribution.py
+   uv run tests/test_safe_update_advisor.py
    ```
 
 6. On an installed Mac, also run `./setup.sh --verify`. On Windows, run

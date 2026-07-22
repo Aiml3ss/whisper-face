@@ -71,7 +71,7 @@ $Required = @(
     "dictate.py", "dictate.py.lock", "parrot_core.py", "voice_compiler.py",
     "insertion_integrity.py", "personal_regression.py",
     "cleanup_circuit_breaker.py",
-    "model_wallet.py", "model_wallet_shadow.py",
+    "model_wallet.py", "model_wallet_shadow.py", "model_readiness_evidence.py",
     "acoustic_keyword_memory.py", "acoustic_time_machine.py",
     "voice_objects.py", "voice_object_command_parser.py", "voice_inbox.py",
     "voice_object_inbox_bridge.py", "demonstration_drafts.py",

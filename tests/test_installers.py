@@ -88,6 +88,7 @@ class InstallerContractTests(unittest.TestCase):
             "uv run --locked --script dictate.py --native-gui-smoke-test",
             "uv run tests/test_installers.py",
             "uv run tests/test_macos_distribution.py",
+            "uv run tests/test_safe_update_advisor.py",
             "setup.sh --verify",
             "setup.ps1 --verify",
         ):
@@ -109,6 +110,7 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_model_wallet_shadow.py",
             "uv run tests/test_model_readiness_evidence.py",
             "uv run tests/test_demonstration_drafts.py",
+            "uv run tests/test_safe_update_advisor.py",
         ):
             with self.subTest(batch_gate=batch_gate):
                 self.assertIn(batch_gate, pull_request)
@@ -142,6 +144,7 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn("cleanup_circuit_breaker.py", installer)
                 self.assertIn("model_wallet.py", installer)
                 self.assertIn("model_wallet_shadow.py", installer)
+                self.assertIn("model_readiness_evidence.py", installer)
                 self.assertIn("acoustic_time_machine.py", installer)
                 self.assertIn("risky_action_confirmation.py", installer)
                 self.assertIn("point_and_speak_resolver.py", installer)

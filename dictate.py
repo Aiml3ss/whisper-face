@@ -340,7 +340,10 @@ from cleanup_circuit_breaker import CleanupCircuitBreaker  # noqa: E402
 from model_wallet import (  # noqa: E402
     MAX_LATENCY_BOUND_MS,
     Capability,
+    CURRENT_PROVIDER_PROFILES,
     ModelRequest,
+    PARAKEET_PROFILE,
+    QWEN_CLEANUP_PROFILE,
     ReadinessState,
     WHISPER_LARGE_TURBO_PROFILE,
     WHISPER_TINY_PROFILE,
@@ -348,6 +351,9 @@ from model_wallet import (  # noqa: E402
 from model_wallet_shadow import (  # noqa: E402
     RuntimeModelEvidence,
     assess_model_wallet,
+)
+from model_readiness_evidence import (  # noqa: E402
+    collect_model_readiness,
 )
 from demonstration_drafts import (  # noqa: E402
     DemonstrationAction,
@@ -809,6 +815,8 @@ ASR_POOL = ThreadPoolExecutor(max_workers=1)
 CHUNK_PREP_POOL = ThreadPoolExecutor(max_workers=1)
 ASR_MODEL_PATHS = {}
 ASR_MODEL_PATHS_LOCK = threading.Lock()
+MODEL_READINESS_CACHE = {"receipt": None, "lock": threading.Lock()}
+MODEL_WARM_PATHS = {"providers": set(), "lock": threading.Lock()}
 
 # Current glossary + active mishearing-fix rules, hot-swapped by the
 # learning loop.
@@ -3625,6 +3633,7 @@ def runtime_status_snapshot() -> dict:
     acoustic_replay = acoustic_time_machine_status_snapshot()
     voice_object_inbox = voice_object_inbox_status()
     risky_confirmation = risky_action_confirmation_status_snapshot()
+    model_wallet_shadow = model_wallet_shadow_status_snapshot()
     outbox_summary = ""
     if outbox:
         latest = outbox[-1].receipt
@@ -3681,54 +3690,80 @@ def runtime_status_snapshot() -> dict:
         "microphone_status": AUDIO_POOL.readiness(),
         "accessibility_status": accessibility,
         "version": "Local checkout",
-        "model_wallet_shadow": model_wallet_shadow_status_snapshot(),
-        "models": [
-            {
-                "name": "Parakeet Unified 0.6B",
-                "role": "Primary recognition",
-                "status": ("Running" if helper_running else
-                           "Installed" if helper_ready else "Unavailable"),
-                "detail": "Native Apple Silicon helper",
-            },
-            {
-                "name": "Whisper large-v3-turbo",
-                "role": "Recognition fallback",
-                "status": "Installed",
-                "detail": "MLX local fallback; health checked by installer",
-            },
-            {
-                "name": OLLAMA_MODEL,
-                "role": "Selective cleanup",
-                "status": PIPELINE_STATE["cleanup_status"],
-                "detail": "Skipped for deterministic fast-path speech",
-            },
-        ],
+        "model_wallet_shadow": model_wallet_shadow,
+        "models": model_status_rows_from_shadow(model_wallet_shadow),
     }
 
 
-def model_wallet_shadow_status_snapshot() -> dict:
-    """Project exact known pins into a closed, non-executing advisory.
+def mark_model_warm_path_observed(provider_id: str) -> bool:
+    """Record historical warm-path evidence without attesting readiness."""
+    current = {profile.provider_id for profile in CURRENT_PROVIDER_PROFILES}
+    if provider_id not in current:
+        return False
+    with MODEL_WARM_PATHS["lock"]:
+        MODEL_WARM_PATHS["providers"].add(provider_id)
+    return True
 
-    A resolved MLX path is the only current runtime signal that binds a
-    Whisper profile to its immutable revision. Resolution alone is not a
-    readiness attestation, so the observation remains RESOLVED. Parakeet's
-    helper readiness and Ollama's health state do not attest the exact pinned
-    model revision, so they are deliberately omitted. The runtime has no
-    conservative quality floor or latency upper bound, therefore it supplies
-    no capability evidence and every supported capability remains fail-closed.
+
+def refresh_model_readiness_evidence(collector=collect_model_readiness) -> bool:
+    """Explicitly refresh bounded filesystem evidence outside status polling."""
+    if not IS_MACOS:
+        return False
+    try:
+        receipt = collector()
+    except Exception:
+        with MODEL_READINESS_CACHE["lock"]:
+            MODEL_READINESS_CACHE["receipt"] = None
+        return False
+    expected = tuple(
+        profile.provider_id for profile in CURRENT_PROVIDER_PROFILES)
+    if tuple(item.provider_id for item in receipt.providers) != expected:
+        with MODEL_READINESS_CACHE["lock"]:
+            MODEL_READINESS_CACHE["receipt"] = None
+        return False
+    with MODEL_READINESS_CACHE["lock"]:
+        MODEL_READINESS_CACHE["receipt"] = receipt
+    return True
+
+
+def model_wallet_shadow_status_snapshot() -> dict:
+    """Project cached exact-pin and runtime readiness evidence, without I/O.
+
+    Exact local files remain RESOLVED even when a process-local warm path has
+    succeeded. That historical signal is not current-health readiness. No
+    latency/quality capability bounds are fabricated, so routing remains
+    fail-closed and the wallet never attempts a provider here.
     """
     observations = []
-    if IS_MACOS:
-        for profile, repository in (
-            (WHISPER_TINY_PROFILE, FAST_WHISPER_REPO),
-            (WHISPER_LARGE_TURBO_PROFILE, WHISPER_REPO),
-        ):
-            if repository in ASR_MODEL_PATHS:
-                observations.append(RuntimeModelEvidence(
-                    profile.provider_id,
-                    ReadinessState.RESOLVED,
-                    revision_verified=True,
-                ))
+    with MODEL_READINESS_CACHE["lock"]:
+        local_receipt = MODEL_READINESS_CACHE["receipt"]
+    with MODEL_WARM_PATHS["lock"]:
+        warm_ids = frozenset(MODEL_WARM_PATHS["providers"])
+    evidence_by_id = {
+        item.provider_id: item
+        for item in getattr(local_receipt, "providers", ())
+    }
+    pins = []
+    for profile in CURRENT_PROVIDER_PROFILES:
+        evidence = evidence_by_id.get(profile.provider_id)
+        resolution_state = getattr(
+            getattr(evidence, "state", None), "value", "unavailable")
+        revision_verified = bool(
+            getattr(evidence, "revision_verified", False))
+        warm_path_observed = (
+            revision_verified and profile.provider_id in warm_ids)
+        wallet_state = getattr(
+            evidence, "state", ReadinessState.NOT_INSTALLED)
+        if evidence is not None:
+            observations.append(RuntimeModelEvidence(
+                profile.provider_id, wallet_state, revision_verified))
+        pins.append({
+            "provider_id": profile.provider_id,
+            "resolution_state": resolution_state,
+            "warm_path_observed": warm_path_observed,
+            "revision_verified": revision_verified,
+            "capability_bounds_attested": False,
+        })
 
     capability_receipts = []
     for capability in Capability:
@@ -3755,9 +3790,51 @@ def model_wallet_shadow_status_snapshot() -> dict:
     return {
         "schema_version": 1,
         "mode": "shadow-only",
+        "pins": pins,
         "capabilities": capability_receipts,
         "attempted": False,
     }
+
+
+def model_status_rows_from_shadow(snapshot: dict) -> list[dict]:
+    """Render only fixed current-pin labels from the closed evidence states."""
+    names = {
+        PARAKEET_PROFILE.provider_id: (
+            "Parakeet Unified 0.6B", "Primary recognition"),
+        WHISPER_TINY_PROFILE.provider_id: (
+            "Whisper Tiny", "Fast recognition preview"),
+        WHISPER_LARGE_TURBO_PROFILE.provider_id: (
+            "Whisper large-v3-turbo", "Recognition fallback"),
+        QWEN_CLEANUP_PROFILE.provider_id: (
+            "qwen3.5:4b", "Selective cleanup"),
+    }
+    pins = snapshot.get("pins", ()) if isinstance(snapshot, dict) else ()
+    by_id = {
+        item.get("provider_id"): item for item in pins
+        if isinstance(item, dict)
+    }
+    rows = []
+    for profile in CURRENT_PROVIDER_PROFILES:
+        pin = by_id.get(profile.provider_id, {})
+        resolved = pin.get("resolution_state") == "resolved"
+        warm = resolved and pin.get("warm_path_observed") is True
+        name, role = names[profile.provider_id]
+        rows.append({
+            "name": name,
+            "role": role,
+            "status": "RESOLVED" if resolved else "UNAVAILABLE",
+            "detail": (
+                "Exact pinned files resolved · Warm path observed · Runtime "
+                "readiness not attested · Capability bounds unavailable"
+                if warm else
+                "Exact pinned files resolved · Warm path not observed · "
+                "Runtime readiness not attested · Capability bounds unavailable"
+                if resolved else
+                "Exact pinned files not resolved · Runtime readiness not "
+                "attested · Capability bounds unavailable"
+            ),
+        })
+    return rows
 
 
 def preview_point_and_speak(phrase: str) -> dict:
@@ -4484,6 +4561,7 @@ class ParakeetClient:
             process.terminate()
             return None
         self.process = process
+        mark_model_warm_path_observed(PARAKEET_PROFILE.provider_id)
         print(f"[asr] Parakeet Unified ready in "
               f"{float(status.get('load_s', 0.0)):.2f}s")
         return process
@@ -4676,6 +4754,11 @@ def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
         )
 
     primary = decode((0.0, 0.2))
+    if IS_MACOS:
+        profile = (WHISPER_TINY_PROFILE
+                   if model_repo == FAST_WHISPER_REPO
+                   else WHISPER_LARGE_TURBO_PROFILE)
+        mark_model_warm_path_observed(profile.provider_id)
     if (not verify or primary.confidence >= LOW_CONFIDENCE
             or len(audio) < int(MIN_SECONDS * SAMPLE_RATE)):
         return primary
@@ -7399,6 +7482,7 @@ def warmup():
                 lambda: ollama_chat(None, "hi", num_predict=1),
             )
             PIPELINE_STATE["cleanup_status"] = "Ready"
+            mark_model_warm_path_observed(QWEN_CLEANUP_PROFILE.provider_id)
         except Exception as e:
             all_ready = 0.0
             PIPELINE_STATE["cleanup_status"] = "Unavailable"
@@ -7411,6 +7495,7 @@ def warmup():
         all_ready = 0.0
         raise
     finally:
+        refresh_model_readiness_evidence()
         emit_performance_trace("warmup_total", {
             "duration_ms": max(
                 0.0, (time.perf_counter() - started_at) * 1000.0),

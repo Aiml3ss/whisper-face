@@ -22,6 +22,55 @@ your private files before changing versions.
 Do not publish that backup: it can contain personal vocabulary, corrections,
 transcripts, local drafts, demonstration recipes, and logs.
 
+## Read-only update advisor
+
+Before changing a checkout, a release operator can inspect an already local
+manifest and artifact directory:
+
+```sh
+python3 scripts/safe_update_advisor.py \
+  --current-version 1.2.2 \
+  --current-revision "$(git rev-parse HEAD)" \
+  --manifest /path/to/release/update-manifest.json \
+  --artifact-dir /path/to/release \
+  --channel stable
+```
+
+The command emits one fixed JSON receipt with `up-to-date`, `upgrade`,
+`rollback`, or `refuse`, the current and proposed public version/revision, and
+an all-false effects map. It does not access the network, download, fetch,
+switch a checkout, overwrite source, install, or change `launchd`. A preview
+manifest is accepted only with explicit `--channel preview` and never reports
+production trust.
+
+Every plan verifies the manifest against the local artifact sizes and SHA-256
+digests, requires exactly one source archive and one disk image, checks strict
+SemVer/channel/revision relationships, and refuses ambiguous same-version or
+same-revision releases. A stable plan additionally requires the manifest's
+signed/notarized claims and live local `codesign --verify` plus
+`xcrun stapler validate`; missing Apple tools or invalid trust refuses the plan.
+This is advice only, not an updater or authorization to install.
+
+A rollback requires both the current release and its linked older release to
+be present and locally verifiable:
+
+```sh
+python3 scripts/safe_update_advisor.py \
+  --intent rollback \
+  --current-version 1.2.3 \
+  --current-revision FULL_CURRENT_REVISION \
+  --manifest /path/to/current/update-manifest.json \
+  --artifact-dir /path/to/current \
+  --rollback-manifest /path/to/older/update-manifest.json \
+  --rollback-artifact-dir /path/to/older \
+  --channel stable
+```
+
+The current manifest must describe the installed version and exact revision;
+its HTTPS rollback linkage must identify the locally verified older manifest,
+whose version must be lower. The advisor never follows the URL or performs the
+rollback.
+
 ## Update the current checkout
 
 From the Whisper Face folder, first check for local source edits:
