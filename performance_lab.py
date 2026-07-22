@@ -12,13 +12,18 @@ timings only; reports never need transcript contents.
 from __future__ import annotations
 
 import argparse
-import json
 import gc
+import json
 import math
+import os
 import statistics
 import sys
+import tempfile
 import time
 import tracemalloc
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -27,6 +32,7 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_CORPUS = HERE / "benchmarks" / "representative_dictation_cases.json"
 DEFAULT_BUDGETS = HERE / "benchmarks" / "performance_budgets.json"
 DEFAULT_MODEL_SCORECARD = HERE / "benchmarks" / "model_scorecard.json"
+_MAX_HUB_RESPONSE_BYTES = 1_000_000
 
 
 def load_corpus(path: Path = DEFAULT_CORPUS) -> dict[str, Any]:
@@ -120,11 +126,48 @@ _LIFECYCLE_IDS = {
     "audio-device-switch",
 }
 
+RUNTIME_TRACE_PREFIX = "[trace] "
+RUNTIME_TRACE_SCHEMA_VERSION = 1
+# This is intentionally duplicated from dictate.py: the lab must be importable
+# without loading platform audio/UI dependencies. A parity test prevents drift.
+RUNTIME_TRACE_SCHEMAS = {
+    "warmup_audio_pool": ("duration_ms", "success"),
+    "warmup_asr_tiny": ("duration_ms", "success"),
+    "warmup_asr_final": ("duration_ms", "success"),
+    "warmup_ollama": ("duration_ms", "success"),
+    "warmup_total": ("duration_ms", "success"),
+    "utterance_acoustic": (
+        "adaptive_threshold",
+        "clipped_ratio",
+        "derived_gain_factor",
+        "duration_ms",
+        "frame_rms_p20",
+        "frame_rms_p50",
+        "frame_rms_p95",
+        "nonfinite_ratio",
+        "peak_amplitude",
+        "peak_rms",
+        "rms",
+        "sample_count",
+        "sample_rate_hz",
+        "silence_ratio",
+        "trailing_silence_ms",
+        "voiced_fraction",
+    ),
+}
+_TRACE_RATIO_FIELDS = {
+    "clipped_ratio", "nonfinite_ratio", "silence_ratio", "voiced_fraction",
+}
+_MAX_TRACE_LINE_CHARACTERS = 16_384
+
 
 def _number(value: Any, *, minimum: float = 0.0) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    result = float(value)
+    try:
+        result = float(value)
+    except (OverflowError, ValueError):
+        return None
     return result if math.isfinite(result) and result >= minimum else None
 
 
@@ -179,11 +222,17 @@ def _validate_observation(
     if "zero_edit" in value and not isinstance(value["zero_edit"], bool):
         return None, "invalid-zero-edit"
     for field in ("selected_route", "expected_route"):
-        if field in value and value[field] not in _ROUTE_IDS:
+        if field in value and (
+                not isinstance(value[field], str)
+                or value[field] not in _ROUTE_IDS):
             return None, f"invalid-{field.replace('_', '-')}"
-    if "lifecycle" in value and value["lifecycle"] not in _LIFECYCLE_IDS:
+    if "lifecycle" in value and (
+            not isinstance(value["lifecycle"], str)
+            or value["lifecycle"] not in _LIFECYCLE_IDS):
         return None, "invalid-lifecycle"
-    if "receipt" in value and value["receipt"] not in _RECEIPTS:
+    if "receipt" in value and (
+            not isinstance(value["receipt"], str)
+            or value["receipt"] not in _RECEIPTS):
         return None, "invalid-receipt"
     return value, ""
 
@@ -293,6 +342,109 @@ def evaluate_observations(
             "rate": round(sum(receipts) / len(receipts), 4)
             if receipts else None,
         },
+    }
+
+
+def _validate_runtime_trace(
+        value: Any) -> tuple[tuple[str, dict[str, float]] | None, str]:
+    """Validate one trace without reflecting untrusted values in a report."""
+    if not isinstance(value, dict):
+        return None, "not-an-object"
+    if (not isinstance(value.get("schema_version"), int)
+            or isinstance(value.get("schema_version"), bool)
+            or value["schema_version"] != RUNTIME_TRACE_SCHEMA_VERSION):
+        return None, "unsupported-schema"
+    event = value.get("event")
+    if not isinstance(event, str) or event not in RUNTIME_TRACE_SCHEMAS:
+        return None, "unknown-event"
+    fields = RUNTIME_TRACE_SCHEMAS[event]
+    if set(value) != {"event", "schema_version", *fields}:
+        return None, "unknown-or-private-field"
+
+    metrics: dict[str, float] = {}
+    for field in fields:
+        number = _number(value[field], minimum=(
+            1.0 if field == "derived_gain_factor" else 0.0))
+        if number is None:
+            return None, "invalid-numeric-field"
+        if field in _TRACE_RATIO_FIELDS and number > 1.0:
+            return None, "invalid-numeric-field"
+        if field == "success" and number not in (0.0, 1.0):
+            return None, "invalid-numeric-field"
+        if field == "adaptive_threshold" and number > 0.1:
+            return None, "invalid-numeric-field"
+        if field == "derived_gain_factor" and number > 8.0:
+            return None, "invalid-numeric-field"
+        metrics[field] = number
+    if event == "utterance_acoustic":
+        if not (metrics["frame_rms_p20"] <= metrics["frame_rms_p50"]
+                <= metrics["frame_rms_p95"]):
+            return None, "invalid-numeric-field"
+        if metrics["trailing_silence_ms"] > metrics["duration_ms"]:
+            return None, "invalid-numeric-field"
+    return (event, metrics), ""
+
+
+def evaluate_runtime_traces(path: Path) -> dict[str, Any]:
+    """Aggregate closed-schema numeric traces from a mixed application log.
+
+    Non-trace lines are counted then discarded. Invalid traces contribute only
+    a fixed rejection category, so raw log text, paths, application metadata,
+    and transcript-like fields can never be reflected into the result.
+    """
+    accepted: dict[str, dict[str, list[float]]] = {}
+    rejected: dict[str, int] = {}
+    ignored_lines = 0
+    with path.open(encoding="utf-8", errors="replace") as source:
+        for raw_line in source:
+            line = raw_line.rstrip("\r\n")
+            if not line.startswith(RUNTIME_TRACE_PREFIX):
+                if line:
+                    ignored_lines += 1
+                continue
+            if len(line) > _MAX_TRACE_LINE_CHARACTERS:
+                reason = "trace-line-too-large"
+                validated = None
+            else:
+                try:
+                    value = json.loads(line[len(RUNTIME_TRACE_PREFIX):])
+                except json.JSONDecodeError:
+                    validated, reason = None, "invalid-json"
+                else:
+                    validated, reason = _validate_runtime_trace(value)
+            if validated is None:
+                rejected[reason] = rejected.get(reason, 0) + 1
+                continue
+            event, metrics = validated
+            event_metrics = accepted.setdefault(
+                event, {field: [] for field in RUNTIME_TRACE_SCHEMAS[event]})
+            for field, number in metrics.items():
+                event_metrics[field].append(number)
+
+    events: dict[str, Any] = {}
+    for event, metrics in sorted(accepted.items()):
+        samples = len(next(iter(metrics.values())))
+        event_report: dict[str, Any] = {
+            "records": samples,
+            "metrics": {
+                field: _distribution(values)
+                for field, values in sorted(metrics.items())
+            },
+        }
+        if "success" in metrics:
+            event_report["success_rate"] = round(
+                statistics.fmean(metrics["success"]), 4)
+        events[event] = event_report
+    records = sum(event["records"] for event in events.values())
+    return {
+        "schema_version": 1,
+        "trace_schema_version": RUNTIME_TRACE_SCHEMA_VERSION,
+        "privacy": "numeric-aggregates-only",
+        "records": records,
+        "rejected_records": sum(rejected.values()),
+        "rejected_by_reason": dict(sorted(rejected.items())),
+        "ignored_non_trace_lines": ignored_lines,
+        "events": events,
     }
 
 
@@ -427,6 +579,15 @@ def load_model_scorecard(
         if upstream is not None and (
                 not isinstance(upstream, str) or not upstream.strip()):
             raise ValueError(f"{identifier}: invalid upstream model id")
+        expected_metadata = candidate.get("expected_hub_metadata")
+        if (not isinstance(expected_metadata, dict)
+                or set(expected_metadata) != {"license", "base_models"}
+                or (expected_metadata["license"] is not None
+                    and not isinstance(expected_metadata["license"], str))
+                or not isinstance(expected_metadata["base_models"], list)
+                or any(not isinstance(model, str) or not model.strip()
+                       for model in expected_metadata["base_models"])):
+            raise ValueError(f"{identifier}: invalid expected Hub metadata")
         for metric, value in candidate["metrics"].items():
             if metric not in metrics or (value is not None and _number(value) is None):
                 raise ValueError(f"{identifier}: invalid metric {metric}")
@@ -526,6 +687,135 @@ def generate_model_scorecard(source: dict[str, Any]) -> dict[str, Any]:
             "Scores are cohort-relative. Missing measurements are excluded, "
             "never treated as zero; license eligibility is a separate gate."
         ),
+    }
+
+
+def _hub_base_models(card_data: Any) -> list[str]:
+    if not isinstance(card_data, dict):
+        return []
+    value = card_data.get("base_model")
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return sorted(item for item in value if isinstance(item, str))
+    return []
+
+
+def _validate_hub_api_url(url: str) -> None:
+    parsed = urllib.parse.urlparse(url)
+    if (parsed.scheme != "https" or parsed.netloc != "huggingface.co"
+            or not parsed.path.startswith("/api/models/")):
+        raise ValueError("model audit only permits the public Hugging Face API")
+
+
+def fetch_hub_json(
+        url: str, *, timeout: float = 10.0, attempts: int = 3,
+        opener=None, sleeper=time.sleep) -> dict[str, Any]:
+    """Fetch a bounded public Hugging Face API response with short retries."""
+    _validate_hub_api_url(url)
+    if not isinstance(attempts, int) or isinstance(attempts, bool) \
+            or not 1 <= attempts <= 5:
+        raise ValueError("attempts must be between 1 and 5")
+    if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+            or not 0 < float(timeout) <= 30):
+        raise ValueError("timeout must be between 0 and 30 seconds")
+    opener = opener or urllib.request.urlopen
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with opener(url, timeout=float(timeout)) as response:
+                _validate_hub_api_url(response.geturl())
+                raw = response.read(_MAX_HUB_RESPONSE_BYTES + 1)
+            if len(raw) > _MAX_HUB_RESPONSE_BYTES:
+                raise ValueError("Hugging Face API response exceeded size limit")
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                raise ValueError("Hugging Face API response must be an object")
+            return payload
+        except (OSError, TimeoutError, json.JSONDecodeError, ValueError) as error:
+            last_error = error
+            if attempt < attempts:
+                sleeper(round(0.1 * attempt, 1))
+    assert last_error is not None
+    raise last_error
+
+
+def audit_model_sources(
+        source: dict[str, Any], *, fetch_json=None,
+        checked_at=None) -> dict[str, Any]:
+    """Compare reviewed Hub metadata with live public model metadata."""
+    fetch_json = fetch_json or fetch_hub_json
+    if checked_at is None:
+        checked_at = lambda: datetime.now(timezone.utc).isoformat().replace(
+            "+00:00", "Z")
+    results: list[dict[str, Any]] = []
+    for candidate in source["candidates"]:
+        model_id = candidate["model_id"]
+        head_url = f"https://huggingface.co/api/models/{model_id}"
+        expected_metadata = candidate["expected_hub_metadata"]
+        reasons: list[str] = []
+        try:
+            head = fetch_json(head_url)
+            pinned = fetch_json(candidate["revision_api_url"])
+            observed_head = head.get("sha") if isinstance(head, dict) else None
+            pinned_sha = pinned.get("sha") if isinstance(pinned, dict) else None
+            card_data = head.get("cardData") if isinstance(head, dict) else None
+            observed_metadata = {
+                "license": card_data.get("license")
+                if isinstance(card_data, dict) else None,
+                "base_models": _hub_base_models(card_data),
+            }
+            if observed_head != candidate["repository_head"]:
+                reasons.append("repository-head-changed")
+            if pinned_sha != candidate["revision"]:
+                reasons.append("immutable-revision-unavailable")
+            if observed_metadata["license"] != expected_metadata["license"]:
+                reasons.append("license-metadata-changed")
+            if (observed_metadata["base_models"]
+                    != sorted(expected_metadata["base_models"])):
+                reasons.append("base-model-metadata-changed")
+            status = "drift" if reasons else "pass"
+            result = {
+                "model_id": model_id,
+                "pinned_revision": candidate["revision"],
+                "expected_head": candidate["repository_head"],
+                "observed_head": observed_head,
+                "pinned_revision_resolved": pinned_sha == candidate["revision"],
+                "expected_metadata": expected_metadata,
+                "observed_metadata": observed_metadata,
+                "status": status,
+                "reasons": reasons,
+            }
+        except Exception as error:
+            result = {
+                "model_id": model_id,
+                "pinned_revision": candidate["revision"],
+                "expected_head": candidate["repository_head"],
+                "observed_head": None,
+                "pinned_revision_resolved": False,
+                "expected_metadata": expected_metadata,
+                "observed_metadata": None,
+                "status": "error",
+                "reasons": ["metadata-check-failed"],
+                "error_type": type(error).__name__,
+            }
+        results.append(result)
+    passed = sum(result["status"] == "pass" for result in results)
+    drifted = sum(result["status"] == "drift" for result in results)
+    errors = sum(result["status"] == "error" for result in results)
+    status = "error" if errors else "drift" if drifted else "pass"
+    return {
+        "schema_version": 1,
+        "privacy": "public-model-metadata-only",
+        "checked_at": checked_at(),
+        "status": status,
+        "summary": {
+            "candidates": len(results),
+            "passed": passed,
+            "drifted": drifted,
+            "errors": errors,
+        },
+        "candidates": results,
     }
 
 
@@ -658,6 +948,23 @@ def render_dashboard(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_runtime_traces(report: dict[str, Any]) -> str:
+    lines = [
+        "PRIVACY-SAFE RUNTIME TRACE AGGREGATES",
+        f"records: {report['records']} (rejected: {report['rejected_records']}; "
+        f"non-trace lines ignored: {report['ignored_non_trace_lines']})",
+        "event                         samples   p95 duration ms   success",
+    ]
+    for event, result in report["events"].items():
+        duration = result["metrics"]["duration_ms"]["p95"]
+        success = result.get("success_rate")
+        success_label = "n/a" if success is None else f"{success * 100:.1f}%"
+        lines.append(
+            f"{event:<29} {result['records']:>7} {duration:>17.2f} "
+            f"{success_label:>9}")
+    return "\n".join(lines)
+
+
 def render_stress(report: dict[str, Any]) -> str:
     latency = report["latency_ms"]["compiler"]
     budget = report.get("budget")
@@ -700,6 +1007,42 @@ def render_scorecard(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_model_audit(report: dict[str, Any]) -> str:
+    lines = [
+        "MODEL SOURCE AUDIT",
+        f"status: {report['status']}",
+        "model                                                     status reasons",
+    ]
+    for candidate in report["candidates"]:
+        lines.append(
+            f"{candidate['model_id']:<57} {candidate['status']:<6} "
+            + (", ".join(candidate["reasons"]) or "none"))
+    summary = report["summary"]
+    lines.append(
+        f"passed: {summary['passed']}; drifted: {summary['drifted']}; "
+        f"errors: {summary['errors']}")
+    return "\n".join(lines)
+
+
+def write_json_artifact(path: Path, payload: dict[str, Any]) -> None:
+    """Atomically replace a machine-readable evidence artifact."""
+    path = path.expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=path.parent,
+                prefix=f".{path.name}.", suffix=".tmp", delete=False) as handle:
+            temporary_name = handle.name
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(temporary_name, path)
+        temporary_name = None
+    finally:
+        if temporary_name is not None:
+            Path(temporary_name).unlink(missing_ok=True)
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -717,6 +1060,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     evaluate.add_argument(
         "--format", choices=("table", "json"), default="table")
 
+    traces = commands.add_parser(
+        "traces", help="aggregate closed-schema traces from a runtime log")
+    traces.add_argument("--trace-log", type=Path, required=True)
+    traces.add_argument(
+        "--format", choices=("table", "json"), default="table")
+
     stress = commands.add_parser(
         "stress", help="run deterministic compiler lifecycle stress")
     stress.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
@@ -731,6 +1080,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     scorecard.add_argument(
         "--scorecard", type=Path, default=DEFAULT_MODEL_SCORECARD)
     scorecard.add_argument(
+        "--format", choices=("table", "json"), default="table")
+
+    audit = commands.add_parser(
+        "audit-models", help="check reviewed public model metadata for drift")
+    audit.add_argument(
+        "--scorecard", type=Path, default=DEFAULT_MODEL_SCORECARD)
+    audit.add_argument("--output", type=Path, required=True)
+    audit.add_argument(
         "--format", choices=("table", "json"), default="table")
     return parser.parse_args(argv)
 
@@ -754,6 +1111,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 or payload["rejected_records"] > 0
                 or ("budget" in payload and not payload["budget"]["passed"])
             )
+        elif args.command == "traces":
+            payload = evaluate_runtime_traces(args.trace_log)
+            rendered = render_runtime_traces(payload)
+            status = int(
+                payload["records"] == 0 or payload["rejected_records"] > 0)
         elif args.command == "stress":
             payload = run_compiler_stress(
                 load_corpus(args.corpus), cycles=args.cycles,
@@ -765,13 +1127,37 @@ def main(argv: Sequence[str] | None = None) -> int:
                 payload["failures"] > 0
                 or payload["nondeterministic_outputs"] > 0
                 or not payload["budget"]["passed"])
-        else:
+        elif args.command == "scorecard":
             payload = generate_model_scorecard(
                 load_model_scorecard(args.scorecard))
             rendered = render_scorecard(payload)
             status = int(payload["recommendation"] is None)
+        else:
+            payload = audit_model_sources(load_model_scorecard(args.scorecard))
+            rendered = render_model_audit(payload)
+            write_json_artifact(args.output, payload)
+            status = {"pass": 0, "drift": 1, "error": 2}[payload["status"]]
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        print(f"performance lab configuration error: {exc}", file=sys.stderr)
+        if args.command == "audit-models":
+            payload = {
+                "schema_version": 1,
+                "privacy": "public-model-metadata-only",
+                "checked_at": datetime.now(timezone.utc).isoformat().replace(
+                    "+00:00", "Z"),
+                "status": "error",
+                "summary": {
+                    "candidates": 0, "passed": 0, "drifted": 0, "errors": 1,
+                },
+                "candidates": [],
+                "error_type": type(exc).__name__,
+            }
+            try:
+                write_json_artifact(args.output, payload)
+            except OSError:
+                pass
+        detail = "runtime trace input unavailable" \
+            if args.command == "traces" else str(exc)
+        print(f"performance lab configuration error: {detail}", file=sys.stderr)
         return 2
     print(json.dumps(payload, indent=2, sort_keys=True)
           if args.format == "json" else rendered)

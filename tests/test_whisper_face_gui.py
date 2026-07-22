@@ -17,15 +17,58 @@ from whisper_face_gui import (
     FACES,
     GUIActions,
     SECTIONS,
+    SETTINGS_PANES,
     WhisperFaceViewModel,
     create_gui,
+    localized_string,
     normalize_snapshot,
+    normalize_settings,
     set_accessible_text,
     sync_accessibility,
+    tone_for_app_index,
 )
 
 
 class SnapshotTests(unittest.TestCase):
+    def test_private_settings_snapshot_normalizes_malformed_rows(self):
+        settings = normalize_settings({
+            "app_tones": [
+                {"bundle": "com.example.mail", "name": "Mail", "tone": "formal"},
+                {"bundle": "com.example.bad", "tone": "invented"},
+                "not a row",
+            ],
+            "snippets": [
+                {"name": "signature", "text": "Cheers"},
+                {"name": "", "text": "ignored"},
+                {"name": "oversize", "text": "x" * 4001},
+            ],
+            "manual_vocabulary": ["Qwen", " qwen ", "Whisper Face"],
+            "banned_vocabulary": "not a list",
+            "corrections": [
+                {"key": "gwen", "source": "Gwen", "target": "Qwen",
+                 "count": "3", "kind": "correction"},
+                {"key": "bad", "source": "", "target": "ignored"},
+            ],
+        })
+        self.assertEqual(len(settings.app_tones), 2)
+        self.assertEqual(settings.app_tones[1].tone, "auto")
+        self.assertEqual(settings.snippets[0].name, "signature")
+        self.assertEqual(len(settings.snippets), 1)
+        self.assertEqual(settings.manual_vocabulary, ("Qwen", "Whisper Face"))
+        self.assertEqual(settings.banned_vocabulary, ())
+        self.assertEqual(settings.corrections[0].count, 3)
+
+    def test_localization_catalog_formats_and_falls_back_to_english(self):
+        self.assertEqual(localized_string("nav.settings"), "Settings")
+        self.assertEqual(
+            localized_string("settings.personalize.snippets.detail",
+                             locale="fr", count=2),
+            "2 saved phrases")
+        with self.assertRaises(KeyError):
+            localized_string("missing.key")
+        with self.assertRaises(ValueError):
+            localized_string("settings.personalize.snippets.detail")
+
     def test_snapshot_is_normalized_without_appkit_or_runtime(self):
         state = normalize_snapshot({
             "capture_state": "Listening",
@@ -229,6 +272,20 @@ class ViewModelTests(unittest.TestCase):
             "active_engine": "Parakeet Unified",
         }
         self.calls = []
+        self.private_settings = {
+            "app_tones": [{
+                "bundle": "com.example.mail", "name": "Mail", "tone": "auto"}],
+            "snippets": [{"name": "signature", "text": "Cheers"}],
+            "manual_vocabulary": ["Qwen"],
+            "banned_vocabulary": ["gwen"],
+            "corrections": [{
+                "key": "gwen", "source": "Gwen", "target": "Qwen",
+                "count": 3, "kind": "correction"}, {
+                "key": "gwen", "source": "Snippet: gwen",
+                "target": "Qwen snippet", "count": 2, "kind": "snippet"}, {
+                "key": "signature", "source": "Snippet: signature",
+                "target": "Cheers", "count": 1, "kind": "snippet"}],
+        }
 
         def set_face(face):
             self.calls.append(("face", face))
@@ -248,8 +305,21 @@ class ViewModelTests(unittest.TestCase):
 
         self.actions = GUIActions(
             status_snapshot=lambda: dict(self.runtime),
+            settings_snapshot=lambda: dict(self.private_settings),
             set_face=set_face,
             set_flight_recorder=set_flight,
+            set_app_tone=lambda bundle, tone:
+                self.calls.append(("tone", bundle, tone)),
+            save_snippet=lambda name, expected, text:
+                self.calls.append(("save_snippet", name, expected, text)),
+            delete_snippet=lambda name, expected:
+                self.calls.append(("delete_snippet", name, expected)),
+            save_vocabulary=lambda terms, bans:
+                self.calls.append(("vocabulary", tuple(terms), tuple(bans))),
+            forget_correction=lambda key:
+                self.calls.append(("forget_correction", key)),
+            forget_snippet_edit=lambda key:
+                self.calls.append(("forget_snippet", key)),
             pause=pause,
             resume=resume,
             open_log=lambda: self.calls.append(("log",)),
@@ -266,6 +336,88 @@ class ViewModelTests(unittest.TestCase):
             self.assertEqual(self.model.select_section(section).section, section)
         with self.assertRaises(ValueError):
             self.model.select_section("Billing")
+
+    def test_unified_settings_load_only_on_navigation_and_all_panes_work(self):
+        self.assertEqual(self.model.state.settings.snippets, ())
+        state = self.model.select_section("Settings")
+        self.assertEqual(state.settings.snippets[0].name, "signature")
+        for pane in SETTINGS_PANES:
+            self.assertEqual(
+                self.model.select_settings_pane(pane).settings_pane, pane)
+        with self.assertRaises(ValueError):
+            self.model.select_settings_pane("Cloud")
+
+    def test_personalization_actions_validate_and_call_runtime(self):
+        self.model.select_section("Settings")
+        self.model.set_app_tone("com.example.mail", "formal")
+        self.model.save_snippet("address", "123 Main Street")
+        self.model.save_snippet(
+            "signature", "Kind regards", expected_original="Cheers")
+        self.model.delete_snippet("signature", "Cheers")
+        self.model.save_vocabulary(["Qwen", "Qwen"], ["Gwen"])
+        self.model.forget_learned("correction", "gwen")
+        self.model.forget_learned("snippet", "gwen")
+        self.model.forget_learned("snippet", "signature")
+        self.assertIn(("tone", "com.example.mail", "formal"), self.calls)
+        self.assertIn(
+            ("save_snippet", "address", None, "123 Main Street"), self.calls)
+        self.assertIn(
+            ("save_snippet", "signature", "Cheers", "Kind regards"),
+            self.calls)
+        self.assertIn(("delete_snippet", "signature", "Cheers"), self.calls)
+        self.assertIn(("vocabulary", ("Qwen",), ("Gwen",)), self.calls)
+        self.assertIn(("forget_correction", "gwen"), self.calls)
+        self.assertIn(("forget_snippet", "gwen"), self.calls)
+        self.assertIn(("forget_snippet", "signature"), self.calls)
+
+    def test_personalization_rejects_invalid_or_ambiguous_input(self):
+        self.model.select_section("Settings")
+        with self.assertRaises(ValueError):
+            self.model.set_app_tone("not a bundle id", "formal")
+        with self.assertRaises(ValueError):
+            self.model.set_app_tone("com.example.mail", "sparkly")
+        self.assertEqual(
+            self.model.save_snippet("bad\nname", "text").notice_level,
+            "error")
+        self.assertIn(
+            "1–4000 characters",
+            self.model.save_snippet("empty", "   ").notice)
+        self.assertIn(
+            "cannot also be excluded",
+            self.model.save_vocabulary(["Qwen"], ["qwen"]).notice)
+        self.assertIn(
+            "reserved",
+            self.model.save_vocabulary(["# managed-looking"], []).notice)
+        self.assertIn(
+            "reserved",
+            self.model.save_vocabulary([], ["-already-prefixed"]).notice)
+        with self.assertRaises(ValueError):
+            self.model.forget_learned("correction", "missing")
+
+    def test_false_snippet_forget_result_is_visible_failure(self):
+        model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {},
+            settings_snapshot=lambda: {
+                "corrections": [{
+                    "key": "signature", "source": "Snippet: signature",
+                    "target": "Cheers", "kind": "snippet"}]},
+            forget_snippet_edit=lambda _key: False,
+        ))
+        model.select_section("Settings")
+        state = model.forget_learned("snippet", "signature")
+        self.assertEqual(state.notice_level, "error")
+        self.assertIn("no longer exists", state.notice)
+
+    def test_app_tone_selection_resolves_each_selected_apps_saved_tone(self):
+        settings = normalize_settings({"app_tones": [{
+            "bundle": "com.example.mail", "name": "Mail", "tone": "formal",
+        }, {
+            "bundle": "com.example.code", "name": "Code", "tone": "code",
+        }]})
+        self.assertEqual(tone_for_app_index(settings.app_tones, 0), "formal")
+        self.assertEqual(tone_for_app_index(settings.app_tones, 1), "code")
+        with self.assertRaises(IndexError):
+            tone_for_app_index(settings.app_tones, 2)
 
     def test_face_selection_validates_and_calls_runtime(self):
         for face in FACES:

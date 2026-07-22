@@ -28,9 +28,11 @@ Example:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
+import select
 import shutil
 import statistics
 import struct
@@ -42,14 +44,26 @@ from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
 
-MLX_MODELS = {
-    "mlx-tiny": "mlx-community/whisper-tiny",
-    "mlx-turbo": "mlx-community/whisper-large-v3-turbo",
-}
-PARAKEET_ENGINES = {
-    "parakeet-unified": "unified",
-    "parakeet-v3": "v3",
-}
+HERE = Path(__file__).resolve().parent
+DEFAULT_MODEL_SCORECARD = HERE / "benchmarks" / "model_scorecard.json"
+DEFAULT_PARAKEET_MODEL_DIR = (
+    Path.home() / "Library" / "Application Support" / "FluidAudio" /
+    "Models" / "parakeet-unified-en-0.6b"
+)
+MLX_ENGINES = ("mlx-tiny", "mlx-turbo")
+PARAKEET_ENGINES = {"parakeet-unified": "unified"}
+PARAKEET_REQUIRED_ASSETS = (
+    "parakeet_unified_encoder_int8.mlmodelc",
+    "parakeet_unified_decoder.mlmodelc",
+    "parakeet_unified_joint_decision_single_step.mlmodelc",
+    "vocab.json",
+    "metadata.json",
+)
+PARAKEET_CLI_TIMEOUT_SECONDS = 30 * 60
+PARAKEET_HELPER_STARTUP_TIMEOUT_SECONDS = 5 * 60
+PARAKEET_HELPER_SAMPLE_TIMEOUT_SECONDS = 2 * 60
+PARAKEET_HELPER_CLEANUP_TIMEOUT_SECONDS = 5
+PARAKEET_HELPER_MAX_RESPONSE_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -57,6 +71,218 @@ class Sample:
     utterance_id: str
     audio_path: Path
     reference: str
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    engine: str
+    model_id: str
+    revision: str
+    runtime_role: str
+
+
+def load_model_specs(
+        path: Path = DEFAULT_MODEL_SCORECARD) -> dict[str, ModelSpec]:
+    """Load exact benchmark targets from the reviewed model scorecard."""
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    candidates = payload.get("candidates") if isinstance(payload, dict) else None
+    if (not isinstance(payload, dict) or payload.get("schema_version") != 1
+            or not isinstance(candidates, list)):
+        raise ValueError("unsupported model scorecard")
+    specs: dict[str, ModelSpec] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            raise ValueError("invalid model scorecard candidate")
+        values = [
+            candidate.get("benchmark_engine"), candidate.get("model_id"),
+            candidate.get("revision"), candidate.get("runtime_role"),
+        ]
+        if any(not isinstance(value, str) or not value.strip()
+               for value in values):
+            raise ValueError("model benchmark target is incomplete")
+        engine, model_id, revision, runtime_role = values
+        if engine in specs:
+            raise ValueError(f"duplicate model benchmark engine: {engine}")
+        if len(revision) != 40 or any(
+                character not in "0123456789abcdef" for character in revision):
+            raise ValueError(f"model revision must be an immutable SHA: {engine}")
+        specs[engine] = ModelSpec(
+            engine=engine, model_id=model_id, revision=revision,
+            runtime_role=runtime_role)
+    if not specs:
+        raise ValueError("model scorecard has no benchmark targets")
+    return specs
+
+
+def resolve_mlx_snapshot(spec: ModelSpec, downloader=None) -> str:
+    """Resolve an MLX artifact by immutable reviewed repository revision."""
+    if downloader is None:
+        from huggingface_hub import snapshot_download
+
+        downloader = snapshot_download
+    return str(downloader(repo_id=spec.model_id, revision=spec.revision))
+
+
+def execution_model_provenance(
+        spec: ModelSpec, *, executor: str,
+        revision_status: str,
+        preflight_status: str) -> dict[str, str | bool | None]:
+    """Separate the reviewed target from what an executor actually proved."""
+    allowed_statuses = {
+        "verified-immutable-snapshot",
+        "unverified-external-executor",
+        "unverified-helper-runtime-unattested",
+    }
+    if revision_status not in allowed_statuses:
+        raise ValueError(f"unsupported revision status: {revision_status}")
+    resolved = revision_status == "verified-immutable-snapshot"
+    return {
+        "requested_model_id": spec.model_id,
+        "requested_model_revision": spec.revision,
+        "resolved_model_id": spec.model_id if resolved else None,
+        "resolved_model_revision": spec.revision if resolved else None,
+        "model_revision_status": revision_status,
+        "model_preflight_status": preflight_status,
+        "runtime_role": spec.runtime_role,
+        "executor": executor,
+    }
+
+
+class BoundedJSONLineReader:
+    """Read newline-delimited helper JSON with strict time and size bounds."""
+
+    def __init__(self, stream, *, maximum_bytes: int =
+                 PARAKEET_HELPER_MAX_RESPONSE_BYTES):
+        if not isinstance(maximum_bytes, int) or maximum_bytes <= 0:
+            raise ValueError("maximum_bytes must be positive")
+        self._fd = stream.fileno()
+        self._maximum_bytes = maximum_bytes
+        self._buffer = bytearray()
+
+    def read(self, *, timeout: float) -> dict:
+        if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                or not 0 < float(timeout) <= 30 * 60):
+            raise ValueError("protocol timeout must be between 0 and 1800 seconds")
+        deadline = time.monotonic() + float(timeout)
+        while True:
+            newline = self._buffer.find(b"\n")
+            if newline >= 0:
+                if newline > self._maximum_bytes:
+                    raise RuntimeError("helper response exceeded size limit")
+                raw = bytes(self._buffer[:newline])
+                del self._buffer[:newline + 1]
+                try:
+                    value = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise RuntimeError("helper returned invalid JSON") from error
+                if not isinstance(value, dict):
+                    raise RuntimeError("helper response must be a JSON object")
+                return value
+            if len(self._buffer) > self._maximum_bytes:
+                raise RuntimeError("helper response exceeded size limit")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("helper protocol response timed out")
+            ready, _, _ = select.select([self._fd], [], [], remaining)
+            if not ready:
+                raise TimeoutError("helper protocol response timed out")
+            capacity = max(
+                1, min(4096, self._maximum_bytes + 1 - len(self._buffer)))
+            chunk = os.read(self._fd, capacity)
+            if not chunk:
+                raise RuntimeError("helper closed before returning a response")
+            self._buffer.extend(chunk)
+
+
+def _cleanup_helper_process(
+        process, *, timeout: float =
+        PARAKEET_HELPER_CLEANUP_TIMEOUT_SECONDS) -> None:
+    """Close, terminate, then kill a helper without allowing cleanup to hang."""
+    try:
+        process.stdin.close()
+    except (AttributeError, OSError, ValueError):
+        pass
+
+    def wait_once() -> bool:
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return False
+        except (AttributeError, OSError, ValueError):
+            return True
+        return True
+
+    try:
+        if wait_once():
+            return
+        try:
+            process.terminate()
+        except (AttributeError, OSError):
+            pass
+        if not wait_once():
+            try:
+                process.kill()
+            except (AttributeError, OSError):
+                pass
+            wait_once()
+    finally:
+        try:
+            process.stdout.close()
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
+def verify_installed_parakeet_revision(
+        spec: ModelSpec,
+        model_dir: Path = DEFAULT_PARAKEET_MODEL_DIR) -> str:
+    """Require every helper asset sidecar to name the reviewed revision."""
+    metadata_root = model_dir / ".cache" / "huggingface" / "download"
+    for relative in PARAKEET_REQUIRED_ASSETS:
+        target = model_dir / relative
+        paths = [target] if target.is_file() else (
+            list(target.rglob("*")) if target.is_dir() else [])
+        files = [path for path in paths if path.is_file()]
+        if not files:
+            raise RuntimeError(f"Parakeet model asset is missing: {relative}")
+        for path in files:
+            metadata = metadata_root / path.relative_to(model_dir)
+            metadata = Path(f"{metadata}.metadata")
+            try:
+                revision = metadata.read_text(encoding="utf-8").splitlines()[0]
+            except (OSError, IndexError) as error:
+                raise RuntimeError(
+                    f"Parakeet revision metadata is missing: {path.name}") \
+                    from error
+            if revision != spec.revision:
+                raise RuntimeError(
+                    f"Parakeet model revision drift: {path.name} is {revision}")
+    return spec.revision
+
+
+def harness_provenance(
+        scorecard: Path = DEFAULT_MODEL_SCORECARD) -> dict[str, str | None]:
+    """Describe the exact benchmark harness and evidence inputs."""
+    script = Path(__file__).resolve()
+    scorecard = scorecard.expanduser().resolve()
+    try:
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=HERE, check=True,
+            capture_output=True, text=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        revision = None
+    try:
+        scorecard_name = str(scorecard.relative_to(HERE))
+    except ValueError:
+        scorecard_name = scorecard.name
+    return {
+        "script": script.name,
+        "script_sha256": hashlib.sha256(script.read_bytes()).hexdigest(),
+        "model_scorecard": scorecard_name,
+        "model_scorecard_sha256": hashlib.sha256(
+            scorecard.read_bytes()).hexdigest(),
+        "git_revision": revision,
+        "python": platform.python_version(),
+    }
 
 
 def load_references(dataset: Path) -> dict[str, str]:
@@ -182,6 +408,16 @@ def score_records(records: Iterable[dict], tokenize=None) -> dict:
     }
 
 
+def summarize_model_run(
+        records: Iterable[dict], spec: ModelSpec, *, executor: str,
+        revision_status: str, preflight_status: str, tokenize=None) -> dict:
+    summary = score_records(records, tokenize=tokenize)
+    summary.update(execution_model_provenance(
+        spec, executor=executor, revision_status=revision_status,
+        preflight_status=preflight_status))
+    return summary
+
+
 def audio_info(path: Path) -> tuple[float, int]:
     import soundfile
 
@@ -204,13 +440,17 @@ def load_audio(path: Path):
     return np.asarray(audio, dtype=np.float32)
 
 
-def run_mlx(engine: str, samples: Sequence[Sample]) -> list[dict]:
+def run_mlx(spec: ModelSpec, samples: Sequence[Sample]) -> list[dict]:
     if platform.system() != "Darwin":
         raise RuntimeError("MLX benchmark engines require macOS")
     import mlx_whisper
-    from huggingface_hub import snapshot_download
 
-    model = str(snapshot_download(repo_id=MLX_MODELS[engine]))
+    engine = spec.engine
+    model = resolve_mlx_snapshot(spec)
+    provenance = execution_model_provenance(
+        spec, executor="mlx-whisper",
+        revision_status="verified-immutable-snapshot",
+        preflight_status="not-applicable")
     records = []
     for index, sample in enumerate(samples, 1):
         audio = load_audio(sample.audio_path)
@@ -229,6 +469,7 @@ def run_mlx(engine: str, samples: Sequence[Sample]) -> list[dict]:
             "hyp": str(result.get("text", "")).strip(),
             "dataset": "librispeech-test-clean",
             "engine": engine,
+            **provenance,
             "audio_s": round(len(audio) / 16_000, 4),
             "proc_s": round(elapsed, 4),
         })
@@ -236,7 +477,9 @@ def run_mlx(engine: str, samples: Sequence[Sample]) -> list[dict]:
     return records
 
 
-def run_parakeet(engine: str, samples: Sequence[Sample], cli: Path) -> list[dict]:
+def run_parakeet(
+        spec: ModelSpec, samples: Sequence[Sample], cli: Path) -> list[dict]:
+    engine = spec.engine
     if not cli.exists():
         raise FileNotFoundError(cli)
     work = Path(tempfile.mkdtemp(prefix="parrot-parakeet-benchmark-"))
@@ -250,11 +493,16 @@ def run_parakeet(engine: str, samples: Sequence[Sample], cli: Path) -> list[dict
     ]
     environment = dict(os.environ)
     environment["MACPARAKEET_TELEMETRY"] = "0"
+    provenance = execution_model_provenance(
+        spec, executor="macparakeet-cli",
+        revision_status="unverified-external-executor",
+        preflight_status="not-supported")
     started = time.monotonic()
-    result = subprocess.run(
-        command, capture_output=True, text=True, env=environment)
-    elapsed = time.monotonic() - started
     try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, env=environment,
+            timeout=PARAKEET_CLI_TIMEOUT_SECONDS)
+        elapsed = time.monotonic() - started
         if result.returncode:
             raise RuntimeError(
                 f"macparakeet-cli exited {result.returncode}: "
@@ -276,6 +524,7 @@ def run_parakeet(engine: str, samples: Sequence[Sample], cli: Path) -> list[dict
                 "hyp": transcript.read_text(encoding="utf-8").strip(),
                 "dataset": "librispeech-test-clean",
                 "engine": engine,
+                **provenance,
                 "audio_s": round(audio_s, 4),
                 # The CLI loads once for the batch. Attribute batch wall time
                 # proportionally so aggregate RTFx remains exact.
@@ -287,14 +536,23 @@ def run_parakeet(engine: str, samples: Sequence[Sample], cli: Path) -> list[dict
 
 
 def run_parrot_helper(
-    engine: str, samples: Sequence[Sample], helper: Path
+    spec: ModelSpec, samples: Sequence[Sample], helper: Path,
+    *, model_dir: Path = DEFAULT_PARAKEET_MODEL_DIR,
+    reader_factory=BoundedJSONLineReader,
 ) -> list[dict]:
     """Drive Whisper Face's shipping RAM-only helper protocol."""
+    engine = spec.engine
+    verify_installed_parakeet_revision(spec, model_dir)
+    provenance = execution_model_provenance(
+        spec, executor="whisper-face-parakeet-helper",
+        revision_status="unverified-helper-runtime-unattested",
+        preflight_status="installed-sidecar-revision-matched")
     process = subprocess.Popen(
         [str(helper), "--server"], stdin=subprocess.PIPE,
         stdout=subprocess.PIPE, stderr=None, bufsize=0)
     try:
-        ready = json.loads(process.stdout.readline().decode("utf-8"))
+        reader = reader_factory(process.stdout)
+        ready = reader.read(timeout=PARAKEET_HELPER_STARTUP_TIMEOUT_SECONDS)
         if not ready.get("ready"):
             raise RuntimeError("Parrot helper did not become ready")
         records = []
@@ -304,7 +562,7 @@ def run_parrot_helper(
             process.stdin.write(struct.pack("<Q", len(audio)))
             process.stdin.write(memoryview(audio).cast("B"))
             process.stdin.flush()
-            response = json.loads(process.stdout.readline().decode("utf-8"))
+            response = reader.read(timeout=PARAKEET_HELPER_SAMPLE_TIMEOUT_SECONDS)
             elapsed = time.monotonic() - started
             if not response.get("ok"):
                 raise RuntimeError(str(response.get("error", "helper error")))
@@ -314,17 +572,14 @@ def run_parrot_helper(
                 "hyp": str(response.get("text", "")).strip(),
                 "dataset": "librispeech-test-clean",
                 "engine": engine,
+                **provenance,
                 "audio_s": round(len(audio) / 16_000, 4),
                 "proc_s": round(elapsed, 4),
             })
             print(f"[{engine}] {index}/{len(samples)}", flush=True)
         return records
     finally:
-        try:
-            process.stdin.close()
-            process.wait(timeout=5)
-        except Exception:
-            process.terminate()
+        _cleanup_helper_process(process)
 
 
 def write_records(path: Path, records: Sequence[dict]) -> None:
@@ -351,13 +606,23 @@ def main() -> int:
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument(
         "--engines", nargs="+", required=True,
-        choices=tuple(MLX_MODELS) + tuple(PARAKEET_ENGINES))
+        choices=MLX_ENGINES + tuple(PARAKEET_ENGINES))
     parser.add_argument("--macparakeet-cli", type=Path)
     parser.add_argument("--parrot-helper", type=Path)
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--scorecard", type=Path, default=DEFAULT_MODEL_SCORECARD,
+        help="reviewed exact model repositories and revisions")
     args = parser.parse_args()
 
+    scorecard = args.scorecard.expanduser().resolve()
+    model_specs = load_model_specs(scorecard)
+    missing = [engine for engine in args.engines if engine not in model_specs]
+    if missing:
+        raise SystemExit(
+            "selected engine is not defined by the reviewed model scorecard: "
+            + ", ".join(missing))
     samples = select_samples(args.dataset.expanduser().resolve(), args.limit)
     if not samples:
         raise SystemExit(f"no referenced FLAC files under {args.dataset}")
@@ -365,22 +630,35 @@ def main() -> int:
 
     summaries = []
     for engine in args.engines:
-        if engine in MLX_MODELS:
-            records = run_mlx(engine, samples)
+        spec = model_specs[engine]
+        if engine in MLX_ENGINES:
+            records = run_mlx(spec, samples)
+            executor = "mlx-whisper"
+            revision_status = "verified-immutable-snapshot"
+            preflight_status = "not-applicable"
         else:
             if args.parrot_helper is not None:
                 records = run_parrot_helper(
-                    engine, samples, args.parrot_helper.expanduser().resolve())
+                    spec, samples, args.parrot_helper.expanduser().resolve())
+                executor = "whisper-face-parakeet-helper"
+                revision_status = "unverified-helper-runtime-unattested"
+                preflight_status = "installed-sidecar-revision-matched"
             elif args.macparakeet_cli is not None:
                 records = run_parakeet(
-                    engine, samples,
+                    spec, samples,
                     args.macparakeet_cli.expanduser().resolve())
+                executor = "macparakeet-cli"
+                revision_status = "unverified-external-executor"
+                preflight_status = "not-supported"
             else:
                 raise SystemExit(
                     f"--parrot-helper or --macparakeet-cli is required for {engine}")
         records_path = args.output_dir / f"{engine}.jsonl"
         write_records(records_path, records)
-        summaries.append(score_records(records))
+        summaries.append(summarize_model_run(
+            records, spec, executor=executor,
+            revision_status=revision_status,
+            preflight_status=preflight_status))
 
     report = {
         "schema_version": 1,
@@ -391,6 +669,7 @@ def main() -> int:
         "dataset": "LibriSpeech test-clean",
         "selection": "deterministic-evenly-spaced",
         "samples": len(samples),
+        "harness": harness_provenance(scorecard),
         "engines": summaries,
     }
     args.output_dir.mkdir(parents=True, exist_ok=True)

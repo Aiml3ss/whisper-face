@@ -62,7 +62,17 @@ uv run benchmark_asr.py \
 An independently downloaded `macparakeet-cli` may be supplied with
 `--macparakeet-cli` for research comparison when the Parrot helper is omitted.
 It is not a Whisper Face dependency and must never be bundled by either
-installer.
+installer. That external CLI does not accept the scorecard repository revision,
+so its result is explicitly marked `unverified-external-executor`; it cannot be
+used as proof of measurements for the pinned shipping model. The shipping
+helper path fails before inference unless every installed Core ML asset has
+local Hugging Face sidecar metadata matching the scorecard revision. Those
+sidecars do not attest the asset contents, helper executable, or model loaded
+at runtime, so shipping-helper results remain
+`unverified-helper-runtime-unattested` with null resolved model fields. CLI,
+helper startup, and per-sample operations have bounded deadlines; helper JSON
+responses are size-limited and timeout cleanup escalates from close to
+terminate to kill.
 
 Generated JSONL may contain public corpus text. Keep it outside the repository
 so benchmark results cannot be mistaken for application assets or personal

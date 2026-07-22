@@ -3,8 +3,12 @@
 # dependencies = []
 # ///
 
+from array import array
+import os
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 import sys
 
@@ -13,10 +17,26 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from benchmark_asr import (
+    BoundedJSONLineReader,
+    DEFAULT_MODEL_SCORECARD,
+    PARAKEET_CLI_TIMEOUT_SECONDS,
+    PARAKEET_HELPER_SAMPLE_TIMEOUT_SECONDS,
+    PARAKEET_HELPER_STARTUP_TIMEOUT_SECONDS,
+    PARAKEET_ENGINES,
+    Sample,
+    _cleanup_helper_process,
     edit_distance,
+    execution_model_provenance,
     evenly_spaced,
+    harness_provenance,
+    load_model_specs,
     load_references,
+    resolve_mlx_snapshot,
+    run_parakeet,
+    run_parrot_helper,
     score_records,
+    summarize_model_run,
+    verify_installed_parakeet_revision,
 )
 
 
@@ -70,6 +90,315 @@ class BenchmarkASRTests(unittest.TestCase):
         self.assertEqual(result["wer_pct"], 25.0)
         self.assertEqual(result["exact_pct"], 50.0)
         self.assertEqual(result["rtfx"], 4.0)
+
+    def test_model_specs_use_exact_reviewed_repositories_and_revisions(self):
+        specs = load_model_specs(DEFAULT_MODEL_SCORECARD)
+        self.assertEqual(
+            (specs["mlx-tiny"].model_id, specs["mlx-tiny"].revision),
+            (
+                "mlx-community/whisper-tiny",
+                "78c52ab98ca87f570bc57ad852e15ef7060f9f76",
+            ),
+        )
+        self.assertEqual(
+            specs["parakeet-unified"].model_id,
+            "FluidInference/parakeet-unified-en-0.6b-coreml",
+        )
+        self.assertEqual(set(specs), {
+            "mlx-tiny", "mlx-turbo", "parakeet-unified",
+        })
+
+    def test_mlx_snapshot_download_is_bound_to_exact_revision(self):
+        spec = load_model_specs(DEFAULT_MODEL_SCORECARD)["mlx-turbo"]
+        calls = []
+
+        def downloader(**kwargs):
+            calls.append(kwargs)
+            return "/tmp/exact-model"
+
+        self.assertEqual(
+            resolve_mlx_snapshot(spec, downloader=downloader),
+            "/tmp/exact-model",
+        )
+        self.assertEqual(calls, [{
+            "repo_id": spec.model_id,
+            "revision": spec.revision,
+        }])
+
+    def test_harness_provenance_hashes_script_and_scorecard(self):
+        provenance = harness_provenance(DEFAULT_MODEL_SCORECARD)
+        self.assertEqual(provenance["script"], "benchmark_asr.py")
+        self.assertEqual(provenance["model_scorecard"], "benchmarks/model_scorecard.json")
+        self.assertEqual(len(provenance["script_sha256"]), 64)
+        self.assertEqual(len(provenance["model_scorecard_sha256"]), 64)
+
+    def test_run_summary_carries_model_and_executor_provenance(self):
+        spec = load_model_specs(DEFAULT_MODEL_SCORECARD)["mlx-tiny"]
+        summary = summarize_model_run([{
+            "engine": spec.engine,
+            "ref": "hello world",
+            "hyp": "hello world",
+            "audio_s": 1.0,
+            "proc_s": 0.1,
+        }], spec, executor="mlx-whisper",
+            revision_status="verified-immutable-snapshot",
+            preflight_status="not-applicable",
+            tokenize=str.split)
+        self.assertEqual(summary["requested_model_id"], spec.model_id)
+        self.assertEqual(summary["requested_model_revision"], spec.revision)
+        self.assertEqual(summary["resolved_model_id"], spec.model_id)
+        self.assertEqual(summary["resolved_model_revision"], spec.revision)
+        self.assertEqual(
+            summary["model_revision_status"], "verified-immutable-snapshot")
+        self.assertEqual(summary["runtime_role"], spec.runtime_role)
+        self.assertEqual(summary["executor"], "mlx-whisper")
+
+    def test_external_parakeet_executor_never_asserts_an_unproved_revision(self):
+        spec = load_model_specs(DEFAULT_MODEL_SCORECARD)["parakeet-unified"]
+        provenance = execution_model_provenance(
+            spec, executor="macparakeet-cli",
+            revision_status="unverified-external-executor",
+            preflight_status="not-supported")
+        self.assertEqual(provenance["requested_model_revision"], spec.revision)
+        self.assertIsNone(provenance["resolved_model_id"])
+        self.assertIsNone(provenance["resolved_model_revision"])
+        self.assertEqual(
+            provenance["model_revision_status"],
+            "unverified-external-executor",
+        )
+        self.assertEqual(set(PARAKEET_ENGINES), {"parakeet-unified"})
+
+        helper = execution_model_provenance(
+            spec, executor="whisper-face-parakeet-helper",
+            revision_status="unverified-helper-runtime-unattested",
+            preflight_status="installed-sidecar-revision-matched")
+        self.assertIsNone(helper["resolved_model_id"])
+        self.assertIsNone(helper["resolved_model_revision"])
+        self.assertEqual(
+            helper["model_revision_status"],
+            "unverified-helper-runtime-unattested")
+        self.assertEqual(
+            helper["model_preflight_status"],
+            "installed-sidecar-revision-matched")
+
+    def test_shipping_helper_sidecar_preflight_is_fail_closed_not_attestation(self):
+        spec = load_model_specs(DEFAULT_MODEL_SCORECARD)["parakeet-unified"]
+        with tempfile.TemporaryDirectory() as directory:
+            model_dir = Path(directory)
+            assets = (
+                "parakeet_unified_encoder_int8.mlmodelc/weights.bin",
+                "parakeet_unified_decoder.mlmodelc/weights.bin",
+                "parakeet_unified_joint_decision_single_step.mlmodelc/weights.bin",
+                "vocab.json",
+                "metadata.json",
+            )
+            for relative in assets:
+                target = model_dir / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"fixture")
+                metadata = (
+                    model_dir / ".cache" / "huggingface" / "download" /
+                    relative)
+                metadata.parent.mkdir(parents=True, exist_ok=True)
+                Path(f"{metadata}.metadata").write_text(
+                    spec.revision + "\n", encoding="utf-8")
+
+            self.assertEqual(
+                verify_installed_parakeet_revision(spec, model_dir),
+                spec.revision,
+            )
+            self.assertEqual((model_dir / "vocab.json").read_bytes(), b"fixture")
+            provenance = execution_model_provenance(
+                spec, executor="whisper-face-parakeet-helper",
+                revision_status="unverified-helper-runtime-unattested",
+                preflight_status="installed-sidecar-revision-matched")
+            self.assertIsNone(provenance["resolved_model_id"])
+            self.assertIsNone(provenance["resolved_model_revision"])
+            bad_metadata = (
+                model_dir / ".cache" / "huggingface" / "download" /
+                "vocab.json.metadata")
+            bad_metadata.write_text("0" * 40 + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "revision drift"):
+                verify_installed_parakeet_revision(spec, model_dir)
+
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch("benchmark_asr.subprocess.Popen") as popen:
+            with self.assertRaisesRegex(RuntimeError, "asset is missing"):
+                run_parrot_helper(
+                    spec, [], Path("/unused/helper"),
+                    model_dir=Path(directory))
+            popen.assert_not_called()
+
+    @unittest.skipUnless(
+        os.name == "posix",
+        "macOS helper reader uses POSIX pipe descriptors with select",
+    )
+    def test_protocol_reader_bounds_startup_and_sample_responses(self):
+        read_fd, write_fd = os.pipe()
+        try:
+            os.write(write_fd, b'{"ready":true}\n')
+            with os.fdopen(read_fd, "rb", buffering=0) as stream:
+                reader = BoundedJSONLineReader(stream, maximum_bytes=32)
+                self.assertEqual(reader.read(timeout=0.1), {"ready": True})
+            read_fd = -1
+        finally:
+            if read_fd >= 0:
+                os.close(read_fd)
+            os.close(write_fd)
+
+        read_fd, write_fd = os.pipe()
+        try:
+            with os.fdopen(read_fd, "rb", buffering=0) as stream:
+                reader = BoundedJSONLineReader(stream, maximum_bytes=16)
+                with self.assertRaisesRegex(TimeoutError, "timed out"):
+                    reader.read(timeout=0.01)
+                os.write(write_fd, b'x' * 17 + b'\n')
+                with self.assertRaisesRegex(RuntimeError, "size limit"):
+                    reader.read(timeout=0.1)
+            read_fd = -1
+        finally:
+            if read_fd >= 0:
+                os.close(read_fd)
+            os.close(write_fd)
+
+    def test_external_cli_timeout_still_removes_temporary_transcripts(self):
+        spec = load_model_specs(DEFAULT_MODEL_SCORECARD)["parakeet-unified"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cli = root / "macparakeet-cli"
+            cli.write_text("fixture", encoding="utf-8")
+            work = root / "work"
+            work.mkdir()
+            with mock.patch(
+                    "benchmark_asr.tempfile.mkdtemp", return_value=str(work)), \
+                    mock.patch(
+                        "benchmark_asr.subprocess.run",
+                        side_effect=subprocess.TimeoutExpired("cli", 1)) as run:
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    run_parakeet(spec, [], cli)
+            self.assertEqual(
+                run.call_args.kwargs["timeout"], PARAKEET_CLI_TIMEOUT_SECONDS)
+            self.assertFalse(work.exists())
+
+    def test_helper_sample_timeout_runs_terminate_wait_kill_cleanup(self):
+        spec = load_model_specs(DEFAULT_MODEL_SCORECARD)["parakeet-unified"]
+
+        class Input:
+            def write(self, _value):
+                return None
+
+            def flush(self):
+                return None
+
+            def close(self):
+                return None
+
+        class Output:
+            def close(self):
+                return None
+
+        class Process:
+            def __init__(self):
+                self.stdin = Input()
+                self.stdout = Output()
+                self.waits = 0
+                self.terminated = False
+                self.killed = False
+
+            def wait(self, timeout):
+                self.waits += 1
+                if self.waits < 3:
+                    raise subprocess.TimeoutExpired("helper", timeout)
+                return 0
+
+            def terminate(self):
+                self.terminated = True
+
+            def kill(self):
+                self.killed = True
+
+        class Reader:
+            def __init__(self):
+                self.timeouts = []
+
+            def read(self, *, timeout):
+                self.timeouts.append(timeout)
+                if len(self.timeouts) == 1:
+                    return {"ready": True}
+                raise TimeoutError("sample response timed out")
+
+        process = Process()
+        reader = Reader()
+        with mock.patch(
+                "benchmark_asr.verify_installed_parakeet_revision"), \
+                mock.patch("benchmark_asr.subprocess.Popen", return_value=process), \
+                mock.patch(
+                    "benchmark_asr.load_audio",
+                    return_value=array("f", [0.1, 0.2])):
+            with self.assertRaisesRegex(TimeoutError, "sample response"):
+                run_parrot_helper(
+                    spec, [Sample("one", Path("one.flac"), "ONE")],
+                    Path("helper"), reader_factory=lambda _stream: reader)
+        self.assertEqual(reader.timeouts, [
+            PARAKEET_HELPER_STARTUP_TIMEOUT_SECONDS,
+            PARAKEET_HELPER_SAMPLE_TIMEOUT_SECONDS,
+        ])
+        self.assertTrue(process.terminated)
+        self.assertTrue(process.killed)
+        self.assertEqual(process.waits, 3)
+
+        process = Process()
+        _cleanup_helper_process(process, timeout=0.01)
+        self.assertTrue(process.terminated)
+        self.assertTrue(process.killed)
+
+    def test_helper_reader_initialization_failure_still_cleans_up_process(self):
+        spec = load_model_specs(DEFAULT_MODEL_SCORECARD)["parakeet-unified"]
+
+        class Stream:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        class Process:
+            def __init__(self):
+                self.stdin = Stream()
+                self.stdout = Stream()
+                self.waits = 0
+                self.terminated = False
+                self.killed = False
+
+            def wait(self, timeout):
+                self.waits += 1
+                if self.waits < 3:
+                    raise subprocess.TimeoutExpired("helper", timeout)
+                return 0
+
+            def terminate(self):
+                self.terminated = True
+
+            def kill(self):
+                self.killed = True
+
+        process = Process()
+
+        def fail_reader(_stream):
+            raise RuntimeError("reader initialization failed")
+
+        with mock.patch(
+                "benchmark_asr.verify_installed_parakeet_revision"), \
+                mock.patch("benchmark_asr.subprocess.Popen", return_value=process):
+            with self.assertRaisesRegex(RuntimeError, "reader initialization"):
+                run_parrot_helper(
+                    spec, [], Path("helper"), reader_factory=fail_reader)
+
+        self.assertTrue(process.stdin.closed)
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.terminated)
+        self.assertTrue(process.killed)
+        self.assertEqual(process.waits, 3)
 
 
 if __name__ == "__main__":

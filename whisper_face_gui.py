@@ -17,8 +17,94 @@ from typing import Any, Callable, Mapping, Sequence
 
 APP_NAME = "Whisper Face"
 DEFAULTS_SUITE = "com.whisperface.app"
-SECTIONS = (
-    "Overview", "Results", "Appearance", "Privacy", "Models", "Diagnostics")
+SECTIONS = ("Overview", "Results", "Settings", "Models", "Diagnostics")
+SETTINGS_PANES = ("Modes", "Personalize", "Privacy")
+MODE_GUIDE = (
+    ("capture", "Right Option", "Faithful dictation"),
+    ("compose", "Shift + Right Option", "Compose and tighten"),
+    ("edit", "Command + Right Option", "Edit selected text"),
+    ("reply", "Control + Right Option", "Draft a direct reply"),
+    ("command", "Command + Control + Right Option", "Editing commands"),
+    ("code", "Shift + Control + Right Option", "Technical dictation"),
+)
+TONE_CHOICES = ("auto", "casual", "formal", "code", "verbatim", "default")
+
+# Stable semantic keys are intentionally separate from AppKit. Additional
+# catalogs can be added without rewriting view logic or persistence schemas.
+STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
+    "en": {
+        "nav.overview": "Overview",
+        "nav.results": "Results",
+        "nav.settings": "Settings",
+        "nav.models": "Models",
+        "nav.diagnostics": "Diagnostics",
+        "settings.title": "Settings",
+        "settings.subtitle": "Modes, personal language, appearance, and privacy in one place.",
+        "settings.pane.modes": "Modes",
+        "settings.pane.personalize": "Personalize",
+        "settings.pane.privacy": "Privacy",
+        "settings.modes.title": "Hold Right Option with a modifier to choose a mode",
+        "settings.modes.footer": "Shortcuts are fixed so capture behavior stays predictable and safe.",
+        "settings.personalize.tones": "App tones",
+        "settings.personalize.tones.detail": "{count} recent or configured apps",
+        "settings.personalize.snippets": "Snippets",
+        "settings.personalize.snippets.detail": "{count} saved phrases",
+        "settings.personalize.vocabulary": "Vocabulary",
+        "settings.personalize.vocabulary.detail": "{terms} terms · {bans} exclusions",
+        "settings.personalize.corrections": "Learned corrections",
+        "settings.personalize.corrections.detail": "{count} inspectable mappings",
+        "settings.action.edit": "Edit",
+        "settings.action.add": "Add",
+        "settings.action.delete": "Delete",
+        "settings.action.forget": "Forget",
+        "settings.action.save": "Save",
+        "settings.action.cancel": "Cancel",
+        "settings.empty.tones": "No recent apps yet",
+        "settings.empty.snippets": "No snippets",
+        "settings.empty.corrections": "No learned corrections",
+        "settings.dialog.tone.title": "App tone",
+        "settings.dialog.tone.message": "Choose how cleanup should sound in this app.",
+        "settings.dialog.snippet.add": "Add snippet",
+        "settings.dialog.snippet.edit": "Edit snippet",
+        "settings.dialog.snippet.name": "Snippet name",
+        "settings.dialog.snippet.value": "Text inserted by this snippet",
+        "settings.dialog.vocabulary.title": "Personal vocabulary",
+        "settings.dialog.vocabulary.message": "One term per line. Exclusions prevent automatic learning.",
+        "settings.dialog.vocabulary.terms": "Preferred terms",
+        "settings.dialog.vocabulary.bans": "Excluded terms",
+        "settings.dialog.delete.title": "Delete snippet?",
+        "settings.dialog.delete.message": "This removes “{name}” from this Mac.",
+        "settings.dialog.forget.title": "Forget learned correction?",
+        "settings.dialog.forget.message": "Whisper Face will stop applying “{source} → {target}”.",
+        "settings.privacy.title": "Privacy controls",
+        "settings.privacy.flight": "Flight Recorder",
+        "settings.privacy.flight.detail": "Keeps a rolling 20-second audio buffer in RAM only.",
+        "settings.privacy.face": "Companion",
+        "settings.notice.loaded": "Settings loaded",
+        "settings.notice.tone_saved": "App tone saved",
+        "settings.notice.snippet_saved": "Snippet saved",
+        "settings.notice.snippet_deleted": "Snippet deleted",
+        "settings.notice.vocabulary_saved": "Vocabulary saved",
+        "settings.notice.correction_forgotten": "Learned correction forgotten",
+    },
+}
+
+
+def localized_string(key: str, *, locale: str = "en", **values: Any) -> str:
+    """Return catalog copy with deterministic English fallback.
+
+    Missing keys are programming errors and fail loudly in tests. An unknown
+    locale falls back to English so a partially translated build remains usable.
+    """
+
+    catalog = STRING_CATALOGS.get(locale, STRING_CATALOGS["en"])
+    template = catalog.get(key, STRING_CATALOGS["en"].get(key))
+    if template is None:
+        raise KeyError(f"unknown localized string: {key}")
+    try:
+        return template.format(**values)
+    except (KeyError, ValueError) as error:
+        raise ValueError(f"invalid values for localized string {key!r}") from error
 FACES = ("parrot", "fox", "owl", "cat", "bear")
 FACE_LABELS = {
     "parrot": "Parrot",
@@ -45,8 +131,15 @@ class GUIActions:
     """Integration API supplied by the running Whisper Face application."""
 
     status_snapshot: Callable[[], Mapping[str, Any]] = lambda: {}
+    settings_snapshot: Callable[[], Mapping[str, Any]] = lambda: {}
     set_face: Callable[[str], None] = _noop
     set_flight_recorder: Callable[[bool], None] = _noop
+    set_app_tone: Callable[[str, str], None] = _noop
+    save_snippet: Callable[[str, str | None, str], None] = _noop
+    delete_snippet: Callable[[str, str], None] = _noop
+    save_vocabulary: Callable[[Sequence[str], Sequence[str]], None] = _noop
+    forget_correction: Callable[[str], None] = _noop
+    forget_snippet_edit: Callable[[str], Any] = _noop
     pause: Callable[[], None] = _noop
     resume: Callable[[], None] = _noop
     open_log: Callable[[], None] = _noop
@@ -62,6 +155,46 @@ class ModelStatus:
     role: str = ""
     status: str = "Unknown"
     detail: str = ""
+
+
+@dataclass(frozen=True)
+class AppToneSetting:
+    bundle: str
+    name: str
+    tone: str = "auto"
+
+
+@dataclass(frozen=True)
+class SnippetSetting:
+    name: str
+    text: str
+
+
+@dataclass(frozen=True)
+class CorrectionSetting:
+    key: str
+    source: str
+    target: str
+    count: int = 0
+    kind: str = "correction"
+
+
+@dataclass(frozen=True)
+class UnifiedSettings:
+    app_tones: tuple[AppToneSetting, ...] = field(default_factory=tuple)
+    snippets: tuple[SnippetSetting, ...] = field(default_factory=tuple)
+    manual_vocabulary: tuple[str, ...] = field(default_factory=tuple)
+    banned_vocabulary: tuple[str, ...] = field(default_factory=tuple)
+    corrections: tuple[CorrectionSetting, ...] = field(default_factory=tuple)
+
+
+def tone_for_app_index(apps: Sequence[AppToneSetting], index: int) -> str:
+    """Resolve the persisted tone for one AppKit popup selection."""
+    if not isinstance(index, int) or isinstance(index, bool) \
+            or not 0 <= index < len(apps):
+        raise IndexError("app tone selection is out of range")
+    tone = apps[index].tone
+    return tone if tone in TONE_CHOICES else "auto"
 
 
 @dataclass(frozen=True)
@@ -141,6 +274,8 @@ class GUIState:
     verification: str = "Not run"
     notice: str = ""
     notice_level: str = "info"
+    settings_pane: str = "Modes"
+    settings: UnifiedSettings = field(default_factory=UnifiedSettings)
 
 
 def _clean_text(value: Any, default: str) -> str:
@@ -177,6 +312,87 @@ def _normalize_models(value: Any) -> tuple[ModelStatus, ...]:
         elif isinstance(item, str) and item.strip():
             models.append(ModelStatus(item.strip()))
     return tuple(models)
+
+
+def _text_items(value: Any, *, maximum: int = 500) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        return ()
+    items: list[str] = []
+    seen: set[str] = set()
+    for raw in value[:maximum]:
+        item = str(raw).strip()
+        folded = item.casefold()
+        if not item or folded in seen:
+            continue
+        items.append(item)
+        seen.add(folded)
+    return tuple(items)
+
+
+def normalize_settings(snapshot: Mapping[str, Any] | None) -> UnifiedSettings:
+    """Normalize the private, explicitly requested settings projection."""
+
+    source = snapshot if isinstance(snapshot, Mapping) else {}
+    tones: list[AppToneSetting] = []
+    raw_tones = source.get("app_tones")
+    if isinstance(raw_tones, Sequence) and not isinstance(raw_tones, (str, bytes)):
+        for item in raw_tones[:100]:
+            if not isinstance(item, Mapping):
+                continue
+            bundle = _clean_text(item.get("bundle"), "")
+            if not bundle or len(bundle) > 255:
+                continue
+            tone = str(item.get("tone", "auto")).strip().casefold()
+            if tone not in TONE_CHOICES:
+                tone = "auto"
+            tones.append(AppToneSetting(
+                bundle=bundle,
+                name=_clean_text(item.get("name"), bundle),
+                tone=tone,
+            ))
+
+    snippets: list[SnippetSetting] = []
+    raw_snippets = source.get("snippets")
+    if isinstance(raw_snippets, Sequence) and not isinstance(
+            raw_snippets, (str, bytes)):
+        for item in raw_snippets[:500]:
+            if not isinstance(item, Mapping):
+                continue
+            name = _clean_text(item.get("name"), "")
+            text = item.get("text")
+            if (not name or len(name) > 80 or not isinstance(text, str)
+                    or not text or len(text) > 4000):
+                continue
+            snippets.append(SnippetSetting(name=name, text=text))
+
+    corrections: list[CorrectionSetting] = []
+    raw_corrections = source.get("corrections")
+    if isinstance(raw_corrections, Sequence) and not isinstance(
+            raw_corrections, (str, bytes)):
+        for item in raw_corrections[:500]:
+            if not isinstance(item, Mapping):
+                continue
+            key = _clean_text(item.get("key"), "")
+            original = _clean_text(item.get("source"), "")
+            replacement = _clean_text(item.get("target"), "")
+            kind = str(item.get("kind", "correction")).strip().casefold()
+            if (not key or not original or not replacement
+                    or kind not in {"correction", "snippet"}):
+                continue
+            corrections.append(CorrectionSetting(
+                key=key,
+                source=original,
+                target=replacement,
+                count=_nonnegative_int(item.get("count")),
+                kind=kind,
+            ))
+    return UnifiedSettings(
+        app_tones=tuple(tones),
+        snippets=tuple(snippets),
+        manual_vocabulary=_text_items(source.get("manual_vocabulary")),
+        banned_vocabulary=_text_items(source.get("banned_vocabulary")),
+        corrections=tuple(corrections),
+    )
 
 
 def _status_contains(value: str, words: Sequence[str]) -> bool:
@@ -382,6 +598,8 @@ def normalize_snapshot(
     notice: str = "",
     notice_level: str = "info",
     onboarding_acknowledged: bool = False,
+    settings_pane: str = "Modes",
+    settings: UnifiedSettings | None = None,
 ) -> GUIState:
     """Convert an intentionally loose runtime snapshot to stable UI state."""
 
@@ -479,6 +697,9 @@ def normalize_snapshot(
         notice=notice,
         notice_level=(notice_level if notice_level in {
             "info", "success", "error"} else "info"),
+        settings_pane=(settings_pane if settings_pane in SETTINGS_PANES
+                       else "Modes"),
+        settings=settings or UnifiedSettings(),
     )
 
 
@@ -499,6 +720,8 @@ class WhisperFaceViewModel:
                 section=self.state.section,
                 verification=self.state.verification,
                 onboarding_acknowledged=self._onboarding_acknowledged,
+                settings_pane=self.state.settings_pane,
+                settings=self.state.settings,
             )
         except Exception as error:
             self.state = replace(
@@ -520,7 +743,178 @@ class WhisperFaceViewModel:
             raise ValueError(f"unknown section: {section}")
         self.state = replace(
             self.state, section=section, notice="", notice_level="info")
+        if section == "Settings":
+            self.load_settings()
         return self.state
+
+    def select_settings_pane(self, pane: str) -> GUIState:
+        if pane not in SETTINGS_PANES:
+            raise ValueError(f"unknown settings pane: {pane}")
+        self.state = replace(
+            self.state, settings_pane=pane, notice="", notice_level="info")
+        return self.state
+
+    def load_settings(self, *, notice: str = "",
+                      notice_level: str = "info") -> GUIState:
+        """Load private personalization only while the Settings page is used."""
+        try:
+            settings = normalize_settings(self.actions.settings_snapshot())
+            self.state = replace(
+                self.state, settings=settings, notice=notice,
+                notice_level=notice_level)
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=f"Could not load settings: {error}",
+                notice_level="error")
+        return self.state
+
+    def set_app_tone(self, bundle: str, tone: str) -> GUIState:
+        app_id = str(bundle).strip()
+        normalized = str(tone).strip().casefold()
+        if not app_id or len(app_id) > 255 or any(
+                character.isspace() for character in app_id):
+            raise ValueError("app identifier must be a non-empty bundle ID")
+        if normalized not in TONE_CHOICES:
+            raise ValueError(f"unsupported tone: {tone}")
+        try:
+            self.actions.set_app_tone(app_id, normalized)
+            return self.load_settings(
+                notice=localized_string("settings.notice.tone_saved"),
+                notice_level="success")
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=f"Could not save app tone: {error}",
+                notice_level="error")
+            return self.state
+
+    @staticmethod
+    def _valid_snippet(name: str, text: str) -> tuple[str, str]:
+        normalized_name = str(name).strip()
+        value = str(text)
+        if (not normalized_name or len(normalized_name) > 80
+                or "\n" in normalized_name or "\r" in normalized_name):
+            raise ValueError("snippet name must be 1–80 characters on one line")
+        if not value.strip() or len(value) > 4000:
+            raise ValueError("snippet text must be 1–4000 characters")
+        return normalized_name, value
+
+    def save_snippet(self, name: str, text: str, *,
+                     expected_original: str | None = None) -> GUIState:
+        try:
+            normalized_name, value = self._valid_snippet(name, text)
+        except ValueError as error:
+            self.state = replace(
+                self.state, notice=f"Could not save snippet: {error}",
+                notice_level="error")
+            return self.state
+        try:
+            self.actions.save_snippet(
+                normalized_name, expected_original, value)
+            return self.load_settings(
+                notice=localized_string("settings.notice.snippet_saved"),
+                notice_level="success")
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=f"Could not save snippet: {error}",
+                notice_level="error")
+            return self.state
+
+    def delete_snippet(self, name: str, expected_original: str) -> GUIState:
+        normalized_name = str(name).strip()
+        if not normalized_name:
+            raise ValueError("snippet name is required")
+        if not isinstance(expected_original, str):
+            raise ValueError("expected snippet text must be a string")
+        try:
+            self.actions.delete_snippet(normalized_name, expected_original)
+            return self.load_settings(
+                notice=localized_string("settings.notice.snippet_deleted"),
+                notice_level="success")
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=f"Could not delete snippet: {error}",
+                notice_level="error")
+            return self.state
+
+    @staticmethod
+    def _valid_vocabulary(values: Sequence[str], *, label: str) -> tuple[str, ...]:
+        if isinstance(values, (str, bytes)):
+            raise ValueError(f"{label} must be a list of terms")
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw in values:
+            value = str(raw).strip()
+            folded = value.casefold()
+            if not value:
+                continue
+            if len(value) > 80 or "\n" in value or "\r" in value:
+                raise ValueError(f"{label} terms must be at most 80 characters")
+            if value.startswith(("-", "#")):
+                raise ValueError(
+                    f"{label} terms cannot start with reserved '-' or '#'")
+            if folded not in seen:
+                cleaned.append(value)
+                seen.add(folded)
+        if len(cleaned) > 500:
+            raise ValueError(f"{label} supports at most 500 terms")
+        return tuple(cleaned)
+
+    def save_vocabulary(self, manual: Sequence[str],
+                        banned: Sequence[str]) -> GUIState:
+        try:
+            terms = self._valid_vocabulary(
+                manual, label="preferred vocabulary")
+            exclusions = self._valid_vocabulary(
+                banned, label="excluded vocabulary")
+        except ValueError as error:
+            self.state = replace(
+                self.state, notice=f"Could not save vocabulary: {error}",
+                notice_level="error")
+            return self.state
+        overlap = {item.casefold() for item in terms} & {
+            item.casefold() for item in exclusions}
+        if overlap:
+            self.state = replace(
+                self.state,
+                notice="Could not save vocabulary: a term cannot also be excluded",
+                notice_level="error")
+            return self.state
+        try:
+            self.actions.save_vocabulary(terms, exclusions)
+            return self.load_settings(
+                notice=localized_string("settings.notice.vocabulary_saved"),
+                notice_level="success")
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=f"Could not save vocabulary: {error}",
+                notice_level="error")
+            return self.state
+
+    def forget_learned(self, kind: str, key: str) -> GUIState:
+        normalized_kind = str(kind).strip().casefold()
+        if normalized_kind not in {"correction", "snippet"}:
+            raise ValueError("unknown learned correction kind")
+        match = next((item for item in self.state.settings.corrections
+                      if item.kind == normalized_kind and item.key == key), None)
+        if match is None:
+            raise ValueError("unknown learned correction")
+        try:
+            callback = (self.actions.forget_snippet_edit
+                        if match.kind == "snippet"
+                        else self.actions.forget_correction)
+            result = callback(match.key)
+            if match.kind == "snippet" and result is False:
+                raise RuntimeError(
+                    "the learned snippet edit no longer exists")
+            return self.load_settings(
+                notice=localized_string(
+                    "settings.notice.correction_forgotten"),
+                notice_level="success")
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=f"Could not forget correction: {error}",
+                notice_level="error")
+            return self.state
 
     def show_next_onboarding_step(self) -> GUIState:
         """Route to the next useful setup surface without blocking capture."""
@@ -713,6 +1107,7 @@ try:  # The view-model above remains usable in headless test environments.
     import objc
     from AppKit import (
         NSApplication,
+        NSAlert,
         NSBackingStoreBuffered,
         NSBezelStyleRounded,
         NSBox,
@@ -726,9 +1121,12 @@ try:  # The view-model above remains usable in headless test environments.
         NSNoBorder,
         NSNoTitle,
         NSProgressIndicator,
+        NSPopUpButton,
+        NSScrollView,
         NSSegmentedControl,
         NSSegmentStyleRounded,
         NSTextField,
+        NSTextView,
         NSView,
         NSWindow,
         NSWorkspace,
@@ -846,8 +1244,9 @@ if APPKIT_AVAILABLE:
             self.section_control.setSegmentCount_(len(SECTIONS))
             self.section_control.setSegmentStyle_(NSSegmentStyleRounded)
             for index, section in enumerate(SECTIONS):
-                self.section_control.setLabel_forSegment_(section, index)
-                self.section_control.setWidth_forSegment_(123, index)
+                self.section_control.setLabel_forSegment_(
+                    localized_string(f"nav.{section.casefold()}"), index)
+                self.section_control.setWidth_forSegment_(148, index)
             self.section_control.setSelectedSegment_(0)
             self.section_control.setTarget_(self)
             self.section_control.setAction_("sectionChanged:")
@@ -860,8 +1259,7 @@ if APPKIT_AVAILABLE:
             builders = {
                 "Overview": self._build_overview,
                 "Results": self._build_results,
-                "Appearance": self._build_appearance,
-                "Privacy": self._build_privacy,
+                "Settings": self._build_settings,
                 "Models": self._build_models,
                 "Diagnostics": self._build_diagnostics,
             }
@@ -1014,6 +1412,133 @@ if APPKIT_AVAILABLE:
                 result_engine=result_engine,
                 result_mode=result_mode,
                 result_context=context,
+            )
+
+        def _build_settings(self, page: Any) -> None:
+            page.addSubview_(_label(
+                localized_string("settings.title"),
+                NSMakeRect(4, 351, 500, 32), size=22, weight="bold"))
+            page.addSubview_(_label(
+                localized_string("settings.subtitle"),
+                NSMakeRect(5, 326, 720, 20), size=13, color=_SECONDARY))
+            pane_control = NSSegmentedControl.alloc().initWithFrame_(
+                NSMakeRect(0, 284, 758, 32))
+            pane_control.setSegmentCount_(len(SETTINGS_PANES))
+            pane_control.setSegmentStyle_(NSSegmentStyleRounded)
+            for index, pane in enumerate(SETTINGS_PANES):
+                pane_control.setLabel_forSegment_(localized_string(
+                    f"settings.pane.{pane.casefold()}"), index)
+                pane_control.setWidth_forSegment_(250, index)
+            pane_control.setTarget_(self)
+            pane_control.setAction_("settingsPaneChanged:")
+            _accessible(pane_control, "Settings category",
+                        "Choose modes, personalization, or privacy settings.")
+            page.addSubview_(pane_control)
+
+            content_frame = NSMakeRect(0, 0, 758, 268)
+            panes = {name: NSView.alloc().initWithFrame_(content_frame)
+                     for name in SETTINGS_PANES}
+            for pane in panes.values():
+                page.addSubview_(pane)
+
+            modes = panes["Modes"]
+            modes.addSubview_(_label(
+                localized_string("settings.modes.title"),
+                NSMakeRect(5, 238, 720, 22), size=14, weight="medium"))
+            for index, (mode, shortcut, detail) in enumerate(MODE_GUIDE):
+                column, row = index % 2, index // 2
+                card = _card(NSMakeRect(column * 379, 153 - row * 66, 365, 54))
+                card.addSubview_(_label(
+                    mode.title(), NSMakeRect(14, 28, 105, 18),
+                    size=12, weight="bold"))
+                card.addSubview_(_label(
+                    shortcut, NSMakeRect(115, 28, 235, 18),
+                    size=11, weight="medium", color=_ACCENT))
+                card.addSubview_(_label(
+                    detail, NSMakeRect(14, 8, 330, 17),
+                    size=10, color=_SECONDARY))
+                modes.addSubview_(card)
+            modes.addSubview_(_label(
+                localized_string("settings.modes.footer"),
+                NSMakeRect(5, 12, 720, 18), size=11, color=_SECONDARY))
+
+            personalize = panes["Personalize"]
+            rows = (
+                ("tones", "settings.personalize.tones", "editTone:"),
+                ("snippets", "settings.personalize.snippets", "editSnippets:"),
+                ("vocabulary", "settings.personalize.vocabulary", "editVocabulary:"),
+                ("corrections", "settings.personalize.corrections", "forgetCorrection:"),
+            )
+            for index, (key, title_key, selector) in enumerate(rows):
+                y = 202 - index * 62
+                card = _card(NSMakeRect(0, y, 758, 52))
+                card.addSubview_(_label(
+                    localized_string(title_key), NSMakeRect(18, 25, 260, 19),
+                    size=13, weight="bold"))
+                detail = _label("", NSMakeRect(18, 7, 550, 18),
+                                size=11, color=_SECONDARY)
+                action_key = ("settings.action.forget" if key == "corrections"
+                              else "settings.action.edit")
+                button = _button(
+                    localized_string(action_key), NSMakeRect(645, 10, 94, 32),
+                    self, selector,
+                    help_text=f"Edit {localized_string(title_key).casefold()}.")
+                card.addSubview_(detail)
+                card.addSubview_(button)
+                personalize.addSubview_(card)
+                self.dynamic[f"settings_{key}_detail"] = detail
+                self.dynamic[f"settings_{key}_button"] = button
+
+            privacy = panes["Privacy"]
+            privacy.addSubview_(_label(
+                localized_string("settings.privacy.title"),
+                NSMakeRect(5, 238, 500, 22), size=14, weight="medium"))
+            face_card = _card(NSMakeRect(0, 137, 758, 84))
+            face_card.addSubview_(_label(
+                localized_string("settings.privacy.face"),
+                NSMakeRect(18, 53, 200, 20), size=13, weight="bold"))
+            picker = NSSegmentedControl.alloc().initWithFrame_(
+                NSMakeRect(18, 12, 720, 36))
+            picker.setSegmentCount_(len(FACES))
+            picker.setSegmentStyle_(NSSegmentStyleRounded)
+            for index, face in enumerate(FACES):
+                picker.setLabel_forSegment_(
+                    f"{FACE_EMOJI[face]} {FACE_LABELS[face]}", index)
+                picker.setWidth_forSegment_(138, index)
+            picker.setTarget_(self)
+            picker.setAction_("faceChanged:")
+            _accessible(picker, "Whisper Face companion",
+                        "Choose the animal shown in the menu bar and listening HUD.")
+            face_card.addSubview_(picker)
+            privacy.addSubview_(face_card)
+
+            flight_card = _card(NSMakeRect(0, 35, 758, 84))
+            flight_card.addSubview_(_label(
+                localized_string("settings.privacy.flight"),
+                NSMakeRect(18, 50, 260, 22), size=14, weight="bold"))
+            flight_card.addSubview_(_label(
+                localized_string("settings.privacy.flight.detail"),
+                NSMakeRect(18, 24, 535, 20), size=11, color=_SECONDARY))
+            flight = NSButton.alloc().initWithFrame_(NSMakeRect(625, 26, 110, 32))
+            flight.setButtonType_(3)
+            flight.setTitle_("Enabled")
+            flight.setTarget_(self)
+            flight.setAction_("flightChanged:")
+            _accessible(flight, "Flight Recorder",
+                        "Toggle the rolling twenty second audio buffer held only in memory.")
+            flight_card.addSubview_(flight)
+            privacy.addSubview_(flight_card)
+            privacy_summary = _label(
+                "Local processing", NSMakeRect(5, 5, 700, 20),
+                size=11, weight="medium", color=_ACCENT)
+            privacy.addSubview_(privacy_summary)
+
+            self.dynamic.update(
+                settings_pane_control=pane_control,
+                settings_panes=panes,
+                face_picker=picker,
+                flight_toggle=flight,
+                privacy_summary=privacy_summary,
             )
 
         def _build_appearance(self, page: Any) -> None:
@@ -1320,6 +1845,35 @@ if APPKIT_AVAILABLE:
                     str(self.dynamic[key].stringValue()),
                     label=label,
                 )
+            self.dynamic["settings_pane_control"].setSelectedSegment_(
+                SETTINGS_PANES.index(state.settings_pane))
+            for pane, view in self.dynamic["settings_panes"].items():
+                view.setHidden_(pane != state.settings_pane)
+            settings = state.settings
+            setting_summaries = {
+                "tones": localized_string(
+                    "settings.personalize.tones.detail",
+                    count=len(settings.app_tones)),
+                "snippets": localized_string(
+                    "settings.personalize.snippets.detail",
+                    count=len(settings.snippets)),
+                "vocabulary": localized_string(
+                    "settings.personalize.vocabulary.detail",
+                    terms=len(settings.manual_vocabulary),
+                    bans=len(settings.banned_vocabulary)),
+                "corrections": localized_string(
+                    "settings.personalize.corrections.detail",
+                    count=len(settings.corrections)),
+            }
+            for key, value in setting_summaries.items():
+                set_accessible_text(
+                    self.dynamic[f"settings_{key}_detail"], value,
+                    label=f"{key.title()} summary")
+            self.dynamic["settings_tones_button"].setEnabled_(
+                bool(settings.app_tones))
+            self.dynamic["settings_snippets_button"].setEnabled_(True)
+            self.dynamic["settings_corrections_button"].setEnabled_(
+                bool(settings.corrections))
             self.dynamic["face_picker"].setSelectedSegment_(FACES.index(state.face))
             sync_accessibility(
                 self.dynamic["face_picker"], FACE_LABELS[state.face],
@@ -1415,6 +1969,195 @@ if APPKIT_AVAILABLE:
                 else NSColor.systemGreenColor()
                 if state.notice_level == "success" else _SECONDARY)
             self.dynamic["notice"].setTextColor_(notice_color)
+
+        @objc.python_method
+        def _text_editor(self, frame: Any, value: str) -> tuple[Any, Any]:
+            scroll = NSScrollView.alloc().initWithFrame_(frame)
+            scroll.setHasVerticalScroller_(True)
+            scroll.setBorderType_(1)
+            editor = NSTextView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, frame.size.width, frame.size.height))
+            editor.setString_(value)
+            scroll.setDocumentView_(editor)
+            return scroll, editor
+
+        @objc.python_method
+        def _confirm(self, title: str, message: str,
+                     primary: str) -> bool:
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(title)
+            alert.setInformativeText_(message)
+            alert.addButtonWithTitle_(primary)
+            alert.addButtonWithTitle_(localized_string("settings.action.cancel"))
+            return alert.runModal() == 1000
+
+        def settingsPaneChanged_(self, sender: Any) -> None:
+            self.view_model.select_settings_pane(
+                SETTINGS_PANES[sender.selectedSegment()])
+            self.render()
+
+        def editTone_(self, _sender: Any) -> None:
+            tones = self.view_model.state.settings.app_tones
+            if not tones:
+                return
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(localized_string("settings.dialog.tone.title"))
+            alert.setInformativeText_(localized_string(
+                "settings.dialog.tone.message"))
+            form = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 430, 76))
+            app_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                NSMakeRect(0, 42, 430, 28), False)
+            app_popup.addItemsWithTitles_([
+                f"{item.name} — {item.bundle}" for item in tones])
+            tone_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                NSMakeRect(0, 4, 430, 28), False)
+            tone_titles = ("Auto", "Casual", "Formal", "Technical",
+                           "Verbatim", "Neutral")
+            tone_popup.addItemsWithTitles_(list(tone_titles))
+            self._tone_dialog_apps = tones
+            self._tone_dialog_tone_popup = tone_popup
+            app_popup.setTarget_(self)
+            app_popup.setAction_("toneDialogAppChanged:")
+            self.toneDialogAppChanged_(app_popup)
+            form.addSubview_(app_popup)
+            form.addSubview_(tone_popup)
+            alert.setAccessoryView_(form)
+            alert.addButtonWithTitle_(localized_string("settings.action.save"))
+            alert.addButtonWithTitle_(localized_string("settings.action.cancel"))
+            if alert.runModal() == 1000:
+                selected = tones[app_popup.indexOfSelectedItem()]
+                self.view_model.set_app_tone(
+                    selected.bundle,
+                    TONE_CHOICES[tone_popup.indexOfSelectedItem()])
+                self.render()
+            self._tone_dialog_apps = ()
+            self._tone_dialog_tone_popup = None
+
+        def toneDialogAppChanged_(self, sender: Any) -> None:
+            apps = getattr(self, "_tone_dialog_apps", ())
+            tone_popup = getattr(self, "_tone_dialog_tone_popup", None)
+            index = int(sender.indexOfSelectedItem())
+            if tone_popup is None or not 0 <= index < len(apps):
+                return
+            tone_popup.selectItemAtIndex_(TONE_CHOICES.index(
+                tone_for_app_index(apps, index)))
+
+        @objc.python_method
+        def _edit_snippet(self, snippet: SnippetSetting | None) -> None:
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(localized_string(
+                "settings.dialog.snippet.edit" if snippet else
+                "settings.dialog.snippet.add"))
+            form = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 500, 200))
+            form.addSubview_(_label(
+                localized_string("settings.dialog.snippet.name"),
+                NSMakeRect(0, 177, 500, 18), size=11, color=_SECONDARY))
+            name = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 145, 500, 28))
+            name.setStringValue_(snippet.name if snippet else "")
+            name.setEditable_(snippet is None)
+            form.addSubview_(name)
+            form.addSubview_(_label(
+                localized_string("settings.dialog.snippet.value"),
+                NSMakeRect(0, 120, 500, 18), size=11, color=_SECONDARY))
+            scroll, editor = self._text_editor(
+                NSMakeRect(0, 0, 500, 116), snippet.text if snippet else "")
+            form.addSubview_(scroll)
+            alert.setAccessoryView_(form)
+            alert.addButtonWithTitle_(localized_string("settings.action.save"))
+            alert.addButtonWithTitle_(localized_string("settings.action.cancel"))
+            if alert.runModal() == 1000:
+                self.view_model.save_snippet(
+                    str(name.stringValue()), str(editor.string()),
+                    expected_original=(snippet.text if snippet else None))
+                self.render()
+
+        def editSnippets_(self, _sender: Any) -> None:
+            snippets = self.view_model.state.settings.snippets
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(localized_string("settings.personalize.snippets"))
+            chooser = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                NSMakeRect(0, 0, 430, 28), False)
+            chooser.addItemsWithTitles_([
+                item.name for item in snippets] or [localized_string(
+                    "settings.empty.snippets")])
+            chooser.setEnabled_(bool(snippets))
+            alert.setAccessoryView_(chooser)
+            alert.addButtonWithTitle_(localized_string("settings.action.edit"))
+            alert.addButtonWithTitle_(localized_string("settings.action.add"))
+            alert.addButtonWithTitle_(localized_string("settings.action.delete"))
+            alert.addButtonWithTitle_(localized_string("settings.action.cancel"))
+            response = alert.runModal()
+            selected = (snippets[chooser.indexOfSelectedItem()]
+                        if snippets else None)
+            if response == 1000 and selected is not None:
+                self._edit_snippet(selected)
+            elif response == 1001:
+                self._edit_snippet(None)
+            elif response == 1002 and selected is not None and self._confirm(
+                    localized_string("settings.dialog.delete.title"),
+                    localized_string("settings.dialog.delete.message",
+                                     name=selected.name),
+                    localized_string("settings.action.delete")):
+                self.view_model.delete_snippet(selected.name, selected.text)
+                self.render()
+
+        def editVocabulary_(self, _sender: Any) -> None:
+            settings = self.view_model.state.settings
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(localized_string(
+                "settings.dialog.vocabulary.title"))
+            alert.setInformativeText_(localized_string(
+                "settings.dialog.vocabulary.message"))
+            form = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 520, 220))
+            form.addSubview_(_label(
+                localized_string("settings.dialog.vocabulary.terms"),
+                NSMakeRect(0, 198, 250, 18), size=11, color=_SECONDARY))
+            form.addSubview_(_label(
+                localized_string("settings.dialog.vocabulary.bans"),
+                NSMakeRect(270, 198, 250, 18), size=11, color=_SECONDARY))
+            term_scroll, term_editor = self._text_editor(
+                NSMakeRect(0, 0, 250, 194),
+                "\n".join(settings.manual_vocabulary))
+            ban_scroll, ban_editor = self._text_editor(
+                NSMakeRect(270, 0, 250, 194),
+                "\n".join(settings.banned_vocabulary))
+            form.addSubview_(term_scroll)
+            form.addSubview_(ban_scroll)
+            alert.setAccessoryView_(form)
+            alert.addButtonWithTitle_(localized_string("settings.action.save"))
+            alert.addButtonWithTitle_(localized_string("settings.action.cancel"))
+            if alert.runModal() == 1000:
+                self.view_model.save_vocabulary(
+                    str(term_editor.string()).splitlines(),
+                    str(ban_editor.string()).splitlines())
+                self.render()
+
+        def forgetCorrection_(self, _sender: Any) -> None:
+            corrections = self.view_model.state.settings.corrections
+            if not corrections:
+                return
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(localized_string(
+                "settings.personalize.corrections"))
+            chooser = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                NSMakeRect(0, 0, 500, 28), False)
+            chooser.addItemsWithTitles_([
+                f"{item.source} → {item.target} · {item.count}×"
+                for item in corrections])
+            alert.setAccessoryView_(chooser)
+            alert.addButtonWithTitle_(localized_string("settings.action.forget"))
+            alert.addButtonWithTitle_(localized_string("settings.action.cancel"))
+            if alert.runModal() != 1000:
+                return
+            selected = corrections[chooser.indexOfSelectedItem()]
+            if self._confirm(
+                    localized_string("settings.dialog.forget.title"),
+                    localized_string("settings.dialog.forget.message",
+                                     source=selected.source,
+                                     target=selected.target),
+                    localized_string("settings.action.forget")):
+                self.view_model.forget_learned(selected.kind, selected.key)
+                self.render()
 
         def sectionChanged_(self, sender: Any) -> None:
             self.view_model.select_section(SECTIONS[sender.selectedSegment()])
@@ -1523,6 +2266,8 @@ def create_gui(actions: GUIActions) -> WhisperFaceGUI:
 
 __all__ = [
     "APPKIT_AVAILABLE",
+    "AppToneSetting",
+    "CorrectionSetting",
     "DegradedIssue",
     "FACES",
     "GUIActions",
@@ -1531,8 +2276,15 @@ __all__ = [
     "OnboardingStep",
     "ResultInspection",
     "SECTIONS",
+    "SETTINGS_PANES",
+    "STRING_CATALOGS",
+    "SnippetSetting",
+    "UnifiedSettings",
     "WhisperFaceGUI",
     "WhisperFaceViewModel",
     "create_gui",
+    "localized_string",
     "normalize_snapshot",
+    "normalize_settings",
+    "tone_for_app_index",
 ]

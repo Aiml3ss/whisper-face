@@ -35,6 +35,7 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_benchmark_asr.py",
             "uv run tests/test_performance_lab.py",
             "uv run tests/test_dictate.py",
+            "uv run tests/test_gui_settings_runtime.py",
             "uv run tests/test_insertion_integrity.py",
             "uv run tests/test_personal_regression.py",
             "uv run tests/test_whisper_face_gui.py",
