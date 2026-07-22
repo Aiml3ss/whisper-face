@@ -82,11 +82,21 @@ and handler failure close the connection without a payload-bearing error or
 logging. The server has no background loop and removes only the socket path it
 created on explicit shutdown. It is not wired to dictation.
 
+[`macos_networkless_worker.py`](../macos_networkless_worker.py) is an
+experimental, one-shot macOS boundary around that transport. It launches a
+private child through Apple's `sandbox-exec` with a deny-default profile,
+denies IP networking, permits only path-filtered Unix-socket IPC in a private
+0700 temporary directory, and proves that loopback bind and outbound connect
+are denied before serving one request. The boundary accepts only a
+non-transcript `capture_proposal` and returns a content-free cancellation. It
+is not imported by the runtime, is not XPC, and is not a speech worker yet.
+
 ## What remains outstanding
 
 This repository does **not** currently ship a public cross-process SDK, public ABI,
-network service, XPC endpoint, sandbox integration, Windows transport,
-or physical-app adapter suite. The bounded POSIX transport is a local test
-foundation, not a stability or compatibility promise to external clients. Any
-such surface needs its own versioning, security/privacy model, adapter
-evidence, and release commitment before it can be described as public.
+network service, XPC endpoint, active sandboxed speech runtime, Windows
+transport, or physical-app adapter suite. The bounded POSIX transport and
+one-shot network-denial worker are local test foundations, not a stability or
+compatibility promise to external clients. Any such surface needs its own
+versioning, security/privacy model, adapter evidence, and release commitment
+before it can be described as public.

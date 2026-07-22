@@ -1,0 +1,22 @@
+;; Experimental one-shot Voice Input Protocol worker.
+;;
+;; The worker may read its Python runtime and source checkout, but it may write
+;; only inside the caller-created private IPC directory.  IP networking stays
+;; denied.  The path-filtered network exception is solely for the filesystem
+;; Unix socket below IPC_ROOT.
+
+(version 1)
+(deny default)
+
+(allow file-read*)
+(allow file-write*
+    (subpath (param "IPC_ROOT")))
+
+(allow process-exec
+    (literal (param "PYTHON_EXECUTABLE")))
+(deny process-fork)
+(allow sysctl-read)
+
+(deny network*)
+(allow network*
+    (subpath (param "IPC_ROOT")))

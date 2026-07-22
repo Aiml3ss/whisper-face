@@ -160,22 +160,33 @@ are never Supporter-only features.
   forgettable from the on-demand Pronunciation Keywords inspector. Only exact,
   verified user corrections add idempotent global evidence; routine status does
   not load keyword text. It deliberately has no recognition authority yet.
-- **Point-and-Speak resolver foundation** — a non-writing resolver combines
-  accessible names, roles, ordinal and spatial language, visibility, focus,
-  and selection facts behind strict confidence/margin gates. Its 17-case
-  synthetic corpus has zero wrong-target resolutions, but it has no live
-  Accessibility automation and makes no physical-app accuracy claim.
+- **Read-only Point-and-Speak preview (Mac)** — from Diagnostics, explicitly
+  enter a bounded target phrase to preview the focused app. Whisper Face reads
+  only bounded Accessibility names, roles, geometry, visibility, enablement,
+  focus, and selection metadata; strict confidence/margin gates either show
+  one selected name and role or fail closed with a content-free receipt. The
+  preview never clicks, focuses, types, pastes, executes an Accessibility
+  action, reads values/document text, or enters routine status and support
+  snapshots. Its 17-case synthetic corpus has zero wrong-target resolutions;
+  no physical-app accuracy or write claim is made.
 - **Provider-neutral model wallet foundation** — immutable Parakeet, Whisper
   Tiny, Whisper large-v3-turbo, and Qwen profiles expose capabilities,
   readiness, and bounded evidence through one in-process policy. Failover is
   sequential and requires an explicit typed failure receipt; live routing is
   intentionally not wired yet.
+- **Networkless worker experiment (Mac)** — an opt-in, one-shot local worker
+  proves OS-enforced denial of IP bind and outbound connection while retaining
+  one private, bounded Unix-socket exchange. It accepts no transcript-bearing
+  protocol message and is not wired to recognition, the app runtime, XPC, or a
+  public SDK.
 - **Voice action foundations without surprise execution** — typed Voice
   Objects can project closed facts into inert text, email, task, and calendar
   drafts; a private Voice Inbox can durably queue exact payloads with source
   provenance; and Drop-to-Target can resolve or refuse a synthetic target
-  behind strict capability and ambiguity gates. None of these foundations can
-  send, schedule, click, type, drag, or run an agent yet.
+  behind strict capability and ambiguity gates. Inert demonstration drafts can
+  also record, preview, approve, or roll back a bounded Finder, Mail, Notes, or
+  menu recipe without replaying it. None of these foundations can send,
+  schedule, click, type, drag, automate an app, or run an agent yet.
 - **Personal Regression Lab** — confirmed correction mappings are evaluated
   against a private, deterministic suite of the user's exact corrected spans.
   Conflicting candidates are quarantined instead of silently becoming a bad

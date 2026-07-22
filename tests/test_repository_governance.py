@@ -148,8 +148,10 @@ class RepositoryGovernanceTests(unittest.TestCase):
             architecture)
         self.assertIn("public ABI", architecture)
         self.assertIn("voice_input_protocol_wire.py", architecture)
-        self.assertIn("bounded POSIX transport is a local test", architecture)
+        self.assertIn("bounded POSIX transport and", architecture)
+        self.assertIn("one-shot network-denial worker", architecture)
         self.assertIn("voice_input_protocol_transport.py", architecture)
+        self.assertIn("macos_networkless_worker.py", architecture)
         self.assertIn("uv run tests/test_voice_input_protocol.py", contributing)
         self.assertIn(
             "Both installers must execute the current checkout", contributing)
