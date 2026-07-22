@@ -131,7 +131,8 @@ class SupportBundleTests(unittest.TestCase):
     def test_missing_descriptor_permissions_fail_closed_and_clean_up(self):
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "support.json"
-            with patch.object(support_bundle_module.os, "fchmod", None):
+            with patch.object(
+                    support_bundle_module.os, "fchmod", None, create=True):
                 with self.assertRaisesRegex(
                         SupportBundleError, "unavailable on this platform"):
                     write_support_bundle(destination, snapshot())
