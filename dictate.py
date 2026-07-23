@@ -593,6 +593,10 @@ FLIGHT_PAD_SECONDS = 0.15
 # Glossary budget: Whisper honors ~224 prompt tokens; keep well under.
 GLOSSARY_MAX_TERMS = 60
 GLOSSARY_MAX_CHARS = 700
+# Dictionary terms also become protected cleanup anchors, independent of the
+# prompt budget above. Bound the anchor pack so a large dictionary cannot slow
+# per-utterance compilation.
+ANCHOR_MAX_TERMS = 256
 AUTO_MARKER = "# --- auto-learned (managed by dictate.py) ---"
 
 # Learning loop
@@ -857,6 +861,9 @@ POINT_AND_SPEAK_TRANSACTIONS = PointAndSpeakTransactions()
 GLOSS = {
     "terms": [], "prompt": None, "fixes": {}, "confusions": {},
     "regression": PersonalRegressionLab(),
+    # Dictionary terms as protected cleanup anchors and a casefold->canonical
+    # casing map, rebuilt alongside the prompt by refresh_glossary().
+    "anchor_pack": ContextPack(), "vocabulary": {},
     "lock": threading.Lock(),
 }
 
@@ -4756,8 +4763,20 @@ def refresh_glossary():
         terms.append(t)
         chars += len(t) + 2
 
+    # The full manual+promoted list (before the prompt truncation above) also
+    # feeds two additive protections that do not touch the prompt budget:
+    # listed terms become protected cleanup anchors, and their casing is
+    # normalized to what the user wrote. Bans are honored in both.
+    vocab_terms = [t for t in manual + promoted if t.casefold() not in banned]
+    anchor_pack = ContextPack(tuple(
+        ContextCandidate(t, 3.5, "dictionary")
+        for t in vocab_terms[:ANCHOR_MAX_TERMS]))
+    vocabulary = {t.casefold(): t for t in vocab_terms}
+
     with GLOSS["lock"]:
         GLOSS["terms"] = terms
+        GLOSS["anchor_pack"] = anchor_pack
+        GLOSS["vocabulary"] = vocabulary
         # A complete sentence, not an open list: "Glossary: a, b," invites
         # Whisper to keep listing terms when the audio is silence.
         GLOSS["prompt"] = ("Common terms: " + ", ".join(terms) + ".") \
@@ -5501,6 +5520,36 @@ def apply_learned_fixes(text: str, bundle: str = "") -> str:
     return text
 
 
+# Whole-word matcher for vocabulary casing: an alphanumeric run, optionally
+# continued across single identifier joiners so "voice_compiler.py" stays one
+# token. Casing only ever fires on a full-token casefold match, so treating a
+# joined form as one token can skip a rewrite but never invent one.
+VOCAB_WORD_RE = re.compile(r"[0-9A-Za-z]+(?:[._+#-][0-9A-Za-z]+)*")
+
+
+def apply_vocabulary_casing(text: str) -> str:
+    """Normalize whole-word matches of user-listed vocabulary to the casing the
+    user wrote in the dictionary (e.g. "github" -> "GitHub"). Case-insensitive
+    on the match, whole-word only so "github" inside "githubbed" is left alone,
+    and a token already in canonical form is untouched. Additive: only a token
+    whose casefold equals a listed term is ever changed."""
+    if not text:
+        return text
+    with GLOSS["lock"]:
+        vocabulary = dict(GLOSS.get("vocabulary") or {})
+    if not vocabulary:
+        return text
+
+    def _canonical(match: "re.Match[str]") -> str:
+        word = match.group(0)
+        canonical = vocabulary.get(word.casefold())
+        if canonical is None or canonical == word:
+            return word
+        return canonical
+
+    return VOCAB_WORD_RE.sub(_canonical, text)
+
+
 def learned_alternatives(text: str, bundle: str) -> list[str]:
     """Unconfirmed personalized alternatives for confidence-aware review."""
     with GLOSS["lock"]:
@@ -5598,6 +5647,14 @@ def compile_voice_evidence(recognition: Recognition,
             if str(term).strip()
         )
         context_pack = ContextPack(candidates)
+    # Merge dictionary terms as protected anchors. protected_anchors only
+    # protects a term that already appears in the recognized text, so this can
+    # never invent or mis-hear words; it only stops cleanup from deleting a
+    # listed term the recognizer produced.
+    with GLOSS["lock"]:
+        anchor_pack = GLOSS.get("anchor_pack")
+    if anchor_pack is not None and anchor_pack.candidates:
+        context_pack = context_pack.merged(anchor_pack)
     prosody = ()
     if audio is not None and len(audio):
         # memoryview avoids turning every audio sample into a Python float.
@@ -7189,6 +7246,7 @@ def phone_clean(raw: str) -> str:
     tone_key = tone_override if tone_override in TONE else "default"
     text = llm_clean(raw, TONE[tone_key]) if needs_llm \
         else quick_clean(raw, verbatim=verbatim)
+    text = apply_vocabulary_casing(text)   # user's canonical term casing
     if text:
         append_transcript(raw, text, "ios.diction", "phone")
     return text
@@ -8090,6 +8148,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         t_clean = time.perf_counter() - clean_started_at
         if tone_key == "casual" and not verbatim:
             text = strip_casual_period(text)   # belt for both paths
+        text = apply_vocabulary_casing(text)   # user's canonical term casing
         if PIPELINE_STATE["last_alternatives"]:
             cleaned_alternatives = []
             for alternative in PIPELINE_STATE["last_alternatives"]:

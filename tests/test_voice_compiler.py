@@ -296,6 +296,25 @@ class VoiceCompilerTests(unittest.TestCase):
         for expected in ("andrew", "january 12", "git", "--short", "./repo"):
             self.assertIn(expected, lowered)
 
+    def test_dictionary_term_supplied_as_anchor_is_protected(self):
+        # A lowercase brand term supplied at the dictionary anchor weight (3.5)
+        # becomes a protected anchor once it appears in the recognized text, so
+        # cleanup may not delete it. It cannot invent the term: protection only
+        # applies because the recognizer already produced it.
+        context = (ContextCandidate("qwen", 3.5, "dictionary"),)
+        source = "switch the model to qwen please"
+        anchors = protected_anchors(source, context)
+        self.assertIn("qwen", {anchor.casefold() for anchor in anchors})
+
+        result = self.compiler.verify_edits(
+            source,
+            (EditProposal("semantic_cleanup", "to qwen please", "please"),),
+            context=context,
+        )
+        self.assertEqual(result.text, source)
+        self.assertFalse(result.edits[0].accepted)
+        self.assertIn("protected anchor removed", result.edits[0].reason)
+
     def test_context_does_not_replace_ordinary_english_words(self):
         voice = VoiceIR(
             hypotheses=(RecognitionHypothesis(

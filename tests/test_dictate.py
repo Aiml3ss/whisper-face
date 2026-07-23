@@ -3034,6 +3034,10 @@ class CleanupGuardTests(unittest.TestCase):
                 "np": np,
                 "analyze_prosody": lambda *_args: (),
                 "SAMPLE_RATE": 16_000,
+                "GLOSS": {
+                    "lock": threading.Lock(),
+                    "anchor_pack": ContextPack(),
+                },
             },
         )
         _voice, result = ns["compile_voice_evidence"](
@@ -5098,6 +5102,67 @@ class ContextFirewallRuntimeProjectionTests(unittest.TestCase):
         self.assertEqual(snapshot["disposition"], "unavailable")
         self.assertEqual(snapshot["reason_counts"], {"receipt-error": 1})
         self.assertNotIn(private, json.dumps(snapshot))
+
+
+class CustomVocabularyTests(unittest.TestCase):
+    def test_refresh_glossary_protects_and_normalizes_every_manual_term(self):
+        # 70 manual terms exceed the 60-term Whisper prompt cap. Every one must
+        # still land in the anchor pack and the casing map even though only the
+        # first 60 fit the prompt.
+        manual = [f"Term{i}" for i in range(70)]
+        gloss = {"lock": threading.Lock()}
+        ns = load_definitions(
+            "refresh_glossary",
+            extra={
+                "parse_dictionary": lambda: (list(manual), set()),
+                "load_learned": lambda: {
+                    "counts": {}, "fixes": {}, "confusions": {}},
+                "write_auto_section": lambda _promoted: None,
+                "personal_regression_lab": lambda _state: object(),
+                "ContextPack": ContextPack,
+                "ContextCandidate": ContextCandidate,
+                "GLOSS": gloss,
+                "PROMOTE_MIN_COUNT": 2,
+                "PERSONAL_GLOBAL_MIN_COUNT": 3,
+                "GLOSSARY_MAX_TERMS": 60,
+                "GLOSSARY_MAX_CHARS": 700,
+                "ANCHOR_MAX_TERMS": 256,
+            },
+        )
+
+        ns["refresh_glossary"]()
+
+        self.assertEqual(len(gloss["terms"]), 60)   # prompt cap unchanged
+        anchor_texts = {c.text for c in gloss["anchor_pack"].candidates}
+        self.assertEqual(len(anchor_texts), 70)
+        for term in manual:
+            self.assertIn(term, anchor_texts)
+            self.assertEqual(gloss["vocabulary"][term.casefold()], term)
+        # A term beyond the 60-term prompt cap is still protected and normalized.
+        self.assertNotIn("Term65", gloss["terms"])
+        self.assertIn("Term65", anchor_texts)
+        for candidate in gloss["anchor_pack"].candidates:
+            self.assertEqual(candidate.weight, 3.5)
+            self.assertEqual(candidate.source, "dictionary")
+
+    def test_apply_vocabulary_casing_is_whole_word_and_additive(self):
+        gloss = {"lock": threading.Lock(),
+                 "vocabulary": {"github": "GitHub"}}
+        ns = load_definitions(
+            "apply_vocabulary_casing",
+            assignments={"VOCAB_WORD_RE"},
+            extra={"GLOSS": gloss},
+        )
+        casing = ns["apply_vocabulary_casing"]
+
+        self.assertEqual(casing("i pushed to github"), "i pushed to GitHub")
+        # A larger word that merely contains the term is left alone.
+        self.assertEqual(
+            casing("i really githubbed it"), "i really githubbed it")
+        # An already-canonical token is left untouched.
+        self.assertEqual(casing("i pushed to GitHub"), "i pushed to GitHub")
+        # An unlisted (or banned, hence absent) term is untouched.
+        self.assertEqual(casing("switch to qwen now"), "switch to qwen now")
 
 
 if __name__ == "__main__":
