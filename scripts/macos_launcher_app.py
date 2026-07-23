@@ -101,10 +101,47 @@ func launchExistingRuntime(start: Bool) throws {
     } while Date() < deadline
 }
 
+func runWorker(_ command: [String]) -> Never {
+    guard let executable = command.first, executable.hasPrefix("/"),
+          FileManager.default.isExecutableFile(atPath: executable) else {
+        FileHandle.standardError.write(Data("Whisper Face launcher: --run needs an absolute executable\n".utf8))
+        exit(78)
+    }
+    let child = Process()
+    child.executableURL = URL(fileURLWithPath: executable)
+    child.arguments = Array(command.dropFirst())
+    // Inherit cwd, stdio, and the environment from launchd; additionally publish
+    // this launcher's PID so the supervised runtime binds its GUI activation
+    // socket to the launchd job (this process), which macOS reports as the
+    // responsible process for TCC.
+    var environment = ProcessInfo.processInfo.environment
+    environment["WHISPER_FACE_SERVICE_PID"] = String(getpid())
+    child.environment = environment
+    // Forward launchd's stop signals so KeepAlive observes the child's own exit
+    // status instead of the supervisor dying first. posix_spawn resets the
+    // child's dispositions to default, so ignoring them here never leaves the
+    // child unkillable.
+    var forwarders: [DispatchSourceSignal] = []
+    for number in [SIGTERM, SIGINT] {
+        signal(number, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
+        source.setEventHandler { let pid = child.processIdentifier; if pid > 0 { kill(pid, number) } }
+        source.resume(); forwarders.append(source)
+    }
+    do { try child.run() } catch {
+        FileHandle.standardError.write(Data("Whisper Face launcher: runtime failed to start: \(error)\n".utf8))
+        exit(70)
+    }
+    child.waitUntilExit(); withExtendedLifetime(forwarders) {}
+    exit(child.terminationStatus)
+}
+
 @main struct WhisperFaceLauncher {
     static func main() {
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        if arguments.first == "--run" { runWorker(Array(arguments.dropFirst())) }
         NSApplication.shared.setActivationPolicy(.accessory)
-        do { try launchExistingRuntime(start: CommandLine.arguments.dropFirst() != ["--verify"]) }
+        do { try launchExistingRuntime(start: arguments != ["--verify"]) }
         catch {
             let alert = NSAlert(); alert.messageText = "Whisper Face could not start"
             alert.informativeText = "Run Install.command again from the installed checkout, then retry."
@@ -163,7 +200,7 @@ def _bundle_digest(app: Path) -> str:
     return digest.hexdigest()
 
 def _expected_plist() -> dict[str, object]:
-    return {"CFBundleDisplayName": PRODUCT, "CFBundleExecutable": EXECUTABLE, "CFBundleIdentifier": BUNDLE_ID, "CFBundleName": PRODUCT, "CFBundlePackageType": "APPL", "CFBundleShortVersionString": "1.0", "CFBundleVersion": "1", "LSMinimumSystemVersion": "14.0", "LSUIElement": True}
+    return {"CFBundleDisplayName": PRODUCT, "CFBundleExecutable": EXECUTABLE, "CFBundleIdentifier": BUNDLE_ID, "CFBundleName": PRODUCT, "CFBundlePackageType": "APPL", "CFBundleShortVersionString": "1.0", "CFBundleVersion": "1", "LSMinimumSystemVersion": "14.0", "LSUIElement": True, "NSMicrophoneUsageDescription": "Whisper Face transcribes your speech into text on this Mac."}
 
 def _pinned_team(policy: Path = DEFAULT_POLICY) -> str:
     try: payload = json.loads(policy.read_text(encoding="utf-8"))

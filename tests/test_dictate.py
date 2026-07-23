@@ -25,6 +25,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -209,6 +210,8 @@ class GuiLauncherActivationTests(unittest.TestCase):
             "gui_activation_socket_path",
             "cleanup_stale_gui_activation_sockets",
             "current_launchd_service_pid",
+            "_parent_pid",
+            "_process_has_ancestor",
             "start_gui_activation_server",
             extra={
                 "AppHelper": SimpleNamespace(callAfter=lambda callback: callback()),
@@ -325,6 +328,39 @@ class GuiLauncherActivationTests(unittest.TestCase):
             stdout="state = running\n\tpid = 99999999\n")
         self.assertIsNone(
             namespace["current_launchd_service_pid"](uid=os.getuid()))
+
+    @unittest.skipUnless(hasattr(os, "getuid"), "launchd PID binding requires POSIX")
+    def test_launchd_pid_binding_trusts_launcher_service_pid_via_env(self):
+        # Under the signed launcher chain (launchd -> Whisper Face.app -> uv ->
+        # python) the job PID is the launcher, an ancestor several hops up, so
+        # it is neither this process nor its parent. It is trusted only when the
+        # exported PID is launchctl-confirmed AND a real ancestor.
+        cleanups = []
+        namespace = self.namespace(cleanups)
+        service_pid = 4242
+        namespace["subprocess"] = SimpleNamespace(
+            SubprocessError=subprocess.SubprocessError,
+            run=lambda *_args, **_kwargs: SimpleNamespace(
+                stdout=f"state = running\n\tpid = {service_pid}\n"),
+        )
+        namespace["_parent_pid"] = lambda pid: (
+            service_pid if pid == os.getpid() else None)
+        resolve = namespace["current_launchd_service_pid"]
+        with mock.patch.dict(
+                os.environ, {"WHISPER_FACE_SERVICE_PID": str(service_pid)}):
+            self.assertEqual(resolve(uid=os.getuid()), service_pid)
+        # A forged PID launchctl does not report is rejected.
+        with mock.patch.dict(
+                os.environ, {"WHISPER_FACE_SERVICE_PID": str(service_pid + 1)}):
+            self.assertIsNone(resolve(uid=os.getuid()))
+        # The correct PID that is not an ancestor of this process is rejected.
+        namespace["_parent_pid"] = lambda pid: None
+        with mock.patch.dict(
+                os.environ, {"WHISPER_FACE_SERVICE_PID": str(service_pid)}):
+            self.assertIsNone(resolve(uid=os.getuid()))
+        # With no exported PID, the non-ancestor job PID stays rejected too.
+        os.environ.pop("WHISPER_FACE_SERVICE_PID", None)
+        self.assertIsNone(resolve(uid=os.getuid()))
 
 
 class DictationSuccessSoundTests(unittest.TestCase):

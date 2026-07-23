@@ -5150,10 +5150,11 @@ def ensure_single_instance():
 
 
 def ensure_event_permissions():
-    """Under launchd, TCC grants belong to the Python binary, not Terminal.
-    Ask for Input Monitoring (hotkey listening) and Accessibility (paste
-    keystroke posting) up front; if missing, wait for the user to flip the
-    toggles and then re-exec so the listener starts trusted."""
+    """Under the signed launcher chain, TCC attributes these grants to the
+    launcher app ("Whisper Face"), the responsible process this fork+exec child
+    rolls up to. Ask for Input Monitoring (hotkey listening) and Accessibility
+    (paste keystroke posting) up front; if missing, wait for the user to flip
+    the toggles and then re-exec so the listener starts trusted."""
     if IS_WINDOWS:
         return
     try:
@@ -5167,8 +5168,17 @@ def ensure_event_permissions():
         return
     CGRequestListenEventAccess()            # each pops the system dialog once
     CGRequestPostEventAccess()
-    print("Waiting for permissions: enable 'uv' under System Settings -> "
-          "Privacy & Security -> Input Monitoring AND Accessibility. "
+    try:
+        # Accessibility is a distinct TCC service from Input Monitoring; prompt
+        # for it directly so the paste keystroke path is trusted too. Under the
+        # signed launcher chain this attributes to "Whisper Face", one toggle.
+        from ApplicationServices import (
+            AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt)
+        AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True})
+    except Exception:
+        pass                                # older pyobjc / headless: best effort
+    print("Waiting for permissions: enable 'Whisper Face' under System Settings "
+          "-> Privacy & Security -> Input Monitoring AND Accessibility. "
           "Re-checking every minute...")
     # TCC verdicts are effectively frozen for a running process — polling
     # preflight here never sees the user's grant. Re-exec for a fresh image;
@@ -7576,8 +7586,45 @@ def cleanup_stale_gui_activation_sockets(*, uid: int | None = None,
     return removed
 
 
+def _parent_pid(pid: int) -> int | None:
+    """Return the parent PID of ``pid`` via ps, or None when it can't be read."""
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=1, check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = result.stdout.strip()
+    return int(value) if value.isdigit() else None
+
+
+def _process_has_ancestor(pid: int, *, max_hops: int = 24) -> bool:
+    """Return True when ``pid`` is this process or one of its forebears."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    current = os.getpid()
+    for _ in range(max_hops):
+        if current == pid:
+            return True
+        if current <= 1:
+            return False
+        parent = _parent_pid(current)
+        if parent is None or parent == current:
+            return False
+        current = parent
+    return False
+
+
 def current_launchd_service_pid(*, uid: int | None = None) -> int | None:
-    """Resolve this process's exact launchd job PID (the uv parent on Mac)."""
+    """Resolve this process's exact launchd job PID.
+
+    Under the signed launcher chain (launchd -> Whisper Face.app -> uv ->
+    python) the job PID is the launcher app several hops up, so it equals
+    neither this process nor its immediate parent. The launcher exports its own
+    PID as WHISPER_FACE_SERVICE_PID; trust it only when launchctl confirms it is
+    the job PID and it is a genuine ancestor of this process. The raw-uv path
+    (server-only / legacy) keeps the self-or-parent check."""
     owner = os.getuid() if uid is None else uid
     try:
         result = subprocess.run(
@@ -7590,9 +7637,13 @@ def current_launchd_service_pid(*, uid: int | None = None) -> int | None:
     if match is None:
         return None
     service_pid = int(match.group(1))
-    if service_pid not in {os.getpid(), os.getppid()}:
-        return None
-    return service_pid
+    exported = os.environ.get("WHISPER_FACE_SERVICE_PID", "").strip()
+    if (exported.isdigit() and int(exported) == service_pid
+            and _process_has_ancestor(service_pid)):
+        return service_pid
+    if service_pid in {os.getpid(), os.getppid()}:
+        return service_pid
+    return None
 
 
 def start_gui_activation_server(gui, *, revision: str | None = None,
@@ -8946,8 +8997,9 @@ def main():
     except Exception as e:
         print(f"! Microphone unavailable: {e}")
         if IS_MACOS:
-            print("  Enable 'uv' under System Settings -> Privacy & Security"
-                  " -> Microphone. A keypress will retry initialization.")
+            print("  Enable 'Whisper Face' under System Settings -> Privacy &"
+                  " Security -> Microphone. A keypress will retry"
+                  " initialization.")
         else:
             print("  Enable microphone access under Windows Settings -> "
                   "Privacy & security. A keypress will retry initialization.")

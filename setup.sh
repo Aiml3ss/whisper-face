@@ -499,10 +499,22 @@ step "installing the login LaunchAgent"
 escaped_uv="$(escape_sed_replacement "$UV")"
 if [ "$MODE" = "server-only" ]; then
     extra_sed="s|__EXTRA_ARGS__|<string>--server-only</string>|"
+    # Server-only stays raw uv and headless: no launcher, no TCC surface.
+    launcher_prefix_sed="/__LAUNCHER_PREFIX__/d"
 else
     extra_sed="/__EXTRA_ARGS__/d"
+    # Full mode runs the login job through the signed launcher app. launchd
+    # execs the launcher, which supervises "uv run ..." as a fork+exec child,
+    # so macOS attributes Input Monitoring and Accessibility to "Whisper Face"
+    # (one grantable toggle that survives reinstalls) while KeepAlive still sees
+    # the child's real exit status.
+    escaped_launcher_exe="$(escape_sed_replacement \
+        "$HOME/Applications/Whisper Face.app/Contents/MacOS/Whisper Face")"
+    launcher_prefix_sed="s|__LAUNCHER_PREFIX__|<string>$escaped_launcher_exe</string>\\
+        <string>--run</string>|"
 fi
 render_plist com.berg.dictate.plist.template "$dictate_plist" \
+    -e "$launcher_prefix_sed" \
     -e "s|__UV__|$escaped_uv|g" \
     -e "s|__DIR__|$escaped_dir|g" \
     -e "$extra_sed"
@@ -554,7 +566,7 @@ if [ "$ready" -eq 1 ]; then
     verify_install
 elif [ "$permissions_needed" -eq 1 ] && [ "$MODE" = "full" ]; then
     echo "== software and models are installed; macOS permissions remain:"
-    echo "== System Settings -> Privacy & Security -> enable uv/Python under"
+    echo "== System Settings -> Privacy & Security -> enable Whisper Face under"
     echo "==   Input Monitoring, Accessibility, and Microphone."
     echo "== The LaunchAgent rechecks automatically; then run ./setup.sh --verify"
 else
