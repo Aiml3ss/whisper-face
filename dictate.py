@@ -7087,7 +7087,7 @@ def readback_timeout_for_frontmost() -> float:
 
 
 def insertion_readback(snapshot: FocusSnapshot, inserted: str,
-                       timeout: float = READBACK_TIMEOUT, reader=None,
+                       timeout: float = 0.02, reader=None,
                        clock=None, sleeper=None) -> ReadbackResult:
     """Prove the exact field mutation after paste without ever retrying it."""
     if snapshot.text is None or snapshot.selection is None:
