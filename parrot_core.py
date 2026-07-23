@@ -442,6 +442,40 @@ def classify_edit_command(raw: str) -> str | None:
     return _EDIT_COMMAND_PHRASES.get(normalized)
 
 
+def _uppercase_first_cased(text: str) -> str:
+    """Uppercase the first cased character, leaving everything else untouched.
+
+    Sentence-style, not title-case: only the first character that actually has a
+    case distinction changes, so leading spaces, quotes, or digits are skipped
+    and the remainder keeps whatever casing the speaker already produced.
+    """
+    for index, char in enumerate(text):
+        if char.upper() != char.lower():
+            return text[:index] + char.upper() + text[index + 1:]
+    return text
+
+
+def transform_last_insertion(command: str, text: str) -> str | None:
+    """Apply a spoken case command to the exact last-inserted text.
+
+    UPPERCASE_LAST upper-cases; LOWERCASE_LAST lower-cases; CAPITALIZE_LAST
+    upper-cases only the first cased character. Returns the rewritten text, or
+    None when the command is not a case transform or when applying it would not
+    change anything. A None result tells the caller to issue no keystroke at
+    all, so a case command spoken over text already in that case never triggers
+    a destructive in-place edit.
+    """
+    if command == EDIT_COMMAND_UPPERCASE_LAST:
+        transformed = text.upper()
+    elif command == EDIT_COMMAND_LOWERCASE_LAST:
+        transformed = text.lower()
+    elif command == EDIT_COMMAND_CAPITALIZE_LAST:
+        transformed = _uppercase_first_cased(text)
+    else:
+        return None
+    return transformed if transformed != text else None
+
+
 CODE_PHRASES = (
     (r"\bopen paren(?:thesis)?\b", "("),
     (r"\bclose paren(?:thesis)?\b", ")"),
