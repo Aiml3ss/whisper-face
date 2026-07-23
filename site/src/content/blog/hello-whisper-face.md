@@ -16,7 +16,7 @@ Whisper Face takes the opposite stance. Hold a key, say the thing, and the words
 
 ## And a face
 
-Every good menu-bar tool needs a face. Whisper Face has five — a fox, a bear, an owl, a parrot, and a cat. Pick the one you like. It sits quietly at the top of your screen and opens its mouth when you start talking.
+Every good menu-bar tool needs a face. Whisper Face has ten — a fox, a bear, an owl, a parrot, a cat, a dog, a wolf, a pig, a panda, and a tiger. Pick the one you like. It sits quietly at the top of your screen and opens its mouth when you start talking.
 
 It is a small thing. It also makes the app feel like it is listening with you, not at you.
 

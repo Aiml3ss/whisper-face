@@ -1717,7 +1717,8 @@ class FacePreferenceTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(ns["normalize_face"](face) for face in ns["FACE_CHOICES"]),
-            ("parrot", "fox", "owl", "cat", "bear"),
+            ("parrot", "fox", "owl", "cat", "bear",
+             "dog", "wolf", "pig", "panda", "tiger"),
         )
 
     def test_reduce_motion_freezes_hud_audio_animation(self):

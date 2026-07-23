@@ -589,6 +589,11 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.face.owl": "Owl",
         "settings.face.cat": "Cat",
         "settings.face.bear": "Bear",
+        "settings.face.dog": "Dog",
+        "settings.face.wolf": "Wolf",
+        "settings.face.pig": "Pig",
+        "settings.face.panda": "Panda",
+        "settings.face.tiger": "Tiger",
         "settings.state.enabled": "Enabled",
         "settings.state.local_processing": "Local processing",
         "settings.accessibility.sections.label": "Settings sections",
@@ -808,13 +813,21 @@ def localized_string(key: str, *, locale: str = "en", **values: Any) -> str:
         return template.format(**values)
     except (KeyError, ValueError) as error:
         raise ValueError(f"invalid values for localized string {key!r}") from error
-FACES = ("parrot", "fox", "owl", "cat", "bear")
+FACES = (
+    "parrot", "fox", "owl", "cat", "bear",
+    "dog", "wolf", "pig", "panda", "tiger",
+)
 FACE_EMOJI = {
     "parrot": "🦜",
     "fox": "🦊",
     "owl": "🦉",
     "cat": "🐱",
     "bear": "🐻",
+    "dog": "🐶",
+    "wolf": "🐺",
+    "pig": "🐷",
+    "panda": "🐼",
+    "tiger": "🐯",
 }
 
 
@@ -4448,11 +4461,16 @@ if APPKIT_AVAILABLE:
                 NSMakeRect(18, 4, 720, 32))
             picker.setSegmentCount_(len(FACES))
             picker.setSegmentStyle_(NSSegmentStyleRounded)
+            # Ten faces no longer fit a labelled row inside the 720pt picker,
+            # so the segments are emoji-forward and share the width evenly.
+            # Each segment's animal name stays available through the tooltip
+            # and the menu-bar "Choose Face" submenu.
+            seg_width = 720.0 / len(FACES)
             for index, face in enumerate(FACES):
-                picker.setLabel_forSegment_(
-                    f"{FACE_EMOJI[face]} "
-                    f"{self._l(f'settings.face.{face}')}", index)
-                picker.setWidth_forSegment_(138, index)
+                picker.setLabel_forSegment_(FACE_EMOJI[face], index)
+                picker.setToolTip_forSegment_(
+                    self._l(f"settings.face.{face}"), index)
+                picker.setWidth_forSegment_(seg_width, index)
             picker.setTarget_(self)
             picker.setAction_("faceChanged:")
             _accessible(
