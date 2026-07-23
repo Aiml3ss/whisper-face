@@ -7066,8 +7066,28 @@ def resolve_insertion_target(rec, timeout: float = 0.12, reader=None,
         sleeper(min(0.02, remaining))
 
 
+READBACK_TIMEOUT = 0.02
+# Chromium publishes its accessibility value well after the paste actually
+# lands, so the tight native window reads stale text, calls a good insertion a
+# conflict, and fails it closed into the Voice Outbox. Electron targets get
+# room to catch up; native fields still verify on the first read.
+READBACK_TIMEOUT_ELECTRON = 0.35
+
+
+def readback_timeout_for_frontmost() -> float:
+    """Pick the readback window for whichever app is receiving this paste."""
+    if not IS_MACOS:
+        return READBACK_TIMEOUT
+    try:
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+    except Exception:
+        return READBACK_TIMEOUT             # unreadable app: keep the default
+    return (READBACK_TIMEOUT_ELECTRON if is_electron_app(app)
+            else READBACK_TIMEOUT)
+
+
 def insertion_readback(snapshot: FocusSnapshot, inserted: str,
-                       timeout: float = 0.02, reader=None,
+                       timeout: float = READBACK_TIMEOUT, reader=None,
                        clock=None, sleeper=None) -> ReadbackResult:
     """Prove the exact field mutation after paste without ever retrying it."""
     if snapshot.text is None or snapshot.selection is None:
@@ -7120,7 +7140,8 @@ def commit_insertion(rec, text: str, bundle: str,
             getattr(rec, "bundle_at_press", bundle),
         ),
         paste,
-        (lambda: insertion_readback(current, text)
+        (lambda: insertion_readback(
+            current, text, timeout=readback_timeout_for_frontmost())
          if current is not None and not lease.opaque
          else ReadbackResult.unverifiable()),
     )
