@@ -1,0 +1,230 @@
+"""Git-based, opt-in self-update for the Whisper Face checkout.
+
+This is the *unsigned local-checkout* update path. The app runs directly from a
+git working copy under launchd, so "update" here means fast-forwarding that
+checkout to its tracked upstream and re-running the installer. It is deliberately
+narrow and fail-closed:
+
+  * user-initiated only -- no background polling, no auto-updates;
+  * the only network access is one explicit ``git fetch`` inside
+    :func:`check_for_update`;
+  * any git/network problem, a dirty working tree, or an unverifiable upstream
+    yields ``available=False`` with an ``error`` string -- never a claimed
+    update it cannot prove;
+  * :func:`apply_update` records the pre-update HEAD and, if the installer
+    fails on the new revision, restores that HEAD and re-installs, so the
+    checkout is never left on a broken revision.
+
+Everything is driven through an injected ``runner`` (a ``subprocess.run``-style
+callable) and an explicit ``checkout`` path, so the logic is unit-testable
+offline with a fake runner and never hard-codes a network endpoint.
+
+The separate, future *signed-release* path (``scripts/release_manifest.py``,
+``scripts/safe_update_advisor.py``, ``scripts/side_by_side_update.py``) is for
+published, notarized releases and is intentionally untouched by this module.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+from typing import Callable
+
+DEFAULT_REMOTE = "origin"
+DEFAULT_INSTALLER = "Install.command"
+
+# One network op (fetch) plus fast local plumbing; keep a menu-driven,
+# background-thread check bounded so it can never hang the app forever.
+_FETCH_TIMEOUT = 60.0
+_GIT_TIMEOUT = 15.0
+_INSTALL_TIMEOUT = 1800.0
+
+# Runner is any subprocess.run-style callable returning a CompletedProcess.
+Runner = Callable[..., "subprocess.CompletedProcess"]
+
+
+def _describe(exc: BaseException) -> str:
+    """A short, privacy-preserving reason for a git failure (no paths/URLs)."""
+    if isinstance(exc, FileNotFoundError):
+        return "git is not installed"
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return "git operation timed out"
+    return f"git error ({type(exc).__name__})"
+
+
+def _git(runner: Runner, checkout: Path, *args: str,
+         timeout: float = _GIT_TIMEOUT) -> "subprocess.CompletedProcess":
+    """Run one ``git -C <checkout> ...`` command through the injected runner.
+
+    Uses ``-C`` (not ``cwd``) so the command is fully described by its argv,
+    which keeps both the real call and the test fake trivial. Never raises for a
+    non-zero git exit; callers inspect ``returncode`` and fail closed.
+    """
+    return runner(
+        ["git", "-C", str(checkout), *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def _rev_parse(runner: Runner, checkout: Path, ref: str,
+               timeout: float = _GIT_TIMEOUT):
+    """Resolve ``ref`` to a commit sha, or ``None`` if it does not resolve."""
+    result = _git(runner, checkout, "rev-parse", "--verify", "--quiet", ref,
+                  timeout=timeout)
+    if result.returncode == 0:
+        sha = (result.stdout or "").strip()
+        return sha or None
+    return None
+
+
+def check_for_update(checkout, remote: str = DEFAULT_REMOTE, *,
+                     runner: Runner) -> dict:
+    """Report whether the tracked upstream is ahead of this checkout.
+
+    Returns ``{"available", "current", "latest", "behind", "error"}``. Fails
+    closed: any git/network failure, a non-repo, or a dirty working tree returns
+    ``available=False`` with a human-readable ``error`` and never raises. The
+    only network access is the single ``git fetch``.
+    """
+    checkout = Path(checkout)
+    result = {"available": False, "current": "", "latest": "",
+              "behind": 0, "error": None}
+    try:
+        current = _rev_parse(runner, checkout, "HEAD")
+        if not current:
+            result["error"] = "not a git checkout"
+            return result
+        result["current"] = current
+
+        # Refuse when the working tree carries uncommitted changes: applying an
+        # update would checkout over them. Fail closed before touching the
+        # network -- there is nothing a fetch could tell us that would make an
+        # update safe here.
+        status = _git(runner, checkout, "status", "--porcelain")
+        if status.returncode != 0:
+            result["error"] = "could not read git status"
+            return result
+        if (status.stdout or "").strip():
+            result["error"] = "local changes present"
+            return result
+
+        # The one and only network access in this module.
+        fetched = _git(runner, checkout, "fetch", "--quiet", remote,
+                       timeout=_FETCH_TIMEOUT)
+        if fetched.returncode != 0:
+            result["error"] = f"could not fetch from {remote!r}"
+            return result
+
+        # Prefer the branch's own tracked upstream; fall back to the remote's
+        # default branch, then its main. If none resolve, refuse rather than
+        # guess.
+        latest = None
+        for ref in ("@{u}", f"{remote}/HEAD", f"{remote}/main"):
+            latest = _rev_parse(runner, checkout, ref)
+            if latest:
+                break
+        if not latest:
+            result["error"] = "no tracked upstream branch"
+            return result
+        result["latest"] = latest
+
+        if latest == current:
+            return result  # up to date: available stays False, behind 0
+
+        counted = _git(runner, checkout, "rev-list", "--count",
+                       f"HEAD..{latest}")
+        if counted.returncode != 0:
+            result["error"] = "could not compare with upstream"
+            return result
+        try:
+            behind = int((counted.stdout or "").strip() or "0")
+        except ValueError:
+            result["error"] = "could not parse commit count"
+            return result
+
+        result["behind"] = behind
+        result["available"] = behind > 0
+        return result
+    except (OSError, subprocess.SubprocessError) as exc:
+        # Missing git binary, fetch timeout, etc. Never propagate -- fail closed.
+        result["available"] = False
+        result["error"] = _describe(exc)
+        return result
+
+
+def _run_installer(runner: Runner, checkout: Path,
+                   installer: str) -> "subprocess.CompletedProcess":
+    """Run the checkout's installer from the checkout directory.
+
+    A missing or non-executable installer is reported as a non-zero result
+    rather than an exception, so the single "installer failed -> roll back" path
+    in :func:`apply_update` handles every failure mode uniformly.
+    """
+    command = [f"./{installer}"]
+    try:
+        return runner(command, cwd=str(checkout), capture_output=True,
+                      text=True, timeout=_INSTALL_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return subprocess.CompletedProcess(command, 127, "", "")
+
+
+def _installer_error(result: "subprocess.CompletedProcess",
+                     installer: str) -> str:
+    return f"{installer} failed (exit {result.returncode})"
+
+
+def apply_update(checkout, target_rev: str, *, runner: Runner,
+                 installer: str = DEFAULT_INSTALLER) -> dict:
+    """Move the checkout to ``target_rev`` and re-run the installer.
+
+    Records the pre-update HEAD as ``from``. On success returns
+    ``{"status": "applied", "from", "to"}``. If the installer fails on the new
+    revision, restores the previous HEAD, re-runs the installer, and returns
+    ``{"status": "rolled_back", "from", "to", "error"}``. If the checkout cannot
+    even be switched (or this is not a repo), nothing moved and it returns
+    ``{"status": "failed", ...}``. The checkout is never left on a broken
+    revision.
+    """
+    checkout = Path(checkout)
+    result = {"status": "failed", "from": "", "to": target_rev, "error": None}
+    try:
+        previous = _rev_parse(runner, checkout, "HEAD")
+        if not previous:
+            result["error"] = "not a git checkout"
+            return result
+        result["from"] = previous
+
+        checked_out = _git(runner, checkout, "checkout", "--quiet", target_rev)
+        if checked_out.returncode != 0:
+            # Never moved off `previous`; there is nothing to roll back.
+            result["error"] = f"could not checkout {target_rev}"
+            return result
+
+        installed = _run_installer(runner, checkout, installer)
+        if installed.returncode == 0:
+            result["status"] = "applied"
+            return result
+
+        # Installer failed on the new revision: restore the old one and
+        # re-install so the checkout is never left broken.
+        forward_error = _installer_error(installed, installer)
+        _git(runner, checkout, "checkout", "--quiet", previous)
+        _run_installer(runner, checkout, installer)
+        result["status"] = "rolled_back"
+        result["error"] = forward_error
+        return result
+    except (OSError, subprocess.SubprocessError) as exc:
+        # Unexpected failure mid-apply (e.g. a git timeout). Best-effort restore
+        # to the recorded previous revision so we do not strand a broken tree.
+        previous = result.get("from")
+        if previous:
+            try:
+                _git(runner, checkout, "checkout", "--quiet", previous)
+                _run_installer(runner, checkout, installer)
+                result["status"] = "rolled_back"
+            except (OSError, subprocess.SubprocessError):
+                result["status"] = "failed"
+        result["error"] = _describe(exc)
+        return result

@@ -224,6 +224,8 @@ if IS_MACOS:
     import objc
     from AppKit import (
         NSAffineTransform,
+        NSAlert,
+        NSAlertFirstButtonReturn,
         NSApplication,
         NSApplicationActivationPolicyAccessory,
         NSBackingStoreBuffered,
@@ -415,6 +417,7 @@ from voice_objects import (  # noqa: E402
     PlainTextDraft,
     TaskDraft,
 )
+import self_update  # noqa: E402
 
 if IS_MACOS:
     from whisper_face_gui import GUIActions, create_gui  # noqa: E402
@@ -2360,6 +2363,7 @@ class StatusBar(NSObject):
         self.flight_item = mk("Flight Recorder", "toggleFlight:")
         self.pause_item = mk("Pause Dictation", "togglePause:")
         menu.addItem_(mk("Open Whisper Face…", "openGUI:"))
+        menu.addItem_(mk("Check for Updates…", "checkForUpdates:"))
         menu.addItem_(NSMenuItem.separatorItem())
         menu.addItem_(self.stat1)
         menu.addItem_(self.stat2)
@@ -2731,6 +2735,98 @@ class StatusBar(NSObject):
         except Exception:
             pass
         NSApplication.sharedApplication().terminate_(None)
+
+    def checkForUpdates_(self, sender):
+        """User-initiated, opt-in git update check.
+
+        The network fetch runs on a background thread so the menu-bar app never
+        blocks; every UI touch happens back on the main thread. Fail-closed and
+        guarded end to end — a checker failure can never crash the app."""
+        def worker():
+            try:
+                report = self_update.check_for_update(
+                    HERE, runner=subprocess.run)
+            except Exception as e:  # never let the menu-bar app crash
+                report = {"available": False, "error": type(e).__name__}
+            AppHelper.callAfter(self._present_update_check, report)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _present_update_check(self, report):
+        try:
+            error = report.get("error")
+            if error:
+                self._update_alert(
+                    "Couldn't check for updates.", str(error))
+                return
+            if not report.get("available"):
+                self._update_alert("Whisper Face is up to date.", "")
+                return
+            behind = int(report.get("behind", 0) or 0)
+            noun = "commit" if behind == 1 else "commits"
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_("An update is available.")
+            alert.setInformativeText_(
+                f"{behind} new {noun} available. Update now?")
+            alert.addButtonWithTitle_("Update")
+            alert.addButtonWithTitle_("Later")
+            if alert.runModal() == NSAlertFirstButtonReturn:
+                self._begin_update(str(report.get("latest") or ""))
+        except Exception as e:
+            print(f"! update check UI failed: {e}")
+
+    def _begin_update(self, target_rev):
+        if not target_rev:
+            self._update_alert(
+                "Couldn't start the update.",
+                "No target revision was found.")
+            return
+
+        def worker():
+            try:
+                outcome = self_update.apply_update(
+                    HERE, target_rev, runner=subprocess.run)
+            except Exception as e:
+                outcome = {"status": "failed", "error": type(e).__name__}
+            AppHelper.callAfter(self._present_update_result, outcome)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _present_update_result(self, outcome):
+        try:
+            status = outcome.get("status")
+            if status == "applied":
+                self._update_alert("Updated. Restarting…", "")
+                self._restart_service()
+            elif status == "rolled_back":
+                self._update_alert(
+                    "Update failed — rolled back.",
+                    "The installer failed on the new version, so Whisper Face "
+                    "restored your previous version. Nothing was kept.")
+            else:
+                error = outcome.get("error") or "unknown error"
+                self._update_alert(
+                    "Couldn't apply the update.", str(error))
+        except Exception as e:
+            print(f"! update result UI failed: {e}")
+
+    def _restart_service(self):
+        try:
+            uid = os.getuid()
+            subprocess.Popen(
+                ["/bin/launchctl", "kickstart", "-k",
+                 f"gui/{uid}/com.berg.dictate"])
+        except Exception as e:
+            print(f"! could not restart service: {e}")
+
+    def _update_alert(self, message, informative):
+        try:
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(message)
+            if informative:
+                alert.setInformativeText_(informative)
+            alert.addButtonWithTitle_("OK")
+            alert.runModal()
+        except Exception as e:
+            print(f"! could not show alert: {e}")
 
 
 if IS_WINDOWS:
