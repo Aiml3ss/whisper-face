@@ -154,6 +154,10 @@ RUNTIME_TRACE_SCHEMAS = {
         "trailing_silence_ms",
         "voiced_fraction",
     ),
+    "warm_path": (
+        "release_ms", "asr_ms", "compiler_ms",
+        "cleanup_ms", "context_ms", "insertion_ms",
+    ),
 }
 STARTUP_TRACE_EVENTS = (
     "warmup_audio_pool",
@@ -161,6 +165,17 @@ STARTUP_TRACE_EVENTS = (
     "warmup_asr_final",
     "warmup_ollama",
     "warmup_total",
+)
+# Ordered (public stage label, closed-schema trace field) pairs for the
+# warm_path latency trace. The label names a stage in the aggregate report; the
+# field is the numeric millisecond key carried by the trace.
+WARM_PATH_STAGES = (
+    ("release", "release_ms"),
+    ("asr", "asr_ms"),
+    ("compiler", "compiler_ms"),
+    ("cleanup", "cleanup_ms"),
+    ("context", "context_ms"),
+    ("insertion", "insertion_ms"),
 )
 _TRACE_RATIO_FIELDS = {
     "clipped_ratio", "nonfinite_ratio", "silence_ratio", "voiced_fraction",
@@ -537,6 +552,38 @@ def evaluate_startup_traces(
         "ignored_non_trace_lines": ignored_lines,
         "ignored_non_startup_records": ignored_non_startup,
         "phases": phase_reports,
+    }
+
+
+def summarize_warm_path(path: Path) -> dict[str, Any]:
+    """Aggregate warm_path latency traces into per-stage percentile tails.
+
+    Reuses evaluate_runtime_traces (and therefore _distribution) so the result
+    is transcript-free by construction: only numeric millisecond aggregates and
+    fixed rejection categories are ever reflected. Traces for other events are
+    counted as ignored records and never contribute a value.
+    """
+    aggregate = evaluate_runtime_traces(path)
+    event = aggregate["events"].get("warm_path")
+    latency_ms: dict[str, Any] = {}
+    warm_path_records = 0
+    if event is not None:
+        warm_path_records = event["records"]
+        for label, field in WARM_PATH_STAGES:
+            distribution = event["metrics"].get(field)
+            if distribution is not None:
+                latency_ms[label] = distribution
+    return {
+        "schema_version": 1,
+        "trace_schema_version": RUNTIME_TRACE_SCHEMA_VERSION,
+        "privacy": "numeric-aggregates-only",
+        "records": warm_path_records,
+        "rejected_records": aggregate["rejected_records"],
+        "rejected_by_reason": aggregate["rejected_by_reason"],
+        "ignored_non_trace_lines": aggregate["ignored_non_trace_lines"],
+        "ignored_non_warm_path_records":
+            aggregate["records"] - warm_path_records,
+        "latency_ms": latency_ms,
     }
 
 
@@ -1257,6 +1304,26 @@ def render_startup_traces(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_warm_path(report: dict[str, Any]) -> str:
+    lines = [
+        "PRIVACY-SAFE WARM-PATH LATENCY AGGREGATES",
+        f"records: {report['records']} (rejected: "
+        f"{report['rejected_records']}; non-warm-path traces ignored: "
+        f"{report['ignored_non_warm_path_records']}; non-trace lines ignored: "
+        f"{report['ignored_non_trace_lines']})",
+        "stage        samples   p50 ms   p90 ms   p95 ms   p99 ms",
+    ]
+    for stage, distribution in report["latency_ms"].items():
+        lines.append(
+            f"{stage:<12} {distribution['samples']:>7} "
+            f"{distribution['p50']:>8.2f} {distribution['p90']:>8.2f} "
+            f"{distribution['p95']:>8.2f} {distribution['p99']:>8.2f}")
+    budget = report.get("budget")
+    if budget is not None:
+        lines.append("budget: " + ("PASS" if budget["passed"] else "FAIL"))
+    return "\n".join(lines)
+
+
 def render_lifecycle_simulation(report: dict[str, Any]) -> str:
     lines = [
         "DETERMINISTIC LIFECYCLE ADAPTER SIMULATION",
@@ -1385,6 +1452,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     startup.add_argument(
         "--format", choices=("table", "json"), default="table")
 
+    warm_path = commands.add_parser(
+        "warm-path",
+        help="aggregate warm-path latency traces from a runtime log")
+    warm_path.add_argument("--trace-log", type=Path, required=True)
+    warm_path.add_argument("--budgets", type=Path, default=DEFAULT_BUDGETS)
+    warm_path.add_argument("--budget-profile")
+    warm_path.add_argument(
+        "--format", choices=("table", "json"), default="table")
+
     lifecycle = commands.add_parser(
         "lifecycle", help="run deterministic lifecycle adapter simulation")
     lifecycle.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
@@ -1452,6 +1528,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 payload["records"] == 0
                 or payload["rejected_records"] > 0
                 or not payload["budget"]["passed"])
+        elif args.command == "warm-path":
+            payload = summarize_warm_path(args.trace_log)
+            if args.budget_profile:
+                payload["budget"] = evaluate_budgets(
+                    payload, load_budgets(args.budgets), args.budget_profile)
+            rendered = render_warm_path(payload)
+            status = int(
+                payload["records"] == 0
+                or payload["rejected_records"] > 0
+                or ("budget" in payload and not payload["budget"]["passed"]))
         elif args.command == "lifecycle":
             payload = run_lifecycle_simulation(
                 load_corpus(args.corpus), iterations=args.iterations)
@@ -1501,7 +1587,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             except OSError:
                 pass
         detail = "runtime trace input unavailable" \
-            if args.command in {"traces", "startup"} else str(exc)
+            if args.command in {"traces", "startup", "warm-path"} else str(exc)
         print(f"performance lab configuration error: {detail}", file=sys.stderr)
         return 2
     print(json.dumps(payload, indent=2, sort_keys=True)
