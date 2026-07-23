@@ -545,6 +545,13 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("launcher-install.json", launcher_tool)
         self.assertIn("macos-signing-policy.json", launcher_tool)
         self.assertIn("0o600", launcher_tool)
+        # The local install path ad-hoc signs the assembled bundle so macOS
+        # records a valid Designated Requirement, then verifies that signature
+        # and refuses an ad-hoc bundle where a release signature is required.
+        self.assertIn('"--force", "--sign", "-", "--identifier"', launcher_tool)
+        self.assertIn("Contents/_CodeSignature/CodeResources", launcher_tool)
+        self.assertIn('"--display", "--verbose=2"', launcher_tool)
+        self.assertIn("release launcher must be signed", launcher_tool)
         self.assertNotIn("dictate.py\n", launcher_tool)
         self.assertNotIn('"/usr/bin/python', launcher_tool)
         self.assertNotIn('"uv"', launcher_tool)

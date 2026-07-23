@@ -188,6 +188,10 @@ def _compile(destination: Path) -> None:
         source.unlink(missing_ok=True)
     os.chmod(destination, 0o755)
 
+def _adhoc_sign(app: Path) -> None:
+    result = subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", "--identifier", BUNDLE_ID, str(app)], text=True, capture_output=True)
+    if result.returncode: raise LauncherError(result.stderr.strip() or "ad-hoc code signing failed")
+
 def _entries(app: Path) -> set[str]:
     return {p.relative_to(app).as_posix() for p in app.rglob("*") if p.is_file() or p.is_symlink()}
 
@@ -220,16 +224,34 @@ def _verify_pinned_signature(app: Path, policy: Path = DEFAULT_POLICY) -> None:
     result = subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", f"-R={requirement}", str(app)], text=True, capture_output=True)
     if result.returncode: raise LauncherError("launcher does not satisfy the pinned Developer ID requirement")
 
+def _is_adhoc_signed(app: Path) -> bool:
+    result = subprocess.run(["/usr/bin/codesign", "--display", "--verbose=2", str(app)], text=True, capture_output=True)
+    return "adhoc" in (result.stdout + result.stderr)
+
+def _verify_adhoc_signature(app: Path) -> None:
+    result = subprocess.run(["/usr/bin/codesign", "--verify", "--strict", f'-R=identifier "{BUNDLE_ID}"', str(app)], text=True, capture_output=True)
+    if result.returncode: raise LauncherError("launcher ad-hoc signature is invalid")
+
+def _stage_bundle(app: Path) -> None:
+    executable = app / "Contents/MacOS" / EXECUTABLE; executable.parent.mkdir(parents=True)
+    resources = app / "Contents/Resources"; resources.mkdir()
+    _atomic_write(app / "Contents/Info.plist", plistlib.dumps(_expected_plist(), sort_keys=True), 0o644)
+    _compile(executable)
+    _atomic_write(resources / "launcher-source-sha256", (_source_digest() + "\n").encode(), 0o644)
+    # Ad-hoc sign the fully staged bundle so its signature is well-formed: macOS
+    # then records a Designated Requirement and lists "Whisper Face" as a
+    # grantable app in the privacy panes instead of the underlying interpreter.
+    # The signature is deterministic (no timestamp), so byte-identical source
+    # still yields a byte-identical signed bundle. Release automation replaces
+    # this with a Developer ID signature via `codesign --force`.
+    _adhoc_sign(app)
+
 def build_app(app: Path) -> None:
     app = app.expanduser().resolve(); app.parent.mkdir(parents=True, exist_ok=True)
     if app.name != f"{PRODUCT}.app": raise LauncherError("launcher target is invalid")
     staging_root = Path(tempfile.mkdtemp(prefix=f".{app.name}.", dir=app.parent)); staging = staging_root / app.name
     try:
-        executable = staging / "Contents/MacOS" / EXECUTABLE; executable.parent.mkdir(parents=True)
-        resources = staging / "Contents/Resources"; resources.mkdir()
-        _atomic_write(staging / "Contents/Info.plist", plistlib.dumps(_expected_plist(), sort_keys=True), 0o644)
-        _compile(executable)
-        _atomic_write(resources / "launcher-source-sha256", (_source_digest() + "\n").encode(), 0o644)
+        _stage_bundle(staging)
         verify_generic_app(staging)
         if app.exists(): verify_owned_app(app); shutil.rmtree(app)
         os.replace(staging, app)
@@ -246,19 +268,23 @@ def verify_owned_app(app: Path) -> None:
 
 def verify_generic_app(app: Path, *, policy: Path = DEFAULT_POLICY, require_signed: bool = False) -> None:
     app = app.expanduser().resolve(); entries = _entries(app) if app.is_dir() else set()
-    signed = entries == BASE_FILES | SIGNATURE_FILES
-    if entries not in (BASE_FILES, BASE_FILES | SIGNATURE_FILES): raise LauncherError("generic launcher contains missing or unexpected files")
+    if entries != BASE_FILES | SIGNATURE_FILES: raise LauncherError("generic launcher contains missing or unexpected files")
     if plistlib.loads((app / "Contents/Info.plist").read_bytes()) != _expected_plist(): raise LauncherError("launcher Info.plist contract mismatch")
     if (app / "Contents/Resources/launcher-source-sha256").read_text().strip() != _source_digest(): raise LauncherError("launcher source contract mismatch")
     executable = app / "Contents/MacOS" / EXECUTABLE
     if not executable.stat().st_mode & stat.S_IXUSR or executable.read_bytes()[:4] != b"\xcf\xfa\xed\xfe": raise LauncherError("launcher executable is not an arm64 Mach-O")
-    if signed:
-        _verify_pinned_signature(app, policy)
-    if require_signed and not signed: raise LauncherError("release launcher must be signed")
-    if not signed:
+    if _is_adhoc_signed(app):
+        # Local install path: a deterministic ad-hoc signature. Reject when a
+        # release signature is required; otherwise confirm the signature is
+        # structurally valid and bound to our identifier, then rebuild + re-sign
+        # from source and require the whole signed bundle to reproduce exactly.
+        if require_signed: raise LauncherError("release launcher must be signed")
+        _verify_adhoc_signature(app)
         with tempfile.TemporaryDirectory() as directory:
-            expected = Path(directory) / EXECUTABLE; _compile(expected)
-            if executable.read_bytes() != expected.read_bytes(): raise LauncherError("launcher compiled binary mismatch")
+            reference = Path(directory) / f"{PRODUCT}.app"; _stage_bundle(reference)
+            if _bundle_digest(app) != _bundle_digest(reference): raise LauncherError("launcher compiled binary mismatch")
+    else:
+        _verify_pinned_signature(app, policy)
     for forbidden in ("checkout-path", "source-revision", "dictate.py", "setup.sh"):
         if any(p.name == forbidden for p in app.rglob("*")): raise LauncherError("launcher must not embed runtime source or machine binding")
 
