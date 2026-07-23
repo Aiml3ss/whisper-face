@@ -1,0 +1,56 @@
+---
+const steps = [
+  { h: 'Download and open', p: 'Grab the latest build and open it. No account, no sign-up wall.' },
+  {
+    h: 'Run Install.command',
+    p: 'One repeatable flow sets up the app, locked dependencies, models, the native helper, login services, and health checks.',
+  },
+  {
+    h: 'Grant mic and accessibility',
+    p: 'macOS asks once for microphone and accessibility access — that is what lets Whisper Face hear you and type for you.',
+  },
+];
+---
+
+<section class="band wrap" id="install">
+  <div class="sec-head">
+    <span class="kicker">Get started</span>
+    <h2>Setup is part of the product.</h2>
+    <p>One command provisions everything and checks its own work. Then hold your key and talk.</p>
+  </div>
+
+  <div class="install-grid">
+    <div class="install-steps">
+      {
+        steps.map((s, i) => (
+          <div class="istep">
+            <div class="n">{i + 1}</div>
+            <div>
+              <h4>{s.h}</h4>
+              <p>{s.p}</p>
+            </div>
+          </div>
+        ))
+      }
+      <div class="cta-row" style="margin-top:8px">
+        <a class="btn btn-primary" href="https://github.com/Aiml3ss/whisper-face">Get it on GitHub</a>
+        <a class="btn btn-ghost" href="/docs/getting-started">Read the guide</a>
+      </div>
+      <p class="install-note">Building from source today — clone the repo and run <code>Install.command</code>. A signed, notarized release is on the way.</p>
+    </div>
+
+    <div class="terminal" role="img" aria-label="Terminal showing the Install.command setup running and reporting all checks passed">
+      <div class="bar"><i></i><i></i><i></i></div>
+      <pre><code><span class="muted"># from the Whisper Face folder</span>
+<span class="p">you@mac</span> ~/Whisper<span class="muted">-</span>Face $ <span class="c">./Install.command</span>
+
+<span class="c">✓</span> app installed
+<span class="c">✓</span> models ready        <span class="muted">(offline)</span>
+<span class="c">✓</span> native helper linked
+<span class="c">✓</span> microphone + accessibility
+<span class="c">✓</span> health checks passed
+
+<span class="muted">Hold your key and start talking →</span></code></pre>
+    </div>
+  </div>
+</section>

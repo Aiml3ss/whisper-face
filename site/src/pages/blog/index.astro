@@ -1,0 +1,30 @@
+---
+import Base from '../../layouts/Base.astro';
+import Nav from '../../components/Nav.astro';
+import Footer from '../../components/Footer.astro';
+import { getCollection } from 'astro:content';
+
+const posts = (await getCollection('blog')).sort((a, b) => (a.data.date < b.data.date ? 1 : -1));
+---
+
+<Base title="Blog · Whisper Face" description="Notes from the menu bar — releases, decisions, and the odd opinion about dictation.">
+  <Nav />
+  <main class="wrap band">
+    <div class="sec-head">
+      <span class="kicker">Blog</span>
+      <h2>Notes from the menu bar.</h2>
+    </div>
+    <div class="post-list">
+      {
+        posts.map((p) => (
+          <a class="post-card" href={`/blog/${p.id}`}>
+            <span class="date">{p.data.date}</span>
+            <h3>{p.data.title}</h3>
+            <p>{p.data.description}</p>
+          </a>
+        ))
+      }
+    </div>
+  </main>
+  <Footer />
+</Base>

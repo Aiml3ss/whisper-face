@@ -1,0 +1,29 @@
+---
+import Base from '../../layouts/Base.astro';
+import Nav from '../../components/Nav.astro';
+import Footer from '../../components/Footer.astro';
+import { getCollection, render } from 'astro:content';
+
+export async function getStaticPaths() {
+  const posts = await getCollection('blog');
+  return posts.map((post) => ({ params: { slug: post.id }, props: { post } }));
+}
+
+const { post } = Astro.props;
+const { Content } = await render(post);
+---
+
+<Base title={`${post.data.title} · Whisper Face`} description={post.data.description}>
+  <Nav />
+  <main class="wrap" style="padding:44px 0 80px">
+    <article class="prose" style="margin-inline:auto">
+      <p class="date" style="font-family:var(--mono);color:var(--brand);font-weight:600;margin:0 0 6px">
+        {post.data.date}
+      </p>
+      <h1>{post.data.title}</h1>
+      <p class="lead">{post.data.description}</p>
+      <Content />
+    </article>
+  </main>
+  <Footer />
+</Base>

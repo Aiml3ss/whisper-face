@@ -1,0 +1,26 @@
+---
+import Face from './Face.astro';
+import { FACES, ORDER } from '../data/faces';
+---
+
+<footer class="foot">
+  <div class="wrap">
+    <div class="foot-faces">
+      {
+        ORDER.map((n) => (
+          <span class="mini" style={`--sc: ${FACES[n].color}`}>
+            <Face animal={n} />
+          </span>
+        ))
+      }
+    </div>
+    <nav class="foot-links">
+      <a href="https://github.com/Aiml3ss/whisper-face">GitHub</a>
+      <a href="/docs">Docs</a>
+      <a href="/blog">Blog</a>
+      <a href="/#privacy">Privacy</a>
+      <a href="/docs/troubleshooting">Support</a>
+    </nav>
+    <span class="foot-note">Made for Mac. Windows in progress.</span>
+  </div>
+</footer>

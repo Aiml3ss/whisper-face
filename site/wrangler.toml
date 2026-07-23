@@ -1,0 +1,4 @@
+# Cloudflare Pages (static build). Used by `wrangler pages deploy` and by the
+# Cloudflare git integration when the project root is set to `site/`.
+name = "whisper-face"
+pages_build_output_dir = "./dist"
