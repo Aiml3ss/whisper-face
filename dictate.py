@@ -313,6 +313,7 @@ from parrot_core import (  # noqa: E402
     EDIT_COMMAND_CAPITALIZE_LAST,
     EDIT_COMMAND_LOWERCASE_LAST,
     classify_edit_command,
+    transform_last_insertion,
     compile_cleanup,
     compile_code_dictation,
     confidence_from_segments,
@@ -950,6 +951,14 @@ PIPELINE_STATE = {
     "last_insertion_state": "legacy",
     "cleanup_status": "Checking",
 }
+
+# The exact text of the most recent verified insertion, retained only so an
+# opt-in spoken case command ("all caps", "capitalize that", "lowercase that")
+# can re-verify and rewrite that exact text in place. Written solely on a
+# verified commit while the pref is enabled; every consumer re-reads the live
+# focused field before touching anything, so a stale value can never drive a
+# destructive edit. None means there is no tracked insertion to act on.
+LAST_INSERTION = None
 
 
 def emit_performance_trace(event: str, metrics: dict) -> bool:
@@ -7827,16 +7836,58 @@ def apply_spoken_edit_command(recognized_raw: str, rec, bundle: str) -> bool:
     cmd = classify_edit_command(recognized_raw)
     if cmd is None:
         return False
-    # Tier 2 (uppercase/capitalize/lowercase the last insertion) needs the exact
-    # last inserted text and an in-place rewrite. A blind backspace+paste would
-    # bypass the insertion-integrity lease/readback the paste path depends on and
-    # could delete unrelated text if focus moved, so it is intentionally deferred
-    # to normal dictation rather than half-implemented.
-    # TODO Tier 2: re-observe the destination, verify it still holds the last
-    # insertion, then replace it through the insertion coordinator.
+    # Tier 2: rewrite the exact text of the last insertion in place. This is
+    # the dispatcher's only destructive edit, so it fails closed. It acts only
+    # after proving, against a FRESH focus snapshot, that the exact previously
+    # inserted text is still sitting immediately before a zero-length caret in
+    # the same field. On any mismatch, focus drift, active selection, or
+    # uncertainty it issues no keystroke at all (a soft cue instead) rather
+    # than risk deleting unrelated text. Replacement is select-then-paste so
+    # the delete and the re-insert are one atomic substitution with no
+    # half-edited interval.
     if cmd in (EDIT_COMMAND_UPPERCASE_LAST, EDIT_COMMAND_CAPITALIZE_LAST,
                EDIT_COMMAND_LOWERCASE_LAST):
-        return False
+        if LAST_INSERTION is None:
+            return False  # no tracked insertion yet: fall through to dictation
+        inserted = LAST_INSERTION["text"]
+        transformed = transform_last_insertion(cmd, inserted)
+        if transformed is None:
+            return False  # already in target case: nothing to do, fall through
+        snapshot = focused_snapshot()
+        cursor = snapshot.selection[0] if (
+            snapshot is not None and snapshot.selection is not None) else None
+        # Fail closed unless the live field still holds the exact inserted text
+        # immediately before a zero-length caret in the same destination.
+        safe = bool(
+            snapshot is not None
+            and snapshot.text is not None
+            and snapshot.selection is not None
+            and snapshot.selection[1] == 0          # a caret, not a selection
+            and cursor is not None
+            and cursor - len(inserted) >= 0
+            and snapshot.text[cursor - len(inserted):cursor] == inserted
+            and focus_destination_matches(
+                LAST_INSERTION["element"], snapshot,
+                LAST_INSERTION["bundle"], bundle)
+        )
+        if not safe:
+            # Focus drifted, the text was edited, or a selection is active.
+            # Neither type the command literally nor edit destructively: return
+            # handled (suppressing dictation) and play a soft "couldn't apply"
+            # cue so the failure is quiet and never mutates the wrong text.
+            print("[edit-command] case rewrite skipped: last insertion not "
+                  "verified before cursor")
+            play("Tink")
+            return True
+        # Select exactly the inserted characters, then paste over the selection
+        # so the substitution is atomic: no interval exists where the text is
+        # deleted but its replacement is not yet in place.
+        for _ in range(len(inserted)):
+            _press_edit_chord(keyboard.Key.shift, keyboard.Key.left)
+        paste(transformed)
+        LAST_INSERTION["text"] = transformed
+        print(f"[edit-command] {cmd}")
+        return True
     # Tier 1: stateless keyboard actions, dispatched exactly like voice commands.
     if cmd in (EDIT_COMMAND_UNDO, EDIT_COMMAND_DELETE_SENTENCE):
         _press_edit_chord(keyboard.Key.cmd, "z")
@@ -8012,6 +8063,7 @@ def assemble_raw(chunk_futs: list, pre_future,
 def finish_and_process(rec: Recorder, hud: HUD, active: dict):
     """Runs at key release: chunks cut during the hold are already decoding;
     kick off the remainder in parallel with the tail capture, then join."""
+    global LAST_INSERTION
     released_at = rec.released_at or time.perf_counter()
     try:
         wait_for_tail = release_should_wait_for_tail(rec)
@@ -8417,6 +8469,18 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 PIPELINE_STATE["last_consequence_route"],
                 is_macos=IS_MACOS,
             ))
+            if PREFERENCES["spoken_edit_commands"]:
+                # Track only what an opt-in spoken case command needs to
+                # re-verify and rewrite this text in place. Recorded solely on
+                # this verified commit and re-checked against a fresh focus
+                # snapshot before any keystroke, so a stale value is never
+                # acted on. Gated by the pref so the feature is inert when off.
+                LAST_INSERTION = {
+                    "text": text,
+                    "element": insertion_target,
+                    "bundle": bundle,
+                    "utterance_id": event_id,
+                }
         elif attempted:
             CAPTION["text"] = (
                 "Paste unverified — check target; saved in Voice Outbox")
