@@ -128,6 +128,24 @@
       "scenario": {"environment": "office", "delivery": "developer", "risk": "identifier"}
     },
     {
+      "id": "quiet-accented-standup",
+      "reference": "In the standup, Priya said the staging build finished at half past nine.",
+      "dimensions": ["accent", "quiet_speech", "names"],
+      "scenario": {"environment": "quiet", "delivery": "low-amplitude", "evaluation_profile": "Indian English physical microphone recording required", "risk": "proper-noun"}
+    },
+    {
+      "id": "open-office-false-start",
+      "reference": "Let's ship on—wait, hold on—let's ship after the security review clears.",
+      "dimensions": ["false_starts", "noise", "corrections"],
+      "scenario": {"environment": "open-office-babble", "delivery": "false-start", "evaluation_profile": "licensed noise mix required", "risk": "meaning-change"}
+    },
+    {
+      "id": "quiet-late-night-note",
+      "reference": "Quietly remind me to back up the drive before the eight o'clock sync.",
+      "dimensions": ["quiet_speech", "numbers"],
+      "scenario": {"environment": "quiet", "delivery": "low-amplitude", "evaluation_profile": "physical microphone recording required", "risk": "numeric-anchor"}
+    },
+    {
       "id": "long-form-release-brief",
       "reference": "Here is the release brief for Tuesday, March 17. First, Morgan will verify build 2042 and publish the checksum. Second, José will review the migration notes and confirm that https://status.example.com is ready. Third, the Mac team will run the full test suite and record every failure without paraphrasing names, numbers, commands, or paths. If the first validation fails—actually, let me correct that—if any validation fails, stop the release, preserve the logs, and open a blocking issue. Do not retry an ambiguous insertion. After all checks pass, send the final notice to release dot team at example dot org and archive the temporary artifacts.",
       "dimensions": ["names", "numbers", "dates", "urls", "commands", "corrections", "email", "false_starts"],

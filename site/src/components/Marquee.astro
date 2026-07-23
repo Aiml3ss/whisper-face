@@ -1,0 +1,28 @@
+---
+const apps = [
+  'Mail',
+  'Slack',
+  'Notes',
+  'VS Code',
+  'Messages',
+  'Google Docs',
+  'Notion',
+  'the terminal',
+  'Figma',
+  'that one login box',
+];
+---
+
+<div class="marquee" aria-hidden="true">
+  <div class="marquee-track">
+    <span>
+      {apps.map((a) => (<>{a}<b class="star">✦</b></>))}
+    </span>
+    <span>
+      {apps.map((a) => (<>{a}<b class="star">✦</b></>))}
+    </span>
+  </div>
+</div>
+<p class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">
+  Whisper Face types into any text field on your Mac.
+</p>

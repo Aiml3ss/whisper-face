@@ -1,0 +1,39 @@
+---
+import Base from '../layouts/Base.astro';
+import Nav from '../components/Nav.astro';
+import Footer from '../components/Footer.astro';
+import Face from '../components/Face.astro';
+---
+
+<Base title="This page wandered off · Whisper Face">
+  <Nav />
+  <main class="wrap" style="text-align:center;padding:90px 0 100px;display:flex;flex-direction:column;align-items:center;gap:22px">
+    <span class="notfound-face"><Face animal="owl" /></span>
+    <h1 class="title" style="font-size:clamp(52px,10vw,96px);margin:0">404</h1>
+    <p class="lede" style="margin:0 auto">The owl heard you, but this page is not where you left it.</p>
+    <div class="cta-row" style="justify-content:center;margin:6px 0 0">
+      <a class="btn btn-primary" href="/">Back home</a>
+      <a class="btn btn-ghost" href="/docs">Read the docs</a>
+    </div>
+  </main>
+  <Footer />
+
+  <style>
+    .notfound-face {
+      display: grid;
+      place-items: center;
+      width: 132px;
+      height: 132px;
+      border-radius: 30px;
+      border: 4px solid var(--line);
+      background: var(--owl);
+      box-shadow: var(--sticker-lg);
+      transform: rotate(-3deg);
+    }
+    .notfound-face .face-frames {
+      position: relative;
+      width: 96px;
+      height: 96px;
+    }
+  </style>
+</Base>

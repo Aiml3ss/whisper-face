@@ -37,6 +37,7 @@ from performance_lab import (
     run_compiler_stress,
     run_lifecycle_simulation,
     summarize_corpus,
+    summarize_warm_path,
 )
 
 
@@ -120,6 +121,92 @@ class PrivacySafeDashboardTests(unittest.TestCase):
         self.assertEqual(report["route_quality"]["rate"], 0.6667)
         self.assertEqual(report["verified_delivery"]["rate"], 0.6667)
         self.assertNotIn("observations", report)
+        self.assertNotIn("reference", json.dumps(report))
+
+    def test_latency_distributions_expose_p90_ordered_within_tail(self):
+        corpus = load_corpus(DEFAULT_CORPUS)
+        records = [
+            {
+                "case_id": "name-multilingual",
+                "latency_ms": {"end_to_end": value, "compiler": value // 10},
+            }
+            for value in (100, 200, 300, 400, 500)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "observations.jsonl"
+            path.write_text(
+                "\n".join(json.dumps(record) for record in records) + "\n",
+                encoding="utf-8",
+            )
+            report = evaluate_observations(path, corpus)
+
+        end_to_end = report["latency_ms"]["end_to_end"]
+        self.assertEqual(end_to_end["p90"], 460.0)
+        for stage, distribution in report["latency_ms"].items():
+            self.assertIn("p90", distribution)
+            self.assertLessEqual(distribution["p50"], distribution["p90"])
+            self.assertLessEqual(distribution["p90"], distribution["p95"])
+            self.assertLessEqual(distribution["p95"], distribution["p99"])
+
+    def test_per_dimension_rollup_accumulates_each_case_dimension(self):
+        corpus = load_corpus(DEFAULT_CORPUS)
+        records = [
+            {
+                "case_id": "currency-and-decimal",
+                "edit_characters": 0,
+                "pasted_words": 10,
+                "zero_edit": True,
+                "selected_route": "turbo",
+                "expected_route": "turbo",
+            },
+            {
+                "case_id": "currency-and-decimal",
+                "edit_characters": 4,
+                "pasted_words": 10,
+                "zero_edit": False,
+                "selected_route": "tiny",
+                "expected_route": "turbo",
+            },
+            {
+                "case_id": "date-time-zone",
+                "edit_characters": 2,
+                "pasted_words": 10,
+                "zero_edit": True,
+                "selected_route": "turbo",
+                "expected_route": "turbo",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "observations.jsonl"
+            path.write_text(
+                "\n".join(json.dumps(record) for record in records) + "\n",
+                encoding="utf-8",
+            )
+            report = evaluate_observations(path, corpus)
+
+        by_dimension = report["by_dimension"]
+        # currency-and-decimal is [numbers, corrections]; date-time-zone is
+        # [dates, numbers], so numbers accumulates all three records.
+        self.assertEqual(by_dimension["numbers"], {
+            "samples": 3,
+            "zero_edit_rate": 0.6667,
+            "correction_burden_c100w": 20.0,
+            "route_quality_rate": 0.6667,
+        })
+        self.assertEqual(by_dimension["corrections"], {
+            "samples": 2,
+            "zero_edit_rate": 0.5,
+            "correction_burden_c100w": 20.0,
+            "route_quality_rate": 0.5,
+        })
+        self.assertEqual(by_dimension["dates"], {
+            "samples": 1,
+            "zero_edit_rate": 1.0,
+            "correction_burden_c100w": 20.0,
+            "route_quality_rate": 1.0,
+        })
+        # Dimensions with no observed records are omitted, never divided by zero.
+        self.assertNotIn("urls", by_dimension)
         self.assertNotIn("reference", json.dumps(report))
 
     def test_malformed_identifiers_and_free_text_labels_are_rejected(self):
@@ -400,6 +487,154 @@ class RuntimeTraceAggregationTests(unittest.TestCase):
             status = main([
                 "startup", "--cold-trace-log", private_path,
                 "--warm-trace-log", private_path, "--format", "json",
+            ])
+        self.assertEqual(status, 2)
+        self.assertNotIn(private_path, error.getvalue())
+        self.assertEqual(
+            error.getvalue().strip(),
+            "performance lab configuration error: runtime trace input unavailable",
+        )
+
+
+class WarmPathLatencyTests(unittest.TestCase):
+    @staticmethod
+    def _warm_path(**metrics):
+        return "[trace] " + json.dumps({
+            "schema_version": 1,
+            "event": "warm_path",
+            **metrics,
+        })
+
+    def test_warm_path_schema_is_shared_and_stage_ordered(self):
+        # Slice 2 adds warm_path to the closed schema. The AST parity test keeps
+        # the runtime and lab tuples byte-identical; this pins the lab side so a
+        # reordered or renamed stage is caught here too.
+        self.assertEqual(
+            RUNTIME_TRACE_SCHEMAS["warm_path"],
+            ("release_ms", "asr_ms", "compiler_ms",
+             "cleanup_ms", "context_ms", "insertion_ms"),
+        )
+
+    def test_summarize_warm_path_aggregates_all_stages_with_p90(self):
+        # insertion_ms sweeps 1..5 so p90 is a known interpolated tail value.
+        samples = (1, 2, 3, 4, 5)
+        traces = [
+            self._warm_path(
+                release_ms=100 * value,
+                asr_ms=200 * value,
+                compiler_ms=10 * value,
+                cleanup_ms=50 * value,
+                context_ms=5 * value,
+                insertion_ms=value,
+            )
+            for value in samples
+        ]
+        private_values = (
+            "the user's private dictation",
+            "/Users/private/warm.log",
+        )
+        noise = [
+            "an ordinary log line may contain private speech",
+            self._warm_path(
+                release_ms=1, asr_ms=1, compiler_ms=1, cleanup_ms=1,
+                context_ms=1, insertion_ms=1, transcript=private_values[0]),
+            "[trace] " + json.dumps({
+                "schema_version": 1, "event": "warmup_total",
+                "duration_ms": 42, "success": 1}),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "contains-private-warm-name.log"
+            path.write_text(
+                "\n".join(traces + noise) + "\n", encoding="utf-8")
+            report = summarize_warm_path(path)
+
+        self.assertEqual(report["records"], 5)
+        self.assertEqual(report["rejected_records"], 1)
+        self.assertEqual(
+            report["rejected_by_reason"], {"unknown-or-private-field": 1})
+        self.assertEqual(report["ignored_non_trace_lines"], 1)
+        self.assertEqual(report["ignored_non_warm_path_records"], 1)
+        self.assertEqual(
+            set(report["latency_ms"]),
+            {"release", "asr", "compiler", "cleanup", "context", "insertion"},
+        )
+        insertion = report["latency_ms"]["insertion"]
+        self.assertIn("p90", insertion)
+        self.assertEqual(insertion["samples"], 5)
+        self.assertEqual(insertion["p50"], 3.0)
+        self.assertEqual(insertion["p90"], 4.6)
+        self.assertEqual(insertion["p95"], 4.8)
+        self.assertEqual(insertion["p99"], 4.96)
+        self.assertEqual(insertion["max"], 5.0)
+        # Seconds are converted to milliseconds upstream and carried straight
+        # through: the release stage sweeps 100..500 ms.
+        self.assertEqual(report["latency_ms"]["release"]["max"], 500.0)
+        for distribution in report["latency_ms"].values():
+            self.assertLessEqual(distribution["p50"], distribution["p90"])
+            self.assertLessEqual(distribution["p90"], distribution["p95"])
+            self.assertLessEqual(distribution["p95"], distribution["p99"])
+        serialized = json.dumps(report)
+        self.assertTrue(
+            all(value not in serialized for value in private_values))
+        self.assertNotIn("transcript", serialized.casefold())
+
+    def test_warm_path_stage_budget_gates_on_samples_and_tail(self):
+        budgets = load_budgets(DEFAULT_BUDGETS)
+        stages = ("release", "asr", "compiler", "cleanup", "context",
+                  "insertion")
+        report = {
+            "latency_ms": {
+                stage: {"samples": 20, "p95": 1.0} for stage in stages
+            }
+        }
+        passing = evaluate_budgets(report, budgets, "warm_path_stage")
+        self.assertTrue(passing["passed"])
+        self.assertEqual(len(passing["checks"]), 6)
+
+        report["latency_ms"]["insertion"] = {"samples": 5, "p95": 1.0}
+        insufficient = evaluate_budgets(report, budgets, "warm_path_stage")
+        insertion = next(
+            check for check in insufficient["checks"]
+            if check["id"] == "insertion-p95")
+        self.assertEqual(insertion["reason"], "insufficient-samples")
+        self.assertFalse(insufficient["passed"])
+
+        report["latency_ms"]["insertion"] = {"samples": 20, "p95": 9000.0}
+        regressed = evaluate_budgets(report, budgets, "warm_path_stage")
+        insertion = next(
+            check for check in regressed["checks"]
+            if check["id"] == "insertion-p95")
+        self.assertEqual(insertion["reason"], "threshold-exceeded")
+
+    def test_warm_path_cli_reports_json_without_echoing_input_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "private-warm-runtime.log"
+            path.write_text(
+                "\n".join(
+                    self._warm_path(
+                        release_ms=100, asr_ms=200, compiler_ms=10,
+                        cleanup_ms=50, context_ms=5, insertion_ms=2)
+                    for _ in range(3)) + "\n",
+                encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                status = main([
+                    "warm-path", "--trace-log", str(path), "--format", "json",
+                ])
+        payload = json.loads(output.getvalue())
+        self.assertEqual(status, 0)
+        self.assertEqual(payload["records"], 3)
+        self.assertEqual(
+            set(payload["latency_ms"]),
+            {"release", "asr", "compiler", "cleanup", "context", "insertion"})
+        self.assertNotIn("private-warm-runtime", output.getvalue())
+
+    def test_warm_path_cli_does_not_echo_an_unavailable_input_path(self):
+        private_path = "/Users/private/secret-warm-runtime.log"
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            status = main([
+                "warm-path", "--trace-log", private_path, "--format", "json",
             ])
         self.assertEqual(status, 2)
         self.assertNotIn(private_path, error.getvalue())

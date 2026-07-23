@@ -469,6 +469,10 @@ PERFORMANCE_TRACE_SCHEMAS = {
         "trailing_silence_ms",
         "voiced_fraction",
     ),
+    "warm_path": (
+        "release_ms", "asr_ms", "compiler_ms",
+        "cleanup_ms", "context_ms", "insertion_ms",
+    ),
 }
 CONSEQUENCE_RISK_IDS = frozenset({
     "name", "number", "currency", "date", "time", "recipient", "contact",
@@ -8393,8 +8397,10 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         receipt = make_paste_receipt(
             insertion_target, text, bundle, rec.mode, event_id) \
             if learn_correction else None
+        insertion_started_at = time.perf_counter()
         integrity_receipt = commit_insertion(
             rec, text, bundle, insertion_target)
+        t_insert = time.perf_counter() - insertion_started_at
         # Insertion is already terminal before any audio is copied. Playback
         # retention is strictly optional and failures cannot affect the paste.
         retain_consequence_microspans(
@@ -8464,7 +8470,33 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
               f"context {t_context_firewall:.3f}s/"
               f"{context_firewall_metrics['disposition']} | "
               f"clean {t_clean:.2f}s | "
+              f"insert {t_insert:.3f}s | "
               f"{len(text.split())} words]")
+        # Best-effort warm-path latency trace: numeric milliseconds only, no
+        # transcript text or identifiers. Any missing, non-numeric, or
+        # non-finite stage value is skipped and any fault is swallowed, so this
+        # telemetry can never interrupt a completed dictation.
+        try:
+            warm_path_stage_seconds = (
+                release_total, t_asr, t_compile,
+                t_clean, t_context_firewall, t_insert,
+            )
+            if all(
+                isinstance(stage, (int, float))
+                and not isinstance(stage, bool)
+                and math.isfinite(stage)
+                for stage in warm_path_stage_seconds
+            ):
+                emit_performance_trace("warm_path", {
+                    "release_ms": round(release_total * 1000.0, 4),
+                    "asr_ms": round(t_asr * 1000.0, 4),
+                    "compiler_ms": round(t_compile * 1000.0, 4),
+                    "cleanup_ms": round(t_clean * 1000.0, 4),
+                    "context_ms": round(t_context_firewall * 1000.0, 4),
+                    "insertion_ms": round(t_insert * 1000.0, 4),
+                })
+        except Exception:
+            pass
         append_transcript(recognized_raw, text, bundle, path, metrics={
             "release_s": round(release_total, 4),
             "press_s": round(press_total, 4),
@@ -8478,6 +8510,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "consequence_s": round(t_consequence, 4),
             "context_firewall_s": round(t_context_firewall, 4),
             "cleanup_s": round(t_clean, 4),
+            "insertion_s": round(t_insert, 4),
             "asr_engine": recognition.engine or "unknown",
             "confidence": round(compiler_result.confidence, 4),
             "verified": recognition.verified,

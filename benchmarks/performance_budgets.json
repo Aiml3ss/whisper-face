@@ -15,6 +15,65 @@
         }
       ]
     },
+    "warm_path_stage": {
+      "description": "Per-stage warm-path latency guardrails aggregated from a collected warm_path trace log. Thresholds are deliberately tolerant of shared CI runners and only catch hangs and order-of-magnitude regressions; they do not assert steady-state or physical dictation conditions. Samples are gated so a thin trace log reports insufficient-samples rather than a misleading pass.",
+      "checks": [
+        {
+          "id": "release-p95",
+          "metric": "latency_ms.release.p95",
+          "samples_metric": "latency_ms.release.samples",
+          "minimum_samples": 20,
+          "operator": "<=",
+          "threshold": 5000.0,
+          "unit": "ms"
+        },
+        {
+          "id": "asr-p95",
+          "metric": "latency_ms.asr.p95",
+          "samples_metric": "latency_ms.asr.samples",
+          "minimum_samples": 20,
+          "operator": "<=",
+          "threshold": 15000.0,
+          "unit": "ms"
+        },
+        {
+          "id": "compiler-p95",
+          "metric": "latency_ms.compiler.p95",
+          "samples_metric": "latency_ms.compiler.samples",
+          "minimum_samples": 20,
+          "operator": "<=",
+          "threshold": 2000.0,
+          "unit": "ms"
+        },
+        {
+          "id": "cleanup-p95",
+          "metric": "latency_ms.cleanup.p95",
+          "samples_metric": "latency_ms.cleanup.samples",
+          "minimum_samples": 20,
+          "operator": "<=",
+          "threshold": 5000.0,
+          "unit": "ms"
+        },
+        {
+          "id": "context-p95",
+          "metric": "latency_ms.context.p95",
+          "samples_metric": "latency_ms.context.samples",
+          "minimum_samples": 20,
+          "operator": "<=",
+          "threshold": 2000.0,
+          "unit": "ms"
+        },
+        {
+          "id": "insertion-p95",
+          "metric": "latency_ms.insertion.p95",
+          "samples_metric": "latency_ms.insertion.samples",
+          "minimum_samples": 20,
+          "operator": "<=",
+          "threshold": 2000.0,
+          "unit": "ms"
+        }
+      ]
+    },
     "startup_readiness": {
       "description": "Caller-labelled startup trace guardrails. Cold requires three independently collected launches and warm requires ten cache-warm launches. These bounds detect hangs and major regressions; they do not prove physical cold-cache or steady-state conditions.",
       "checks": [
@@ -255,6 +314,33 @@
           "minimum_samples": 100,
           "operator": ">=",
           "threshold": 0.99,
+          "unit": "fraction"
+        },
+        {
+          "id": "numbers-correction-burden",
+          "metric": "by_dimension.numbers.correction_burden_c100w",
+          "samples_metric": "by_dimension.numbers.samples",
+          "minimum_samples": 100,
+          "operator": "<=",
+          "threshold": 5.0,
+          "unit": "characters-per-100-words"
+        },
+        {
+          "id": "names-correction-burden",
+          "metric": "by_dimension.names.correction_burden_c100w",
+          "samples_metric": "by_dimension.names.samples",
+          "minimum_samples": 100,
+          "operator": "<=",
+          "threshold": 8.0,
+          "unit": "characters-per-100-words"
+        },
+        {
+          "id": "code-route-quality",
+          "metric": "by_dimension.code.route_quality_rate",
+          "samples_metric": "by_dimension.code.samples",
+          "minimum_samples": 100,
+          "operator": ">=",
+          "threshold": 0.95,
           "unit": "fraction"
         }
       ]

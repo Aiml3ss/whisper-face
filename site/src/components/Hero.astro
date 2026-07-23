@@ -1,0 +1,157 @@
+---
+import Face from './Face.astro';
+import { FACES, ORDER, framePair, nextId, type Animal } from '../data/faces';
+
+const initial: Animal = 'parrot';
+const heroUid = nextId();
+---
+
+<section class="hero wrap">
+  <div class="hero-copy">
+    <p class="eyebrow"><span class="dot"></span>Local voice input for Mac</p>
+    <h1 class="title">Hold a key.<br />Say the thing.<br /><span class="hl">It types.</span></h1>
+    <p class="lede">
+      A one-click voice keyboard for your Mac. It listens, tidies up what you said, and drops the
+      text right where your cursor is.
+    </p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="/#install">Download for Mac</a>
+      <a class="btn btn-ghost" href="https://github.com/Aiml3ss/whisper-face">Star on GitHub</a>
+    </div>
+    <ul class="pills">
+      <li><b>◆</b> 100% on-device</li>
+      <li><b>◆</b> No account</li>
+      <li><b>◆</b> No word cap</li>
+      <li><b>◆</b> Open source</li>
+    </ul>
+  </div>
+
+  <div class="hero-stage">
+    <div class="stage" id="stage">
+      <div class="chip" id="chip" style={`--chip: ${FACES[initial].color}`}>
+        <svg class="spark" viewBox="0 0 64 64" fill="none" stroke="var(--spark)" stroke-width="4" stroke-linecap="round" aria-hidden="true">
+          <path d="M40 12 L52 6"></path>
+          <path d="M46 24 L60 21" opacity=".6"></path>
+          <circle cx="57" cy="9" r="3" fill="var(--spark)" stroke="none" opacity=".7"></circle>
+        </svg>
+        <div class="face-frames" id="heroFace" set:html={framePair(initial, heroUid)}></div>
+      </div>
+    </div>
+
+    <div class="switcher" id="switcher">
+      {
+        ORDER.map((n) => (
+          <button
+            class="swatch"
+            data-animal={n}
+            style={`--sc: ${FACES[n].color}`}
+            aria-pressed={n === initial ? 'true' : 'false'}
+            aria-label={`Use the ${FACES[n].label} face`}
+          >
+            <Face animal={n} />
+          </button>
+        ))
+      }
+    </div>
+
+    <div class="ticker">
+      <span class="kbd">Hold&nbsp;⌥</span>
+      <span class="stream" id="stream" aria-live="polite"></span>
+    </div>
+  </div>
+</section>
+
+<script>
+  import { FACES, ORDER, framePair, type Animal } from '../data/faces';
+
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const stage = document.getElementById('stage')!;
+  const chip = document.getElementById('chip')!;
+  const heroFace = document.getElementById('heroFace')!;
+  const stream = document.getElementById('stream')!;
+  const switcher = document.getElementById('switcher')!;
+
+  let current: Animal = 'parrot';
+  let uid = 0;
+  let flapT: number | undefined;
+  let typeT: number | undefined;
+  let restT: number | undefined;
+
+  function setActive() {
+    switcher.querySelectorAll<HTMLElement>('.swatch').forEach((b) => {
+      b.setAttribute('aria-pressed', b.dataset.animal === current ? 'true' : 'false');
+    });
+  }
+
+  function render() {
+    chip.style.setProperty('--chip', FACES[current].color);
+    heroFace.innerHTML = framePair(current, 'h' + uid++);
+    setActive();
+  }
+
+  function stop() {
+    window.clearTimeout(flapT);
+    window.clearTimeout(typeT);
+    window.clearTimeout(restT);
+  }
+
+  function setStream(txt: string, cursor: boolean) {
+    stream.innerHTML = txt + (cursor ? '<span class="cur"></span>' : '');
+  }
+
+  function speak() {
+    const text = FACES[current].line;
+    let i = 0;
+    stage.classList.add('speaking');
+
+    function flap() {
+      stage.querySelector('#heroFace')!.classList.toggle('mouth');
+      flapT = window.setTimeout(flap, 90 + Math.floor(Math.abs(Math.sin(i * 1.7)) * 120));
+    }
+    function type() {
+      i++;
+      setStream(text.slice(0, i), true);
+      if (i < text.length) {
+        typeT = window.setTimeout(type, 34 + (text[i - 1] === ' ' ? 55 : 0));
+      } else {
+        window.clearTimeout(flapT);
+        heroFace.classList.remove('mouth');
+        stage.classList.remove('speaking');
+        restT = window.setTimeout(() => {
+          current = ORDER[(ORDER.indexOf(current) + 1) % ORDER.length];
+          render();
+          restart();
+        }, 2200);
+      }
+    }
+    flap();
+    type();
+  }
+
+  function restart() {
+    stop();
+    if (reduce) {
+      setStream(FACES[current].line, false);
+      return;
+    }
+    setStream('', true);
+    typeT = window.setTimeout(speak, 420);
+  }
+
+  switcher.addEventListener('click', (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLElement>('.swatch');
+    if (!b || !b.dataset.animal) return;
+    current = b.dataset.animal as Animal;
+    render();
+    restart();
+  });
+
+  window.addEventListener('wf:setface', (e) => {
+    current = (e as CustomEvent).detail as Animal;
+    render();
+    restart();
+  });
+
+  render();
+  restart();
+</script>

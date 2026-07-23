@@ -1,0 +1,13 @@
+---
+import { framePair, nextId, type Animal } from '../data/faces';
+
+interface Props {
+  animal: Animal;
+  class?: string;
+}
+
+const { animal, class: cls = '' } = Astro.props;
+const uid = nextId();
+---
+
+<span class={`face-frames ${cls}`.trim()} set:html={framePair(animal, uid)}></span>
