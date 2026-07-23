@@ -534,6 +534,12 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn(expected, self.shell)
         self.assertNotIn("macos_launcher_app.py", self.powershell)
         self.assertIn('"CFBundlePackageType": "APPL"', launcher_tool)
+        # The installed app carries the brand icon, so macOS has artwork to
+        # show beside "Whisper Face" in the microphone and privacy panes.
+        self.assertIn('"CFBundleIconFile": ICON_NAME', launcher_tool)
+        self.assertIn(
+            "_atomic_write(app / ICON_FILE, _icon_bytes(), 0o644)", launcher_tool)
+        self.assertTrue((ROOT / "icons" / "WhisperFace.icns").is_file())
         self.assertIn("import AppKit", launcher_tool)
         self.assertIn('"-framework", "AppKit"', launcher_tool)
         self.assertIn('shutil.which("swiftc")', launcher_tool)

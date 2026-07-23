@@ -4,6 +4,7 @@
 # ///
 
 import hashlib
+import importlib.util
 import json
 import os
 import plistlib
@@ -19,8 +20,18 @@ MANIFEST_TOOL = ROOT / "scripts" / "release_manifest.py"
 PACKAGE_SCRIPT = ROOT / "scripts" / "package_macos.sh"
 PACKAGE_VERIFIER = ROOT / "scripts" / "verify_macos_package.py"
 LAUNCHER_TOOL = ROOT / "scripts" / "macos_launcher_app.py"
+LAUNCHER_ICON = ROOT / "icons" / "WhisperFace.icns"
 REVISION = "1" * 40
 PREVIOUS_REVISION = "2" * 40
+
+
+def load_launcher_tool():
+    """Import the launcher builder for the checks that need no Swift toolchain."""
+    specification = importlib.util.spec_from_file_location(
+        "whisper_face_launcher_tool", LAUNCHER_TOOL)
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
 
 
 class ReleaseManifestTests(unittest.TestCase):
@@ -264,11 +275,21 @@ class MacDistributionContractTests(unittest.TestCase):
             self.assertFalse(executable.read_bytes().startswith(b"#!"))
             plist = plistlib.loads((app / "Contents/Info.plist").read_bytes())
             self.assertEqual(plist["CFBundlePackageType"], "APPL")
+            # The bundle carries the brand icon, and the plist names it, so
+            # macOS shows "Whisper Face" with its own artwork in the privacy
+            # panes instead of a blank placeholder.
+            self.assertEqual(plist["CFBundleIconFile"], "WhisperFace")
+            icon = app / "Contents/Resources/WhisperFace.icns"
+            self.assertEqual(icon.read_bytes()[:4], b"icns")
+            self.assertEqual(
+                icon.read_bytes(), (ROOT / "icons/WhisperFace.icns").read_bytes()
+            )
             self.assertEqual(
                 {path.relative_to(app).as_posix() for path in app.rglob("*") if path.is_file()},
                 {
                     "Contents/Info.plist",
                     "Contents/MacOS/Whisper Face",
+                    "Contents/Resources/WhisperFace.icns",
                     "Contents/Resources/launcher-source-sha256",
                     "Contents/_CodeSignature/CodeResources",
                 },
@@ -427,6 +448,58 @@ class MacDistributionContractTests(unittest.TestCase):
         # native POSIX tool (including macOS and Linux CI).
         if os.name == "posix":
             subprocess.run(["bash", "-n", str(PACKAGE_SCRIPT)], check=True)
+
+    def test_launcher_ships_the_brand_icon_named_by_its_info_plist(self):
+        data = LAUNCHER_ICON.read_bytes()
+        self.assertEqual(data[:4], b"icns")
+        self.assertEqual(int.from_bytes(data[4:8], "big"), len(data))
+        module = load_launcher_tool()
+        self.assertIn("Contents/Resources/WhisperFace.icns", module.BASE_FILES)
+        self.assertEqual(module._expected_plist()["CFBundleIconFile"], "WhisperFace")
+        self.assertEqual(module._icon_bytes(), data)
+        # Every consumer of the bundle contract has to agree, or a release
+        # artifact would be rejected as containing unexpected files.
+        self.assertIn(
+            "Contents/Resources/WhisperFace.icns",
+            self.read("scripts/verify_macos_package.py"),
+        )
+        self.assertIn("icons/WhisperFace.icns", self.read("scripts/package_macos.sh"))
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "absent.icns"
+            with self.assertRaises(module.LauncherError):
+                module._icon_bytes(missing)
+            truncated = Path(directory) / "truncated.icns"
+            truncated.write_bytes(data[:64])
+            with self.assertRaises(module.LauncherError):
+                module._icon_bytes(truncated)
+            foreign = Path(directory) / "foreign.icns"
+            foreign.write_bytes(b"\x89PNG\r\n\x1a\n")
+            with self.assertRaises(module.LauncherError):
+                module._icon_bytes(foreign)
+
+    def test_ownership_check_still_accepts_installs_made_before_the_icon(self):
+        module = load_launcher_tool()
+        self.assertNotIn("Contents/Resources/WhisperFace.icns", module.PRE_ICON_FILES)
+        self.assertNotIn("Contents/Resources/WhisperFace.icns", module.LEGACY_FILES)
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / "Whisper Face.app"
+            (app / "Contents/MacOS").mkdir(parents=True)
+            (app / "Contents/Resources").mkdir(parents=True)
+            (app / "Contents/Info.plist").write_bytes(
+                plistlib.dumps(module._expected_plist(), sort_keys=True))
+            (app / "Contents/MacOS/Whisper Face").write_bytes(b"\xcf\xfa\xed\xfe")
+            (app / "Contents/Resources/launcher-source-sha256").write_text("0\n")
+            module.verify_owned_app(app)          # older unsigned install
+            (app / "Contents/_CodeSignature").mkdir()
+            (app / "Contents/_CodeSignature/CodeResources").write_text("<plist/>")
+            module.verify_owned_app(app)          # older signed install
+            (app / "Contents/Resources/WhisperFace.icns").write_bytes(b"icns")
+            module.verify_owned_app(app)          # current layout
+            # A stowaway file is still rejected: tolerance is per known layout,
+            # not a relaxation of the file-set contract.
+            (app / "Contents/Resources/extra").write_text("x")
+            with self.assertRaises(module.LauncherError):
+                module.verify_owned_app(app)
 
     def test_release_workflow_fails_closed_and_publishes_only_tags(self):
         workflow = self.read(".github/workflows/macos-release.yml")

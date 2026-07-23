@@ -83,7 +83,8 @@ SOURCE_DATE_EPOCH="$(git -C "$REPO_DIR" show -s --format=%ct "$FULL_REVISION")" 
 git -C "$REPO_DIR" cat-file -e "$FULL_REVISION:Install.command" \
     || fail "release revision does not contain Install.command"
 for required in LICENSE LICENSE_POLICY.md NOTICE THIRD_PARTY_NOTICES.md setup.sh \
-        scripts/macos_launcher_app.py config/macos-signing-policy.json; do
+        scripts/macos_launcher_app.py config/macos-signing-policy.json \
+        icons/WhisperFace.icns; do
     git -C "$REPO_DIR" cat-file -e "$FULL_REVISION:$required" \
         || fail "release revision is missing $required"
 done

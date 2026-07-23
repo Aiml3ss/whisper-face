@@ -3121,6 +3121,80 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "only on macOS"):
             ns["open_mac_system_settings"]()
 
+    def load_permission_recheck(self):
+        return load_definitions(
+            "permission_recheck_attempt",
+            "permission_recheck_delay",
+            assignments=(
+                "PERMISSION_ATTEMPT_ENV",
+                "PERMISSION_RECHECK_ENV",
+                "PERMISSION_RECHECK_SECONDS",
+                "PERMISSION_RECHECK_BACKOFF_SECONDS",
+                "PERMISSION_RECHECK_FAST_ATTEMPTS",
+                "PERMISSION_RECHECK_MAX_SECONDS",
+            ),
+            extra={"os": SimpleNamespace(environ={})},
+        )
+
+    def test_permission_recheck_is_fast_then_backs_off(self):
+        ns = self.load_permission_recheck()
+        delay = ns["permission_recheck_delay"]
+        fast = ns["PERMISSION_RECHECK_SECONDS"]
+        attempts = ns["PERMISSION_RECHECK_FAST_ATTEMPTS"]
+        backoff = ns["PERMISSION_RECHECK_BACKOFF_SECONDS"]
+
+        # A grant has to start the app within seconds, not a minute.
+        self.assertLessEqual(fast, 5)
+        self.assertEqual(delay(0, {}), fast)
+        self.assertEqual(delay(attempts - 1, {}), fast)
+        # The eager phase covers roughly the first minute of attempts.
+        self.assertGreaterEqual(fast * attempts, 45)
+        self.assertLessEqual(fast * attempts, 120)
+        # Then it backs off so an unattended Mac never spins at that rate.
+        self.assertGreater(backoff, fast)
+        self.assertEqual(delay(attempts, {}), backoff)
+        self.assertEqual(delay(1_000_000, {}), backoff)
+
+    def test_permission_recheck_interval_is_overridable_and_bounded(self):
+        ns = self.load_permission_recheck()
+        delay = ns["permission_recheck_delay"]
+        fast = ns["PERMISSION_RECHECK_SECONDS"]
+        name = ns["PERMISSION_RECHECK_ENV"]
+
+        self.assertEqual(delay(0, {name: "0.25"}), 0.25)
+        self.assertEqual(delay(0, {name: " 1 "}), 1.0)
+        # Anything unusable keeps the built-in interval: the wait is never
+        # zero, negative, unbounded, or an exception.
+        for hostile in ("", "0", "-5", "abc", "nan", None, "1e9", "600"):
+            with self.subTest(hostile=hostile):
+                self.assertEqual(delay(0, {name: hostile}), fast)
+        for hostile in (None, "", object()):
+            with self.subTest(attempt=hostile):
+                self.assertEqual(delay(hostile, {}), fast)
+
+    def test_permission_attempt_counter_survives_reexec_and_bad_values(self):
+        ns = self.load_permission_recheck()
+        attempt = ns["permission_recheck_attempt"]
+        name = ns["PERMISSION_ATTEMPT_ENV"]
+
+        self.assertEqual(attempt({}), 0)
+        self.assertEqual(attempt({name: " 7 "}), 7)
+        for hostile in ("", "-1", "abc", None, "9999999999", "1.5"):
+            with self.subTest(hostile=hostile):
+                self.assertEqual(attempt({name: hostile}), 0)
+
+    def test_permission_wait_reexecs_on_the_fast_interval(self):
+        body = (ROOT / "dictate.py").read_text(encoding="utf-8").split(
+            "def ensure_event_permissions", 1)[1].split("\ndef ", 1)[0]
+        self.assertNotIn("time.sleep(60)", body)
+        self.assertIn("Re-checking every few seconds", body)
+        self.assertIn("attempt = permission_recheck_attempt()", body)
+        self.assertIn("time.sleep(permission_recheck_delay(attempt))", body)
+        # The re-exec is what makes macOS re-read the frozen TCC verdict, and
+        # the counter has to ride the new process image.
+        self.assertIn("os.environ[PERMISSION_ATTEMPT_ENV] = str(attempt + 1)", body)
+        self.assertIn("os.execv(sys.executable", body)
+
     def test_mlx_progress_uses_thread_lock_not_multiprocessing_semaphore(self):
         received = []
 
