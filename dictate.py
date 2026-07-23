@@ -6313,6 +6313,96 @@ def _ax_text(element) -> str | None:
         return None
 
 
+# Electron/Chromium apps (e.g. Claude for desktop) withhold their accessibility
+# tree until AXManualAccessibility is set on the app element. Detection stays
+# additive: native apps read non-empty on the first focus read and never enter
+# the wake path, so they see no added latency and no behavior change.
+_ELECTRON_BUNDLE_IDS = frozenset({"com.anthropic.claudefordesktop"})
+# bundle id -> is-electron verdict, memoized so repeated focus reads skip the
+# filesystem probe.
+_ELECTRON_BUNDLE_CACHE = {}
+
+
+def _bundle_is_electron(bundle_id, bundle_path) -> bool:
+    """Classify a bundle as Electron by allowlist, else by framework probe."""
+    if bundle_id in _ELECTRON_BUNDLE_IDS:
+        return True
+    if not bundle_path:
+        return False
+    framework = Path(bundle_path) / "Contents" / "Frameworks" \
+        / "Electron Framework.framework"
+    try:
+        return framework.exists()
+    except Exception:
+        return False
+
+
+def is_electron_app(app) -> bool:
+    """True when the frontmost app ships on Electron. macOS-only, memoized."""
+    if not IS_MACOS or app is None:
+        return False
+    try:
+        bundle_id = app.bundleIdentifier()
+    except Exception:
+        bundle_id = None
+    if bundle_id is not None and bundle_id in _ELECTRON_BUNDLE_CACHE:
+        return _ELECTRON_BUNDLE_CACHE[bundle_id]
+    try:
+        url = app.bundleURL()
+        bundle_path = url.path() if url is not None else None
+    except Exception:
+        bundle_path = None
+    verdict = _bundle_is_electron(bundle_id, bundle_path)
+    if bundle_id is not None:
+        _ELECTRON_BUNDLE_CACHE[bundle_id] = verdict
+    return verdict
+
+
+def wake_electron_accessibility(pid) -> bool:
+    """Enable an Electron app's own a11y tree via AXManualAccessibility.
+
+    Idempotent and side-effect free beyond exposing the app's existing tree —
+    it grants no new data. Returns False on any failure so callers fall back to
+    their normal empty-read handling.
+    """
+    if not IS_MACOS:
+        return False
+    try:
+        from ApplicationServices import (
+            AXUIElementCreateApplication,
+            AXUIElementSetAttributeValue,
+        )
+        from CoreFoundation import kCFBooleanTrue
+        err = AXUIElementSetAttributeValue(
+            AXUIElementCreateApplication(int(pid)),
+            "AXManualAccessibility", kCFBooleanTrue)
+        return not err
+    except Exception:
+        return False
+
+
+def _focus_read_is_empty(err, focused, text_reader) -> bool:
+    """Empty when the read errored, returned nothing, or is unreadable."""
+    return bool(err) or focused is None or text_reader(focused) is None
+
+
+def electron_wake_retry(reader, app, *, detector=is_electron_app,
+                        waker=wake_electron_accessibility,
+                        text_reader=_ax_text):
+    """Read focus once; on an empty read from an Electron app, wake its
+    accessibility tree and read exactly once more.
+
+    Returns the (err, focused) pair. The wake fires only on empty + Electron,
+    so native apps read on the first try and never pay the retry.
+    """
+    err, focused = reader()
+    if _focus_read_is_empty(err, focused, text_reader) \
+            and app is not None and detector(app):
+        waker(app.processIdentifier())
+        err, focused = reader()
+    return err, focused
+
+
 def _coerce_range(value) -> tuple[int, int] | None:
     """Accept the CFRange representations PyObjC has used across releases."""
     if value is None:
@@ -6394,13 +6484,18 @@ def focused_snapshot() -> FocusSnapshot | None:
             kAXSelectedTextAttribute,
             kAXTitleAttribute,
         )
-        err, focused = AXUIElementCopyAttributeValue(
-            AXUIElementCreateSystemWide(), kAXFocusedUIElementAttribute, None)
+        systemwide = AXUIElementCreateSystemWide()
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        # An empty focus read from an Electron app means its accessibility tree
+        # is still withheld; wake it and read once more before failing closed.
+        err, focused = electron_wake_retry(
+            lambda: AXUIElementCopyAttributeValue(
+                systemwide, kAXFocusedUIElementAttribute, None),
+            app)
         if err or focused is None:
             return None
         text = _ax_text(focused)
         selected = _ax_attribute(focused, kAXSelectedTextAttribute)
-        app = NSWorkspace.sharedWorkspace().frontmostApplication()
         app_element = AXUIElementCreateApplication(app.processIdentifier()) \
             if app is not None else None
         window = _ax_attribute(app_element, kAXFocusedWindowAttribute) \

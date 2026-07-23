@@ -4324,6 +4324,177 @@ class InsertionAdapterTests(unittest.TestCase):
             ns["copy_support_snapshot"]("  ")
 
 
+class ElectronAccessibilityTests(unittest.TestCase):
+    def _classifier(self):
+        return load_definitions(
+            "is_electron_app", "_bundle_is_electron",
+            assignments={"_ELECTRON_BUNDLE_IDS", "_ELECTRON_BUNDLE_CACHE"},
+            extra={"IS_MACOS": True, "Path": Path},
+        )
+
+    def _wake_retry(self):
+        # electron_wake_retry binds its detector/waker/text_reader defaults at
+        # def-execution time, so those module globals must exist in the
+        # namespace even though every test overrides them per call.
+        return load_definitions(
+            "electron_wake_retry", "_focus_read_is_empty",
+            extra={
+                "is_electron_app": lambda app: False,
+                "wake_electron_accessibility": lambda pid: True,
+                "_ax_text": lambda element: None,
+            },
+        )
+
+    @staticmethod
+    def _reader(*reads):
+        calls = []
+
+        def reader():
+            calls.append(True)
+            return reads[min(len(calls) - 1, len(reads) - 1)]
+
+        return reader, calls
+
+    def test_allowlisted_bundle_is_electron_without_touching_the_filesystem(
+            self):
+        ns = self._classifier()
+        app = SimpleNamespace(
+            bundleIdentifier=lambda: "com.anthropic.claudefordesktop",
+            bundleURL=lambda: None,
+            processIdentifier=lambda: 501,
+        )
+        self.assertTrue(ns["is_electron_app"](app))
+        # The allowlist short-circuits before any bundle path is inspected, so
+        # even a path that does not exist stays classified as Electron.
+        self.assertTrue(
+            ns["_bundle_is_electron"](
+                "com.anthropic.claudefordesktop", "/nonexistent/Claude.app"))
+
+    def test_framework_probe_follows_the_electron_framework_directory(self):
+        ns = load_definitions(
+            "_bundle_is_electron",
+            assignments={"_ELECTRON_BUNDLE_IDS"},
+            extra={"Path": Path},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp) / "Third Party.app"
+            bundle.mkdir()
+            # No framework present: a non-allowlisted bundle is not Electron.
+            self.assertFalse(
+                ns["_bundle_is_electron"]("com.example.other", str(bundle)))
+            framework = bundle / "Contents" / "Frameworks" \
+                / "Electron Framework.framework"
+            framework.mkdir(parents=True)
+            self.assertTrue(
+                ns["_bundle_is_electron"]("com.example.other", str(bundle)))
+
+    def test_native_bundle_id_is_not_electron(self):
+        ns = self._classifier()
+        app = SimpleNamespace(
+            bundleIdentifier=lambda: "com.apple.Notes",
+            bundleURL=lambda: None,
+            processIdentifier=lambda: 777,
+        )
+        self.assertFalse(ns["is_electron_app"](app))
+        self.assertFalse(ns["_bundle_is_electron"]("com.apple.Notes", None))
+
+    def test_verdict_is_memoized_by_bundle_id(self):
+        ns = self._classifier()
+        app = SimpleNamespace(
+            bundleIdentifier=lambda: "com.anthropic.claudefordesktop",
+            bundleURL=lambda: None,
+            processIdentifier=lambda: 501,
+        )
+        self.assertTrue(ns["is_electron_app"](app))
+        self.assertEqual(
+            ns["_ELECTRON_BUNDLE_CACHE"],
+            {"com.anthropic.claudefordesktop": True})
+
+        # A later lookup returns the cached verdict without re-probing: the
+        # bundle URL, which would raise, is never consulted a second time.
+        def exploding_url():
+            raise RuntimeError("bundleURL should not be consulted again")
+
+        cached_app = SimpleNamespace(
+            bundleIdentifier=lambda: "com.anthropic.claudefordesktop",
+            bundleURL=exploding_url,
+            processIdentifier=lambda: 501,
+        )
+        self.assertTrue(ns["is_electron_app"](cached_app))
+
+    def test_empty_electron_read_wakes_once_and_reads_again(self):
+        ns = self._wake_retry()
+        reader, calls = self._reader((0, "first-el"), (0, "second-el"))
+        waker_pids = []
+
+        def waker(pid):
+            waker_pids.append(pid)
+            return True
+
+        app = SimpleNamespace(processIdentifier=lambda: 4242)
+        err, focused = ns["electron_wake_retry"](
+            reader, app,
+            detector=lambda a: True,
+            waker=waker,
+            text_reader=lambda element: None,
+        )
+
+        self.assertEqual(waker_pids, [4242])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual((err, focused), (0, "second-el"))
+
+    def test_empty_non_electron_read_does_not_wake(self):
+        ns = self._wake_retry()
+        reader, calls = self._reader((0, "only-el"))
+        waker_pids = []
+        app = SimpleNamespace(processIdentifier=lambda: 9)
+        err, focused = ns["electron_wake_retry"](
+            reader, app,
+            detector=lambda a: False,
+            waker=lambda pid: waker_pids.append(pid),
+            text_reader=lambda element: None,
+        )
+
+        self.assertEqual(waker_pids, [])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((err, focused), (0, "only-el"))
+
+    def test_non_empty_read_returns_without_waking(self):
+        ns = self._wake_retry()
+        reader, calls = self._reader((0, "editor"))
+        waker_pids = []
+        app = SimpleNamespace(processIdentifier=lambda: 9)
+        err, focused = ns["electron_wake_retry"](
+            reader, app,
+            detector=lambda a: True,
+            waker=lambda pid: waker_pids.append(pid),
+            text_reader=lambda element: "typed text",
+        )
+
+        self.assertEqual(waker_pids, [])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((err, focused), (0, "editor"))
+
+    def test_focus_read_emptiness_covers_error_missing_and_unreadable(self):
+        ns = self._wake_retry()
+        probed = []
+
+        def text_reader(element):
+            probed.append(element)
+            return None if element == "blank" else "readable"
+
+        is_empty = ns["_focus_read_is_empty"]
+        # An errored read is empty and never consults the text reader.
+        self.assertTrue(is_empty(1, "ignored", text_reader))
+        # A missing element is empty without consulting the text reader.
+        self.assertTrue(is_empty(0, None, text_reader))
+        self.assertEqual(probed, [])
+        # Present but unreadable is empty; a readable element is not.
+        self.assertTrue(is_empty(0, "blank", text_reader))
+        self.assertFalse(is_empty(0, "field", text_reader))
+        self.assertEqual(probed, ["blank", "field"])
+
+
 class PersonalPriorIntegrationTests(unittest.TestCase):
     def test_unpromoted_case_does_not_disable_established_legacy_fix(self):
         lab = PersonalRegressionLab()
