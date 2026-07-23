@@ -126,7 +126,7 @@ class RiskyConfirmationRuntimeIntegrationTests(unittest.TestCase):
         # whole-utterance command and before cleanup, and the sentinel is
         # restored to its exact expansion on the finalized text just before it
         # is committed to the paste. This pins that ordering in the pipeline.
-        source = (ROOT / "dictate.py").read_text()
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         function = next(
             node for node in tree.body

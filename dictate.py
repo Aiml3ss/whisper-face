@@ -6125,7 +6125,7 @@ def _load_snippet_map() -> dict[str, str]:
     if not SNIPPETS_FILE.exists():
         return {}
     try:
-        data = json.loads(SNIPPETS_FILE.read_text())
+        data = json.loads(SNIPPETS_FILE.read_text(encoding="utf-8"))
     except Exception as e:
         print(f"! snippets.json unreadable: {e}")
         return {}
