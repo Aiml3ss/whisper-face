@@ -585,13 +585,33 @@ SERVER_ONLY = "--server-only" in sys.argv   # headless: endpoint only
 TONES_FILE = HERE / "tones.json"
 PREFERENCES_FILE = HERE / "preferences.json"
 APP_NAME = "Whisper Face"
-FACE_CHOICES = ("parrot", "fox", "owl", "cat", "bear")
+FACE_CHOICES = (
+    "parrot", "fox", "owl", "cat", "bear",
+    "dog", "wolf", "pig", "panda", "tiger",
+)
 FACE_LABELS = {
     "parrot": "Parrot",
     "fox": "Fox",
     "owl": "Owl",
     "cat": "Cat",
     "bear": "Bear",
+    "dog": "Dog",
+    "wolf": "Wolf",
+    "pig": "Pig",
+    "panda": "Panda",
+    "tiger": "Tiger",
+}
+FACE_EMOJI = {
+    "parrot": "🦜",
+    "fox": "🦊",
+    "owl": "🦉",
+    "cat": "🐱",
+    "bear": "🐻",
+    "dog": "🐶",
+    "wolf": "🐺",
+    "pig": "🐷",
+    "panda": "🐼",
+    "tiger": "🐯",
 }
 DEFAULT_FACE = "parrot"
 
@@ -1714,6 +1734,12 @@ MINT = (0.369, 0.918, 0.831)            # #5eead4
 CATCH = (0.918, 1.000, 0.965)           # #eafff6
 CAPTION_COL = (0.847, 1.000, 0.941)     # #d8fff0
 AMBER = (0.984, 0.573, 0.235)           # processing accent #fb923c
+# Every non-parrot, non-owl face renders through the shared front-facing
+# companion template. A style names three fills plus optional feature flags:
+#   ears     "pointed" (canine/feline) or "round" (bear family); default pointed
+#   whiskers draw the three-per-side cat whiskers
+#   patches  dark eye patches (panda)
+#   stripes  forehead stripes (tiger)
 COMPANION_STYLES = {
     "fox": {
         "head": (0.949, 0.404, 0.188),
@@ -1724,11 +1750,42 @@ COMPANION_STYLES = {
         "head": (0.365, 0.592, 0.824),
         "deep": (0.188, 0.349, 0.573),
         "muzzle": (0.824, 0.914, 1.000),
+        "whiskers": True,
     },
     "bear": {
         "head": (0.647, 0.424, 0.267),
         "deep": (0.373, 0.220, 0.133),
         "muzzle": (0.890, 0.710, 0.514),
+        "ears": "round",
+    },
+    "dog": {
+        "head": (0.855, 0.647, 0.376),
+        "deep": (0.573, 0.396, 0.196),
+        "muzzle": (0.988, 0.925, 0.816),
+    },
+    "wolf": {
+        "head": (0.514, 0.565, 0.627),
+        "deep": (0.310, 0.345, 0.400),
+        "muzzle": (0.831, 0.859, 0.902),
+    },
+    "pig": {
+        "head": (0.945, 0.620, 0.694),
+        "deep": (0.804, 0.435, 0.533),
+        "muzzle": (1.000, 0.859, 0.878),
+        "ears": "round",
+    },
+    "panda": {
+        "head": (0.960, 0.965, 0.975),
+        "deep": (0.129, 0.145, 0.161),
+        "muzzle": (1.000, 1.000, 1.000),
+        "ears": "round",
+        "patches": True,
+    },
+    "tiger": {
+        "head": (0.976, 0.616, 0.235),
+        "deep": (0.816, 0.404, 0.098),
+        "muzzle": (1.000, 0.910, 0.784),
+        "stripes": True,
     },
 }
 
@@ -1899,79 +1956,73 @@ class WaveView(NSView):
             NSMakeRect(232, 32, 16, 16)).fill()
 
     def drawParrot_(self, lv):
-        # tail
-        tail = NSBezierPath.bezierPath()
-        tail.moveToPoint_((74, 178))
-        tail.curveToPoint_controlPoint1_controlPoint2_(
-            (28, 232), (56, 206), (44, 222))
-        tail.curveToPoint_controlPoint1_controlPoint2_(
-            (58, 166), (36, 206), (44, 186))
-        tail.closePath()
+        # The parrot now faces straight ahead like every other character, so
+        # the whole set shares one front-on axis. It keeps its signature: an
+        # emerald head, a gold crest, and a hooked beak whose lower mandible
+        # drops with the microphone level.
+        mouth = self._update_mouth()
+
+        # crest feathers poke up from behind the head
+        _rgb(*BEAK_UP)
+        _poly([(120, 60), (136, 60), (128, 22)]).fill()
         _rgb(*DEEP)
-        tail.fill()
+        _poly([(104, 68), (120, 60), (112, 30)]).fill()
+        _poly([(136, 60), (152, 68), (144, 30)]).fill()
+
         # head
         _rgb(*EMERALD)
         NSBezierPath.bezierPathWithOvalInRect_(
-            NSMakeRect(18, 46, 172, 172)).fill()
-        # wing swoosh: arc r120 from (120,210) to (158,152)
-        wing = NSBezierPath.bezierPath()
-        wc = (42.9, 118.1)
-        a1 = math.degrees(math.atan2(210 - wc[1], 120 - wc[0]))
-        a2 = math.degrees(math.atan2(152 - wc[1], 158 - wc[0]))
-        wing.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(
-            wc, 120.0, a1, a2, True)
-        wing.setLineWidth_(24.0)
-        wing.setLineCapStyle_(1)
-        _rgb(*DEEP)
-        wing.stroke()
-        # eye + catch-light
+            NSMakeRect(34, 55, 188, 172)).fill()
+
+        # eyes + catch-lights, on the shared front-facing layout
         _rgb(*DARK_EYE)
-        NSBezierPath.bezierPathWithOvalInRect_(
-            NSMakeRect(97, 85, 22, 22)).fill()
+        for x in (82, 156):
+            NSBezierPath.bezierPathWithOvalInRect_(
+                NSMakeRect(x, 96, 19, 23)).fill()
         _rgb(*CATCH)
-        NSBezierPath.bezierPathWithOvalInRect_(
-            NSMakeRect(108.6, 88.6, 6.8, 6.8)).fill()
-        # mouth cavity, revealed as the mandible opens
+        for x in (92, 166):
+            NSBezierPath.bezierPathWithOvalInRect_(
+                NSMakeRect(x, 99, 6, 7)).fill()
+
+        # mouth cavity, revealed as the beak opens
         _rgb(*MOUTH)
-        _poly([(156, 114), (214, 121), (156, 132)]).fill()
-        # upper mandible (static)
+        _poly([(114, 150), (142, 150), (128, 170 + mouth * 16)]).fill()
+
+        # upper mandible — a static, centered hook
         up = NSBezierPath.bezierPath()
-        up.moveToPoint_((154, 96))
+        up.moveToPoint_((106, 148))
         up.curveToPoint_controlPoint1_controlPoint2_(
-            (228, 118), (192, 88), (226, 102))
+            (128, 188), (110, 178), (120, 188))
         up.curveToPoint_controlPoint1_controlPoint2_(
-            (156, 116), (206, 116), (178, 114))
+            (150, 148), (136, 188), (146, 178))
         up.closePath()
         _rgb(*BEAK_UP)
         up.fill()
-        # lower mandible rotates about (156,116), driven by microphone level.
-        self._update_mouth()
+
+        # lower mandible tucks under and drops with the mic level
         lo = NSBezierPath.bezierPath()
-        lo.moveToPoint_((156, 118))
+        lo.moveToPoint_((116, 168))
         lo.curveToPoint_controlPoint1_controlPoint2_(
-            (226, 124), (178, 122), (206, 126))
+            (140, 168), (122, 172), (134, 172))
         lo.curveToPoint_controlPoint1_controlPoint2_(
-            (172, 146), (222, 140), (198, 150))
-        lo.curveToPoint_controlPoint1_controlPoint2_(
-            (156, 118), (162, 140), (158, 130))
+            (116, 168), (132, 184), (120, 184))
         lo.closePath()
-        rot = NSAffineTransform.transform()
-        rot.translateXBy_yBy_(156, 116)
-        rot.rotateByDegrees_(self.beak)
-        rot.translateXBy_yBy_(-156, -116)
-        lo.transformUsingAffineTransform_(rot)
+        shift = NSAffineTransform.transform()
+        shift.translateXBy_yBy_(0, mouth * 12)
+        lo.transformUsingAffineTransform_(shift)
         _rgb(*BEAK_LO)
         lo.fill()
+
         self._draw_whispers(lv)
 
     def _draw_companion(self, face, lv):
         style = COMPANION_STYLES.get(face, COMPANION_STYLES["fox"])
         mouth = self._update_mouth()
 
-        # Ears sit behind the shared rounded head. Fox and cat use expressive
-        # points; Bear keeps the same geometry family with round ears.
+        # Ears sit behind the shared rounded head. Pointed ears cover the
+        # canine and feline characters; the bear family uses round ears.
         _rgb(*style["deep"])
-        if face == "bear":
+        if style.get("ears") == "round":
             NSBezierPath.bezierPathWithOvalInRect_(
                 NSMakeRect(40, 42, 58, 58)).fill()
             NSBezierPath.bezierPathWithOvalInRect_(
@@ -1995,6 +2046,13 @@ class WaveView(NSView):
         NSBezierPath.bezierPathWithOvalInRect_(
             NSMakeRect(117, 123, 78, 68)).fill()
 
+        # Dark eye patches (panda) sit behind the eyes.
+        if style.get("patches"):
+            _rgb(*style["deep"])
+            for x in (76, 150):
+                NSBezierPath.bezierPathWithOvalInRect_(
+                    NSMakeRect(x, 90, 31, 36)).fill()
+
         _rgb(*DARK_EYE)
         for x in (82, 156):
             NSBezierPath.bezierPathWithOvalInRect_(
@@ -2003,6 +2061,19 @@ class WaveView(NSView):
         for x in (92, 166):
             NSBezierPath.bezierPathWithOvalInRect_(
                 NSMakeRect(x, 99, 6, 7)).fill()
+
+        # Forehead stripes (tiger) read over the head above the eyes.
+        if style.get("stripes"):
+            _rgb(*style["deep"], 0.85)
+            for x0, y0, x1, y1 in ((128, 60, 128, 90),
+                                   (104, 66, 112, 92),
+                                   (152, 66, 144, 92)):
+                stripe = NSBezierPath.bezierPath()
+                stripe.setLineWidth_(6)
+                stripe.setLineCapStyle_(1)
+                stripe.moveToPoint_((x0, y0))
+                stripe.lineToPoint_((x1, y1))
+                stripe.stroke()
 
         _rgb(*style["deep"])
         _poly([(116, 137), (140, 137), (128, 150)]).fill()
@@ -2015,7 +2086,7 @@ class WaveView(NSView):
             NSBezierPath.bezierPathWithOvalInRect_(
                 NSMakeRect(119, 160 + mouth * 10, 18, 9)).fill()
 
-        if face == "cat":
+        if style.get("whiskers"):
             _rgb(*style["deep"], 0.75)
             for y, dy in ((149, -5), (158, 0), (167, 5)):
                 left = NSBezierPath.bezierPath()
@@ -2398,9 +2469,7 @@ class StatusBar(NSObject):
         icon = self.face_icons.get(current_face(), {}).get(frame)
         btn.setImage_(icon)
         if icon is None:
-            fallback = {"parrot": "🦜", "fox": "🦊", "owl": "🦉",
-                        "cat": "🐱", "bear": "🐻"}
-            btn.setTitle_(fallback.get(current_face(), "◉"))
+            btn.setTitle_(FACE_EMOJI.get(current_face(), "◉"))
         else:
             suffix = "…" if self.state == "proc" else \
                 ("•" if self.state == "idle" and FLIGHT.is_enabled() else "")
@@ -2448,11 +2517,9 @@ class StatusBar(NSObject):
     def rebuild_faces(self):
         self.faces_menu.removeAllItems()
         selected = current_face()
-        emoji = {"parrot": "🦜", "fox": "🦊", "owl": "🦉",
-                 "cat": "🐱", "bear": "🐻"}
         for face in FACE_CHOICES:
             item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                f"{emoji[face]}  {FACE_LABELS[face]}", "setFace:", "")
+                f"{FACE_EMOJI[face]}  {FACE_LABELS[face]}", "setFace:", "")
             item.setTarget_(self)
             item.setRepresentedObject_(face)
             item.setState_(1 if face == selected else 0)
@@ -2767,31 +2834,46 @@ if IS_WINDOWS:
                 "cat": ((92, 151, 210, 255), (210, 233, 255, 255)),
                 "bear": ((165, 108, 68, 255), (227, 181, 131, 255)),
                 "owl": ((116, 100, 189, 255), (227, 218, 255, 255)),
+                "dog": ((218, 165, 96, 255), (252, 236, 208, 255)),
+                "wolf": ((131, 144, 160, 255), (212, 219, 230, 255)),
+                "pig": ((241, 158, 177, 255), (255, 219, 224, 255)),
+                "panda": ((245, 246, 249, 255), (255, 255, 255, 255)),
+                "tiger": ((249, 157, 60, 255), (255, 232, 200, 255)),
             }
             if face == "parrot":
-                fill = (135, 135, 145, 255) if disabled \
+                # front-facing: emerald head, gold crest, centered beak
+                head = (135, 135, 145, 255) if disabled \
                     else (55, 170, 92, 255)
-                draw.ellipse((7, 7, 55, 57), fill=fill)
-                draw.ellipse((22, 17, 42, 37), fill=(252, 252, 245, 255))
+                if not disabled:
+                    draw.polygon(((28, 9), (36, 9), (32, 1)),
+                                 fill=(244, 174, 46, 255))
+                draw.ellipse((8, 8, 56, 58), fill=head)
+                draw.ellipse((19, 24, 27, 33), fill=(20, 25, 30, 255))
+                draw.ellipse((37, 24, 45, 33), fill=(20, 25, 30, 255))
                 gap = 6 if talking else 1
-                draw.polygon(((39, 27 - gap), (59, 32), (39, 34)),
+                draw.polygon(((26, 34), (38, 34), (32, 42)),
                              fill=(244, 174, 46, 255))
-                draw.polygon(((39, 34), (56, 37 + gap), (39, 37)),
+                draw.polygon(((28, 42), (36, 42), (32, 42 + gap)),
                              fill=(225, 137, 33, 255))
-                draw.ellipse((34, 22, 38, 26), fill=(20, 25, 30, 255))
                 return image
 
             head, muzzle = palettes.get(face, palettes["fox"])
             if disabled:
                 head = (135, 135, 145, 255)
                 muzzle = (205, 205, 210, 255)
-            if face in ("fox", "cat", "owl"):
-                draw.polygon(((9, 23), (16, 2), (29, 18)), fill=head)
-                draw.polygon(((35, 18), (48, 2), (55, 23)), fill=head)
+            round_ears = face in ("bear", "pig", "panda")
+            ear_fill = (30, 32, 38, 255) \
+                if (face == "panda" and not disabled) else head
+            if not round_ears:
+                draw.polygon(((9, 23), (16, 2), (29, 18)), fill=ear_fill)
+                draw.polygon(((35, 18), (48, 2), (55, 23)), fill=ear_fill)
             else:
-                draw.ellipse((7, 5, 25, 23), fill=head)
-                draw.ellipse((39, 5, 57, 23), fill=head)
+                draw.ellipse((7, 5, 25, 23), fill=ear_fill)
+                draw.ellipse((39, 5, 57, 23), fill=ear_fill)
             draw.ellipse((7, 10, 57, 60), fill=head)
+            if face == "panda" and not disabled:
+                draw.ellipse((16, 22, 28, 36), fill=(30, 32, 38, 255))
+                draw.ellipse((36, 22, 48, 36), fill=(30, 32, 38, 255))
             if face == "owl":
                 draw.ellipse((13, 19, 35, 41), fill=muzzle)
                 draw.ellipse((29, 19, 51, 41), fill=muzzle)
@@ -2810,6 +2892,10 @@ if IS_WINDOWS:
                 mouth_h = 10 if talking else 2
                 draw.ellipse((27, 45, 37, 45 + mouth_h),
                              fill=(35, 24, 28, 255))
+            if face == "tiger" and not disabled:
+                for x0, x1 in ((32, 32), (25, 27), (39, 37)):
+                    draw.line(((x0, 12), (x1, 22)),
+                              fill=(208, 103, 25, 255), width=2)
             return image
 
         def init(self):

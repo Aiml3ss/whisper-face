@@ -2027,7 +2027,7 @@ class ViewModelTests(unittest.TestCase):
     def test_face_selection_validates_and_calls_runtime(self):
         for face in FACES:
             self.assertEqual(self.model.choose_face(face).face, face)
-        self.assertEqual(self.calls[-1], ("face", "bear"))
+        self.assertEqual(self.calls[-1], ("face", FACES[-1]))
         with self.assertRaises(ValueError):
             self.model.choose_face("dragon")
 

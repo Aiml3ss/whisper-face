@@ -484,7 +484,8 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn(".voice_inbox.json.*.tmp", gitignore)
         self.assertIn("demonstrations.json", gitignore)
         self.assertIn(".demonstrations.json.*.tmp", gitignore)
-        for face in ("parrot", "fox", "owl", "cat", "bear"):
+        for face in ("parrot", "fox", "owl", "cat", "bear",
+                     "dog", "wolf", "pig", "panda", "tiger"):
             for frame in ("idle", "talk"):
                 relative = f"icons/faces/{face}-{frame}.svg"
                 with self.subTest(relative=relative):
@@ -493,7 +494,7 @@ class InstallerContractTests(unittest.TestCase):
                     self.assertIn(relative.replace("/", "\\"), self.powershell)
         for expected in (
             'APP_NAME = "Whisper Face"',
-            'FACE_CHOICES = ("parrot", "fox", "owl", "cat", "bear")',
+            "FACE_CHOICES = (",
             "setMouthLevel_",
             "_draw_companion",
             "drawOwl_",

@@ -248,6 +248,11 @@ required=(
     icons/faces/owl-idle.svg icons/faces/owl-talk.svg
     icons/faces/cat-idle.svg icons/faces/cat-talk.svg
     icons/faces/bear-idle.svg icons/faces/bear-talk.svg
+    icons/faces/dog-idle.svg icons/faces/dog-talk.svg
+    icons/faces/wolf-idle.svg icons/faces/wolf-talk.svg
+    icons/faces/pig-idle.svg icons/faces/pig-talk.svg
+    icons/faces/panda-idle.svg icons/faces/panda-talk.svg
+    icons/faces/tiger-idle.svg icons/faces/tiger-talk.svg
 )
 for file in "${required[@]}"; do
     [ -f "$DIR/$file" ] || fail "repository is incomplete: missing $file"
