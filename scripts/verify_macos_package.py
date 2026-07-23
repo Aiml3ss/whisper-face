@@ -39,6 +39,7 @@ LAUNCHER_BASE_FILES = {
     "Contents/Info.plist",
     "Contents/MacOS/Whisper Face",
     "Contents/Resources/launcher-source-sha256",
+    "Contents/Resources/WhisperFace.icns",
 }
 LAUNCHER_SIGNATURE_FILES = {"Contents/_CodeSignature/CodeResources"}
 

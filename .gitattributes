@@ -2,3 +2,6 @@
 # stable even when Git checks the repository out on Windows.
 /LICENSE text eol=lf
 /CLA.md text eol=lf
+# The launcher bundles this icon verbatim and the signed bundle has to
+# reproduce byte for byte, so never let Git rewrite it.
+/icons/WhisperFace.icns binary

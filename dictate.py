@@ -5331,6 +5331,51 @@ def ensure_single_instance():
     return fd                               # keep the fd (and lock) alive
 
 
+PERMISSION_ATTEMPT_ENV = "WHISPER_FACE_PERMISSION_ATTEMPT"
+PERMISSION_RECHECK_ENV = "WHISPER_FACE_PERMISSION_RECHECK_SECONDS"
+PERMISSION_RECHECK_SECONDS = 3.0        # a grant should start the app at once
+PERMISSION_RECHECK_BACKOFF_SECONDS = 15.0
+PERMISSION_RECHECK_FAST_ATTEMPTS = 20   # ~the first minute of re-exec attempts
+PERMISSION_RECHECK_MAX_SECONDS = 300.0
+
+
+def permission_recheck_attempt(environ=None) -> int:
+    """Read the re-exec counter that rides the environment across generations.
+
+    Anything unparseable restarts the count: the counter only decides how long
+    to wait, so a hostile or corrupt value must never do worse than re-check
+    eagerly."""
+    values = os.environ if environ is None else environ
+    try:
+        attempt = int(str(values.get(PERMISSION_ATTEMPT_ENV, "") or "0").strip())
+    except (AttributeError, TypeError, ValueError):
+        return 0
+    return attempt if 0 <= attempt <= 1_000_000 else 0
+
+
+def permission_recheck_delay(attempt: int, environ=None) -> float:
+    """Seconds to wait before re-execing to re-read the frozen TCC verdict.
+
+    Poll every few seconds while the user is plausibly still in the Privacy
+    pane, then back off so an unattended Mac isn't re-execing forever at that
+    rate."""
+    values = os.environ if environ is None else environ
+    interval = PERMISSION_RECHECK_SECONDS
+    try:
+        override = float(str(values.get(PERMISSION_RECHECK_ENV, "") or "").strip())
+    except (AttributeError, TypeError, ValueError):
+        override = 0.0
+    if 0 < override <= PERMISSION_RECHECK_MAX_SECONDS:
+        interval = override
+    try:
+        count = int(attempt)
+    except (TypeError, ValueError):
+        count = 0
+    if count < PERMISSION_RECHECK_FAST_ATTEMPTS:
+        return interval
+    return max(interval, PERMISSION_RECHECK_BACKOFF_SECONDS)
+
+
 def ensure_event_permissions():
     """Under the signed launcher chain, TCC attributes these grants to the
     launcher app ("Whisper Face"), the responsible process this fork+exec child
@@ -5361,11 +5406,18 @@ def ensure_event_permissions():
         pass                                # older pyobjc / headless: best effort
     print("Waiting for permissions: enable 'Whisper Face' under System Settings "
           "-> Privacy & Security -> Input Monitoring AND Accessibility. "
-          "Re-checking every minute...")
+          "Re-checking every few seconds...")
     # TCC verdicts are effectively frozen for a running process — polling
     # preflight here never sees the user's grant. Re-exec for a fresh image;
-    # the loop continues across exec generations until both grants stick.
-    time.sleep(60)
+    # the loop continues across exec generations until both grants stick. The
+    # attempt counter rides the environment through execv, so the wait starts
+    # short (the user is at the toggle) and backs off on an unattended Mac.
+    attempt = permission_recheck_attempt()
+    try:
+        os.environ[PERMISSION_ATTEMPT_ENV] = str(attempt + 1)
+    except (OSError, ValueError):
+        pass                                # the counter is a nicety, not a gate
+    time.sleep(permission_recheck_delay(attempt))
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 

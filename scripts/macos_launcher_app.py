@@ -20,18 +20,24 @@ BUNDLE_ID = "com.berg.whisper-face.launcher"
 PRODUCT = "Whisper Face"
 EXECUTABLE = PRODUCT
 REVISION = re.compile(r"^[0-9a-f]{40}$")
-BASE_FILES = {
+ICON_NAME = "WhisperFace"
+ICON_FILE = f"Contents/Resources/{ICON_NAME}.icns"
+# Installs built before the app carried an icon are still ours; keep their
+# layouts nameable so ownership checks tolerate an upgrade in place.
+PRE_ICON_FILES = {
     "Contents/Info.plist",
     f"Contents/MacOS/{EXECUTABLE}",
     "Contents/Resources/launcher-source-sha256",
 }
+BASE_FILES = PRE_ICON_FILES | {ICON_FILE}
 SIGNATURE_FILES = {"Contents/_CodeSignature/CodeResources"}
-LEGACY_FILES = BASE_FILES | {
+LEGACY_FILES = PRE_ICON_FILES | {
     "Contents/Resources/checkout-path",
     "Contents/Resources/source-revision",
 }
 DEFAULT_RECEIPT = Path("Library/Application Support/Whisper Face/launcher-install.json")
 DEFAULT_POLICY = Path(__file__).resolve().parents[1] / "config/macos-signing-policy.json"
+DEFAULT_ICON = Path(__file__).resolve().parents[1] / f"icons/{ICON_NAME}.icns"
 TEAM_IDENTIFIER = re.compile(r"^[A-Z0-9]{10}$")
 SWIFT_SOURCE = r'''import AppKit
 import Foundation
@@ -204,7 +210,15 @@ def _bundle_digest(app: Path) -> str:
     return digest.hexdigest()
 
 def _expected_plist() -> dict[str, object]:
-    return {"CFBundleDisplayName": PRODUCT, "CFBundleExecutable": EXECUTABLE, "CFBundleIdentifier": BUNDLE_ID, "CFBundleName": PRODUCT, "CFBundlePackageType": "APPL", "CFBundleShortVersionString": "1.0", "CFBundleVersion": "1", "LSMinimumSystemVersion": "14.0", "LSUIElement": True, "NSMicrophoneUsageDescription": "Whisper Face transcribes your speech into text on this Mac."}
+    return {"CFBundleDisplayName": PRODUCT, "CFBundleExecutable": EXECUTABLE, "CFBundleIconFile": ICON_NAME, "CFBundleIdentifier": BUNDLE_ID, "CFBundleName": PRODUCT, "CFBundlePackageType": "APPL", "CFBundleShortVersionString": "1.0", "CFBundleVersion": "1", "LSMinimumSystemVersion": "14.0", "LSUIElement": True, "NSMicrophoneUsageDescription": "Whisper Face transcribes your speech into text on this Mac."}
+
+def _icon_bytes(icon: Path = DEFAULT_ICON) -> bytes:
+    """Read the committed brand icon. It is a static repository file, so the
+    staged bundle stays byte-identical across builds of the same revision."""
+    try: data = icon.read_bytes()
+    except OSError as exc: raise LauncherError("launcher app icon is missing from the checkout") from exc
+    if data[:4] != b"icns" or len(data) < 8 or int.from_bytes(data[4:8], "big") != len(data): raise LauncherError("launcher app icon is not a well-formed Apple icon set")
+    return data
 
 def _pinned_team(policy: Path = DEFAULT_POLICY) -> str:
     try: payload = json.loads(policy.read_text(encoding="utf-8"))
@@ -238,6 +252,9 @@ def _stage_bundle(app: Path) -> None:
     _atomic_write(app / "Contents/Info.plist", plistlib.dumps(_expected_plist(), sort_keys=True), 0o644)
     _compile(executable)
     _atomic_write(resources / "launcher-source-sha256", (_source_digest() + "\n").encode(), 0o644)
+    # Ship the brand icon inside the bundle: without one macOS draws a blank
+    # placeholder next to "Whisper Face" in the microphone and privacy panes.
+    _atomic_write(app / ICON_FILE, _icon_bytes(), 0o644)
     # Ad-hoc sign the fully staged bundle so its signature is well-formed: macOS
     # then records a Designated Requirement and lists "Whisper Face" as a
     # grantable app in the privacy panes instead of the underlying interpreter.
@@ -261,7 +278,7 @@ def build_app(app: Path) -> None:
 def verify_owned_app(app: Path) -> None:
     if not app.is_dir() or app.name != f"{PRODUCT}.app": raise LauncherError("existing launcher is not an owned app")
     entries = _entries(app)
-    if entries not in (BASE_FILES, LEGACY_FILES, BASE_FILES | SIGNATURE_FILES): raise LauncherError("existing launcher contains unexpected files")
+    if entries not in (BASE_FILES, LEGACY_FILES, BASE_FILES | SIGNATURE_FILES, PRE_ICON_FILES, PRE_ICON_FILES | SIGNATURE_FILES): raise LauncherError("existing launcher contains unexpected files")
     try: plist = plistlib.loads((app / "Contents/Info.plist").read_bytes())
     except Exception as exc: raise LauncherError("existing launcher Info.plist is invalid") from exc
     if plist.get("CFBundleIdentifier") != BUNDLE_ID or plist.get("CFBundleExecutable") != EXECUTABLE: raise LauncherError("existing launcher ownership markers do not match")
