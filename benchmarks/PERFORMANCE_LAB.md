@@ -36,11 +36,19 @@ uv run performance_lab.py evaluate \
   --observations /private/tmp/whisper-face-outcomes.jsonl
 ```
 
-It reports p50/p95/p99/max latency, Correction Burden in changed characters
+It reports p50/p90/p95/p99/max latency, Correction Burden in changed characters
 per 100 pasted words, the observed zero-edit proxy, route accuracy, corpus
-coverage, and verified-delivery rate. Add `--format json` for automation. Add
+coverage, and verified-delivery rate. Each report also includes a
+`by_dimension` block that repeats the zero-edit, Correction Burden, and
+route-quality signals for every risk dimension a record touches, so a
+regression concentrated in one dimension such as numbers or code stays visible
+without reading any transcript. A record with several dimensions contributes to
+each of them, and a dimension with no observations is omitted rather than
+divided by zero. Add `--format json` for automation. Add
 `--budget-profile product_quality` to enforce the versioned minimum sample
-counts and targets in `performance_budgets.json`.
+counts and targets in `performance_budgets.json`; that profile also carries a
+few per-dimension checks gated on `by_dimension.<dim>.samples`, so sparse data
+reports `insufficient-samples` instead of a false regression.
 
 Route and lifecycle values are fixed schema identifiers rather than free-form
 labels, preventing a user string from being reflected into aggregate keys.

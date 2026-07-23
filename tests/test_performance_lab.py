@@ -122,6 +122,92 @@ class PrivacySafeDashboardTests(unittest.TestCase):
         self.assertNotIn("observations", report)
         self.assertNotIn("reference", json.dumps(report))
 
+    def test_latency_distributions_expose_p90_ordered_within_tail(self):
+        corpus = load_corpus(DEFAULT_CORPUS)
+        records = [
+            {
+                "case_id": "name-multilingual",
+                "latency_ms": {"end_to_end": value, "compiler": value // 10},
+            }
+            for value in (100, 200, 300, 400, 500)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "observations.jsonl"
+            path.write_text(
+                "\n".join(json.dumps(record) for record in records) + "\n",
+                encoding="utf-8",
+            )
+            report = evaluate_observations(path, corpus)
+
+        end_to_end = report["latency_ms"]["end_to_end"]
+        self.assertEqual(end_to_end["p90"], 460.0)
+        for stage, distribution in report["latency_ms"].items():
+            self.assertIn("p90", distribution)
+            self.assertLessEqual(distribution["p50"], distribution["p90"])
+            self.assertLessEqual(distribution["p90"], distribution["p95"])
+            self.assertLessEqual(distribution["p95"], distribution["p99"])
+
+    def test_per_dimension_rollup_accumulates_each_case_dimension(self):
+        corpus = load_corpus(DEFAULT_CORPUS)
+        records = [
+            {
+                "case_id": "currency-and-decimal",
+                "edit_characters": 0,
+                "pasted_words": 10,
+                "zero_edit": True,
+                "selected_route": "turbo",
+                "expected_route": "turbo",
+            },
+            {
+                "case_id": "currency-and-decimal",
+                "edit_characters": 4,
+                "pasted_words": 10,
+                "zero_edit": False,
+                "selected_route": "tiny",
+                "expected_route": "turbo",
+            },
+            {
+                "case_id": "date-time-zone",
+                "edit_characters": 2,
+                "pasted_words": 10,
+                "zero_edit": True,
+                "selected_route": "turbo",
+                "expected_route": "turbo",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "observations.jsonl"
+            path.write_text(
+                "\n".join(json.dumps(record) for record in records) + "\n",
+                encoding="utf-8",
+            )
+            report = evaluate_observations(path, corpus)
+
+        by_dimension = report["by_dimension"]
+        # currency-and-decimal is [numbers, corrections]; date-time-zone is
+        # [dates, numbers], so numbers accumulates all three records.
+        self.assertEqual(by_dimension["numbers"], {
+            "samples": 3,
+            "zero_edit_rate": 0.6667,
+            "correction_burden_c100w": 20.0,
+            "route_quality_rate": 0.6667,
+        })
+        self.assertEqual(by_dimension["corrections"], {
+            "samples": 2,
+            "zero_edit_rate": 0.5,
+            "correction_burden_c100w": 20.0,
+            "route_quality_rate": 0.5,
+        })
+        self.assertEqual(by_dimension["dates"], {
+            "samples": 1,
+            "zero_edit_rate": 1.0,
+            "correction_burden_c100w": 20.0,
+            "route_quality_rate": 1.0,
+        })
+        # Dimensions with no observed records are omitted, never divided by zero.
+        self.assertNotIn("urls", by_dimension)
+        self.assertNotIn("reference", json.dumps(report))
+
     def test_malformed_identifiers_and_free_text_labels_are_rejected(self):
         corpus = load_corpus(DEFAULT_CORPUS)
         records = [

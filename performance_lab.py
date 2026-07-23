@@ -104,7 +104,7 @@ _OBSERVATION_FIELDS = {
 _RECEIPTS = {"verified", "unverifiable", "conflict", "unresolved"}
 _LATENCY_STAGES = {
     "ready", "tail", "asr", "compiler", "cleanup", "insertion",
-    "end_to_end", "release", "press",
+    "end_to_end", "release", "press", "context", "consequence",
 }
 _ROUTE_IDS = {
     "tiny",
@@ -195,6 +195,7 @@ def _distribution(values: Sequence[float]) -> dict[str, Any]:
     return {
         "samples": len(values),
         "p50": round(_percentile(values, 0.50), 4),
+        "p90": round(_percentile(values, 0.90), 4),
         "p95": round(_percentile(values, 0.95), 4),
         "p99": round(_percentile(values, 0.99), 4),
         "mean": round(statistics.fmean(values), 4),
@@ -253,6 +254,10 @@ def evaluate_observations(
     """
     corpus = corpus or load_corpus()
     case_ids = {case["id"] for case in corpus["cases"]}
+    case_dimensions = {
+        case["id"]: tuple(case.get("dimensions", ()))
+        for case in corpus["cases"]
+    }
     records: list[dict[str, Any]] = []
     rejected: dict[str, int] = {}
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -279,6 +284,11 @@ def evaluate_observations(
     per_route: dict[str, list[bool]] = {}
     receipts: list[bool] = []
     observed_cases: set[str] = set()
+    dim_samples: dict[str, int] = {}
+    dim_zero_edits: dict[str, list[bool]] = {}
+    dim_edit_characters: dict[str, float] = {}
+    dim_pasted_words: dict[str, float] = {}
+    dim_route_results: dict[str, list[bool]] = {}
     for record in records:
         observed_cases.add(record["case_id"])
         for stage, duration in record.get("latency_ms", {}).items():
@@ -299,6 +309,35 @@ def evaluate_observations(
             per_route.setdefault(expected, []).append(correct)
         if "receipt" in record:
             receipts.append(record["receipt"] == "verified")
+        for dimension in case_dimensions.get(record["case_id"], ()):
+            dim_samples[dimension] = dim_samples.get(dimension, 0) + 1
+            if isinstance(record.get("zero_edit"), bool):
+                dim_zero_edits.setdefault(dimension, []).append(
+                    record["zero_edit"])
+            if edits is not None and words is not None and words > 0:
+                dim_edit_characters[dimension] = (
+                    dim_edit_characters.get(dimension, 0.0) + edits)
+                dim_pasted_words[dimension] = (
+                    dim_pasted_words.get(dimension, 0.0) + words)
+            if isinstance(selected, str) and isinstance(expected, str):
+                dim_route_results.setdefault(dimension, []).append(
+                    selected == expected)
+
+    by_dimension: dict[str, dict[str, Any]] = {}
+    for dimension in sorted(dim_samples):
+        dim_zero = dim_zero_edits.get(dimension, [])
+        dim_words = dim_pasted_words.get(dimension, 0.0)
+        dim_routes = dim_route_results.get(dimension, [])
+        by_dimension[dimension] = {
+            "samples": dim_samples[dimension],
+            "zero_edit_rate": round(sum(dim_zero) / len(dim_zero), 4)
+            if dim_zero else None,
+            "correction_burden_c100w": round(
+                dim_edit_characters.get(dimension, 0.0) / dim_words * 100, 4)
+            if dim_words else None,
+            "route_quality_rate": round(sum(dim_routes) / len(dim_routes), 4)
+            if dim_routes else None,
+        }
 
     return {
         "schema_version": 1,
@@ -349,6 +388,7 @@ def evaluate_observations(
             "rate": round(sum(receipts) / len(receipts), 4)
             if receipts else None,
         },
+        "by_dimension": by_dimension,
     }
 
 
@@ -1145,11 +1185,12 @@ def render_dashboard(report: dict[str, Any]) -> str:
     lines = [
         "PRIVACY-SAFE OUTCOME DASHBOARD",
         f"records: {report['records']} (rejected: {report['rejected_records']})",
-        "stage                         p50 ms     p95 ms     p99 ms     max ms",
+        "stage                         p50 ms     p90 ms     p95 ms     "
+        "p99 ms     max ms",
     ]
     lines.extend(
-        f"{stage:<28} {result['p50']:>10.2f} {result['p95']:>10.2f} "
-        f"{result['p99']:>10.2f} {result['max']:>10.2f}"
+        f"{stage:<28} {result['p50']:>10.2f} {result['p90']:>10.2f} "
+        f"{result['p95']:>10.2f} {result['p99']:>10.2f} {result['max']:>10.2f}"
         for stage, result in report["latency_ms"].items()
     )
     lines.extend((
@@ -1163,6 +1204,18 @@ def render_dashboard(report: dict[str, Any]) -> str:
         f"verified delivery: {_rate(report['verified_delivery']['rate'])} "
         f"({report['verified_delivery']['samples']} samples)",
     ))
+    by_dimension = report.get("by_dimension", {})
+    if by_dimension:
+        lines.append(
+            f"{'dimension':<31} {'samples':>7} {'zero-edit':>10} "
+            f"{'burden':>7} {'route-quality':>13}")
+        for dimension, stats in by_dimension.items():
+            burden = stats["correction_burden_c100w"]
+            burden_label = "n/a" if burden is None else f"{burden:.1f}"
+            lines.append(
+                f"{dimension:<31} {stats['samples']:>7} "
+                f"{_rate(stats['zero_edit_rate']):>10} {burden_label:>7} "
+                f"{_rate(stats['route_quality_rate']):>13}")
     return "\n".join(lines)
 
 

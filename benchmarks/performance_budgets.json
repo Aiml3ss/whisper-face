@@ -256,6 +256,33 @@
           "operator": ">=",
           "threshold": 0.99,
           "unit": "fraction"
+        },
+        {
+          "id": "numbers-correction-burden",
+          "metric": "by_dimension.numbers.correction_burden_c100w",
+          "samples_metric": "by_dimension.numbers.samples",
+          "minimum_samples": 100,
+          "operator": "<=",
+          "threshold": 5.0,
+          "unit": "characters-per-100-words"
+        },
+        {
+          "id": "names-correction-burden",
+          "metric": "by_dimension.names.correction_burden_c100w",
+          "samples_metric": "by_dimension.names.samples",
+          "minimum_samples": 100,
+          "operator": "<=",
+          "threshold": 8.0,
+          "unit": "characters-per-100-words"
+        },
+        {
+          "id": "code-route-quality",
+          "metric": "by_dimension.code.route_quality_rate",
+          "samples_metric": "by_dimension.code.samples",
+          "minimum_samples": 100,
+          "operator": ">=",
+          "threshold": 0.95,
+          "unit": "fraction"
         }
       ]
     }
