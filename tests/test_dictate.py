@@ -3320,6 +3320,125 @@ class ConfigurationTests(unittest.TestCase):
         self.assertTrue(metadata["license_policy"].endswith("LICENSE_POLICY.md"))
         self.assertIn("without warranty", metadata["warranty"].lower())
 
+
+class InlineSnippetExpansionTests(unittest.TestCase):
+    """Inline (embedded-trigger) snippet expansion. Additive to the
+    whole-utterance command covered by ConfigurationTests; must never alter a
+    non-matching dictation and must survive a missing or damaged file."""
+
+    def _expander(self, mapping=None):
+        ns = load_definitions(
+            "expand_snippets_inline",
+            "_load_snippet_map",
+            "_compile_snippet_pattern",
+        )
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "snippets.json"
+        if mapping is not None:
+            path.write_text(json.dumps(mapping))
+        ns["SNIPPETS_FILE"] = path
+        return ns["expand_snippets_inline"]
+
+    def test_inline_hit_inside_a_sentence(self):
+        expand = self._expander({"email": "andrew@example.com"})
+        self.assertEqual(
+            expand("text him my email please"),
+            "text him my andrew@example.com please",
+        )
+
+    def test_expansion_is_case_insensitive(self):
+        expand = self._expander({"email": "andrew@example.com"})
+        self.assertEqual(expand("send EMAIL now"), "send andrew@example.com now")
+
+    def test_partial_word_never_fires(self):
+        # "address" must not expand inside "addressed"; the boundary is
+        # stricter than \b so a suffix cannot trigger it.
+        expand = self._expander({"address": "1 Main St"})
+        self.assertEqual(expand("he addressed the room"), "he addressed the room")
+
+    def test_longest_trigger_wins(self):
+        expand = self._expander({
+            "email": "andrew@example.com",
+            "email signature": "Best,\nAndrew",
+        })
+        self.assertEqual(
+            expand("use my email signature here"),
+            "use my Best,\nAndrew here",
+        )
+
+    def test_multiline_expansion_is_preserved(self):
+        expand = self._expander({"address": "7623 Opal Ridge Lane\nBainbridge Island, WA 98110"})
+        self.assertEqual(
+            expand("mail it to my address today"),
+            "mail it to my 7623 Opal Ridge Lane\nBainbridge Island, WA 98110 today",
+        )
+
+    def test_no_matching_trigger_returns_raw_unchanged(self):
+        expand = self._expander({"email": "andrew@example.com"})
+        self.assertEqual(expand("just talking normally"), "just talking normally")
+
+    def test_missing_file_returns_raw_unchanged(self):
+        expand = self._expander(mapping=None)  # file never written
+        self.assertEqual(expand("send my email now"), "send my email now")
+
+    def test_wrong_shaped_snippets_file_returns_raw_unchanged(self):
+        # Clone of ConfigurationTests.test_wrong_shaped_snippets_file_is_ignored,
+        # asserted against the inline path: a JSON array (not an object) and
+        # syntactically broken JSON both degrade to leaving the dictation alone.
+        for payload in ("[]", "{not valid json"):
+            with self.subTest(payload=payload):
+                ns = load_definitions(
+                    "expand_snippets_inline",
+                    "_load_snippet_map",
+                    "_compile_snippet_pattern",
+                )
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "snippets.json"
+                    path.write_text(payload)
+                    ns["SNIPPETS_FILE"] = path
+                    self.assertEqual(
+                        ns["expand_snippets_inline"]("send my email now"),
+                        "send my email now",
+                    )
+
+    def test_masked_multiline_survives_deterministic_cleanup(self):
+        # The pipeline round-trip: masking shields a multiline (indented)
+        # expansion from cleanup, the surrounding words are still cleaned, and
+        # restoration leaves no sentinel behind.
+        ns = load_definitions(
+            "_compile_snippet_pattern",
+            "_snippet_sentinel",
+            "_mask_snippets_inline",
+            "_restore_snippet_sentinels",
+            assignments={"_SNIPPET_SENTINEL_MARK"},
+        )
+        expansion = "Regards,\n    Andrew\n    Engineer"
+        masked, restore = ns["_mask_snippets_inline"](
+            "here is my sig okay", {"my sig": expansion})
+        self.assertTrue(restore)
+        self.assertNotIn("my sig", masked)      # trigger was masked away
+        cleaned = compile_cleanup(masked).text  # deterministic cleanup only
+        restored = ns["_restore_snippet_sentinels"](cleaned, restore)
+        self.assertIn(expansion, restored)      # indentation intact
+        self.assertEqual(restored.count("\ue000"), 0)  # no sentinel leaked
+
+    def test_restoration_of_absent_sentinel_is_a_no_op(self):
+        ns = load_definitions(
+            "_compile_snippet_pattern",
+            "_snippet_sentinel",
+            "_mask_snippets_inline",
+            "_restore_snippet_sentinels",
+            assignments={"_SNIPPET_SENTINEL_MARK"},
+        )
+        _, restore = ns["_mask_snippets_inline"]("my email", {"email": "X"})
+        # A token the cleaned text no longer contains must not corrupt output.
+        self.assertEqual(
+            ns["_restore_snippet_sentinels"]("unrelated text", restore),
+            "unrelated text",
+        )
+
+
 class LearningTests(unittest.TestCase):
     def test_snippet_edit_is_persisted_and_exposed_as_learning(self):
         ns = load_definitions(

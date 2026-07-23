@@ -121,6 +121,29 @@ class RiskyConfirmationRuntimeIntegrationTests(unittest.TestCase):
             with self.subTest(sink=sink):
                 self.assertLess(intercept, body.index(sink))
 
+    def test_inline_snippet_masking_wraps_cleanup(self):
+        # Inline expansion is a round-trip: the trigger is masked after the
+        # whole-utterance command and before cleanup, and the sentinel is
+        # restored to its exact expansion on the finalized text just before it
+        # is committed to the paste. This pins that ordering in the pipeline.
+        source = (ROOT / "dictate.py").read_text()
+        tree = ast.parse(source)
+        function = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "finish_and_process")
+        body = ast.get_source_segment(source, function)
+        self.assertIsNotNone(body)
+        whole_utterance = body.index("hit = match_snippet(raw)")
+        mask = body.index("_mask_snippets_inline(")
+        first_cleanup = body.index("extract_tone_override(raw)")
+        restore = body.index("_restore_snippet_sentinels(")
+        commit = body.index("commit_insertion(")
+        self.assertLess(whole_utterance, mask)   # after the verbatim command
+        self.assertLess(mask, first_cleanup)     # before tone/cleanup
+        self.assertLess(mask, restore)
+        self.assertLess(restore, commit)         # restored before the paste
+
 
 def settings_namespace(*names):
     return load_definitions(

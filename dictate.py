@@ -6094,6 +6094,103 @@ def match_snippet(raw: str) -> tuple[str, str] | None:
     return None
 
 
+def _load_snippet_map() -> dict[str, str]:
+    """Tolerant per-use read of snippets.json for inline expansion, mirroring
+    match_snippet's contract: {} when the file is missing, {} (with a printed
+    note) on unreadable or non-object JSON, and only the str->str pairs
+    otherwise. Never raises, so a damaged file can never break dictation."""
+    if not SNIPPETS_FILE.exists():
+        return {}
+    try:
+        data = json.loads(SNIPPETS_FILE.read_text())
+    except Exception as e:
+        print(f"! snippets.json unreadable: {e}")
+        return {}
+    if not isinstance(data, dict):
+        print("! snippets.json must contain a JSON object; ignoring it")
+        return {}
+    return {name: text for name, text in data.items()
+            if isinstance(name, str) and isinstance(text, str)}
+
+
+def _compile_snippet_pattern(snippets: dict[str, str]):
+    """One whole-word, case-insensitive alternation over every trigger. Triggers
+    are ordered longest-first so a compound trigger ("email signature") wins over
+    a prefix ("email"), each is re.escape'd, and the boundaries are stricter than
+    \\b — (?<!\\w)(...)(?!\\w) — so "address" never fires inside "addressed"."""
+    if not snippets:
+        return None
+    triggers = sorted(snippets, key=len, reverse=True)
+    alternation = "|".join(re.escape(trigger) for trigger in triggers)
+    return re.compile(rf"(?<!\w)({alternation})(?!\w)", re.I)
+
+
+def expand_snippets_inline(raw: str, snippets: dict[str, str] | None = None) -> str:
+    """Pure, side-effect-free inline expansion: replace each whole-word snippet
+    trigger embedded in a longer dictation with its canonical expansion,
+    case-insensitively and longest-trigger-first. Returns raw unchanged when
+    there are no snippets or no trigger fires. snippets defaults to the live
+    snippets.json via _load_snippet_map()."""
+    if snippets is None:
+        snippets = _load_snippet_map()
+    pattern = _compile_snippet_pattern(snippets)
+    if pattern is None:
+        return raw
+    lookup = {trigger.casefold(): text for trigger, text in snippets.items()}
+
+    def replace(match: "re.Match[str]") -> str:
+        return lookup.get(match.group(1).casefold(), match.group(0))
+
+    return pattern.sub(replace, raw)
+
+
+# Opaque private-use-area sentinel used to shield an inline expansion from
+# cleanup. Pure PUA codepoints carry no case, are not \w, whitespace, or
+# punctuation, and match none of the cleanup regexes, so deterministic cleanup
+# passes the token through byte-for-byte instead of reflowing multiline
+# boilerplate. The exact expansion is substituted back only after cleanup.
+_SNIPPET_SENTINEL_MARK = "\ue000"
+
+
+def _snippet_sentinel(index: int) -> str:
+    return f"{_SNIPPET_SENTINEL_MARK}{chr(0xe001 + index)}{_SNIPPET_SENTINEL_MARK}"
+
+
+def _mask_snippets_inline(
+        raw: str, snippets: dict[str, str]) -> tuple[str, dict[str, str]]:
+    """Round-trip masking half of inline expansion: replace each whole-word
+    trigger (same matching as expand_snippets_inline) with an opaque sentinel and
+    return (masked_text, sentinel -> expansion). An empty mapping means nothing
+    matched, and the caller must leave raw untouched."""
+    pattern = _compile_snippet_pattern(snippets)
+    if pattern is None:
+        return raw, {}
+    lookup = {trigger.casefold(): text for trigger, text in snippets.items()}
+    restore: dict[str, str] = {}
+    counter = [0]
+
+    def replace(match: "re.Match[str]") -> str:
+        expansion = lookup.get(match.group(1).casefold())
+        if expansion is None:
+            return match.group(0)
+        token = _snippet_sentinel(counter[0])
+        counter[0] += 1
+        restore[token] = expansion
+        return token
+
+    return pattern.sub(replace, raw), restore
+
+
+def _restore_snippet_sentinels(text: str, restore: dict[str, str]) -> str:
+    """Substitute each shielded sentinel back to its exact expansion. A sentinel
+    absent from the final text is a no-op, so a dropped token can never corrupt
+    the surrounding dictation."""
+    for token, expansion in restore.items():
+        if token in text:
+            text = text.replace(token, expansion)
+    return text
+
+
 def save_snippet_edit(name: str, old: str, new: str, bundle: str) -> bool:
     """Persist one focus-safe snippet replacement and its inspectable record."""
     if not new or new == old or len(new) > 4000:
@@ -7240,13 +7337,25 @@ def phone_clean(raw: str) -> str:
     hit = match_snippet(raw)
     if hit is not None:
         return hit[1]
+    # Inline snippet expansion, parity with the desktop pipeline. This path has
+    # no proof-checked LLM reconstruction, so when a trigger fires we shield it
+    # behind a sentinel and force the deterministic no-LLM route — the sentinel
+    # is never handed to the model — then restore the exact expansion after
+    # cleanup. With no trigger the mapping is empty and this path is unchanged.
+    masked, snippet_restore = _mask_snippets_inline(raw, _load_snippet_map())
+    if snippet_restore:
+        raw = masked
     raw, tone_override = extract_tone_override(raw)
     verbatim = tone_override == "verbatim"
-    needs_llm = needs_llm_cleanup(raw, tone_override, verbatim)
+    needs_llm = needs_llm_cleanup(raw, tone_override, verbatim) \
+        and not snippet_restore
     tone_key = tone_override if tone_override in TONE else "default"
     text = llm_clean(raw, TONE[tone_key]) if needs_llm \
         else quick_clean(raw, verbatim=verbatim)
     text = apply_vocabulary_casing(text)   # user's canonical term casing
+    if snippet_restore:
+        text = _restore_snippet_sentinels(text, snippet_restore)
+        raw = _restore_snippet_sentinels(raw, snippet_restore)
     if text:
         append_transcript(raw, text, "ios.diction", "phone")
     return text
@@ -8050,6 +8159,22 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                   f"asr {t_asr:.2f}s]")
             return
 
+        # Inline snippet expansion is additive to the whole-utterance command
+        # handled above: a trigger embedded in a longer dictation ("text him my
+        # address and say thanks") expands only the trigger words while the
+        # surrounding phrase still flows through normal cleanup. Mask each hit
+        # with an opaque sentinel now and restore the exact expansion after
+        # cleanup (below), so multiline boilerplate is never reflowed. Limited
+        # to capture/code — the modes that insert literal text and whose
+        # proof-checked cleanup preserves the sentinel byte-for-byte; edit,
+        # reply, and compose keep their existing behavior unchanged.
+        snippet_restore: dict[str, str] = {}
+        if rec.mode in {"capture", "code"}:
+            masked_raw, snippet_restore = _mask_snippets_inline(
+                raw, _load_snippet_map())
+            if snippet_restore:
+                raw = masked_raw
+
         raw, tone_override = extract_tone_override(raw)
         if ((is_verbatim_app(bundle) or tone_override == "verbatim")
                 and rec.mode in {"capture", "code"}):
@@ -8166,6 +8291,13 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 text = text[len(tail40):].lstrip()      # model echoed context
             if not ctx[-1].isspace() and text[:1] not in ",.;:!?…":
                 text = " " + text                       # joining needs a space
+
+        # Restore the shielded inline expansions on the finalized text, just
+        # before the correction receipt and the paste consume it, so both agree
+        # on the exact bytes. A sentinel missing from the text is a no-op, so a
+        # dropped token can never partially expand or corrupt the dictation.
+        if snippet_restore:
+            text = _restore_snippet_sentinels(text, snippet_restore)
 
         learn_correction = not verbatim and rec.mode != "edit"
         if rec.insertion_lease is not None:
