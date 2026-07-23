@@ -1,0 +1,21 @@
+---
+import Doc from '../../layouts/Doc.astro';
+import { getCollection } from 'astro:content';
+
+const docs = (await getCollection('docs')).sort((a, b) => a.data.order - b.data.order);
+---
+
+<Doc title="Docs" description="Install Whisper Face, understand how it protects your voice, and fix it when your Mac gets weird.">
+  <h1>Whisper Face docs</h1>
+  <p class="lead">Install it, trust it, and fix it when your Mac gets weird.</p>
+  <ul>
+    {
+      docs.map((d) => (
+        <li>
+          <a href={`/docs/${d.id}`}>{d.data.title}</a>
+          {d.data.description ? ` — ${d.data.description}` : ''}
+        </li>
+      ))
+    }
+  </ul>
+</Doc>
