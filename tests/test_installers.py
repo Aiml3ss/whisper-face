@@ -137,6 +137,125 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn(model, self.shell)
         self.assertIn(model, self.powershell)
 
+    def test_mac_installer_probes_before_announcing_any_model_download(self):
+        # Hugging Face and Ollama both skip files they already have, so a size
+        # may only be printed for a model this run is really going to fetch.
+        self.assertIn("--model-inventory", self.shell)
+        self.assertIn("--model-inventory", self.script)
+        inventory = self.shell.index('refresh_model_inventory() {')
+        for step in (
+            'step "downloading the pinned Parakeet Unified model',
+            'step "downloading Whisper Tiny',
+            'step "downloading Whisper large-v3-turbo',
+            'step "downloading qwen3.5:4b',
+        ):
+            with self.subTest(step=step):
+                self.assertLess(inventory, self.shell.index(step))
+        for probe, announcement in (
+            ('[ "$(model_state parakeet)" = "present" ]',
+             'step "Parakeet Unified model already installed'),
+            ('[ "$(model_state whisper-fast)" = "present" ]',
+             'step "Whisper Tiny already installed'),
+            ('[ "$(model_state whisper-large)" = "present" ]',
+             'step "Whisper large-v3-turbo already installed'),
+            ('if qwen_is_installed; then',
+             'echo "== qwen3.5:4b already installed"'),
+        ):
+            with self.subTest(probe=probe):
+                self.assertIn(probe, self.shell)
+                self.assertLess(
+                    self.shell.index(probe), self.shell.index(announcement))
+        # The old unconditional claim printed a download that a warm rerun
+        # never performed.
+        self.assertNotIn("downloading both Whisper models", self.shell)
+
+    def test_mac_default_install_skips_the_optional_quality_models(self):
+        for flag in ("--with-all-models", "--models", "--preload-fast-model"):
+            with self.subTest(flag=flag):
+                self.assertIn(flag, self.shell)
+        self.assertIn("--preload-fast-model", self.script)
+        self.assertIn("WITH_ALL_MODELS=0", self.shell)
+        self.assertIn("--models) MODELS_ONLY=1; WITH_ALL_MODELS=1 ;;",
+                      self.shell)
+
+        # Each heavy download is reachable only through the opt-in flag.
+        for download in (
+            '"$OLLAMA" pull qwen3.5:4b',
+            'step "downloading Whisper large-v3-turbo (~1.6 GB)"',
+        ):
+            with self.subTest(download=download):
+                guard = self.shell.rindex(
+                    'elif [ "$WITH_ALL_MODELS" -eq 1 ]; then',
+                    0, self.shell.index(download))
+                self.assertLess(guard, self.shell.index(download))
+        # The always-required models stay unconditional.
+        for required in (
+            '"$UV" run --locked --script "$DIR/dictate.py" '
+            '--preload-parakeet-model',
+            '"$UV" run --locked --script "$DIR/dictate.py" '
+            '--preload-fast-model',
+        ):
+            with self.subTest(required=required):
+                self.assertIn(f'\n{required}\n', self.shell)
+        # The closing hint names what was skipped and how to get it.
+        self.assertIn("skipped_models+=(", self.shell)
+        self.assertIn(
+            'echo "== Dictation works without them. '
+            'Add them with: ./setup.sh --models"',
+            self.shell)
+        self.assertIn("install_optional_models()", self.shell)
+        self.assertIn('if [ "$MODELS_ONLY" -eq 1 ]; then', self.shell)
+
+    def test_minimal_mac_install_is_a_supported_verified_configuration(self):
+        verify_start = self.shell.index("verify_install() {")
+        verify_end = self.shell.index('if [ "$VERIFY_ONLY" -eq 1 ]')
+        verify = self.shell[verify_start:verify_end]
+        # An absent optional cleanup model is a supported state, not a failure.
+        self.assertNotIn('fail "qwen3.5:4b is not installed"', self.shell)
+        self.assertIn(
+            'if "$ollama_bin" show qwen3.5:4b >/dev/null 2>&1; then\n'
+            '        verify_qwen=1\n',
+            verify)
+        manifest = verify.index("--verify-ollama-model")
+        guard = verify.rindex('if [ "$verify_qwen" -eq 1 ]; then', 0, manifest)
+        self.assertLess(guard, manifest)
+        self.assertIn("cleanup stays deterministic", verify)
+        # Installing the model keeps its manifest audit mandatory.
+        self.assertIn('fail "Qwen model manifest verification failed"', verify)
+        install = self.shell[self.shell.index(
+            'step "installing the locked Python environment"'):]
+        install_manifest = install.index("--verify-ollama-model")
+        self.assertLess(
+            install.rindex('if [ "$qwen_installed" -eq 1 ]; then',
+                           0, install_manifest),
+            install_manifest)
+
+    def test_runtime_degrades_when_an_optional_model_is_absent(self):
+        # Recognition falls back to a model that exists instead of failing the
+        # utterance, and cleanup falls back to the deterministic compiler.
+        for required in (
+            "def asr_model_is_cached(",
+            "def asr_decode_target(",
+            "model_repo = asr_decode_target(model_repo)",
+            "ASR_MODELS_NOT_CACHED",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, self.script)
+        tree = ast.parse(self.script)
+        warmup = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "warmup")
+        handlers = [
+            handler for node in ast.walk(warmup)
+            if isinstance(node, ast.Try) for handler in node.handlers
+            if "Ollama warmup failed" in ast.dump(handler)
+        ]
+        self.assertEqual(len(handlers), 1)
+        self.assertIn("cleanup_status", ast.dump(handlers[0]))
+        self.assertFalse(any(
+            isinstance(statement, ast.Raise)
+            for statement in ast.walk(handlers[0])))
+
     def test_warm_rerun_reuses_only_an_exact_healthy_ollama_service(self):
         # macOS renders the desired plist on every run and may retain the warm
         # process only when config, launchd state, and health all agree.

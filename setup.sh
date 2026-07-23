@@ -33,14 +33,33 @@ esac
 
 MODE="full"
 VERIFY_ONLY=0
+# A default install downloads only what dictation needs to work at all:
+# Parakeet Unified plus Whisper Tiny. The large Whisper fallback and the Qwen
+# cleanup model are quality upgrades and are opt-in.
+WITH_ALL_MODELS=0
+MODELS_ONLY=0
 for arg in "$@"; do
     case "$arg" in
         --server-only) MODE="server-only" ;;
         --verify) VERIFY_ONLY=1 ;;
+        --with-all-models) WITH_ALL_MODELS=1 ;;
+        --models) MODELS_ONLY=1; WITH_ALL_MODELS=1 ;;
         -h|--help)
-            echo "Usage: ./setup.sh [--server-only] [--verify]"
+            echo "Usage: ./setup.sh [--server-only] [--verify]" \
+                "[--with-all-models] [--models]"
             echo "  --server-only  install the headless endpoint without UI/mic"
             echo "  --verify       check an existing installation without changing it"
+            echo "  --with-all-models  also download the optional quality models"
+            echo "  --models       download only the optional models into an"
+            echo "                 existing installation, then exit"
+            echo
+            echo "Required (always installed, ~650 MB):"
+            echo "  Parakeet Unified 0.6B  primary recognition"
+            echo "  Whisper Tiny           fast preview pass"
+            echo "Optional (skipped unless requested, ~5 GB):"
+            echo "  Whisper large-v3-turbo recognition fallback"
+            echo "  qwen3.5:4b             semantic cleanup; deterministic"
+            echo "                         cleanup runs without it"
             exit 0
             ;;
         *) echo "Unknown option: $arg" >&2; exit 2 ;;
@@ -280,7 +299,7 @@ ollama_log="$DIR/ollama.log"
 verify_install() {
     step "verifying installation"
     local uv_bin ollama_bin verify_ollama_plist verify_ollama_digest
-    local verify_cleanup
+    local verify_cleanup verify_qwen
     local escaped_verify_ollama escaped_verify_dir
     uv_bin="$(command -v uv 2>/dev/null || true)"
     ollama_bin="$(command -v ollama 2>/dev/null || true)"
@@ -338,17 +357,28 @@ verify_install() {
     "$uv_bin" run --locked --script "$DIR/dictate.py" \
         --verify-parakeet-model >/dev/null \
         || fail "Parakeet Unified model revision verification failed"
-    "$uv_bin" run --locked --script "$DIR/dictate.py" \
-        --verify-ollama-model >/dev/null \
-        || fail "Qwen model manifest verification failed"
-    "$ollama_bin" show qwen3.5:4b >/dev/null 2>&1 \
-        || fail "qwen3.5:4b is not installed"
+    # qwen3.5:4b is an optional cleanup upgrade. Audit it when it is installed;
+    # a minimal install without it is a supported configuration, not a failure.
+    verify_qwen=0
+    if "$ollama_bin" show qwen3.5:4b >/dev/null 2>&1; then
+        verify_qwen=1
+    fi
+    if [ "$verify_qwen" -eq 1 ]; then
+        "$uv_bin" run --locked --script "$DIR/dictate.py" \
+            --verify-ollama-model >/dev/null \
+            || fail "Qwen model manifest verification failed"
+    fi
     agent_is_running com.berg.ollama || fail "Ollama LaunchAgent is not running"
     agent_is_running com.berg.dictate \
         || fail "dictation LaunchAgent is not running"
     curl -fsS --max-time 3 http://127.0.0.1:8787/health >/dev/null \
         || fail "dictation process is not ready; inspect $DIR/dictate.log"
-    echo "== verified: locked Python environment, Whisper + Parakeet + Qwen models, services, and health"
+    if [ "$verify_qwen" -eq 1 ]; then
+        echo "== verified: locked Python environment, Whisper + Parakeet + Qwen models, services, and health"
+    else
+        echo "== verified: locked Python environment, Whisper + Parakeet models, services, and health"
+        echo "== qwen3.5:4b is not installed; cleanup stays deterministic (add it with ./setup.sh --models)"
+    fi
 }
 
 if [ "$VERIFY_ONLY" -eq 1 ]; then
@@ -357,12 +387,30 @@ if [ "$VERIFY_ONLY" -eq 1 ]; then
 fi
 
 step "Whisper Face setup in $DIR (mode: $MODE)"
+if [ "$MODELS_ONLY" -eq 1 ]; then
+    echo "== models: adding the optional Whisper large-v3-turbo and qwen3.5:4b"
+    echo "==         to this installation; models already present are reused"
+elif [ "$WITH_ALL_MODELS" -eq 1 ]; then
+    echo "== models: Parakeet Unified + Whisper Tiny + Whisper large-v3-turbo"
+    echo "==         + qwen3.5:4b (already-downloaded models are reused)"
+else
+    echo "== models: Parakeet Unified + Whisper Tiny only. The optional"
+    echo "==         large-v3-turbo and qwen3.5:4b models are skipped unless"
+    echo "==         already present; add them later with ./setup.sh --models"
+fi
 
-# Keep enough headroom for Ollama, both Whisper models, Python wheels, caches,
-# and model expansion. Existing cached files make reruns much cheaper.
+# Keep enough headroom for Ollama, the Whisper models, Python wheels, caches,
+# and model expansion. Existing cached files make reruns much cheaper, and a
+# default install without the optional models needs far less room.
+required_kb=5242880
+required_gb=5
+if [ "$WITH_ALL_MODELS" -eq 1 ]; then
+    required_kb=8388608
+    required_gb=8
+fi
 available_kb="$(df -Pk "$DIR" | awk 'NR == 2 {print $4}')"
-if [ "${available_kb:-0}" -lt 8388608 ]; then
-    fail "at least 8 GB of free disk space is required"
+if [ "${available_kb:-0}" -lt "$required_kb" ]; then
+    fail "at least $required_gb GB of free disk space is required"
 fi
 
 confirm_writable_checkout
@@ -397,10 +445,73 @@ UV="$(command -v uv)"
 OLLAMA="$(command -v ollama)"
 mkdir -p "$launch_dir"
 
+# --- Model inventory --------------------------------------------------------
+# Probe the caches before announcing any size. Hugging Face and Ollama both
+# skip files they already have, so a rerun that printed "downloading ~1.7 GB"
+# was lying about work it never did.
+model_inventory=""
+skipped_models=()
+
+refresh_model_inventory() {
+    model_inventory="$("$UV" run --locked --script "$DIR/dictate.py" \
+        --model-inventory)" \
+        || fail "could not inspect the local model cache"
+}
+
+model_state() {
+    printf '%s\n' "$model_inventory" \
+        | awk -F= -v key="$1" '$1 == key { print $2; exit }'
+}
+
+qwen_is_installed() {
+    "$OLLAMA" show qwen3.5:4b >/dev/null 2>&1
+}
+
+install_optional_models() {
+    # Fetch only the opt-in quality models into an existing installation.
+    step "checking which optional models are already installed"
+    refresh_model_inventory
+    if [ "$(model_state whisper-large)" = "present" ]; then
+        echo "== Whisper large-v3-turbo already installed"
+    else
+        step "downloading Whisper large-v3-turbo (~1.6 GB)"
+        "$UV" run --locked --script "$DIR/dictate.py" --preload-models
+    fi
+    if qwen_is_installed; then
+        echo "== qwen3.5:4b already installed"
+    else
+        curl -fsS --max-time 3 http://127.0.0.1:11434/api/tags \
+            >/dev/null 2>&1 \
+            || fail "Ollama is not running; run ./setup.sh first, then ./setup.sh --models"
+        step "downloading qwen3.5:4b (~3.4 GB)"
+        "$OLLAMA" pull qwen3.5:4b
+    fi
+    "$UV" run --locked --script "$DIR/dictate.py" --verify-ollama-model
+    if agent_is_running com.berg.dictate; then
+        step "restarting Whisper Face so it loads the new models"
+        launchctl kickstart -k "gui/$(id -u)/com.berg.dictate" >/dev/null 2>&1 \
+            || echo "!! could not restart Whisper Face; rerun ./setup.sh"
+    fi
+    echo
+    echo "== optional models are installed"
+}
+
+if [ "$MODELS_ONLY" -eq 1 ]; then
+    install_optional_models
+    exit 0
+fi
+
+step "checking which models are already installed"
+refresh_model_inventory
+
 # --- Native Parakeet helper ------------------------------------------------
 # Both FluidAudio and its Core ML model are pinned. The warm helper receives
 # Float32 audio over a pipe, so the RAM-only application contract remains intact.
-step "downloading the pinned Parakeet Unified model (~565 MB, first run only)"
+if [ "$(model_state parakeet)" = "present" ]; then
+    step "Parakeet Unified model already installed (~565 MB, cached)"
+else
+    step "downloading the pinned Parakeet Unified model (~565 MB, first run only)"
+fi
 "$UV" run --locked --script "$DIR/dictate.py" --preload-parakeet-model
 
 step "building the native Parakeet Unified helper"
@@ -468,19 +579,48 @@ printf '%s\n' "$desired_ollama_digest" > "$receipt_temporary"
 chmod 600 "$receipt_temporary"
 mv -f "$receipt_temporary" "$ollama_service_receipt"
 
-if ! "$OLLAMA" show qwen3.5:4b >/dev/null 2>&1; then
+# The cleanup model only rewrites text the deterministic compiler refuses to
+# touch, so it is optional: an install without it cleans up deterministically.
+qwen_installed=0
+if qwen_is_installed; then
+    echo "== qwen3.5:4b already installed"
+    qwen_installed=1
+elif [ "$WITH_ALL_MODELS" -eq 1 ]; then
     step "downloading qwen3.5:4b (~3.4 GB)"
     "$OLLAMA" pull qwen3.5:4b
+    qwen_installed=1
 else
-    echo "== qwen3.5:4b already present"
+    echo "== skipping qwen3.5:4b (~3.4 GB): semantic cleanup upgrade"
+    skipped_models+=(
+        "qwen3.5:4b (~3.4 GB) — semantic cleanup; deterministic cleanup runs without it")
 fi
 
 # --- Reproducible Python environment and Whisper model cache ---------------
 step "installing the locked Python environment"
 "$UV" sync --locked --script "$DIR/dictate.py"
-"$UV" run --locked --script "$DIR/dictate.py" --verify-ollama-model
-step "downloading both Whisper models (~1.7 GB total)"
-"$UV" run --locked --script "$DIR/dictate.py" --preload-models
+if [ "$qwen_installed" -eq 1 ]; then
+    "$UV" run --locked --script "$DIR/dictate.py" --verify-ollama-model
+fi
+
+# Whisper Tiny is the fast preview pass every dictation runs; it is required.
+if [ "$(model_state whisper-fast)" = "present" ]; then
+    step "Whisper Tiny already installed (~75 MB, cached)"
+else
+    step "downloading Whisper Tiny (~75 MB)"
+fi
+"$UV" run --locked --script "$DIR/dictate.py" --preload-fast-model
+
+# large-v3-turbo only decodes what Parakeet declines, so it is an upgrade.
+if [ "$(model_state whisper-large)" = "present" ]; then
+    step "Whisper large-v3-turbo already installed (~1.6 GB, cached)"
+elif [ "$WITH_ALL_MODELS" -eq 1 ]; then
+    step "downloading Whisper large-v3-turbo (~1.6 GB)"
+    "$UV" run --locked --script "$DIR/dictate.py" --preload-models
+else
+    echo "== skipping Whisper large-v3-turbo (~1.6 GB): recognition fallback"
+    skipped_models+=(
+        "Whisper large-v3-turbo (~1.6 GB) — recognition fallback behind Parakeet")
+fi
 
 # --- Private, per-machine state --------------------------------------------
 step "creating private per-machine files (existing files are preserved)"
@@ -587,5 +727,12 @@ if [ "$MODE" = "full" ]; then
     echo "== Launcher: $launcher_app"
 else
     echo "== server-only installation is ready."
+fi
+if [ "${#skipped_models[@]}" -gt 0 ]; then
+    echo "== These optional models were skipped to keep the install small:"
+    for skipped_model in "${skipped_models[@]}"; do
+        echo "==   $skipped_model"
+    done
+    echo "== Dictation works without them. Add them with: ./setup.sh --models"
 fi
 echo "== Logs: $DIR/dictate.log"

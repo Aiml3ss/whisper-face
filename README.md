@@ -273,12 +273,22 @@ are never Supporter-only features.
 
 | Platform | Requirements |
 |---|---|
-| macOS | Apple Silicon, macOS 14 or newer recommended, ~8 GB free |
+| macOS | Apple Silicon, macOS 14 or newer recommended, ~5 GB free (~8 GB with `--with-all-models`) |
 | Windows | Windows 10/11 x64, ~8 GB free; NVIDIA GPU preferred, CPU fallback supported |
 
-Both platforms install Whisper Tiny, Whisper large-v3-turbo, and Qwen3.5-4B.
-Mac also builds a pinned FluidAudio helper and downloads Parakeet Unified;
-Whisper remains installed for fallback and broader language support.
+A default Mac install downloads only what dictation needs: Parakeet Unified
+(~565 MB, primary recognition) and Whisper Tiny (~75 MB, the fast preview
+pass). It also builds a pinned FluidAudio helper. Two models are optional
+quality upgrades and are skipped unless you ask for them:
+
+| Optional model | Size | What you lose without it |
+|---|---|---|
+| Whisper large-v3-turbo | ~1.6 GB | The accurate fallback for audio Parakeet declines; the cascade uses Whisper Tiny instead |
+| Qwen3.5-4B | ~3.4 GB | Semantic cleanup; the deterministic compiler still punctuates and cleans every dictation |
+
+Install them up front with `./setup.sh --with-all-models`, or add them later
+with `./setup.sh --models`. Windows installs Whisper Tiny, Whisper
+large-v3-turbo, and Qwen3.5-4B.
 Whisper and Parakeet preload immutable audited revisions so a later upstream
 model update cannot silently change a fresh install. Qwen's current Ollama tag
 manifest is recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and
@@ -301,6 +311,12 @@ From a terminal, the same installers are:
 # macOS
 ./setup.sh
 
+# macOS, including the optional large-v3-turbo and Qwen3.5-4B models
+./setup.sh --with-all-models
+
+# macOS, add those optional models to an existing installation
+./setup.sh --models
+
 # Windows PowerShell
 .\setup.ps1
 ```
@@ -312,8 +328,12 @@ The launcher detects the OS. A Windows Git Bash or WSL invocation of
    packages on Windows), then installs `uv`, `ffmpeg`, and Ollama.
 2. Reproduces the locked Python dependency environment from
    `dictate.py.lock`.
-3. Downloads Qwen3.5-4B and both Whisper models before launching the app. On
-   Mac it also builds and preloads the native Parakeet Unified helper.
+3. Downloads the models it needs before launching the app: Parakeet Unified
+   and Whisper Tiny on Mac (plus large-v3-turbo and Qwen3.5-4B when you pass
+   `--with-all-models`), Qwen3.5-4B and both Whisper models on Windows. Each
+   model is probed first, so a rerun reports what is already cached instead of
+   announcing a download it will skip. On Mac it also builds and preloads the
+   native Parakeet Unified helper.
 4. Creates private configuration files without overwriting existing ones.
 5. Installs and validates the tuned Ollama and dictation login services
    (`launchd` on Mac, Task Scheduler on Windows).
@@ -328,8 +348,10 @@ The launcher detects the OS. A Windows Git Bash or WSL invocation of
    local endpoint.
 
 Homebrew's official installer may pause once to explain its changes and ask
-for your macOS password. Model downloads are several gigabytes, so the first
-run can take a while. Subsequent runs are idempotent and reuse the caches.
+for your macOS password. A default Mac install downloads about 650 MB of
+models; `--with-all-models` adds roughly 5 GB, so that first run takes a
+while. Subsequent runs are idempotent, reuse the caches, and say which models
+were already present.
 
 Every runtime change is governed by the repository's
 [installer release process](docs/installer-release-process.md). It requires

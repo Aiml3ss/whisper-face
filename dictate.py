@@ -889,6 +889,12 @@ ASR_POOL = ThreadPoolExecutor(max_workers=1)
 CHUNK_PREP_POOL = ThreadPoolExecutor(max_workers=1)
 ASR_MODEL_PATHS = {}
 ASR_MODEL_PATHS_LOCK = threading.Lock()
+# Repositories a cache-only probe has already proven absent. A minimal install
+# ships Parakeet plus Whisper Tiny, so the large fallback is legitimately
+# missing on many machines; remembering that keeps every later utterance from
+# repeating the same Hugging Face cache walk.
+ASR_MODELS_NOT_CACHED = set()
+ASR_DEGRADED_NOTICES = set()
 MODEL_READINESS_CACHE = {"receipt": None, "lock": threading.Lock()}
 MODEL_WARM_PATHS = {"providers": set(), "lock": threading.Lock()}
 POINT_AND_SPEAK_TRANSACTIONS = PointAndSpeakTransactions()
@@ -5616,9 +5622,11 @@ def resolve_asr_model(model_repo: str, downloader=None, *,
                       local_files_only: bool = True) -> str:
     """Resolve an MLX repository once, then decode from its local snapshot.
 
-    Runtime resolution is deliberately offline because the Mac clickable
-    installer preloads both pinned snapshots. Preload opts into downloads
-    explicitly; a dictation must never wait on a Hugging Face metadata walk.
+    Runtime resolution is deliberately offline because the installer preloads
+    every pinned snapshot it installs. Preload opts into downloads explicitly;
+    a dictation must never wait on a Hugging Face metadata walk. A snapshot the
+    installer skipped raises here, which ``asr_decode_target`` turns into a
+    fallback to the model this machine does have.
     """
     if not IS_MACOS:
         return model_repo
@@ -5636,6 +5644,57 @@ def resolve_asr_model(model_repo: str, downloader=None, *,
         ))
         ASR_MODEL_PATHS[model_repo] = resolved
         return resolved
+
+
+def asr_model_is_cached(model_repo: str, downloader=None, *,
+                        is_macos: bool = IS_MACOS) -> bool:
+    """Answer whether the exact pinned snapshot is already on this machine.
+
+    Nothing is downloaded: resolution is offline-only, so success proves the
+    pinned revision is on disk and failure proves it is not. Installers use
+    this to describe what a run will really fetch, and the runtime uses it to
+    pick a model that actually exists.
+    """
+    if not is_macos:
+        # Windows resolves through faster-whisper's own cache at load time.
+        return False
+    with ASR_MODEL_PATHS_LOCK:
+        if model_repo in ASR_MODEL_PATHS:
+            return True
+        if model_repo in ASR_MODELS_NOT_CACHED:
+            return False
+    try:
+        resolve_asr_model(model_repo, downloader)
+    except Exception:
+        with ASR_MODEL_PATHS_LOCK:
+            ASR_MODELS_NOT_CACHED.add(model_repo)
+        return False
+    return True
+
+
+def asr_decode_target(model_repo: str, *, available=None,
+                      is_macos: bool = IS_MACOS) -> str:
+    """Pick the decode model this machine can actually load.
+
+    Whisper large-v3-turbo is an optional accuracy upgrade behind Parakeet, so
+    a minimal install may not have it. Rather than failing an utterance the
+    cascade degrades to the always-installed Tiny model and says so once.
+    """
+    if not is_macos or model_repo != WHISPER_REPO:
+        return model_repo
+    available = available or asr_model_is_cached
+    if available(WHISPER_REPO):
+        return model_repo
+    if not available(FAST_WHISPER_REPO):
+        # Neither snapshot is present; let the normal resolution error report
+        # the real problem instead of hiding it behind a silent substitution.
+        return model_repo
+    if model_repo not in ASR_DEGRADED_NOTICES:
+        ASR_DEGRADED_NOTICES.add(model_repo)
+        print(f"! {WHISPER_REPO} is not installed; using "
+              f"{FAST_WHISPER_REPO} for this fallback. "
+              "Run ./setup.sh --models to add the accurate model.")
+    return FAST_WHISPER_REPO
 
 
 def windows_whisper_model(model_repo: str):
@@ -5696,6 +5755,8 @@ def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
                 native_processing_s=native_processing_s,
             )
 
+    model_repo = asr_decode_target(model_repo)
+    engine = "tiny" if model_repo == FAST_WHISPER_REPO else "turbo"
     resolved_model = resolve_asr_model(model_repo)
 
     def decode(temperature):
@@ -9072,7 +9133,9 @@ def warmup():
             all_ready = 0.0
             PIPELINE_STATE["cleanup_status"] = "Unavailable"
             print(f"! Ollama warmup failed: {e}")
-            print("  Is Ollama running, and has qwen3.5:4b been pulled?")
+            print("  Dictation still works; cleanup stays deterministic. "
+                  f"A minimal install has no {OLLAMA_MODEL}: add it with "
+                  "./setup.sh --models.")
         print("Ready (phone endpoint only)." if SERVER_ONLY else
               f"Ready. Hold {'RIGHT OPTION' if IS_MACOS else 'RIGHT ALT'} and "
               "speak; release to paste. Ctrl-C quits.")
@@ -9088,22 +9151,47 @@ def warmup():
         })
 
 
-def preload_model_files():
-    """Download both platform ASR models without touching the mic or UI.
+def preload_model_files(repos=None):
+    """Download the requested platform ASR models without mic or UI access.
 
     setup.sh uses this before installing the LaunchAgent so a successful
     installer guarantees that first-use recognition is not still waiting on
-    a multi-gigabyte background download.
+    a background download. Already-cached snapshots are reported as cached
+    instead of being announced as a download that will not happen.
     """
+    repos = tuple(repos) if repos is not None \
+        else (FAST_WHISPER_REPO, WHISPER_REPO)
     if IS_WINDOWS:
-        for repo in (FAST_WHISPER_REPO, WHISPER_REPO):
+        for repo in repos:
             print(f"Caching faster-Whisper {repo}...")
             windows_whisper_model(repo)
     else:
-        for repo in (FAST_WHISPER_REPO, WHISPER_REPO):
-            print(f"Caching {repo}...")
+        for repo in repos:
+            if asr_model_is_cached(repo):
+                print(f"{repo} is already cached; nothing to download.")
+                continue
+            print(f"Downloading {repo}...")
             resolve_asr_model(repo, local_files_only=False)
     print("Whisper model cache ready.")
+
+
+def model_inventory() -> dict:
+    """Report which pinned model assets are already present, downloading none.
+
+    Installers probe this before printing a size, so a rerun can never claim
+    a multi-gigabyte download that the cache is going to skip.
+    """
+    return {
+        "parakeet": parakeet_model_is_cached(),
+        "whisper-fast": asr_model_is_cached(FAST_WHISPER_REPO),
+        "whisper-large": asr_model_is_cached(WHISPER_REPO),
+    }
+
+
+def print_model_inventory():
+    """Emit one ``name=present|missing`` line per model for the installers."""
+    for name, present in model_inventory().items():
+        print(f"{name}={'present' if present else 'missing'}")
 
 
 def preload_parakeet_model():
@@ -9149,6 +9237,21 @@ def verify_ollama_model_manifest():
 
 def verify_parakeet_model_revision():
     """Fail closed if FluidAudio would load weights from another revision."""
+    check_parakeet_model_revision()
+    print(f"Parakeet revision verified: {PARAKEET_MODEL_REVISION}")
+
+
+def parakeet_model_is_cached() -> bool:
+    """True when the exact pinned Parakeet snapshot is already on disk."""
+    try:
+        check_parakeet_model_revision()
+    except Exception:
+        return False
+    return True
+
+
+def check_parakeet_model_revision():
+    """Raise when the local Parakeet assets are missing or off-revision."""
     required = (
         "parakeet_unified_encoder_int8.mlmodelc",
         "parakeet_unified_decoder.mlmodelc",
@@ -9176,7 +9279,6 @@ def verify_parakeet_model_revision():
             if revision != PARAKEET_MODEL_REVISION:
                 raise RuntimeError(
                     f"Parakeet model revision drift: {path.name} is {revision}")
-    print(f"Parakeet revision verified: {PARAKEET_MODEL_REVISION}")
 
 
 def platform_smoke_test():
@@ -9481,6 +9583,11 @@ if __name__ == "__main__":
                 f"{result['settings_panes']} settings panes.")
     elif "--preload-models" in sys.argv:
         preload_model_files()
+    elif "--preload-fast-model" in sys.argv:
+        # Minimal install: only the small model every dictation actually uses.
+        preload_model_files((FAST_WHISPER_REPO,))
+    elif "--model-inventory" in sys.argv:
+        print_model_inventory()
     elif "--preload-parakeet-model" in sys.argv:
         preload_parakeet_model()
     elif "--verify-parakeet-model" in sys.argv:

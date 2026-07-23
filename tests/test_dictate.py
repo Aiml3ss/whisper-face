@@ -3256,6 +3256,164 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(resolved, "/models/org--turbo")
         self.assertEqual(downloads, [("org/turbo", None, False)])
 
+    @staticmethod
+    def probe_namespace(cached, downloads=None, *, is_macos=True):
+        """Load the cache probe over a fake, download-free Hugging Face API."""
+        def download(repo_id, revision=None, local_files_only=None):
+            if downloads is not None:
+                downloads.append((repo_id, revision, local_files_only))
+            if repo_id not in cached:
+                raise FileNotFoundError(repo_id)
+            return f"/models/{repo_id.replace('/', '--')}"
+
+        ns = load_definitions(
+            "resolve_asr_model", "asr_model_is_cached",
+            assignments={
+                "ASR_MODEL_PATHS", "ASR_MODEL_PATHS_LOCK",
+                "ASR_MODEL_REVISIONS", "ASR_MODELS_NOT_CACHED",
+            },
+            extra={"IS_MACOS": is_macos},
+        )
+        ns["download"] = download
+        return ns
+
+    def test_model_presence_probe_never_downloads_and_memoizes_its_answer(self):
+        downloads = []
+        ns = self.probe_namespace({"org/tiny"}, downloads)
+
+        probe = ns["asr_model_is_cached"]
+        self.assertTrue(probe("org/tiny", ns["download"]))
+        self.assertFalse(probe("org/turbo", ns["download"]))
+        # Repeat probes must reuse both the hit and the miss, so an installer
+        # or a dictation never pays for the same cache walk twice.
+        self.assertTrue(probe("org/tiny", ns["download"]))
+        self.assertFalse(probe("org/turbo", ns["download"]))
+
+        self.assertEqual(downloads, [
+            ("org/tiny", None, True),
+            ("org/turbo", None, True),
+        ])
+        self.assertTrue(all(
+            local_files_only is True for _, _, local_files_only in downloads))
+        self.assertEqual(ns["ASR_MODELS_NOT_CACHED"], {"org/turbo"})
+
+        # Windows resolves through faster-whisper's own cache, so this probe
+        # claims nothing about it rather than guessing.
+        windows = self.probe_namespace({"org/tiny"}, is_macos=False)
+        self.assertFalse(
+            windows["asr_model_is_cached"]("org/tiny", windows["download"]))
+
+    def test_missing_optional_whisper_model_degrades_to_the_installed_one(self):
+        present = set()
+
+        def available(repo):
+            return repo in present
+
+        ns = load_definitions(
+            "asr_decode_target",
+            assignments={"ASR_DEGRADED_NOTICES"},
+            extra={
+                "IS_MACOS": True,
+                "WHISPER_REPO": "org/turbo",
+                "FAST_WHISPER_REPO": "org/tiny",
+            },
+        )
+        target = ns["asr_decode_target"]
+
+        # A full install keeps the accurate fallback.
+        present = {"org/turbo", "org/tiny"}
+        self.assertEqual(target("org/turbo", available=available), "org/turbo")
+
+        # A minimal install decodes with the model it actually has.
+        ns["ASR_DEGRADED_NOTICES"].clear()
+        present = {"org/tiny"}
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(
+                target("org/turbo", available=available), "org/tiny")
+            self.assertEqual(
+                target("org/turbo", available=available), "org/tiny")
+        self.assertEqual(out.getvalue().count("./setup.sh --models"), 1)
+
+        # Nothing cached: surface the real resolution error, do not substitute.
+        ns["ASR_DEGRADED_NOTICES"].clear()
+        present = set()
+        self.assertEqual(target("org/turbo", available=available), "org/turbo")
+
+        # The fast model and non-macOS routing are never rewritten.
+        present = {"org/tiny"}
+        self.assertEqual(target("org/tiny", available=available), "org/tiny")
+        self.assertEqual(
+            target("org/turbo", available=available, is_macos=False),
+            "org/turbo")
+
+    def test_transcription_decodes_through_the_available_model_target(self):
+        transcribe = next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "transcribe_detailed"
+        )
+        calls = {
+            node.func.id for node in ast.walk(transcribe)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        self.assertIn("asr_decode_target", calls)
+        self.assertIn("resolve_asr_model", calls)
+
+    def test_preload_downloads_only_the_requested_missing_models(self):
+        resolved = []
+        present = {"org/tiny"}
+        ns = load_definitions(
+            "preload_model_files",
+            extra={
+                "IS_WINDOWS": False,
+                "FAST_WHISPER_REPO": "org/tiny",
+                "WHISPER_REPO": "org/turbo",
+                "asr_model_is_cached": lambda repo: repo in present,
+                "resolve_asr_model": lambda repo, local_files_only=None: (
+                    resolved.append((repo, local_files_only)) or repo),
+                "windows_whisper_model": lambda repo: repo,
+            },
+        )
+
+        # Default minimal install: only the small model, and it is cached.
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            ns["preload_model_files"](("org/tiny",))
+        self.assertEqual(resolved, [])
+        self.assertIn("already cached", out.getvalue())
+        self.assertNotIn("Downloading", out.getvalue())
+
+        # Opt-in run: fetch only the model that is genuinely absent.
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            ns["preload_model_files"]()
+        self.assertEqual(resolved, [("org/turbo", False)])
+        self.assertIn("Downloading org/turbo", out.getvalue())
+        self.assertNotIn("Downloading org/tiny", out.getvalue())
+
+    def test_model_inventory_reports_every_pinned_model_without_downloading(
+            self):
+        ns = load_definitions(
+            "model_inventory", "print_model_inventory",
+            extra={
+                "FAST_WHISPER_REPO": "org/tiny",
+                "WHISPER_REPO": "org/turbo",
+                "parakeet_model_is_cached": lambda: True,
+                "asr_model_is_cached": lambda repo: repo == "org/tiny",
+            },
+        )
+
+        self.assertEqual(ns["model_inventory"](), {
+            "parakeet": True,
+            "whisper-fast": True,
+            "whisper-large": False,
+        })
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            ns["print_model_inventory"]()
+        self.assertEqual(sorted(out.getvalue().split()), [
+            "parakeet=present",
+            "whisper-fast=present",
+            "whisper-large=missing",
+        ])
+
     def test_production_asr_repositories_have_immutable_revisions(self):
         ns = load_definitions(
             assignments={"ASR_MODEL_REVISIONS", "PARAKEET_MODEL_REVISION"})
