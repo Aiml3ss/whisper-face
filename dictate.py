@@ -5393,26 +5393,31 @@ def ensure_event_permissions():
         return                              # older pyobjc: fall back to luck
     if CGPreflightListenEventAccess() and CGPreflightPostEventAccess():
         return
-    CGRequestListenEventAccess()            # each pops the system dialog once
-    CGRequestPostEventAccess()
-    try:
-        # Accessibility is a distinct TCC service from Input Monitoring; prompt
-        # for it directly so the paste keystroke path is trusted too. Under the
-        # signed launcher chain this attributes to "Whisper Face", one toggle.
-        from ApplicationServices import (
-            AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt)
-        AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True})
-    except Exception:
-        pass                                # older pyobjc / headless: best effort
-    print("Waiting for permissions: enable 'Whisper Face' under System Settings "
-          "-> Privacy & Security -> Input Monitoring AND Accessibility. "
-          "Re-checking every few seconds...")
+    attempt = permission_recheck_attempt()
+    if attempt == 0:
+        # Ask exactly once. Every Request/prompt call pops a system dialog, and
+        # the re-exec loop below revisits this function every few seconds, so
+        # prompting on each pass buries the user in dialogs. Later generations
+        # only preflight (above) and wait quietly for the toggle.
+        CGRequestListenEventAccess()
+        CGRequestPostEventAccess()
+        try:
+            # Accessibility is a distinct TCC service from Input Monitoring;
+            # prompt for it directly so the paste keystroke path is trusted too.
+            # Under the signed launcher chain this attributes to "Whisper Face".
+            from ApplicationServices import (
+                AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt)
+            AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True})
+        except Exception:
+            pass                            # older pyobjc / headless: best effort
+        print("Waiting for permissions: enable 'Whisper Face' under System "
+              "Settings -> Privacy & Security -> Input Monitoring AND "
+              "Accessibility. Re-checking every few seconds...")
     # TCC verdicts are effectively frozen for a running process — polling
     # preflight here never sees the user's grant. Re-exec for a fresh image;
     # the loop continues across exec generations until both grants stick. The
     # attempt counter rides the environment through execv, so the wait starts
     # short (the user is at the toggle) and backs off on an unattended Mac.
-    attempt = permission_recheck_attempt()
     try:
         os.environ[PERMISSION_ATTEMPT_ENV] = str(attempt + 1)
     except (OSError, ValueError):
