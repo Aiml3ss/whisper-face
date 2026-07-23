@@ -104,7 +104,7 @@ _OBSERVATION_FIELDS = {
 _RECEIPTS = {"verified", "unverifiable", "conflict", "unresolved"}
 _LATENCY_STAGES = {
     "ready", "tail", "asr", "compiler", "cleanup", "insertion",
-    "end_to_end", "release", "press",
+    "end_to_end", "release", "press", "context", "consequence",
 }
 _ROUTE_IDS = {
     "tiny",
@@ -154,6 +154,10 @@ RUNTIME_TRACE_SCHEMAS = {
         "trailing_silence_ms",
         "voiced_fraction",
     ),
+    "warm_path": (
+        "release_ms", "asr_ms", "compiler_ms",
+        "cleanup_ms", "context_ms", "insertion_ms",
+    ),
 }
 STARTUP_TRACE_EVENTS = (
     "warmup_audio_pool",
@@ -161,6 +165,17 @@ STARTUP_TRACE_EVENTS = (
     "warmup_asr_final",
     "warmup_ollama",
     "warmup_total",
+)
+# Ordered (public stage label, closed-schema trace field) pairs for the
+# warm_path latency trace. The label names a stage in the aggregate report; the
+# field is the numeric millisecond key carried by the trace.
+WARM_PATH_STAGES = (
+    ("release", "release_ms"),
+    ("asr", "asr_ms"),
+    ("compiler", "compiler_ms"),
+    ("cleanup", "cleanup_ms"),
+    ("context", "context_ms"),
+    ("insertion", "insertion_ms"),
 )
 _TRACE_RATIO_FIELDS = {
     "clipped_ratio", "nonfinite_ratio", "silence_ratio", "voiced_fraction",
@@ -195,6 +210,7 @@ def _distribution(values: Sequence[float]) -> dict[str, Any]:
     return {
         "samples": len(values),
         "p50": round(_percentile(values, 0.50), 4),
+        "p90": round(_percentile(values, 0.90), 4),
         "p95": round(_percentile(values, 0.95), 4),
         "p99": round(_percentile(values, 0.99), 4),
         "mean": round(statistics.fmean(values), 4),
@@ -253,6 +269,10 @@ def evaluate_observations(
     """
     corpus = corpus or load_corpus()
     case_ids = {case["id"] for case in corpus["cases"]}
+    case_dimensions = {
+        case["id"]: tuple(case.get("dimensions", ()))
+        for case in corpus["cases"]
+    }
     records: list[dict[str, Any]] = []
     rejected: dict[str, int] = {}
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -279,6 +299,11 @@ def evaluate_observations(
     per_route: dict[str, list[bool]] = {}
     receipts: list[bool] = []
     observed_cases: set[str] = set()
+    dim_samples: dict[str, int] = {}
+    dim_zero_edits: dict[str, list[bool]] = {}
+    dim_edit_characters: dict[str, float] = {}
+    dim_pasted_words: dict[str, float] = {}
+    dim_route_results: dict[str, list[bool]] = {}
     for record in records:
         observed_cases.add(record["case_id"])
         for stage, duration in record.get("latency_ms", {}).items():
@@ -299,6 +324,35 @@ def evaluate_observations(
             per_route.setdefault(expected, []).append(correct)
         if "receipt" in record:
             receipts.append(record["receipt"] == "verified")
+        for dimension in case_dimensions.get(record["case_id"], ()):
+            dim_samples[dimension] = dim_samples.get(dimension, 0) + 1
+            if isinstance(record.get("zero_edit"), bool):
+                dim_zero_edits.setdefault(dimension, []).append(
+                    record["zero_edit"])
+            if edits is not None and words is not None and words > 0:
+                dim_edit_characters[dimension] = (
+                    dim_edit_characters.get(dimension, 0.0) + edits)
+                dim_pasted_words[dimension] = (
+                    dim_pasted_words.get(dimension, 0.0) + words)
+            if isinstance(selected, str) and isinstance(expected, str):
+                dim_route_results.setdefault(dimension, []).append(
+                    selected == expected)
+
+    by_dimension: dict[str, dict[str, Any]] = {}
+    for dimension in sorted(dim_samples):
+        dim_zero = dim_zero_edits.get(dimension, [])
+        dim_words = dim_pasted_words.get(dimension, 0.0)
+        dim_routes = dim_route_results.get(dimension, [])
+        by_dimension[dimension] = {
+            "samples": dim_samples[dimension],
+            "zero_edit_rate": round(sum(dim_zero) / len(dim_zero), 4)
+            if dim_zero else None,
+            "correction_burden_c100w": round(
+                dim_edit_characters.get(dimension, 0.0) / dim_words * 100, 4)
+            if dim_words else None,
+            "route_quality_rate": round(sum(dim_routes) / len(dim_routes), 4)
+            if dim_routes else None,
+        }
 
     return {
         "schema_version": 1,
@@ -349,6 +403,7 @@ def evaluate_observations(
             "rate": round(sum(receipts) / len(receipts), 4)
             if receipts else None,
         },
+        "by_dimension": by_dimension,
     }
 
 
@@ -497,6 +552,38 @@ def evaluate_startup_traces(
         "ignored_non_trace_lines": ignored_lines,
         "ignored_non_startup_records": ignored_non_startup,
         "phases": phase_reports,
+    }
+
+
+def summarize_warm_path(path: Path) -> dict[str, Any]:
+    """Aggregate warm_path latency traces into per-stage percentile tails.
+
+    Reuses evaluate_runtime_traces (and therefore _distribution) so the result
+    is transcript-free by construction: only numeric millisecond aggregates and
+    fixed rejection categories are ever reflected. Traces for other events are
+    counted as ignored records and never contribute a value.
+    """
+    aggregate = evaluate_runtime_traces(path)
+    event = aggregate["events"].get("warm_path")
+    latency_ms: dict[str, Any] = {}
+    warm_path_records = 0
+    if event is not None:
+        warm_path_records = event["records"]
+        for label, field in WARM_PATH_STAGES:
+            distribution = event["metrics"].get(field)
+            if distribution is not None:
+                latency_ms[label] = distribution
+    return {
+        "schema_version": 1,
+        "trace_schema_version": RUNTIME_TRACE_SCHEMA_VERSION,
+        "privacy": "numeric-aggregates-only",
+        "records": warm_path_records,
+        "rejected_records": aggregate["rejected_records"],
+        "rejected_by_reason": aggregate["rejected_by_reason"],
+        "ignored_non_trace_lines": aggregate["ignored_non_trace_lines"],
+        "ignored_non_warm_path_records":
+            aggregate["records"] - warm_path_records,
+        "latency_ms": latency_ms,
     }
 
 
@@ -1145,11 +1232,12 @@ def render_dashboard(report: dict[str, Any]) -> str:
     lines = [
         "PRIVACY-SAFE OUTCOME DASHBOARD",
         f"records: {report['records']} (rejected: {report['rejected_records']})",
-        "stage                         p50 ms     p95 ms     p99 ms     max ms",
+        "stage                         p50 ms     p90 ms     p95 ms     "
+        "p99 ms     max ms",
     ]
     lines.extend(
-        f"{stage:<28} {result['p50']:>10.2f} {result['p95']:>10.2f} "
-        f"{result['p99']:>10.2f} {result['max']:>10.2f}"
+        f"{stage:<28} {result['p50']:>10.2f} {result['p90']:>10.2f} "
+        f"{result['p95']:>10.2f} {result['p99']:>10.2f} {result['max']:>10.2f}"
         for stage, result in report["latency_ms"].items()
     )
     lines.extend((
@@ -1163,6 +1251,18 @@ def render_dashboard(report: dict[str, Any]) -> str:
         f"verified delivery: {_rate(report['verified_delivery']['rate'])} "
         f"({report['verified_delivery']['samples']} samples)",
     ))
+    by_dimension = report.get("by_dimension", {})
+    if by_dimension:
+        lines.append(
+            f"{'dimension':<31} {'samples':>7} {'zero-edit':>10} "
+            f"{'burden':>7} {'route-quality':>13}")
+        for dimension, stats in by_dimension.items():
+            burden = stats["correction_burden_c100w"]
+            burden_label = "n/a" if burden is None else f"{burden:.1f}"
+            lines.append(
+                f"{dimension:<31} {stats['samples']:>7} "
+                f"{_rate(stats['zero_edit_rate']):>10} {burden_label:>7} "
+                f"{_rate(stats['route_quality_rate']):>13}")
     return "\n".join(lines)
 
 
@@ -1201,6 +1301,26 @@ def render_startup_traces(report: dict[str, Any]) -> str:
         "budget: " + ("PASS" if budget and budget["passed"] else "FAIL"),
         "physical cold/warm conditions verified: no",
     ))
+    return "\n".join(lines)
+
+
+def render_warm_path(report: dict[str, Any]) -> str:
+    lines = [
+        "PRIVACY-SAFE WARM-PATH LATENCY AGGREGATES",
+        f"records: {report['records']} (rejected: "
+        f"{report['rejected_records']}; non-warm-path traces ignored: "
+        f"{report['ignored_non_warm_path_records']}; non-trace lines ignored: "
+        f"{report['ignored_non_trace_lines']})",
+        "stage        samples   p50 ms   p90 ms   p95 ms   p99 ms",
+    ]
+    for stage, distribution in report["latency_ms"].items():
+        lines.append(
+            f"{stage:<12} {distribution['samples']:>7} "
+            f"{distribution['p50']:>8.2f} {distribution['p90']:>8.2f} "
+            f"{distribution['p95']:>8.2f} {distribution['p99']:>8.2f}")
+    budget = report.get("budget")
+    if budget is not None:
+        lines.append("budget: " + ("PASS" if budget["passed"] else "FAIL"))
     return "\n".join(lines)
 
 
@@ -1332,6 +1452,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     startup.add_argument(
         "--format", choices=("table", "json"), default="table")
 
+    warm_path = commands.add_parser(
+        "warm-path",
+        help="aggregate warm-path latency traces from a runtime log")
+    warm_path.add_argument("--trace-log", type=Path, required=True)
+    warm_path.add_argument("--budgets", type=Path, default=DEFAULT_BUDGETS)
+    warm_path.add_argument("--budget-profile")
+    warm_path.add_argument(
+        "--format", choices=("table", "json"), default="table")
+
     lifecycle = commands.add_parser(
         "lifecycle", help="run deterministic lifecycle adapter simulation")
     lifecycle.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
@@ -1399,6 +1528,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 payload["records"] == 0
                 or payload["rejected_records"] > 0
                 or not payload["budget"]["passed"])
+        elif args.command == "warm-path":
+            payload = summarize_warm_path(args.trace_log)
+            if args.budget_profile:
+                payload["budget"] = evaluate_budgets(
+                    payload, load_budgets(args.budgets), args.budget_profile)
+            rendered = render_warm_path(payload)
+            status = int(
+                payload["records"] == 0
+                or payload["rejected_records"] > 0
+                or ("budget" in payload and not payload["budget"]["passed"]))
         elif args.command == "lifecycle":
             payload = run_lifecycle_simulation(
                 load_corpus(args.corpus), iterations=args.iterations)
@@ -1448,7 +1587,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             except OSError:
                 pass
         detail = "runtime trace input unavailable" \
-            if args.command in {"traces", "startup"} else str(exc)
+            if args.command in {"traces", "startup", "warm-path"} else str(exc)
         print(f"performance lab configuration error: {detail}", file=sys.stderr)
         return 2
     print(json.dumps(payload, indent=2, sort_keys=True)

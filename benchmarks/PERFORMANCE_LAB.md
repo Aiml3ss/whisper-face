@@ -36,11 +36,19 @@ uv run performance_lab.py evaluate \
   --observations /private/tmp/whisper-face-outcomes.jsonl
 ```
 
-It reports p50/p95/p99/max latency, Correction Burden in changed characters
+It reports p50/p90/p95/p99/max latency, Correction Burden in changed characters
 per 100 pasted words, the observed zero-edit proxy, route accuracy, corpus
-coverage, and verified-delivery rate. Add `--format json` for automation. Add
+coverage, and verified-delivery rate. Each report also includes a
+`by_dimension` block that repeats the zero-edit, Correction Burden, and
+route-quality signals for every risk dimension a record touches, so a
+regression concentrated in one dimension such as numbers or code stays visible
+without reading any transcript. A record with several dimensions contributes to
+each of them, and a dimension with no observations is omitted rather than
+divided by zero. Add `--format json` for automation. Add
 `--budget-profile product_quality` to enforce the versioned minimum sample
-counts and targets in `performance_budgets.json`.
+counts and targets in `performance_budgets.json`; that profile also carries a
+few per-dimension checks gated on `by_dimension.<dim>.samples`, so sparse data
+reports `insufficient-samples` instead of a false regression.
 
 Route and lifecycle values are fixed schema identifiers rather than free-form
 labels, preventing a user string from being reflected into aggregate keys.
@@ -69,6 +77,33 @@ content. Classification is explicitly
 order and sets `physical_conditions_verified` to false. A controlled Mac test
 procedure is still required before treating those labels as physical cold and
 steady-state evidence.
+
+## Warm-path stage latency traces
+
+Each completed dictation emits one closed numeric `warm_path` trace carrying
+only per-stage millisecond timings: release, ASR, compiler, cleanup, context
+firewall, and insertion. The trace holds no text, identifiers, or other
+open-ended data, and the runtime emits it best-effort, so this telemetry can
+never delay or break a paste. The insertion stage times the commit step that
+was previously the one un-instrumented stage.
+
+Collect these traces from a runtime log and aggregate them into per-stage
+percentile tails:
+
+```sh
+uv run performance_lab.py warm-path \
+  --trace-log /private/tmp/whisper-face-warm-path.log
+```
+
+The report gives p50/p90/p95/p99/mean/max and a sample count for every stage
+under `latency_ms.<stage>`. Non-`warm_path` traces are counted as ignored
+records, invalid lines fall into fixed rejection categories, and the input path
+is never returned. Add `--format json` for automation. Add
+`--budget-profile warm_path_stage` to apply the versioned per-stage p95
+thresholds in `performance_budgets.json`; each check is gated on
+`latency_ms.<stage>.samples`, so a thin log reports `insufficient-samples`
+instead of a false pass. The trace schema is duplicated between `dictate.py` and
+`performance_lab.py` and held identical by a parity test.
 
 ## Deterministic warm-path gate
 
