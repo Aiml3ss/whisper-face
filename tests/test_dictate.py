@@ -1656,6 +1656,7 @@ class FacePreferenceTests(unittest.TestCase):
                 "flight_recorder": True,
                 "acoustic_time_machine": True,
                 "voice_object_commands": False,
+                "spoken_edit_commands": False,
                 "face": "dragon",
             }), encoding="utf-8")
             ns["load_preferences"]()
@@ -1663,6 +1664,7 @@ class FacePreferenceTests(unittest.TestCase):
             self.assertTrue(ns["PREFERENCES"]["flight_recorder"])
             self.assertTrue(ns["PREFERENCES"]["acoustic_time_machine"])
             self.assertFalse(ns["PREFERENCES"]["voice_object_commands"])
+            self.assertFalse(ns["PREFERENCES"]["spoken_edit_commands"])
 
             ns["PREFERENCES"]["face"] = "FOX"
             ns["save_preferences"]()
@@ -1671,6 +1673,7 @@ class FacePreferenceTests(unittest.TestCase):
                 "flight_recorder": True,
                 "acoustic_time_machine": True,
                 "voice_object_commands": False,
+                "spoken_edit_commands": False,
                 "face": "fox",
             })
 
@@ -1685,6 +1688,7 @@ class FacePreferenceTests(unittest.TestCase):
                     path.write_text(json.dumps({
                         "acoustic_time_machine": acoustic,
                         "voice_object_commands": voice_objects,
+                        "spoken_edit_commands": voice_objects,
                     }), encoding="utf-8")
                     buffer = AcousticTimeMachine()
                     ns = load_definitions(
@@ -1702,6 +1706,8 @@ class FacePreferenceTests(unittest.TestCase):
                         ns["PREFERENCES"]["acoustic_time_machine"], expected)
                     self.assertIs(
                         ns["PREFERENCES"]["voice_object_commands"], expected)
+                    self.assertIs(
+                        ns["PREFERENCES"]["spoken_edit_commands"], expected)
                     self.assertIs(buffer.enabled, expected)
 
     def test_all_default_faces_are_supported(self):
@@ -3034,6 +3040,10 @@ class CleanupGuardTests(unittest.TestCase):
                 "np": np,
                 "analyze_prosody": lambda *_args: (),
                 "SAMPLE_RATE": 16_000,
+                "GLOSS": {
+                    "lock": threading.Lock(),
+                    "anchor_pack": ContextPack(),
+                },
             },
         )
         _voice, result = ns["compile_voice_evidence"](
@@ -3315,6 +3325,125 @@ class ConfigurationTests(unittest.TestCase):
         )
         self.assertTrue(metadata["license_policy"].endswith("LICENSE_POLICY.md"))
         self.assertIn("without warranty", metadata["warranty"].lower())
+
+
+class InlineSnippetExpansionTests(unittest.TestCase):
+    """Inline (embedded-trigger) snippet expansion. Additive to the
+    whole-utterance command covered by ConfigurationTests; must never alter a
+    non-matching dictation and must survive a missing or damaged file."""
+
+    def _expander(self, mapping=None):
+        ns = load_definitions(
+            "expand_snippets_inline",
+            "_load_snippet_map",
+            "_compile_snippet_pattern",
+        )
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "snippets.json"
+        if mapping is not None:
+            path.write_text(json.dumps(mapping))
+        ns["SNIPPETS_FILE"] = path
+        return ns["expand_snippets_inline"]
+
+    def test_inline_hit_inside_a_sentence(self):
+        expand = self._expander({"email": "andrew@example.com"})
+        self.assertEqual(
+            expand("text him my email please"),
+            "text him my andrew@example.com please",
+        )
+
+    def test_expansion_is_case_insensitive(self):
+        expand = self._expander({"email": "andrew@example.com"})
+        self.assertEqual(expand("send EMAIL now"), "send andrew@example.com now")
+
+    def test_partial_word_never_fires(self):
+        # "address" must not expand inside "addressed"; the boundary is
+        # stricter than \b so a suffix cannot trigger it.
+        expand = self._expander({"address": "1 Main St"})
+        self.assertEqual(expand("he addressed the room"), "he addressed the room")
+
+    def test_longest_trigger_wins(self):
+        expand = self._expander({
+            "email": "andrew@example.com",
+            "email signature": "Best,\nAndrew",
+        })
+        self.assertEqual(
+            expand("use my email signature here"),
+            "use my Best,\nAndrew here",
+        )
+
+    def test_multiline_expansion_is_preserved(self):
+        expand = self._expander({"address": "7623 Opal Ridge Lane\nBainbridge Island, WA 98110"})
+        self.assertEqual(
+            expand("mail it to my address today"),
+            "mail it to my 7623 Opal Ridge Lane\nBainbridge Island, WA 98110 today",
+        )
+
+    def test_no_matching_trigger_returns_raw_unchanged(self):
+        expand = self._expander({"email": "andrew@example.com"})
+        self.assertEqual(expand("just talking normally"), "just talking normally")
+
+    def test_missing_file_returns_raw_unchanged(self):
+        expand = self._expander(mapping=None)  # file never written
+        self.assertEqual(expand("send my email now"), "send my email now")
+
+    def test_wrong_shaped_snippets_file_returns_raw_unchanged(self):
+        # Clone of ConfigurationTests.test_wrong_shaped_snippets_file_is_ignored,
+        # asserted against the inline path: a JSON array (not an object) and
+        # syntactically broken JSON both degrade to leaving the dictation alone.
+        for payload in ("[]", "{not valid json"):
+            with self.subTest(payload=payload):
+                ns = load_definitions(
+                    "expand_snippets_inline",
+                    "_load_snippet_map",
+                    "_compile_snippet_pattern",
+                )
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "snippets.json"
+                    path.write_text(payload)
+                    ns["SNIPPETS_FILE"] = path
+                    self.assertEqual(
+                        ns["expand_snippets_inline"]("send my email now"),
+                        "send my email now",
+                    )
+
+    def test_masked_multiline_survives_deterministic_cleanup(self):
+        # The pipeline round-trip: masking shields a multiline (indented)
+        # expansion from cleanup, the surrounding words are still cleaned, and
+        # restoration leaves no sentinel behind.
+        ns = load_definitions(
+            "_compile_snippet_pattern",
+            "_snippet_sentinel",
+            "_mask_snippets_inline",
+            "_restore_snippet_sentinels",
+            assignments={"_SNIPPET_SENTINEL_MARK"},
+        )
+        expansion = "Regards,\n    Andrew\n    Engineer"
+        masked, restore = ns["_mask_snippets_inline"](
+            "here is my sig okay", {"my sig": expansion})
+        self.assertTrue(restore)
+        self.assertNotIn("my sig", masked)      # trigger was masked away
+        cleaned = compile_cleanup(masked).text  # deterministic cleanup only
+        restored = ns["_restore_snippet_sentinels"](cleaned, restore)
+        self.assertIn(expansion, restored)      # indentation intact
+        self.assertEqual(restored.count("\ue000"), 0)  # no sentinel leaked
+
+    def test_restoration_of_absent_sentinel_is_a_no_op(self):
+        ns = load_definitions(
+            "_compile_snippet_pattern",
+            "_snippet_sentinel",
+            "_mask_snippets_inline",
+            "_restore_snippet_sentinels",
+            assignments={"_SNIPPET_SENTINEL_MARK"},
+        )
+        _, restore = ns["_mask_snippets_inline"]("my email", {"email": "X"})
+        # A token the cleaned text no longer contains must not corrupt output.
+        self.assertEqual(
+            ns["_restore_snippet_sentinels"]("unrelated text", restore),
+            "unrelated text",
+        )
+
 
 class LearningTests(unittest.TestCase):
     def test_snippet_edit_is_persisted_and_exposed_as_learning(self):
@@ -5098,6 +5227,67 @@ class ContextFirewallRuntimeProjectionTests(unittest.TestCase):
         self.assertEqual(snapshot["disposition"], "unavailable")
         self.assertEqual(snapshot["reason_counts"], {"receipt-error": 1})
         self.assertNotIn(private, json.dumps(snapshot))
+
+
+class CustomVocabularyTests(unittest.TestCase):
+    def test_refresh_glossary_protects_and_normalizes_every_manual_term(self):
+        # 70 manual terms exceed the 60-term Whisper prompt cap. Every one must
+        # still land in the anchor pack and the casing map even though only the
+        # first 60 fit the prompt.
+        manual = [f"Term{i}" for i in range(70)]
+        gloss = {"lock": threading.Lock()}
+        ns = load_definitions(
+            "refresh_glossary",
+            extra={
+                "parse_dictionary": lambda: (list(manual), set()),
+                "load_learned": lambda: {
+                    "counts": {}, "fixes": {}, "confusions": {}},
+                "write_auto_section": lambda _promoted: None,
+                "personal_regression_lab": lambda _state: object(),
+                "ContextPack": ContextPack,
+                "ContextCandidate": ContextCandidate,
+                "GLOSS": gloss,
+                "PROMOTE_MIN_COUNT": 2,
+                "PERSONAL_GLOBAL_MIN_COUNT": 3,
+                "GLOSSARY_MAX_TERMS": 60,
+                "GLOSSARY_MAX_CHARS": 700,
+                "ANCHOR_MAX_TERMS": 256,
+            },
+        )
+
+        ns["refresh_glossary"]()
+
+        self.assertEqual(len(gloss["terms"]), 60)   # prompt cap unchanged
+        anchor_texts = {c.text for c in gloss["anchor_pack"].candidates}
+        self.assertEqual(len(anchor_texts), 70)
+        for term in manual:
+            self.assertIn(term, anchor_texts)
+            self.assertEqual(gloss["vocabulary"][term.casefold()], term)
+        # A term beyond the 60-term prompt cap is still protected and normalized.
+        self.assertNotIn("Term65", gloss["terms"])
+        self.assertIn("Term65", anchor_texts)
+        for candidate in gloss["anchor_pack"].candidates:
+            self.assertEqual(candidate.weight, 3.5)
+            self.assertEqual(candidate.source, "dictionary")
+
+    def test_apply_vocabulary_casing_is_whole_word_and_additive(self):
+        gloss = {"lock": threading.Lock(),
+                 "vocabulary": {"github": "GitHub"}}
+        ns = load_definitions(
+            "apply_vocabulary_casing",
+            assignments={"VOCAB_WORD_RE"},
+            extra={"GLOSS": gloss},
+        )
+        casing = ns["apply_vocabulary_casing"]
+
+        self.assertEqual(casing("i pushed to github"), "i pushed to GitHub")
+        # A larger word that merely contains the term is left alone.
+        self.assertEqual(
+            casing("i really githubbed it"), "i really githubbed it")
+        # An already-canonical token is left untouched.
+        self.assertEqual(casing("i pushed to GitHub"), "i pushed to GitHub")
+        # An unlisted (or banned, hence absent) term is untouched.
+        self.assertEqual(casing("switch to qwen now"), "switch to qwen now")
 
 
 if __name__ == "__main__":

@@ -304,6 +304,15 @@ from parrot_core import (  # noqa: E402
     CleanupEdit,
     Recognition,
     RecognitionWord,
+    EDIT_COMMAND_UNDO,
+    EDIT_COMMAND_DELETE_WORD,
+    EDIT_COMMAND_DELETE_SENTENCE,
+    EDIT_COMMAND_NEWLINE,
+    EDIT_COMMAND_NEWPARAGRAPH,
+    EDIT_COMMAND_UPPERCASE_LAST,
+    EDIT_COMMAND_CAPITALIZE_LAST,
+    EDIT_COMMAND_LOWERCASE_LAST,
+    classify_edit_command,
     compile_cleanup,
     compile_code_dictation,
     confidence_from_segments,
@@ -597,6 +606,10 @@ FLIGHT_PAD_SECONDS = 0.15
 # Glossary budget: Whisper honors ~224 prompt tokens; keep well under.
 GLOSSARY_MAX_TERMS = 60
 GLOSSARY_MAX_CHARS = 700
+# Dictionary terms also become protected cleanup anchors, independent of the
+# prompt budget above. Bound the anchor pack so a large dictionary cannot slow
+# per-utterance compilation.
+ANCHOR_MAX_TERMS = 256
 AUTO_MARKER = "# --- auto-learned (managed by dictate.py) ---"
 
 # Learning loop
@@ -861,6 +874,9 @@ POINT_AND_SPEAK_TRANSACTIONS = PointAndSpeakTransactions()
 GLOSS = {
     "terms": [], "prompt": None, "fixes": {}, "confusions": {},
     "regression": PersonalRegressionLab(),
+    # Dictionary terms as protected cleanup anchors and a casefold->canonical
+    # casing map, rebuilt alongside the prompt by refresh_glossary().
+    "anchor_pack": ContextPack(), "vocabulary": {},
     "lock": threading.Lock(),
 }
 
@@ -1001,6 +1017,7 @@ PREFERENCES = {
     "flight_recorder": False,
     "acoustic_time_machine": False,
     "voice_object_commands": False,
+    "spoken_edit_commands": False,
     "face": DEFAULT_FACE,
 }
 ACOUSTIC_TIME_MACHINE = AcousticTimeMachine()
@@ -1116,6 +1133,11 @@ def load_preferences():
     # preferences file cannot activate command diversion on Windows.
     PREFERENCES["voice_object_commands"] = bool(
         IS_MACOS and loaded.get("voice_object_commands") is True)
+    # Spoken edit commands act on already-dictated text via keyboard shortcuts,
+    # so they are a Mac-only, explicit opt-in. A shared private preferences file
+    # cannot activate command diversion on Windows.
+    PREFERENCES["spoken_edit_commands"] = bool(
+        IS_MACOS and loaded.get("spoken_edit_commands") is True)
     PREFERENCES["face"] = normalize_face(loaded.get("face"))
     if PREFERENCES["acoustic_time_machine"]:
         ACOUSTIC_TIME_MACHINE.enable()
@@ -1130,6 +1152,8 @@ def save_preferences():
             IS_MACOS and PREFERENCES["acoustic_time_machine"]),
         "voice_object_commands": bool(
             IS_MACOS and PREFERENCES["voice_object_commands"]),
+        "spoken_edit_commands": bool(
+            IS_MACOS and PREFERENCES["spoken_edit_commands"]),
         "face": current_face(),
     }
     atomic_write_text(
@@ -1146,6 +1170,12 @@ def set_voice_object_commands_enabled(enabled: bool) -> None:
         with VOICE_OBJECT_INBOX_STATE["lock"]:
             VOICE_OBJECT_INBOX_STATE["inbox"] = None
             VOICE_OBJECT_INBOX_STATE["bridge"] = None
+    save_preferences()
+
+
+def set_spoken_edit_commands_enabled(enabled: bool) -> None:
+    """Persist the Mac-only spoken-edit-command opt-in."""
+    PREFERENCES["spoken_edit_commands"] = bool(enabled) and IS_MACOS
     save_preferences()
 
 
@@ -4760,8 +4790,20 @@ def refresh_glossary():
         terms.append(t)
         chars += len(t) + 2
 
+    # The full manual+promoted list (before the prompt truncation above) also
+    # feeds two additive protections that do not touch the prompt budget:
+    # listed terms become protected cleanup anchors, and their casing is
+    # normalized to what the user wrote. Bans are honored in both.
+    vocab_terms = [t for t in manual + promoted if t.casefold() not in banned]
+    anchor_pack = ContextPack(tuple(
+        ContextCandidate(t, 3.5, "dictionary")
+        for t in vocab_terms[:ANCHOR_MAX_TERMS]))
+    vocabulary = {t.casefold(): t for t in vocab_terms}
+
     with GLOSS["lock"]:
         GLOSS["terms"] = terms
+        GLOSS["anchor_pack"] = anchor_pack
+        GLOSS["vocabulary"] = vocabulary
         # A complete sentence, not an open list: "Glossary: a, b," invites
         # Whisper to keep listing terms when the audio is silence.
         GLOSS["prompt"] = ("Common terms: " + ", ".join(terms) + ".") \
@@ -5505,6 +5547,36 @@ def apply_learned_fixes(text: str, bundle: str = "") -> str:
     return text
 
 
+# Whole-word matcher for vocabulary casing: an alphanumeric run, optionally
+# continued across single identifier joiners so "voice_compiler.py" stays one
+# token. Casing only ever fires on a full-token casefold match, so treating a
+# joined form as one token can skip a rewrite but never invent one.
+VOCAB_WORD_RE = re.compile(r"[0-9A-Za-z]+(?:[._+#-][0-9A-Za-z]+)*")
+
+
+def apply_vocabulary_casing(text: str) -> str:
+    """Normalize whole-word matches of user-listed vocabulary to the casing the
+    user wrote in the dictionary (e.g. "github" -> "GitHub"). Case-insensitive
+    on the match, whole-word only so "github" inside "githubbed" is left alone,
+    and a token already in canonical form is untouched. Additive: only a token
+    whose casefold equals a listed term is ever changed."""
+    if not text:
+        return text
+    with GLOSS["lock"]:
+        vocabulary = dict(GLOSS.get("vocabulary") or {})
+    if not vocabulary:
+        return text
+
+    def _canonical(match: "re.Match[str]") -> str:
+        word = match.group(0)
+        canonical = vocabulary.get(word.casefold())
+        if canonical is None or canonical == word:
+            return word
+        return canonical
+
+    return VOCAB_WORD_RE.sub(_canonical, text)
+
+
 def learned_alternatives(text: str, bundle: str) -> list[str]:
     """Unconfirmed personalized alternatives for confidence-aware review."""
     with GLOSS["lock"]:
@@ -5602,6 +5674,14 @@ def compile_voice_evidence(recognition: Recognition,
             if str(term).strip()
         )
         context_pack = ContextPack(candidates)
+    # Merge dictionary terms as protected anchors. protected_anchors only
+    # protects a term that already appears in the recognized text, so this can
+    # never invent or mis-hear words; it only stops cleanup from deleting a
+    # listed term the recognizer produced.
+    with GLOSS["lock"]:
+        anchor_pack = GLOSS.get("anchor_pack")
+    if anchor_pack is not None and anchor_pack.candidates:
+        context_pack = context_pack.merged(anchor_pack)
     prosody = ()
     if audio is not None and len(audio):
         # memoryview avoids turning every audio sample into a Python float.
@@ -6039,6 +6119,103 @@ def match_snippet(raw: str) -> tuple[str, str] | None:
         if isinstance(text, str) and key == norm(name):
             return name, text
     return None
+
+
+def _load_snippet_map() -> dict[str, str]:
+    """Tolerant per-use read of snippets.json for inline expansion, mirroring
+    match_snippet's contract: {} when the file is missing, {} (with a printed
+    note) on unreadable or non-object JSON, and only the str->str pairs
+    otherwise. Never raises, so a damaged file can never break dictation."""
+    if not SNIPPETS_FILE.exists():
+        return {}
+    try:
+        data = json.loads(SNIPPETS_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"! snippets.json unreadable: {e}")
+        return {}
+    if not isinstance(data, dict):
+        print("! snippets.json must contain a JSON object; ignoring it")
+        return {}
+    return {name: text for name, text in data.items()
+            if isinstance(name, str) and isinstance(text, str)}
+
+
+def _compile_snippet_pattern(snippets: dict[str, str]):
+    """One whole-word, case-insensitive alternation over every trigger. Triggers
+    are ordered longest-first so a compound trigger ("email signature") wins over
+    a prefix ("email"), each is re.escape'd, and the boundaries are stricter than
+    \\b — (?<!\\w)(...)(?!\\w) — so "address" never fires inside "addressed"."""
+    if not snippets:
+        return None
+    triggers = sorted(snippets, key=len, reverse=True)
+    alternation = "|".join(re.escape(trigger) for trigger in triggers)
+    return re.compile(rf"(?<!\w)({alternation})(?!\w)", re.I)
+
+
+def expand_snippets_inline(raw: str, snippets: dict[str, str] | None = None) -> str:
+    """Pure, side-effect-free inline expansion: replace each whole-word snippet
+    trigger embedded in a longer dictation with its canonical expansion,
+    case-insensitively and longest-trigger-first. Returns raw unchanged when
+    there are no snippets or no trigger fires. snippets defaults to the live
+    snippets.json via _load_snippet_map()."""
+    if snippets is None:
+        snippets = _load_snippet_map()
+    pattern = _compile_snippet_pattern(snippets)
+    if pattern is None:
+        return raw
+    lookup = {trigger.casefold(): text for trigger, text in snippets.items()}
+
+    def replace(match: "re.Match[str]") -> str:
+        return lookup.get(match.group(1).casefold(), match.group(0))
+
+    return pattern.sub(replace, raw)
+
+
+# Opaque private-use-area sentinel used to shield an inline expansion from
+# cleanup. Pure PUA codepoints carry no case, are not \w, whitespace, or
+# punctuation, and match none of the cleanup regexes, so deterministic cleanup
+# passes the token through byte-for-byte instead of reflowing multiline
+# boilerplate. The exact expansion is substituted back only after cleanup.
+_SNIPPET_SENTINEL_MARK = "\ue000"
+
+
+def _snippet_sentinel(index: int) -> str:
+    return f"{_SNIPPET_SENTINEL_MARK}{chr(0xe001 + index)}{_SNIPPET_SENTINEL_MARK}"
+
+
+def _mask_snippets_inline(
+        raw: str, snippets: dict[str, str]) -> tuple[str, dict[str, str]]:
+    """Round-trip masking half of inline expansion: replace each whole-word
+    trigger (same matching as expand_snippets_inline) with an opaque sentinel and
+    return (masked_text, sentinel -> expansion). An empty mapping means nothing
+    matched, and the caller must leave raw untouched."""
+    pattern = _compile_snippet_pattern(snippets)
+    if pattern is None:
+        return raw, {}
+    lookup = {trigger.casefold(): text for trigger, text in snippets.items()}
+    restore: dict[str, str] = {}
+    counter = [0]
+
+    def replace(match: "re.Match[str]") -> str:
+        expansion = lookup.get(match.group(1).casefold())
+        if expansion is None:
+            return match.group(0)
+        token = _snippet_sentinel(counter[0])
+        counter[0] += 1
+        restore[token] = expansion
+        return token
+
+    return pattern.sub(replace, raw), restore
+
+
+def _restore_snippet_sentinels(text: str, restore: dict[str, str]) -> str:
+    """Substitute each shielded sentinel back to its exact expansion. A sentinel
+    absent from the final text is a no-op, so a dropped token can never corrupt
+    the surrounding dictation."""
+    for token, expansion in restore.items():
+        if token in text:
+            text = text.replace(token, expansion)
+    return text
 
 
 def save_snippet_edit(name: str, old: str, new: str, bundle: str) -> bool:
@@ -7187,12 +7364,25 @@ def phone_clean(raw: str) -> str:
     hit = match_snippet(raw)
     if hit is not None:
         return hit[1]
+    # Inline snippet expansion, parity with the desktop pipeline. This path has
+    # no proof-checked LLM reconstruction, so when a trigger fires we shield it
+    # behind a sentinel and force the deterministic no-LLM route — the sentinel
+    # is never handed to the model — then restore the exact expansion after
+    # cleanup. With no trigger the mapping is empty and this path is unchanged.
+    masked, snippet_restore = _mask_snippets_inline(raw, _load_snippet_map())
+    if snippet_restore:
+        raw = masked
     raw, tone_override = extract_tone_override(raw)
     verbatim = tone_override == "verbatim"
-    needs_llm = needs_llm_cleanup(raw, tone_override, verbatim)
+    needs_llm = needs_llm_cleanup(raw, tone_override, verbatim) \
+        and not snippet_restore
     tone_key = tone_override if tone_override in TONE else "default"
     text = llm_clean(raw, TONE[tone_key]) if needs_llm \
         else quick_clean(raw, verbatim=verbatim)
+    text = apply_vocabulary_casing(text)   # user's canonical term casing
+    if snippet_restore:
+        text = _restore_snippet_sentinels(text, snippet_restore)
+        raw = _restore_snippet_sentinels(raw, snippet_restore)
     if text:
         append_transcript(raw, text, "ios.diction", "phone")
     return text
@@ -7610,6 +7800,59 @@ def execute_voice_command(raw: str) -> bool:
     return True
 
 
+def _press_edit_chord(*keys) -> None:
+    """Press a modifier+key chord with the same discipline as voice commands."""
+    modifiers, final = keys[:-1], keys[-1]
+    for modifier in modifiers:
+        kb.press(modifier)
+    try:
+        kb.press(final)
+        kb.release(final)
+    finally:
+        for modifier in reversed(modifiers):
+            kb.release(modifier)
+
+
+def apply_spoken_edit_command(recognized_raw: str, rec, bundle: str) -> bool:
+    """Act on already-dictated text when a lone utterance is an edit command.
+
+    Opt-in and additive: unless the Mac-only preference is set and the whole
+    normalized utterance is exactly one closed-grammar command, this returns
+    False and dictation proceeds untouched. Only stateless keyboard actions run
+    here; the closed grammar itself lives in parrot_core.classify_edit_command.
+    """
+    if not (IS_MACOS and PREFERENCES["spoken_edit_commands"]
+            and rec.mode in {"capture", "code"}):
+        return False
+    cmd = classify_edit_command(recognized_raw)
+    if cmd is None:
+        return False
+    # Tier 2 (uppercase/capitalize/lowercase the last insertion) needs the exact
+    # last inserted text and an in-place rewrite. A blind backspace+paste would
+    # bypass the insertion-integrity lease/readback the paste path depends on and
+    # could delete unrelated text if focus moved, so it is intentionally deferred
+    # to normal dictation rather than half-implemented.
+    # TODO Tier 2: re-observe the destination, verify it still holds the last
+    # insertion, then replace it through the insertion coordinator.
+    if cmd in (EDIT_COMMAND_UPPERCASE_LAST, EDIT_COMMAND_CAPITALIZE_LAST,
+               EDIT_COMMAND_LOWERCASE_LAST):
+        return False
+    # Tier 1: stateless keyboard actions, dispatched exactly like voice commands.
+    if cmd in (EDIT_COMMAND_UNDO, EDIT_COMMAND_DELETE_SENTENCE):
+        _press_edit_chord(keyboard.Key.cmd, "z")
+    elif cmd == EDIT_COMMAND_DELETE_WORD:
+        _press_edit_chord(keyboard.Key.alt, keyboard.Key.backspace)
+    elif cmd == EDIT_COMMAND_NEWLINE:
+        _press_edit_chord(keyboard.Key.enter)
+    elif cmd == EDIT_COMMAND_NEWPARAGRAPH:
+        _press_edit_chord(keyboard.Key.enter)
+        _press_edit_chord(keyboard.Key.enter)
+    else:
+        return False  # defensive: an unmapped classification never acts
+    print(f"[edit-command] {cmd}")
+    return True
+
+
 def release_should_wait_for_tail(rec: Recorder) -> bool:
     """Whether speech was still active at key release."""
     return bool(rec.voiced_since_cut) and (
@@ -7968,6 +8211,15 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             play("Pop")
             return
 
+        # Opt-in, Mac-only spoken edit commands act on already-dictated text.
+        # recognized_raw is the pre-compiler transcript, so cleanup cannot mangle
+        # a lone command before it is matched. Every non-command utterance returns
+        # False here and continues through the ordinary path below unchanged.
+        if rec.mode in {"capture", "code"} and apply_spoken_edit_command(
+                recognized_raw, rec, bundle):
+            play("Pop")
+            return
+
         hit = match_snippet(raw)
         if hit is not None:
             name, snippet = hit
@@ -7995,6 +8247,22 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             print(f"[release {release_total:.2f}s | snippet | "
                   f"asr {t_asr:.2f}s]")
             return
+
+        # Inline snippet expansion is additive to the whole-utterance command
+        # handled above: a trigger embedded in a longer dictation ("text him my
+        # address and say thanks") expands only the trigger words while the
+        # surrounding phrase still flows through normal cleanup. Mask each hit
+        # with an opaque sentinel now and restore the exact expansion after
+        # cleanup (below), so multiline boilerplate is never reflowed. Limited
+        # to capture/code — the modes that insert literal text and whose
+        # proof-checked cleanup preserves the sentinel byte-for-byte; edit,
+        # reply, and compose keep their existing behavior unchanged.
+        snippet_restore: dict[str, str] = {}
+        if rec.mode in {"capture", "code"}:
+            masked_raw, snippet_restore = _mask_snippets_inline(
+                raw, _load_snippet_map())
+            if snippet_restore:
+                raw = masked_raw
 
         raw, tone_override = extract_tone_override(raw)
         if ((is_verbatim_app(bundle) or tone_override == "verbatim")
@@ -8094,6 +8362,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         t_clean = time.perf_counter() - clean_started_at
         if tone_key == "casual" and not verbatim:
             text = strip_casual_period(text)   # belt for both paths
+        text = apply_vocabulary_casing(text)   # user's canonical term casing
         if PIPELINE_STATE["last_alternatives"]:
             cleaned_alternatives = []
             for alternative in PIPELINE_STATE["last_alternatives"]:
@@ -8111,6 +8380,13 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 text = text[len(tail40):].lstrip()      # model echoed context
             if not ctx[-1].isspace() and text[:1] not in ",.;:!?…":
                 text = " " + text                       # joining needs a space
+
+        # Restore the shielded inline expansions on the finalized text, just
+        # before the correction receipt and the paste consume it, so both agree
+        # on the exact bytes. A sentinel missing from the text is a no-op, so a
+        # dropped token can never partially expand or corrupt the dictation.
+        if snippet_restore:
+            text = _restore_snippet_sentinels(text, snippet_restore)
 
         learn_correction = not verbatim and rec.mode != "edit"
         if rec.insertion_lease is not None:
