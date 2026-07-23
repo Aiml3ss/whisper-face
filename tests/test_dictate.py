@@ -4424,8 +4424,9 @@ class InsertionAdapterTests(unittest.TestCase):
                 "ReceiptState": ReceiptState,
                 "_ax_elements_equal": lambda left, right:
                     (left is original_element and right is current_element),
-                "insertion_readback": lambda *_args:
+                "insertion_readback": lambda *_args, **_kwargs:
                     ReadbackResult.verified(),
+                "readback_timeout_for_frontmost": lambda: 0.02,
                 "paste": pasted.append,
                 "PIPELINE_STATE": pipeline,
                 "frontmost_bundle": lambda: "com.openai.codex",
