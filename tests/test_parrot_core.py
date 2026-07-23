@@ -13,6 +13,15 @@ sys.path.insert(0, str(ROOT))
 from parrot_core import (  # noqa: E402
     Recognition,
     RecognitionWord,
+    EDIT_COMMAND_UNDO,
+    EDIT_COMMAND_DELETE_WORD,
+    EDIT_COMMAND_DELETE_SENTENCE,
+    EDIT_COMMAND_NEWLINE,
+    EDIT_COMMAND_NEWPARAGRAPH,
+    EDIT_COMMAND_UPPERCASE_LAST,
+    EDIT_COMMAND_CAPITALIZE_LAST,
+    EDIT_COMMAND_LOWERCASE_LAST,
+    classify_edit_command,
     compile_cleanup,
     compile_code_dictation,
     confidence_from_segments,
@@ -75,6 +84,48 @@ class CleanupCompilerTests(unittest.TestCase):
         self.assertEqual(plan.text, raw)
         self.assertNotIn("scratch_that", plan.edit_kinds)
         self.assertTrue(plan.needs_semantic_cleanup)
+
+    def test_classify_edit_command_matches_each_closed_phrase(self):
+        cases = {
+            "scratch that": EDIT_COMMAND_UNDO,
+            "undo that": EDIT_COMMAND_UNDO,
+            "undo": EDIT_COMMAND_UNDO,
+            "delete last word": EDIT_COMMAND_DELETE_WORD,
+            "delete last sentence": EDIT_COMMAND_DELETE_SENTENCE,
+            "delete that": EDIT_COMMAND_DELETE_SENTENCE,
+            "new line": EDIT_COMMAND_NEWLINE,
+            "new paragraph": EDIT_COMMAND_NEWPARAGRAPH,
+            "all caps": EDIT_COMMAND_UPPERCASE_LAST,
+            "uppercase that": EDIT_COMMAND_UPPERCASE_LAST,
+            "capitalize that": EDIT_COMMAND_CAPITALIZE_LAST,
+            "lowercase that": EDIT_COMMAND_LOWERCASE_LAST,
+        }
+        for phrase, expected in cases.items():
+            with self.subTest(phrase=phrase):
+                self.assertEqual(classify_edit_command(phrase), expected)
+
+    def test_classify_edit_command_normalizes_like_execute_voice_command(self):
+        # Casefold, strip everything but a-z and spaces, then trim the ends.
+        self.assertEqual(
+            classify_edit_command("Scratch that."), EDIT_COMMAND_UNDO)
+        self.assertEqual(
+            classify_edit_command("  NEW LINE  "), EDIT_COMMAND_NEWLINE)
+
+    def test_classify_edit_command_only_fires_on_the_whole_utterance(self):
+        for sentence in (
+            "lets scratch that plan",
+            "please undo the migration",
+            "start a new line of thinking",
+            "delete last word from the report",
+            "capitalize that first heading",
+        ):
+            with self.subTest(sentence=sentence):
+                self.assertIsNone(classify_edit_command(sentence))
+
+    def test_classify_edit_command_rejects_empty_and_garbage(self):
+        for junk in ("", "   ", "!!!", "12345", "hello world", None):
+            with self.subTest(junk=junk):
+                self.assertIsNone(classify_edit_command(junk))
 
     def test_enumeration_requests_semantic_cleanup(self):
         self.assertTrue(compile_cleanup(

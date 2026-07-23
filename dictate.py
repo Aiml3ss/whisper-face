@@ -304,6 +304,15 @@ from parrot_core import (  # noqa: E402
     CleanupEdit,
     Recognition,
     RecognitionWord,
+    EDIT_COMMAND_UNDO,
+    EDIT_COMMAND_DELETE_WORD,
+    EDIT_COMMAND_DELETE_SENTENCE,
+    EDIT_COMMAND_NEWLINE,
+    EDIT_COMMAND_NEWPARAGRAPH,
+    EDIT_COMMAND_UPPERCASE_LAST,
+    EDIT_COMMAND_CAPITALIZE_LAST,
+    EDIT_COMMAND_LOWERCASE_LAST,
+    classify_edit_command,
     compile_cleanup,
     compile_code_dictation,
     confidence_from_segments,
@@ -1004,6 +1013,7 @@ PREFERENCES = {
     "flight_recorder": False,
     "acoustic_time_machine": False,
     "voice_object_commands": False,
+    "spoken_edit_commands": False,
     "face": DEFAULT_FACE,
 }
 ACOUSTIC_TIME_MACHINE = AcousticTimeMachine()
@@ -1119,6 +1129,11 @@ def load_preferences():
     # preferences file cannot activate command diversion on Windows.
     PREFERENCES["voice_object_commands"] = bool(
         IS_MACOS and loaded.get("voice_object_commands") is True)
+    # Spoken edit commands act on already-dictated text via keyboard shortcuts,
+    # so they are a Mac-only, explicit opt-in. A shared private preferences file
+    # cannot activate command diversion on Windows.
+    PREFERENCES["spoken_edit_commands"] = bool(
+        IS_MACOS and loaded.get("spoken_edit_commands") is True)
     PREFERENCES["face"] = normalize_face(loaded.get("face"))
     if PREFERENCES["acoustic_time_machine"]:
         ACOUSTIC_TIME_MACHINE.enable()
@@ -1133,6 +1148,8 @@ def save_preferences():
             IS_MACOS and PREFERENCES["acoustic_time_machine"]),
         "voice_object_commands": bool(
             IS_MACOS and PREFERENCES["voice_object_commands"]),
+        "spoken_edit_commands": bool(
+            IS_MACOS and PREFERENCES["spoken_edit_commands"]),
         "face": current_face(),
     }
     atomic_write_text(
@@ -1149,6 +1166,12 @@ def set_voice_object_commands_enabled(enabled: bool) -> None:
         with VOICE_OBJECT_INBOX_STATE["lock"]:
             VOICE_OBJECT_INBOX_STATE["inbox"] = None
             VOICE_OBJECT_INBOX_STATE["bridge"] = None
+    save_preferences()
+
+
+def set_spoken_edit_commands_enabled(enabled: bool) -> None:
+    """Persist the Mac-only spoken-edit-command opt-in."""
+    PREFERENCES["spoken_edit_commands"] = bool(enabled) and IS_MACOS
     save_preferences()
 
 
@@ -7773,6 +7796,59 @@ def execute_voice_command(raw: str) -> bool:
     return True
 
 
+def _press_edit_chord(*keys) -> None:
+    """Press a modifier+key chord with the same discipline as voice commands."""
+    modifiers, final = keys[:-1], keys[-1]
+    for modifier in modifiers:
+        kb.press(modifier)
+    try:
+        kb.press(final)
+        kb.release(final)
+    finally:
+        for modifier in reversed(modifiers):
+            kb.release(modifier)
+
+
+def apply_spoken_edit_command(recognized_raw: str, rec, bundle: str) -> bool:
+    """Act on already-dictated text when a lone utterance is an edit command.
+
+    Opt-in and additive: unless the Mac-only preference is set and the whole
+    normalized utterance is exactly one closed-grammar command, this returns
+    False and dictation proceeds untouched. Only stateless keyboard actions run
+    here; the closed grammar itself lives in parrot_core.classify_edit_command.
+    """
+    if not (IS_MACOS and PREFERENCES["spoken_edit_commands"]
+            and rec.mode in {"capture", "code"}):
+        return False
+    cmd = classify_edit_command(recognized_raw)
+    if cmd is None:
+        return False
+    # Tier 2 (uppercase/capitalize/lowercase the last insertion) needs the exact
+    # last inserted text and an in-place rewrite. A blind backspace+paste would
+    # bypass the insertion-integrity lease/readback the paste path depends on and
+    # could delete unrelated text if focus moved, so it is intentionally deferred
+    # to normal dictation rather than half-implemented.
+    # TODO Tier 2: re-observe the destination, verify it still holds the last
+    # insertion, then replace it through the insertion coordinator.
+    if cmd in (EDIT_COMMAND_UPPERCASE_LAST, EDIT_COMMAND_CAPITALIZE_LAST,
+               EDIT_COMMAND_LOWERCASE_LAST):
+        return False
+    # Tier 1: stateless keyboard actions, dispatched exactly like voice commands.
+    if cmd in (EDIT_COMMAND_UNDO, EDIT_COMMAND_DELETE_SENTENCE):
+        _press_edit_chord(keyboard.Key.cmd, "z")
+    elif cmd == EDIT_COMMAND_DELETE_WORD:
+        _press_edit_chord(keyboard.Key.alt, keyboard.Key.backspace)
+    elif cmd == EDIT_COMMAND_NEWLINE:
+        _press_edit_chord(keyboard.Key.enter)
+    elif cmd == EDIT_COMMAND_NEWPARAGRAPH:
+        _press_edit_chord(keyboard.Key.enter)
+        _press_edit_chord(keyboard.Key.enter)
+    else:
+        return False  # defensive: an unmapped classification never acts
+    print(f"[edit-command] {cmd}")
+    return True
+
+
 def release_should_wait_for_tail(rec: Recorder) -> bool:
     """Whether speech was still active at key release."""
     return bool(rec.voiced_since_cut) and (
@@ -8128,6 +8204,15 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 recognized_raw, rec.utterance_id):
             CAPTION["text"] = "Voice Object draft queued locally"
             print("[voice-objects] local draft queued")
+            play("Pop")
+            return
+
+        # Opt-in, Mac-only spoken edit commands act on already-dictated text.
+        # recognized_raw is the pre-compiler transcript, so cleanup cannot mangle
+        # a lone command before it is matched. Every non-command utterance returns
+        # False here and continues through the ordinary path below unchanged.
+        if rec.mode in {"capture", "code"} and apply_spoken_edit_command(
+                recognized_raw, rec, bundle):
             play("Pop")
             return
 

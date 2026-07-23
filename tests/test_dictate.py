@@ -1656,6 +1656,7 @@ class FacePreferenceTests(unittest.TestCase):
                 "flight_recorder": True,
                 "acoustic_time_machine": True,
                 "voice_object_commands": False,
+                "spoken_edit_commands": False,
                 "face": "dragon",
             }), encoding="utf-8")
             ns["load_preferences"]()
@@ -1663,6 +1664,7 @@ class FacePreferenceTests(unittest.TestCase):
             self.assertTrue(ns["PREFERENCES"]["flight_recorder"])
             self.assertTrue(ns["PREFERENCES"]["acoustic_time_machine"])
             self.assertFalse(ns["PREFERENCES"]["voice_object_commands"])
+            self.assertFalse(ns["PREFERENCES"]["spoken_edit_commands"])
 
             ns["PREFERENCES"]["face"] = "FOX"
             ns["save_preferences"]()
@@ -1671,6 +1673,7 @@ class FacePreferenceTests(unittest.TestCase):
                 "flight_recorder": True,
                 "acoustic_time_machine": True,
                 "voice_object_commands": False,
+                "spoken_edit_commands": False,
                 "face": "fox",
             })
 
@@ -1685,6 +1688,7 @@ class FacePreferenceTests(unittest.TestCase):
                     path.write_text(json.dumps({
                         "acoustic_time_machine": acoustic,
                         "voice_object_commands": voice_objects,
+                        "spoken_edit_commands": voice_objects,
                     }), encoding="utf-8")
                     buffer = AcousticTimeMachine()
                     ns = load_definitions(
@@ -1702,6 +1706,8 @@ class FacePreferenceTests(unittest.TestCase):
                         ns["PREFERENCES"]["acoustic_time_machine"], expected)
                     self.assertIs(
                         ns["PREFERENCES"]["voice_object_commands"], expected)
+                    self.assertIs(
+                        ns["PREFERENCES"]["spoken_edit_commands"], expected)
                     self.assertIs(buffer.enabled, expected)
 
     def test_all_default_faces_are_supported(self):

@@ -397,6 +397,51 @@ def compile_cleanup(raw: str) -> CleanupPlan:
                        needs_semantic_cleanup=needs_semantic)
 
 
+# Spoken edit commands: a closed, whole-utterance grammar. A phrase only counts
+# when the entire normalized utterance is exactly a command, so a lone spoken
+# command can act on already-dictated text while ordinary prose that merely
+# contains the words ("lets scratch that plan") flows through as normal
+# dictation. This classifier stays pure; the keyboard and text effects live in
+# dictate.py's dispatcher.
+EDIT_COMMAND_UNDO = "undo"
+EDIT_COMMAND_DELETE_WORD = "delete_word"
+EDIT_COMMAND_DELETE_SENTENCE = "delete_sentence"
+EDIT_COMMAND_NEWLINE = "newline"
+EDIT_COMMAND_NEWPARAGRAPH = "newparagraph"
+EDIT_COMMAND_UPPERCASE_LAST = "uppercase_last"
+EDIT_COMMAND_CAPITALIZE_LAST = "capitalize_last"
+EDIT_COMMAND_LOWERCASE_LAST = "lowercase_last"
+
+_EDIT_COMMAND_PHRASES = {
+    "scratch that": EDIT_COMMAND_UNDO,
+    "undo that": EDIT_COMMAND_UNDO,
+    "undo": EDIT_COMMAND_UNDO,
+    "delete last word": EDIT_COMMAND_DELETE_WORD,
+    "delete last sentence": EDIT_COMMAND_DELETE_SENTENCE,
+    "delete that": EDIT_COMMAND_DELETE_SENTENCE,
+    "new line": EDIT_COMMAND_NEWLINE,
+    "new paragraph": EDIT_COMMAND_NEWPARAGRAPH,
+    "all caps": EDIT_COMMAND_UPPERCASE_LAST,
+    "uppercase that": EDIT_COMMAND_UPPERCASE_LAST,
+    "capitalize that": EDIT_COMMAND_CAPITALIZE_LAST,
+    "lowercase that": EDIT_COMMAND_LOWERCASE_LAST,
+}
+
+
+def classify_edit_command(raw: str) -> str | None:
+    """Classify a whole utterance as one closed-set spoken edit command.
+
+    Normalizes with the same rule as dictate.py's execute_voice_command, then
+    matches the entire normalized string against a fixed phrase table. A command
+    word embedded in a longer utterance never matches, so ordinary dictation is
+    untouched. No inference: anything outside the closed set returns None.
+    """
+    if not isinstance(raw, str):
+        return None
+    normalized = re.sub(r"[^a-z ]", "", raw.casefold()).strip()
+    return _EDIT_COMMAND_PHRASES.get(normalized)
+
+
 CODE_PHRASES = (
     (r"\bopen paren(?:thesis)?\b", "("),
     (r"\bclose paren(?:thesis)?\b", ")"),
