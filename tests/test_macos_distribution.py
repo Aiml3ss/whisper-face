@@ -270,8 +270,23 @@ class MacDistributionContractTests(unittest.TestCase):
                     "Contents/Info.plist",
                     "Contents/MacOS/Whisper Face",
                     "Contents/Resources/launcher-source-sha256",
+                    "Contents/_CodeSignature/CodeResources",
                 },
             )
+            # The built bundle carries a valid ad-hoc signature bound to the
+            # launcher identifier so macOS lists it as a grantable app.
+            signature = subprocess.run(
+                ["codesign", "--verify", "--strict",
+                 '-R=identifier "com.berg.whisper-face.launcher"', str(app)],
+                capture_output=True,
+            )
+            self.assertEqual(signature.returncode, 0)
+            display = subprocess.run(
+                ["codesign", "--display", "--verbose=2", str(app)],
+                text=True, capture_output=True,
+            )
+            self.assertIn("adhoc", display.stderr)
+            self.assertIn("com.berg.whisper-face.launcher", display.stderr)
             installed = root / "installed" / "Whisper Face.app"
             receipt = root / "state" / "launcher-install.json"
             subprocess.run([
@@ -296,32 +311,54 @@ class MacDistributionContractTests(unittest.TestCase):
             )
             self.assertEqual(verification.returncode, 0, verification.stderr)
 
-            tampered = root / "tampered" / "Whisper Face.app"
-            subprocess.run(["ditto", str(app), str(tampered)], check=True)
-            tampered_executable = tampered / "Contents/MacOS/Whisper Face"
-            data = tampered_executable.read_bytes()
-            tampered_executable.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
-            unsigned_rejected = subprocess.run([
+            # A substituted binary that is re-signed ad-hoc carries a valid
+            # signature yet no longer reproduces byte-for-byte from source.
+            resigned = root / "resigned" / "Whisper Face.app"
+            subprocess.run(["ditto", str(app), str(resigned)], check=True)
+            resigned_executable = resigned / "Contents/MacOS/Whisper Face"
+            data = resigned_executable.read_bytes()
+            middle = len(data) // 2
+            resigned_executable.write_bytes(
+                data[:middle] + bytes([data[middle] ^ 1]) + data[middle + 1:])
+            subprocess.run(
+                ["codesign", "--force", "--sign", "-", "--identifier",
+                 "com.berg.whisper-face.launcher", str(resigned)],
+                check=True, capture_output=True)
+            resigned_rejected = subprocess.run([
                 sys.executable, str(LAUNCHER_TOOL), "install",
-                "--app", str(root / "rejected-unsigned" / "Whisper Face.app"),
-                "--source-app", str(tampered), "--checkout", str(ROOT),
-                "--receipt", str(root / "rejected-unsigned.json"),
+                "--app", str(root / "rejected-resigned" / "Whisper Face.app"),
+                "--source-app", str(resigned), "--checkout", str(ROOT),
+                "--receipt", str(root / "rejected-resigned.json"),
             ], cwd=ROOT, text=True, capture_output=True)
-            self.assertEqual(unsigned_rejected.returncode, 2)
-            self.assertIn("compiled binary mismatch", unsigned_rejected.stderr)
+            self.assertEqual(resigned_rejected.returncode, 2)
+            self.assertIn("compiled binary mismatch", resigned_rejected.stderr)
 
-            untrusted = root / "untrusted" / "Whisper Face.app"
-            subprocess.run(["ditto", str(app), str(untrusted)], check=True)
-            subprocess.run(["codesign", "--force", "--sign", "-", str(untrusted)],
-                           check=True, capture_output=True)
-            signed_rejected = subprocess.run([
+            # Modifying a signed executable without re-signing invalidates the
+            # ad-hoc signature outright.
+            corrupt = root / "corrupt" / "Whisper Face.app"
+            subprocess.run(["ditto", str(app), str(corrupt)], check=True)
+            corrupt_executable = corrupt / "Contents/MacOS/Whisper Face"
+            data = corrupt_executable.read_bytes()
+            middle = len(data) // 2
+            corrupt_executable.write_bytes(
+                data[:middle] + bytes([data[middle] ^ 1]) + data[middle + 1:])
+            corrupt_rejected = subprocess.run([
                 sys.executable, str(LAUNCHER_TOOL), "install",
-                "--app", str(root / "rejected-signed" / "Whisper Face.app"),
-                "--source-app", str(untrusted), "--checkout", str(ROOT),
-                "--receipt", str(root / "rejected-signed.json"),
+                "--app", str(root / "rejected-corrupt" / "Whisper Face.app"),
+                "--source-app", str(corrupt), "--checkout", str(ROOT),
+                "--receipt", str(root / "rejected-corrupt.json"),
             ], cwd=ROOT, text=True, capture_output=True)
-            self.assertEqual(signed_rejected.returncode, 2)
-            self.assertIn("pinned Developer ID", signed_rejected.stderr)
+            self.assertEqual(corrupt_rejected.returncode, 2)
+            self.assertIn("ad-hoc signature is invalid", corrupt_rejected.stderr)
+
+            # The release gate refuses an ad-hoc signed bundle: only a Developer
+            # ID signature satisfies --require-signed.
+            require_signed = subprocess.run([
+                sys.executable, str(LAUNCHER_TOOL), "verify",
+                "--app", str(installed), "--require-signed",
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual(require_signed.returncode, 2)
+            self.assertIn("release launcher must be signed", require_signed.stderr)
 
             payload = json.loads(receipt.read_text())
             payload["checkout"] = "/tmp/not-the-checkout"

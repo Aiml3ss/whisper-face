@@ -224,6 +224,8 @@ if IS_MACOS:
     import objc
     from AppKit import (
         NSAffineTransform,
+        NSAlert,
+        NSAlertFirstButtonReturn,
         NSApplication,
         NSApplicationActivationPolicyAccessory,
         NSBackingStoreBuffered,
@@ -415,6 +417,7 @@ from voice_objects import (  # noqa: E402
     PlainTextDraft,
     TaskDraft,
 )
+import self_update  # noqa: E402
 
 if IS_MACOS:
     from whisper_face_gui import GUIActions, create_gui  # noqa: E402
@@ -2431,6 +2434,7 @@ class StatusBar(NSObject):
         self.flight_item = mk("Flight Recorder", "toggleFlight:")
         self.pause_item = mk("Pause Dictation", "togglePause:")
         menu.addItem_(mk("Open Whisper Face…", "openGUI:"))
+        menu.addItem_(mk("Check for Updates…", "checkForUpdates:"))
         menu.addItem_(NSMenuItem.separatorItem())
         menu.addItem_(self.stat1)
         menu.addItem_(self.stat2)
@@ -2798,6 +2802,98 @@ class StatusBar(NSObject):
         except Exception:
             pass
         NSApplication.sharedApplication().terminate_(None)
+
+    def checkForUpdates_(self, sender):
+        """User-initiated, opt-in git update check.
+
+        The network fetch runs on a background thread so the menu-bar app never
+        blocks; every UI touch happens back on the main thread. Fail-closed and
+        guarded end to end — a checker failure can never crash the app."""
+        def worker():
+            try:
+                report = self_update.check_for_update(
+                    HERE, runner=subprocess.run)
+            except Exception as e:  # never let the menu-bar app crash
+                report = {"available": False, "error": type(e).__name__}
+            AppHelper.callAfter(self._present_update_check, report)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _present_update_check(self, report):
+        try:
+            error = report.get("error")
+            if error:
+                self._update_alert(
+                    "Couldn't check for updates.", str(error))
+                return
+            if not report.get("available"):
+                self._update_alert("Whisper Face is up to date.", "")
+                return
+            behind = int(report.get("behind", 0) or 0)
+            noun = "commit" if behind == 1 else "commits"
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_("An update is available.")
+            alert.setInformativeText_(
+                f"{behind} new {noun} available. Update now?")
+            alert.addButtonWithTitle_("Update")
+            alert.addButtonWithTitle_("Later")
+            if alert.runModal() == NSAlertFirstButtonReturn:
+                self._begin_update(str(report.get("latest") or ""))
+        except Exception as e:
+            print(f"! update check UI failed: {e}")
+
+    def _begin_update(self, target_rev):
+        if not target_rev:
+            self._update_alert(
+                "Couldn't start the update.",
+                "No target revision was found.")
+            return
+
+        def worker():
+            try:
+                outcome = self_update.apply_update(
+                    HERE, target_rev, runner=subprocess.run)
+            except Exception as e:
+                outcome = {"status": "failed", "error": type(e).__name__}
+            AppHelper.callAfter(self._present_update_result, outcome)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _present_update_result(self, outcome):
+        try:
+            status = outcome.get("status")
+            if status == "applied":
+                self._update_alert("Updated. Restarting…", "")
+                self._restart_service()
+            elif status == "rolled_back":
+                self._update_alert(
+                    "Update failed — rolled back.",
+                    "The installer failed on the new version, so Whisper Face "
+                    "restored your previous version. Nothing was kept.")
+            else:
+                error = outcome.get("error") or "unknown error"
+                self._update_alert(
+                    "Couldn't apply the update.", str(error))
+        except Exception as e:
+            print(f"! update result UI failed: {e}")
+
+    def _restart_service(self):
+        try:
+            uid = os.getuid()
+            subprocess.Popen(
+                ["/bin/launchctl", "kickstart", "-k",
+                 f"gui/{uid}/com.berg.dictate"])
+        except Exception as e:
+            print(f"! could not restart service: {e}")
+
+    def _update_alert(self, message, informative):
+        try:
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(message)
+            if informative:
+                alert.setInformativeText_(informative)
+            alert.addButtonWithTitle_("OK")
+            alert.runModal()
+        except Exception as e:
+            print(f"! could not show alert: {e}")
 
 
 if IS_WINDOWS:
@@ -5236,10 +5332,11 @@ def ensure_single_instance():
 
 
 def ensure_event_permissions():
-    """Under launchd, TCC grants belong to the Python binary, not Terminal.
-    Ask for Input Monitoring (hotkey listening) and Accessibility (paste
-    keystroke posting) up front; if missing, wait for the user to flip the
-    toggles and then re-exec so the listener starts trusted."""
+    """Under the signed launcher chain, TCC attributes these grants to the
+    launcher app ("Whisper Face"), the responsible process this fork+exec child
+    rolls up to. Ask for Input Monitoring (hotkey listening) and Accessibility
+    (paste keystroke posting) up front; if missing, wait for the user to flip
+    the toggles and then re-exec so the listener starts trusted."""
     if IS_WINDOWS:
         return
     try:
@@ -5253,8 +5350,17 @@ def ensure_event_permissions():
         return
     CGRequestListenEventAccess()            # each pops the system dialog once
     CGRequestPostEventAccess()
-    print("Waiting for permissions: enable 'uv' under System Settings -> "
-          "Privacy & Security -> Input Monitoring AND Accessibility. "
+    try:
+        # Accessibility is a distinct TCC service from Input Monitoring; prompt
+        # for it directly so the paste keystroke path is trusted too. Under the
+        # signed launcher chain this attributes to "Whisper Face", one toggle.
+        from ApplicationServices import (
+            AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt)
+        AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True})
+    except Exception:
+        pass                                # older pyobjc / headless: best effort
+    print("Waiting for permissions: enable 'Whisper Face' under System Settings "
+          "-> Privacy & Security -> Input Monitoring AND Accessibility. "
           "Re-checking every minute...")
     # TCC verdicts are effectively frozen for a running process — polling
     # preflight here never sees the user's grant. Re-exec for a fresh image;
@@ -6399,6 +6505,96 @@ def _ax_text(element) -> str | None:
         return None
 
 
+# Electron/Chromium apps (e.g. Claude for desktop) withhold their accessibility
+# tree until AXManualAccessibility is set on the app element. Detection stays
+# additive: native apps read non-empty on the first focus read and never enter
+# the wake path, so they see no added latency and no behavior change.
+_ELECTRON_BUNDLE_IDS = frozenset({"com.anthropic.claudefordesktop"})
+# bundle id -> is-electron verdict, memoized so repeated focus reads skip the
+# filesystem probe.
+_ELECTRON_BUNDLE_CACHE = {}
+
+
+def _bundle_is_electron(bundle_id, bundle_path) -> bool:
+    """Classify a bundle as Electron by allowlist, else by framework probe."""
+    if bundle_id in _ELECTRON_BUNDLE_IDS:
+        return True
+    if not bundle_path:
+        return False
+    framework = Path(bundle_path) / "Contents" / "Frameworks" \
+        / "Electron Framework.framework"
+    try:
+        return framework.exists()
+    except Exception:
+        return False
+
+
+def is_electron_app(app) -> bool:
+    """True when the frontmost app ships on Electron. macOS-only, memoized."""
+    if not IS_MACOS or app is None:
+        return False
+    try:
+        bundle_id = app.bundleIdentifier()
+    except Exception:
+        bundle_id = None
+    if bundle_id is not None and bundle_id in _ELECTRON_BUNDLE_CACHE:
+        return _ELECTRON_BUNDLE_CACHE[bundle_id]
+    try:
+        url = app.bundleURL()
+        bundle_path = url.path() if url is not None else None
+    except Exception:
+        bundle_path = None
+    verdict = _bundle_is_electron(bundle_id, bundle_path)
+    if bundle_id is not None:
+        _ELECTRON_BUNDLE_CACHE[bundle_id] = verdict
+    return verdict
+
+
+def wake_electron_accessibility(pid) -> bool:
+    """Enable an Electron app's own a11y tree via AXManualAccessibility.
+
+    Idempotent and side-effect free beyond exposing the app's existing tree —
+    it grants no new data. Returns False on any failure so callers fall back to
+    their normal empty-read handling.
+    """
+    if not IS_MACOS:
+        return False
+    try:
+        from ApplicationServices import (
+            AXUIElementCreateApplication,
+            AXUIElementSetAttributeValue,
+        )
+        from CoreFoundation import kCFBooleanTrue
+        err = AXUIElementSetAttributeValue(
+            AXUIElementCreateApplication(int(pid)),
+            "AXManualAccessibility", kCFBooleanTrue)
+        return not err
+    except Exception:
+        return False
+
+
+def _focus_read_is_empty(err, focused, text_reader) -> bool:
+    """Empty when the read errored, returned nothing, or is unreadable."""
+    return bool(err) or focused is None or text_reader(focused) is None
+
+
+def electron_wake_retry(reader, app, *, detector=is_electron_app,
+                        waker=wake_electron_accessibility,
+                        text_reader=_ax_text):
+    """Read focus once; on an empty read from an Electron app, wake its
+    accessibility tree and read exactly once more.
+
+    Returns the (err, focused) pair. The wake fires only on empty + Electron,
+    so native apps read on the first try and never pay the retry.
+    """
+    err, focused = reader()
+    if _focus_read_is_empty(err, focused, text_reader) \
+            and app is not None and detector(app):
+        waker(app.processIdentifier())
+        err, focused = reader()
+    return err, focused
+
+
 def _coerce_range(value) -> tuple[int, int] | None:
     """Accept the CFRange representations PyObjC has used across releases."""
     if value is None:
@@ -6480,13 +6676,18 @@ def focused_snapshot() -> FocusSnapshot | None:
             kAXSelectedTextAttribute,
             kAXTitleAttribute,
         )
-        err, focused = AXUIElementCopyAttributeValue(
-            AXUIElementCreateSystemWide(), kAXFocusedUIElementAttribute, None)
+        systemwide = AXUIElementCreateSystemWide()
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        # An empty focus read from an Electron app means its accessibility tree
+        # is still withheld; wake it and read once more before failing closed.
+        err, focused = electron_wake_retry(
+            lambda: AXUIElementCopyAttributeValue(
+                systemwide, kAXFocusedUIElementAttribute, None),
+            app)
         if err or focused is None:
             return None
         text = _ax_text(focused)
         selected = _ax_attribute(focused, kAXSelectedTextAttribute)
-        app = NSWorkspace.sharedWorkspace().frontmostApplication()
         app_element = AXUIElementCreateApplication(app.processIdentifier()) \
             if app is not None else None
         window = _ax_attribute(app_element, kAXFocusedWindowAttribute) \
@@ -7567,8 +7768,45 @@ def cleanup_stale_gui_activation_sockets(*, uid: int | None = None,
     return removed
 
 
+def _parent_pid(pid: int) -> int | None:
+    """Return the parent PID of ``pid`` via ps, or None when it can't be read."""
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=1, check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = result.stdout.strip()
+    return int(value) if value.isdigit() else None
+
+
+def _process_has_ancestor(pid: int, *, max_hops: int = 24) -> bool:
+    """Return True when ``pid`` is this process or one of its forebears."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    current = os.getpid()
+    for _ in range(max_hops):
+        if current == pid:
+            return True
+        if current <= 1:
+            return False
+        parent = _parent_pid(current)
+        if parent is None or parent == current:
+            return False
+        current = parent
+    return False
+
+
 def current_launchd_service_pid(*, uid: int | None = None) -> int | None:
-    """Resolve this process's exact launchd job PID (the uv parent on Mac)."""
+    """Resolve this process's exact launchd job PID.
+
+    Under the signed launcher chain (launchd -> Whisper Face.app -> uv ->
+    python) the job PID is the launcher app several hops up, so it equals
+    neither this process nor its immediate parent. The launcher exports its own
+    PID as WHISPER_FACE_SERVICE_PID; trust it only when launchctl confirms it is
+    the job PID and it is a genuine ancestor of this process. The raw-uv path
+    (server-only / legacy) keeps the self-or-parent check."""
     owner = os.getuid() if uid is None else uid
     try:
         result = subprocess.run(
@@ -7581,9 +7819,13 @@ def current_launchd_service_pid(*, uid: int | None = None) -> int | None:
     if match is None:
         return None
     service_pid = int(match.group(1))
-    if service_pid not in {os.getpid(), os.getppid()}:
-        return None
-    return service_pid
+    exported = os.environ.get("WHISPER_FACE_SERVICE_PID", "").strip()
+    if (exported.isdigit() and int(exported) == service_pid
+            and _process_has_ancestor(service_pid)):
+        return service_pid
+    if service_pid in {os.getpid(), os.getppid()}:
+        return service_pid
+    return None
 
 
 def start_gui_activation_server(gui, *, revision: str | None = None,
@@ -8937,8 +9179,9 @@ def main():
     except Exception as e:
         print(f"! Microphone unavailable: {e}")
         if IS_MACOS:
-            print("  Enable 'uv' under System Settings -> Privacy & Security"
-                  " -> Microphone. A keypress will retry initialization.")
+            print("  Enable 'Whisper Face' under System Settings -> Privacy &"
+                  " Security -> Microphone. A keypress will retry"
+                  " initialization.")
         else:
             print("  Enable microphone access under Windows Settings -> "
                   "Privacy & security. A keypress will retry initialization.")
