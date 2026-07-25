@@ -3183,17 +3183,154 @@ class ConfigurationTests(unittest.TestCase):
             with self.subTest(hostile=hostile):
                 self.assertEqual(attempt({name: hostile}), 0)
 
-    def test_permission_wait_reexecs_on_the_fast_interval(self):
-        body = (ROOT / "dictate.py").read_text(encoding="utf-8").split(
+    def test_permission_wait_reexecs_without_blocking_appkit_reachability(self):
+        script = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        body = script.split(
             "def ensure_event_permissions", 1)[1].split("\ndef ", 1)[0]
         self.assertNotIn("time.sleep(60)", body)
         self.assertIn("Re-checking every few seconds", body)
         self.assertIn("attempt = permission_recheck_attempt()", body)
-        self.assertIn("time.sleep(permission_recheck_delay(attempt))", body)
-        # The re-exec is what makes macOS re-read the frozen TCC verdict, and
-        # the counter has to ride the new process image.
         self.assertIn("os.environ[PERMISSION_ATTEMPT_ENV] = str(attempt + 1)", body)
-        self.assertIn("os.execv(sys.executable", body)
+        self.assertIn('name="whisper-face-permission-recheck"', body)
+        self.assertIn("return False", body)
+        self.assertNotIn("time.sleep(", body)
+        # Main must publish the exact-process activation socket before entering
+        # permission recovery, then keep AppKit alive while the worker refreshes
+        # macOS's process-frozen TCC verdict.
+        main = script.split("def main():", 1)[1].split(
+            '\n\nif __name__ == "__main__":', 1)[0]
+        self.assertLess(
+            main.index('start_gui_activation_server(STATUS["bar"].gui)'),
+            main.index("if not ensure_event_permissions():"),
+        )
+        self.assertLess(
+            main.index("if not ensure_event_permissions():"),
+            main.index('trace_operation("warmup_audio_pool", AUDIO_POOL.warm)'),
+        )
+        recovery = main.split("if not ensure_event_permissions():", 1)[1]
+        self.assertIn("AppHelper.runEventLoop", recovery)
+
+    def test_permission_recheck_worker_reexecs_once_after_fresh_grant(self):
+        calls = []
+        verdicts = iter((False, False, True))
+        fake_os = SimpleNamespace(
+            environ={},
+            execv=lambda executable, arguments:
+                calls.append(("execv", executable, arguments)))
+        fake_sys = SimpleNamespace(
+            executable="/runtime/python", argv=["dictate.py", "--test"])
+        namespace = load_definitions(
+            "_wait_for_permission_grant_and_reexec",
+            assignments={"PERMISSION_ATTEMPT_ENV"},
+            extra={
+                "os": fake_os,
+                "sys": fake_sys,
+                "time": SimpleNamespace(
+                    sleep=lambda delay: calls.append(("sleep", delay))),
+                "permission_recheck_delay": lambda attempt: attempt + 0.5,
+                "_fresh_event_permissions_granted": lambda: False,
+            },
+        )
+
+        namespace["_wait_for_permission_grant_and_reexec"](
+            3,
+            sleeper=lambda delay: calls.append(("sleep", delay)),
+            preflight=lambda: next(verdicts),
+            execv=fake_os.execv,
+        )
+
+        self.assertEqual(calls, [
+            ("sleep", 3.5),
+            ("sleep", 4.5),
+            ("sleep", 5.5),
+            ("execv", "/runtime/python", [
+                "/runtime/python", "dictate.py", "--test"]),
+        ])
+        self.assertEqual(
+            fake_os.environ[namespace["PERMISSION_ATTEMPT_ENV"]], "6")
+
+    def test_permission_probe_is_content_free_and_non_prompting(self):
+        received = []
+        fake_subprocess = SimpleNamespace(
+            DEVNULL=-3,
+            SubprocessError=subprocess.SubprocessError,
+            run=None,
+        )
+        namespace = load_definitions(
+            "_fresh_event_permissions_granted",
+            extra={
+                "subprocess": fake_subprocess,
+                "sys": SimpleNamespace(executable="/runtime/python"),
+            },
+        )
+        probe = namespace["_fresh_event_permissions_granted"]
+
+        def runner(arguments, **options):
+            received.append((arguments, options))
+            return SimpleNamespace(returncode=0)
+
+        self.assertTrue(probe(runner=runner))
+        arguments, options = received[0]
+        self.assertEqual(arguments[:2], ["/runtime/python", "-c"])
+        self.assertIn("CGPreflightListenEventAccess", arguments[2])
+        self.assertIn("CGPreflightPostEventAccess", arguments[2])
+        self.assertNotIn("CGRequest", arguments[2])
+        self.assertEqual(options["timeout"], 5)
+        self.assertFalse(options["check"])
+        self.assertFalse(probe(
+            runner=lambda *_args, **_kwargs: SimpleNamespace(returncode=1)))
+        self.assertFalse(probe(
+            runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("unavailable"))))
+
+    def test_missing_permissions_schedule_recovery_without_blocking(self):
+        calls = []
+
+        class FakeThread:
+            def __init__(self, *, target, args, name, daemon):
+                calls.append(("thread", target, args, name, daemon))
+
+            def start(self):
+                calls.append(("start",))
+
+        fake_os = SimpleNamespace(environ={})
+        worker = object()
+        namespace = load_definitions(
+            "ensure_event_permissions",
+            assignments={"PERMISSION_ATTEMPT_ENV"},
+            extra={
+                "IS_WINDOWS": False,
+                "os": fake_os,
+                "threading": SimpleNamespace(Thread=FakeThread),
+                "permission_recheck_attempt": lambda: 0,
+                "_wait_for_permission_grant_and_reexec": worker,
+            },
+        )
+        quartz = SimpleNamespace(
+            CGPreflightListenEventAccess=lambda: False,
+            CGPreflightPostEventAccess=lambda: False,
+            CGRequestListenEventAccess=lambda: calls.append(("listen",)),
+            CGRequestPostEventAccess=lambda: calls.append(("post",)),
+        )
+        application_services = SimpleNamespace(
+            AXIsProcessTrustedWithOptions=lambda options:
+                calls.append(("accessibility", options)),
+            kAXTrustedCheckOptionPrompt="prompt",
+        )
+        with mock.patch.dict(sys.modules, {
+            "Quartz": quartz,
+            "ApplicationServices": application_services,
+        }):
+            self.assertFalse(namespace["ensure_event_permissions"]())
+
+        self.assertIn(("listen",), calls)
+        self.assertIn(("post",), calls)
+        thread = next(call for call in calls if call[0] == "thread")
+        self.assertIs(thread[1], worker)
+        self.assertEqual(thread[2], (0,))
+        self.assertEqual(thread[3:], (
+            "whisper-face-permission-recheck", True))
+        self.assertIn(("start",), calls)
 
     def test_mlx_progress_uses_thread_lock_not_multiprocessing_semaphore(self):
         received = []

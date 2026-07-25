@@ -686,6 +686,13 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("activateIgnoringOtherApps_(True)", gui_source)
         self.assertIn(
             'start_gui_activation_server(STATUS["bar"].gui)', self.script)
+        self.assertLess(
+            self.script.index(
+                'start_gui_activation_server(STATUS["bar"].gui)'),
+            self.script.index("if not ensure_event_permissions():"),
+        )
+        self.assertIn(
+            'name="whisper-face-permission-recheck"', self.script)
 
     def test_update_and_rollback_guide_uses_supported_install_paths(self):
         guide = (
