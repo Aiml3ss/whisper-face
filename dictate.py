@@ -4179,6 +4179,34 @@ def gui_settings_snapshot() -> dict:
         except (TypeError, ValueError):
             return 0
 
+    def scope_decision(
+        source: str,
+        target: str,
+        app: str | None,
+        *,
+        count: int,
+        threshold: int,
+    ) -> str:
+        """Mirror the active correction gate without exporting private cases."""
+        scoped_promoted = [
+            item for item in regression.promoted
+            if item.heard.casefold() == source.casefold() and item.app == app
+        ]
+        if scoped_promoted:
+            return (
+                "active"
+                if any(item.preferred == target for item in scoped_promoted)
+                else "held_back"
+            )
+        scoped_quarantined = [
+            item for item in regression.quarantined
+            if item.heard.casefold() == source.casefold() and item.app == app
+        ]
+        if scoped_quarantined:
+            return "held_back"
+        # Pre-regression state remains supported by apply_learned_fixes().
+        return "active" if count >= threshold else "learning"
+
     with APP_TONES["lock"]:
         tone_map = dict(APP_TONES["map"])
     bundles = list(dict.fromkeys(recent_dictation_apps() + list(tone_map)))
@@ -4198,6 +4226,7 @@ def gui_settings_snapshot() -> dict:
         manual, banned = parse_dictionary()
     with LEARN_LOCK:
         learned = load_learned()
+    regression = personal_regression_lab(learned)
     corrections = []
     for key, info in learned.get("confusions", {}).items():
         if not isinstance(key, str) or not isinstance(info, dict):
@@ -4205,10 +4234,40 @@ def gui_settings_snapshot() -> dict:
         source = info.get("from")
         target = info.get("to")
         if isinstance(source, str) and source and isinstance(target, str) and target:
+            total = safe_count(info.get("n"))
+            raw_apps = info.get("apps")
+            app_scopes = []
+            if isinstance(raw_apps, dict):
+                for bundle, raw_count in raw_apps.items():
+                    if not isinstance(bundle, str) or not bundle:
+                        continue
+                    app_count = safe_count(raw_count)
+                    app_scopes.append({
+                        "bundle": bundle,
+                        "name": app_display_name(bundle),
+                        "count": app_count,
+                        "decision": scope_decision(
+                            source,
+                            target,
+                            bundle,
+                            count=app_count,
+                            threshold=PERSONAL_APP_MIN_COUNT,
+                        ),
+                    })
+            app_scopes.sort(
+                key=lambda item: (-item["count"], item["name"].casefold()))
             corrections.append({
                 "key": key, "source": source, "target": target,
-                "count": safe_count(info.get("n")),
+                "count": total,
                 "kind": "correction",
+                "global_decision": scope_decision(
+                    source,
+                    target,
+                    None,
+                    count=total,
+                    threshold=PERSONAL_GLOBAL_MIN_COUNT,
+                ),
+                "app_scopes": app_scopes,
             })
     for name, info in learned.get("snippet_edits", {}).items():
         if not isinstance(name, str) or not isinstance(info, dict):
@@ -4219,6 +4278,8 @@ def gui_settings_snapshot() -> dict:
                 "key": name, "source": f"Snippet: {name}",
                 "target": target, "count": safe_count(info.get("n")),
                 "kind": "snippet",
+                "global_decision": "saved",
+                "app_scopes": [],
             })
     corrections.sort(key=lambda item: (-item["count"], item["source"].casefold()))
     return {
