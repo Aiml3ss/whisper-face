@@ -451,6 +451,7 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn("macos_drop_to_target_snapshot.py", installer)
                 self.assertIn("drop_to_target.py", installer)
                 self.assertIn("whisper_face_gui.py", installer)
+                self.assertIn("whisper_face_theme.py", installer)
                 self.assertIn("support_bundle.py", installer)
                 self.assertIn("side_by_side_update.py", installer)
                 self.assertIn("safe_update_advisor.py", installer)
@@ -578,6 +579,8 @@ class InstallerContractTests(unittest.TestCase):
                       workflow)
         self.assertIn("native_appkit_smoke_contract", gui)
         self.assertIn("allowed_side_effects: tuple[str, ...] = ()", gui)
+        self.assertIn("run_native_hud_smoke_test", self.script)
+        self.assertIn("CASpringAnimation", self.script)
         self.assertIn("if not IS_MACOS", self.script)
 
     def test_whisper_face_assets_and_preference_ship_on_both_platforms(self):
@@ -586,6 +589,8 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn('"face": "parrot"', template)
         self.assertIn('"acoustic_time_machine": false', template)
         self.assertIn('"voice_object_commands": false', template)
+        self.assertIn("whisper_face_theme.py", self.shell)
+        self.assertIn("whisper_face_theme.py", self.powershell)
         for runtime_module in (
                 "voice_objects.py", "voice_object_command_parser.py",
                 "voice_inbox.py", "voice_object_inbox_bridge.py",

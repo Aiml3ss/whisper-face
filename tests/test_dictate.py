@@ -79,6 +79,15 @@ from model_wallet_shadow import (  # noqa: E402
     RuntimeModelEvidence,
     assess_model_wallet,
 )
+from whisper_face_theme import (  # noqa: E402
+    DARK_PALETTE,
+    FACE_CHIP_COLORS,
+    LIGHT_PALETTE,
+    MOTION_SPECS,
+    TYPE_SPECS,
+    hud_presentation,
+    jelly_face_scale,
+)
 
 TREE = ast.parse((ROOT / "dictate.py").read_text(encoding="utf-8"))
 
@@ -1764,6 +1773,58 @@ class FacePreferenceTests(unittest.TestCase):
         self.assertEqual(ns["hud_level_step"](0.9, 0.7, "recording", True), 0.0)
         self.assertGreater(
             ns["hud_level_step"](0.9, 0.0, "recording", False), 0.0)
+
+
+class WhisperFaceThemeTests(unittest.TestCase):
+    def test_light_and_dark_palettes_share_brand_but_not_work_surfaces(self):
+        self.assertEqual(LIGHT_PALETTE.brand, DARK_PALETTE.brand)
+        self.assertNotEqual(LIGHT_PALETTE.bg, DARK_PALETTE.bg)
+        self.assertNotEqual(LIGHT_PALETTE.surface, DARK_PALETTE.surface)
+        self.assertNotEqual(LIGHT_PALETTE.ink, DARK_PALETTE.ink)
+        self.assertEqual(
+            set(FACE_CHIP_COLORS),
+            {"parrot", "fox", "owl", "cat", "bear",
+             "dog", "wolf", "pig", "panda", "tiger"},
+        )
+
+    def test_all_named_jelly_motions_have_bounded_fast_springs(self):
+        self.assertEqual(
+            set(MOTION_SPECS), {"press", "release", "wobble", "pop"})
+        for motion in MOTION_SPECS.values():
+            self.assertGreater(motion.stiffness, 0.0)
+            self.assertGreater(motion.damping, 0.0)
+            self.assertLessEqual(motion.duration, 0.5)
+            self.assertGreater(motion.squash_x, 0.0)
+            self.assertGreater(motion.squash_y, 0.0)
+
+    def test_hud_type_tokens_use_compact_rounded_chrome_sizes(self):
+        self.assertEqual(
+            set(TYPE_SPECS),
+            {"hud_eyebrow", "hud_confidence", "hud_caption"},
+        )
+        self.assertLess(TYPE_SPECS["hud_eyebrow"].size, 10.0)
+        self.assertLessEqual(TYPE_SPECS["hud_caption"].size, 12.0)
+
+    def test_hud_copy_distinguishes_stable_listening_and_processing(self):
+        listening = hud_presentation(
+            "recording", "hello world", 0.91, stable_prefix=True)
+        processing = hud_presentation(
+            "processing", "hello world", 0.61, stable_prefix=True)
+
+        self.assertEqual(listening.eyebrow, "HEARD YOU")
+        self.assertEqual(listening.confidence, "Recognition 91%")
+        self.assertIn("hello world", listening.accessibility_value)
+        self.assertEqual(processing.eyebrow, "TIDYING UP")
+        self.assertEqual(processing.accent, "accent")
+
+    def test_reduce_motion_disables_whole_head_squash(self):
+        self.assertEqual(
+            jelly_face_scale(0.9, reduce_motion=True), (1.0, 1.0))
+        self.assertEqual(
+            jelly_face_scale(0.9, processing=True), (1.0, 1.0))
+        active = jelly_face_scale(0.9)
+        self.assertGreater(active[0], 1.0)
+        self.assertLess(active[1], 1.0)
 
 
 class AcousticKeywordMemoryRuntimeTests(unittest.TestCase):
