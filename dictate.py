@@ -650,6 +650,7 @@ TRANSCRIPT_KEEP = 500        # trim the log to this many lines after a pass
 # them out (a cold first dictation used to cost ~6s of page-in).
 KEEPWARM_INTERVAL = 240      # seconds between heartbeats
 KEEPWARM_MIN_IDLE = 60       # skip the beat if dictating right now
+HOTKEY_WATCHDOG_INTERVAL = 3.0
 
 LOCK_FILE = HERE / ".dictate.lock"
 
@@ -934,7 +935,7 @@ SNIPPETS_LOCK = threading.Lock()
 DICTIONARY_LOCK = threading.RLock()
 
 # The active pynput listener, replaceable by the watchdog if it dies.
-LISTENER = {"l": None, "make": None}
+LISTENER = {"l": None, "make": None, "recovering": False}
 
 # Menu-bar state: the status item (main-thread only) and the pause switch.
 STATUS = {"bar": None}
@@ -5195,15 +5196,58 @@ def learn_scheduler():
         time.sleep(LEARN_INTERVAL)
 
 
+def restart_dead_hotkey_listener(on_dead, listener_state=None) -> bool:
+    """Replace one dead listener without losing retry state."""
+    state = LISTENER if listener_state is None else listener_state
+    listener = state.get("l")
+    if listener is None or getattr(listener, "running", False):
+        state["recovering"] = False
+        return False
+    if not state.get("recovering", False):
+        state["recovering"] = True
+        try:
+            on_dead()
+        except Exception as e:
+            print(f"! hotkey recovery cleanup failed: {e}")
+    print("! hotkey listener died — restarting it")
+    try:
+        replacement = state["make"]()
+    except Exception as e:
+        print(f"! hotkey listener restart failed; retrying: {e}")
+        return False
+    state["l"] = replacement
+    state["recovering"] = False
+    return True
+
+
+def queue_hotkey_listener_recovery(
+        key_down: dict, modifiers: set, events, event_at=None):
+    """Unlatch a dead listener and serialize orphaned-capture cleanup."""
+    key_down["on"] = False
+    modifiers.clear()
+    events.put((
+        "listener_recovery",
+        time.perf_counter() if event_at is None else event_at,
+        frozenset(),
+    ))
+
+
+def hotkey_watchdog_loop(on_dead):
+    """Recover input within seconds, independently of model heartbeats."""
+    while True:
+        time.sleep(HOTKEY_WATCHDOG_INTERVAL)
+        try:
+            restart_dead_hotkey_listener(on_dead)
+        except Exception as e:
+            print(f"! hotkey watchdog recovered from error: {e}")
+
+
 def keepwarm_loop():
     """Touch both models periodically while idle. Costs ~0.2s every few
     minutes; saves the several-second page-in stall on the first dictation
-    after a long break. Doubles as the hotkey-listener watchdog."""
+    after a long break."""
     while True:
         time.sleep(KEEPWARM_INTERVAL)
-        if LISTENER["l"] is not None and not LISTENER["l"].running:
-            print("! hotkey listener died — restarting it")
-            LISTENER["l"] = LISTENER["make"]()
         if time.time() - LAST_USE["t"] < KEEPWARM_MIN_IDLE:
             continue
         try:
@@ -9457,10 +9501,24 @@ def main():
     # callbacks only enqueue; this worker does the actual work.
     events = queue.Queue()
 
+    def abandon_active_recording():
+        rec = active.get("rec")
+        active["rec"] = None
+        if rec is not None:
+            try:
+                rec.stop()
+            except Exception:
+                pass
+        set_status("off" if PAUSED["on"] else "idle")
+        AppHelper.callAfter(hud.dismiss)
+
     def hotkey_worker():
         while True:
             ev, event_at, modifiers = events.get()
             try:
+                if ev == "listener_recovery":
+                    abandon_active_recording()
+                    continue
                 if (ev == "press" and active["rec"] is None
                         and not PAUSED["on"]):
                     LAST_USE["t"] = time.time()
@@ -9533,15 +9591,7 @@ def main():
                     ).start()
             except Exception as e:
                 print(f"! hotkey worker recovered from error: {e}")
-                rec = active.get("rec")
-                active["rec"] = None
-                if rec is not None:
-                    try:
-                        rec.stop()
-                    except Exception:
-                        pass
-                set_status("off" if PAUSED["on"] else "idle")
-                AppHelper.callAfter(hud.dismiss)
+                abandon_active_recording()
 
     threading.Thread(target=hotkey_worker, daemon=True).start()
 
@@ -9578,8 +9628,19 @@ def main():
         lst.start()
         return lst
 
+    def recover_listener_state():
+        # A listener can die between press and release. Unlatch its local key
+        # state before the replacement starts, then let the serialized worker
+        # stop any orphaned capture ahead of the next real key event.
+        queue_hotkey_listener_recovery(key_down, modifiers, events)
+
     LISTENER["make"] = make_listener
     LISTENER["l"] = make_listener()
+    threading.Thread(
+        target=hotkey_watchdog_loop,
+        args=(recover_listener_state,),
+        daemon=True,
+    ).start()
 
     AppHelper.runEventLoop(installInterrupt=True)
 
