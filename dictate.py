@@ -951,6 +951,7 @@ PIPELINE_STATE = {
     "last_stable_prefix_words": 0,
     "last_proof_edits_accepted": 0,
     "last_proof_edits_rejected": 0,
+    "last_result_evidence": {},
     "last_context_influence": "No context influence reported",
     "last_consequence_route": "standard",
     "last_risk_counts": {},
@@ -4438,6 +4439,75 @@ def runtime_status_snapshot() -> dict:
         "version": "Local checkout",
         "model_wallet_shadow": model_wallet_shadow,
         "models": model_status_rows_from_shadow(model_wallet_shadow),
+    }
+
+
+def inspect_last_result_evidence() -> dict:
+    """Return private latest-result details only after an explicit GUI action."""
+
+    def bounded_text(value, *, limit: int) -> str:
+        if not isinstance(value, str) or "\x00" in value:
+            return ""
+        return value[:limit]
+
+    raw_evidence = PIPELINE_STATE.get("last_result_evidence")
+    if not isinstance(raw_evidence, dict):
+        raw_evidence = {}
+    raw_alternatives = raw_evidence.get("alternatives")
+    if not isinstance(raw_alternatives, (list, tuple)):
+        raw_alternatives = ()
+    alternatives = [
+        text for value in raw_alternatives[:3]
+        if (text := bounded_text(value, limit=2000))
+    ]
+    raw_anchors = raw_evidence.get("protected_anchors")
+    if not isinstance(raw_anchors, (list, tuple)):
+        raw_anchors = ()
+    anchors = [
+        text for value in raw_anchors[:64]
+        if (text := bounded_text(value, limit=160))
+    ]
+    proof_edits = []
+    raw_proof_edits = raw_evidence.get("proof_edits")
+    if not isinstance(raw_proof_edits, (list, tuple)):
+        raw_proof_edits = ()
+    for raw in raw_proof_edits[:64]:
+        if not isinstance(raw, dict) or not isinstance(
+                raw.get("accepted"), bool):
+            continue
+        kind = bounded_text(raw.get("kind"), limit=80)
+        before = bounded_text(raw.get("before"), limit=1000)
+        after = bounded_text(raw.get("after"), limit=1000)
+        reason = bounded_text(raw.get("reason"), limit=240)
+        if not kind or (not before and not after):
+            continue
+        proof_edits.append({
+            "kind": kind,
+            "before": before,
+            "after": after,
+            "accepted": raw["accepted"],
+            "reason": reason,
+        })
+    timing_keys = (
+        "release", "asr", "compiler", "consequence",
+        "context", "cleanup", "insertion",
+    )
+    raw_timings = raw_evidence.get("timings_ms", {})
+    timings = {}
+    if isinstance(raw_timings, dict):
+        for key in timing_keys:
+            value = raw_timings.get(key)
+            if (isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(value) and 0 <= value <= 3_600_000):
+                timings[key] = round(float(value), 1)
+    return {
+        "schema_version": 1,
+        "kind": "whisper-face/result-evidence",
+        "alternatives": alternatives,
+        "protected_anchors": anchors,
+        "proof_edits": proof_edits,
+        "timings_ms": timings,
     }
 
 
@@ -8985,6 +9055,28 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         PIPELINE_STATE["last_asr_engine"] = recognition.engine or "unknown"
         PIPELINE_STATE["last_release_s"] = release_total
         PIPELINE_STATE["last_word_count"] = len(text.split())
+        # Publish the private detail as one atomic, in-memory latest-result
+        # object so an explicit inspection can never mix pipeline generations.
+        PIPELINE_STATE["last_result_evidence"] = {
+            "alternatives": list(PIPELINE_STATE["last_alternatives"])[:3],
+            "protected_anchors": list(compiler_result.anchors)[:64],
+            "proof_edits": [{
+                "kind": edit.kind,
+                "before": edit.before,
+                "after": edit.after,
+                "accepted": bool(edit.accepted),
+                "reason": edit.reason,
+            } for edit in proof_edits[:64]],
+            "timings_ms": {
+                "release": release_total * 1000.0,
+                "asr": t_asr * 1000.0,
+                "compiler": t_compile * 1000.0,
+                "consequence": t_consequence * 1000.0,
+                "context": t_context_firewall * 1000.0,
+                "cleanup": t_clean * 1000.0,
+                "insertion": t_insert * 1000.0,
+            },
+        }
         consequence_metrics = consequence_state_snapshot()
         context_firewall_metrics = context_firewall_state_snapshot()
         native_timing = (
@@ -9383,6 +9475,7 @@ def main():
     if IS_MACOS:
         STATUS["bar"].gui = create_gui(GUIActions(
             status_snapshot=runtime_status_snapshot,
+            inspect_result_evidence=inspect_last_result_evidence,
             settings_snapshot=gui_settings_snapshot,
             set_face=STATUS["bar"].set_face_choice,
             set_flight_recorder=STATUS["bar"].set_flight_enabled,

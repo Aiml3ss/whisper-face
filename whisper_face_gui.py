@@ -37,6 +37,10 @@ CONSEQUENCE_RELISTEN_STATUSES = frozenset({
     "not-needed", "skipped", "confirmed", "contradicted", "timed-out",
     "inconclusive", "mixed", "unavailable",
 })
+RESULT_EVIDENCE_STAGES = (
+    "release", "asr", "compiler", "consequence",
+    "context", "cleanup", "insertion",
+)
 VOICE_DRAFT_DESTINATIONS = frozenset({
     "plain_text", "email_draft", "task", "calendar_draft", "unavailable",
 })
@@ -301,6 +305,25 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "results.audio.notice.cleared": "Retained consequential audio cleared",
         "results.audio.notice.unavailable": "No retained consequential span is available",
         "results.privacy": "Audio replay is off by default. Selected latest-result spans stay only in RAM and are wiped after one minute, on a new result, or when cleared; they are never written, logged, or sent.",
+        "results.inspect.action": "Inspect Evidence",
+        "results.inspect.action.help": "Explicitly reveal private alternatives, protected anchors, proof-edit decisions, and timing for only the latest result.",
+        "results.inspect.title": "Latest-result evidence",
+        "results.inspect.message": "Revealed only for this session. This detail is not added to transcript history or support exports.",
+        "results.inspect.empty": "No detailed evidence was reported for this result.",
+        "results.inspect.alternatives": "ALTERNATIVES",
+        "results.inspect.anchors": "PROTECTED ANCHORS",
+        "results.inspect.proof": "PROOF EDITS",
+        "results.inspect.proof.accepted": "ACCEPTED",
+        "results.inspect.proof.rejected": "REJECTED",
+        "results.inspect.timing": "TIMING",
+        "results.inspect.stage.release": "Total release",
+        "results.inspect.stage.asr": "Recognition",
+        "results.inspect.stage.compiler": "Voice Compiler",
+        "results.inspect.stage.consequence": "Consequence check",
+        "results.inspect.stage.context": "Context firewall",
+        "results.inspect.stage.cleanup": "Cleanup",
+        "results.inspect.stage.insertion": "Insertion",
+        "results.inspect.none": "None reported",
         "results.value.words": "{count} words",
         "results.value.confidence": " · {confidence} confidence",
         "results.value.none_reported": "None reported",
@@ -326,6 +349,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "results.accessibility.consequence": "Consequence decision receipt",
         "results.accessibility.consequence_advisory": "Review guidance",
         "results.accessibility.audio": "Acoustic replay privacy status",
+        "results.accessibility.inspect": "Inspect private latest-result evidence",
+        "results.accessibility.inspect.content": "Private latest-result evidence",
         "models.title": "Your local voice stack",
         "models.subtitle": "Fast recognition, accurate fallback, and private cleanup.",
         "models.waiting": "Waiting for model status",
@@ -974,6 +999,7 @@ class GUIActions:
     """Integration API supplied by the running Whisper Face application."""
 
     status_snapshot: Callable[[], Mapping[str, Any]] = lambda: {}
+    inspect_result_evidence: Callable[[], Mapping[str, Any]] = lambda: {}
     settings_snapshot: Callable[[], Mapping[str, Any]] = lambda: {}
     set_face: Callable[[str], None] = _noop
     set_flight_recorder: Callable[[bool], None] = _noop
@@ -1373,6 +1399,33 @@ class DegradedIssue:
     detail: str
     route: str = "Diagnostics"
     severity: str = "error"
+
+
+@dataclass(frozen=True, repr=False)
+class ProofEditInspection:
+    kind: str
+    before: str = field(repr=False)
+    after: str = field(repr=False)
+    accepted: bool = False
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class StageTiming:
+    stage: str
+    milliseconds: float
+
+
+@dataclass(frozen=True, repr=False)
+class ResultEvidenceInspection:
+    """Private details returned transiently after an explicit reveal."""
+
+    alternatives: tuple[str, ...] = field(default_factory=tuple, repr=False)
+    protected_anchors: tuple[str, ...] = field(
+        default_factory=tuple, repr=False)
+    proof_edits: tuple[ProofEditInspection, ...] = field(
+        default_factory=tuple, repr=False)
+    timings: tuple[StageTiming, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -2270,6 +2323,144 @@ def _context_firewall_summary(
                else "results.firewall.promotion.many")
         return localized_string(key, locale=locale, count=count)
     return localized_string("results.firewall.unavailable", locale=locale)
+
+
+def normalize_result_evidence(
+    snapshot: Mapping[str, Any] | None,
+) -> ResultEvidenceInspection:
+    """Validate the private, on-demand latest-result reveal."""
+
+    expected = {
+        "schema_version", "kind", "alternatives",
+        "protected_anchors", "proof_edits", "timings_ms",
+    }
+    if (not isinstance(snapshot, Mapping) or set(snapshot) != expected
+            or snapshot.get("schema_version") != 1
+            or snapshot.get("kind") != "whisper-face/result-evidence"):
+        raise ValueError("latest-result evidence is malformed")
+
+    def private_items(key: str, *, limit: int, chars: int) -> tuple[str, ...]:
+        raw = snapshot.get(key)
+        if (not isinstance(raw, Sequence)
+                or isinstance(raw, (str, bytes)) or len(raw) > limit):
+            raise ValueError("latest-result evidence is malformed")
+        items = []
+        for value in raw:
+            if (not isinstance(value, str) or not value
+                    or "\x00" in value or len(value) > chars):
+                raise ValueError("latest-result evidence is malformed")
+            items.append(value)
+        return tuple(items)
+
+    alternatives = private_items("alternatives", limit=3, chars=2000)
+    anchors = private_items("protected_anchors", limit=64, chars=160)
+    raw_proof = snapshot.get("proof_edits")
+    if (not isinstance(raw_proof, Sequence)
+            or isinstance(raw_proof, (str, bytes)) or len(raw_proof) > 64):
+        raise ValueError("latest-result evidence is malformed")
+    proof_edits = []
+    proof_keys = {"kind", "before", "after", "accepted", "reason"}
+    for raw in raw_proof:
+        if not isinstance(raw, Mapping) or set(raw) != proof_keys:
+            raise ValueError("latest-result evidence is malformed")
+        kind = raw.get("kind")
+        before = raw.get("before")
+        after = raw.get("after")
+        accepted = raw.get("accepted")
+        reason = raw.get("reason")
+        if (not isinstance(kind, str) or not kind or len(kind) > 80
+                or "\x00" in kind
+                or not isinstance(before, str) or len(before) > 1000
+                or "\x00" in before
+                or not isinstance(after, str) or len(after) > 1000
+                or "\x00" in after or (not before and not after)
+                or not isinstance(accepted, bool)
+                or not isinstance(reason, str) or len(reason) > 240
+                or "\x00" in reason):
+            raise ValueError("latest-result evidence is malformed")
+        proof_edits.append(ProofEditInspection(
+            kind=kind,
+            before=before,
+            after=after,
+            accepted=accepted,
+            reason=reason,
+        ))
+
+    raw_timings = snapshot.get("timings_ms")
+    if not isinstance(raw_timings, Mapping) or any(
+            key not in RESULT_EVIDENCE_STAGES for key in raw_timings):
+        raise ValueError("latest-result evidence is malformed")
+    timings = []
+    for stage in RESULT_EVIDENCE_STAGES:
+        if stage not in raw_timings:
+            continue
+        value = _finite_number(raw_timings[stage])
+        if value is None or value < 0 or value > 3_600_000:
+            raise ValueError("latest-result evidence is malformed")
+        timings.append(StageTiming(stage, value))
+    return ResultEvidenceInspection(
+        alternatives=alternatives,
+        protected_anchors=anchors,
+        proof_edits=tuple(proof_edits),
+        timings=tuple(timings),
+    )
+
+
+def result_evidence_text(
+    evidence: ResultEvidenceInspection,
+    *,
+    locale: str = "en",
+) -> str:
+    """Format a transient, selectable latest-result evidence view."""
+
+    lines: list[str] = []
+
+    def section(key: str, rows: Sequence[str]) -> None:
+        lines.append(localized_string(key, locale=locale))
+        lines.extend(rows or (
+            localized_string("results.inspect.none", locale=locale),))
+        lines.append("")
+
+    section(
+        "results.inspect.alternatives",
+        tuple(f"{index}. {value}" for index, value in enumerate(
+            evidence.alternatives, 1)),
+    )
+    section(
+        "results.inspect.anchors",
+        tuple(f"• {value}" for value in evidence.protected_anchors),
+    )
+    proof_rows = []
+    for edit in evidence.proof_edits:
+        status = localized_string(
+            "results.inspect.proof.accepted"
+            if edit.accepted else "results.inspect.proof.rejected",
+            locale=locale,
+        )
+        row = f"{status} · {edit.kind}: {edit.before!r} → {edit.after!r}"
+        if edit.reason:
+            row += f"\n  {edit.reason}"
+        proof_rows.append(row)
+    section("results.inspect.proof", tuple(proof_rows))
+    timing_rows = []
+    for timing in evidence.timings:
+        label = localized_string(
+            f"results.inspect.stage.{timing.stage}", locale=locale)
+        value = (
+            f"{timing.milliseconds / 1000:.2f} s"
+            if timing.milliseconds >= 1000
+            else f"{timing.milliseconds:.1f} ms"
+        )
+        timing_rows.append(f"{label}: {value}")
+    section("results.inspect.timing", tuple(timing_rows))
+    rendered = "\n".join(lines).rstrip()
+    if not any((
+            evidence.alternatives,
+            evidence.protected_anchors,
+            evidence.proof_edits,
+            evidence.timings)):
+        return localized_string("results.inspect.empty", locale=locale)
+    return rendered
 
 
 def _build_result_inspection(
@@ -3574,6 +3765,20 @@ class WhisperFaceViewModel:
             )
         return self.state
 
+    def inspect_result_evidence(self) -> ResultEvidenceInspection:
+        """Reveal private latest-result detail without retaining it in state."""
+
+        try:
+            return normalize_result_evidence(
+                self.actions.inspect_result_evidence())
+        except Exception:
+            self.state = replace(
+                self.state,
+                notice=self.localized("results.inspect.empty"),
+                notice_level="error",
+            )
+            raise ValueError(self.state.notice) from None
+
     def play_retained_span(self) -> GUIState:
         try:
             played = bool(self.actions.play_retained_span())
@@ -4059,6 +4264,7 @@ if APPKIT_AVAILABLE:
                     self.dynamic["copy_outbox_button"],
                 ),
                 "Results": (
+                    self.dynamic["result_inspect_button"],
                     self.dynamic["result_play_audio_button"],
                     self.dynamic["result_clear_audio_button"],
                 ),
@@ -4191,7 +4397,15 @@ if APPKIT_AVAILABLE:
                 size=22, weight="bold"))
             page.addSubview_(_label(
                 self._l("results.subtitle"),
-                NSMakeRect(5, 326, 690, 20), size=13, color=_SECONDARY))
+                NSMakeRect(5, 326, 575, 20), size=13, color=_SECONDARY))
+            inspect_evidence = _button(
+                self._l("results.inspect.action"),
+                NSMakeRect(600, 319, 158, 30),
+                self,
+                "inspectResultEvidence:",
+                help_text=self._l("results.inspect.action.help"),
+            )
+            page.addSubview_(inspect_evidence)
 
             summary_card = _card(NSMakeRect(0, 216, 758, 89))
             result_summary = _label(
@@ -4268,6 +4482,7 @@ if APPKIT_AVAILABLE:
                 result_engine=result_engine,
                 result_mode=result_mode,
                 result_audio=result_audio,
+                result_inspect_button=inspect_evidence,
                 result_play_audio_button=play_audio,
                 result_clear_audio_button=clear_audio,
                 result_context=context,
@@ -4924,6 +5139,7 @@ if APPKIT_AVAILABLE:
                 )
 
             result = state.last_result
+            self.dynamic["result_inspect_button"].setEnabled_(result.available)
             self.dynamic["result_summary"].setStringValue_(result.summary)
             self.dynamic["result_engine"].setStringValue_(
                 self._l("results.engine.session", engine=result.engine))
@@ -6233,6 +6449,26 @@ if APPKIT_AVAILABLE:
             self.view_model.cancel_risky_action_confirmation()
             self.render()
 
+        def inspectResultEvidence_(self, _sender: Any) -> None:
+            try:
+                evidence = self.view_model.inspect_result_evidence()
+            except ValueError:
+                self.render()
+                return
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(self._l("results.inspect.title"))
+            alert.setInformativeText_(self._l("results.inspect.message"))
+            scroll, editor = self._text_editor(
+                NSMakeRect(0, 0, 580, 320),
+                result_evidence_text(evidence, locale=self.view_model.locale),
+                label=self._l("results.accessibility.inspect.content"),
+                help_text=self._l("results.inspect.message"),
+            )
+            editor.setEditable_(False)
+            alert.setAccessoryView_(scroll)
+            alert.addButtonWithTitle_(self._l("settings.action.done"))
+            alert.runModal()
+
         def playRetainedSpan_(self, _sender: Any) -> None:
             self.view_model.play_retained_span()
             self.render()
@@ -6686,6 +6922,16 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             not bool(controller.dynamic[
                 "result_consequence_advisory"].isHidden()),
             "review consequence guidance visibility")
+        require(
+            str(controller.dynamic["result_inspect_button"].action()) ==
+            "inspectResultEvidence:",
+            "latest-result evidence action")
+        require(
+            accessible_value(
+                controller.dynamic["result_inspect_button"],
+                "accessibilityHelp") == localized_string(
+                    "results.inspect.action.help"),
+            "latest-result evidence accessibility")
 
         for index, section in enumerate(SECTIONS):
             controller.section_control.setSelectedSegment_(index)
@@ -6997,6 +7243,9 @@ __all__ = [
     "PointAndSpeakActionResult",
     "PointAndSpeakPreview",
     "PointAndSpeakReceipt",
+    "ProofEditInspection",
+    "RESULT_EVIDENCE_STAGES",
+    "ResultEvidenceInspection",
     "ResultInspection",
     "RevealedDemonstrationDraft",
     "RevealedVoiceDraft",
@@ -7005,6 +7254,7 @@ __all__ = [
     "STRING_CATALOGS",
     "SUPPORTED_LOCALES",
     "SnippetSetting",
+    "StageTiming",
     "UnifiedSettings",
     "VoiceDraftMetadata",
     "VoiceDraftCopyReceipt",
@@ -7019,10 +7269,12 @@ __all__ = [
     "normalize_point_and_speak_action",
     "normalize_drop_target_preview",
     "normalize_email_compose_receipt",
+    "normalize_result_evidence",
     "normalize_voice_draft_copy_receipt",
     "normalize_settings",
     "run_native_appkit_smoke",
     "resolve_locale",
+    "result_evidence_text",
     "support_snapshot_text",
     "tone_for_app_index",
 ]

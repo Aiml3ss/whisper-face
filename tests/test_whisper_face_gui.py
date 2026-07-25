@@ -38,8 +38,10 @@ from whisper_face_gui import (
     normalize_acoustic_keyword_inspection,
     normalize_drop_target_preview,
     normalize_point_and_speak_preview,
+    normalize_result_evidence,
     normalize_snapshot,
     normalize_settings,
+    result_evidence_text,
     run_native_appkit_smoke,
     resolve_locale,
     set_accessible_text,
@@ -705,6 +707,9 @@ class SnapshotTests(unittest.TestCase):
             "last_cleanup_edits": ["private rewrite", "another edit"],
             "last_proof_edits_accepted": 1,
             "last_proof_edits_rejected": 2,
+            "last_result_evidence": {
+                "alternatives": ["private latest evidence"],
+            },
             "transcript": "private dictation",
             "selection": "private selection",
             "context": "private context",
@@ -735,7 +740,7 @@ class SnapshotTests(unittest.TestCase):
                 "private dictation", "private selection", "private context",
                 "/Users/example/private.log", "private dictionary",
                 "private snippet", "private correction", "private machine",
-                "private rewrite", "another edit"):
+                "private rewrite", "another edit", "private latest evidence"):
             self.assertNotIn(private_value, first)
 
         poisoned = support_snapshot_text(normalize_snapshot({
@@ -979,6 +984,50 @@ class SnapshotTests(unittest.TestCase):
         self.assertFalse(hasattr(result, "compiler_details"))
         self.assertTrue(state.prefers_reduced_motion)
 
+    def test_explicit_result_evidence_reveal_is_strict_and_private(self):
+        payload = {
+            "schema_version": 1,
+            "kind": "whisper-face/result-evidence",
+            "alternatives": ["private alternative text"],
+            "protected_anchors": ["Qwen", "Project Bluebird"],
+            "proof_edits": [{
+                "kind": "filler",
+                "before": "um",
+                "after": "",
+                "accepted": True,
+                "reason": "allowlisted filler",
+            }, {
+                "kind": "rewrite",
+                "before": "private before",
+                "after": "private after",
+                "accepted": False,
+                "reason": "changed protected meaning",
+            }],
+            "timings_ms": {
+                "release": 842.2,
+                "asr": 410.0,
+                "cleanup": 87.5,
+            },
+        }
+
+        evidence = normalize_result_evidence(payload)
+        rendered = result_evidence_text(evidence)
+
+        self.assertIn("private alternative text", rendered)
+        self.assertIn("• Project Bluebird", rendered)
+        self.assertIn("ACCEPTED · filler", rendered)
+        self.assertIn("REJECTED · rewrite", rendered)
+        self.assertIn("Total release: 842.2 ms", rendered)
+        self.assertNotIn("private alternative text", repr(evidence))
+        self.assertNotIn("private before", repr(evidence.proof_edits[1]))
+
+        poisoned = dict(payload, transcript="must not enter the reveal")
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            normalize_result_evidence(poisoned)
+        poisoned = dict(payload, timings_ms={"unknown": 1})
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            normalize_result_evidence(poisoned)
+
     def test_review_advisory_is_scoped_to_the_review_route(self):
         for route in ("standard", "protected", "verified", "unavailable"):
             with self.subTest(route=route):
@@ -1019,6 +1068,31 @@ class SnapshotTests(unittest.TestCase):
 
 
 class ViewModelTests(unittest.TestCase):
+    def test_result_evidence_is_fetched_only_on_explicit_inspection(self):
+        reads = []
+        private = {
+            "schema_version": 1,
+            "kind": "whisper-face/result-evidence",
+            "alternatives": ["private latest alternative"],
+            "protected_anchors": [],
+            "proof_edits": [],
+            "timings_ms": {},
+        }
+        model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {"last_word_count": 4},
+            inspect_result_evidence=lambda: reads.append(True) or private,
+        ))
+
+        self.assertEqual(reads, [])
+        evidence = model.inspect_result_evidence()
+
+        self.assertEqual(reads, [True])
+        self.assertEqual(
+            evidence.alternatives, ("private latest alternative",))
+        self.assertNotIn("private latest alternative", repr(model.state))
+        self.assertNotIn(
+            "private latest alternative", support_snapshot_text(model.state))
+
     def test_point_and_speak_preview_is_explicit_bounded_and_never_enters_state(self):
         phrases = []
         private_name = "Project Bluebird Submit"
