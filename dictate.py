@@ -571,6 +571,7 @@ CHUNK_MIN_SECONDS = 4.0      # never cut a segment shorter than this
 CHUNK_CUT_SILENCE = 0.6      # a pause this long marks a safe cut point
 SPECULATIVE_MIN_SECONDS = 0.8
 SPECULATIVE_SILENCE = 0.25   # likely end pause: decode before key release
+CAPTURE_BLOCK_SECONDS = 8     # bound ndarray count during long dictations
 
 SNIPPETS_FILE = HERE / "snippets.json"
 SNIPPET_RE = re.compile(
@@ -3753,9 +3754,81 @@ def _speculative_frames(frames, prompt=None, still_valid=None) -> Recognition:
     return accurate
 
 
+class CapturedAudio:
+    """Exact in-memory audio stored in a small number of fixed-size blocks."""
+
+    def __init__(self, initial=None, *, block_samples=None):
+        self.block_samples = (
+            int(block_samples)
+            if block_samples is not None
+            else int(CAPTURE_BLOCK_SECONDS * SAMPLE_RATE)
+        )
+        if self.block_samples <= 0:
+            raise ValueError("capture block size must be positive")
+        self.blocks = []
+        self.tail = None
+        self.tail_samples = 0
+        self.total_samples = 0
+        self.lock = threading.Lock()
+        if initial is not None:
+            self.append(initial)
+
+    def __bool__(self):
+        with self.lock:
+            return self.total_samples > 0
+
+    def append(self, audio):
+        source = np.asarray(audio, dtype=np.float32).reshape(-1)
+        with self.lock:
+            offset = 0
+            while offset < len(source):
+                if self.tail is None:
+                    self.tail = np.empty(
+                        self.block_samples, dtype=np.float32)
+                    self.tail_samples = 0
+                count = min(
+                    self.block_samples - self.tail_samples,
+                    len(source) - offset,
+                )
+                end = self.tail_samples + count
+                self.tail[self.tail_samples:end] = (
+                    source[offset:offset + count])
+                self.tail_samples = end
+                self.total_samples += count
+                offset += count
+                if self.tail_samples == self.block_samples:
+                    self.blocks.append(self.tail)
+                    self.tail = None
+                    self.tail_samples = 0
+
+    def frames_from(self, start_sample=0) -> tuple:
+        """Immutable-length views covering captured samples from one offset."""
+        with self.lock:
+            start = max(0, min(int(start_sample), self.total_samples))
+            frames = []
+            cursor = 0
+            for block in self.blocks:
+                end = cursor + len(block)
+                if end > start:
+                    frames.append(block[max(0, start - cursor):])
+                cursor = end
+            if self.tail is not None and self.tail_samples:
+                end = cursor + self.tail_samples
+                if end > start:
+                    frames.append(
+                        self.tail[max(0, start - cursor):self.tail_samples])
+            return tuple(frames)
+
+    def array(self) -> np.ndarray:
+        frames = self.frames_from()
+        if not frames:
+            return np.zeros(0, dtype=np.float32)
+        return np.concatenate(frames)
+
+
 class Recorder:
     def __init__(self):
-        self.frames = []
+        self.frames = CapturedAudio()
         self.slot = None
         self.recording = False
         self.press_at = None
@@ -3781,20 +3854,18 @@ class Recorder:
         self.total_samples = 0
         self.silent_samples = 0
         self.voiced_since_cut = False
-        self._cut_frame_idx = 0
         self.speculative_future = None
         self.speculative_start = 0
         self.speculative_end = 0
         self.speculative_invalid = False
 
     def start(self, press_at=None):
-        self.frames = []
+        self.frames = CapturedAudio()
         self.chunks = []
         self.cut_samples = 0
         self.total_samples = 0
         self.silent_samples = 0
         self.voiced_since_cut = False
-        self._cut_frame_idx = 0
         self.speculative_future = None
         self.speculative_start = 0
         self.speculative_end = 0
@@ -3820,13 +3891,12 @@ class Recorder:
 
     def replace_with_buffered_audio(self, audio: np.ndarray):
         """Turn a quick tap's Recorder into a retrospective captured take."""
-        self.frames = [audio.reshape(-1, 1)]
+        self.frames = CapturedAudio(audio)
         self.chunks = []
         self.cut_samples = 0
         self.total_samples = len(audio)
         self.silent_samples = 0
         self.voiced_since_cut = False
-        self._cut_frame_idx = 0
         self.speculative_future = None
         self.speculative_start = 0
         self.speculative_end = 0
@@ -3839,7 +3909,7 @@ class Recorder:
             return
         if status and len(self.audio_status) < 3:
             self.audio_status.append(str(status))
-        self.frames.append(indata.copy())
+        self.frames.append(indata)
         if (self.speculative_invalid and self.speculative_future is not None
                 and self.speculative_future.done()):
             self.speculative_future = None
@@ -3875,8 +3945,7 @@ class Recorder:
                 self.speculative_future is not None,
                 SPECULATIVE_MIN_SECONDS,
                 SPECULATIVE_SILENCE):
-            frames_for_speculation = tuple(
-                self.frames[self._cut_frame_idx:])
+            frames_for_speculation = self.frames.frames_from(self.cut_samples)
             self.speculative_start = self.cut_samples
             self.speculative_end = self.total_samples
             self.speculative_invalid = False
@@ -3898,7 +3967,7 @@ class Recorder:
                 decode_start = self.speculative_start
                 decode_end = self.speculative_end
             else:
-                frames_for_chunk = tuple(self.frames[self._cut_frame_idx:])
+                frames_for_chunk = self.frames.frames_from(self.cut_samples)
                 decode_future = CHUNK_PREP_POOL.submit(
                     _transcribe_frames, frames_for_chunk, self.prompt)
                 decode_start = self.cut_samples
@@ -3915,16 +3984,12 @@ class Recorder:
             self.speculative_start = 0
             self.speculative_end = 0
             self.speculative_invalid = False
-            self._cut_frame_idx = len(self.frames)
             self.cut_samples = self.total_samples
             self.voiced_since_cut = False
 
     def snapshot(self) -> np.ndarray:
         """Audio so far, without stopping the stream."""
-        frames = list(self.frames)
-        if not frames:
-            return np.zeros(0, dtype=np.float32)
-        return np.concatenate(frames).flatten()
+        return self.frames.array()
 
     def stop(self) -> np.ndarray:
         self.recording = False
@@ -3935,8 +4000,7 @@ class Recorder:
             AUDIO_POOL.release(slot)
         if self.audio_status:
             print(f"! audio callback status: {'; '.join(self.audio_status)}")
-        audio = np.concatenate(self.frames).flatten() if self.frames \
-            else np.zeros(0, dtype=np.float32)
+        audio = self.frames.array()
         if self.captured_via_flight and self.source == "hold":
             FLIGHT.clear()                   # never let a hold paste twice
         return audio

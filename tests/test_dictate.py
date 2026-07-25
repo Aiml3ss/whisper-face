@@ -4817,6 +4817,60 @@ class PersonalPriorIntegrationTests(unittest.TestCase):
         self.assertEqual(other, ())
 
 
+class CapturedAudioTests(unittest.TestCase):
+    def namespace(self):
+        return load_definitions(
+            "CapturedAudio",
+            extra={
+                "np": np,
+                "CAPTURE_BLOCK_SECONDS": 8,
+                "SAMPLE_RATE": 16_000,
+            },
+        )
+
+    def test_blocks_preserve_exact_audio_and_capture_offsets(self):
+        captured = self.namespace()["CapturedAudio"](block_samples=4)
+        captured.append(np.array([[0.0], [1.0], [2.0]], dtype=np.float32))
+        captured.append(np.array([3.0, 4.0, 5.0], dtype=np.float32))
+        captured.append(np.array([6.0], dtype=np.float32))
+
+        np.testing.assert_array_equal(
+            captured.array(), np.arange(7, dtype=np.float32))
+        np.testing.assert_array_equal(
+            np.concatenate(captured.frames_from(3)),
+            np.arange(3, 7, dtype=np.float32),
+        )
+        self.assertEqual(captured.frames_from(99), ())
+        self.assertEqual(captured.total_samples, 7)
+
+    def test_small_callbacks_use_fixed_size_storage_blocks(self):
+        captured = self.namespace()["CapturedAudio"](block_samples=8)
+        for value in range(1_000):
+            captured.append(np.array([value], dtype=np.float32))
+
+        self.assertEqual(len(captured.blocks), 125)
+        self.assertIsNone(captured.tail)
+        self.assertEqual(captured.total_samples, 1_000)
+        np.testing.assert_array_equal(
+            captured.array(), np.arange(1_000, dtype=np.float32))
+
+    def test_snapshot_views_do_not_expand_with_later_callbacks(self):
+        captured = self.namespace()["CapturedAudio"](block_samples=8)
+        captured.append(np.arange(4, dtype=np.float32))
+        snapshot = captured.frames_from()
+
+        captured.append(np.arange(4, 8, dtype=np.float32))
+
+        np.testing.assert_array_equal(
+            np.concatenate(snapshot), np.arange(4, dtype=np.float32))
+        np.testing.assert_array_equal(
+            captured.array(), np.arange(8, dtype=np.float32))
+
+    def test_invalid_block_size_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "block size"):
+            self.namespace()["CapturedAudio"](block_samples=0)
+
+
 class ReleasePlanTests(unittest.TestCase):
     def test_active_speech_waits_before_submitting_the_remainder(self):
         ns = load_definitions(
@@ -5008,6 +5062,7 @@ class ReleasePlanTests(unittest.TestCase):
         prep_pool = SimpleNamespace(
             submit=lambda *_args, **_kwargs: future)
         ns = load_definitions(
+            "CapturedAudio",
             "BoundedRecognitionFuture",
             "Recorder",
             extra={
@@ -5017,6 +5072,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "LEVELS": [],
                 "SILENCE_RMS": 0.01,
                 "SAMPLE_RATE": 16_000,
+                "CAPTURE_BLOCK_SECONDS": 8,
                 "should_start_speculation": lambda *_args: False,
                 "SPECULATIVE_MIN_SECONDS": 0.5,
                 "SPECULATIVE_SILENCE": 0.1,
