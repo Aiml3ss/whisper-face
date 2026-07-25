@@ -31,6 +31,7 @@ from whisper_face_gui import (
     create_gui,
     localized_string,
     native_appkit_smoke_contract,
+    onboarding_presentation,
     normalize_email_compose_receipt,
     normalize_voice_draft_clear_receipt,
     normalize_voice_draft_copy_receipt,
@@ -381,6 +382,11 @@ class SnapshotTests(unittest.TestCase):
             "onboarding.step.summary",
             "onboarding.action.open_system_settings",
             "onboarding.action.open_system_settings.help",
+            "onboarding.action.finish",
+            "onboarding.complete.title",
+            "onboarding.complete.detail",
+            "onboarding.privacy",
+            "overview.accessibility.onboarding.face",
             "overview.accessibility.onboarding.steps",
             "overview.accessibility.onboarding.step",
             "settings.action.diagnostics",
@@ -561,6 +567,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertIn("command-d:diagnostics", contract.key_equivalents)
         self.assertIn("select_section", contract.model_actions)
         self.assertIn("open_system_settings", contract.model_actions)
+        self.assertIn("acknowledge_onboarding", contract.model_actions)
         self.assertIn("forget_snippet", contract.model_actions)
         self.assertIn("preview_point_and_speak", contract.model_actions)
         self.assertIn("issue_point_and_speak_nonce", contract.model_actions)
@@ -834,6 +841,36 @@ class SnapshotTests(unittest.TestCase):
         )
         runtime["last_word_count"] = 5
         self.assertTrue(model.refresh().onboarding_complete)
+
+    def test_first_run_presentation_keeps_completion_visible_until_acknowledged(self):
+        first_run = normalize_snapshot({
+            "microphone_status": "Needs attention",
+            "accessibility_status": "Needs attention",
+        })
+        active = onboarding_presentation(
+            first_run.onboarding_steps, acknowledged=False)
+        self.assertTrue(active.visible)
+        self.assertFalse(active.complete)
+        self.assertEqual(active.current_key, "permissions")
+        self.assertEqual(active.title, "First, let your face listen.")
+        self.assertEqual(active.action_title, "Open System Settings")
+
+        complete = normalize_snapshot({
+            "microphone_status": "Ready",
+            "accessibility_status": "Granted",
+            "hotkey_practiced": True,
+            "models": [{"name": "Parakeet", "status": "Running"}],
+            "last_word_count": 5,
+        })
+        celebration = onboarding_presentation(
+            complete.onboarding_steps, acknowledged=False)
+        self.assertTrue(celebration.visible)
+        self.assertTrue(celebration.complete)
+        self.assertIsNone(celebration.current_key)
+        self.assertEqual(celebration.title, "Your face works.")
+        self.assertEqual(celebration.action_title, "Start Dictating")
+        self.assertFalse(onboarding_presentation(
+            complete.onboarding_steps, acknowledged=True).visible)
 
     def test_onboarding_copy_explains_observed_practice_and_recovery(self):
         state = normalize_snapshot({
