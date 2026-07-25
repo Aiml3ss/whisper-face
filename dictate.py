@@ -887,6 +887,46 @@ ASR_POOL = ThreadPoolExecutor(max_workers=1)
 # PortAudio's real-time callback. This pool prepares one chunk at a time, then
 # hands the actual MLX call to the single-threaded ASR pool.
 CHUNK_PREP_POOL = ThreadPoolExecutor(max_workers=1)
+
+
+class ReleaseOrder:
+    """Keep side effects ordered while allowing capture and ASR to overlap."""
+
+    def __init__(self):
+        self.condition = threading.Condition()
+        self.issued = 0
+        self.next = 0
+        self.completed = set()
+
+    def issue(self) -> int:
+        with self.condition:
+            ticket = self.issued
+            self.issued += 1
+            return ticket
+
+    def wait(self, ticket: int | None):
+        if ticket is None:
+            return
+        with self.condition:
+            while ticket > self.next:
+                self.condition.wait()
+
+    def complete(self, ticket: int | None):
+        if ticket is None:
+            return
+        with self.condition:
+            if ticket < self.next:
+                return
+            self.completed.add(ticket)
+            while self.next in self.completed:
+                self.completed.remove(self.next)
+                self.next += 1
+            self.condition.notify_all()
+
+
+# Capture may begin again while an earlier take is still processing. Ticket
+# releases so final cleanup and insertion cannot reverse the dictated order.
+DICTATION_PROCESS_ORDER = ReleaseOrder()
 ASR_MODEL_PATHS = {}
 ASR_MODEL_PATHS_LOCK = threading.Lock()
 # Repositories a cache-only probe has already proven absent. A minimal install
@@ -3768,6 +3808,7 @@ class Recorder:
         self.utterance_id = ""
         self.insertion_lease = None
         self.insertion_receipt = None
+        self.process_ticket = None
         self.input_signature_at_press = None
         self.context_terms = []
         self.context_pack = ContextPack()
@@ -3807,6 +3848,7 @@ class Recorder:
         self.utterance_id = f"{time.time_ns():x}-{id(self):x}"
         self.insertion_lease = None
         self.insertion_receipt = None
+        self.process_ticket = None
         self.input_signature_at_press = None
         self.recording = True
         try:
@@ -8605,8 +8647,12 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         asr_started_at = time.perf_counter()
         recognition = assemble_raw(
             chunk_futs, pre_future, full_audio[cut:], rec.prompt)
-        raw = recognition.text
         t_asr = time.perf_counter() - asr_started_at
+        # A later take may finish ASR first, but user-visible cleanup, commands,
+        # and insertion must follow release order. Capture is already stopped,
+        # so waiting here never holds the microphone.
+        DICTATION_PROCESS_ORDER.wait(rec.process_ticket)
+        raw = recognition.text
         if not raw or is_hallucination(raw):
             print("[dropped] ASR gave nothing" if not raw
                   else "[dropped] ASR hallucination detected")
@@ -9120,6 +9166,14 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             AppHelper.callAfter(dismiss_if_idle)
 
 
+def finish_in_release_order(rec: Recorder, hud: HUD, active: dict):
+    """Finish one ticket and always unblock later releases."""
+    try:
+        finish_and_process(rec, hud, active)
+    finally:
+        DICTATION_PROCESS_ORDER.complete(rec.process_ticket)
+
+
 # ------------------------- warmup & main -------------------------
 
 
@@ -9525,10 +9579,11 @@ def main():
                         rec.replace_with_buffered_audio(buffered)
                         print(f"[flight] captured "
                               f"{len(buffered) / SAMPLE_RATE:.1f}s from RAM")
+                    rec.process_ticket = DICTATION_PROCESS_ORDER.issue()
                     set_status("proc")
                     AppHelper.callAfter(hud.showMode_, "processing")
                     threading.Thread(
-                        target=finish_and_process, args=(rec, hud, active),
+                        target=finish_in_release_order, args=(rec, hud, active),
                         daemon=True,
                     ).start()
             except Exception as e:
