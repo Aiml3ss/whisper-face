@@ -5058,6 +5058,79 @@ class PersonalPriorIntegrationTests(unittest.TestCase):
 
 
 class ReleasePlanTests(unittest.TestCase):
+    def test_back_to_back_releases_finish_in_order(self):
+        ns = load_definitions("ReleaseOrder")
+        release_order = ns["ReleaseOrder"]()
+        first = release_order.issue()
+        second = release_order.issue()
+        order = []
+
+        second_entered = threading.Event()
+
+        def await_second():
+            release_order.wait(second)
+            order.append("second")
+            second_entered.set()
+
+        waiter = threading.Thread(target=await_second)
+        waiter.start()
+        self.assertFalse(second_entered.wait(0.05))
+        release_order.wait(first)
+        order.append("first")
+        release_order.complete(first)
+        self.assertTrue(second_entered.wait(1.0))
+        release_order.complete(second)
+        waiter.join(1.0)
+
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(order, ["first", "second"])
+
+    def test_failed_release_does_not_strand_later_tickets(self):
+        ns = load_definitions("ReleaseOrder")
+        release_order = ns["ReleaseOrder"]()
+        first = release_order.issue()
+        failed_second = release_order.issue()
+        third = release_order.issue()
+        third_entered = threading.Event()
+
+        release_order.complete(failed_second)
+        waiter = threading.Thread(
+            target=lambda: (
+                release_order.wait(third),
+                third_entered.set(),
+            ),
+        )
+        waiter.start()
+        self.assertFalse(third_entered.wait(0.05))
+        release_order.complete(first)
+        self.assertTrue(third_entered.wait(1.0))
+        release_order.complete(third)
+        waiter.join(1.0)
+
+        self.assertFalse(waiter.is_alive())
+
+    def test_finish_failure_completes_release_ticket(self):
+        def fail(*_args):
+            raise RuntimeError("failed")
+
+        ns = load_definitions(
+            "ReleaseOrder",
+            "finish_in_release_order",
+            extra={"finish_and_process": fail},
+        )
+        release_order = ns["ReleaseOrder"]()
+        first = release_order.issue()
+        rec = SimpleNamespace(process_ticket=first)
+        ns["finish_in_release_order"].__globals__[
+            "DICTATION_PROCESS_ORDER"] = release_order
+
+        with self.assertRaisesRegex(RuntimeError, "failed"):
+            ns["finish_in_release_order"](rec, None, {})
+
+        second = release_order.issue()
+        release_order.wait(second)
+        release_order.complete(second)
+
     def test_active_speech_waits_before_submitting_the_remainder(self):
         ns = load_definitions(
             "release_should_wait_for_tail",
@@ -5317,6 +5390,8 @@ class ReleasePlanTests(unittest.TestCase):
                 "assemble_raw": assemble,
                 "Recognition": Recognition,
                 "is_hallucination": lambda _text: False,
+                "DICTATION_PROCESS_ORDER": SimpleNamespace(
+                    wait=lambda _ticket: None),
                 "print": lambda *_args: None,
                 "LAST_USE": {},
                 "AppHelper": SimpleNamespace(callAfter=lambda *_args: None),
@@ -5330,6 +5405,7 @@ class ReleasePlanTests(unittest.TestCase):
             speculative_start = 0
             speculative_end = 0
             prompt = None
+            process_ticket = None
             recording = False
             uncertain = False
 
