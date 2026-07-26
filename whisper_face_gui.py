@@ -4740,7 +4740,8 @@ if APPKIT_AVAILABLE:
             for index, section in enumerate(SECTIONS):
                 self.section_control.setLabel_forSegment_(
                     self._l(f"nav.{section.casefold()}"), index)
-                self.section_control.setWidth_forSegment_(148, index)
+                self.section_control.setWidth_forSegment_(
+                    758.0 / len(SECTIONS), index)
             self.section_control.setSelectedSegment_(0)
             self.section_control.setTarget_(self)
             self.section_control.setAction_("sectionChanged:")
@@ -4807,34 +4808,34 @@ if APPKIT_AVAILABLE:
             self.render()
 
         def _build_overview(self, page: Any) -> None:
-            hero = _card(NSMakeRect(0, 224, 758, 178))
+            hero = _card(NSMakeRect(0, 184, 758, 218))
             phase = _label(
                 self._l("overview.phase.ready"),
-                NSMakeRect(24, 137, 320, 18),
+                NSMakeRect(24, 174, 320, 18),
                 size=11, weight="bold", color=_ACCENT)
             status = _label(
                 self._l("overview.status.ready.title"),
-                NSMakeRect(24, 92, 520, 42), size=32, weight="bold")
-            detail = _label("", NSMakeRect(26, 67, 520, 20),
+                NSMakeRect(24, 122, 520, 44), size=32, weight="bold")
+            detail = _label("", NSMakeRect(26, 94, 520, 20),
                             size=12, color=_SECONDARY)
-            engine = _label("", NSMakeRect(26, 42, 500, 20),
+            engine = _label("", NSMakeRect(26, 66, 500, 20),
                             size=13, color=_SECONDARY)
             outbox = _label(
                 self._l("overview.outbox.empty"),
-                NSMakeRect(26, 16, 500, 20),
+                NSMakeRect(26, 36, 500, 20),
                 size=12, color=_SECONDARY)
             pause = _button(
                 self._l("overview.action.pause"),
-                NSMakeRect(610, 89, 116, 38), self, "pauseChanged:",
+                NSMakeRect(602, 122, 124, 40), self, "pauseChanged:",
                 help_text=self._l("overview.action.pause.help"))
             fix = _button(
                 self._l("overview.action.review"),
-                NSMakeRect(590, 49, 136, 30),
+                NSMakeRect(590, 74, 136, 34),
                 self, "reviewIssue:",
                 help_text=self._l("overview.action.review.help"))
             copy_outbox = _button(
                 self._l("overview.action.copy_outbox"),
-                NSMakeRect(590, 13, 136, 30),
+                NSMakeRect(590, 34, 136, 34),
                 self, "copyOutbox:",
                 help_text=self._l("overview.action.copy_outbox.help"))
             hero.addSubview_(phase)
@@ -4940,13 +4941,13 @@ if APPKIT_AVAILABLE:
                      ("overview.metric.saved.heading", "overview_saved"))
             metric_cards: list[Any] = []
             for index, (heading_key, key) in enumerate(cards):
-                card = _card(NSMakeRect(index * 253, 0, 239, 76))
+                card = _card(NSMakeRect(index * 257, 52, 244, 96))
                 card.addSubview_(_label(
-                    self._l(heading_key), NSMakeRect(16, 49, 200, 18),
+                    self._l(heading_key), NSMakeRect(18, 66, 208, 18),
                     size=11, color=_SECONDARY))
                 value = _label(
                     self._l("overview.metric.last.empty"),
-                    NSMakeRect(16, 13, 205, 31),
+                    NSMakeRect(18, 20, 208, 31),
                     size=21, weight="bold")
                 card.addSubview_(value)
                 page.addSubview_(card)
@@ -4956,39 +4957,39 @@ if APPKIT_AVAILABLE:
 
         def _build_results(self, page: Any) -> None:
             page.addSubview_(_label(
-                self._l("results.title"), NSMakeRect(4, 351, 500, 32),
+                self._l("results.title"), NSMakeRect(4, 350, 500, 32),
                 size=22, weight="bold"))
             page.addSubview_(_label(
                 self._l("results.subtitle"),
-                NSMakeRect(5, 326, 575, 20), size=13, color=_SECONDARY))
+                NSMakeRect(5, 322, 575, 20), size=13, color=_SECONDARY))
             inspect_evidence = _button(
                 self._l("results.inspect.action"),
-                NSMakeRect(600, 319, 158, 30),
+                NSMakeRect(598, 347, 160, 34),
                 self,
                 "inspectResultEvidence:",
                 help_text=self._l("results.inspect.action.help"),
             )
             page.addSubview_(inspect_evidence)
 
-            summary_card = _card(NSMakeRect(0, 216, 758, 89))
+            summary_card = _card(NSMakeRect(0, 220, 758, 94))
             result_summary = _label(
-                self._l("results.summary.empty"), NSMakeRect(20, 45, 430, 27),
+                self._l("results.summary.empty"), NSMakeRect(20, 50, 430, 27),
                 size=18, weight="bold")
             result_engine = _label(
-                self._l("results.engine.waiting"), NSMakeRect(20, 26, 500, 20),
+                self._l("results.engine.waiting"), NSMakeRect(20, 29, 500, 20),
                 size=12, color=_SECONDARY)
             result_audio = _label(
-                self._l("results.audio.off"), NSMakeRect(20, 7, 500, 18),
+                self._l("results.audio.off"), NSMakeRect(20, 9, 500, 18),
                 size=10, color=_SECONDARY)
             result_mode = _label(
-                self._l("results.mode.capture"), NSMakeRect(620, 39, 110, 22),
+                self._l("results.mode.capture"), NSMakeRect(600, 50, 132, 22),
                 size=12, weight="medium", color=_ACCENT)
             play_audio = _button(
-                self._l("results.audio.play"), NSMakeRect(532, 6, 102, 30),
+                self._l("results.audio.play"), NSMakeRect(532, 9, 102, 30),
                 self, "playRetainedSpan:",
                 help_text=self._l("results.audio.play.help"))
             clear_audio = _button(
-                self._l("results.audio.clear"), NSMakeRect(640, 6, 92, 30),
+                self._l("results.audio.clear"), NSMakeRect(640, 9, 92, 30),
                 self, "clearRetainedSpans:",
                 help_text=self._l("results.audio.clear.help"))
             summary_card.addSubview_(result_summary)
@@ -4999,7 +5000,7 @@ if APPKIT_AVAILABLE:
             summary_card.addSubview_(clear_audio)
             page.addSubview_(summary_card)
 
-            evidence_card = _card(NSMakeRect(0, 83, 758, 125))
+            evidence_card = _card(NSMakeRect(0, 92, 758, 116))
             evidence_keys = (
                 ("results.evidence.stable", "result_stable"),
                 ("results.evidence.anchors", "result_anchors"),
@@ -5010,7 +5011,7 @@ if APPKIT_AVAILABLE:
             )
             for index, (heading_key, key) in enumerate(evidence_keys):
                 x = 20 + (index % 2) * 370
-                y = 91 - (index // 2) * 35
+                y = 82 - (index // 2) * 33
                 evidence_card.addSubview_(_label(
                     self._l(heading_key), NSMakeRect(x, y, 140, 18),
                     size=11, color=_SECONDARY))
@@ -5019,27 +5020,29 @@ if APPKIT_AVAILABLE:
                 evidence_card.addSubview_(value)
                 self.dynamic[key] = value
             page.addSubview_(evidence_card)
+            assurance_card = _card(NSMakeRect(0, 0, 758, 80))
             firewall = _label(
                 self._l("results.firewall.unavailable"),
-                NSMakeRect(5, 62, 740, 17),
+                NSMakeRect(18, 60, 722, 16),
                 size=11, weight="medium", color=_ACCENT)
-            page.addSubview_(firewall)
+            assurance_card.addSubview_(firewall)
             context = _label(
                 self._l("results.context.unreported"),
-                NSMakeRect(5, 45, 740, 17),
+                NSMakeRect(18, 44, 722, 16),
                 size=11, color=_SECONDARY)
-            page.addSubview_(context)
+            assurance_card.addSubview_(context)
             consequence = _label(
-                "", NSMakeRect(5, 28, 740, 17), size=10, color=_SECONDARY)
-            page.addSubview_(consequence)
+                "", NSMakeRect(18, 28, 722, 16), size=10, color=_SECONDARY)
+            assurance_card.addSubview_(consequence)
             consequence_advisory = _label(
-                "", NSMakeRect(5, 12, 740, 16), size=10, weight="medium",
+                "", NSMakeRect(18, 12, 722, 16), size=10, weight="medium",
                 color=_REVIEW)
             consequence_advisory.setHidden_(True)
-            page.addSubview_(consequence_advisory)
-            page.addSubview_(_label(
+            assurance_card.addSubview_(consequence_advisory)
+            assurance_card.addSubview_(_label(
                 self._l("results.privacy"),
-                NSMakeRect(5, 0, 740, 12), size=8, color=_SECONDARY))
+                NSMakeRect(18, 1, 722, 10), size=8, color=_SECONDARY))
+            page.addSubview_(assurance_card)
             self.dynamic.update(
                 result_summary=result_summary,
                 result_engine=result_engine,
@@ -5101,7 +5104,8 @@ if APPKIT_AVAILABLE:
             for index, pane in enumerate(SETTINGS_PANES):
                 pane_control.setLabel_forSegment_(self._l(
                     f"settings.pane.{pane.casefold()}"), index)
-                pane_control.setWidth_forSegment_(250, index)
+                pane_control.setWidth_forSegment_(
+                    758.0 / len(SETTINGS_PANES), index)
             pane_control.setTarget_(self)
             pane_control.setAction_("settingsPaneChanged:")
             _accessible(
@@ -5122,18 +5126,19 @@ if APPKIT_AVAILABLE:
                 NSMakeRect(5, 238, 720, 22), size=14, weight="medium"))
             for index, mode in enumerate(MODE_GUIDE):
                 column, row = index % 2, index // 2
-                card = _card(NSMakeRect(column * 379, 153 - row * 66, 365, 54))
+                card = _card(NSMakeRect(
+                    column * 387, 168 - row * 62, 371, 52))
                 card.addSubview_(_label(
                     self._l(f"settings.mode.{mode}.name"),
-                    NSMakeRect(14, 28, 105, 18),
+                    NSMakeRect(14, 27, 98, 18),
                     size=12, weight="bold"))
                 card.addSubview_(_label(
                     self._l(f"settings.mode.{mode}.shortcut"),
-                    NSMakeRect(115, 28, 235, 18),
+                    NSMakeRect(122, 27, 234, 18),
                     size=11, weight="medium", color=_ACCENT))
                 card.addSubview_(_label(
                     self._l(f"settings.mode.{mode}.detail"),
-                    NSMakeRect(14, 8, 330, 17),
+                    NSMakeRect(14, 7, 342, 17),
                     size=10, color=_SECONDARY))
                 modes.addSubview_(card)
             modes.addSubview_(_label(
@@ -5405,7 +5410,7 @@ if APPKIT_AVAILABLE:
             page.addSubview_(advisory)
             rows = []
             for index in range(4):
-                row = _card(NSMakeRect(0, 232 - index * 62, 758, 56))
+                row = _card(NSMakeRect(0, 230 - index * 61, 758, 54))
                 name = _label(self._l("models.waiting"), NSMakeRect(20, 29, 430, 20),
                               size=14, weight="medium")
                 detail = _label("", NSMakeRect(20, 9, 560, 16),
@@ -5419,7 +5424,7 @@ if APPKIT_AVAILABLE:
                 rows.append((row, name, detail, status))
             guidance = _label(
                 self._l("models.guidance"),
-                NSMakeRect(5, 25, 740, 22), size=11, color=_SECONDARY)
+                NSMakeRect(5, 17, 740, 22), size=11, color=_SECONDARY)
             page.addSubview_(guidance)
             self.dynamic.update(
                 model_rows=rows,
@@ -5450,7 +5455,7 @@ if APPKIT_AVAILABLE:
             page.addSubview_(_label(
                 self._l("diagnostics.subtitle"),
                 NSMakeRect(5, 326, 650, 20), size=13, color=_SECONDARY))
-            card = _card(NSMakeRect(0, 137, 758, 161))
+            card = _card(NSMakeRect(0, 151, 758, 157))
             keys = (("diagnostics.service", "diag_service"),
                     ("diagnostics.microphone", "diag_microphone"),
                     ("diagnostics.accessibility", "diag_accessibility"),
@@ -5458,7 +5463,7 @@ if APPKIT_AVAILABLE:
                     ("diagnostics.motion", "diag_motion"),
                     ("diagnostics.build", "diag_version"))
             for index, (heading_key, key) in enumerate(keys):
-                y = 133 - index * 23
+                y = 129 - index * 22
                 card.addSubview_(_label(self._l(heading_key), NSMakeRect(20, y, 170, 19),
                                         size=12, color=_SECONDARY))
                 value = _label(self._l("diagnostics.unknown"), NSMakeRect(185, y, 525, 19),
@@ -5466,37 +5471,40 @@ if APPKIT_AVAILABLE:
                 card.addSubview_(value)
                 self.dynamic[key] = value
             page.addSubview_(card)
-            open_log = _button(self._l("diagnostics.action.log"), NSMakeRect(0, 89, 120, 36),
+            open_log = _button(self._l("diagnostics.action.log"), NSMakeRect(0, 101, 118, 36),
                                self, "openLog:")
             copy_support_snapshot = _button(
                 self._l("diagnostics.action.copy_support"),
-                NSMakeRect(132, 89, 180, 36), self, "copySupportSnapshot:",
+                NSMakeRect(130, 101, 180, 36), self, "copySupportSnapshot:",
                 help_text=self._l("diagnostics.action.copy_support.help"))
-            verify = _button(self._l("diagnostics.action.verify"), NSMakeRect(324, 89, 152, 36),
+            verify = _button(self._l("diagnostics.action.verify"), NSMakeRect(322, 101, 154, 36),
                              self, "verify:")
             verify.setKeyEquivalent_("r")
             verify.setKeyEquivalentModifierMask_(NSEventModifierFlagCommand)
             open_system_settings = _accessible(_button(
                 self._l("diagnostics.action.open_system_settings"),
-                NSMakeRect(0, 36, 178, 28), self, "openSystemSettings:",
+                NSMakeRect(0, 53, 180, 32), self, "openSystemSettings:",
                 help_text=self._l(
                     "diagnostics.action.open_system_settings.help")),
                 self._l("diagnostics.accessibility.open_system_settings"),
                 self._l("diagnostics.action.open_system_settings.help"))
             export_support_bundle = _button(
                 self._l("diagnostics.action.export_support"),
-                NSMakeRect(190, 36, 180, 28), self, "exportSupportBundle:",
+                NSMakeRect(192, 53, 180, 32), self, "exportSupportBundle:",
                 help_text=self._l("diagnostics.action.export_support.help"))
             license_notices = _button(
-                self._l("diagnostics.action.licenses"), NSMakeRect(488, 89, 138, 36),
+                self._l("diagnostics.action.licenses"), NSMakeRect(488, 101, 132, 36),
                 self, "openLicense:")
-            source = _button(self._l("diagnostics.action.source"), NSMakeRect(638, 89, 120, 36),
+            source = _button(self._l("diagnostics.action.source"), NSMakeRect(632, 101, 126, 36),
                              self, "openSource:")
-            progress = NSProgressIndicator.alloc().initWithFrame_(NSMakeRect(5, 59, 20, 20))
+            progress = NSProgressIndicator.alloc().initWithFrame_(
+                NSMakeRect(390, 63, 18, 18))
             progress.setStyle_(1)
             progress.setDisplayedWhenStopped_(False)
-            verification = _label(self._l("diagnostics.verification.not_run"), NSMakeRect(32, 59, 710, 20),
-                                  size=12, color=_SECONDARY)
+            verification = _label(
+                self._l("diagnostics.verification.not_run"),
+                NSMakeRect(416, 62, 336, 20),
+                size=11, color=_SECONDARY)
             page.addSubview_(open_log)
             page.addSubview_(copy_support_snapshot)
             page.addSubview_(verify)
@@ -5507,12 +5515,12 @@ if APPKIT_AVAILABLE:
             page.addSubview_(progress)
             page.addSubview_(verification)
             guidance = _label(
-                self._l("diagnostics.ready"), NSMakeRect(190, 41, 552, 18),
-                size=11, color=_SECONDARY)
+                self._l("diagnostics.ready"), NSMakeRect(390, 42, 362, 16),
+                size=10, color=_SECONDARY)
             page.addSubview_(guidance)
             page.addSubview_(_label(
                 self._l("diagnostics.license"),
-                NSMakeRect(5, 12, 620, 18), size=11, color=_SECONDARY))
+                NSMakeRect(5, 14, 620, 18), size=11, color=_SECONDARY))
             self.dynamic.update(
                 point_and_speak_button=point_and_speak,
                 drop_target_button=drop_target,
