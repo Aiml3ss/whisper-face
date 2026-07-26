@@ -251,7 +251,7 @@ required=(
     point_and_speak_resolver.py point_and_speak_transaction.py
     macos_point_and_speak_snapshot.py
     macos_drop_to_target_snapshot.py drop_to_target.py
-    whisper_face_gui.py support_bundle.py
+    whisper_face_gui.py whisper_face_theme.py support_bundle.py
     scripts/macos_launcher_app.py scripts/side_by_side_update.py
     scripts/safe_update_advisor.py scripts/release_manifest.py
     config/macos-signing-policy.json
