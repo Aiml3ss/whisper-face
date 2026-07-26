@@ -76,7 +76,8 @@ are never Supporter-only features.
   element at all, the insertion fails closed into the outbox. The count-only
   **Voice Outbox** menu entry routes directly to Overview; only the existing
   explicit **Copy & Dismiss** control can recover content.
-- **Flight Recorder (experimental)** — enable its menu-bar toggle, speak
+- **Flight Recorder (experimental)** — enable it under Settings →
+  Privacy, speak
   naturally, then tap Right Option afterward. Whisper Face finds and pastes the
   latest utterance from a 20-second RAM-only buffer. Holding Right Option still
   performs normal push-to-talk.
@@ -153,7 +154,8 @@ are never Supporter-only features.
   reversible editing commands.
 - **Tone awareness** — casual in Slack/Messages (texting style: no trailing
   period), formal prose in Mail, technical in editors and AI chats, verbatim
-  in terminals. Pick a tone per app from the menu-bar **App Tones** picker,
+  in terminals. Pick a tone per app under Settings → Personalize →
+  **App tones**,
   or force one per-dictation: *"Formal tone, …"*, *"casual, …"*.
 - **Spoken structure** — "new line" / "new paragraph" / "scratch that" work;
   explicit list lead-ins ("two things", "here's a list", "here are some
@@ -260,7 +262,8 @@ are never Supporter-only features.
   a bad rule. No audio or surrounding document text enters receipts.
 - **Self-editing snippets (Mac)** — say "insert my email" and your saved text
   pastes instead. Edit that exact insertion within ten seconds and the revised
-  value is saved for next time and listed under **Learned Corrections**.
+  value is saved for next time and listed under Settings → Personalize →
+  **Learned corrections**.
 - **Whispering works** — quiet speech is gain-normalized before recognition.
 - **Choose your Whisper Face** — Parrot, Fox, Owl, Cat, and Bear share the
   original friendly vector style. Pick one from the menu bar and it persists
@@ -269,8 +272,11 @@ are never Supporter-only features.
   and recording state in its tray icon.
 - **Menu-bar/tray presence** — the selected face remains visible in the menu
   bar or Windows notification area, with processing and paused states. The Mac
-  menu includes character, usage, tones, recognition alternatives, and learned
-  corrections; Windows adds character, pause, Flight Recorder, logs, and quit.
+  menu stays a quick-glance surface: usage, pause, character choice, and a
+  Last Recognition shortcut, with Voice Outbox/Inbox recovery rows appearing
+  only while they hold something. Tones, learned corrections, mode reference,
+  and logs live in the app window; Windows adds character, pause, Flight
+  Recorder, logs, and quit to its tray.
 - **Experimental phone compatibility endpoint** — an OpenAI-compatible
   `/v1/audio/transcriptions` endpoint (port 8787) can support self-hosted
   clients such as [Diction](https://diction.one). Ordinary desktop mode binds
@@ -522,7 +528,8 @@ subprocess, network, or application API path.
 The bundled `EDIT ME` values are setup placeholders. On Mac, insert one and
 replace the pasted placeholder in place within ten seconds; Whisper Face saves
 that exact replacement to `snippets.json`. You can also edit the private JSON file
-directly. Learned snippet edits appear by name under **Learned Corrections**;
+directly. Learned snippet edits appear by name under Settings →
+Personalize → **Learned corrections**;
 forgetting one restores its previous value when the file has not since changed.
 
 On Windows, use **Right Alt** wherever the table says Right Option and the
@@ -550,8 +557,8 @@ paste, delete selection, new line, and escape. It cannot launch arbitrary shell
 commands. Edit mode requires a selection, so ordinary dictation cannot rewrite
 an unseen document by accident.
 
-Flight Recorder is disabled by default and must be enabled from the menu-bar
-menu. Its audio is never written to disk: the bounded buffer is cleared after
+Flight Recorder is disabled by default and must be enabled under Settings →
+Privacy. Its audio is never written to disk: the bounded buffer is cleared after
 use, on pause, when disabled, and on quit. The menu-bar dot and macOS microphone
 indicator remain visible while it is active.
 
