@@ -26,6 +26,9 @@ published, notarized releases and is intentionally untouched by this module.
 
 from __future__ import annotations
 
+import argparse
+import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Callable
@@ -228,3 +231,83 @@ def apply_update(checkout, target_rev: str, *, runner: Runner,
                 result["status"] = "failed"
         result["error"] = _describe(exc)
         return result
+
+
+def _write_result(path: Path, payload: dict) -> None:
+    """Atomically persist a private update result across service restarts."""
+    path = path.expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
+def apply_update_detached(
+        checkout, target_rev: str, result_path, *, label: str = "") -> int:
+    """Apply an update from a launchd job independent of the app service.
+
+    ``Install.command`` reloads ``com.berg.dictate``. Running the installer
+    inside that service therefore kills an in-process updater. This helper
+    persists its state outside the checkout, survives the reload, and performs
+    one final restart after the result is durable.
+    """
+    checkout = Path(checkout).expanduser().resolve()
+    result_path = Path(result_path).expanduser().resolve()
+    _write_result(result_path, {
+        "status": "running",
+        "from": _rev_parse(subprocess.run, checkout, "HEAD") or "",
+        "to": target_rev,
+        "error": None,
+    })
+    try:
+        outcome = apply_update(
+            checkout, target_rev, runner=subprocess.run)
+    except Exception as exc:
+        outcome = {
+            "status": "failed",
+            "from": "",
+            "to": target_rev,
+            "error": type(exc).__name__,
+        }
+    _write_result(result_path, outcome)
+    subprocess.run(
+        ["/bin/launchctl", "kickstart", "-k",
+         f"gui/{os.getuid()}/com.berg.dictate"],
+        capture_output=True,
+        text=True,
+        timeout=_GIT_TIMEOUT,
+    )
+    if label:
+        subprocess.run(
+            ["/bin/launchctl", "remove", label],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT,
+        )
+    return 0 if outcome.get("status") == "applied" else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    detached = subparsers.add_parser("apply-detached")
+    detached.add_argument("--checkout", required=True)
+    detached.add_argument("--target", required=True)
+    detached.add_argument("--result", required=True)
+    detached.add_argument("--label", default="")
+    args = parser.parse_args(argv)
+    return apply_update_detached(
+        args.checkout,
+        args.target,
+        args.result,
+        label=args.label,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
