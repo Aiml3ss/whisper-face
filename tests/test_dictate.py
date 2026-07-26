@@ -14,6 +14,7 @@ import ctypes
 import io
 import json
 import os
+import queue
 import re
 import select
 import socket
@@ -78,6 +79,15 @@ from model_wallet import (  # noqa: E402
 from model_wallet_shadow import (  # noqa: E402
     RuntimeModelEvidence,
     assess_model_wallet,
+)
+from whisper_face_theme import (  # noqa: E402
+    DARK_PALETTE,
+    FACE_CHIP_COLORS,
+    LIGHT_PALETTE,
+    MOTION_SPECS,
+    TYPE_SPECS,
+    hud_presentation,
+    jelly_face_scale,
 )
 
 TREE = ast.parse((ROOT / "dictate.py").read_text(encoding="utf-8"))
@@ -1768,6 +1778,66 @@ class FacePreferenceTests(unittest.TestCase):
             ns["hud_level_step"](0.9, 0.7, "error", False), 0.7)
 
 
+class WhisperFaceThemeTests(unittest.TestCase):
+    def test_light_and_dark_palettes_share_brand_but_not_work_surfaces(self):
+        self.assertEqual(LIGHT_PALETTE.brand, DARK_PALETTE.brand)
+        self.assertNotEqual(LIGHT_PALETTE.bg, DARK_PALETTE.bg)
+        self.assertNotEqual(LIGHT_PALETTE.surface, DARK_PALETTE.surface)
+        self.assertNotEqual(LIGHT_PALETTE.ink, DARK_PALETTE.ink)
+        self.assertEqual(
+            set(FACE_CHIP_COLORS),
+            {"parrot", "fox", "owl", "cat", "bear",
+             "dog", "wolf", "pig", "panda", "tiger"},
+        )
+
+    def test_all_named_jelly_motions_have_bounded_fast_springs(self):
+        self.assertEqual(
+            set(MOTION_SPECS), {"press", "release", "wobble", "pop"})
+        for motion in MOTION_SPECS.values():
+            self.assertGreater(motion.stiffness, 0.0)
+            self.assertGreater(motion.damping, 0.0)
+            self.assertLessEqual(motion.duration, 0.5)
+            self.assertGreater(motion.squash_x, 0.0)
+            self.assertGreater(motion.squash_y, 0.0)
+
+    def test_hud_type_tokens_use_compact_rounded_chrome_sizes(self):
+        self.assertEqual(
+            set(TYPE_SPECS),
+            {"hud_eyebrow", "hud_confidence", "hud_caption"},
+        )
+        self.assertLess(TYPE_SPECS["hud_eyebrow"].size, 10.0)
+        self.assertLessEqual(TYPE_SPECS["hud_caption"].size, 12.0)
+
+    def test_hud_copy_distinguishes_stable_listening_and_processing(self):
+        listening = hud_presentation(
+            "recording", "hello world", 0.91, stable_prefix=True)
+        processing = hud_presentation(
+            "processing", "hello world", 0.61, stable_prefix=True)
+        error = hud_presentation(
+            "error", "I couldn't understand that — try again", 0.61,
+            stable_prefix=True)
+
+        self.assertEqual(listening.eyebrow, "HEARD YOU")
+        self.assertEqual(listening.confidence, "Recognition 91%")
+        self.assertIn("hello world", listening.accessibility_value)
+        self.assertEqual(processing.eyebrow, "TIDYING UP")
+        self.assertEqual(processing.accent, "accent")
+        self.assertEqual(error.eyebrow, "TRY AGAIN")
+        self.assertEqual(error.confidence, "")
+        self.assertEqual(error.accent, "error")
+        self.assertIn(
+            "Dictation needs another try", error.accessibility_value)
+
+    def test_reduce_motion_disables_whole_head_squash(self):
+        self.assertEqual(
+            jelly_face_scale(0.9, reduce_motion=True), (1.0, 1.0))
+        self.assertEqual(
+            jelly_face_scale(0.9, processing=True), (1.0, 1.0))
+        active = jelly_face_scale(0.9)
+        self.assertGreater(active[0], 1.0)
+        self.assertLess(active[1], 1.0)
+
+
 class AcousticKeywordMemoryRuntimeTests(unittest.TestCase):
     @staticmethod
     def runtime_namespace(path: Path):
@@ -2073,6 +2143,45 @@ class AudioPoolTests(unittest.TestCase):
         self.assertNotIn(slot.stream, original)
         pool.release(slot)
 
+    def test_idle_recovery_prewarms_before_the_next_keypress(self):
+        streams = []
+
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        pool = self.namespace()["AudioPool"](
+            size=2, stream_factory=factory)
+        pool.warm()
+        original = tuple(streams)
+
+        self.assertTrue(pool.recover_default_device())
+
+        self.assertEqual(pool.readiness(), "Ready")
+        self.assertEqual(len(pool.slots), 2)
+        self.assertEqual(len(streams), 4)
+        self.assertTrue(all(stream.closed for stream in original))
+
+    def test_close_prevents_a_background_reopen(self):
+        streams = []
+
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        pool = self.namespace()["AudioPool"](
+            size=1, stream_factory=factory)
+        pool.warm()
+        pool.close()
+
+        self.assertFalse(pool.warm_async())
+        self.assertEqual(len(streams), 1)
+        self.assertTrue(streams[0].closed)
+        with self.assertRaisesRegex(RuntimeError, "stream unavailable"):
+            pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+
     def test_active_capture_finishes_before_stale_pool_is_replaced(self):
         streams = []
 
@@ -2101,8 +2210,9 @@ class AudioPoolTests(unittest.TestCase):
         self.assertEqual(len(streams), 2)
 
         pool.release(slot)
+        self.assertTrue(pool.wait_for_recovery())
         self.assertTrue(all(stream.closed for stream in original))
-        self.assertEqual(pool.slots, [])
+        self.assertEqual(len(pool.slots), 2)
         replacement = pool.acquire(
             SimpleNamespace(_callback=lambda *_args: None))
         self.assertEqual(len(streams), 4)
@@ -2122,8 +2232,9 @@ class AudioPoolTests(unittest.TestCase):
         pool = self.namespace()["AudioPool"](
             size=1, stream_factory=factory)
         pool.warm()
-        pool.invalidate()
         fail["on"] = True
+
+        self.assertFalse(pool.recover_default_device())
 
         with self.assertRaises(RuntimeError):
             pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
@@ -2172,6 +2283,7 @@ class AudioPoolTests(unittest.TestCase):
             pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
 
         pool.release(second)
+        self.assertTrue(pool.wait_for_recovery())
         self.assertTrue(all(stream.closed for stream in original))
         replacement = pool.acquire(
             SimpleNamespace(_callback=lambda *_args: None))
@@ -2249,7 +2361,7 @@ class MacAudioRecoveryNotificationTests(unittest.TestCase):
             "_invalidate_default_audio_inputs",
             extra={
                 "AUDIO_POOL": SimpleNamespace(
-                    invalidate=lambda: calls.append("pool")),
+                    recover_default_device=lambda: calls.append("pool")),
                 "FLIGHT": SimpleNamespace(
                     invalidate=lambda: calls.append("flight")),
             },
@@ -3185,17 +3297,154 @@ class ConfigurationTests(unittest.TestCase):
             with self.subTest(hostile=hostile):
                 self.assertEqual(attempt({name: hostile}), 0)
 
-    def test_permission_wait_reexecs_on_the_fast_interval(self):
-        body = (ROOT / "dictate.py").read_text(encoding="utf-8").split(
+    def test_permission_wait_reexecs_without_blocking_appkit_reachability(self):
+        script = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        body = script.split(
             "def ensure_event_permissions", 1)[1].split("\ndef ", 1)[0]
         self.assertNotIn("time.sleep(60)", body)
         self.assertIn("Re-checking every few seconds", body)
         self.assertIn("attempt = permission_recheck_attempt()", body)
-        self.assertIn("time.sleep(permission_recheck_delay(attempt))", body)
-        # The re-exec is what makes macOS re-read the frozen TCC verdict, and
-        # the counter has to ride the new process image.
         self.assertIn("os.environ[PERMISSION_ATTEMPT_ENV] = str(attempt + 1)", body)
-        self.assertIn("os.execv(sys.executable", body)
+        self.assertIn('name="whisper-face-permission-recheck"', body)
+        self.assertIn("return False", body)
+        self.assertNotIn("time.sleep(", body)
+        # Main must publish the exact-process activation socket before entering
+        # permission recovery, then keep AppKit alive while the worker refreshes
+        # macOS's process-frozen TCC verdict.
+        main = script.split("def main():", 1)[1].split(
+            '\n\nif __name__ == "__main__":', 1)[0]
+        self.assertLess(
+            main.index('start_gui_activation_server(STATUS["bar"].gui)'),
+            main.index("if not ensure_event_permissions():"),
+        )
+        self.assertLess(
+            main.index("if not ensure_event_permissions():"),
+            main.index('trace_operation("warmup_audio_pool", AUDIO_POOL.warm)'),
+        )
+        recovery = main.split("if not ensure_event_permissions():", 1)[1]
+        self.assertIn("AppHelper.runEventLoop", recovery)
+
+    def test_permission_recheck_worker_reexecs_once_after_fresh_grant(self):
+        calls = []
+        verdicts = iter((False, False, True))
+        fake_os = SimpleNamespace(
+            environ={},
+            execv=lambda executable, arguments:
+                calls.append(("execv", executable, arguments)))
+        fake_sys = SimpleNamespace(
+            executable="/runtime/python", argv=["dictate.py", "--test"])
+        namespace = load_definitions(
+            "_wait_for_permission_grant_and_reexec",
+            assignments={"PERMISSION_ATTEMPT_ENV"},
+            extra={
+                "os": fake_os,
+                "sys": fake_sys,
+                "time": SimpleNamespace(
+                    sleep=lambda delay: calls.append(("sleep", delay))),
+                "permission_recheck_delay": lambda attempt: attempt + 0.5,
+                "_fresh_event_permissions_granted": lambda: False,
+            },
+        )
+
+        namespace["_wait_for_permission_grant_and_reexec"](
+            3,
+            sleeper=lambda delay: calls.append(("sleep", delay)),
+            preflight=lambda: next(verdicts),
+            execv=fake_os.execv,
+        )
+
+        self.assertEqual(calls, [
+            ("sleep", 3.5),
+            ("sleep", 4.5),
+            ("sleep", 5.5),
+            ("execv", "/runtime/python", [
+                "/runtime/python", "dictate.py", "--test"]),
+        ])
+        self.assertEqual(
+            fake_os.environ[namespace["PERMISSION_ATTEMPT_ENV"]], "6")
+
+    def test_permission_probe_is_content_free_and_non_prompting(self):
+        received = []
+        fake_subprocess = SimpleNamespace(
+            DEVNULL=-3,
+            SubprocessError=subprocess.SubprocessError,
+            run=None,
+        )
+        namespace = load_definitions(
+            "_fresh_event_permissions_granted",
+            extra={
+                "subprocess": fake_subprocess,
+                "sys": SimpleNamespace(executable="/runtime/python"),
+            },
+        )
+        probe = namespace["_fresh_event_permissions_granted"]
+
+        def runner(arguments, **options):
+            received.append((arguments, options))
+            return SimpleNamespace(returncode=0)
+
+        self.assertTrue(probe(runner=runner))
+        arguments, options = received[0]
+        self.assertEqual(arguments[:2], ["/runtime/python", "-c"])
+        self.assertIn("CGPreflightListenEventAccess", arguments[2])
+        self.assertIn("CGPreflightPostEventAccess", arguments[2])
+        self.assertNotIn("CGRequest", arguments[2])
+        self.assertEqual(options["timeout"], 5)
+        self.assertFalse(options["check"])
+        self.assertFalse(probe(
+            runner=lambda *_args, **_kwargs: SimpleNamespace(returncode=1)))
+        self.assertFalse(probe(
+            runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("unavailable"))))
+
+    def test_missing_permissions_schedule_recovery_without_blocking(self):
+        calls = []
+
+        class FakeThread:
+            def __init__(self, *, target, args, name, daemon):
+                calls.append(("thread", target, args, name, daemon))
+
+            def start(self):
+                calls.append(("start",))
+
+        fake_os = SimpleNamespace(environ={})
+        worker = object()
+        namespace = load_definitions(
+            "ensure_event_permissions",
+            assignments={"PERMISSION_ATTEMPT_ENV"},
+            extra={
+                "IS_WINDOWS": False,
+                "os": fake_os,
+                "threading": SimpleNamespace(Thread=FakeThread),
+                "permission_recheck_attempt": lambda: 0,
+                "_wait_for_permission_grant_and_reexec": worker,
+            },
+        )
+        quartz = SimpleNamespace(
+            CGPreflightListenEventAccess=lambda: False,
+            CGPreflightPostEventAccess=lambda: False,
+            CGRequestListenEventAccess=lambda: calls.append(("listen",)),
+            CGRequestPostEventAccess=lambda: calls.append(("post",)),
+        )
+        application_services = SimpleNamespace(
+            AXIsProcessTrustedWithOptions=lambda options:
+                calls.append(("accessibility", options)),
+            kAXTrustedCheckOptionPrompt="prompt",
+        )
+        with mock.patch.dict(sys.modules, {
+            "Quartz": quartz,
+            "ApplicationServices": application_services,
+        }):
+            self.assertFalse(namespace["ensure_event_permissions"]())
+
+        self.assertIn(("listen",), calls)
+        self.assertIn(("post",), calls)
+        thread = next(call for call in calls if call[0] == "thread")
+        self.assertIs(thread[1], worker)
+        self.assertEqual(thread[2], (0,))
+        self.assertEqual(thread[3:], (
+            "whisper-face-permission-recheck", True))
+        self.assertIn(("start",), calls)
 
     def test_mlx_progress_uses_thread_lock_not_multiprocessing_semaphore(self):
         received = []
@@ -4819,6 +5068,142 @@ class PersonalPriorIntegrationTests(unittest.TestCase):
         self.assertEqual(other, ())
 
 
+class CapturedAudioTests(unittest.TestCase):
+    def namespace(self):
+        return load_definitions(
+            "CapturedAudio",
+            extra={
+                "np": np,
+                "CAPTURE_BLOCK_SECONDS": 8,
+                "SAMPLE_RATE": 16_000,
+            },
+        )
+
+    def test_blocks_preserve_exact_audio_and_capture_offsets(self):
+        captured = self.namespace()["CapturedAudio"](block_samples=4)
+        captured.append(np.array([[0.0], [1.0], [2.0]], dtype=np.float32))
+        captured.append(np.array([3.0, 4.0, 5.0], dtype=np.float32))
+        captured.append(np.array([6.0], dtype=np.float32))
+
+        np.testing.assert_array_equal(
+            captured.array(), np.arange(7, dtype=np.float32))
+        np.testing.assert_array_equal(
+            np.concatenate(captured.frames_from(3)),
+            np.arange(3, 7, dtype=np.float32),
+        )
+        self.assertEqual(captured.frames_from(99), ())
+        self.assertEqual(captured.total_samples, 7)
+
+    def test_small_callbacks_use_fixed_size_storage_blocks(self):
+        captured = self.namespace()["CapturedAudio"](block_samples=8)
+        for value in range(1_000):
+            captured.append(np.array([value], dtype=np.float32))
+
+        self.assertEqual(len(captured.blocks), 125)
+        self.assertIsNone(captured.tail)
+        self.assertEqual(captured.total_samples, 1_000)
+        np.testing.assert_array_equal(
+            captured.array(), np.arange(1_000, dtype=np.float32))
+
+    def test_snapshot_views_do_not_expand_with_later_callbacks(self):
+        captured = self.namespace()["CapturedAudio"](block_samples=8)
+        captured.append(np.arange(4, dtype=np.float32))
+        snapshot = captured.frames_from()
+
+        captured.append(np.arange(4, 8, dtype=np.float32))
+
+        np.testing.assert_array_equal(
+            np.concatenate(snapshot), np.arange(4, dtype=np.float32))
+        np.testing.assert_array_equal(
+            captured.array(), np.arange(8, dtype=np.float32))
+
+    def test_invalid_block_size_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "block size"):
+            self.namespace()["CapturedAudio"](block_samples=0)
+
+
+class HotkeyListenerRecoveryTests(unittest.TestCase):
+    def test_healthy_listener_is_left_alone(self):
+        ns = load_definitions("restart_dead_hotkey_listener")
+        state = {
+            "l": SimpleNamespace(running=True),
+            "make": lambda: self.fail("healthy listener was replaced"),
+            "recovering": False,
+        }
+        cleanups = []
+
+        self.assertFalse(ns["restart_dead_hotkey_listener"](
+            lambda: cleanups.append(True), state))
+        self.assertEqual(cleanups, [])
+        self.assertFalse(state["recovering"])
+
+    def test_dead_listener_cleanup_runs_once_across_restart_retries(self):
+        ns = load_definitions(
+            "restart_dead_hotkey_listener",
+            extra={"print": lambda *_args: None},
+        )
+        replacement = SimpleNamespace(running=True)
+        attempts = []
+        cleanups = []
+
+        def make_listener():
+            attempts.append(True)
+            if len(attempts) == 1:
+                raise RuntimeError("event tap unavailable")
+            return replacement
+
+        state = {
+            "l": SimpleNamespace(running=False),
+            "make": make_listener,
+            "recovering": False,
+        }
+
+        self.assertFalse(ns["restart_dead_hotkey_listener"](
+            lambda: cleanups.append(True), state))
+        self.assertTrue(state["recovering"])
+        self.assertTrue(ns["restart_dead_hotkey_listener"](
+            lambda: cleanups.append(True), state))
+
+        self.assertEqual(cleanups, [True])
+        self.assertEqual(len(attempts), 2)
+        self.assertIs(state["l"], replacement)
+        self.assertFalse(state["recovering"])
+
+    def test_cleanup_failure_does_not_prevent_listener_replacement(self):
+        ns = load_definitions(
+            "restart_dead_hotkey_listener",
+            extra={"print": lambda *_args: None},
+        )
+        replacement = SimpleNamespace(running=True)
+        state = {
+            "l": SimpleNamespace(running=False),
+            "make": lambda: replacement,
+            "recovering": False,
+        }
+
+        def fail_cleanup():
+            raise RuntimeError("cleanup failed")
+
+        self.assertTrue(ns["restart_dead_hotkey_listener"](
+            fail_cleanup, state))
+        self.assertIs(state["l"], replacement)
+        self.assertFalse(state["recovering"])
+
+    def test_recovery_unlatches_key_and_queues_capture_cleanup(self):
+        ns = load_definitions("queue_hotkey_listener_recovery")
+        key_down = {"on": True}
+        modifiers = {"command", "shift"}
+        events = queue.Queue()
+
+        ns["queue_hotkey_listener_recovery"](
+            key_down, modifiers, events, event_at=12.5)
+
+        self.assertFalse(key_down["on"])
+        self.assertEqual(modifiers, set())
+        self.assertEqual(events.get_nowait(), (
+            "listener_recovery", 12.5, frozenset()))
+
+
 class ReleasePlanTests(unittest.TestCase):
     def test_dictation_problem_shows_bounded_retry_guidance(self):
         captions = {"text": ""}
@@ -4852,6 +5237,8 @@ class ReleasePlanTests(unittest.TestCase):
 
         self.assertEqual(
             captions["text"], "I couldn't understand that — try again")
+        self.assertIsNone(captions["confidence"])
+        self.assertFalse(captions["stable_prefix"])
         self.assertEqual(statuses, ["err"])
         self.assertEqual(modes, ["error"])
         self.assertEqual(sounds, ["Funk"])
@@ -4872,6 +5259,79 @@ class ReleasePlanTests(unittest.TestCase):
             SimpleNamespace(uncertain=False, feedback_seconds=float("nan"))), 0.0)
         self.assertEqual(ns["dictation_feedback_delay"](
             SimpleNamespace(uncertain=False, feedback_seconds="bad")), 0.0)
+
+    def test_back_to_back_releases_finish_in_order(self):
+        ns = load_definitions("ReleaseOrder")
+        release_order = ns["ReleaseOrder"]()
+        first = release_order.issue()
+        second = release_order.issue()
+        order = []
+
+        second_entered = threading.Event()
+
+        def await_second():
+            release_order.wait(second)
+            order.append("second")
+            second_entered.set()
+
+        waiter = threading.Thread(target=await_second)
+        waiter.start()
+        self.assertFalse(second_entered.wait(0.05))
+        release_order.wait(first)
+        order.append("first")
+        release_order.complete(first)
+        self.assertTrue(second_entered.wait(1.0))
+        release_order.complete(second)
+        waiter.join(1.0)
+
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(order, ["first", "second"])
+
+    def test_failed_release_does_not_strand_later_tickets(self):
+        ns = load_definitions("ReleaseOrder")
+        release_order = ns["ReleaseOrder"]()
+        first = release_order.issue()
+        failed_second = release_order.issue()
+        third = release_order.issue()
+        third_entered = threading.Event()
+
+        release_order.complete(failed_second)
+        waiter = threading.Thread(
+            target=lambda: (
+                release_order.wait(third),
+                third_entered.set(),
+            ),
+        )
+        waiter.start()
+        self.assertFalse(third_entered.wait(0.05))
+        release_order.complete(first)
+        self.assertTrue(third_entered.wait(1.0))
+        release_order.complete(third)
+        waiter.join(1.0)
+
+        self.assertFalse(waiter.is_alive())
+
+    def test_finish_failure_completes_release_ticket(self):
+        def fail(*_args):
+            raise RuntimeError("failed")
+
+        ns = load_definitions(
+            "ReleaseOrder",
+            "finish_in_release_order",
+            extra={"finish_and_process": fail},
+        )
+        release_order = ns["ReleaseOrder"]()
+        first = release_order.issue()
+        rec = SimpleNamespace(process_ticket=first)
+        ns["finish_in_release_order"].__globals__[
+            "DICTATION_PROCESS_ORDER"] = release_order
+
+        with self.assertRaisesRegex(RuntimeError, "failed"):
+            ns["finish_in_release_order"](rec, None, {})
+
+        second = release_order.issue()
+        release_order.wait(second)
+        release_order.complete(second)
 
     def test_active_speech_waits_before_submitting_the_remainder(self):
         ns = load_definitions(
@@ -5063,6 +5523,7 @@ class ReleasePlanTests(unittest.TestCase):
         prep_pool = SimpleNamespace(
             submit=lambda *_args, **_kwargs: future)
         ns = load_definitions(
+            "CapturedAudio",
             "BoundedRecognitionFuture",
             "Recorder",
             extra={
@@ -5072,6 +5533,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "LEVELS": [],
                 "SILENCE_RMS": 0.01,
                 "SAMPLE_RATE": 16_000,
+                "CAPTURE_BLOCK_SECONDS": 8,
                 "should_start_speculation": lambda *_args: False,
                 "SPECULATIVE_MIN_SECONDS": 0.5,
                 "SPECULATIVE_SILENCE": 0.1,
@@ -5137,6 +5599,8 @@ class ReleasePlanTests(unittest.TestCase):
                     lambda _rec, _hud, caption, log, **_kwargs:
                     problems.append((caption, log))),
                 "dictation_feedback_delay": lambda _rec: 0.0,
+                "DICTATION_PROCESS_ORDER": SimpleNamespace(
+                    wait=lambda _ticket: None),
                 "print": lambda *_args: None,
                 "LAST_USE": {},
                 "AppHelper": SimpleNamespace(callAfter=lambda *_args: None),
@@ -5150,6 +5614,7 @@ class ReleasePlanTests(unittest.TestCase):
             speculative_start = 0
             speculative_end = 0
             prompt = None
+            process_ticket = None
             recording = False
             uncertain = False
 

@@ -18,6 +18,11 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from support_bundle import SupportBundleError, write_support_bundle
+from whisper_face_theme import (
+    FACE_CHIP_COLORS,
+    MOTION_SPECS,
+    palette_for_appearance,
+)
 
 
 APP_NAME = "Whisper Face"
@@ -37,6 +42,10 @@ CONSEQUENCE_RELISTEN_STATUSES = frozenset({
     "not-needed", "skipped", "confirmed", "contradicted", "timed-out",
     "inconclusive", "mixed", "unavailable",
 })
+RESULT_EVIDENCE_STAGES = (
+    "release", "asr", "compiler", "consequence",
+    "context", "cleanup", "insertion",
+)
 VOICE_DRAFT_DESTINATIONS = frozenset({
     "plain_text", "email_draft", "task", "calendar_draft", "unavailable",
 })
@@ -211,19 +220,20 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "overview.accessibility.onboarding.progress": "First run setup progress",
         "overview.accessibility.onboarding.title": "Next setup step",
         "overview.accessibility.onboarding.detail": "Setup step detail",
+        "overview.accessibility.onboarding.face": "{face} face, first-run guide",
         "overview.accessibility.onboarding.steps": "First run setup walkthrough",
         "overview.accessibility.onboarding.step": "Setup step {step}: {status}",
         "overview.notice.outbox.copied": "Latest recoverable dictation copied and dismissed",
         "overview.notice.outbox.error": "Could not copy Voice Outbox: {error}",
         "overview.notice.capture.error": "Could not change capture state: {error}",
         "overview.notice.status.error": "Status unavailable: {error}",
-        "onboarding.permissions.title": "Allow Mac permissions",
+        "onboarding.permissions.title": "First, let your face listen.",
         "onboarding.permissions.detail": "Microphone captures speech; Accessibility safely inserts it into the field you chose. Input Monitoring lets the hotkey listen.",
-        "onboarding.hotkey.title": "Practice {hotkey}",
+        "onboarding.hotkey.title": "Now make it blink with {hotkey}.",
         "onboarding.hotkey.detail": "Hold {hotkey}, speak, then release. This step completes only after Whisper Face observes capture.",
-        "onboarding.models.title": "Confirm local models",
+        "onboarding.models.title": "Meet the local brain.",
         "onboarding.models.detail": "At least one local recognition engine must be ready; fallbacks can finish warming in the background.",
-        "onboarding.first_dictation.title": "Make your first dictation",
+        "onboarding.first_dictation.title": "Say something. Watch it land.",
         "onboarding.first_dictation.detail": "Speak one sentence in a text field. If focus changes, recover it in Voice Outbox with Copy & Dismiss.",
         "onboarding.status.done": "Done",
         "onboarding.status.attention": "Needs attention",
@@ -244,6 +254,13 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "onboarding.action.first_dictation": "Show How",
         "onboarding.action.continue": "Continue Setup",
         "onboarding.action.help": "Open the next incomplete first-run setup step.",
+        "onboarding.action.finish": "Start Dictating",
+        "onboarding.action.finish.help": "Finish first-run setup and show the live dictation overview.",
+        "onboarding.complete.progress": "READY TO DICTATE · {total} OF {total} CONFIRMED",
+        "onboarding.complete.title": "Your face works.",
+        "onboarding.complete.detail": "Permissions, hotkey practice, local model readiness, and your first successful dictation are all confirmed on this Mac.",
+        "onboarding.complete.status": "All set",
+        "onboarding.privacy": "Speech and setup stay on this Mac.",
         "onboarding.complete": "Setup is complete — Whisper Face is ready.",
         "results.title": "Last Result",
         "results.subtitle": "Inspectable evidence from this session — no transcript history.",
@@ -301,6 +318,25 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "results.audio.notice.cleared": "Retained consequential audio cleared",
         "results.audio.notice.unavailable": "No retained consequential span is available",
         "results.privacy": "Audio replay is off by default. Selected latest-result spans stay only in RAM and are wiped after one minute, on a new result, or when cleared; they are never written, logged, or sent.",
+        "results.inspect.action": "Inspect Evidence",
+        "results.inspect.action.help": "Explicitly reveal private alternatives, protected anchors, proof-edit decisions, and timing for only the latest result.",
+        "results.inspect.title": "Latest-result evidence",
+        "results.inspect.message": "Revealed only for this session. This detail is not added to transcript history or support exports.",
+        "results.inspect.empty": "No detailed evidence was reported for this result.",
+        "results.inspect.alternatives": "ALTERNATIVES",
+        "results.inspect.anchors": "PROTECTED ANCHORS",
+        "results.inspect.proof": "PROOF EDITS",
+        "results.inspect.proof.accepted": "ACCEPTED",
+        "results.inspect.proof.rejected": "REJECTED",
+        "results.inspect.timing": "TIMING",
+        "results.inspect.stage.release": "Total release",
+        "results.inspect.stage.asr": "Recognition",
+        "results.inspect.stage.compiler": "Voice Compiler",
+        "results.inspect.stage.consequence": "Consequence check",
+        "results.inspect.stage.context": "Context firewall",
+        "results.inspect.stage.cleanup": "Cleanup",
+        "results.inspect.stage.insertion": "Insertion",
+        "results.inspect.none": "None reported",
         "results.value.words": "{count} words",
         "results.value.confidence": " · {confidence} confidence",
         "results.value.none_reported": "None reported",
@@ -326,6 +362,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "results.accessibility.consequence": "Consequence decision receipt",
         "results.accessibility.consequence_advisory": "Review guidance",
         "results.accessibility.audio": "Acoustic replay privacy status",
+        "results.accessibility.inspect": "Inspect private latest-result evidence",
+        "results.accessibility.inspect.content": "Private latest-result evidence",
         "models.title": "Your local voice stack",
         "models.subtitle": "Fast recognition, accurate fallback, and private cleanup.",
         "models.waiting": "Waiting for model status",
@@ -499,6 +537,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.action.add": "Add",
         "settings.action.delete": "Delete",
         "settings.action.forget": "Forget",
+        "settings.action.forget_mapping": "Forget This Mapping",
+        "settings.action.review": "Review",
         "settings.action.save": "Save",
         "settings.action.cancel": "Cancel",
         "settings.action.diagnostics": "Open Diagnostics",
@@ -533,10 +573,22 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.dialog.vocabulary.bans.help": "Enter words that Whisper Face must not learn, one per line.",
         "settings.dialog.delete.title": "Delete snippet?",
         "settings.dialog.delete.message": "This removes “{name}” from this Mac.",
-        "settings.dialog.forget.title": "Forget learned correction?",
-        "settings.dialog.forget.message": "Whisper Face will stop applying “{source} → {target}”.",
         "settings.dialog.correction.chooser.label": "Learned correction",
-        "settings.dialog.correction.chooser.help": "Choose a learned correction to inspect and forget.",
+        "settings.dialog.correction.chooser.help": "Choose a learned correction to review.",
+        "settings.dialog.correction.chooser.message": "Choose a mapping to see what was learned, where it applies, and why.",
+        "settings.dialog.correction.scope.global": "Applies: Whole-word matches in every app.",
+        "settings.dialog.correction.scope.apps": "Applies: Whole-word matches in {apps}.",
+        "settings.dialog.correction.scope.inactive": "Applies: Not active yet.",
+        "settings.dialog.correction.scope.snippet": "Applies: This saved snippet now uses the replacement shown above.",
+        "settings.dialog.correction.why.global": "Why: {count} exact corrections passed the local safety checks.",
+        "settings.dialog.correction.why.apps": "Why: Repeated corrections passed the local safety checks in {apps}.",
+        "settings.dialog.correction.why.held": "Why: Held back because the local correction cases disagree.",
+        "settings.dialog.correction.why.learning": "Why: Still learning. Three matching corrections activate everywhere; two in one app activate there.",
+        "settings.dialog.correction.why.snippet": "Why: You explicitly edited this snippet {count} time(s).",
+        "settings.dialog.correction.observed": "Observed in: {apps}.",
+        "settings.dialog.correction.observed.none": "Observed in: App information unavailable.",
+        "settings.dialog.correction.privacy": "Stored locally: the corrected words, app scope, and counts only—never audio or surrounding transcript.",
+        "settings.dialog.correction.privacy.snippet": "Stored locally: the snippet name, replacement, and edit count.",
         "settings.dialog.keywords.title": "Pronunciation keywords",
         "settings.dialog.keywords.message": "These candidates come only from exact corrections you made. They do not affect recognition yet.",
         "settings.dialog.keywords.empty": "No correction-backed keyword candidates yet.",
@@ -896,6 +948,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "press_point_and_speak",
             "preview_drop_to_target",
             "open_system_settings",
+            "acknowledge_onboarding",
         ),
         accessibility_catalog_keys=(
             "overview.accessibility.phase",
@@ -909,6 +962,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "overview.accessibility.onboarding.progress",
             "overview.accessibility.onboarding.title",
             "overview.accessibility.onboarding.detail",
+            "overview.accessibility.onboarding.face",
             "overview.accessibility.onboarding.steps",
             "overview.accessibility.onboarding.step",
             "settings.accessibility.sections.label",
@@ -974,6 +1028,7 @@ class GUIActions:
     """Integration API supplied by the running Whisper Face application."""
 
     status_snapshot: Callable[[], Mapping[str, Any]] = lambda: {}
+    inspect_result_evidence: Callable[[], Mapping[str, Any]] = lambda: {}
     settings_snapshot: Callable[[], Mapping[str, Any]] = lambda: {}
     set_face: Callable[[str], None] = _noop
     set_flight_recorder: Callable[[bool], None] = _noop
@@ -1193,12 +1248,22 @@ class SnippetSetting:
 
 
 @dataclass(frozen=True)
+class CorrectionScopeSetting:
+    bundle: str
+    name: str
+    count: int = 0
+    decision: str = "learning"
+
+
+@dataclass(frozen=True)
 class CorrectionSetting:
     key: str
     source: str
     target: str
     count: int = 0
     kind: str = "correction"
+    global_decision: str = "learning"
+    app_scopes: tuple[CorrectionScopeSetting, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -1365,6 +1430,21 @@ class OnboardingStep:
 
 
 @dataclass(frozen=True)
+class OnboardingPresentation:
+    """Localized first-run card state derived only from readiness evidence."""
+
+    visible: bool
+    complete: bool
+    current_key: str | None
+    progress: str
+    title: str
+    detail: str
+    status: str
+    action_title: str
+    action_help: str
+
+
+@dataclass(frozen=True)
 class DegradedIssue:
     """A local recovery hint; ``error`` affects the main readiness state."""
 
@@ -1373,6 +1453,33 @@ class DegradedIssue:
     detail: str
     route: str = "Diagnostics"
     severity: str = "error"
+
+
+@dataclass(frozen=True, repr=False)
+class ProofEditInspection:
+    kind: str
+    before: str = field(repr=False)
+    after: str = field(repr=False)
+    accepted: bool = False
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class StageTiming:
+    stage: str
+    milliseconds: float
+
+
+@dataclass(frozen=True, repr=False)
+class ResultEvidenceInspection:
+    """Private details returned transiently after an explicit reveal."""
+
+    alternatives: tuple[str, ...] = field(default_factory=tuple, repr=False)
+    protected_anchors: tuple[str, ...] = field(
+        default_factory=tuple, repr=False)
+    proof_edits: tuple[ProofEditInspection, ...] = field(
+        default_factory=tuple, repr=False)
+    timings: tuple[StageTiming, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -2033,12 +2140,43 @@ def normalize_settings(snapshot: Mapping[str, Any] | None) -> UnifiedSettings:
             if (not key or not original or not replacement
                     or kind not in {"correction", "snippet"}):
                 continue
+            default_decision = "saved" if kind == "snippet" else "learning"
+            global_decision = str(
+                item.get("global_decision", default_decision)
+            ).strip().casefold()
+            if global_decision not in {
+                    "active", "held_back", "learning", "saved"}:
+                global_decision = default_decision
+            app_scopes: list[CorrectionScopeSetting] = []
+            raw_scopes = item.get("app_scopes")
+            if isinstance(raw_scopes, Sequence) and not isinstance(
+                    raw_scopes, (str, bytes)):
+                for scope in raw_scopes[:100]:
+                    if not isinstance(scope, Mapping):
+                        continue
+                    bundle = _clean_text(scope.get("bundle"), "")
+                    name = _clean_text(scope.get("name"), bundle)
+                    decision = str(
+                        scope.get("decision", "learning")
+                    ).strip().casefold()
+                    if (not bundle or len(bundle) > 255
+                            or decision not in {
+                                "active", "held_back", "learning"}):
+                        continue
+                    app_scopes.append(CorrectionScopeSetting(
+                        bundle=bundle,
+                        name=name,
+                        count=_nonnegative_int(scope.get("count")),
+                        decision=decision,
+                    ))
             corrections.append(CorrectionSetting(
                 key=key,
                 source=original,
                 target=replacement,
                 count=_nonnegative_int(item.get("count")),
                 kind=kind,
+                global_decision=global_decision,
+                app_scopes=tuple(app_scopes),
             ))
     return UnifiedSettings(
         app_tones=tuple(tones),
@@ -2047,6 +2185,81 @@ def normalize_settings(snapshot: Mapping[str, Any] | None) -> UnifiedSettings:
         banned_vocabulary=_text_items(source.get("banned_vocabulary")),
         corrections=tuple(corrections),
     )
+
+
+def correction_review_text(
+    correction: CorrectionSetting,
+    *,
+    locale: str = "en",
+) -> str:
+    """Explain one local learned mapping without exposing correction cases."""
+
+    if correction.kind == "snippet":
+        return "\n".join((
+            localized_string(
+                "settings.dialog.correction.scope.snippet", locale=locale),
+            localized_string(
+                "settings.dialog.correction.why.snippet",
+                locale=locale,
+                count=correction.count,
+            ),
+            localized_string(
+                "settings.dialog.correction.privacy.snippet", locale=locale),
+        ))
+
+    active_apps = [
+        scope.name for scope in correction.app_scopes
+        if scope.decision == "active"
+    ]
+    held_back = (
+        correction.global_decision == "held_back"
+        or any(scope.decision == "held_back"
+               for scope in correction.app_scopes)
+    )
+    if correction.global_decision == "active":
+        scope_line = localized_string(
+            "settings.dialog.correction.scope.global", locale=locale)
+        why_line = localized_string(
+            "settings.dialog.correction.why.global",
+            locale=locale,
+            count=correction.count,
+        )
+    elif active_apps:
+        app_names = ", ".join(active_apps)
+        scope_line = localized_string(
+            "settings.dialog.correction.scope.apps",
+            locale=locale,
+            apps=app_names,
+        )
+        why_line = localized_string(
+            "settings.dialog.correction.why.apps",
+            locale=locale,
+            apps=app_names,
+        )
+    else:
+        scope_line = localized_string(
+            "settings.dialog.correction.scope.inactive", locale=locale)
+        why_line = localized_string(
+            "settings.dialog.correction.why.held"
+            if held_back else "settings.dialog.correction.why.learning",
+            locale=locale,
+        )
+
+    observations = ", ".join(
+        f"{scope.name} {scope.count}×" for scope in correction.app_scopes)
+    observed_line = localized_string(
+        "settings.dialog.correction.observed"
+        if observations else "settings.dialog.correction.observed.none",
+        locale=locale,
+        **({"apps": observations} if observations else {}),
+    )
+    return "\n".join((
+        scope_line,
+        why_line,
+        observed_line,
+        localized_string(
+            "settings.dialog.correction.privacy", locale=locale),
+    ))
 
 
 def normalize_acoustic_keyword_inspection(
@@ -2196,6 +2409,61 @@ def _build_onboarding_steps(
     )
 
 
+def onboarding_presentation(
+    steps: Sequence[OnboardingStep],
+    *,
+    acknowledged: bool,
+    locale: str = "en",
+) -> OnboardingPresentation:
+    """Build the active-step or explicit completion presentation."""
+
+    total = len(steps)
+    completed = sum(step.complete for step in steps)
+    next_step = next((step for step in steps if not step.complete), None)
+    if next_step is None:
+        return OnboardingPresentation(
+            visible=not acknowledged,
+            complete=True,
+            current_key=None,
+            progress=localized_string(
+                "onboarding.complete.progress", locale=locale, total=total),
+            title=localized_string(
+                "onboarding.complete.title", locale=locale),
+            detail=localized_string(
+                "onboarding.complete.detail", locale=locale),
+            status=localized_string(
+                "onboarding.complete.status", locale=locale),
+            action_title=localized_string(
+                "onboarding.action.finish", locale=locale),
+            action_help=localized_string(
+                "onboarding.action.finish.help", locale=locale),
+        )
+    action_key = {
+        "permissions": "onboarding.action.open_system_settings",
+        "hotkey": "onboarding.action.hotkey",
+        "models": "onboarding.action.models",
+        "first_dictation": "onboarding.action.first_dictation",
+    }.get(next_step.key, "onboarding.action.continue")
+    help_key = (
+        "onboarding.action.open_system_settings.help"
+        if next_step.key == "permissions"
+        else "onboarding.action.help"
+    )
+    return OnboardingPresentation(
+        visible=not acknowledged,
+        complete=False,
+        current_key=next_step.key,
+        progress=localized_string(
+            "onboarding.progress", locale=locale,
+            completed=completed, total=total),
+        title=next_step.title,
+        detail=next_step.detail,
+        status=next_step.status,
+        action_title=localized_string(action_key, locale=locale),
+        action_help=localized_string(help_key, locale=locale),
+    )
+
+
 def _build_degraded_issues(
     *,
     service_status: str,
@@ -2270,6 +2538,144 @@ def _context_firewall_summary(
                else "results.firewall.promotion.many")
         return localized_string(key, locale=locale, count=count)
     return localized_string("results.firewall.unavailable", locale=locale)
+
+
+def normalize_result_evidence(
+    snapshot: Mapping[str, Any] | None,
+) -> ResultEvidenceInspection:
+    """Validate the private, on-demand latest-result reveal."""
+
+    expected = {
+        "schema_version", "kind", "alternatives",
+        "protected_anchors", "proof_edits", "timings_ms",
+    }
+    if (not isinstance(snapshot, Mapping) or set(snapshot) != expected
+            or snapshot.get("schema_version") != 1
+            or snapshot.get("kind") != "whisper-face/result-evidence"):
+        raise ValueError("latest-result evidence is malformed")
+
+    def private_items(key: str, *, limit: int, chars: int) -> tuple[str, ...]:
+        raw = snapshot.get(key)
+        if (not isinstance(raw, Sequence)
+                or isinstance(raw, (str, bytes)) or len(raw) > limit):
+            raise ValueError("latest-result evidence is malformed")
+        items = []
+        for value in raw:
+            if (not isinstance(value, str) or not value
+                    or "\x00" in value or len(value) > chars):
+                raise ValueError("latest-result evidence is malformed")
+            items.append(value)
+        return tuple(items)
+
+    alternatives = private_items("alternatives", limit=3, chars=2000)
+    anchors = private_items("protected_anchors", limit=64, chars=160)
+    raw_proof = snapshot.get("proof_edits")
+    if (not isinstance(raw_proof, Sequence)
+            or isinstance(raw_proof, (str, bytes)) or len(raw_proof) > 64):
+        raise ValueError("latest-result evidence is malformed")
+    proof_edits = []
+    proof_keys = {"kind", "before", "after", "accepted", "reason"}
+    for raw in raw_proof:
+        if not isinstance(raw, Mapping) or set(raw) != proof_keys:
+            raise ValueError("latest-result evidence is malformed")
+        kind = raw.get("kind")
+        before = raw.get("before")
+        after = raw.get("after")
+        accepted = raw.get("accepted")
+        reason = raw.get("reason")
+        if (not isinstance(kind, str) or not kind or len(kind) > 80
+                or "\x00" in kind
+                or not isinstance(before, str) or len(before) > 1000
+                or "\x00" in before
+                or not isinstance(after, str) or len(after) > 1000
+                or "\x00" in after or (not before and not after)
+                or not isinstance(accepted, bool)
+                or not isinstance(reason, str) or len(reason) > 240
+                or "\x00" in reason):
+            raise ValueError("latest-result evidence is malformed")
+        proof_edits.append(ProofEditInspection(
+            kind=kind,
+            before=before,
+            after=after,
+            accepted=accepted,
+            reason=reason,
+        ))
+
+    raw_timings = snapshot.get("timings_ms")
+    if not isinstance(raw_timings, Mapping) or any(
+            key not in RESULT_EVIDENCE_STAGES for key in raw_timings):
+        raise ValueError("latest-result evidence is malformed")
+    timings = []
+    for stage in RESULT_EVIDENCE_STAGES:
+        if stage not in raw_timings:
+            continue
+        value = _finite_number(raw_timings[stage])
+        if value is None or value < 0 or value > 3_600_000:
+            raise ValueError("latest-result evidence is malformed")
+        timings.append(StageTiming(stage, value))
+    return ResultEvidenceInspection(
+        alternatives=alternatives,
+        protected_anchors=anchors,
+        proof_edits=tuple(proof_edits),
+        timings=tuple(timings),
+    )
+
+
+def result_evidence_text(
+    evidence: ResultEvidenceInspection,
+    *,
+    locale: str = "en",
+) -> str:
+    """Format a transient, selectable latest-result evidence view."""
+
+    lines: list[str] = []
+
+    def section(key: str, rows: Sequence[str]) -> None:
+        lines.append(localized_string(key, locale=locale))
+        lines.extend(rows or (
+            localized_string("results.inspect.none", locale=locale),))
+        lines.append("")
+
+    section(
+        "results.inspect.alternatives",
+        tuple(f"{index}. {value}" for index, value in enumerate(
+            evidence.alternatives, 1)),
+    )
+    section(
+        "results.inspect.anchors",
+        tuple(f"• {value}" for value in evidence.protected_anchors),
+    )
+    proof_rows = []
+    for edit in evidence.proof_edits:
+        status = localized_string(
+            "results.inspect.proof.accepted"
+            if edit.accepted else "results.inspect.proof.rejected",
+            locale=locale,
+        )
+        row = f"{status} · {edit.kind}: {edit.before!r} → {edit.after!r}"
+        if edit.reason:
+            row += f"\n  {edit.reason}"
+        proof_rows.append(row)
+    section("results.inspect.proof", tuple(proof_rows))
+    timing_rows = []
+    for timing in evidence.timings:
+        label = localized_string(
+            f"results.inspect.stage.{timing.stage}", locale=locale)
+        value = (
+            f"{timing.milliseconds / 1000:.2f} s"
+            if timing.milliseconds >= 1000
+            else f"{timing.milliseconds:.1f} ms"
+        )
+        timing_rows.append(f"{label}: {value}")
+    section("results.inspect.timing", tuple(timing_rows))
+    rendered = "\n".join(lines).rstrip()
+    if not any((
+            evidence.alternatives,
+            evidence.protected_anchors,
+            evidence.proof_edits,
+            evidence.timings)):
+        return localized_string("results.inspect.empty", locale=locale)
+    return rendered
 
 
 def _build_result_inspection(
@@ -3574,6 +3980,20 @@ class WhisperFaceViewModel:
             )
         return self.state
 
+    def inspect_result_evidence(self) -> ResultEvidenceInspection:
+        """Reveal private latest-result detail without retaining it in state."""
+
+        try:
+            return normalize_result_evidence(
+                self.actions.inspect_result_evidence())
+        except Exception:
+            self.state = replace(
+                self.state,
+                notice=self.localized("results.inspect.empty"),
+                notice_level="error",
+            )
+            raise ValueError(self.state.notice) from None
+
     def play_retained_span(self) -> GUIState:
         try:
             played = bool(self.actions.play_retained_span())
@@ -3864,8 +4284,15 @@ try:  # The view-model above remains usable in headless test environments.
         NSColor,
         NSControlStateValueOff,
         NSControlStateValueOn,
+        NSAppearanceNameAqua,
+        NSAppearanceNameDarkAqua,
         NSEventModifierFlagCommand,
         NSFont,
+        NSFontDescriptorSystemDesignRounded,
+        NSImage,
+        NSImageScaleProportionallyUpOrDown,
+        NSImageView,
+        NSLineBorder,
         NSMakeRect,
         NSNoBorder,
         NSNoTitle,
@@ -3885,6 +4312,7 @@ try:  # The view-model above remains usable in headless test environments.
         NSWindowStyleMaskTitled,
     )
     from Foundation import NSLocale, NSObject, NSTimer, NSUserDefaults
+    from Quartz import CASpringAnimation
 
     APPKIT_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised only outside macOS installs
@@ -3901,6 +4329,20 @@ if APPKIT_AVAILABLE:
     _REVIEW = NSColor.systemOrangeColor()
     _CARD = NSColor.controlBackgroundColor()
 
+    def _theme_color(
+            color: tuple[float, float, float], alpha: float = 1.0) -> Any:
+        return NSColor.colorWithCalibratedRed_green_blue_alpha_(
+            color[0], color[1], color[2], alpha)
+
+    def _uses_dark_appearance(view: Any) -> bool:
+        try:
+            match = view.effectiveAppearance() \
+                .bestMatchFromAppearancesWithNames_(
+                    [NSAppearanceNameAqua, NSAppearanceNameDarkAqua])
+            return str(match) == str(NSAppearanceNameDarkAqua)
+        except Exception:
+            return False
+
     def _accessible(view: Any, label: str, help_text: str = "") -> Any:
         """Apply explicit VoiceOver copy without depending on visual text."""
         try:
@@ -3913,17 +4355,30 @@ if APPKIT_AVAILABLE:
 
     def _label(text: str, frame: Any, *, size: float = 13,
                weight: str = "regular", color: Any = None,
-               accessibility_label: str = "") -> Any:
+               accessibility_label: str = "", rounded: bool = False,
+               wrap: bool = False, alignment: int | None = None) -> Any:
         label = NSTextField.labelWithString_(text)
         label.setFrame_(frame)
-        if weight == "bold":
-            label.setFont_(NSFont.systemFontOfSize_weight_(size, 0.6))
-        elif weight == "medium":
-            label.setFont_(NSFont.systemFontOfSize_weight_(size, 0.35))
-        else:
-            label.setFont_(NSFont.systemFontOfSize_(size))
+        font_weight = (
+            0.6 if weight == "bold" else 0.35
+            if weight == "medium" else 0.0)
+        font = NSFont.systemFontOfSize_weight_(size, font_weight)
+        if rounded:
+            try:
+                descriptor = font.fontDescriptor().fontDescriptorWithDesign_(
+                    NSFontDescriptorSystemDesignRounded)
+                if descriptor is not None:
+                    font = NSFont.fontWithDescriptor_size_(descriptor, size)
+            except Exception:
+                pass
+        label.setFont_(font)
         label.setTextColor_(color or _TEXT)
         label.setLineBreakMode_(0)
+        if wrap:
+            label.setUsesSingleLineMode_(False)
+            label.setMaximumNumberOfLines_(0)
+        if alignment is not None:
+            label.setAlignment_(alignment)
         return _accessible(label, accessibility_label or text)
 
     def _button(title: str, frame: Any, target: Any, action: str,
@@ -3955,6 +4410,9 @@ if APPKIT_AVAILABLE:
             self.dynamic: dict[str, Any] = {}
             self.timer = None
             self.defaults = None
+            self._face_images: dict[tuple[str, bool], Any] = {}
+            self._onboarding_stage: str | None = None
+            self._onboarding_presentation: OnboardingPresentation | None = None
             if read_system_state:
                 try:
                     preferred = NSLocale.preferredLanguages()
@@ -3982,6 +4440,89 @@ if APPKIT_AVAILABLE:
         @objc.python_method
         def _l(self, key: str, **values: Any) -> str:
             return self.view_model.localized(key, **values)
+
+        @objc.python_method
+        def _face_image(self, face: str, *, talk: bool) -> Any:
+            key = (face, talk)
+            if key not in self._face_images:
+                path = Path(__file__).resolve().parent / "icons" / "faces" / (
+                    f"{face}-{'talk' if talk else 'idle'}.svg")
+                image = NSImage.alloc().initWithContentsOfFile_(str(path))
+                if image is not None:
+                    image.setTemplate_(False)
+                self._face_images[key] = image
+            return self._face_images[key]
+
+        @objc.python_method
+        def _apply_onboarding_theme(
+                self, state: GUIState,
+                presentation: OnboardingPresentation) -> None:
+            palette = palette_for_appearance(
+                _uses_dark_appearance(self.window))
+            card = self.dynamic["onboarding_card"]
+            card.setFillColor_(_theme_color(palette.bg))
+            card.setBorderColor_(_theme_color(palette.line, 0.22))
+            chip = self.dynamic["onboarding_face_chip"]
+            chip.setFillColor_(_theme_color(FACE_CHIP_COLORS[state.face]))
+            self.dynamic["onboarding_progress"].setTextColor_(
+                _theme_color(palette.brand))
+            self.dynamic["onboarding_title"].setTextColor_(
+                _theme_color(palette.ink))
+            self.dynamic["onboarding_detail"].setTextColor_(
+                _theme_color(palette.ink_soft))
+            self.dynamic["onboarding_face_kicker"].setTextColor_(
+                _theme_color(palette.ink_soft))
+            self.dynamic["onboarding_status"].setTextColor_(
+                _theme_color(
+                    palette.brand if presentation.complete
+                    else palette.accent))
+            try:
+                self.dynamic["onboarding_action"].setBezelColor_(
+                    _theme_color(palette.brand))
+            except Exception:
+                pass
+            for step, step_card, control in zip(
+                    state.onboarding_steps,
+                    self.dynamic["onboarding_step_cards"],
+                    self.dynamic["onboarding_steps"]):
+                current = step.key == presentation.current_key
+                if step.complete:
+                    fill = _theme_color(palette.brand, 0.20)
+                    text = _theme_color(palette.brand)
+                elif current:
+                    fill = _theme_color(palette.accent, 0.28)
+                    text = _theme_color(palette.ink)
+                else:
+                    fill = _theme_color(palette.surface, 0.76)
+                    text = _theme_color(palette.ink_soft)
+                step_card.setFillColor_(fill)
+                control.setTextColor_(text)
+
+        @objc.python_method
+        def _animate_onboarding_face(
+                self, presentation: OnboardingPresentation) -> None:
+            stage = "complete" if presentation.complete else (
+                presentation.current_key or "hidden")
+            if (not presentation.visible or stage == self._onboarding_stage
+                    or not bool(self.window.isVisible())):
+                return
+            self._onboarding_stage = stage
+            if self.view_model.state.prefers_reduced_motion:
+                return
+            layer = self.dynamic["onboarding_face_chip"].layer()
+            if layer is None:
+                return
+            spec = MOTION_SPECS["pop"]
+            spring = CASpringAnimation.animationWithKeyPath_("transform.scale")
+            spring.setFromValue_(spec.squash_x)
+            spring.setToValue_(1.0)
+            spring.setMass_(spec.mass)
+            spring.setStiffness_(spec.stiffness)
+            spring.setDamping_(spec.damping)
+            spring.setInitialVelocity_(spec.initial_velocity)
+            spring.setDuration_(spec.duration)
+            spring.setRemovedOnCompletion_(True)
+            layer.addAnimation_forKey_(spring, "onboarding-soft-pop")
 
         def initWithViewModel_(self, view_model: WhisperFaceViewModel):
             self = objc.super(WhisperFaceWindowController, self).init()
@@ -4059,6 +4600,7 @@ if APPKIT_AVAILABLE:
                     self.dynamic["copy_outbox_button"],
                 ),
                 "Results": (
+                    self.dynamic["result_inspect_button"],
                     self.dynamic["result_play_audio_button"],
                     self.dynamic["result_clear_audio_button"],
                 ),
@@ -4119,59 +4661,99 @@ if APPKIT_AVAILABLE:
             hero.addSubview_(fix)
             hero.addSubview_(copy_outbox)
             page.addSubview_(hero)
-            self.dynamic.update(overview_phase=phase, overview_status=status,
-                                overview_detail=detail, overview_engine=engine,
-                                overview_outbox=outbox,
-                                pause_button=pause,
-                                review_issue_button=fix,
-                                copy_outbox_button=copy_outbox)
+            self.dynamic.update(
+                overview_hero=hero,
+                overview_phase=phase,
+                overview_status=status,
+                overview_detail=detail,
+                overview_engine=engine,
+                overview_outbox=outbox,
+                pause_button=pause,
+                review_issue_button=fix,
+                copy_outbox_button=copy_outbox,
+            )
 
-            onboarding = _card(NSMakeRect(0, 84, 758, 138))
+            onboarding = _card(NSMakeRect(0, 0, 758, 402))
+            onboarding.setBorderType_(NSLineBorder)
+            onboarding.setBorderWidth_(1.0)
             _accessible(
                 onboarding,
                 self._l("overview.accessibility.onboarding.steps"))
+            face_chip = _card(NSMakeRect(28, 138, 196, 196))
+            face_chip.setCornerRadius_(58.0)
+            face_chip.setWantsLayer_(True)
+            face_image = NSImageView.alloc().initWithFrame_(
+                NSMakeRect(53, 163, 146, 146))
+            face_image.setImageScaling_(NSImageScaleProportionallyUpOrDown)
+            face_image.setEditable_(False)
+            onboarding.addSubview_(face_chip)
+            onboarding.addSubview_(face_image)
+            face_kicker = _label(
+                self._l("onboarding.privacy"),
+                NSMakeRect(28, 93, 196, 38),
+                size=11, weight="medium", rounded=True, wrap=True,
+                alignment=1)
+            onboarding.addSubview_(face_kicker)
             onboarding_progress = _label(
                 self._l("overview.onboarding.initial_progress"),
-                NSMakeRect(20, 105, 280, 18),
-                size=10, weight="bold", color=_ACCENT)
+                NSMakeRect(260, 345, 450, 18),
+                size=10, weight="bold", color=_ACCENT, rounded=True)
             onboarding_title = _label(
                 self._l("onboarding.permissions.title"),
-                NSMakeRect(20, 74, 540, 27),
-                size=17, weight="bold")
+                NSMakeRect(258, 269, 458, 68),
+                size=30, weight="bold", rounded=True, wrap=True)
             onboarding_detail = _label(
-                "", NSMakeRect(20, 48, 540, 22), size=11, color=_SECONDARY)
+                "", NSMakeRect(260, 202, 440, 62),
+                size=13, color=_SECONDARY, wrap=True)
+            onboarding_status = _label(
+                "", NSMakeRect(260, 170, 310, 22),
+                size=12, weight="bold", rounded=True)
             onboarding_action = _button(
                 self._l("onboarding.action.open_system_settings"),
-                NSMakeRect(566, 68, 160, 36),
+                NSMakeRect(258, 116, 210, 42),
                 self, "continueSetup:",
                 help_text=self._l("onboarding.action.open_system_settings.help"))
             onboarding_action.setKeyEquivalent_("\r")
             onboarding.addSubview_(onboarding_progress)
             onboarding.addSubview_(onboarding_title)
             onboarding.addSubview_(onboarding_detail)
+            onboarding.addSubview_(onboarding_status)
             onboarding.addSubview_(onboarding_action)
             onboarding_steps: list[Any] = []
+            onboarding_step_cards: list[Any] = []
             for index, step_key in enumerate((
                     "permissions", "hotkey", "models", "first_dictation")):
+                step_card = _card(NSMakeRect(
+                    18 + index * 181, 18, 171, 58))
+                step_card.setCornerRadius_(13.0)
                 step = _label(
                     self._l(f"onboarding.step.{step_key}"),
-                    NSMakeRect(20 + index * 178, 17, 172, 20),
-                    size=10, weight="medium", color=_SECONDARY)
-                onboarding.addSubview_(step)
+                    NSMakeRect(11, 8, 149, 42),
+                    size=9.5, weight="medium", color=_SECONDARY,
+                    rounded=True, wrap=True)
+                step_card.addSubview_(step)
+                onboarding.addSubview_(step_card)
                 onboarding_steps.append(step)
+                onboarding_step_cards.append(step_card)
             page.addSubview_(onboarding)
             self.dynamic.update(
                 onboarding_card=onboarding,
+                onboarding_face_chip=face_chip,
+                onboarding_face=face_image,
+                onboarding_face_kicker=face_kicker,
                 onboarding_progress=onboarding_progress,
                 onboarding_title=onboarding_title,
                 onboarding_detail=onboarding_detail,
+                onboarding_status=onboarding_status,
                 onboarding_action=onboarding_action,
                 onboarding_steps=tuple(onboarding_steps),
+                onboarding_step_cards=tuple(onboarding_step_cards),
             )
 
             cards = (("overview.metric.last.heading", "overview_last"),
                      ("overview.metric.words.heading", "overview_words"),
                      ("overview.metric.saved.heading", "overview_saved"))
+            metric_cards: list[Any] = []
             for index, (heading_key, key) in enumerate(cards):
                 card = _card(NSMakeRect(index * 253, 0, 239, 76))
                 card.addSubview_(_label(
@@ -4184,6 +4766,8 @@ if APPKIT_AVAILABLE:
                 card.addSubview_(value)
                 page.addSubview_(card)
                 self.dynamic[key] = value
+                metric_cards.append(card)
+            self.dynamic["overview_metric_cards"] = tuple(metric_cards)
 
         def _build_results(self, page: Any) -> None:
             page.addSubview_(_label(
@@ -4191,7 +4775,15 @@ if APPKIT_AVAILABLE:
                 size=22, weight="bold"))
             page.addSubview_(_label(
                 self._l("results.subtitle"),
-                NSMakeRect(5, 326, 690, 20), size=13, color=_SECONDARY))
+                NSMakeRect(5, 326, 575, 20), size=13, color=_SECONDARY))
+            inspect_evidence = _button(
+                self._l("results.inspect.action"),
+                NSMakeRect(600, 319, 158, 30),
+                self,
+                "inspectResultEvidence:",
+                help_text=self._l("results.inspect.action.help"),
+            )
+            page.addSubview_(inspect_evidence)
 
             summary_card = _card(NSMakeRect(0, 216, 758, 89))
             result_summary = _label(
@@ -4268,6 +4860,7 @@ if APPKIT_AVAILABLE:
                 result_engine=result_engine,
                 result_mode=result_mode,
                 result_audio=result_audio,
+                result_inspect_button=inspect_evidence,
                 result_play_audio_button=play_audio,
                 result_clear_audio_button=clear_audio,
                 result_context=context,
@@ -4335,7 +4928,7 @@ if APPKIT_AVAILABLE:
                 ("tones", "settings.personalize.tones", "editTone:"),
                 ("snippets", "settings.personalize.snippets", "editSnippets:"),
                 ("vocabulary", "settings.personalize.vocabulary", "editVocabulary:"),
-                ("corrections", "settings.personalize.corrections", "forgetCorrection:"),
+                ("corrections", "settings.personalize.corrections", "reviewCorrections:"),
                 ("keywords", "settings.personalize.keywords", "inspectKeywords:"),
             )
             for index, (key, title_key, selector) in enumerate(rows):
@@ -4347,7 +4940,7 @@ if APPKIT_AVAILABLE:
                 detail = _label("", NSMakeRect(18, 4, 550, 17),
                                 size=10, color=_SECONDARY)
                 action_key = (
-                    "settings.action.forget" if key == "corrections" else
+                    "settings.action.review" if key == "corrections" else
                     "settings.action.inspect" if key == "keywords" else
                     "settings.action.edit")
                 help_key = (
@@ -4701,6 +5294,9 @@ if APPKIT_AVAILABLE:
             self.render()
             self.window.makeKeyAndOrderFront_(None)
             NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            if self._onboarding_presentation is not None:
+                self._animate_onboarding_face(
+                    self._onboarding_presentation)
             if self.timer is None:
                 self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                     2.0, self, "refreshTimer:", None, True)
@@ -4758,10 +5354,6 @@ if APPKIT_AVAILABLE:
 
         def render(self) -> None:
             state = self.view_model.state
-            if state.onboarding_complete and not state.onboarding_acknowledged:
-                if self.defaults is not None:
-                    self.defaults.setBool_forKey_(True, "onboardingComplete")
-                state = self.view_model.acknowledge_onboarding()
             for section, page in self.pages.items():
                 page.setHidden_(section != state.section)
             selected = SECTIONS.index(state.section)
@@ -4855,14 +5447,17 @@ if APPKIT_AVAILABLE:
                     label=self._l(label_key),
                 )
 
-            completed = sum(
-                step.complete for step in state.onboarding_steps)
-            next_step = next(
-                (step for step in state.onboarding_steps if not step.complete),
-                None,
+            presentation = onboarding_presentation(
+                state.onboarding_steps,
+                acknowledged=state.onboarding_acknowledged,
+                locale=self.view_model.locale,
             )
+            self._onboarding_presentation = presentation
             self.dynamic["onboarding_card"].setHidden_(
-                next_step is None or state.onboarding_acknowledged)
+                not presentation.visible)
+            self.dynamic["overview_hero"].setHidden_(presentation.visible)
+            for card in self.dynamic["overview_metric_cards"]:
+                card.setHidden_(presentation.visible)
             for control, step in zip(
                     self.dynamic["onboarding_steps"], state.onboarding_steps):
                 step_label = self._l(f"onboarding.step.{step.key}")
@@ -4871,9 +5466,6 @@ if APPKIT_AVAILABLE:
                     step=step_label,
                     status=step.status)
                 control.setStringValue_(summary)
-                control.setTextColor_(
-                    _ACCENT if step.complete
-                    else (_TEXT if step is next_step else _SECONDARY))
                 sync_accessibility(
                     control,
                     summary,
@@ -4882,48 +5474,56 @@ if APPKIT_AVAILABLE:
                         step=step_label,
                         status=step.status),
                 )
-            if next_step is not None:
-                self.dynamic["onboarding_progress"].setStringValue_(
-                    self._l(
-                        "onboarding.progress", completed=completed,
-                        total=len(state.onboarding_steps)))
-                self.dynamic["onboarding_title"].setStringValue_(next_step.title)
-                self.dynamic["onboarding_detail"].setStringValue_(next_step.detail)
-                action_title = {
-                    "permissions": self._l(
-                        "onboarding.action.open_system_settings"),
-                    "hotkey": self._l("onboarding.action.hotkey"),
-                    "models": self._l("onboarding.action.models"),
-                    "first_dictation": self._l(
-                        "onboarding.action.first_dictation"),
-                }.get(next_step.key, self._l("onboarding.action.continue"))
-                self.dynamic["onboarding_action"].setTitle_(action_title)
-                try:
-                    self.dynamic["onboarding_action"].setAccessibilityHelp_(
-                        self._l("onboarding.action.open_system_settings.help")
-                        if next_step.key == "permissions" else self._l(
-                            "onboarding.action.help"))
-                except Exception:
-                    pass
-                for key, label_key in (
-                    ("onboarding_progress",
-                     "overview.accessibility.onboarding.progress"),
-                    ("onboarding_title",
-                     "overview.accessibility.onboarding.title"),
-                    ("onboarding_detail",
-                     "overview.accessibility.onboarding.detail"),
-                ):
-                    sync_accessibility(
-                        self.dynamic[key],
-                        str(self.dynamic[key].stringValue()),
-                        label=self._l(label_key),
-                    )
+            self.dynamic["onboarding_progress"].setStringValue_(
+                presentation.progress)
+            self.dynamic["onboarding_title"].setStringValue_(
+                presentation.title)
+            self.dynamic["onboarding_detail"].setStringValue_(
+                presentation.detail)
+            self.dynamic["onboarding_status"].setStringValue_(
+                presentation.status)
+            self.dynamic["onboarding_action"].setTitle_(
+                presentation.action_title)
+            try:
+                self.dynamic["onboarding_action"].setAccessibilityHelp_(
+                    presentation.action_help)
+            except Exception:
+                pass
+            face_name = self._l(f"settings.face.{state.face}")
+            self.dynamic["onboarding_face"].setImage_(
+                self._face_image(state.face, talk=presentation.complete))
+            sync_accessibility(
+                self.dynamic["onboarding_face"], face_name,
+                label=self._l(
+                    "overview.accessibility.onboarding.face",
+                    face=face_name),
+            )
+            for key, label_key in (
+                ("onboarding_progress",
+                 "overview.accessibility.onboarding.progress"),
+                ("onboarding_title",
+                 "overview.accessibility.onboarding.title"),
+                ("onboarding_detail",
+                 "overview.accessibility.onboarding.detail"),
+            ):
                 sync_accessibility(
-                    self.dynamic["onboarding_action"], next_step.status,
-                    label=action_title,
+                    self.dynamic[key],
+                    str(self.dynamic[key].stringValue()),
+                    label=self._l(label_key),
                 )
+            sync_accessibility(
+                self.dynamic["onboarding_status"], presentation.status,
+                label=presentation.status,
+            )
+            sync_accessibility(
+                self.dynamic["onboarding_action"], presentation.status,
+                label=presentation.action_title,
+            )
+            self._apply_onboarding_theme(state, presentation)
+            self._animate_onboarding_face(presentation)
 
             result = state.last_result
+            self.dynamic["result_inspect_button"].setEnabled_(result.available)
             self.dynamic["result_summary"].setStringValue_(result.summary)
             self.dynamic["result_engine"].setStringValue_(
                 self._l("results.engine.session", engine=result.engine))
@@ -5411,13 +6011,15 @@ if APPKIT_AVAILABLE:
                     str(ban_editor.string()).splitlines())
                 self.render()
 
-        def forgetCorrection_(self, _sender: Any) -> None:
+        def reviewCorrections_(self, _sender: Any) -> None:
             corrections = self.view_model.state.settings.corrections
             if not corrections:
                 return
             alert = NSAlert.alloc().init()
             alert.setMessageText_(self._l(
                 "settings.personalize.corrections"))
+            alert.setInformativeText_(self._l(
+                "settings.dialog.correction.chooser.message"))
             chooser = NSPopUpButton.alloc().initWithFrame_pullsDown_(
                 NSMakeRect(0, 0, 500, 28), False)
             chooser.addItemsWithTitles_([
@@ -5430,17 +6032,20 @@ if APPKIT_AVAILABLE:
                 self._l(
                     "settings.dialog.correction.chooser.help"))
             alert.setAccessoryView_(chooser)
-            alert.addButtonWithTitle_(self._l("settings.action.forget"))
-            alert.addButtonWithTitle_(self._l("settings.action.cancel"))
+            alert.addButtonWithTitle_(self._l("settings.action.review"))
+            alert.addButtonWithTitle_(self._l("settings.action.done"))
             if alert.runModal() != 1000:
                 return
             selected = corrections[chooser.indexOfSelectedItem()]
-            if self._confirm(
-                    self._l("settings.dialog.forget.title"),
-                    self._l("settings.dialog.forget.message",
-                                     source=selected.source,
-                                     target=selected.target),
-                    self._l("settings.action.forget")):
+            review = NSAlert.alloc().init()
+            review.setMessageText_(
+                f"{selected.source} → {selected.target}")
+            review.setInformativeText_(correction_review_text(
+                selected, locale=self.locale))
+            review.addButtonWithTitle_(
+                self._l("settings.action.forget_mapping"))
+            review.addButtonWithTitle_(self._l("settings.action.done"))
+            if review.runModal() == 1000:
                 self.view_model.forget_learned(selected.kind, selected.key)
                 self.render()
 
@@ -6233,6 +6838,26 @@ if APPKIT_AVAILABLE:
             self.view_model.cancel_risky_action_confirmation()
             self.render()
 
+        def inspectResultEvidence_(self, _sender: Any) -> None:
+            try:
+                evidence = self.view_model.inspect_result_evidence()
+            except ValueError:
+                self.render()
+                return
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(self._l("results.inspect.title"))
+            alert.setInformativeText_(self._l("results.inspect.message"))
+            scroll, editor = self._text_editor(
+                NSMakeRect(0, 0, 580, 320),
+                result_evidence_text(evidence, locale=self.view_model.locale),
+                label=self._l("results.accessibility.inspect.content"),
+                help_text=self._l("results.inspect.message"),
+            )
+            editor.setEditable_(False)
+            alert.setAccessoryView_(scroll)
+            alert.addButtonWithTitle_(self._l("settings.action.done"))
+            alert.runModal()
+
         def playRetainedSpan_(self, _sender: Any) -> None:
             self.view_model.play_retained_span()
             self.render()
@@ -6246,7 +6871,12 @@ if APPKIT_AVAILABLE:
             self.render()
 
         def continueSetup_(self, _sender: Any) -> None:
-            if self.view_model.permission_recovery_needed():
+            state = self.view_model.state
+            if state.onboarding_complete:
+                if self.defaults is not None:
+                    self.defaults.setBool_forKey_(True, "onboardingComplete")
+                self.view_model.acknowledge_onboarding()
+            elif self.view_model.permission_recovery_needed():
                 self.view_model.open_system_settings()
             else:
                 self.view_model.show_next_onboarding_step()
@@ -6580,7 +7210,7 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                     status=localized_string("onboarding.status.attention")),
             "onboarding walkthrough accessibility")
         require(
-            int(controller._configure_key_view_loop(model.state)) >= 3,
+            int(controller._configure_key_view_loop(model.state)) >= 2,
             "overview key-view loop")
         require(
             controller.section_control.nextKeyView() is not None,
@@ -6638,7 +7268,30 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         model.refresh()
         controller.render()
         require(model.state.onboarding_complete, "onboarding completion")
-        require(model.state.onboarding_acknowledged, "onboarding acknowledgement")
+        require(
+            not model.state.onboarding_acknowledged,
+            "onboarding awaits explicit acknowledgement")
+        require(
+            not bool(controller.dynamic["onboarding_card"].isHidden()),
+            "onboarding completion visible")
+        require(
+            str(controller.dynamic["onboarding_title"].stringValue()) ==
+            localized_string("onboarding.complete.title"),
+            "onboarding completion title")
+        require(
+            str(controller.dynamic["onboarding_action"].title()) ==
+            localized_string("onboarding.action.finish"),
+            "onboarding completion action")
+        controller.continueSetup_(None)
+        require(
+            model.state.onboarding_acknowledged,
+            "onboarding explicit acknowledgement")
+        require(
+            bool(controller.dynamic["onboarding_card"].isHidden()),
+            "onboarding hidden after acknowledgement")
+        require(
+            not bool(controller.dynamic["overview_hero"].isHidden()),
+            "overview visible after onboarding")
         require(
             str(controller.dynamic["overview_phase"].stringValue()) ==
             localized_string("overview.phase.ready"),
@@ -6686,6 +7339,16 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             not bool(controller.dynamic[
                 "result_consequence_advisory"].isHidden()),
             "review consequence guidance visibility")
+        require(
+            str(controller.dynamic["result_inspect_button"].action()) ==
+            "inspectResultEvidence:",
+            "latest-result evidence action")
+        require(
+            accessible_value(
+                controller.dynamic["result_inspect_button"],
+                "accessibilityHelp") == localized_string(
+                    "results.inspect.action.help"),
+            "latest-result evidence accessibility")
 
         for index, section in enumerate(SECTIONS):
             controller.section_control.setSelectedSegment_(index)
@@ -6978,6 +7641,7 @@ __all__ = [
     "AcousticKeywordCandidate",
     "AcousticKeywordInspection",
     "AppToneSetting",
+    "CorrectionScopeSetting",
     "CorrectionSetting",
     "DROP_TARGET_MAX_PHRASE_CHARS",
     "DropTargetPreview",
@@ -6991,12 +7655,16 @@ __all__ = [
     "GUIState",
     "ModelStatus",
     "NativeAppKitSmokeContract",
+    "OnboardingPresentation",
     "OnboardingStep",
     "POINT_AND_SPEAK_MAX_PHRASE_CHARS",
     "PointAndSpeakActionReceipt",
     "PointAndSpeakActionResult",
     "PointAndSpeakPreview",
     "PointAndSpeakReceipt",
+    "ProofEditInspection",
+    "RESULT_EVIDENCE_STAGES",
+    "ResultEvidenceInspection",
     "ResultInspection",
     "RevealedDemonstrationDraft",
     "RevealedVoiceDraft",
@@ -7005,24 +7673,29 @@ __all__ = [
     "STRING_CATALOGS",
     "SUPPORTED_LOCALES",
     "SnippetSetting",
+    "StageTiming",
     "UnifiedSettings",
     "VoiceDraftMetadata",
     "VoiceDraftCopyReceipt",
     "WhisperFaceGUI",
     "WhisperFaceViewModel",
+    "correction_review_text",
     "create_gui",
     "localized_string",
     "native_appkit_smoke_contract",
+    "onboarding_presentation",
     "normalize_snapshot",
     "normalize_acoustic_keyword_inspection",
     "normalize_point_and_speak_preview",
     "normalize_point_and_speak_action",
     "normalize_drop_target_preview",
     "normalize_email_compose_receipt",
+    "normalize_result_evidence",
     "normalize_voice_draft_copy_receipt",
     "normalize_settings",
     "run_native_appkit_smoke",
     "resolve_locale",
+    "result_evidence_text",
     "support_snapshot_text",
     "tone_for_app_index",
 ]

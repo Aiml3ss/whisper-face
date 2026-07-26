@@ -28,9 +28,11 @@ from whisper_face_gui import (
     STRING_CATALOGS,
     SUPPORTED_LOCALES,
     WhisperFaceViewModel,
+    correction_review_text,
     create_gui,
     localized_string,
     native_appkit_smoke_contract,
+    onboarding_presentation,
     normalize_email_compose_receipt,
     normalize_voice_draft_clear_receipt,
     normalize_voice_draft_copy_receipt,
@@ -38,8 +40,10 @@ from whisper_face_gui import (
     normalize_acoustic_keyword_inspection,
     normalize_drop_target_preview,
     normalize_point_and_speak_preview,
+    normalize_result_evidence,
     normalize_snapshot,
     normalize_settings,
+    result_evidence_text,
     run_native_appkit_smoke,
     resolve_locale,
     set_accessible_text,
@@ -334,7 +338,14 @@ class SnapshotTests(unittest.TestCase):
             "banned_vocabulary": "not a list",
             "corrections": [
                 {"key": "gwen", "source": "Gwen", "target": "Qwen",
-                 "count": "3", "kind": "correction"},
+                 "count": "3", "kind": "correction",
+                 "global_decision": "active",
+                 "app_scopes": [{
+                     "bundle": "com.example.mail",
+                     "name": "Mail",
+                     "count": 2,
+                     "decision": "active",
+                 }]},
                 {"key": "bad", "source": "", "target": "ignored"},
             ],
         })
@@ -345,6 +356,44 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(settings.manual_vocabulary, ("Qwen", "Whisper Face"))
         self.assertEqual(settings.banned_vocabulary, ())
         self.assertEqual(settings.corrections[0].count, 3)
+        self.assertEqual(settings.corrections[0].global_decision, "active")
+        self.assertEqual(settings.corrections[0].app_scopes[0].name, "Mail")
+
+    def test_correction_review_explains_scope_reason_and_local_storage(self):
+        active = normalize_settings({"corrections": [{
+            "key": "gwen",
+            "source": "Gwen",
+            "target": "Qwen",
+            "count": 2,
+            "kind": "correction",
+            "global_decision": "learning",
+            "app_scopes": [{
+                "bundle": "com.example.mail",
+                "name": "Mail",
+                "count": 2,
+                "decision": "active",
+            }],
+        }]}).corrections[0]
+
+        review = correction_review_text(active)
+
+        self.assertIn("Applies: Whole-word matches in Mail.", review)
+        self.assertIn("passed the local safety checks in Mail", review)
+        self.assertIn("Observed in: Mail 2×.", review)
+        self.assertIn("never audio or surrounding transcript", review)
+
+        held = normalize_settings({"corrections": [{
+            "key": "gwen",
+            "source": "Gwen",
+            "target": "Qwen",
+            "count": 3,
+            "kind": "correction",
+            "global_decision": "held_back",
+        }]}).corrections[0]
+        self.assertIn(
+            "Held back because the local correction cases disagree",
+            correction_review_text(held),
+        )
 
     def test_localization_catalog_formats_and_falls_back_to_english(self):
         self.assertEqual(SUPPORTED_LOCALES, ("en",))
@@ -381,6 +430,11 @@ class SnapshotTests(unittest.TestCase):
             "onboarding.step.summary",
             "onboarding.action.open_system_settings",
             "onboarding.action.open_system_settings.help",
+            "onboarding.action.finish",
+            "onboarding.complete.title",
+            "onboarding.complete.detail",
+            "onboarding.privacy",
+            "overview.accessibility.onboarding.face",
             "overview.accessibility.onboarding.steps",
             "overview.accessibility.onboarding.step",
             "settings.action.diagnostics",
@@ -561,6 +615,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertIn("command-d:diagnostics", contract.key_equivalents)
         self.assertIn("select_section", contract.model_actions)
         self.assertIn("open_system_settings", contract.model_actions)
+        self.assertIn("acknowledge_onboarding", contract.model_actions)
         self.assertIn("forget_snippet", contract.model_actions)
         self.assertIn("preview_point_and_speak", contract.model_actions)
         self.assertIn("issue_point_and_speak_nonce", contract.model_actions)
@@ -705,6 +760,9 @@ class SnapshotTests(unittest.TestCase):
             "last_cleanup_edits": ["private rewrite", "another edit"],
             "last_proof_edits_accepted": 1,
             "last_proof_edits_rejected": 2,
+            "last_result_evidence": {
+                "alternatives": ["private latest evidence"],
+            },
             "transcript": "private dictation",
             "selection": "private selection",
             "context": "private context",
@@ -735,7 +793,7 @@ class SnapshotTests(unittest.TestCase):
                 "private dictation", "private selection", "private context",
                 "/Users/example/private.log", "private dictionary",
                 "private snippet", "private correction", "private machine",
-                "private rewrite", "another edit"):
+                "private rewrite", "another edit", "private latest evidence"):
             self.assertNotIn(private_value, first)
 
         poisoned = support_snapshot_text(normalize_snapshot({
@@ -834,6 +892,36 @@ class SnapshotTests(unittest.TestCase):
         )
         runtime["last_word_count"] = 5
         self.assertTrue(model.refresh().onboarding_complete)
+
+    def test_first_run_presentation_keeps_completion_visible_until_acknowledged(self):
+        first_run = normalize_snapshot({
+            "microphone_status": "Needs attention",
+            "accessibility_status": "Needs attention",
+        })
+        active = onboarding_presentation(
+            first_run.onboarding_steps, acknowledged=False)
+        self.assertTrue(active.visible)
+        self.assertFalse(active.complete)
+        self.assertEqual(active.current_key, "permissions")
+        self.assertEqual(active.title, "First, let your face listen.")
+        self.assertEqual(active.action_title, "Open System Settings")
+
+        complete = normalize_snapshot({
+            "microphone_status": "Ready",
+            "accessibility_status": "Granted",
+            "hotkey_practiced": True,
+            "models": [{"name": "Parakeet", "status": "Running"}],
+            "last_word_count": 5,
+        })
+        celebration = onboarding_presentation(
+            complete.onboarding_steps, acknowledged=False)
+        self.assertTrue(celebration.visible)
+        self.assertTrue(celebration.complete)
+        self.assertIsNone(celebration.current_key)
+        self.assertEqual(celebration.title, "Your face works.")
+        self.assertEqual(celebration.action_title, "Start Dictating")
+        self.assertFalse(onboarding_presentation(
+            complete.onboarding_steps, acknowledged=True).visible)
 
     def test_onboarding_copy_explains_observed_practice_and_recovery(self):
         state = normalize_snapshot({
@@ -979,6 +1067,50 @@ class SnapshotTests(unittest.TestCase):
         self.assertFalse(hasattr(result, "compiler_details"))
         self.assertTrue(state.prefers_reduced_motion)
 
+    def test_explicit_result_evidence_reveal_is_strict_and_private(self):
+        payload = {
+            "schema_version": 1,
+            "kind": "whisper-face/result-evidence",
+            "alternatives": ["private alternative text"],
+            "protected_anchors": ["Qwen", "Project Bluebird"],
+            "proof_edits": [{
+                "kind": "filler",
+                "before": "um",
+                "after": "",
+                "accepted": True,
+                "reason": "allowlisted filler",
+            }, {
+                "kind": "rewrite",
+                "before": "private before",
+                "after": "private after",
+                "accepted": False,
+                "reason": "changed protected meaning",
+            }],
+            "timings_ms": {
+                "release": 842.2,
+                "asr": 410.0,
+                "cleanup": 87.5,
+            },
+        }
+
+        evidence = normalize_result_evidence(payload)
+        rendered = result_evidence_text(evidence)
+
+        self.assertIn("private alternative text", rendered)
+        self.assertIn("• Project Bluebird", rendered)
+        self.assertIn("ACCEPTED · filler", rendered)
+        self.assertIn("REJECTED · rewrite", rendered)
+        self.assertIn("Total release: 842.2 ms", rendered)
+        self.assertNotIn("private alternative text", repr(evidence))
+        self.assertNotIn("private before", repr(evidence.proof_edits[1]))
+
+        poisoned = dict(payload, transcript="must not enter the reveal")
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            normalize_result_evidence(poisoned)
+        poisoned = dict(payload, timings_ms={"unknown": 1})
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            normalize_result_evidence(poisoned)
+
     def test_review_advisory_is_scoped_to_the_review_route(self):
         for route in ("standard", "protected", "verified", "unavailable"):
             with self.subTest(route=route):
@@ -1019,6 +1151,31 @@ class SnapshotTests(unittest.TestCase):
 
 
 class ViewModelTests(unittest.TestCase):
+    def test_result_evidence_is_fetched_only_on_explicit_inspection(self):
+        reads = []
+        private = {
+            "schema_version": 1,
+            "kind": "whisper-face/result-evidence",
+            "alternatives": ["private latest alternative"],
+            "protected_anchors": [],
+            "proof_edits": [],
+            "timings_ms": {},
+        }
+        model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {"last_word_count": 4},
+            inspect_result_evidence=lambda: reads.append(True) or private,
+        ))
+
+        self.assertEqual(reads, [])
+        evidence = model.inspect_result_evidence()
+
+        self.assertEqual(reads, [True])
+        self.assertEqual(
+            evidence.alternatives, ("private latest alternative",))
+        self.assertNotIn("private latest alternative", repr(model.state))
+        self.assertNotIn(
+            "private latest alternative", support_snapshot_text(model.state))
+
     def test_point_and_speak_preview_is_explicit_bounded_and_never_enters_state(self):
         phrases = []
         private_name = "Project Bluebird Submit"

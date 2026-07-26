@@ -9,7 +9,7 @@ machine without maintaining a second copy of the application.
 `dictate.py`, `parrot_core.py`, `voice_compiler.py`,
 `insertion_integrity.py`, `personal_regression.py`,
 `cleanup_circuit_breaker.py`, `model_wallet.py`, `model_wallet_shadow.py`,
-`whisper_face_gui.py`, `support_bundle.py`, `voice_objects.py`,
+`whisper_face_gui.py`, `whisper_face_theme.py`, `support_bundle.py`,
 `voice_object_command_parser.py`, `voice_inbox.py`,
 `voice_object_inbox_bridge.py`, `demonstration_drafts.py`, and
 `risky_action_confirmation.py`,
@@ -107,8 +107,9 @@ Run the live verification available on the current platform:
 ```
 
 The native GUI smoke command is a macOS-only gate. It constructs and tears
-down the AppKit window without showing or activating it, querying permissions,
-loading user files, starting runtime services, or persisting defaults.
+down the AppKit window, menu-bar face, and HUD without showing or activating
+them, querying permissions, loading user files, starting runtime services, or
+persisting defaults.
 `tests/test_whisper_face_gui.py` validates the same static contract on Windows;
 Windows setup must never execute AppKit.
 Headless Mac endpoints use `./setup.sh --server-only --verify`; that mode skips

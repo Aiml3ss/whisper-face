@@ -228,10 +228,14 @@ if IS_MACOS:
         NSAlertFirstButtonReturn,
         NSApplication,
         NSApplicationActivationPolicyAccessory,
+        NSAppearanceNameAqua,
+        NSAppearanceNameDarkAqua,
         NSBackingStoreBuffered,
         NSBezierPath,
+        NSBitmapImageFileTypePNG,
         NSColor,
         NSFont,
+        NSFontDescriptorSystemDesignRounded,
         NSGraphicsContext,
         NSFontAttributeName,
         NSForegroundColorAttributeName,
@@ -262,6 +266,7 @@ if IS_MACOS:
         NSAttributedString, NSData, NSMakeRect, NSMakeSize, NSObject, NSTimer,
     )
     from PyObjCTools import AppHelper
+    from Quartz import CASpringAnimation
 else:
     import pyperclip
     import pystray
@@ -302,6 +307,14 @@ else:
     objc = _ObjCCompat()
     AppHelper = _AppHelperCompat()
 
+from whisper_face_theme import (  # noqa: E402
+    FACE_CHIP_COLORS,
+    MOTION_SPECS,
+    TYPE_SPECS,
+    hud_presentation,
+    jelly_face_scale,
+    palette_for_appearance,
+)
 from parrot_core import (  # noqa: E402
     CleanupEdit,
     Recognition,
@@ -571,6 +584,7 @@ CHUNK_MIN_SECONDS = 4.0      # never cut a segment shorter than this
 CHUNK_CUT_SILENCE = 0.6      # a pause this long marks a safe cut point
 SPECULATIVE_MIN_SECONDS = 0.8
 SPECULATIVE_SILENCE = 0.25   # likely end pause: decode before key release
+CAPTURE_BLOCK_SECONDS = 8     # bound ndarray count during long dictations
 
 SNIPPETS_FILE = HERE / "snippets.json"
 SNIPPET_RE = re.compile(
@@ -650,19 +664,19 @@ TRANSCRIPT_KEEP = 500        # trim the log to this many lines after a pass
 # them out (a cold first dictation used to cost ~6s of page-in).
 KEEPWARM_INTERVAL = 240      # seconds between heartbeats
 KEEPWARM_MIN_IDLE = 60       # skip the beat if dictating right now
+HOTKEY_WATCHDOG_INTERVAL = 3.0
 
 LOCK_FILE = HERE / ".dictate.lock"
 
-# HUD: the "Voice Listening" stage from the design handoff — no panel, no
-# background: the face, bars, ring, and caption float transparently over
-# the screen. Geometry is the spec's times HUD_SCALE.
-HUD_SCALE = 0.28
-HUD_W, HUD_H = 210.0, 142.0
+# HUD: compact native sticker card. Face and waveform retain the existing
+# off-hot-path renderer; shared theme/motion contracts supply the personality.
+HUD_SCALE = 0.30
+HUD_W, HUD_H = 248.0, 178.0
 HUD_BOTTOM_MARGIN = 80.0
 HUD_RADIUS = 20.0
-STAGE = 360.0 * HUD_SCALE    # square stage, centered horizontally
-STAGE_TOP = 8.0             # design y-down coords
-PARROT_SCALE = 300.0 / 256.0
+STAGE = 320.0 * HUD_SCALE    # square stage, centered horizontally
+STAGE_TOP = 31.0             # design y-down coords
+PARROT_SCALE = 280.0 / 256.0
 RADIAL_BARS = 60
 BAR_INNER_R = 134.0
 BEAK_MAX_DEG = 26.0          # spec: lower mandible max open
@@ -888,6 +902,46 @@ ASR_POOL = ThreadPoolExecutor(max_workers=1)
 # PortAudio's real-time callback. This pool prepares one chunk at a time, then
 # hands the actual MLX call to the single-threaded ASR pool.
 CHUNK_PREP_POOL = ThreadPoolExecutor(max_workers=1)
+
+
+class ReleaseOrder:
+    """Keep side effects ordered while allowing capture and ASR to overlap."""
+
+    def __init__(self):
+        self.condition = threading.Condition()
+        self.issued = 0
+        self.next = 0
+        self.completed = set()
+
+    def issue(self) -> int:
+        with self.condition:
+            ticket = self.issued
+            self.issued += 1
+            return ticket
+
+    def wait(self, ticket: int | None):
+        if ticket is None:
+            return
+        with self.condition:
+            while ticket > self.next:
+                self.condition.wait()
+
+    def complete(self, ticket: int | None):
+        if ticket is None:
+            return
+        with self.condition:
+            if ticket < self.next:
+                return
+            self.completed.add(ticket)
+            while self.next in self.completed:
+                self.completed.remove(self.next)
+                self.next += 1
+            self.condition.notify_all()
+
+
+# Capture may begin again while an earlier take is still processing. Ticket
+# releases so final cleanup and insertion cannot reverse the dictated order.
+DICTATION_PROCESS_ORDER = ReleaseOrder()
 ASR_MODEL_PATHS = {}
 ASR_MODEL_PATHS_LOCK = threading.Lock()
 # Repositories a cache-only probe has already proven absent. A minimal install
@@ -935,7 +989,7 @@ SNIPPETS_LOCK = threading.Lock()
 DICTIONARY_LOCK = threading.RLock()
 
 # The active pynput listener, replaceable by the watchdog if it dies.
-LISTENER = {"l": None, "make": None}
+LISTENER = {"l": None, "make": None, "recovering": False}
 
 # Menu-bar state: the status item (main-thread only) and the pause switch.
 STATUS = {"bar": None}
@@ -952,6 +1006,7 @@ PIPELINE_STATE = {
     "last_stable_prefix_words": 0,
     "last_proof_edits_accepted": 0,
     "last_proof_edits_rejected": 0,
+    "last_result_evidence": {},
     "last_context_influence": "No context influence reported",
     "last_consequence_route": "standard",
     "last_risk_counts": {},
@@ -1732,19 +1787,58 @@ def _color(r, g, b, a=1.0):
     return NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, a)
 
 
+def _theme_is_dark() -> bool:
+    """Follow effective app appearance; never persist a separate UI setting."""
+    try:
+        appearance = NSApplication.sharedApplication().effectiveAppearance()
+        match = appearance.bestMatchFromAppearancesWithNames_(
+            (NSAppearanceNameAqua, NSAppearanceNameDarkAqua))
+        return match == NSAppearanceNameDarkAqua
+    except Exception:
+        return False
+
+
+def _rounded_font(size: float, weight: float):
+    """Use native SF Rounded, falling back to the system face if unavailable."""
+    base = NSFont.systemFontOfSize_weight_(size, weight)
+    try:
+        descriptor = base.fontDescriptor().fontDescriptorWithDesign_(
+            NSFontDescriptorSystemDesignRounded)
+        rounded = NSFont.fontWithDescriptor_size_(descriptor, size)
+        return rounded or base
+    except Exception:
+        return base
+
+
+def _add_jelly_animation(layer, motion_name: str) -> None:
+    """Translate one named motion into two native Core Animation springs."""
+    if layer is None:
+        return
+    spec = MOTION_SPECS[motion_name]
+    for axis, start in (("x", spec.squash_x), ("y", spec.squash_y)):
+        animation = CASpringAnimation.animationWithKeyPath_(
+            f"transform.scale.{axis}")
+        animation.setMass_(spec.mass)
+        animation.setStiffness_(spec.stiffness)
+        animation.setDamping_(spec.damping)
+        animation.setInitialVelocity_(spec.initial_velocity)
+        animation.setFromValue_(start)
+        animation.setToValue_(1.0)
+        animation.setDuration_(spec.duration)
+        layer.addAnimation_forKey_(
+            animation, f"whisper-face-{motion_name}-{axis}")
+
+
 # Design tokens from the Voice Listening handoff
-ACCENT = (0.204, 0.827, 0.600)          # #34d399
-EMERALD = (0.063, 0.725, 0.506)         # #10b981
+EMERALD = FACE_CHIP_COLORS["parrot"]     # #34d399
 DEEP = (0.016, 0.471, 0.341)            # #047857
 BEAK_UP = (0.984, 0.749, 0.141)         # #fbbf24
 BEAK_LO = (0.941, 0.659, 0.118)         # #f0a81e
 DARK_EYE = (0.043, 0.231, 0.196)        # #0b3b32
 MOUTH = (0.024, 0.145, 0.122)           # #06251f
-MINT = (0.369, 0.918, 0.831)            # #5eead4
+MINT = FACE_CHIP_COLORS["owl"]           # #5eead4
 CATCH = (0.918, 1.000, 0.965)           # #eafff6
-CAPTION_COL = (0.847, 1.000, 0.941)     # #d8fff0
-AMBER = (0.984, 0.573, 0.235)           # processing accent #fb923c
-CORAL = (1.000, 0.424, 0.353)            # recoverable error #ff6c5a
+CORAL = (1.000, 0.424, 0.353)           # recoverable error #ff6c5a
 # Every non-parrot, non-owl face renders through the shared front-facing
 # companion template. A style names three fills plus optional feature flags:
 #   ears     "pointed" (canine/feline) or "round" (bear family); default pointed
@@ -1753,56 +1847,56 @@ CORAL = (1.000, 0.424, 0.353)            # recoverable error #ff6c5a
 #   stripes  forehead stripes (tiger)
 COMPANION_STYLES = {
     "fox": {
-        "head": (0.949, 0.404, 0.188),
+        "head": FACE_CHIP_COLORS["fox"],
         "deep": (0.706, 0.231, 0.075),
         "muzzle": (1.000, 0.878, 0.702),
     },
     "cat": {
-        "head": (0.365, 0.592, 0.824),
+        "head": FACE_CHIP_COLORS["cat"],
         "deep": (0.188, 0.349, 0.573),
         "muzzle": (0.824, 0.914, 1.000),
         "whiskers": True,
     },
     "bear": {
-        "head": (0.647, 0.424, 0.267),
+        "head": FACE_CHIP_COLORS["bear"],
         "deep": (0.373, 0.220, 0.133),
         "muzzle": (0.890, 0.710, 0.514),
         "ears": "round",
     },
     "dog": {
-        "head": (0.855, 0.647, 0.376),
+        "head": FACE_CHIP_COLORS["dog"],
         "deep": (0.573, 0.396, 0.196),
         "muzzle": (0.988, 0.925, 0.816),
     },
     "wolf": {
-        "head": (0.514, 0.565, 0.627),
+        "head": FACE_CHIP_COLORS["wolf"],
         "deep": (0.310, 0.345, 0.400),
         "muzzle": (0.831, 0.859, 0.902),
     },
     "pig": {
-        "head": (0.945, 0.620, 0.694),
+        "head": FACE_CHIP_COLORS["pig"],
         "deep": (0.804, 0.435, 0.533),
         "muzzle": (1.000, 0.859, 0.878),
         "ears": "round",
     },
     "panda": {
-        "head": (0.960, 0.965, 0.975),
+        "head": FACE_CHIP_COLORS["panda"],
         "deep": (0.129, 0.145, 0.161),
         "muzzle": (1.000, 1.000, 1.000),
         "ears": "round",
         "patches": True,
     },
     "tiger": {
-        "head": (0.976, 0.616, 0.235),
+        "head": FACE_CHIP_COLORS["tiger"],
         "deep": (0.816, 0.404, 0.098),
         "muzzle": (1.000, 0.910, 0.784),
         "stripes": True,
     },
 }
 
-# Live caption: rolling-ASR chunks land here as they finish, the full raw
-# transcript lands at release, WaveView reads it every frame.
-CAPTION = {"text": ""}
+# Live presentation evidence. Rolling-ASR chunks add compiler-approved stable
+# text and confidence; WaveView only reads it on the main thread's display tick.
+CAPTION = {"text": "", "confidence": None, "stable_prefix": False}
 
 
 def hud_level_step(raw: float, current: float, mode: str,
@@ -1822,6 +1916,8 @@ def _caption_add(fut, context_terms=(), bundle="", context_pack=None):
                 result, context_terms, bundle, "capture", finalized=False,
                 context_pack=context_pack)
             t = compiled.stable_prefix.strip()
+            CAPTION["confidence"] = getattr(
+                compiled, "confidence", result.confidence)
         else:
             t = str(result or "").strip()
     except Exception:
@@ -1831,6 +1927,7 @@ def _caption_add(fut, context_terms=(), bundle="", context_pack=None):
         if current == "Listening" or current.endswith(" mode"):
             current = ""
         CAPTION["text"] = (current + " " + t).strip()
+        CAPTION["stable_prefix"] = True
 
 
 class WaveView(NSView):
@@ -1847,13 +1944,41 @@ class WaveView(NSView):
         self.t = 0.0
         self.frame_n = 0
         self.reduce_motion = False
+        self.last_accessibility_value = ""
+        try:
+            self.setAccessibilityElement_(True)
+            self.setAccessibilityRole_("AXGroup")
+            self.setAccessibilityLabel_("Whisper Face dictation HUD")
+        except Exception:
+            pass
         return self
 
     def isFlipped(self):
         return True
 
+    def _presentation(self):
+        return hud_presentation(
+            self.mode,
+            CAPTION["text"],
+            CAPTION.get("confidence"),
+            stable_prefix=bool(CAPTION.get("stable_prefix")),
+        )
+
+    def syncAccessibilityState(self):
+        presentation = self._presentation()
+        if presentation.accessibility_value == self.last_accessibility_value:
+            return False
+        self.last_accessibility_value = presentation.accessibility_value
+        try:
+            self.setAccessibilityValue_(presentation.accessibility_value)
+        except Exception:
+            pass
+        return True
+
     def drawRect_(self, rect):
         W = self.bounds().size.width
+        palette = palette_for_appearance(_theme_is_dark())
+        presentation = self._presentation()
         # per-frame state
         S = HUD_SCALE
         if not self.reduce_motion:
@@ -1864,6 +1989,54 @@ class WaveView(NSView):
         lv = max(0.0, min(1.0, self.lv))
         cx = W / 2.0
         cy = STAGE_TOP + STAGE / 2.0
+
+        # Sticker card: calm surface, one hard offset shadow, no wall of
+        # decoration. The face remains the playful object.
+        card_rect = NSMakeRect(5, 3, W - 16, HUD_H - 14)
+        shadow_rect = NSMakeRect(11, 9, W - 16, HUD_H - 14)
+        _rgb(*palette.line, 0.96)
+        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            shadow_rect, HUD_RADIUS, HUD_RADIUS).fill()
+        card = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            card_rect, HUD_RADIUS, HUD_RADIUS)
+        _rgb(*palette.surface)
+        card.fill()
+        card.setLineWidth_(2.0)
+        _rgb(*palette.line)
+        card.stroke()
+
+        accent = (
+            palette.accent if presentation.accent == "accent"
+            else CORAL if presentation.accent == "error"
+            else palette.brand
+        )
+        eyebrow_type = TYPE_SPECS["hud_eyebrow"]
+        status = NSAttributedString.alloc().initWithString_attributes_(
+            presentation.eyebrow, {
+                NSFontAttributeName: _rounded_font(
+                    eyebrow_type.size, eyebrow_type.weight),
+                NSForegroundColorAttributeName: _color(*palette.line),
+            })
+        status_size = status.size()
+        status_w = status_size.width + 18
+        _rgb(*accent)
+        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            NSMakeRect(15, 11, status_w, 19), 9.5, 9.5).fill()
+        status.drawAtPoint_((24, 14))
+
+        if presentation.confidence:
+            confidence_type = TYPE_SPECS["hud_confidence"]
+            confidence = NSAttributedString.alloc() \
+                .initWithString_attributes_(
+                    presentation.confidence, {
+                        NSFontAttributeName: _rounded_font(
+                            confidence_type.size, confidence_type.weight),
+                        NSForegroundColorAttributeName:
+                            _color(*palette.ink_soft),
+                    })
+            confidence_size = confidence.size()
+            confidence.drawAtPoint_(
+                (W - 16 - confidence_size.width, 14))
 
         # radial waveform (spec: 60 bars, inner r 134, len 6 + v*66)
         if self.mode == "recording" or lv > 0.01:
@@ -1880,7 +2053,7 @@ class WaveView(NSView):
                                   cy + r0 * math.sin(ang)))
                 bar.lineToPoint_((cx + r1 * math.cos(ang),
                                   cy + r1 * math.sin(ang)))
-                _rgb(*ACCENT, 0.3 + 0.65 * v)
+                _rgb(*palette.brand, 0.20 + 0.58 * v)
                 bar.stroke()
 
         # pulse ring (300px, scale 1 + lv*0.16, opacity 0.12 + lv*0.5)
@@ -1889,47 +2062,58 @@ class WaveView(NSView):
             NSMakeRect(cx - rr, cy - rr, rr * 2, rr * 2))
         ring.setLineWidth_(1.5)
         if self.mode == "processing":
-            _rgb(*AMBER, 0.12 + 0.18 * abs(math.sin(self.t * 2.2)))
+            _rgb(*palette.accent,
+                 0.18 + 0.18 * abs(math.sin(self.t * 2.2)))
         elif self.mode == "error":
             _rgb(*CORAL, 0.42)
         else:
-            _rgb(*ACCENT, 0.12 + lv * 0.5)
+            _rgb(*palette.brand, 0.16 + lv * 0.44)
         ring.stroke()
 
-        # Selected Whisper Face (256 viewBox at 300*S, centered). Every face
-        # uses the same measured microphone level for its mouth animation.
-        bob = 0.0 if self.mode != "recording" else \
-            -3.0 * S * (1.0 - math.cos(2.0 * math.pi * self.t / 3.2))
+        # Selected Whisper Face (256 viewBox, centered). Live level drives a
+        # small whole-head squash/stretch as well as the mouth. Reduce Motion
+        # returns an identity transform and freezes both effects.
+        scale_x, scale_y = jelly_face_scale(
+            lv,
+            processing=self.mode == "processing",
+            reduce_motion=self.reduce_motion,
+        )
         ctx = NSGraphicsContext.currentContext()
         ctx.saveGraphicsState()
         tr = NSAffineTransform.transform()
-        tr.translateXBy_yBy_(cx - 150.0 * S, STAGE_TOP + 30.0 * S + bob)
+        tr.translateXBy_yBy_(cx - 140.0 * S, STAGE_TOP + 20.0 * S)
         tr.scaleBy_(PARROT_SCALE * S)
+        tr.translateXBy_yBy_(128.0, 128.0)
+        tr.scaleXBy_yBy_(scale_x, scale_y)
+        tr.translateXBy_yBy_(-128.0, -128.0)
         tr.concat()
         self.drawFace_(lv)
         ctx.restoreGraphicsState()
 
-        # caption (live transcript on a slim chip so it reads over anything)
+        # Stable prefix/result stays readable on a quiet theme surface.
         text = CAPTION["text"].strip()
-        if len(text) > 64:
-            text = "…" + text[-62:]
+        if text == "Listening":
+            text = "Speak naturally"
+        if len(text) > 72:
+            text = "…" + text[-70:]
         if text:
+            caption_type = TYPE_SPECS["hud_caption"]
             para = NSMutableParagraphStyle.alloc().init()
             para.setAlignment_(1)                # NSTextAlignmentCenter
             dim = 0.75 if self.mode == "processing" else 1.0
             cap = NSAttributedString.alloc().initWithString_attributes_(
                 text, {
-                    NSFontAttributeName:
-                        NSFont.systemFontOfSize_weight_(11.5, 0.23),
+                    NSFontAttributeName: _rounded_font(
+                        caption_type.size, caption_type.weight),
                     NSForegroundColorAttributeName:
-                        _color(*CAPTION_COL, dim),
+                        _color(*palette.ink, dim),
                     NSParagraphStyleAttributeName: para,
                 })
             size = cap.size()
-            cw = min(W - 16, size.width + 22)
+            cw = min(W - 30, size.width + 22)
             ch = size.height + 8
-            chip_y = STAGE_TOP + STAGE + 6
-            _rgb(0.016, 0.063, 0.051, 0.82)      # #04100d chip
+            chip_y = STAGE_TOP + STAGE + 12
+            _rgb(*palette.bg)
             NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
                 NSMakeRect((W - cw) / 2.0, chip_y, cw, ch),
                 ch / 2.0, ch / 2.0).fill()
@@ -2117,7 +2301,7 @@ class WaveView(NSView):
 
     def drawOwl_(self, lv):
         mouth = self._update_mouth()
-        purple = (0.455, 0.392, 0.741)
+        purple = FACE_CHIP_COLORS["owl"]
         deep = (0.255, 0.200, 0.506)
         cream = (0.890, 0.855, 1.000)
 
@@ -2166,7 +2350,7 @@ class WaveView(NSView):
 
 
 class HUD(NSObject):
-    """Floating frosted pill. Call only on the main thread (AppHelper.callAfter)."""
+    """Floating Whisper Face card. Main-thread only."""
 
     def init(self):
         self = objc.super(HUD, self).init()
@@ -2192,9 +2376,10 @@ class HUD(NSObject):
             | NSWindowCollectionBehaviorStationary
         )
 
-        # The stage paints its own gradient panel — no frosted effect view.
+        # The stage paints its own themed sticker card — no effect view.
         wave = WaveView.alloc().initWithFrame_(rect)
         wave.setAutoresizingMask_(18)
+        wave.setWantsLayer_(True)
         panel.setContentView_(wave)
 
         self.panel = panel
@@ -2211,6 +2396,10 @@ class HUD(NSObject):
             self.wave.raw = 0.0
             self.wave.lv = 0.0
             self.wave.beak = 0.0
+            layer = self.wave.layer()
+            if layer is not None:
+                layer.removeAllAnimations()
+        self.wave.syncAccessibilityState()
         self.wave.setNeedsDisplay_(True)
         if not self.panel.isVisible():
             screen = NSScreen.mainScreen().visibleFrame()
@@ -2218,18 +2407,25 @@ class HUD(NSObject):
             y = screen.origin.y + HUD_BOTTOM_MARGIN
             self.panel.setFrame_display_(NSMakeRect(x, y, HUD_W, HUD_H), True)
             self.panel.orderFrontRegardless()
+            if not self.wave.reduce_motion:
+                _add_jelly_animation(self.wave.layer(), "pop")
 
     def dismiss(self):
         self.panel.orderOut_(None)
         LEVELS.extend([0.0] * NUM_BARS)
         CAPTION["text"] = ""
+        CAPTION["confidence"] = None
+        CAPTION["stable_prefix"] = False
         self.wave.lv = 0.0
         self.wave.beak = 0.0
 
     def tick_(self, timer):
         if not self.panel.isVisible():
             return
+        accessibility_changed = self.wave.syncAccessibilityState()
         if self.wave.reduce_motion:
+            if accessibility_changed:
+                self.wave.setNeedsDisplay_(True)
             return
         self.wave.raw = LEVELS[-1] if LEVELS else 0.0
         bar = STATUS.get("bar")
@@ -2381,6 +2577,12 @@ class StatusBar(NSObject):
             return None
         self.item = NSStatusBar.systemStatusBar().statusItemWithLength_(
             NSVariableStatusItemLength)
+        button = self.item.button()
+        button.setWantsLayer_(True)
+        try:
+            button.setAccessibilityLabel_("Whisper Face menu")
+        except Exception:
+            pass
         # Two cached template frames per character. The open-mouth frame is
         # selected from the live mic level, so the tiny menu-bar face talks
         # along with the larger HUD without decoding or storing extra audio.
@@ -2478,6 +2680,10 @@ class StatusBar(NSObject):
             btn.setImage_(None)
             btn.setTitle_("⏸")
             btn.setToolTip_(f"{APP_NAME} — paused")
+            try:
+                btn.setAccessibilityValue_(f"{APP_NAME} — paused")
+            except Exception:
+                pass
             return
         frame = "talk" if self.state == "rec" and self.mouth_open else "idle"
         icon = self.face_icons.get(current_face(), {}).get(frame)
@@ -2499,7 +2705,12 @@ class StatusBar(NSObject):
             "proc": f"{APP_NAME} — processing",
             "err": f"{APP_NAME} — try again",
         }
-        btn.setToolTip_(labels.get(self.state, APP_NAME))
+        state_label = labels.get(self.state, APP_NAME)
+        btn.setToolTip_(state_label)
+        try:
+            btn.setAccessibilityValue_(state_label)
+        except Exception:
+            pass
 
     def setMouthLevel_(self, level):
         if self.state != "rec" or self.reduce_motion:
@@ -2508,6 +2719,10 @@ class StatusBar(NSObject):
         if mouth_open != self.mouth_open:
             self.mouth_open = mouth_open
             self._refresh_face_icon()
+            _add_jelly_animation(
+                self.item.button().layer(),
+                "wobble" if mouth_open else "release",
+            )
 
     def menuWillOpen_(self, menu):
         try:
@@ -3386,6 +3601,8 @@ class AudioPool:
         self.warm_attempted = False
         self.warm_error = None
         self.recovery_pending = False
+        self.recovery_worker = None
+        self.closed = False
 
     def readiness(self) -> str:
         """Expose startup failure without leaking device or exception text."""
@@ -3407,6 +3624,8 @@ class AudioPool:
     def _warm_locked(self):
         """Open the current default device while ``init_lock`` is held."""
         with self.lock:
+            if self.closed:
+                raise RuntimeError("audio pool is closed")
             if self.slots:
                 return
             self.warm_attempted = True
@@ -3499,8 +3718,61 @@ class AudioPool:
                     stale_slots = self._invalidate_locked(
                         reset_error=stop_error is None)
             self._close_slots(stale_slots)
+            if should_recover:
+                self.warm_async()
         if stop_error is not None:
             raise RuntimeError("microphone stream stop failed") from None
+
+    def warm_async(self):
+        """Prewarm an idle recovered device without blocking notification code."""
+
+        with self.lock:
+            worker = self.recovery_worker
+            if (self.closed or self.recovery_pending or self.slots
+                    or (worker is not None and worker.is_alive())):
+                return False
+
+            def recover():
+                try:
+                    self.warm()
+                except RuntimeError:
+                    # Readiness becomes Unavailable; the next keypress retries
+                    # without exposing device or exception details.
+                    pass
+
+            worker = threading.Thread(
+                target=recover,
+                name="whisper-face-audio-prewarm",
+                daemon=True,
+            )
+            self.recovery_worker = worker
+            worker.start()
+            return True
+
+    def wait_for_recovery(self, timeout=1.0):
+        """Wait for a scheduled prewarm; deterministic tests use this seam."""
+
+        with self.lock:
+            worker = self.recovery_worker
+        if worker is None:
+            return self.readiness() == "Ready"
+        if worker is threading.current_thread():
+            return False
+        worker.join(timeout=max(0.0, float(timeout)))
+        return not worker.is_alive() and self.readiness() == "Ready"
+
+    def recover_default_device(self):
+        """Replace and prewarm an idle default input on a recovery worker."""
+
+        self.invalidate()
+        with self.lock:
+            if self.recovery_pending:
+                return False
+        try:
+            self.warm()
+        except RuntimeError:
+            return False
+        return self.readiness() == "Ready"
 
     def invalidate(self):
         """Forget stale default-device streams without cutting off a take."""
@@ -3515,6 +3787,7 @@ class AudioPool:
                 self.slots = []
                 self.busy.clear()
                 self.recovery_pending = False
+                self.closed = True
         self._close_slots(slots)
 
 
@@ -3713,7 +3986,7 @@ AUDIO_POOL = AudioPool(size=2)
 def _invalidate_default_audio_inputs():
     """Refresh every stream bound to the prior macOS default input."""
     try:
-        AUDIO_POOL.invalidate()
+        AUDIO_POOL.recover_default_device()
     finally:
         FLIGHT.invalidate()
 
@@ -3763,9 +4036,81 @@ def _speculative_frames(frames, prompt=None, still_valid=None) -> Recognition:
     return accurate
 
 
+class CapturedAudio:
+    """Exact in-memory audio stored in a small number of fixed-size blocks."""
+
+    def __init__(self, initial=None, *, block_samples=None):
+        self.block_samples = (
+            int(block_samples)
+            if block_samples is not None
+            else int(CAPTURE_BLOCK_SECONDS * SAMPLE_RATE)
+        )
+        if self.block_samples <= 0:
+            raise ValueError("capture block size must be positive")
+        self.blocks = []
+        self.tail = None
+        self.tail_samples = 0
+        self.total_samples = 0
+        self.lock = threading.Lock()
+        if initial is not None:
+            self.append(initial)
+
+    def __bool__(self):
+        with self.lock:
+            return self.total_samples > 0
+
+    def append(self, audio):
+        source = np.asarray(audio, dtype=np.float32).reshape(-1)
+        with self.lock:
+            offset = 0
+            while offset < len(source):
+                if self.tail is None:
+                    self.tail = np.empty(
+                        self.block_samples, dtype=np.float32)
+                    self.tail_samples = 0
+                count = min(
+                    self.block_samples - self.tail_samples,
+                    len(source) - offset,
+                )
+                end = self.tail_samples + count
+                self.tail[self.tail_samples:end] = (
+                    source[offset:offset + count])
+                self.tail_samples = end
+                self.total_samples += count
+                offset += count
+                if self.tail_samples == self.block_samples:
+                    self.blocks.append(self.tail)
+                    self.tail = None
+                    self.tail_samples = 0
+
+    def frames_from(self, start_sample=0) -> tuple:
+        """Immutable-length views covering captured samples from one offset."""
+        with self.lock:
+            start = max(0, min(int(start_sample), self.total_samples))
+            frames = []
+            cursor = 0
+            for block in self.blocks:
+                end = cursor + len(block)
+                if end > start:
+                    frames.append(block[max(0, start - cursor):])
+                cursor = end
+            if self.tail is not None and self.tail_samples:
+                end = cursor + self.tail_samples
+                if end > start:
+                    frames.append(
+                        self.tail[max(0, start - cursor):self.tail_samples])
+            return tuple(frames)
+
+    def array(self) -> np.ndarray:
+        frames = self.frames_from()
+        if not frames:
+            return np.zeros(0, dtype=np.float32)
+        return np.concatenate(frames)
+
+
 class Recorder:
     def __init__(self):
-        self.frames = []
+        self.frames = CapturedAudio()
         self.slot = None
         self.recording = False
         self.press_at = None
@@ -3778,6 +4123,7 @@ class Recorder:
         self.utterance_id = ""
         self.insertion_lease = None
         self.insertion_receipt = None
+        self.process_ticket = None
         self.input_signature_at_press = None
         self.context_terms = []
         self.context_pack = ContextPack()
@@ -3792,20 +4138,18 @@ class Recorder:
         self.total_samples = 0
         self.silent_samples = 0
         self.voiced_since_cut = False
-        self._cut_frame_idx = 0
         self.speculative_future = None
         self.speculative_start = 0
         self.speculative_end = 0
         self.speculative_invalid = False
 
     def start(self, press_at=None):
-        self.frames = []
+        self.frames = CapturedAudio()
         self.chunks = []
         self.cut_samples = 0
         self.total_samples = 0
         self.silent_samples = 0
         self.voiced_since_cut = False
-        self._cut_frame_idx = 0
         self.speculative_future = None
         self.speculative_start = 0
         self.speculative_end = 0
@@ -3819,6 +4163,7 @@ class Recorder:
         self.utterance_id = f"{time.time_ns():x}-{id(self):x}"
         self.insertion_lease = None
         self.insertion_receipt = None
+        self.process_ticket = None
         self.input_signature_at_press = None
         self.recording = True
         try:
@@ -3832,13 +4177,12 @@ class Recorder:
 
     def replace_with_buffered_audio(self, audio: np.ndarray):
         """Turn a quick tap's Recorder into a retrospective captured take."""
-        self.frames = [audio.reshape(-1, 1)]
+        self.frames = CapturedAudio(audio)
         self.chunks = []
         self.cut_samples = 0
         self.total_samples = len(audio)
         self.silent_samples = 0
         self.voiced_since_cut = False
-        self._cut_frame_idx = 0
         self.speculative_future = None
         self.speculative_start = 0
         self.speculative_end = 0
@@ -3851,7 +4195,7 @@ class Recorder:
             return
         if status and len(self.audio_status) < 3:
             self.audio_status.append(str(status))
-        self.frames.append(indata.copy())
+        self.frames.append(indata)
         if (self.speculative_invalid and self.speculative_future is not None
                 and self.speculative_future.done()):
             self.speculative_future = None
@@ -3887,8 +4231,7 @@ class Recorder:
                 self.speculative_future is not None,
                 SPECULATIVE_MIN_SECONDS,
                 SPECULATIVE_SILENCE):
-            frames_for_speculation = tuple(
-                self.frames[self._cut_frame_idx:])
+            frames_for_speculation = self.frames.frames_from(self.cut_samples)
             self.speculative_start = self.cut_samples
             self.speculative_end = self.total_samples
             self.speculative_invalid = False
@@ -3910,7 +4253,7 @@ class Recorder:
                 decode_start = self.speculative_start
                 decode_end = self.speculative_end
             else:
-                frames_for_chunk = tuple(self.frames[self._cut_frame_idx:])
+                frames_for_chunk = self.frames.frames_from(self.cut_samples)
                 decode_future = CHUNK_PREP_POOL.submit(
                     _transcribe_frames, frames_for_chunk, self.prompt)
                 decode_start = self.cut_samples
@@ -3927,16 +4270,12 @@ class Recorder:
             self.speculative_start = 0
             self.speculative_end = 0
             self.speculative_invalid = False
-            self._cut_frame_idx = len(self.frames)
             self.cut_samples = self.total_samples
             self.voiced_since_cut = False
 
     def snapshot(self) -> np.ndarray:
         """Audio so far, without stopping the stream."""
-        frames = list(self.frames)
-        if not frames:
-            return np.zeros(0, dtype=np.float32)
-        return np.concatenate(frames).flatten()
+        return self.frames.array()
 
     def stop(self) -> np.ndarray:
         self.recording = False
@@ -3947,8 +4286,7 @@ class Recorder:
             AUDIO_POOL.release(slot)
         if self.audio_status:
             print(f"! audio callback status: {'; '.join(self.audio_status)}")
-        audio = np.concatenate(self.frames).flatten() if self.frames \
-            else np.zeros(0, dtype=np.float32)
+        audio = self.frames.array()
         if self.captured_via_flight and self.source == "hold":
             FLIGHT.clear()                   # never let a hold paste twice
         return audio
@@ -4191,6 +4529,34 @@ def gui_settings_snapshot() -> dict:
         except (TypeError, ValueError):
             return 0
 
+    def scope_decision(
+        source: str,
+        target: str,
+        app: str | None,
+        *,
+        count: int,
+        threshold: int,
+    ) -> str:
+        """Mirror the active correction gate without exporting private cases."""
+        scoped_promoted = [
+            item for item in regression.promoted
+            if item.heard.casefold() == source.casefold() and item.app == app
+        ]
+        if scoped_promoted:
+            return (
+                "active"
+                if any(item.preferred == target for item in scoped_promoted)
+                else "held_back"
+            )
+        scoped_quarantined = [
+            item for item in regression.quarantined
+            if item.heard.casefold() == source.casefold() and item.app == app
+        ]
+        if scoped_quarantined:
+            return "held_back"
+        # Pre-regression state remains supported by apply_learned_fixes().
+        return "active" if count >= threshold else "learning"
+
     with APP_TONES["lock"]:
         tone_map = dict(APP_TONES["map"])
     bundles = list(dict.fromkeys(recent_dictation_apps() + list(tone_map)))
@@ -4210,6 +4576,7 @@ def gui_settings_snapshot() -> dict:
         manual, banned = parse_dictionary()
     with LEARN_LOCK:
         learned = load_learned()
+    regression = personal_regression_lab(learned)
     corrections = []
     for key, info in learned.get("confusions", {}).items():
         if not isinstance(key, str) or not isinstance(info, dict):
@@ -4217,10 +4584,40 @@ def gui_settings_snapshot() -> dict:
         source = info.get("from")
         target = info.get("to")
         if isinstance(source, str) and source and isinstance(target, str) and target:
+            total = safe_count(info.get("n"))
+            raw_apps = info.get("apps")
+            app_scopes = []
+            if isinstance(raw_apps, dict):
+                for bundle, raw_count in raw_apps.items():
+                    if not isinstance(bundle, str) or not bundle:
+                        continue
+                    app_count = safe_count(raw_count)
+                    app_scopes.append({
+                        "bundle": bundle,
+                        "name": app_display_name(bundle),
+                        "count": app_count,
+                        "decision": scope_decision(
+                            source,
+                            target,
+                            bundle,
+                            count=app_count,
+                            threshold=PERSONAL_APP_MIN_COUNT,
+                        ),
+                    })
+            app_scopes.sort(
+                key=lambda item: (-item["count"], item["name"].casefold()))
             corrections.append({
                 "key": key, "source": source, "target": target,
-                "count": safe_count(info.get("n")),
+                "count": total,
                 "kind": "correction",
+                "global_decision": scope_decision(
+                    source,
+                    target,
+                    None,
+                    count=total,
+                    threshold=PERSONAL_GLOBAL_MIN_COUNT,
+                ),
+                "app_scopes": app_scopes,
             })
     for name, info in learned.get("snippet_edits", {}).items():
         if not isinstance(name, str) or not isinstance(info, dict):
@@ -4231,6 +4628,8 @@ def gui_settings_snapshot() -> dict:
                 "key": name, "source": f"Snippet: {name}",
                 "target": target, "count": safe_count(info.get("n")),
                 "kind": "snippet",
+                "global_decision": "saved",
+                "app_scopes": [],
             })
     corrections.sort(key=lambda item: (-item["count"], item["source"].casefold()))
     return {
@@ -4450,6 +4849,75 @@ def runtime_status_snapshot() -> dict:
         "version": "Local checkout",
         "model_wallet_shadow": model_wallet_shadow,
         "models": model_status_rows_from_shadow(model_wallet_shadow),
+    }
+
+
+def inspect_last_result_evidence() -> dict:
+    """Return private latest-result details only after an explicit GUI action."""
+
+    def bounded_text(value, *, limit: int) -> str:
+        if not isinstance(value, str) or "\x00" in value:
+            return ""
+        return value[:limit]
+
+    raw_evidence = PIPELINE_STATE.get("last_result_evidence")
+    if not isinstance(raw_evidence, dict):
+        raw_evidence = {}
+    raw_alternatives = raw_evidence.get("alternatives")
+    if not isinstance(raw_alternatives, (list, tuple)):
+        raw_alternatives = ()
+    alternatives = [
+        text for value in raw_alternatives[:3]
+        if (text := bounded_text(value, limit=2000))
+    ]
+    raw_anchors = raw_evidence.get("protected_anchors")
+    if not isinstance(raw_anchors, (list, tuple)):
+        raw_anchors = ()
+    anchors = [
+        text for value in raw_anchors[:64]
+        if (text := bounded_text(value, limit=160))
+    ]
+    proof_edits = []
+    raw_proof_edits = raw_evidence.get("proof_edits")
+    if not isinstance(raw_proof_edits, (list, tuple)):
+        raw_proof_edits = ()
+    for raw in raw_proof_edits[:64]:
+        if not isinstance(raw, dict) or not isinstance(
+                raw.get("accepted"), bool):
+            continue
+        kind = bounded_text(raw.get("kind"), limit=80)
+        before = bounded_text(raw.get("before"), limit=1000)
+        after = bounded_text(raw.get("after"), limit=1000)
+        reason = bounded_text(raw.get("reason"), limit=240)
+        if not kind or (not before and not after):
+            continue
+        proof_edits.append({
+            "kind": kind,
+            "before": before,
+            "after": after,
+            "accepted": raw["accepted"],
+            "reason": reason,
+        })
+    timing_keys = (
+        "release", "asr", "compiler", "consequence",
+        "context", "cleanup", "insertion",
+    )
+    raw_timings = raw_evidence.get("timings_ms", {})
+    timings = {}
+    if isinstance(raw_timings, dict):
+        for key in timing_keys:
+            value = raw_timings.get(key)
+            if (isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(value) and 0 <= value <= 3_600_000):
+                timings[key] = round(float(value), 1)
+    return {
+        "schema_version": 1,
+        "kind": "whisper-face/result-evidence",
+        "alternatives": alternatives,
+        "protected_anchors": anchors,
+        "proof_edits": proof_edits,
+        "timings_ms": timings,
     }
 
 
@@ -5207,15 +5675,58 @@ def learn_scheduler():
         time.sleep(LEARN_INTERVAL)
 
 
+def restart_dead_hotkey_listener(on_dead, listener_state=None) -> bool:
+    """Replace one dead listener without losing retry state."""
+    state = LISTENER if listener_state is None else listener_state
+    listener = state.get("l")
+    if listener is None or getattr(listener, "running", False):
+        state["recovering"] = False
+        return False
+    if not state.get("recovering", False):
+        state["recovering"] = True
+        try:
+            on_dead()
+        except Exception as e:
+            print(f"! hotkey recovery cleanup failed: {e}")
+    print("! hotkey listener died — restarting it")
+    try:
+        replacement = state["make"]()
+    except Exception as e:
+        print(f"! hotkey listener restart failed; retrying: {e}")
+        return False
+    state["l"] = replacement
+    state["recovering"] = False
+    return True
+
+
+def queue_hotkey_listener_recovery(
+        key_down: dict, modifiers: set, events, event_at=None):
+    """Unlatch a dead listener and serialize orphaned-capture cleanup."""
+    key_down["on"] = False
+    modifiers.clear()
+    events.put((
+        "listener_recovery",
+        time.perf_counter() if event_at is None else event_at,
+        frozenset(),
+    ))
+
+
+def hotkey_watchdog_loop(on_dead):
+    """Recover input within seconds, independently of model heartbeats."""
+    while True:
+        time.sleep(HOTKEY_WATCHDOG_INTERVAL)
+        try:
+            restart_dead_hotkey_listener(on_dead)
+        except Exception as e:
+            print(f"! hotkey watchdog recovered from error: {e}")
+
+
 def keepwarm_loop():
     """Touch both models periodically while idle. Costs ~0.2s every few
     minutes; saves the several-second page-in stall on the first dictation
-    after a long break. Doubles as the hotkey-listener watchdog."""
+    after a long break."""
     while True:
         time.sleep(KEEPWARM_INTERVAL)
-        if LISTENER["l"] is not None and not LISTENER["l"].running:
-            print("! hotkey listener died — restarting it")
-            LISTENER["l"] = LISTENER["make"]()
         if time.time() - LAST_USE["t"] < KEEPWARM_MIN_IDLE:
             continue
         try:
@@ -5372,10 +5883,10 @@ def permission_recheck_attempt(environ=None) -> int:
 
 
 def permission_recheck_delay(attempt: int, environ=None) -> float:
-    """Seconds to wait before re-execing to re-read the frozen TCC verdict.
+    """Seconds to wait between fresh-process TCC probes.
 
     Poll every few seconds while the user is plausibly still in the Privacy
-    pane, then back off so an unattended Mac isn't re-execing forever at that
+    pane, then back off so an unattended Mac does not keep probing at that
     rate."""
     values = os.environ if environ is None else environ
     interval = PERMISSION_RECHECK_SECONDS
@@ -5394,29 +5905,70 @@ def permission_recheck_delay(attempt: int, environ=None) -> float:
     return max(interval, PERMISSION_RECHECK_BACKOFF_SECONDS)
 
 
-def ensure_event_permissions():
+def _fresh_event_permissions_granted(*, runner=None) -> bool:
+    """Read TCC from a short-lived process so the visible app stays stable."""
+    run = runner or subprocess.run
+    probe = (
+        "from Quartz import CGPreflightListenEventAccess,"
+        "CGPreflightPostEventAccess;"
+        "raise SystemExit(0 if CGPreflightListenEventAccess() and "
+        "CGPreflightPostEventAccess() else 1)"
+    )
+    try:
+        result = run(
+            [sys.executable, "-c", probe],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def _wait_for_permission_grant_and_reexec(
+        attempt: int, *, sleeper=time.sleep,
+        preflight=_fresh_event_permissions_granted, execv=os.execv) -> None:
+    """Poll fresh TCC evidence, then replace the process exactly once."""
+    current_attempt = attempt
+    while True:
+        sleeper(permission_recheck_delay(current_attempt))
+        if not preflight():
+            current_attempt += 1
+            continue
+        try:
+            os.environ[PERMISSION_ATTEMPT_ENV] = str(current_attempt + 1)
+        except (OSError, ValueError):
+            pass
+        execv(sys.executable, [sys.executable] + sys.argv)
+        return
+
+
+def ensure_event_permissions() -> bool:
     """Under the signed launcher chain, TCC attributes these grants to the
     launcher app ("Whisper Face"), the responsible process this fork+exec child
     rolls up to. Ask for Input Monitoring (hotkey listening) and Accessibility
-    (paste keystroke posting) up front; if missing, wait for the user to flip
-    the toggles and then re-exec so the listener starts trusted."""
+    (paste keystroke posting) up front. If either is missing, schedule a re-exec
+    while AppKit keeps the menu and main window reachable."""
     if IS_WINDOWS:
-        return
+        return True
     try:
         from Quartz import (
             CGPreflightListenEventAccess, CGRequestListenEventAccess,
             CGPreflightPostEventAccess, CGRequestPostEventAccess,
         )
     except ImportError:
-        return                              # older pyobjc: fall back to luck
+        return True                         # older pyobjc: fall back to luck
     if CGPreflightListenEventAccess() and CGPreflightPostEventAccess():
-        return
+        return True
     attempt = permission_recheck_attempt()
     if attempt == 0:
         # Ask exactly once. Every Request/prompt call pops a system dialog, and
-        # the re-exec loop below revisits this function every few seconds, so
-        # prompting on each pass buries the user in dialogs. Later generations
-        # only preflight (above) and wait quietly for the toggle.
+        # later process generations revisit this function, so prompting on each
+        # pass buries the user in dialogs. The fresh probe below only preflights
+        # and waits quietly for the toggle.
         CGRequestListenEventAccess()
         CGRequestPostEventAccess()
         try:
@@ -5431,17 +5983,21 @@ def ensure_event_permissions():
         print("Waiting for permissions: enable 'Whisper Face' under System "
               "Settings -> Privacy & Security -> Input Monitoring AND "
               "Accessibility. Re-checking every few seconds...")
-    # TCC verdicts are effectively frozen for a running process — polling
-    # preflight here never sees the user's grant. Re-exec for a fresh image;
-    # the loop continues across exec generations until both grants stick. The
-    # attempt counter rides the environment through execv, so the wait starts
-    # short (the user is at the toggle) and backs off on an unattended Mac.
+    # TCC verdicts are effectively frozen for a running process. Short-lived
+    # probes see fresh evidence while this AppKit process stays stable; only a
+    # confirmed grant triggers one re-exec. The counter rides the environment
+    # so a manual restart does not prompt again.
     try:
         os.environ[PERMISSION_ATTEMPT_ENV] = str(attempt + 1)
     except (OSError, ValueError):
         pass                                # the counter is a nicety, not a gate
-    time.sleep(permission_recheck_delay(attempt))
-    os.execv(sys.executable, [sys.executable] + sys.argv)
+    threading.Thread(
+        target=_wait_for_permission_grant_and_reexec,
+        args=(attempt,),
+        name="whisper-face-permission-recheck",
+        daemon=True,
+    ).start()
+    return False
 
 
 # ------------------------- native Mac ASR helper -------------------------
@@ -8395,6 +8951,8 @@ def report_dictation_problem(
         *, seconds: float = DICTATION_ERROR_SECONDS):
     """Show bounded retry guidance without retaining or inserting content."""
     CAPTION["text"] = caption
+    CAPTION["confidence"] = None
+    CAPTION["stable_prefix"] = False
     rec.feedback_seconds = max(
         float(getattr(rec, "feedback_seconds", 0.0) or 0.0),
         max(0.0, float(seconds)),
@@ -8656,8 +9214,12 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         asr_started_at = time.perf_counter()
         recognition = assemble_raw(
             chunk_futs, pre_future, full_audio[cut:], rec.prompt)
-        raw = recognition.text
         t_asr = time.perf_counter() - asr_started_at
+        # A later take may finish ASR first, but user-visible cleanup, commands,
+        # and insertion must follow release order. Capture is already stopped,
+        # so waiting here never holds the microphone.
+        DICTATION_PROCESS_ORDER.wait(rec.process_ticket)
+        raw = recognition.text
         if not raw or is_hallucination(raw):
             report_dictation_problem(
                 rec,
@@ -8762,6 +9324,8 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             compiler_result.anchors)
         PIPELINE_STATE["last_stable_prefix_words"] = len(
             compiler_result.stable_prefix.split())
+        CAPTION["confidence"] = compiler_result.confidence
+        CAPTION["stable_prefix"] = bool(compiler_result.stable_prefix.strip())
         rec.uncertain = bool(
             PIPELINE_STATE["last_alternatives"]
             and compiler_result.confidence < 0.65)
@@ -9046,6 +9610,28 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         PIPELINE_STATE["last_asr_engine"] = recognition.engine or "unknown"
         PIPELINE_STATE["last_release_s"] = release_total
         PIPELINE_STATE["last_word_count"] = len(text.split())
+        # Publish the private detail as one atomic, in-memory latest-result
+        # object so an explicit inspection can never mix pipeline generations.
+        PIPELINE_STATE["last_result_evidence"] = {
+            "alternatives": list(PIPELINE_STATE["last_alternatives"])[:3],
+            "protected_anchors": list(compiler_result.anchors)[:64],
+            "proof_edits": [{
+                "kind": edit.kind,
+                "before": edit.before,
+                "after": edit.after,
+                "accepted": bool(edit.accepted),
+                "reason": edit.reason,
+            } for edit in proof_edits[:64]],
+            "timings_ms": {
+                "release": release_total * 1000.0,
+                "asr": t_asr * 1000.0,
+                "compiler": t_compile * 1000.0,
+                "consequence": t_consequence * 1000.0,
+                "context": t_context_firewall * 1000.0,
+                "cleanup": t_clean * 1000.0,
+                "insertion": t_insert * 1000.0,
+            },
+        }
         consequence_metrics = consequence_state_snapshot()
         context_firewall_metrics = context_firewall_state_snapshot()
         native_timing = (
@@ -9182,6 +9768,14 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             ).start()
         else:
             AppHelper.callAfter(dismiss_if_idle)
+
+
+def finish_in_release_order(rec: Recorder, hud: HUD, active: dict):
+    """Finish one ticket and always unblock later releases."""
+    try:
+        finish_and_process(rec, hud, active)
+    finally:
+        DICTATION_PROCESS_ORDER.complete(rec.process_ticket)
 
 
 # ------------------------- warmup & main -------------------------
@@ -9366,6 +9960,54 @@ def check_parakeet_model_revision():
                     f"Parakeet model revision drift: {path.name} is {revision}")
 
 
+def run_native_hud_smoke_test() -> dict[str, int]:
+    """Exercise Phase 1 AppKit surfaces without showing UI or reading state."""
+    if not IS_MACOS:
+        raise RuntimeError("native HUD smoke requires macOS")
+
+    saved_caption = dict(CAPTION)
+    hud = status_bar = None
+    try:
+        NSApplication.sharedApplication()
+        hud = HUD.alloc().init()
+        for mode, confidence, stable in (
+                ("recording", 0.91, True),
+                ("processing", 0.61, True)):
+            hud.wave.mode = mode
+            hud.wave.raw = 0.72
+            hud.wave.reduce_motion = False
+            CAPTION.update({
+                "text": "Local smoke transcript",
+                "confidence": confidence,
+                "stable_prefix": stable,
+            })
+            hud.wave.syncAccessibilityState()
+            hud.wave.setNeedsDisplay_(True)
+            hud.wave.displayIfNeeded()
+            bounds = hud.wave.bounds()
+            bitmap = hud.wave.bitmapImageRepForCachingDisplayInRect_(bounds)
+            hud.wave.cacheDisplayInRect_toBitmapImageRep_(bounds, bitmap)
+            data = bitmap.representationUsingType_properties_(
+                NSBitmapImageFileTypePNG, {})
+            if data is None or data.length() == 0:
+                raise RuntimeError(f"could not render {mode} HUD smoke frame")
+
+        status_bar = StatusBar.alloc().init()
+        status_bar.setState_("rec")
+        status_bar.setMouthLevel_(0.5)
+        status_bar.setMouthLevel_(0.0)
+        status_bar.setState_("proc")
+        return {"states": 2, "motions": len(MOTION_SPECS)}
+    finally:
+        CAPTION.clear()
+        CAPTION.update(saved_caption)
+        if status_bar is not None:
+            NSStatusBar.systemStatusBar().removeStatusItem_(status_bar.item)
+        if hud is not None:
+            hud.timer.invalidate()
+            hud.panel.close()
+
+
 def platform_smoke_test():
     """Import-only validation used by installers and cross-platform CI."""
     expected = (
@@ -9400,45 +10042,11 @@ def main():
         phone_server()                      # blocks forever
         return
 
-    ensure_event_permissions()
-
-    if AUDIO_RECOVERY is not None:
-        try:
-            AUDIO_RECOVERY.start()
-            atexit.register(AUDIO_RECOVERY.close)
-        except Exception:
-            print("! Automatic microphone recovery notifications unavailable")
-
     if IS_MACOS:
         app = NSApplication.sharedApplication()
         app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
     hud = HUD.alloc().init()
     STATUS["bar"] = StatusBar.alloc().init()
-
-    # Open and exercise both reusable streams before enabling the hotkey. This
-    # deliberately pays CoreAudio's cold-start cost at launch, never after the
-    # user has heard the recording cue and begun speaking.
-    try:
-        trace_operation("warmup_audio_pool", AUDIO_POOL.warm)
-    except Exception as e:
-        print(f"! Microphone unavailable: {e}")
-        if IS_MACOS:
-            print("  Enable 'Whisper Face' under System Settings -> Privacy &"
-                  " Security -> Microphone. A keypress will retry"
-                  " initialization.")
-        else:
-            print("  Enable microphone access under Windows Settings -> "
-                  "Privacy & security. A keypress will retry initialization.")
-    if PREFERENCES["flight_recorder"]:
-        try:
-            FLIGHT.enable()
-            print("[flight] active: 20s RAM-only buffer; tap Right Option "
-                  "after speaking")
-            STATUS["bar"].setState_("idle")
-        except Exception as e:
-            PREFERENCES["flight_recorder"] = False
-            save_preferences()
-            print(f"! Flight Recorder could not start: {e}")
 
     # One Recorder per hold. A fresh press during the previous take's 0.3s
     # tail just opens a second short-lived stream instead of being swallowed.
@@ -9447,6 +10055,7 @@ def main():
     if IS_MACOS:
         STATUS["bar"].gui = create_gui(GUIActions(
             status_snapshot=runtime_status_snapshot,
+            inspect_result_evidence=inspect_last_result_evidence,
             settings_snapshot=gui_settings_snapshot,
             set_face=STATUS["bar"].set_face_choice,
             set_flight_recorder=STATUS["bar"].set_flight_enabled,
@@ -9510,6 +10119,46 @@ def main():
         ))
         start_gui_activation_server(STATUS["bar"].gui)
 
+    if not ensure_event_permissions():
+        # Keep AppKit alive while TCC recovery waits. The signed launcher can
+        # now request this existing GUI even when its menu-bar item is hidden by
+        # a notch or a full menu bar. The background recheck replaces this
+        # process once macOS can report the newly granted permissions.
+        AppHelper.runEventLoop(installInterrupt=True)
+        return
+
+    if AUDIO_RECOVERY is not None:
+        try:
+            AUDIO_RECOVERY.start()
+            atexit.register(AUDIO_RECOVERY.close)
+        except Exception:
+            print("! Automatic microphone recovery notifications unavailable")
+
+    # Open and exercise both reusable streams before enabling the hotkey. This
+    # deliberately pays CoreAudio's cold-start cost at launch, never after the
+    # user has heard the recording cue and begun speaking.
+    try:
+        trace_operation("warmup_audio_pool", AUDIO_POOL.warm)
+    except Exception as e:
+        print(f"! Microphone unavailable: {e}")
+        if IS_MACOS:
+            print("  Enable 'Whisper Face' under System Settings -> Privacy &"
+                  " Security -> Microphone. A keypress will retry"
+                  " initialization.")
+        else:
+            print("  Enable microphone access under Windows Settings -> "
+                  "Privacy & security. A keypress will retry initialization.")
+    if PREFERENCES["flight_recorder"]:
+        try:
+            FLIGHT.enable()
+            print("[flight] active: 20s RAM-only buffer; tap Right Option "
+                  "after speaking")
+            STATUS["bar"].setState_("idle")
+        except Exception as e:
+            PREFERENCES["flight_recorder"] = False
+            save_preferences()
+            print(f"! Flight Recorder could not start: {e}")
+
     threading.Thread(target=warmup, daemon=True).start()
     threading.Thread(target=learn_scheduler, daemon=True).start()
     threading.Thread(target=keepwarm_loop, daemon=True).start()
@@ -9521,14 +10170,30 @@ def main():
     # callbacks only enqueue; this worker does the actual work.
     events = queue.Queue()
 
+    def abandon_active_recording():
+        rec = active.get("rec")
+        active["rec"] = None
+        if rec is not None:
+            try:
+                rec.stop()
+            except Exception:
+                pass
+        set_status("off" if PAUSED["on"] else "idle")
+        AppHelper.callAfter(hud.dismiss)
+
     def hotkey_worker():
         while True:
             ev, event_at, modifiers = events.get()
             try:
+                if ev == "listener_recovery":
+                    abandon_active_recording()
+                    continue
                 if (ev == "press" and active["rec"] is None
                         and not PAUSED["on"]):
                     LAST_USE["t"] = time.time()
                     CAPTION["text"] = ""
+                    CAPTION["confidence"] = None
+                    CAPTION["stable_prefix"] = False
                     rec = Recorder()
                     active["rec"] = rec
                     rec.start(event_at)
@@ -9589,23 +10254,16 @@ def main():
                         rec.replace_with_buffered_audio(buffered)
                         print(f"[flight] captured "
                               f"{len(buffered) / SAMPLE_RATE:.1f}s from RAM")
+                    rec.process_ticket = DICTATION_PROCESS_ORDER.issue()
                     set_status("proc")
                     AppHelper.callAfter(hud.showMode_, "processing")
                     threading.Thread(
-                        target=finish_and_process, args=(rec, hud, active),
+                        target=finish_in_release_order, args=(rec, hud, active),
                         daemon=True,
                     ).start()
             except Exception as e:
                 print(f"! hotkey worker recovered from error: {e}")
-                rec = active.get("rec")
-                active["rec"] = None
-                if rec is not None:
-                    try:
-                        rec.stop()
-                    except Exception:
-                        pass
-                set_status("off" if PAUSED["on"] else "idle")
-                AppHelper.callAfter(hud.dismiss)
+                abandon_active_recording()
 
     threading.Thread(target=hotkey_worker, daemon=True).start()
 
@@ -9642,8 +10300,19 @@ def main():
         lst.start()
         return lst
 
+    def recover_listener_state():
+        # A listener can die between press and release. Unlatch its local key
+        # state before the replacement starts, then let the serialized worker
+        # stop any orphaned capture ahead of the next real key event.
+        queue_hotkey_listener_recovery(key_down, modifiers, events)
+
     LISTENER["make"] = make_listener
     LISTENER["l"] = make_listener()
+    threading.Thread(
+        target=hotkey_watchdog_loop,
+        args=(recover_listener_state,),
+        daemon=True,
+    ).start()
 
     AppHelper.runEventLoop(installInterrupt=True)
 
@@ -9658,12 +10327,15 @@ if __name__ == "__main__":
             try:
                 from whisper_face_gui import run_native_appkit_smoke
 
+                hud_result = run_native_hud_smoke_test()
                 result = run_native_appkit_smoke()
             except Exception:
                 print("Whisper Face native GUI smoke failed.", file=sys.stderr)
                 raise SystemExit(1)
             print(
                 "Whisper Face native GUI smoke passed: "
+                f"{hud_result['states']} HUD states, "
+                f"{hud_result['motions']} named motions, "
                 f"{result['sections']} sections, "
                 f"{result['settings_panes']} settings panes.")
     elif "--preload-models" in sys.argv:
