@@ -439,7 +439,12 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn("voice_compiler.py", installer)
                 self.assertIn("insertion_integrity.py", installer)
                 self.assertIn("personal_regression.py", installer)
+                self.assertIn("shadow_candidate_gate.py", installer)
                 self.assertIn("cleanup_circuit_breaker.py", installer)
+                self.assertIn("delayed_cleanup_activation.py", installer)
+                self.assertIn("delayed_cleanup_merge.py", installer)
+                self.assertIn(
+                    "macos_delayed_cleanup_destination.py", installer)
                 self.assertIn("model_wallet.py", installer)
                 self.assertIn("model_wallet_shadow.py", installer)
                 self.assertIn("model_readiness_evidence.py", installer)
@@ -603,11 +608,15 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("voice_inbox.json", self.powershell)
         self.assertIn("demonstrations.json", self.shell)
         self.assertIn("demonstrations.json", self.powershell)
+        self.assertIn("delayed_cleanup_activation.json", self.shell)
+        self.assertIn("delayed_cleanup_activation.json", self.powershell)
         gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
         self.assertIn("voice_inbox.json", gitignore)
         self.assertIn(".voice_inbox.json.*.tmp", gitignore)
         self.assertIn("demonstrations.json", gitignore)
         self.assertIn(".demonstrations.json.*.tmp", gitignore)
+        self.assertIn("delayed_cleanup_activation.json", gitignore)
+        self.assertIn(".delayed_cleanup_activation.json.*.tmp", gitignore)
         for face in ("parrot", "fox", "owl", "cat", "bear",
                      "dog", "wolf", "pig", "panda", "tiger"):
             for frame in ("idle", "talk"):

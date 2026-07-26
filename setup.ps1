@@ -155,7 +155,9 @@ function Confirm-WritableCheckout {
 $Required = @(
     "dictate.py", "dictate.py.lock", "parrot_core.py", "voice_compiler.py",
     "insertion_integrity.py", "personal_regression.py",
-    "cleanup_circuit_breaker.py",
+    "shadow_candidate_gate.py", "cleanup_circuit_breaker.py",
+    "delayed_cleanup_activation.py", "delayed_cleanup_merge.py",
+    "macos_delayed_cleanup_destination.py",
     "model_wallet.py", "model_wallet_shadow.py", "model_readiness_evidence.py",
     "acoustic_keyword_memory.py", "acoustic_time_machine.py",
     "voice_objects.py", "voice_object_command_parser.py", "voice_inbox.py",
@@ -425,7 +427,10 @@ foreach ($DestinationName in $PrivateTemplates.Keys) {
     }
     & icacls $Destination /inheritance:r /grant:r "${env:USERNAME}:(F)" /Q | Out-Null
 }
-foreach ($PrivateStateName in @("voice_inbox.json", "demonstrations.json")) {
+foreach ($PrivateStateName in @(
+    "voice_inbox.json", "demonstrations.json",
+    "delayed_cleanup_activation.json"
+)) {
     $PrivateState = Join-Path $Repo $PrivateStateName
     if (Test-Path $PrivateState) {
         & icacls $PrivateState /inheritance:r /grant:r "${env:USERNAME}:(F)" /Q | Out-Null

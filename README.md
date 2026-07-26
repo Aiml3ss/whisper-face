@@ -244,8 +244,12 @@ are never Supporter-only features.
   or run an agent yet.
 - **Personal Regression Lab** — confirmed correction mappings are evaluated
   against a private, deterministic suite of the user's exact corrected spans.
-  Conflicting candidates are quarantined instead of silently becoming a bad
-  global rule; no audio or surrounding document text enters the suite.
+  Every model, prompt, dictionary, or Personal Prior candidate can use the same
+  content-free shadow gate: it must materially improve the whole suite with
+  zero regressions or evaluation errors before its activation callback runs.
+  Personal Priors use that gate in the live learning path; conflicting or
+  collateral-changing candidates are quarantined instead of silently becoming
+  a bad rule. No audio or surrounding document text enters receipts.
 - **Self-editing snippets (Mac)** — say "insert my email" and your saved text
   pastes instead. Edit that exact insertion within ten seconds and the revised
   value is saved for next time and listed under **Learned Corrections**.
@@ -627,14 +631,31 @@ socket, server, discovery layer, or public transport is shipped.
 `delayed_cleanup_merge.py` provides a pure three-way merge for cleanup that
 finishes after insertion. It proposes changes only where the original span and
 unique boundary anchors remain untouched, rejects ambiguous or reordered text,
-and returns an explainable candidate. Its callback boundary requires two exact
-destination snapshots and a final atomic compare-and-swap, with content-free
-idempotent receipts. A standalone Mac adapter can now read one focused,
-enabled text destination into transient exact text/selection plus keyed
-memory-only identity and revision tokens; private text is redacted from repr
-and receipts. It has no write callback, Accessibility action, clipboard,
-runtime, GUI, log, or persistence surface, so a real atomic destination writer
-and runtime evidence are still required before activation.
+and returns an explainable candidate. The Mac capture-mode runtime can now
+insert the deterministic result immediately, finish Voice Compiler-proofed
+cleanup in a daemon thread, and apply only safe edits after two exact
+destination snapshots and one final exact Accessibility recheck. User edits
+win, proposal IDs are single-use, correction learning is skipped for a
+scheduled delayed pass, and receipts/logs contain only fixed outcomes and
+counts. macOS Accessibility has no native atomic compare-and-swap, so a small
+read-to-write scheduling window remains.
+
+Delayed cleanup stays disabled unless a local, owner-only activation receipt
+proves a manually reviewed caller-attested physical suite: at least 50 cases,
+coverage across native, web, Electron, and terminal editors, balanced applied
+and rejected outcomes, zero wrong-target/user-overwrite/duplicate failures,
+no unexpected selection disruption, and p95 final-apply latency no greater
+than 150 ms. Evidence files contain no transcript or application names.
+Evaluate and install a passing receipt with:
+
+```sh
+uv run delayed_cleanup_activation.py delayed_cleanup_physical_cases.json \
+  --manual-reviewed --write-receipt delayed_cleanup_activation.json
+```
+
+Missing, synthetic, malformed, mixed, or failing evidence leaves the feature
+off. The physical suite has not been run in this repository, so no live safety
+or application-compatibility claim is made yet.
 
 `voice_objects.py`, `voice_inbox.py`, and `drop_to_target.py` define inert,
 local foundations for the next interaction layer. Typed drafts can now enter

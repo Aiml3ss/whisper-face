@@ -1,4 +1,4 @@
-"""Read-only macOS destination state for delayed-cleanup planning.
+"""Guarded macOS destination state for delayed-cleanup transactions.
 
 This standalone adapter may read one focused editable destination's bounded
 value and selection so the pure delayed-cleanup transaction can plan against
@@ -6,8 +6,11 @@ an exact ``DestinationSnapshot``. Raw text and raw Accessibility identifiers
 remain transient and are excluded from repr and receipts. Stable identity and
 revision tokens are keyed, process-memory-only projections.
 
-There is no write callback, AX action, pasteboard, keyboard, persistence,
-logging, runtime, or GUI surface in this module.
+The only mutation is a whole-value Accessibility replacement after the same
+reader resolves the focused element again and proves every captured field is
+unchanged.  The adapter retains at most eight exact observations in memory so
+the transaction callback can perform that final compare-and-swap.  It has no
+pasteboard, keyboard, persistence, logging, or network surface.
 """
 from __future__ import annotations
 
@@ -65,6 +68,10 @@ class DestinationStateReader(Protocol):
     def trusted(self) -> bool: ...
 
     def read_focused_destination(self) -> Mapping[str, Any] | None: ...
+
+    def compare_and_swap_focused_destination(
+        self, expected: Mapping[str, Any], replacement: str,
+    ) -> bool: ...
 
 
 def _bounded_element_identifier(value: object) -> bool:
@@ -133,6 +140,7 @@ class MacDestinationStateAdapter:
             raise ValueError("destination token key is too short")
         self._reader = reader
         self._key = key
+        self._raw_by_revision: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def _empty(
@@ -222,13 +230,43 @@ class MacDestinationStateAdapter:
             (*identity_parts, selection[0], selection[1], text))
         snapshot = DestinationSnapshot(
             destination_id, revision, text, focused=True)
+        # Exact destination text stays transient and bounded.  Keep only the
+        # newest observations required by in-flight delayed transactions.
+        self._raw_by_revision[revision] = dict(data)
+        while len(self._raw_by_revision) > 8:
+            self._raw_by_revision.pop(next(iter(self._raw_by_revision)))
         return CapturedDestinationState(
             snapshot, selection, DestinationCaptureReceipt(
                 DestinationCaptureState.CAPTURED, True, True, True, True))
 
+    def apply_if_unchanged(
+            self, expected: DestinationSnapshot, replacement: str) -> bool:
+        """Perform the transaction's final exact recheck and one AX write."""
+        if (sys.platform != "darwin"
+                or not isinstance(expected, DestinationSnapshot)
+                or not isinstance(replacement, str)
+                or len(replacement) > MAX_TEXT_CHARS
+                or "\x00" in replacement
+                or any(0xD800 <= ord(character) <= 0xDFFF
+                       for character in replacement)):
+            return False
+        raw = self._raw_by_revision.pop(expected.revision, None)
+        if raw is None or raw.get("text") != expected.text:
+            return False
+        compare_and_swap = getattr(
+            self._reader, "compare_and_swap_focused_destination", None)
+        if not callable(compare_and_swap):
+            return False
+        try:
+            if self._reader.trusted() is not True:
+                return False
+            return compare_and_swap(raw, replacement) is True
+        except Exception:
+            return False
+
 
 class SystemMacDestinationStateReader:
-    """Narrow AX copy-only reader; no action or mutation API is exposed."""
+    """Narrow AX reader with one exact whole-value conditional replacement."""
 
     def __init__(self) -> None:
         if sys.platform != "darwin":
@@ -253,7 +291,8 @@ class SystemMacDestinationStateReader:
         except Exception:
             return None
 
-    def read_focused_destination(self) -> Mapping[str, Any] | None:
+    def _focused_destination(
+            self) -> tuple[object, Mapping[str, Any]] | None:
         try:
             system = self.services.AXUIElementCreateSystemWide()
             app = self._copy(system, "AXFocusedApplication")
@@ -276,7 +315,7 @@ class SystemMacDestinationStateReader:
                 selected_range = _coerce_ax_range(extracted)
             if selected_range is None:
                 return None
-            return {
+            return element, {
                 "schema_version": 1,
                 "pid": pid,
                 "window_id": self._copy(window, "AXWindowNumber"),
@@ -289,6 +328,36 @@ class SystemMacDestinationStateReader:
             }
         except Exception:
             return None
+
+    def read_focused_destination(self) -> Mapping[str, Any] | None:
+        focused = self._focused_destination()
+        return focused[1] if focused is not None else None
+
+    def compare_and_swap_focused_destination(
+            self, expected: Mapping[str, Any], replacement: str) -> bool:
+        """Re-resolve, compare the closed observation, then write once.
+
+        Accessibility has no native compare-and-swap primitive.  Keeping the
+        final read and set in this single callback minimizes the remaining
+        operating-system scheduling window; callers must still require
+        physical-app evidence before enabling delayed cleanup.
+        """
+        if (not isinstance(expected, Mapping)
+                or set(expected) != _OBSERVATION_KEYS
+                or not isinstance(replacement, str)
+                or len(replacement) > MAX_TEXT_CHARS):
+            return False
+        focused = self._focused_destination()
+        if focused is None:
+            return False
+        element, current = focused
+        if dict(current) != dict(expected):
+            return False
+        try:
+            return self.services.AXUIElementSetAttributeValue(
+                element, "AXValue", replacement) == 0
+        except Exception:
+            return False
 
 
 def capture_frontmost_destination_state() -> CapturedDestinationState:

@@ -54,11 +54,17 @@ class FakeReader:
     def read_focused_destination(self):
         return next(self.values)
 
+    def compare_and_swap_focused_destination(self, expected, replacement):
+        current = next(self.values)
+        return current == expected and isinstance(replacement, str)
+
 
 class FakeServices:
     def __init__(self, *, selected="selected-range", extracted=None):
         self.requests = []
+        self.writes = []
         self.selected = selected
+        self.value = "Private destination words"
         self.extracted = extracted if extracted is not None else (
             True, SimpleNamespace(location=25, length=0))
 
@@ -77,7 +83,7 @@ class FakeServices:
             ("window", "AXWindowNumber"): 44,
             ("editor", "AXIdentifier"): "message-editor",
             ("editor", "AXRole"): "AXTextArea",
-            ("editor", "AXValue"): "Private destination words",
+            ("editor", "AXValue"): self.value,
             ("editor", "AXSelectedTextRange"): self.selected,
             ("editor", "AXFocused"): True,
             ("editor", "AXEnabled"): True,
@@ -92,6 +98,13 @@ class FakeServices:
         if value == "selected-range" and kind == 4:
             return self.extracted
         return False, None
+
+    def AXUIElementSetAttributeValue(self, element, attribute, value):
+        self.writes.append((element, attribute, value))
+        if element != "editor" or attribute != "AXValue":
+            return 1
+        self.value = value
+        return 0
 
 
 class MacDelayedCleanupDestinationTests(unittest.TestCase):
@@ -133,11 +146,12 @@ class MacDelayedCleanupDestinationTests(unittest.TestCase):
         self.assertNotEqual(original.snapshot.destination_id,
                             other.snapshot.destination_id)
 
-    def test_snapshot_plugs_into_transaction_but_adapter_exposes_no_apply(self):
-        reader = FakeReader((observation(), observation()))
+    def test_snapshot_plugs_into_transaction_and_applies_after_final_cas(self):
+        reader = FakeReader((
+            observation(), observation(), observation(),
+        ))
         destination = MacDestinationStateAdapter(
             reader, token_key=b"k" * 32)
-        proposed_writes = []
 
         with mock.patch(
                 "macos_delayed_cleanup_destination.sys.platform", "darwin"):
@@ -146,17 +160,26 @@ class MacDelayedCleanupDestinationTests(unittest.TestCase):
                 "We should uh ship Friday.",
                 "We should ship Friday.",
                 lambda: destination.capture().snapshot,
-                lambda expected, replacement: (
-                    proposed_writes.append((expected, replacement)) or False),
+                destination.apply_if_unchanged,
             )
 
-        self.assertEqual(
-            receipt.outcome, DelayedApplyOutcome.COMPARE_AND_SWAP_REJECTED)
-        self.assertFalse(receipt.applied)
-        self.assertEqual(len(proposed_writes), 1)
-        self.assertEqual(proposed_writes[0][1], "We should ship Friday.")
-        self.assertFalse(hasattr(destination, "apply"))
-        self.assertFalse(hasattr(destination, "write"))
+        self.assertEqual(receipt.outcome, DelayedApplyOutcome.APPLIED)
+        self.assertTrue(receipt.applied)
+
+    def test_final_cas_rejects_drift_and_never_retries_a_consumed_revision(self):
+        reader = FakeReader((
+            observation(), observation(text="User typed"),
+        ))
+        destination = MacDestinationStateAdapter(
+            reader, token_key=b"k" * 32)
+        with mock.patch(
+                "macos_delayed_cleanup_destination.sys.platform", "darwin"):
+            expected = destination.capture().snapshot
+            self.assertIsNotNone(expected)
+            self.assertFalse(destination.apply_if_unchanged(
+                expected, "We should ship Friday."))
+            self.assertFalse(destination.apply_if_unchanged(
+                expected, "We should ship Friday."))
 
     def test_receipt_and_repr_never_expose_destination_content_or_ids(self):
         _, (capture,) = self.capture(observation(
@@ -264,7 +287,26 @@ class MacDelayedCleanupDestinationTests(unittest.TestCase):
         requested = {attribute for _, attribute in services.requests}
         self.assertNotIn("AXSelectedText", requested)
 
-    def test_module_has_no_write_action_logging_persistence_or_network_surface(self):
+    def test_concrete_reader_sets_value_only_after_exact_observation_recheck(self):
+        services = FakeServices()
+        reader = object.__new__(SystemMacDestinationStateReader)
+        reader._services = services
+        expected = reader.read_focused_destination()
+
+        self.assertTrue(reader.compare_and_swap_focused_destination(
+            expected, "Clean destination words"))
+        self.assertEqual(
+            services.writes,
+            [("editor", "AXValue", "Clean destination words")],
+        )
+
+        stale = dict(expected)
+        stale["text"] = "Stale private words"
+        self.assertFalse(reader.compare_and_swap_focused_destination(
+            stale, "Must not write"))
+        self.assertEqual(len(services.writes), 1)
+
+    def test_module_has_only_allowlisted_ax_write_and_no_other_side_effects(self):
         tree = ast.parse((ROOT / "macos_delayed_cleanup_destination.py").read_text(
             encoding="utf-8"))
         called_attributes = {
@@ -279,6 +321,11 @@ class MacDelayedCleanupDestinationTests(unittest.TestCase):
             "AXUIElementPerformAction", "setString", "write", "send",
             "connect", "setValue", "paste", "type",
         })
+        self.assertEqual(
+            sum(name == "AXUIElementSetAttributeValue"
+                for name in called_attributes),
+            1,
+        )
         self.assertFalse(called_names & {
             "open", "print", "exec", "eval", "compile", "paste_text",
             "type_text", "click", "focus", "drag", "drop",

@@ -28,6 +28,17 @@ tombstone retained for deduplication. Non-verified terminal results enter the
 bounded Voice Outbox; in-flight results are never recoverable or dismissible.
 Clipboard recovery acknowledges an item only after macOS confirms the copy.
 
+Optional delayed capture cleanup is a second, separately gated transaction
+after the initial insertion is verified. It compares the original insertion,
+the Voice Compiler-proofed proposal, and two fresh focused-destination
+snapshots; it merges only untouched spans and consumes each proposal and final
+revision once. The macOS Accessibility API has no native atomic
+compare-and-swap, so the adapter performs one last exact closed-observation
+comparison immediately before its single whole-value write. This residual
+read-to-write scheduling window requires caller-attested physical evidence
+before a local activation receipt can enable the path. Missing or invalid
+evidence leaves synchronous behavior unchanged.
+
 ## Consequences
 
 - Focus, selection, and nearby-text drift cannot silently redirect readable
@@ -39,6 +50,8 @@ Clipboard recovery acknowledges an item only after macOS confirms the copy.
 - Recovery is explicit; attempted-unknown items warn that text may already be
   present at the destination.
 - Receipt proof adds at most 20 ms beyond the existing paste operation.
+- Delayed cleanup cannot run before a verified initial insertion, and
+  scheduled delayed utterances do not enter correction learning.
 
 Residual risk: an opaque app can programmatically change its focused field
 without user input while keeping the same window. The compatibility adapter

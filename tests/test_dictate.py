@@ -6260,5 +6260,201 @@ class CustomVocabularyTests(unittest.TestCase):
         self.assertEqual(casing("switch to qwen now"), "switch to qwen now")
 
 
+class DelayedCleanupRuntimeTests(unittest.TestCase):
+    @staticmethod
+    def activation_namespace(*, is_macos=True, validator=None):
+        state = {
+            "active": False,
+            "status": "not_loaded",
+            "generation": 0,
+            "lock": threading.Lock(),
+        }
+        namespace = load_definitions(
+            "load_delayed_cleanup_activation",
+            "delayed_cleanup_activation_status",
+            extra={
+                "Path": Path,
+                "os": os,
+                "stat": stat,
+                "IS_MACOS": is_macos,
+                "DELAYED_CLEANUP_ACTIVATION_FILE":
+                    Path("delayed_cleanup_activation.json"),
+                "validate_delayed_cleanup_activation":
+                    validator or (lambda value: value == {"valid": True}),
+                "DELAYED_CLEANUP_STATE": state,
+            },
+        )
+        return namespace, state
+
+    def test_activation_receipt_is_mac_only_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activation.json"
+            path.write_text('{"valid": true}', encoding="utf-8")
+            path.chmod(0o600)
+            namespace, state = self.activation_namespace()
+
+            self.assertTrue(
+                namespace["load_delayed_cleanup_activation"](path))
+            self.assertEqual(
+                namespace["delayed_cleanup_activation_status"](),
+                {"active": True, "status": "active"},
+            )
+
+            path.write_text('{"valid": false}', encoding="utf-8")
+            path.chmod(0o600)
+            self.assertFalse(
+                namespace["load_delayed_cleanup_activation"](path))
+            self.assertEqual(state["status"], "invalid")
+            path.write_text('{"valid": true}', encoding="utf-8")
+            path.chmod(0o644)
+            self.assertFalse(
+                namespace["load_delayed_cleanup_activation"](path))
+            self.assertEqual(state["status"], "unsafe_permissions")
+            path.unlink()
+            self.assertFalse(
+                namespace["load_delayed_cleanup_activation"](path))
+            self.assertEqual(state["status"], "missing")
+
+            other, other_state = self.activation_namespace(is_macos=False)
+            path.write_text('{"valid": true}', encoding="utf-8")
+            self.assertFalse(other["load_delayed_cleanup_activation"](path))
+            self.assertEqual(other_state["status"], "unsupported_platform")
+
+    def test_scheduler_is_inert_until_active_and_copies_private_inputs(self):
+        starts = []
+        state = {
+            "active": False,
+            "status": "missing",
+            "generation": 0,
+            "lock": threading.Lock(),
+        }
+        pipeline = {}
+        worker = object()
+        namespace = load_definitions(
+            "schedule_delayed_cleanup",
+            extra={
+                "DELAYED_CLEANUP_STATE": state,
+                "PIPELINE_STATE": pipeline,
+                "_run_delayed_cleanup": worker,
+            },
+        )
+        restore = {"sentinel": "private expansion"}
+        arguments = (
+            "proposal-1", "original", "compiled", "tone",
+            SimpleNamespace(),
+        )
+        keywords = {
+            "continuing": False,
+            "context_tail": "private tail",
+            "context_text": "private document",
+            "tone_key": "formal",
+            "snippet_restore": restore,
+            "starter": lambda target, args: starts.append((target, args)),
+        }
+
+        self.assertFalse(
+            namespace["schedule_delayed_cleanup"](*arguments, **keywords))
+        self.assertEqual(starts, [])
+        state["active"] = True
+        self.assertTrue(
+            namespace["schedule_delayed_cleanup"](*arguments, **keywords))
+        restore["sentinel"] = "changed after scheduling"
+
+        self.assertEqual(len(starts), 1)
+        self.assertIs(starts[0][0], worker)
+        self.assertEqual(starts[0][1][0:4], (
+            1, "proposal-1", "original", "compiled"))
+        self.assertEqual(
+            starts[0][1][-1], {"sentinel": "private expansion"})
+        self.assertEqual(
+            pipeline["last_delayed_cleanup_outcome"], "scheduled")
+
+    def test_proposal_requires_exact_voice_compiler_reconstruction(self):
+        verified = []
+
+        class Compiler:
+            proof_text = "clean github"
+
+            def verify_edits(
+                    self, original, proposals, candidates, *, mode):
+                verified.append(
+                    (original, tuple(proposals), candidates, mode))
+                return SimpleNamespace(text=self.proof_text)
+
+        compiler = Compiler()
+        namespace = load_definitions(
+            "build_delayed_cleanup_proposal",
+            extra={
+                "VOICE_COMPILER": compiler,
+                "EditProposal": lambda kind, before, after:
+                    SimpleNamespace(
+                        kind=kind, before=before, after=after),
+                "llm_clean_with_edits": lambda *_args: (
+                    "clean github",
+                    (SimpleNamespace(
+                        kind="replace", before="raw", after="clean"),),
+                ),
+                "quick_clean": lambda text, **_kwargs: text,
+                "strip_casual_period": lambda text: text,
+                "apply_vocabulary_casing":
+                    lambda text: text.replace("github", "GitHub"),
+                "_restore_snippet_sentinels": lambda text, _restore: text,
+            },
+        )
+        voice_ir = SimpleNamespace(
+            context=SimpleNamespace(candidates=("anchor",)))
+        kwargs = {
+            "continuing": False,
+            "context_tail": "",
+            "context_text": None,
+            "tone_key": "formal",
+            "snippet_restore": {},
+        }
+
+        self.assertEqual(
+            namespace["build_delayed_cleanup_proposal"](
+                "raw github", "tone", voice_ir, **kwargs),
+            "clean GitHub",
+        )
+        self.assertEqual(
+            (verified[0][0], verified[0][2], verified[0][3]),
+            ("raw github", ("anchor",), "capture"),
+        )
+        compiler.proof_text = "not the claimed candidate"
+        self.assertIsNone(
+            namespace["build_delayed_cleanup_proposal"](
+                "raw github", "tone", voice_ir, **kwargs))
+
+    def test_finish_schedules_only_after_verified_commit(self):
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        finish = next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "finish_and_process"
+        )
+        segment = ast.get_source_segment(source, finish)
+        self.assertIn(
+            "if needs_llm and not delayed_cleanup_requested:", segment)
+        self.assertIn(
+            "if verified and delayed_cleanup_requested:", segment)
+        self.assertIn(
+            "if learn_correction and verified and "
+            "not delayed_cleanup_scheduled:",
+            segment,
+        )
+        self.assertGreater(
+            segment.index("schedule_delayed_cleanup("),
+            segment.index("integrity_receipt = commit_insertion("),
+        )
+        main = next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef) and node.name == "main"
+        )
+        self.assertIn(
+            "load_delayed_cleanup_activation()",
+            ast.get_source_segment(source, main),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

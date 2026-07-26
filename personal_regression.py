@@ -13,6 +13,13 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
+from shadow_candidate_gate import (
+    CandidateDisposition,
+    CandidateKind,
+    ShadowCandidateGate,
+    ShadowRegressionCase,
+)
+
 
 SCHEMA_VERSION = 1
 MAX_CASES = 256
@@ -128,15 +135,79 @@ class PersonalRegressionLab:
         if not result.passed:
             self._remember_quarantine(result)
             return result
+        key = (heard.casefold(), app)
+        mapping = LearnedMapping(heard, preferred, app)
+        if self._promoted.get(key) == mapping:
+            return replace(result, promoted=True)
+
+        cases = [
+            ShadowRegressionCase(
+                case.id, case.heard, case.preferred, case.app)
+            for case in self.cases
+        ]
+        # A global candidate can be proposed from repeated app-scoped
+        # observations after the app-specific mapping is already active. Add a
+        # transient scope-counterfactual so that material improvement outside
+        # the existing app mapping is measurable without persisting synthetic
+        # evidence into the user's regression suite.
+        if not any(
+                case.heard.casefold() == heard.casefold()
+                and case.app == app
+                for case in self.cases):
+            cases.append(ShadowRegressionCase(
+                "candidate-scope-" + _case_id(
+                    heard, preferred, app),
+                heard,
+                preferred,
+                app,
+            ))
+        suite_digest = hashlib.sha256(
+            "\n".join(case.id for case in self.cases).encode("ascii")
+        ).hexdigest()[:16]
+        candidate_id = (
+            "personal-prior-"
+            + hashlib.sha256(json.dumps(
+                [heard.casefold(), preferred, app, suite_digest],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()[:24]
+        )
+
+        def candidate_transform(text: str, case_app: str | None) -> str:
+            return self._apply_mappings(
+                text, app=case_app, candidate=mapping)
+
+        def activate() -> bool:
+            self._promoted[key] = mapping
+            while len(self._promoted) > MAX_MAPPINGS:
+                self._promoted.pop(next(iter(self._promoted)))
+            return True
+
+        receipt = ShadowCandidateGate().attempt(
+            candidate_id,
+            CandidateKind.PERSONAL_PRIOR,
+            tuple(cases),
+            lambda text, case_app: self.apply(text, app=case_app),
+            candidate_transform,
+            activate,
+        )
+        if receipt.disposition != CandidateDisposition.PROMOTED:
+            reason = (
+                "shadow suite found "
+                f"{receipt.regression_count} regressions and "
+                f"{receipt.error_count} errors across "
+                f"{receipt.case_count} cases"
+                if receipt.disposition == CandidateDisposition.QUARANTINED
+                else "shadow suite found no material improvement"
+            )
+            held = replace(result, passed=False, reasons=(reason,))
+            self._remember_quarantine(held)
+            return held
         self._quarantined = [
             item for item in self._quarantined
             if not (item.heard.casefold() == heard.casefold()
                     and item.app == app)
         ]
-        self._promoted[(heard.casefold(), app)] = LearnedMapping(
-            heard, preferred, app)
-        while len(self._promoted) > MAX_MAPPINGS:
-            self._promoted.pop(next(iter(self._promoted)))
         return replace(result, promoted=True)
 
     def _remember_quarantine(self, result: CandidateEvaluation) -> None:
@@ -172,11 +243,24 @@ class PersonalRegressionLab:
             case_ids=tuple(case.id for case in applicable),
         )
 
-    def apply(self, text: str, *, app: str | None = None) -> str:
+    def _apply_mappings(
+            self, text: str, *, app: str | None = None,
+            candidate: LearnedMapping | None = None) -> str:
         chosen: dict[str, LearnedMapping] = {}
+        mappings = list(self._promoted.values())
+        if candidate is not None:
+            mappings = [
+                mapping for mapping in mappings
+                if not (
+                    mapping.heard.casefold() == candidate.heard.casefold()
+                    and mapping.app == candidate.app
+                )
+            ]
+            mappings.append(candidate)
         mappings = sorted(
-            self._promoted.values(),
+            mappings,
             key=lambda mapping: (
+                0 if candidate is not None and mapping == candidate else 1,
                 0 if mapping.app == app and app is not None else 1,
                 -len(mapping.heard), mapping.heard.casefold()),
         )
@@ -199,6 +283,9 @@ class PersonalRegressionLab:
             lambda match: chosen[match.group(0).casefold()].preferred,
             text,
         )
+
+    def apply(self, text: str, *, app: str | None = None) -> str:
+        return self._apply_mappings(text, app=app)
 
     def forget(self, heard: str, *, app: str | None = None) -> int:
         """Forget all evidence and decisions for one mapping scope."""
