@@ -427,6 +427,13 @@ class PrewarmedWhisperTinyVerifier:
     def close(self) -> None:
         self._supervisor.close()
 
+    @property
+    def ready(self) -> bool:
+        return self._supervisor.ready
+
+    def prewarm(self, *, deadline_at: float) -> bool:
+        return self._supervisor.prewarm(deadline_at=deadline_at)
+
     def verify(
             self,
             samples: Sequence[float],

@@ -95,6 +95,7 @@ from whisper_face_theme import (  # noqa: E402
     FACE_CHIP_COLORS,
     LIGHT_PALETTE,
     MOTION_SPECS,
+    SURFACE_SPECS,
     TYPE_SPECS,
     hud_presentation,
     jelly_face_scale,
@@ -1731,6 +1732,7 @@ class FacePreferenceTests(unittest.TestCase):
                 "acoustic_time_machine": True,
                 "voice_object_commands": False,
                 "spoken_edit_commands": False,
+                "selective_relisten": False,
                 "face": "fox",
             })
 
@@ -1746,6 +1748,7 @@ class FacePreferenceTests(unittest.TestCase):
                         "acoustic_time_machine": acoustic,
                         "voice_object_commands": voice_objects,
                         "spoken_edit_commands": voice_objects,
+                        "selective_relisten": voice_objects,
                     }), encoding="utf-8")
                     buffer = AcousticTimeMachine()
                     ns = load_definitions(
@@ -1765,6 +1768,8 @@ class FacePreferenceTests(unittest.TestCase):
                         ns["PREFERENCES"]["voice_object_commands"], expected)
                     self.assertIs(
                         ns["PREFERENCES"]["spoken_edit_commands"], expected)
+                    self.assertIs(
+                        ns["PREFERENCES"]["selective_relisten"], expected)
                     self.assertIs(buffer.enabled, expected)
 
     def test_all_default_faces_are_supported(self):
@@ -1789,9 +1794,58 @@ class FacePreferenceTests(unittest.TestCase):
             ns["hud_level_step"](0.9, 0.7, "error", False), 0.7)
 
 
+class SelectiveRelistenPreferenceTests(unittest.TestCase):
+    def _namespace(self, *, is_macos=True, evidence_ready=True):
+        calls = []
+        status = SimpleNamespace(ready=evidence_ready)
+        ns = load_definitions(
+            "set_selective_relisten_enabled",
+            assignments={"PREFERENCES"},
+            extra={
+                "DEFAULT_FACE": "parrot",
+                "IS_MACOS": is_macos,
+                "RELISTEN_ACTIVATION_FILE": Path("private-receipt.json"),
+                "load_activation_receipt": lambda _path: status,
+                "refresh_selective_relisten_verifier":
+                    lambda: calls.append("refresh"),
+                "save_preferences": lambda: calls.append("save"),
+            },
+        )
+        return ns, calls
+
+    def test_enable_requires_current_local_activation_evidence(self):
+        ns, calls = self._namespace(evidence_ready=False)
+
+        with self.assertRaisesRegex(RuntimeError, "evidence"):
+            ns["set_selective_relisten_enabled"](True)
+
+        self.assertFalse(ns["PREFERENCES"]["selective_relisten"])
+        self.assertEqual(calls, [])
+
+    def test_enable_and_disable_refresh_lifetime_then_persist(self):
+        ns, calls = self._namespace()
+
+        ns["set_selective_relisten_enabled"](True)
+        self.assertTrue(ns["PREFERENCES"]["selective_relisten"])
+        self.assertEqual(calls, ["refresh", "save"])
+
+        ns["set_selective_relisten_enabled"](False)
+        self.assertFalse(ns["PREFERENCES"]["selective_relisten"])
+        self.assertEqual(calls, ["refresh", "save", "refresh", "save"])
+
+    def test_non_mac_cannot_activate_even_with_receipt(self):
+        ns, calls = self._namespace(is_macos=False)
+
+        ns["set_selective_relisten_enabled"](True)
+
+        self.assertFalse(ns["PREFERENCES"]["selective_relisten"])
+        self.assertEqual(calls, ["refresh", "save"])
+
+
 class WhisperFaceThemeTests(unittest.TestCase):
     def test_light_and_dark_palettes_share_brand_but_not_work_surfaces(self):
         self.assertEqual(LIGHT_PALETTE.brand, DARK_PALETTE.brand)
+        self.assertEqual(LIGHT_PALETTE.error, DARK_PALETTE.error)
         self.assertNotEqual(LIGHT_PALETTE.bg, DARK_PALETTE.bg)
         self.assertNotEqual(LIGHT_PALETTE.surface, DARK_PALETTE.surface)
         self.assertNotEqual(LIGHT_PALETTE.ink, DARK_PALETTE.ink)
@@ -1810,6 +1864,18 @@ class WhisperFaceThemeTests(unittest.TestCase):
             self.assertLessEqual(motion.duration, 0.5)
             self.assertGreater(motion.squash_x, 0.0)
             self.assertGreater(motion.squash_y, 0.0)
+
+    def test_surface_tokens_keep_work_quiet_and_playful_objects_offset(self):
+        self.assertEqual(
+            set(SURFACE_SPECS), {"work", "card", "playful", "control"})
+        self.assertEqual(SURFACE_SPECS["work"].shadow_x, 0.0)
+        self.assertEqual(SURFACE_SPECS["work"].shadow_y, 0.0)
+        self.assertGreater(SURFACE_SPECS["playful"].shadow_x, 0.0)
+        self.assertLess(SURFACE_SPECS["playful"].shadow_y, 0.0)
+        self.assertGreater(
+            SURFACE_SPECS["playful"].border_width,
+            SURFACE_SPECS["work"].border_width,
+        )
 
     def test_hud_type_tokens_use_compact_rounded_chrome_sizes(self):
         self.assertEqual(

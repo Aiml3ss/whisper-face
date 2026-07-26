@@ -77,6 +77,12 @@ change code that handles release artifacts or precedes signing steps.
 | `actions/upload-artifact` v7 | `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` | MIT | Transfers verified assets out of the read-only packaging job. |
 | `actions/download-artifact` v8 | `3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c` | MIT | Retrieves verified assets in the isolated release-publishing job. |
 
+## Marketing-site interface library
+
+| Component | Version/revision | License | How used |
+|---|---|---|---|
+| Jelly UI | 1.1.0 / upstream revision `8e39a8e61b5a43a562ae85e4b01191d333d5b121` | MIT, Copyright 2026 bmson | The public site loads the official bundled Web Components module from `jelly-ui.com` for its theme provider and theme control. Subresource Integrity pins the audited bundle bytes; branded surfaces use first-party CSS motion derived from the same interaction language. [Source and license](https://github.com/jelly-org/ui) |
+
 ## Binary distribution warning
 
 Before distributing a signed, notarized, self-contained binary or hardware

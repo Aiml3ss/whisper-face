@@ -21,6 +21,7 @@ from support_bundle import SupportBundleError, write_support_bundle
 from whisper_face_theme import (
     FACE_CHIP_COLORS,
     MOTION_SPECS,
+    SURFACE_SPECS,
     palette_for_appearance,
 )
 
@@ -81,6 +82,11 @@ RISKY_ACTION_CLASSES = (
 RISKY_ACTION_STATES = frozenset({
     "idle", "awaiting_voice", "awaiting_click", "confirmed", "cancelled",
     "expired",
+})
+SELECTIVE_RELISTEN_STATUSES = frozenset({
+    "off", "ready", "warming", "enabled-not-ready", "receipt-missing",
+    "receipt-invalid", "receipt-policy-mismatch",
+    "receipt-evidence-insufficient",
 })
 POINT_AND_SPEAK_MAX_PHRASE_CHARS = 96
 POINT_AND_SPEAK_ROLES = frozenset({
@@ -161,6 +167,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "nav.models": "Models",
         "nav.diagnostics": "Diagnostics",
         "app.subtitle": "Private, fast voice input on your Mac",
+        "app.local_badge": "LOCAL FIRST",
         "overview.phase.ready": "READY",
         "overview.phase.recording": "RECORDING",
         "overview.phase.processing": "PROCESSING",
@@ -306,6 +313,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "results.relisten.inconclusive": "inconclusive",
         "results.relisten.mixed": "mixed",
         "results.relisten.unavailable": "unavailable",
+        "results.empty.kicker": "YOUR LAST RESULT LIVES HERE",
+        "results.empty.title": "Nothing to inspect yet",
+        "results.empty.detail": "Dictate something and Whisper Face will explain what it heard, protected, changed, and delivered.",
         "results.audio.off": "Acoustic replay is off",
         "results.audio.empty": "No consequential span retained; expired audio is cleared automatically",
         "results.audio.available.one": "1 consequential span retained in RAM for at most one minute",
@@ -370,6 +380,13 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "models.unknown": "Unknown",
         "models.waiting.detail": "Open this window after startup completes",
         "models.guidance": "Models prepare locally and can finish in the background.",
+        "models.relisten.label": "Selective Re-listen",
+        "models.relisten.status.off": "Off",
+        "models.relisten.status.ready": "On · verifier ready",
+        "models.relisten.status.warming": "On · warming locally",
+        "models.relisten.status.enabled-not-ready": "On · starting locally",
+        "models.relisten.status.evidence-required": "Evidence required",
+        "models.relisten.help": "Recheck only uncertain names and numbers with the local Whisper Tiny verifier. Activation requires approved evidence from this Mac.",
         "models.wallet.unavailable": "Model wallet shadow advisory only · No model execution or routing · Exact pin evidence unavailable · Runtime readiness and capability evidence remain separate.",
         "models.wallet.evidence": "Model wallet shadow advisory only · No model execution or routing · Exact files resolved {resolved}/4 · Warm path observed {warm}/4 · Runtime readiness attested 0/4 · Capability bounds available 0/4.",
         "models.wallet.informational": "Model wallet shadow advisory only · No model execution or routing · Eligible ordering is informational.",
@@ -378,6 +395,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "models.accessibility.status": "{name} status",
         "models.accessibility.guidance": "Model guidance",
         "models.accessibility.wallet": "Model wallet shadow advisory; no execution or routing",
+        "models.accessibility.relisten": "Selective Re-listen activation",
         "diagnostics.title": "Diagnostics",
         "diagnostics.subtitle": "A quick health check when something does not feel right.",
         "diagnostics.service": "Service",
@@ -739,6 +757,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "operation.face.change_failed": "Could not change face: {error}",
         "operation.flight.update_failed": "Could not update Flight Recorder: {error}",
         "operation.acoustic.update_failed": "Could not update Acoustic Time Machine: {error}",
+        "operation.relisten.update_failed": "Could not update Selective Re-listen: {error}",
         "operation.voice_objects.update_failed": "Could not update Voice Object Commands: {error}",
         "operation.voice_objects.inspect_failed": "Could not inspect local Voice Object drafts.",
         "operation.voice_objects.reveal_failed": "Could not reveal the selected local draft.",
@@ -919,6 +938,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "choose_face",
             "set_flight_recorder",
             "set_acoustic_time_machine",
+            "set_selective_relisten",
             "set_voice_object_commands",
             "inspect_voice_object_drafts",
             "reveal_voice_object_draft",
@@ -1000,6 +1020,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "results.accessibility.audio",
             "models.accessibility.guidance",
             "models.accessibility.wallet",
+            "models.accessibility.relisten",
             "diagnostics.accessibility.verification",
             "diagnostics.accessibility.open_system_settings",
             "point_and_speak.dialog.input.label",
@@ -1033,6 +1054,7 @@ class GUIActions:
     set_face: Callable[[str], None] = _noop
     set_flight_recorder: Callable[[bool], None] = _noop
     set_acoustic_time_machine: Callable[[bool], None] = _noop
+    set_selective_relisten: Callable[[bool], None] = _noop
     set_voice_object_commands: Callable[[bool], None] = _noop
     inspect_voice_object_drafts: Callable[[], Sequence[Mapping[str, Any]]] = (
         lambda: ())
@@ -1516,6 +1538,9 @@ class GUIState:
     flight_recorder: bool = False
     flight_state: str = localized_string("default.flight.off")
     acoustic_time_machine: bool = False
+    selective_relisten_requested: bool = False
+    selective_relisten_evidence_ready: bool = False
+    selective_relisten_status: str = "receipt-missing"
     voice_object_commands: bool = False
     voice_object_inbox_count: int = 0
     voice_object_inbox_status: str = "Off"
@@ -2911,6 +2936,12 @@ def normalize_snapshot(
         active_engine = localized_string(
             "overview.engine.waiting", locale=locale)
     outbox_count = _nonnegative_int(source.get("outbox_count"))
+    relisten = source.get("selective_relisten")
+    relisten = relisten if isinstance(relisten, Mapping) else {}
+    relisten_status = str(
+        relisten.get("status", "receipt-missing")).strip().casefold()
+    if relisten_status not in SELECTIVE_RELISTEN_STATUSES:
+        relisten_status = "receipt-invalid"
     voice_object_inbox_status = str(
         source.get("voice_object_inbox_status", "Off")).strip().casefold()
     if voice_object_inbox_status not in {"off", "ready", "unavailable"}:
@@ -2980,6 +3011,10 @@ def normalize_snapshot(
             source.get("flight_state"), localized_string(
                 "default.flight.off", locale=locale)),
         acoustic_time_machine=source.get("acoustic_time_machine") is True,
+        selective_relisten_requested=relisten.get("requested") is True,
+        selective_relisten_evidence_ready=(
+            relisten.get("evidence_ready") is True),
+        selective_relisten_status=relisten_status,
         voice_object_commands=source.get("voice_object_commands") is True,
         voice_object_inbox_count=_nonnegative_int(
             source.get("voice_object_inbox_count")),
@@ -3433,6 +3468,21 @@ class WhisperFaceViewModel:
             self.state = replace(
                 self.state, notice=self.localized(
                     "operation.acoustic.update_failed", error=error),
+                notice_level="error")
+        return self.state
+
+    def set_selective_relisten(self, enabled: bool) -> GUIState:
+        desired = bool(enabled)
+        try:
+            self.actions.set_selective_relisten(desired)
+            self.state = replace(
+                self.state, selective_relisten_requested=desired,
+                notice="", notice_level="info")
+            return self.refresh()
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.relisten.update_failed", error=error),
                 notice_level="error")
         return self.state
 
@@ -4386,17 +4436,45 @@ if APPKIT_AVAILABLE:
         button = NSButton.alloc().initWithFrame_(frame)
         button.setTitle_(title)
         button.setBezelStyle_(NSBezelStyleRounded)
+        font = NSFont.systemFontOfSize_weight_(12.0, 0.45)
+        try:
+            descriptor = font.fontDescriptor().fontDescriptorWithDesign_(
+                NSFontDescriptorSystemDesignRounded)
+            if descriptor is not None:
+                font = NSFont.fontWithDescriptor_size_(descriptor, 12.0)
+        except Exception:
+            pass
+        button.setFont_(font)
+        button.setWantsLayer_(True)
+        if button.layer() is not None:
+            button.layer().setCornerRadius_(
+                SURFACE_SPECS["control"].radius)
         button.setTarget_(target)
         button.setAction_(action)
         return _accessible(button, title, help_text)
 
-    def _card(frame: Any) -> Any:
+    def _card(frame: Any, treatment: str = "card") -> Any:
+        spec = SURFACE_SPECS.get(treatment, SURFACE_SPECS["card"])
+        palette = palette_for_appearance(
+            _uses_dark_appearance(NSApplication.sharedApplication()))
         box = NSBox.alloc().initWithFrame_(frame)
         box.setBoxType_(NSBoxCustom)
-        box.setBorderType_(NSNoBorder)
+        box.setBorderType_(NSLineBorder)
         box.setTitlePosition_(NSNoTitle)
-        box.setFillColor_(_CARD)
-        box.setCornerRadius_(12.0)
+        box.setFillColor_(_theme_color(palette.surface))
+        box.setBorderColor_(_theme_color(palette.line, 0.18))
+        box.setBorderWidth_(spec.border_width)
+        box.setCornerRadius_(spec.radius)
+        box.setWantsLayer_(True)
+        layer = box.layer()
+        if layer is not None and (spec.shadow_x or spec.shadow_y):
+            try:
+                layer.setShadowColor_(_theme_color(palette.line).CGColor())
+                layer.setShadowOpacity_(0.94)
+                layer.setShadowRadius_(0.0)
+                layer.setShadowOffset_((spec.shadow_x, spec.shadow_y))
+            except Exception:
+                pass
         return box
 
     class WhisperFaceWindowController(NSObject):
@@ -4413,6 +4491,7 @@ if APPKIT_AVAILABLE:
             self._face_images: dict[tuple[str, bool], Any] = {}
             self._onboarding_stage: str | None = None
             self._onboarding_presentation: OnboardingPresentation | None = None
+            self._rendered_section: str | None = None
             if read_system_state:
                 try:
                     preferred = NSLocale.preferredLanguages()
@@ -4524,6 +4603,80 @@ if APPKIT_AVAILABLE:
             spring.setRemovedOnCompletion_(True)
             layer.addAnimation_forKey_(spring, "onboarding-soft-pop")
 
+        @objc.python_method
+        def _apply_window_theme(self, state: GUIState) -> None:
+            """Apply the shared palette to the whole working window."""
+            palette = palette_for_appearance(
+                _uses_dark_appearance(self.window))
+            root = self.window.contentView()
+            root.setWantsLayer_(True)
+            if root.layer() is not None:
+                root.layer().setBackgroundColor_(
+                    _theme_color(palette.bg).CGColor())
+
+            def theme_boxes(view: Any) -> None:
+                for child in view.subviews():
+                    try:
+                        if child.isKindOfClass_(NSBox):
+                            child.setFillColor_(_theme_color(palette.surface))
+                            child.setBorderColor_(
+                                _theme_color(palette.line, 0.18))
+                    except Exception:
+                        pass
+                    if hasattr(child, "subviews"):
+                        theme_boxes(child)
+
+            theme_boxes(root)
+            self.dynamic["window_header"].setFillColor_(
+                _theme_color(palette.surface))
+            self.dynamic["window_header"].setBorderColor_(
+                _theme_color(palette.line))
+            self.dynamic["window_face_chip"].setFillColor_(
+                _theme_color(FACE_CHIP_COLORS[state.face]))
+            self.dynamic["window_title"].setTextColor_(
+                _theme_color(palette.ink))
+            self.dynamic["window_subtitle"].setTextColor_(
+                _theme_color(palette.ink_soft))
+            self.dynamic["window_badge"].setTextColor_(
+                _theme_color(palette.brand))
+            self.dynamic["window_nav_shell"].setFillColor_(
+                _theme_color(palette.surface, 0.86))
+            try:
+                self.section_control.setSelectedSegmentBezelColor_(
+                    _theme_color(palette.brand))
+            except Exception:
+                pass
+
+        @objc.python_method
+        def _animate_section_change(self, state: GUIState) -> None:
+            previous = self._rendered_section
+            self._rendered_section = state.section
+            if (previous is None or previous == state.section
+                    or state.prefers_reduced_motion
+                    or not bool(self.window.isVisible())):
+                return
+            page = self.pages[state.section]
+            page.setWantsLayer_(True)
+            layer = page.layer()
+            if layer is None:
+                return
+            spec = MOTION_SPECS["release"]
+            spring = CASpringAnimation.animationWithKeyPath_(
+                "transform.scale")
+            spring.setFromValue_(spec.squash_x)
+            spring.setToValue_(1.0)
+            spring.setMass_(spec.mass)
+            spring.setStiffness_(spec.stiffness)
+            spring.setDamping_(spec.damping)
+            spring.setInitialVelocity_(spec.initial_velocity)
+            spring.setDuration_(spec.duration)
+            spring.setRemovedOnCompletion_(True)
+            layer.addAnimation_forKey_(spring, "section-soft-release")
+            face_layer = self.dynamic["window_face_chip"].layer()
+            if face_layer is not None:
+                face_layer.addAnimation_forKey_(
+                    spring, "header-face-soft-release")
+
         def initWithViewModel_(self, view_model: WhisperFaceViewModel):
             self = objc.super(WhisperFaceWindowController, self).init()
             if self is None:
@@ -4549,16 +4702,39 @@ if APPKIT_AVAILABLE:
             root = self.window.contentView()
             root.setWantsLayer_(True)
 
-            title = _label(APP_NAME, NSMakeRect(32, 518, 300, 30),
-                           size=24, weight="bold")
-            subtitle = _label(self._l("app.subtitle"),
-                              NSMakeRect(33, 493, 360, 20),
-                              size=12, color=_SECONDARY)
-            root.addSubview_(title)
-            root.addSubview_(subtitle)
+            header = _card(
+                NSMakeRect(20, 500, 780, 52), treatment="playful")
+            face_chip = _card(
+                NSMakeRect(10, 4, 44, 44), treatment="control")
+            face_image = NSImageView.alloc().initWithFrame_(
+                NSMakeRect(15, 9, 34, 34))
+            face_image.setImageScaling_(
+                NSImageScaleProportionallyUpOrDown)
+            face_image.setEditable_(False)
+            title = _label(
+                APP_NAME, NSMakeRect(66, 24, 300, 23),
+                size=19, weight="bold", rounded=True)
+            subtitle = _label(
+                self._l("app.subtitle"), NSMakeRect(67, 6, 430, 18),
+                size=11, color=_SECONDARY)
+            badge = _label(
+                self._l("app.local_badge"),
+                NSMakeRect(630, 17, 120, 18),
+                size=10, weight="bold", color=_ACCENT,
+                rounded=True, alignment=2)
+            header.addSubview_(face_chip)
+            header.addSubview_(face_image)
+            header.addSubview_(title)
+            header.addSubview_(subtitle)
+            header.addSubview_(badge)
+            root.addSubview_(header)
+
+            nav_shell = _card(
+                NSMakeRect(25, 447, 770, 38), treatment="work")
+            root.addSubview_(nav_shell)
 
             self.section_control = NSSegmentedControl.alloc().initWithFrame_(
-                NSMakeRect(31, 447, 758, 32))
+                NSMakeRect(6, 3, 758, 32))
             self.section_control.setSegmentCount_(len(SECTIONS))
             self.section_control.setSegmentStyle_(NSSegmentStyleRounded)
             for index, section in enumerate(SECTIONS):
@@ -4572,7 +4748,16 @@ if APPKIT_AVAILABLE:
                 self.section_control,
                 self._l("settings.accessibility.sections.label"),
                 self._l("settings.accessibility.sections.help"))
-            root.addSubview_(self.section_control)
+            nav_shell.addSubview_(self.section_control)
+            self.dynamic.update(
+                window_header=header,
+                window_face_chip=face_chip,
+                window_face=face_image,
+                window_title=title,
+                window_subtitle=subtitle,
+                window_badge=badge,
+                window_nav_shell=nav_shell,
+            )
 
             page_frame = NSMakeRect(31, 25, 758, 402)
             builders = {
@@ -4605,7 +4790,7 @@ if APPKIT_AVAILABLE:
                     self.dynamic["result_clear_audio_button"],
                 ),
                 "Settings": (self.dynamic["settings_pane_control"],),
-                "Models": (),
+                "Models": (self.dynamic["selective_relisten_toggle"],),
                 "Diagnostics": (
                     self.dynamic["point_and_speak_button"],
                     self.dynamic["drop_target_button"],
@@ -4867,6 +5052,39 @@ if APPKIT_AVAILABLE:
                 result_firewall=firewall,
                 result_consequence=consequence,
                 result_consequence_advisory=consequence_advisory,
+            )
+            empty = _card(
+                NSMakeRect(110, 48, 538, 258), treatment="playful")
+            empty_chip = _card(
+                NSMakeRect(205, 118, 128, 118), treatment="control")
+            empty_face = NSImageView.alloc().initWithFrame_(
+                NSMakeRect(224, 137, 90, 82))
+            empty_face.setImageScaling_(
+                NSImageScaleProportionallyUpOrDown)
+            empty.addSubview_(empty_chip)
+            empty.addSubview_(empty_face)
+            empty.addSubview_(_label(
+                self._l("results.empty.kicker"),
+                NSMakeRect(44, 89, 450, 18),
+                size=10, weight="bold", color=_ACCENT,
+                rounded=True, alignment=1))
+            empty.addSubview_(_label(
+                self._l("results.empty.title"),
+                NSMakeRect(44, 54, 450, 31),
+                size=24, weight="bold", rounded=True, alignment=1))
+            empty.addSubview_(_label(
+                self._l("results.empty.detail"),
+                NSMakeRect(54, 14, 430, 38),
+                size=11, color=_SECONDARY, wrap=True, alignment=1))
+            _accessible(
+                empty,
+                self._l("results.empty.title"),
+                self._l("results.empty.detail"))
+            page.addSubview_(empty)
+            self.dynamic.update(
+                result_empty_card=empty,
+                result_empty_chip=empty_chip,
+                result_empty_face=empty_face,
             )
 
         def _build_settings(self, page: Any) -> None:
@@ -5159,7 +5377,26 @@ if APPKIT_AVAILABLE:
                                     size=22, weight="bold"))
             page.addSubview_(_label(
                 self._l("models.subtitle"),
-                NSMakeRect(5, 326, 650, 20), size=13, color=_SECONDARY))
+                NSMakeRect(5, 326, 525, 20), size=13, color=_SECONDARY))
+            relisten = NSButton.alloc().initWithFrame_(
+                NSMakeRect(552, 349, 206, 28))
+            relisten.setButtonType_(3)
+            relisten.setTitle_(self._l("models.relisten.label"))
+            relisten.setTarget_(self)
+            relisten.setAction_("selectiveRelistenChanged:")
+            relisten.setToolTip_(self._l("models.relisten.help"))
+            _accessible(
+                relisten,
+                self._l("models.accessibility.relisten"),
+                self._l("models.relisten.help"))
+            page.addSubview_(relisten)
+            relisten_status = _label(
+                self._l("models.relisten.status.evidence-required"),
+                NSMakeRect(557, 327, 196, 18), size=10,
+                color=_SECONDARY, alignment=1,
+                accessibility_label=self._l(
+                    "models.accessibility.relisten"))
+            page.addSubview_(relisten_status)
             advisory = _label(
                 self._l("models.wallet.unavailable"),
                 NSMakeRect(5, 298, 740, 20), size=11, color=_SECONDARY,
@@ -5188,6 +5425,8 @@ if APPKIT_AVAILABLE:
                 model_rows=rows,
                 model_wallet_advisory=advisory,
                 model_guidance=guidance,
+                selective_relisten_toggle=relisten,
+                selective_relisten_status=relisten_status,
             )
 
         def _build_diagnostics(self, page: Any) -> None:
@@ -5354,10 +5593,18 @@ if APPKIT_AVAILABLE:
 
         def render(self) -> None:
             state = self.view_model.state
+            self._apply_window_theme(state)
             for section, page in self.pages.items():
                 page.setHidden_(section != state.section)
             selected = SECTIONS.index(state.section)
             self.section_control.setSelectedSegment_(selected)
+            face_name = self._l(f"settings.face.{state.face}")
+            self.dynamic["window_face"].setImage_(self._face_image(
+                state.face, talk=state.status_phase == "recording"))
+            sync_accessibility(
+                self.dynamic["window_face"], state.status_title,
+                label=face_name)
+            self._animate_section_change(state)
 
             phase_keys = {
                 "ready": "overview.phase.ready",
@@ -5489,7 +5736,6 @@ if APPKIT_AVAILABLE:
                     presentation.action_help)
             except Exception:
                 pass
-            face_name = self._l(f"settings.face.{state.face}")
             self.dynamic["onboarding_face"].setImage_(
                 self._face_image(state.face, talk=presentation.complete))
             sync_accessibility(
@@ -5523,6 +5769,11 @@ if APPKIT_AVAILABLE:
             self._animate_onboarding_face(presentation)
 
             result = state.last_result
+            self.dynamic["result_empty_card"].setHidden_(result.available)
+            self.dynamic["result_empty_chip"].setFillColor_(
+                _theme_color(FACE_CHIP_COLORS[state.face]))
+            self.dynamic["result_empty_face"].setImage_(
+                self._face_image(state.face, talk=False))
             self.dynamic["result_inspect_button"].setEnabled_(result.available)
             self.dynamic["result_summary"].setStringValue_(result.summary)
             self.dynamic["result_engine"].setStringValue_(
@@ -5754,6 +6005,29 @@ if APPKIT_AVAILABLE:
                 self.dynamic["model_wallet_advisory"],
                 state.model_wallet_advisory,
                 label=self._l("models.accessibility.wallet"),
+            )
+            relisten_status_key = state.selective_relisten_status
+            if relisten_status_key not in {
+                    "off", "ready", "warming", "enabled-not-ready"}:
+                relisten_status_key = "evidence-required"
+            relisten_status = self._l(
+                f"models.relisten.status.{relisten_status_key}")
+            relisten_toggle = self.dynamic["selective_relisten_toggle"]
+            relisten_toggle.setState_(
+                NSControlStateValueOn
+                if state.selective_relisten_requested
+                else NSControlStateValueOff)
+            relisten_toggle.setEnabled_(
+                state.selective_relisten_evidence_ready
+                or state.selective_relisten_requested)
+            set_accessible_text(
+                self.dynamic["selective_relisten_status"],
+                relisten_status,
+                label=self._l("models.accessibility.relisten"),
+            )
+            sync_accessibility(
+                relisten_toggle, relisten_status,
+                label=self._l("models.accessibility.relisten"),
             )
             model_issue = next(
                 (issue for issue in state.degraded_issues
@@ -6817,6 +7091,11 @@ if APPKIT_AVAILABLE:
             self.view_model.set_acoustic_time_machine(enabled)
             self.render()
 
+        def selectiveRelistenChanged_(self, sender: Any) -> None:
+            enabled = sender.state() == NSControlStateValueOn
+            self.view_model.set_selective_relisten(enabled)
+            self.render()
+
         def voiceObjectCommandsChanged_(self, sender: Any) -> None:
             enabled = sender.state() == NSControlStateValueOn
             self.view_model.set_voice_object_commands(enabled)
@@ -7176,6 +7455,21 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         require(not bool(controller.window.isVisible()), "window visibility")
         require(tuple(controller.pages) == SECTIONS, "sections")
         require(
+            controller.dynamic["window_header"] is not None,
+            "themed window header")
+        require(
+            controller.dynamic["window_face"].image() is not None,
+            "themed window face")
+        require(
+            not bool(controller.dynamic["result_empty_card"].isHidden()),
+            "results empty state")
+        require(
+            accessible_value(
+                controller.dynamic["result_empty_card"],
+                "accessibilityLabel") == localized_string(
+                    "results.empty.title"),
+            "results empty state accessibility")
+        require(
             tuple(controller.dynamic["settings_panes"]) == SETTINGS_PANES,
             "settings panes")
         require(model.locale == "en", "locale propagation")
@@ -7267,6 +7561,9 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         runtime["last_word_count"] = 4
         model.refresh()
         controller.render()
+        require(
+            bool(controller.dynamic["result_empty_card"].isHidden()),
+            "results empty state clears after dictation")
         require(model.state.onboarding_complete, "onboarding completion")
         require(
             not model.state.onboarding_acknowledged,

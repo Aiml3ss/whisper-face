@@ -162,6 +162,35 @@ class PrewarmedVerifierSupervisor:
     def __exit__(self, *_exc: object) -> None:
         self.close()
 
+    @property
+    def ready(self) -> bool:
+        """Report readiness without waiting behind model initialization."""
+        if not self._lock.acquire(blocking=False):
+            return False
+        try:
+            return bool(
+                not self._closed
+                and self._connection is not None
+                and self._process is not None
+                and self._process.is_alive()
+            )
+        finally:
+            self._lock.release()
+
+    def prewarm(self, *, deadline_at: float) -> bool:
+        """Initialize the child without sending audio or expected text."""
+        if (isinstance(deadline_at, bool)
+                or not isinstance(deadline_at, (int, float))
+                or not math.isfinite(float(deadline_at))):
+            raise ValueError("deadline_at must be a finite monotonic timestamp")
+        deadline = float(deadline_at)
+        if time.monotonic() >= deadline:
+            return False
+        with self._lock:
+            if self._closed or time.monotonic() >= deadline:
+                return False
+            return self._ensure_child_locked(deadline) is None
+
     @staticmethod
     def _refused(reason: RefusalReason) -> VerificationReceipt:
         return VerificationReceipt(refusal=reason)

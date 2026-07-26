@@ -35,6 +35,12 @@ const CF_ANALYTICS_TOKEN = '';
     <meta property="og:image" content={ogImage} />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:image" content={ogImage} />
+    <script
+      type="module"
+      src="https://jelly-ui.com/dist/jelly.js"
+      integrity="sha384-ftCoNMap6OQSid+PyZ/rndaaw9grzCxUOYiXbTN1fxw1OYuI95Gm/HwyjOknBIG5"
+      crossorigin="anonymous"
+    ></script>
     <script is:inline>
       (function () {
         try {
@@ -45,8 +51,14 @@ const CF_ANALYTICS_TOKEN = '';
     </script>
   </head>
   <body class="dotgrid">
-    <slot />
+    <jelly-theme class="site-theme" mode="auto" accent="#10b981">
+      <slot />
+    </jelly-theme>
     <script>
+      const jellyTheme = document.querySelector<HTMLElement>('jelly-theme.site-theme');
+      const explicitTheme = document.documentElement.getAttribute('data-theme');
+      if (explicitTheme) jellyTheme?.setAttribute('mode', explicitTheme);
+
       // Theme toggle (event delegation so it works for any [data-theme-toggle]).
       document.addEventListener('click', function (e) {
         const t = e.target as HTMLElement;
@@ -58,9 +70,33 @@ const CF_ANALYTICS_TOKEN = '';
         }
         const next = cur === 'dark' ? 'light' : 'dark';
         document.documentElement.setAttribute('data-theme', next);
+        jellyTheme?.setAttribute('mode', next);
         try {
           localStorage.setItem('wf-theme', next);
         } catch (e) {}
+      });
+
+      // Shared soft-body release. CSS handles the press frame; this short
+      // rebound keeps interactive objects consistent with the native app.
+      const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+      function releaseJelly(target: EventTarget | null) {
+        if (!(target instanceof HTMLElement) || reduceMotion.matches) return;
+        const jelly = target.closest<HTMLElement>('[data-jelly]');
+        if (!jelly) return;
+        jelly.removeAttribute('data-jelly-releasing');
+        requestAnimationFrame(() => {
+          jelly.setAttribute('data-jelly-releasing', '');
+          jelly.addEventListener(
+            'animationend',
+            () => jelly.removeAttribute('data-jelly-releasing'),
+            { once: true },
+          );
+        });
+      }
+      document.addEventListener('pointerup', (e) => releaseJelly(e.target));
+      document.addEventListener('pointercancel', (e) => releaseJelly(e.target));
+      document.addEventListener('keyup', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') releaseJelly(e.target);
       });
     </script>
     {

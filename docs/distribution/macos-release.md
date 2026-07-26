@@ -194,11 +194,10 @@ not replace an existing destination. A separately extracted rollback folder has
 no automatic access to state in the current folder: before running its installer,
 manually copy `dictionary.txt`, `snippets.json`, `tones.json`, `preferences.json`,
 `learned.json`, `acoustic_keyword_memory.json`,
-`acoustic_keyword_activation.json`, and
-`acoustic_calibration_activation.json` into it with user-only
-permissions. Copy `transcripts.jsonl` only if retaining transcript history is
-intentional. Review the files rather than copying the entire old checkout or
-its logs.
+`acoustic_keyword_activation.json`, `acoustic_calibration_activation.json`,
+and `relisten_activation.json` into it with user-only permissions. Copy
+`transcripts.jsonl` only if retaining transcript history is intentional.
+Review the files rather than copying the entire old checkout or its logs.
 
 Never overwrite the only working checkout before the prior artifact has been
 verified. Keep the failed release folder until diagnostics are collected. If a

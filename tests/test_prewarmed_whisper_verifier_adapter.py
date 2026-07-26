@@ -109,6 +109,17 @@ class PrewarmedWhisperTinyAdapterTests(unittest.TestCase):
         self.assertNotIn("2042", repr(first))
         verifier.close()
 
+    def test_explicit_prewarm_exposes_nonblocking_readiness(self):
+        verifier = PrewarmedWhisperTinyVerifier(provider_factory=fake_factory())
+
+        self.assertFalse(verifier.ready)
+        self.assertTrue(verifier.prewarm(
+            deadline_at=time.monotonic() + 2.0))
+        self.assertTrue(verifier.ready)
+        self.assertEqual(self.verify(verifier).result.confidence, 0.11)
+        verifier.close()
+        self.assertFalse(verifier.ready)
+
     def test_decoder_failure_discards_loaded_child_and_lazily_reloads(self):
         verifier = PrewarmedWhisperTinyVerifier(provider_factory=fake_factory())
         self.assertEqual(self.verify(verifier).result.confidence, 0.11)

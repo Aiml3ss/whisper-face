@@ -15,9 +15,16 @@ import Face from './Face.astro';
       <a href="/blog">Blog</a>
     </nav>
     <div class="nav-right">
-      <button class="btn theme-toggle" data-theme-toggle aria-label="Toggle light and dark theme">◐</button>
-      <a class="btn btn-ghost btn-sm" href="https://github.com/Aiml3ss/whisper-face" aria-label="Star Whisper Face on GitHub">★ Star</a>
-      <a class="btn btn-primary btn-sm" href="/#install">Download</a>
+      <jelly-button
+        class="theme-toggle"
+        data-theme-toggle
+        label="Toggle light and dark theme"
+        size="small"
+        shape="square"
+        variant="graphite"
+      >◐</jelly-button>
+      <a class="btn btn-ghost btn-sm" data-jelly href="https://github.com/Aiml3ss/whisper-face" aria-label="Star Whisper Face on GitHub">★ Star</a>
+      <a class="btn btn-primary btn-sm" data-jelly href="/#install">Download</a>
     </div>
   </div>
 </header>

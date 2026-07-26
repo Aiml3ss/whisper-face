@@ -154,6 +154,8 @@ function Confirm-WritableCheckout {
 
 $Required = @(
     "dictate.py", "dictate.py.lock", "parrot_core.py", "voice_compiler.py",
+    "process_verifier.py", "prewarmed_verifier.py",
+    "whisper_verifier_adapter.py", "relisten_activation.py",
     "insertion_integrity.py", "personal_regression.py",
     "cleanup_circuit_breaker.py",
     "model_wallet.py", "model_wallet_shadow.py", "model_readiness_evidence.py",
@@ -430,7 +432,8 @@ foreach ($DestinationName in $PrivateTemplates.Keys) {
 }
 foreach ($PrivateStateName in @(
     "voice_inbox.json", "demonstrations.json",
-    "acoustic_keyword_activation.json", "acoustic_calibration_activation.json"
+    "acoustic_keyword_activation.json", "acoustic_calibration_activation.json",
+    "relisten_activation.json"
 )) {
     $PrivateState = Join-Path $Repo $PrivateStateName
     if (Test-Path $PrivateState) {
