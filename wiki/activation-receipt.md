@@ -48,6 +48,42 @@ absent.
   activation), content-free self-validating receipts, bounded evidence,
   fail closed ([[privacy-and-security]]).
 
+## Producing the evidence
+
+Since 2026-07-26 the pattern has a producer side. Four guided,
+resumable harnesses ([[evidence-capture]]) record real sessions —
+16 kHz corpora for the three voice gates, a fifty-app insertion matrix,
+the delayed-cleanup grid, and the lifecycle scenarios — and hand their
+output to the existing evaluators. They are structurally incapable of
+approving anything: AST-level tests assert they import no activation
+module, execute no process, generate no audio, and cannot even *declare*
+`--confirm-manual-review` or `--approve-runtime`. Each prints the exact
+benchmark invocation and stops. Manual review stays where it was: a
+non-defaultable flag the operator passes to the benchmark, after
+listening.
+
+## Three of the four gates cannot currently be earned
+
+> ⚠️ **Known blocker (issues #108 and #110, open on `main`)**: three of
+> the four receipts require evidence whose *candidate* arm the runtime
+> only produces after the receipt that evidence would authorize.
+>
+> - **Calibration** applies its settings only from a valid receipt, so
+>   the candidate recordings cannot exercise the calibrated front end.
+> - **Keyword priority** reaches the ASR prompt only through the
+>   activation file, so the biased arm cannot be measured without it.
+> - **Delayed cleanup** adds two more: the gate wants p95 apply timing
+>   the runtime never measures, and ≥8 cases of a `duplicate-callback`
+>   scenario that no operator action can reach.
+>
+> Selective re-listen has no such circularity — its benchmark drives the
+> verifier directly. The proposed fix in #108 is an explicitly labelled
+> measurement-only override that is recorded in the manifest and grants
+> no runtime authority of its own. Until then, three of the four
+> capabilities on this page are unearnable in practice, not merely
+> un-activated — a stronger and less comfortable statement than "the
+> suite has not been run".
+
 ## Examples
 
 - Calibration: 40 balanced physical A/B cases across
@@ -63,6 +99,7 @@ absent.
 - [[acoustic-personalization]], [[consequence-receipts]],
   [[delayed-cleanup]] — the four consumers
 - [[benchmarks]] — the producers and their no-runtime-authority stance
+- [[evidence-capture]] — the harnesses that record what they evaluate
 - [[personalization]] — the same philosophy on the always-on path
 
 ## References

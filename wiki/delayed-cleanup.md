@@ -47,11 +47,41 @@ a manually reviewed physical suite.
   final-apply ≤150 ms, manual review. The suite has not been run in the
   repository, so the feature ships off and no live safety claim is made.
 
+## The activation bar is currently unearnable
+
+> ⚠️ **Known blocker (issue #110, open on `main`)**: building the capture
+> harness ([[evidence-capture]]) established that the 50-case corpus
+> cannot be produced at all today. Three defects, all still present:
+>
+> 1. **Bootstrap deadlock.** `schedule_delayed_cleanup` returns `False`
+>    unless `DELAYED_CLEANUP_STATE["active"]`, which is only true once a
+>    valid receipt exists — and that receipt requires 50 manually
+>    reviewed cases produced *by the feature running*. With no receipt
+>    the runtime schedules nothing, prints no `[delayed-cleanup]` line,
+>    and every case blocks.
+> 2. **`apply_ms` has no source.** The gate wants per-case apply timing
+>    at p95 ≤150 ms, but nothing measures it: the log line carries only
+>    `{outcome}; N applied, M held`. A stopwatch is not evidence at a
+>    150 ms threshold, so cases block on `no-runtime-timing` rather than
+>    defaulting to a guess.
+> 3. **`duplicate-callback` is physically unreachable.** The gate demands
+>    ≥8 cases of it, but the runtime passes the per-utterance `event_id`
+>    as the proposal id, so two passes never share one and the adapter's
+>    in-flight and completed-duplicate paths cannot be reached by any
+>    operator action. (Deterministic single-use-id tests do cover them.)
+>
+> This is the same circular-gate family as #108
+> ([[activation-receipt]]). `docs/evidence/physical-sessions.md` records
+> all three for the operator, noting that running the session anyway
+> records which blocker fired — "the evidence that these are gate defects
+> rather than operator error".
+
 ## Related Concepts
 
 - [[cleanup-pipeline]] — the synchronous sibling
 - [[insertion-transaction]] — provides the verified receipt gate
 - [[activation-receipt]] — the unlock pattern
+- [[evidence-capture]] — the harness that surfaced the three defects
 - [[proof-edit]] — the proposal contract
 
 ## References

@@ -56,6 +56,18 @@ parity is a hard gate.
   Supporter-only; the pilot accepts no payment and counts only stated
   interest.
 
+> 📝 **Updated from [[2026-07-26-evidence-capture-research]]**: the
+> repository is **public** (`Aiml3ss/whisper-face`, created 2026-07-21),
+> and the release pipeline has now produced published artifacts — v0.1.0,
+> v0.2.0 and v0.2.1, all on 2026-07-26 ([[distribution]]). Publication
+> makes the AGPL source offer and the `/source` endpoint checkable by
+> anyone rather than by the owner alone. Nothing in the tree describes
+> the repository as private. *Not asserted*: the day's session notes say
+> it was private until today; the repository's own event feed carries a
+> single `PublicEvent` stamped at its creation instant, so the visibility
+> history is not recoverable from the API and this wiki does not claim
+> it.
+
 ## Related Concepts
 
 - [[privacy-and-security]] — the commitments the process protects

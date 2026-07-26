@@ -47,6 +47,14 @@ anonymous.
   named open security work, alongside capture sandboxing, independent
   manifest signing, provenance attestations, egress regression tests,
   and external review.
+- **Evidence sessions** ([[evidence-capture]]): everything the capture
+  harnesses write — WAVs, resumable session state, manifests, artifacts —
+  lands in the single gitignored `.evidence/` tree with 0700 directories
+  and 0600 files, written atomically. The voice tool parses the real
+  `.gitignore` and refuses any destination a checkout does not already
+  ignore. Operator answers are listed keys rather than free text, the
+  practice phrases live in source so only their ids are written, and
+  poison-string tests prove no dictated words reach an artifact.
 - **Support bundle** (`support_bundle.py`): rebuilds a fixed schema from
   an already-allowlisted GUI snapshot — status enums, model
   family/status pairs, and last-result aggregates only; excludes

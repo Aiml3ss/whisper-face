@@ -16,8 +16,9 @@ confidence: high
 
 The dictation pipeline is the ordered sequence an utterance travels in
 `dictate.py` from the Right Option key-down to a terminal insertion
-receipt. `dictate.py` (~10.8k lines) is a shell module owning every side
-effect; nearly every algorithm is imported from pure modules
+receipt. `dictate.py` (10,683 lines at `1165335`, down from ~10.8k after
+#101 removed the menu's second control panel) is a shell module owning
+every side effect; nearly every algorithm is imported from pure modules
 (`parrot_core.py`, `voice_compiler.py`, and friends).
 
 ## The flow
@@ -51,7 +52,9 @@ effect; nearly every algorithm is imported from pure modules
 10. Afterwards: optional microspan retention
     ([[acoustic-personalization]]), then either [[delayed-cleanup]] is
     scheduled or correction learning starts ([[personalization]]);
-    metrics append to `transcripts.jsonl` (0600).
+    metrics append to `transcripts.jsonl` (0600). In practice the
+    delayed-cleanup branch is never taken on any machine today: it
+    requires a receipt whose evidence is currently unproducible.
 
 ## Invariants
 
@@ -64,6 +67,10 @@ effect; nearly every algorithm is imported from pure modules
 - Correction learning is strictly downstream of a verified receipt.
 - Private state is written atomically at 0600; a flock enforces a
   single instance.
+- No window or menu chrome runs on this path: the crossfades, hovers and
+  springs added in the 2026-07-26 rebuild are explicitly scoped to
+  chrome, and every one of them is Reduce-Motion gated
+  ([[design-language]]).
 
 ## Key tunables (top of dictate.py)
 

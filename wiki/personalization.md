@@ -41,8 +41,12 @@ survives the Personal Regression Lab.
   the old ungated fixes/confusions, so a quarantine decision also blocks
   the legacy path.
 - **Inspectable and forgettable**: every learned mapping is listed under
-  Learned Corrections in the menu and can be forgotten; snippets learned
-  from placeholder edits appear the same way.
+  **Learned corrections** and can be forgotten; snippets learned from
+  placeholder edits appear the same way. Since 2026-07-26 that row lives
+  on Settings → Personalize in [[app-window]] rather than in
+  [[menu-bar]], alongside Snippets, Vocabulary and Pronunciation
+  keywords; a row with nothing yet shows an invitation ("Fix the same
+  word a few times and I’ll remember it") instead of a zero.
 - **Vocabulary mining** runs only after 180 s of dictation inactivity;
   transcripts trim to the recent 500.
 - Priors reach recognition as scored span alternatives in the

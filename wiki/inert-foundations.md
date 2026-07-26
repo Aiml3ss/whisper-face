@@ -28,8 +28,9 @@ execution verb at all.
   rather than redirects — when the best name-match cannot accept the
   drop. There is **no drop transaction module**: no nonce, lease, or
   execute path; nothing in the repo can initiate a drag. The only
-  runtime consumer is a read-only Diagnostics preview stamped
-  `execution: none`.
+  runtime consumer was a read-only preview stamped `execution: none`,
+  which #104 removed from the window on 2026-07-26 — so today the
+  resolver has no user surface at all.
 - **Demonstration drafts** (`demonstration_drafts.py`): inert Finder /
   Mail / Notes / menu recipes with described steps (not recorded
   events). Recording, approval, cancel-rollback, and explicit deletion
@@ -68,6 +69,19 @@ receipts. Corpora stamp themselves `physical_validation: false`.
 Sending, scheduling, dragging, replaying, or agent execution could be
 built on this substrate later — none can happen today by accident,
 drift, replay, or a plausible-sounding phrase.
+
+> 📝 **Updated from [[2026-07-26-interface-rebuild-research]]**: #104
+> removed the last window surfaces these foundations had — the
+> Demonstrations author, the risky-action ceremony dialogs, and the
+> Drop-to-Target preview. The removal is *chrome only*: their
+> `GUIActions` fields, view-model passthroughs, runtime modules and tests
+> all remain, so they are developer-invokable rather than deleted
+> ([[app-window]]). The risky-action runtime is covered by
+> `tests/test_gui_settings_runtime.py`; the demonstrations and
+> drop-to-target view-model layers by `tests/test_whisper_face_gui.py`.
+> One string was deliberately left exact through the states rewrite:
+> "Confirmation stayed blocked: this click was not preceded by a valid
+> voice receipt."
 
 ## Related Concepts
 

@@ -59,10 +59,30 @@ checkout.
   detached checkout of the known-good revision; never `git reset
   --hard`.
 
+## The pipeline has now shipped
+
+> 📝 **Updated from [[2026-07-26-evidence-capture-research]]**: three
+> releases exist on the public repository, all published on 2026-07-26 —
+> **v0.1.0**, **v0.2.0**, and **v0.2.1**. Each carries the same four
+> assets the packaging script produces: an Apple-Silicon DMG, a source
+> ZIP, `SHA256SUMS`, and `update-manifest.json`. Every download count is
+> still zero.
+>
+> The [[marketing-site]] offers exactly one of them through a single
+> constant, `site/src/data/release.ts` — version, tag, DMG URL, size,
+> notes and checksums links, plus an `unsigned: true` flag. That flag is
+> what drives the honest Gatekeeper copy on the install section: "This
+> build is not notarized yet", with a pointer to `SHA256SUMS` and "A
+> signed release is on the way." This is consistent with the signing
+> policy above: `config/macos-signing-policy.json` still records no team
+> id, so packaging cannot sign, and the site says so rather than hiding
+> it.
+
 ## Related Concepts
 
 - [[installers-and-services]] — what an update actually runs
 - [[governance]] — gates, source offers, licensing of artifacts
+- [[marketing-site]] — where the download is offered
 - [[privacy-and-security]] — signing and provenance invariants
 
 ## References

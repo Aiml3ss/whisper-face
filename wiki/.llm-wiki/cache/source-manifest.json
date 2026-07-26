@@ -39,5 +39,53 @@
       "windows-support"
     ],
     "pages_updated": []
+  },
+  "db3392d4430fa92e865e501d4b38273a5c6be412eb64f1b2afa1f844f6aef7f6": {
+    "name": ".raw/interface-rebuild-research.md",
+    "date": "2026-07-26T22:54:59Z",
+    "language": "en",
+    "pages_created": [
+      "2026-07-26-interface-rebuild-research",
+      "app-window",
+      "design-language",
+      "menu-bar"
+    ],
+    "pages_updated": [
+      "consequence-receipts",
+      "dictation-pipeline",
+      "inert-foundations",
+      "insertion-transaction",
+      "marketing-site",
+      "model-wallet",
+      "personalization",
+      "point-and-speak",
+      "voice-modes",
+      "voice-objects",
+      "whisper-face",
+      "whisper-faces",
+      "windows-support"
+    ]
+  },
+  "687ab3fe5b3ea5b5f57be752ef7b6428adc4ab7e016791b97076b7a66d292a15": {
+    "name": ".raw/evidence-capture-research.md",
+    "date": "2026-07-26T22:54:59Z",
+    "language": "en",
+    "pages_created": [
+      "2026-07-26-evidence-capture-research",
+      "evidence-capture"
+    ],
+    "pages_updated": [
+      "acoustic-personalization",
+      "activation-receipt",
+      "benchmarks",
+      "consequence-receipts",
+      "delayed-cleanup",
+      "distribution",
+      "governance",
+      "insertion-transaction",
+      "privacy-and-security",
+      "whisper-face",
+      "windows-support"
+    ]
   }
 }
