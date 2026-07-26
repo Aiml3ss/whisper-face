@@ -21,6 +21,7 @@ from support_bundle import SupportBundleError, write_support_bundle
 from whisper_face_theme import (
     FACE_CHIP_COLORS,
     MOTION_SPECS,
+    SURFACE_SPECS,
     palette_for_appearance,
 )
 
@@ -161,6 +162,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "nav.models": "Models",
         "nav.diagnostics": "Diagnostics",
         "app.subtitle": "Private, fast voice input on your Mac",
+        "app.local_badge": "LOCAL FIRST",
         "overview.phase.ready": "READY",
         "overview.phase.recording": "RECORDING",
         "overview.phase.processing": "PROCESSING",
@@ -306,6 +308,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "results.relisten.inconclusive": "inconclusive",
         "results.relisten.mixed": "mixed",
         "results.relisten.unavailable": "unavailable",
+        "results.empty.kicker": "YOUR LAST RESULT LIVES HERE",
+        "results.empty.title": "Nothing to inspect yet",
+        "results.empty.detail": "Dictate something and Whisper Face will explain what it heard, protected, changed, and delivered.",
         "results.audio.off": "Acoustic replay is off",
         "results.audio.empty": "No consequential span retained; expired audio is cleared automatically",
         "results.audio.available.one": "1 consequential span retained in RAM for at most one minute",
@@ -4386,17 +4391,45 @@ if APPKIT_AVAILABLE:
         button = NSButton.alloc().initWithFrame_(frame)
         button.setTitle_(title)
         button.setBezelStyle_(NSBezelStyleRounded)
+        font = NSFont.systemFontOfSize_weight_(12.0, 0.45)
+        try:
+            descriptor = font.fontDescriptor().fontDescriptorWithDesign_(
+                NSFontDescriptorSystemDesignRounded)
+            if descriptor is not None:
+                font = NSFont.fontWithDescriptor_size_(descriptor, 12.0)
+        except Exception:
+            pass
+        button.setFont_(font)
+        button.setWantsLayer_(True)
+        if button.layer() is not None:
+            button.layer().setCornerRadius_(
+                SURFACE_SPECS["control"].radius)
         button.setTarget_(target)
         button.setAction_(action)
         return _accessible(button, title, help_text)
 
-    def _card(frame: Any) -> Any:
+    def _card(frame: Any, treatment: str = "card") -> Any:
+        spec = SURFACE_SPECS.get(treatment, SURFACE_SPECS["card"])
+        palette = palette_for_appearance(
+            _uses_dark_appearance(NSApplication.sharedApplication()))
         box = NSBox.alloc().initWithFrame_(frame)
         box.setBoxType_(NSBoxCustom)
-        box.setBorderType_(NSNoBorder)
+        box.setBorderType_(NSLineBorder)
         box.setTitlePosition_(NSNoTitle)
-        box.setFillColor_(_CARD)
-        box.setCornerRadius_(12.0)
+        box.setFillColor_(_theme_color(palette.surface))
+        box.setBorderColor_(_theme_color(palette.line, 0.18))
+        box.setBorderWidth_(spec.border_width)
+        box.setCornerRadius_(spec.radius)
+        box.setWantsLayer_(True)
+        layer = box.layer()
+        if layer is not None and (spec.shadow_x or spec.shadow_y):
+            try:
+                layer.setShadowColor_(_theme_color(palette.line).CGColor())
+                layer.setShadowOpacity_(0.94)
+                layer.setShadowRadius_(0.0)
+                layer.setShadowOffset_((spec.shadow_x, spec.shadow_y))
+            except Exception:
+                pass
         return box
 
     class WhisperFaceWindowController(NSObject):
@@ -4413,6 +4446,7 @@ if APPKIT_AVAILABLE:
             self._face_images: dict[tuple[str, bool], Any] = {}
             self._onboarding_stage: str | None = None
             self._onboarding_presentation: OnboardingPresentation | None = None
+            self._rendered_section: str | None = None
             if read_system_state:
                 try:
                     preferred = NSLocale.preferredLanguages()
@@ -4524,6 +4558,80 @@ if APPKIT_AVAILABLE:
             spring.setRemovedOnCompletion_(True)
             layer.addAnimation_forKey_(spring, "onboarding-soft-pop")
 
+        @objc.python_method
+        def _apply_window_theme(self, state: GUIState) -> None:
+            """Apply the shared palette to the whole working window."""
+            palette = palette_for_appearance(
+                _uses_dark_appearance(self.window))
+            root = self.window.contentView()
+            root.setWantsLayer_(True)
+            if root.layer() is not None:
+                root.layer().setBackgroundColor_(
+                    _theme_color(palette.bg).CGColor())
+
+            def theme_boxes(view: Any) -> None:
+                for child in view.subviews():
+                    try:
+                        if child.isKindOfClass_(NSBox):
+                            child.setFillColor_(_theme_color(palette.surface))
+                            child.setBorderColor_(
+                                _theme_color(palette.line, 0.18))
+                    except Exception:
+                        pass
+                    if hasattr(child, "subviews"):
+                        theme_boxes(child)
+
+            theme_boxes(root)
+            self.dynamic["window_header"].setFillColor_(
+                _theme_color(palette.surface))
+            self.dynamic["window_header"].setBorderColor_(
+                _theme_color(palette.line))
+            self.dynamic["window_face_chip"].setFillColor_(
+                _theme_color(FACE_CHIP_COLORS[state.face]))
+            self.dynamic["window_title"].setTextColor_(
+                _theme_color(palette.ink))
+            self.dynamic["window_subtitle"].setTextColor_(
+                _theme_color(palette.ink_soft))
+            self.dynamic["window_badge"].setTextColor_(
+                _theme_color(palette.brand))
+            self.dynamic["window_nav_shell"].setFillColor_(
+                _theme_color(palette.surface, 0.86))
+            try:
+                self.section_control.setSelectedSegmentBezelColor_(
+                    _theme_color(palette.brand))
+            except Exception:
+                pass
+
+        @objc.python_method
+        def _animate_section_change(self, state: GUIState) -> None:
+            previous = self._rendered_section
+            self._rendered_section = state.section
+            if (previous is None or previous == state.section
+                    or state.prefers_reduced_motion
+                    or not bool(self.window.isVisible())):
+                return
+            page = self.pages[state.section]
+            page.setWantsLayer_(True)
+            layer = page.layer()
+            if layer is None:
+                return
+            spec = MOTION_SPECS["release"]
+            spring = CASpringAnimation.animationWithKeyPath_(
+                "transform.scale")
+            spring.setFromValue_(spec.squash_x)
+            spring.setToValue_(1.0)
+            spring.setMass_(spec.mass)
+            spring.setStiffness_(spec.stiffness)
+            spring.setDamping_(spec.damping)
+            spring.setInitialVelocity_(spec.initial_velocity)
+            spring.setDuration_(spec.duration)
+            spring.setRemovedOnCompletion_(True)
+            layer.addAnimation_forKey_(spring, "section-soft-release")
+            face_layer = self.dynamic["window_face_chip"].layer()
+            if face_layer is not None:
+                face_layer.addAnimation_forKey_(
+                    spring, "header-face-soft-release")
+
         def initWithViewModel_(self, view_model: WhisperFaceViewModel):
             self = objc.super(WhisperFaceWindowController, self).init()
             if self is None:
@@ -4549,16 +4657,39 @@ if APPKIT_AVAILABLE:
             root = self.window.contentView()
             root.setWantsLayer_(True)
 
-            title = _label(APP_NAME, NSMakeRect(32, 518, 300, 30),
-                           size=24, weight="bold")
-            subtitle = _label(self._l("app.subtitle"),
-                              NSMakeRect(33, 493, 360, 20),
-                              size=12, color=_SECONDARY)
-            root.addSubview_(title)
-            root.addSubview_(subtitle)
+            header = _card(
+                NSMakeRect(20, 500, 780, 52), treatment="playful")
+            face_chip = _card(
+                NSMakeRect(10, 4, 44, 44), treatment="control")
+            face_image = NSImageView.alloc().initWithFrame_(
+                NSMakeRect(15, 9, 34, 34))
+            face_image.setImageScaling_(
+                NSImageScaleProportionallyUpOrDown)
+            face_image.setEditable_(False)
+            title = _label(
+                APP_NAME, NSMakeRect(66, 24, 300, 23),
+                size=19, weight="bold", rounded=True)
+            subtitle = _label(
+                self._l("app.subtitle"), NSMakeRect(67, 6, 430, 18),
+                size=11, color=_SECONDARY)
+            badge = _label(
+                self._l("app.local_badge"),
+                NSMakeRect(630, 17, 120, 18),
+                size=10, weight="bold", color=_ACCENT,
+                rounded=True, alignment=2)
+            header.addSubview_(face_chip)
+            header.addSubview_(face_image)
+            header.addSubview_(title)
+            header.addSubview_(subtitle)
+            header.addSubview_(badge)
+            root.addSubview_(header)
+
+            nav_shell = _card(
+                NSMakeRect(25, 447, 770, 38), treatment="work")
+            root.addSubview_(nav_shell)
 
             self.section_control = NSSegmentedControl.alloc().initWithFrame_(
-                NSMakeRect(31, 447, 758, 32))
+                NSMakeRect(6, 3, 758, 32))
             self.section_control.setSegmentCount_(len(SECTIONS))
             self.section_control.setSegmentStyle_(NSSegmentStyleRounded)
             for index, section in enumerate(SECTIONS):
@@ -4572,7 +4703,16 @@ if APPKIT_AVAILABLE:
                 self.section_control,
                 self._l("settings.accessibility.sections.label"),
                 self._l("settings.accessibility.sections.help"))
-            root.addSubview_(self.section_control)
+            nav_shell.addSubview_(self.section_control)
+            self.dynamic.update(
+                window_header=header,
+                window_face_chip=face_chip,
+                window_face=face_image,
+                window_title=title,
+                window_subtitle=subtitle,
+                window_badge=badge,
+                window_nav_shell=nav_shell,
+            )
 
             page_frame = NSMakeRect(31, 25, 758, 402)
             builders = {
@@ -4867,6 +5007,39 @@ if APPKIT_AVAILABLE:
                 result_firewall=firewall,
                 result_consequence=consequence,
                 result_consequence_advisory=consequence_advisory,
+            )
+            empty = _card(
+                NSMakeRect(110, 48, 538, 258), treatment="playful")
+            empty_chip = _card(
+                NSMakeRect(205, 118, 128, 118), treatment="control")
+            empty_face = NSImageView.alloc().initWithFrame_(
+                NSMakeRect(224, 137, 90, 82))
+            empty_face.setImageScaling_(
+                NSImageScaleProportionallyUpOrDown)
+            empty.addSubview_(empty_chip)
+            empty.addSubview_(empty_face)
+            empty.addSubview_(_label(
+                self._l("results.empty.kicker"),
+                NSMakeRect(44, 89, 450, 18),
+                size=10, weight="bold", color=_ACCENT,
+                rounded=True, alignment=1))
+            empty.addSubview_(_label(
+                self._l("results.empty.title"),
+                NSMakeRect(44, 54, 450, 31),
+                size=24, weight="bold", rounded=True, alignment=1))
+            empty.addSubview_(_label(
+                self._l("results.empty.detail"),
+                NSMakeRect(54, 14, 430, 38),
+                size=11, color=_SECONDARY, wrap=True, alignment=1))
+            _accessible(
+                empty,
+                self._l("results.empty.title"),
+                self._l("results.empty.detail"))
+            page.addSubview_(empty)
+            self.dynamic.update(
+                result_empty_card=empty,
+                result_empty_chip=empty_chip,
+                result_empty_face=empty_face,
             )
 
         def _build_settings(self, page: Any) -> None:
@@ -5354,10 +5527,18 @@ if APPKIT_AVAILABLE:
 
         def render(self) -> None:
             state = self.view_model.state
+            self._apply_window_theme(state)
             for section, page in self.pages.items():
                 page.setHidden_(section != state.section)
             selected = SECTIONS.index(state.section)
             self.section_control.setSelectedSegment_(selected)
+            face_name = self._l(f"settings.face.{state.face}")
+            self.dynamic["window_face"].setImage_(self._face_image(
+                state.face, talk=state.status_phase == "recording"))
+            sync_accessibility(
+                self.dynamic["window_face"], state.status_title,
+                label=face_name)
+            self._animate_section_change(state)
 
             phase_keys = {
                 "ready": "overview.phase.ready",
@@ -5489,7 +5670,6 @@ if APPKIT_AVAILABLE:
                     presentation.action_help)
             except Exception:
                 pass
-            face_name = self._l(f"settings.face.{state.face}")
             self.dynamic["onboarding_face"].setImage_(
                 self._face_image(state.face, talk=presentation.complete))
             sync_accessibility(
@@ -5523,6 +5703,11 @@ if APPKIT_AVAILABLE:
             self._animate_onboarding_face(presentation)
 
             result = state.last_result
+            self.dynamic["result_empty_card"].setHidden_(result.available)
+            self.dynamic["result_empty_chip"].setFillColor_(
+                _theme_color(FACE_CHIP_COLORS[state.face]))
+            self.dynamic["result_empty_face"].setImage_(
+                self._face_image(state.face, talk=False))
             self.dynamic["result_inspect_button"].setEnabled_(result.available)
             self.dynamic["result_summary"].setStringValue_(result.summary)
             self.dynamic["result_engine"].setStringValue_(
@@ -7176,6 +7361,21 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         require(not bool(controller.window.isVisible()), "window visibility")
         require(tuple(controller.pages) == SECTIONS, "sections")
         require(
+            controller.dynamic["window_header"] is not None,
+            "themed window header")
+        require(
+            controller.dynamic["window_face"].image() is not None,
+            "themed window face")
+        require(
+            not bool(controller.dynamic["result_empty_card"].isHidden()),
+            "results empty state")
+        require(
+            accessible_value(
+                controller.dynamic["result_empty_card"],
+                "accessibilityLabel") == localized_string(
+                    "results.empty.title"),
+            "results empty state accessibility")
+        require(
             tuple(controller.dynamic["settings_panes"]) == SETTINGS_PANES,
             "settings panes")
         require(model.locale == "en", "locale propagation")
@@ -7267,6 +7467,9 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         runtime["last_word_count"] = 4
         model.refresh()
         controller.render()
+        require(
+            bool(controller.dynamic["result_empty_card"].isHidden()),
+            "results empty state clears after dictation")
         require(model.state.onboarding_complete, "onboarding completion")
         require(
             not model.state.onboarding_acknowledged,

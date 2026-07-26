@@ -32,6 +32,7 @@ class ThemePalette:
     brand: Color
     accent: Color
     teal: Color
+    error: Color
 
 
 LIGHT_PALETTE = ThemePalette(
@@ -43,6 +44,7 @@ LIGHT_PALETTE = ThemePalette(
     brand=_hex_color("#10B981"),
     accent=_hex_color("#FBBF24"),
     teal=_hex_color("#5EEAD4"),
+    error=_hex_color("#FF6C5A"),
 )
 
 DARK_PALETTE = ThemePalette(
@@ -54,6 +56,7 @@ DARK_PALETTE = ThemePalette(
     brand=_hex_color("#10B981"),
     accent=_hex_color("#FBBF24"),
     teal=_hex_color("#5EEAD4"),
+    error=_hex_color("#FF6C5A"),
 )
 
 FACE_CHIP_COLORS: Mapping[str, Color] = {
@@ -104,6 +107,25 @@ MOTION_SPECS: Mapping[str, MotionSpec] = {
     "release": MotionSpec(1.0, 360.0, 22.0, 0.5, 0.34, 0.96, 1.05),
     "wobble": MotionSpec(1.0, 330.0, 16.0, 0.8, 0.46, 1.07, 0.93),
     "pop": MotionSpec(1.0, 390.0, 20.0, 0.4, 0.38, 0.90, 0.90),
+}
+
+
+@dataclass(frozen=True)
+class SurfaceSpec:
+    radius: float
+    border_width: float
+    shadow_x: float
+    shadow_y: float
+
+
+# AppKit and the site translate these geometry tokens into native layers and
+# CSS. Work surfaces remain quiet; only playful objects carry the full sticker
+# offset.
+SURFACE_SPECS: Mapping[str, SurfaceSpec] = {
+    "work": SurfaceSpec(14.0, 1.0, 0.0, 0.0),
+    "card": SurfaceSpec(16.0, 1.5, 0.0, 0.0),
+    "playful": SurfaceSpec(18.0, 2.0, 5.0, -5.0),
+    "control": SurfaceSpec(12.0, 1.5, 2.0, -2.0),
 }
 
 
