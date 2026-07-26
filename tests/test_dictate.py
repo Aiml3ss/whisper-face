@@ -14,6 +14,7 @@ import ctypes
 import io
 import json
 import os
+import queue
 import re
 import select
 import socket
@@ -5055,6 +5056,88 @@ class PersonalPriorIntegrationTests(unittest.TestCase):
         self.assertEqual([(p.heard, p.preferred) for p in matching], [
             ("Gwen", "Qwen")])
         self.assertEqual(other, ())
+
+
+class HotkeyListenerRecoveryTests(unittest.TestCase):
+    def test_healthy_listener_is_left_alone(self):
+        ns = load_definitions("restart_dead_hotkey_listener")
+        state = {
+            "l": SimpleNamespace(running=True),
+            "make": lambda: self.fail("healthy listener was replaced"),
+            "recovering": False,
+        }
+        cleanups = []
+
+        self.assertFalse(ns["restart_dead_hotkey_listener"](
+            lambda: cleanups.append(True), state))
+        self.assertEqual(cleanups, [])
+        self.assertFalse(state["recovering"])
+
+    def test_dead_listener_cleanup_runs_once_across_restart_retries(self):
+        ns = load_definitions(
+            "restart_dead_hotkey_listener",
+            extra={"print": lambda *_args: None},
+        )
+        replacement = SimpleNamespace(running=True)
+        attempts = []
+        cleanups = []
+
+        def make_listener():
+            attempts.append(True)
+            if len(attempts) == 1:
+                raise RuntimeError("event tap unavailable")
+            return replacement
+
+        state = {
+            "l": SimpleNamespace(running=False),
+            "make": make_listener,
+            "recovering": False,
+        }
+
+        self.assertFalse(ns["restart_dead_hotkey_listener"](
+            lambda: cleanups.append(True), state))
+        self.assertTrue(state["recovering"])
+        self.assertTrue(ns["restart_dead_hotkey_listener"](
+            lambda: cleanups.append(True), state))
+
+        self.assertEqual(cleanups, [True])
+        self.assertEqual(len(attempts), 2)
+        self.assertIs(state["l"], replacement)
+        self.assertFalse(state["recovering"])
+
+    def test_cleanup_failure_does_not_prevent_listener_replacement(self):
+        ns = load_definitions(
+            "restart_dead_hotkey_listener",
+            extra={"print": lambda *_args: None},
+        )
+        replacement = SimpleNamespace(running=True)
+        state = {
+            "l": SimpleNamespace(running=False),
+            "make": lambda: replacement,
+            "recovering": False,
+        }
+
+        def fail_cleanup():
+            raise RuntimeError("cleanup failed")
+
+        self.assertTrue(ns["restart_dead_hotkey_listener"](
+            fail_cleanup, state))
+        self.assertIs(state["l"], replacement)
+        self.assertFalse(state["recovering"])
+
+    def test_recovery_unlatches_key_and_queues_capture_cleanup(self):
+        ns = load_definitions("queue_hotkey_listener_recovery")
+        key_down = {"on": True}
+        modifiers = {"command", "shift"}
+        events = queue.Queue()
+
+        ns["queue_hotkey_listener_recovery"](
+            key_down, modifiers, events, event_at=12.5)
+
+        self.assertFalse(key_down["on"])
+        self.assertEqual(modifiers, set())
+        self.assertEqual(events.get_nowait(), (
+            "listener_recovery", 12.5, frozenset()))
 
 
 class ReleasePlanTests(unittest.TestCase):
