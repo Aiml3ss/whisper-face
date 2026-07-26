@@ -414,6 +414,31 @@ class InstallerContractTests(unittest.TestCase):
         # The detached updater must carry a usable PATH across launchctl.
         self.assertIn('"/usr/bin/env", f"PATH=', self.script)
 
+    def test_mac_installer_does_not_trust_the_inherited_path(self):
+        # A self-update runs this installer from a detached launchd job, which
+        # inherits either launchd's minimal PATH or whatever the caller handed
+        # over. The dictation agent's own PATH carries Homebrew but not
+        # /usr/sbin, where lsof lives. Losing lsof made ollama_listener_pid
+        # report "no unique listener" -- indistinguishable from an unhealthy
+        # service -- so the readiness wait spun until it timed out and the
+        # update rolled back with a misleading reason.
+        normalise = self.shell.index(
+            'for system_path in /usr/bin /bin /usr/sbin /sbin; do')
+        self.assertIn('export PATH', self.shell)
+        # Normalising must precede every tool lookup that depends on it.
+        for dependent in (
+            'ollama_listener_pid() {',
+            'command -v lsof >/dev/null 2>&1',
+            'command -v brew >/dev/null 2>&1',
+        ):
+            with self.subTest(dependent=dependent):
+                self.assertLess(normalise, self.shell.index(dependent))
+        # An absent tool and an unhealthy service must not share a symptom.
+        guard = self.shell.index('command -v lsof >/dev/null 2>&1')
+        self.assertIn('lsof was not found on PATH', self.shell)
+        self.assertLess(guard, self.shell.index(
+            'step "configuring the tuned local Ollama service"'))
+
     def test_mac_ollama_identity_helper_fails_closed(self):
         helper_start = self.shell.index("ollama_listener_pid()")
         helper_end = self.shell.index("reload_agent()", helper_start)

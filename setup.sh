@@ -31,6 +31,20 @@ case "$kernel" in
         ;;
 esac
 
+# Guarantee the standard system directories are searchable before anything
+# looks for a tool. A self-update runs this installer from a detached launchd
+# job, which inherits either launchd's own minimal PATH or whatever PATH the
+# caller handed over -- and the dictation agent's PATH, for one, carries
+# Homebrew but not /usr/sbin, where lsof lives. Losing lsof made every service
+# identity probe fail in a way indistinguishable from an unhealthy service.
+for system_path in /usr/bin /bin /usr/sbin /sbin; do
+    case ":$PATH:" in
+        *":$system_path:"*) ;;
+        *) PATH="$PATH:$system_path" ;;
+    esac
+done
+export PATH
+
 MODE="full"
 VERIFY_ONLY=0
 # A default install downloads only what dictation needs to work at all:
@@ -297,6 +311,13 @@ done
 
 [ "$(uname -m)" = "arm64" ] \
     || fail "this stack requires an Apple Silicon Mac (MLX)"
+
+# Service identity is decided by lsof. Without it every probe reports "no
+# unique listener", which reads exactly like a broken service and stalls the
+# readiness wait until it times out. Refuse up front instead: an absent tool
+# and an unhealthy service must never be the same symptom.
+command -v lsof >/dev/null 2>&1 \
+    || fail "lsof was not found on PATH; it is required to bind a service to its listening process"
 
 macos_major="$(sw_vers -productVersion | cut -d. -f1)"
 if [ "$macos_major" -lt 14 ]; then
