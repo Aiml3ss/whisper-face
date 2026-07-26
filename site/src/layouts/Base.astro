@@ -1,10 +1,16 @@
 ---
 import '../styles/global.css';
+import { motionStylesheet } from '../data/motion';
 
 interface Props {
   title: string;
   description?: string;
 }
+
+// The four named motions, baked from the same spring constants the Mac app
+// hands to CASpringAnimation. Inlined rather than bundled so the first paint
+// already knows how a press feels.
+const motionCss = motionStylesheet();
 
 const {
   title,
@@ -41,11 +47,25 @@ const CF_ANALYTICS_TOKEN = '';
       integrity="sha384-ftCoNMap6OQSid+PyZ/rndaaw9grzCxUOYiXbTN1fxw1OYuI95Gm/HwyjOknBIG5"
       crossorigin="anonymous"
     ></script>
+    <style is:inline set:html={motionCss}></style>
     <script is:inline>
       (function () {
+        var root = document.documentElement;
         try {
           var t = localStorage.getItem('wf-theme');
-          if (t) document.documentElement.setAttribute('data-theme', t);
+          if (t) root.setAttribute('data-theme', t);
+        } catch (e) {}
+        // Reduce Motion is switched off before first paint, and the flag is set
+        // explicitly rather than left to jelly.js's own fallback so the guarantee
+        // is auditable in the served HTML.
+        try {
+          var mq = matchMedia('(prefers-reduced-motion: reduce)');
+          var apply = function () {
+            root.setAttribute('data-jelly-motion', mq.matches ? 'reduce' : 'no-preference');
+            dispatchEvent(new Event('jelly-motion-change'));
+          };
+          apply();
+          mq.addEventListener('change', apply);
         } catch (e) {}
       })();
     </script>
@@ -55,6 +75,8 @@ const CF_ANALYTICS_TOKEN = '';
       <slot />
     </jelly-theme>
     <script>
+      import { playJelly } from '../data/jelly';
+
       const jellyTheme = document.querySelector<HTMLElement>('jelly-theme.site-theme');
       const explicitTheme = document.documentElement.getAttribute('data-theme');
       if (explicitTheme) jellyTheme?.setAttribute('mode', explicitTheme);
@@ -76,27 +98,24 @@ const CF_ANALYTICS_TOKEN = '';
         } catch (e) {}
       });
 
-      // Shared soft-body release. CSS handles the press frame; this short
-      // rebound keeps interactive objects consistent with the native app.
-      const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
-      function releaseJelly(target: EventTarget | null) {
-        if (!(target instanceof HTMLElement) || reduceMotion.matches) return;
-        const jelly = target.closest<HTMLElement>('[data-jelly]');
-        if (!jelly) return;
-        jelly.removeAttribute('data-jelly-releasing');
-        requestAnimationFrame(() => {
-          jelly.setAttribute('data-jelly-releasing', '');
-          jelly.addEventListener(
-            'animationend',
-            () => jelly.removeAttribute('data-jelly-releasing'),
-            { once: true },
-          );
-        });
-      }
-      document.addEventListener('pointerup', (e) => releaseJelly(e.target));
-      document.addEventListener('pointercancel', (e) => releaseJelly(e.target));
+      // Shared soft-body motion. Every [data-jelly] object runs the same four
+      // named springs the Mac app runs through CASpringAnimation: press squashes
+      // on the way down, release springs back through a little overshoot, and
+      // wobble/pop are fired by hand where a moment deserves them.
+      const jellyTarget = (target: EventTarget | null) =>
+        target instanceof HTMLElement ? target.closest<HTMLElement>('[data-jelly]') : null;
+
+      document.addEventListener('pointerdown', (e) => playJelly(jellyTarget(e.target), 'press'));
+      document.addEventListener('pointerup', (e) => playJelly(jellyTarget(e.target), 'release'));
+      document.addEventListener('pointercancel', (e) =>
+        playJelly(jellyTarget(e.target), 'release'),
+      );
+      document.addEventListener('keydown', (e) => {
+        if (e.repeat) return;
+        if (e.key === 'Enter' || e.key === ' ') playJelly(jellyTarget(e.target), 'press');
+      });
       document.addEventListener('keyup', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') releaseJelly(e.target);
+        if (e.key === 'Enter' || e.key === ' ') playJelly(jellyTarget(e.target), 'release');
       });
     </script>
     {

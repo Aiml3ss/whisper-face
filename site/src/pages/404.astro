@@ -7,18 +7,45 @@ import Face from '../components/Face.astro';
 
 <Base title="This page wandered off · Whisper Face">
   <Nav />
-  <main class="wrap" style="text-align:center;padding:90px 0 100px;display:flex;flex-direction:column;align-items:center;gap:22px">
+  <main class="notfound wrap">
     <span class="notfound-face"><Face animal="owl" /></span>
-    <h1 class="title" style="font-size:clamp(52px,10vw,96px);margin:0">404</h1>
-    <p class="lede" style="margin:0 auto">The owl heard you, but this page is not where you left it.</p>
-    <div class="cta-row" style="justify-content:center;margin:6px 0 0">
+    <h1 class="title notfound-code">404</h1>
+    <p class="lede">
+      The owl heard you, but this page is not where you left it. Nothing is broken — the link just
+      points somewhere that moved.
+    </p>
+    <div class="cta-row notfound-cta">
       <a class="btn btn-primary" data-jelly href="/">Back home</a>
       <a class="btn btn-ghost" data-jelly href="/docs">Read the docs</a>
     </div>
+    <p class="notfound-note">
+      Looking for setup or permissions? Those live in the docs. Everything else starts at home.
+    </p>
   </main>
   <Footer />
 
   <style>
+    /* `.wrap` supplies the 24px gutter; the old inline padding shorthand was
+       silently zeroing it, so long copy ran into both edges on a phone. */
+    .notfound {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 22px;
+      padding-block: 90px 100px;
+      text-align: center;
+    }
+    .notfound-code {
+      font-size: clamp(52px, 10vw, 96px);
+      margin: 0;
+    }
+    .notfound .lede {
+      margin: 0;
+    }
+    .notfound-cta {
+      justify-content: center;
+      margin: 6px 0 0;
+    }
     .notfound-face {
       display: grid;
       place-items: center;
@@ -32,10 +59,21 @@ import Face from '../components/Face.astro';
         var(--sticker-lg);
       transform: rotate(-3deg);
     }
-    .notfound-face .face-frames {
+    /* `.face-frames` is rendered by Face.astro, so it carries that component's
+       scope id and not this one. Without :global() the sizing never applied and
+       the owl collapsed to nothing. */
+    .notfound-face :global(.face-frames) {
       position: relative;
       width: 96px;
       height: 96px;
+    }
+    .notfound-note {
+      margin: 2px 0 0;
+      max-width: 46ch;
+      font-family: var(--mono);
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--ink-soft);
     }
   </style>
 </Base>
