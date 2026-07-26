@@ -2090,10 +2090,38 @@ def _rounded_font(size: float, weight: float):
         return base
 
 
+def _center_layer_anchor(layer) -> None:
+    """Move a layer's anchor to its middle without moving the layer.
+
+    AppKit hands view-backed layers an anchor of (0, 0), so a scale spring
+    grows out of the bottom-left corner and the squash reads as a slide.
+    Re-anchoring at the center makes squash-and-stretch behave the way the
+    shared motion specs describe it. The position is shifted by exactly the
+    distance the anchor moved so the layer does not jump, and any later
+    ``setFrame:`` from AppKit recomputes the position from the new anchor.
+    """
+    if layer is None:
+        return
+    try:
+        anchor = layer.anchorPoint()
+        if abs(anchor.x - 0.5) < 1e-6 and abs(anchor.y - 0.5) < 1e-6:
+            return
+        size = layer.bounds().size
+        position = layer.position()
+        layer.setAnchorPoint_((0.5, 0.5))
+        layer.setPosition_((
+            position.x + (0.5 - anchor.x) * size.width,
+            position.y + (0.5 - anchor.y) * size.height,
+        ))
+    except Exception:
+        return
+
+
 def _add_jelly_animation(layer, motion_name: str) -> None:
     """Translate one named motion into two native Core Animation springs."""
     if layer is None:
         return
+    _center_layer_anchor(layer)
     spec = MOTION_SPECS[motion_name]
     for axis, start in (("x", spec.squash_x), ("y", spec.squash_y)):
         animation = CASpringAnimation.animationWithKeyPath_(
