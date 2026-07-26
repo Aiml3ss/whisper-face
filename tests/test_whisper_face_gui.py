@@ -499,6 +499,7 @@ class SnapshotTests(unittest.TestCase):
                 "operation.face.change_failed",
                 "operation.flight.update_failed",
                 "operation.acoustic.update_failed",
+                "operation.relisten.update_failed",
                 "operation.acoustic.play_failed",
                 "operation.acoustic.clear_failed",
                 "operation.voice_objects.update_failed",
@@ -629,6 +630,7 @@ class SnapshotTests(unittest.TestCase):
             "clear_voice_object_draft_clipboard", contract.model_actions)
         self.assertIn(
             "click_risky_action_confirmation", contract.model_actions)
+        self.assertIn("set_selective_relisten", contract.model_actions)
         for key in contract.accessibility_catalog_keys:
             with self.subTest(key=key):
                 self.assertIn(key, STRING_CATALOGS["en"])
@@ -1406,6 +1408,17 @@ class ViewModelTests(unittest.TestCase):
             if not enabled:
                 self.runtime["retained_consequence_spans"] = 0
 
+        def set_selective_relisten(enabled):
+            self.calls.append(("selective_relisten", enabled))
+            self.runtime["selective_relisten"] = {
+                "requested": enabled,
+                "evidence_ready": True,
+                "enabled": enabled,
+                "verifier_ready": enabled,
+                "warming": False,
+                "status": "ready" if enabled else "off",
+            }
+
         def set_voice_objects(enabled):
             self.calls.append(("voice_objects", enabled))
             self.runtime["voice_object_commands"] = enabled
@@ -1505,6 +1518,7 @@ class ViewModelTests(unittest.TestCase):
             set_face=set_face,
             set_flight_recorder=set_flight,
             set_acoustic_time_machine=set_acoustic,
+            set_selective_relisten=set_selective_relisten,
             set_voice_object_commands=set_voice_objects,
             inspect_voice_object_drafts=inspect_voice_drafts,
             reveal_voice_object_draft=reveal_voice_draft,
@@ -1598,6 +1612,49 @@ class ViewModelTests(unittest.TestCase):
         self.assertIn(("clear_retained",), self.calls)
         self.assertIn(("acoustic", False), self.calls)
         self.assertFalse(self.model.state.acoustic_time_machine)
+
+    def test_selective_relisten_projection_and_toggle_use_content_free_state(self):
+        self.runtime["selective_relisten"] = {
+            "requested": False,
+            "evidence_ready": True,
+            "enabled": False,
+            "verifier_ready": False,
+            "warming": False,
+            "status": "off",
+            "private_manifest": "must-not-project",
+        }
+        state = self.model.refresh()
+        self.assertFalse(state.selective_relisten_requested)
+        self.assertTrue(state.selective_relisten_evidence_ready)
+        self.assertEqual(state.selective_relisten_status, "off")
+        self.assertNotIn("private_manifest", repr(state))
+
+        state = self.model.set_selective_relisten(True)
+
+        self.assertIn(("selective_relisten", True), self.calls)
+        self.assertTrue(state.selective_relisten_requested)
+        self.assertEqual(state.selective_relisten_status, "ready")
+
+    def test_selective_relisten_fails_closed_on_unknown_or_failed_state(self):
+        state = normalize_snapshot({
+            "selective_relisten": {
+                "requested": True,
+                "evidence_ready": False,
+                "status": "private-unknown-state",
+            },
+        })
+        self.assertTrue(state.selective_relisten_requested)
+        self.assertFalse(state.selective_relisten_evidence_ready)
+        self.assertEqual(state.selective_relisten_status, "receipt-invalid")
+
+        model = WhisperFaceViewModel(GUIActions(
+            set_selective_relisten=lambda _enabled:
+                (_ for _ in ()).throw(RuntimeError("evidence unavailable")),
+        ))
+        failed = model.set_selective_relisten(True)
+        self.assertFalse(failed.selective_relisten_requested)
+        self.assertEqual(failed.notice_level, "error")
+        self.assertIn("evidence unavailable", failed.notice)
 
     def test_acoustic_privacy_copy_and_projection_expose_no_audio_metadata(self):
         state = normalize_snapshot({

@@ -1721,6 +1721,7 @@ class FacePreferenceTests(unittest.TestCase):
                 "acoustic_time_machine": True,
                 "voice_object_commands": False,
                 "spoken_edit_commands": False,
+                "selective_relisten": False,
                 "face": "fox",
             })
 
@@ -1736,6 +1737,7 @@ class FacePreferenceTests(unittest.TestCase):
                         "acoustic_time_machine": acoustic,
                         "voice_object_commands": voice_objects,
                         "spoken_edit_commands": voice_objects,
+                        "selective_relisten": voice_objects,
                     }), encoding="utf-8")
                     buffer = AcousticTimeMachine()
                     ns = load_definitions(
@@ -1755,6 +1757,8 @@ class FacePreferenceTests(unittest.TestCase):
                         ns["PREFERENCES"]["voice_object_commands"], expected)
                     self.assertIs(
                         ns["PREFERENCES"]["spoken_edit_commands"], expected)
+                    self.assertIs(
+                        ns["PREFERENCES"]["selective_relisten"], expected)
                     self.assertIs(buffer.enabled, expected)
 
     def test_all_default_faces_are_supported(self):
@@ -1777,6 +1781,54 @@ class FacePreferenceTests(unittest.TestCase):
             ns["hud_level_step"](0.9, 0.0, "recording", False), 0.0)
         self.assertLess(
             ns["hud_level_step"](0.9, 0.7, "error", False), 0.7)
+
+
+class SelectiveRelistenPreferenceTests(unittest.TestCase):
+    def _namespace(self, *, is_macos=True, evidence_ready=True):
+        calls = []
+        status = SimpleNamespace(ready=evidence_ready)
+        ns = load_definitions(
+            "set_selective_relisten_enabled",
+            assignments={"PREFERENCES"},
+            extra={
+                "DEFAULT_FACE": "parrot",
+                "IS_MACOS": is_macos,
+                "RELISTEN_ACTIVATION_FILE": Path("private-receipt.json"),
+                "load_activation_receipt": lambda _path: status,
+                "refresh_selective_relisten_verifier":
+                    lambda: calls.append("refresh"),
+                "save_preferences": lambda: calls.append("save"),
+            },
+        )
+        return ns, calls
+
+    def test_enable_requires_current_local_activation_evidence(self):
+        ns, calls = self._namespace(evidence_ready=False)
+
+        with self.assertRaisesRegex(RuntimeError, "evidence"):
+            ns["set_selective_relisten_enabled"](True)
+
+        self.assertFalse(ns["PREFERENCES"]["selective_relisten"])
+        self.assertEqual(calls, [])
+
+    def test_enable_and_disable_refresh_lifetime_then_persist(self):
+        ns, calls = self._namespace()
+
+        ns["set_selective_relisten_enabled"](True)
+        self.assertTrue(ns["PREFERENCES"]["selective_relisten"])
+        self.assertEqual(calls, ["refresh", "save"])
+
+        ns["set_selective_relisten_enabled"](False)
+        self.assertFalse(ns["PREFERENCES"]["selective_relisten"])
+        self.assertEqual(calls, ["refresh", "save", "refresh", "save"])
+
+    def test_non_mac_cannot_activate_even_with_receipt(self):
+        ns, calls = self._namespace(is_macos=False)
+
+        ns["set_selective_relisten_enabled"](True)
+
+        self.assertFalse(ns["PREFERENCES"]["selective_relisten"])
+        self.assertEqual(calls, ["refresh", "save"])
 
 
 class WhisperFaceThemeTests(unittest.TestCase):

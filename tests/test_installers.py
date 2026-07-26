@@ -437,6 +437,10 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn("dictate.py", installer)
                 self.assertIn("parrot_core.py", installer)
                 self.assertIn("voice_compiler.py", installer)
+                self.assertIn("process_verifier.py", installer)
+                self.assertIn("prewarmed_verifier.py", installer)
+                self.assertIn("whisper_verifier_adapter.py", installer)
+                self.assertIn("relisten_activation.py", installer)
                 self.assertIn("insertion_integrity.py", installer)
                 self.assertIn("personal_regression.py", installer)
                 self.assertIn("cleanup_circuit_breaker.py", installer)
@@ -713,6 +717,7 @@ class InstallerContractTests(unittest.TestCase):
             "tones.json",
             "preferences.json",
             "acoustic_keyword_memory.json",
+            "relisten_activation.json",
             "dictionary.txt",
             "transcripts.jsonl",
             "learned.json",

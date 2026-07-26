@@ -389,6 +389,12 @@ from model_wallet_shadow import (  # noqa: E402
 from model_readiness_evidence import (  # noqa: E402
     collect_model_readiness,
 )
+from relisten_activation import (  # noqa: E402
+    load_activation_receipt,
+)
+from whisper_verifier_adapter import (  # noqa: E402
+    PrewarmedWhisperTinyVerifier,
+)
 from demonstration_drafts import (  # noqa: E402
     DemonstrationAction,
     DemonstrationDomain,
@@ -601,6 +607,7 @@ SERVER_ONLY = "--server-only" in sys.argv   # headless: endpoint only
 # built-in *_APPS sets. bundle id -> "casual"|"formal"|"code"|"verbatim"|"default"
 TONES_FILE = HERE / "tones.json"
 PREFERENCES_FILE = HERE / "preferences.json"
+RELISTEN_ACTIVATION_FILE = HERE / "relisten_activation.json"
 APP_NAME = "Whisper Face"
 FACE_CHOICES = (
     "parrot", "fox", "owl", "cat", "bear",
@@ -1100,10 +1107,11 @@ VOICE_COMPILER = VoiceCompiler()
 CONTEXT_ROUTER = ContextRouter()
 INSERTION_COORDINATOR = InsertionCoordinator(
     max_recoverable=VOICE_OUTBOX_MAX_ITEMS)
-# Selective re-listen is fail-closed until a local adapter can attest that it
-# enforces the deadline internally and never retains its bounded audio input.
-# The pure consequence receipt still explains why a span was skipped.
 CONSEQUENCE_VERIFIER = None
+CONSEQUENCE_VERIFIER_STATE = {
+    "lock": threading.RLock(),
+    "warming": False,
+}
 ACOUSTIC_TIME_MACHINE_TTL_SECONDS = 60.0
 
 APP_TONES = {"map": {}, "lock": threading.Lock()}
@@ -1112,6 +1120,7 @@ PREFERENCES = {
     "acoustic_time_machine": False,
     "voice_object_commands": False,
     "spoken_edit_commands": False,
+    "selective_relisten": False,
     "face": DEFAULT_FACE,
 }
 ACOUSTIC_TIME_MACHINE = AcousticTimeMachine()
@@ -1209,6 +1218,116 @@ def current_face() -> str:
     return normalize_face(PREFERENCES.get("face"))
 
 
+def close_selective_relisten_verifier() -> None:
+    """Destroy all verifier/model state without retaining request history."""
+    global CONSEQUENCE_VERIFIER
+    with CONSEQUENCE_VERIFIER_STATE["lock"]:
+        verifier = CONSEQUENCE_VERIFIER
+        CONSEQUENCE_VERIFIER = None
+        CONSEQUENCE_VERIFIER_STATE["warming"] = False
+    if verifier is not None:
+        try:
+            verifier.close()
+        except Exception:
+            pass
+
+
+def selective_relisten_status_snapshot() -> dict:
+    """Return content-free activation and readiness state."""
+    evidence = load_activation_receipt(RELISTEN_ACTIVATION_FILE)
+    requested = bool(
+        IS_MACOS and PREFERENCES.get("selective_relisten", False))
+    with CONSEQUENCE_VERIFIER_STATE["lock"]:
+        verifier = CONSEQUENCE_VERIFIER
+        warming = bool(CONSEQUENCE_VERIFIER_STATE["warming"])
+    verifier_ready = bool(
+        verifier is not None and getattr(verifier, "ready", False))
+    enabled = requested and evidence.ready and verifier is not None
+    return {
+        "requested": requested,
+        "evidence_ready": bool(IS_MACOS and evidence.ready),
+        "enabled": enabled,
+        "verifier_ready": verifier_ready,
+        "warming": warming,
+        "status": (
+            "ready" if enabled and verifier_ready
+            else "warming" if enabled and warming
+            else "enabled-not-ready" if enabled
+            else evidence.reason if requested or not evidence.ready
+            else "off"
+        ),
+    }
+
+
+def _prewarm_selective_relisten_worker(verifier) -> None:
+    try:
+        verifier.prewarm(deadline_at=time.monotonic() + 60.0)
+    except Exception:
+        pass
+    finally:
+        with CONSEQUENCE_VERIFIER_STATE["lock"]:
+            if CONSEQUENCE_VERIFIER is verifier:
+                CONSEQUENCE_VERIFIER_STATE["warming"] = False
+
+
+def schedule_selective_relisten_prewarm() -> bool:
+    """Start one model-only warmup without blocking dictation."""
+    with CONSEQUENCE_VERIFIER_STATE["lock"]:
+        verifier = CONSEQUENCE_VERIFIER
+        if (verifier is None
+                or getattr(verifier, "ready", False)
+                or CONSEQUENCE_VERIFIER_STATE["warming"]):
+            return False
+        CONSEQUENCE_VERIFIER_STATE["warming"] = True
+    threading.Thread(
+        target=_prewarm_selective_relisten_worker,
+        args=(verifier,),
+        name="whisper-face-relisten-prewarm",
+        daemon=True,
+    ).start()
+    return True
+
+
+def refresh_selective_relisten_verifier() -> bool:
+    """Match verifier lifetime to Mac-only opt-in plus validated evidence."""
+    global CONSEQUENCE_VERIFIER
+    evidence = load_activation_receipt(RELISTEN_ACTIVATION_FILE)
+    desired = bool(
+        IS_MACOS
+        and PREFERENCES.get("selective_relisten", False)
+        and evidence.ready
+    )
+    stale = None
+    with CONSEQUENCE_VERIFIER_STATE["lock"]:
+        if desired and CONSEQUENCE_VERIFIER is None:
+            CONSEQUENCE_VERIFIER = PrewarmedWhisperTinyVerifier()
+        elif not desired and CONSEQUENCE_VERIFIER is not None:
+            stale = CONSEQUENCE_VERIFIER
+            CONSEQUENCE_VERIFIER = None
+            CONSEQUENCE_VERIFIER_STATE["warming"] = False
+    if stale is not None:
+        try:
+            stale.close()
+        except Exception:
+            pass
+    if desired:
+        schedule_selective_relisten_prewarm()
+    return desired
+
+
+def active_consequence_verifier():
+    """Return only a prewarmed verifier; cold state remains fail-closed."""
+    status = selective_relisten_status_snapshot()
+    if not status["enabled"]:
+        return None
+    with CONSEQUENCE_VERIFIER_STATE["lock"]:
+        verifier = CONSEQUENCE_VERIFIER
+    if verifier is not None and getattr(verifier, "ready", False):
+        return verifier
+    schedule_selective_relisten_prewarm()
+    return None
+
+
 def load_preferences():
     try:
         loaded = json.loads(PREFERENCES_FILE.read_text()) \
@@ -1232,6 +1351,8 @@ def load_preferences():
     # cannot activate command diversion on Windows.
     PREFERENCES["spoken_edit_commands"] = bool(
         IS_MACOS and loaded.get("spoken_edit_commands") is True)
+    PREFERENCES["selective_relisten"] = bool(
+        IS_MACOS and loaded.get("selective_relisten") is True)
     PREFERENCES["face"] = normalize_face(loaded.get("face"))
     if PREFERENCES["acoustic_time_machine"]:
         ACOUSTIC_TIME_MACHINE.enable()
@@ -1248,6 +1369,8 @@ def save_preferences():
             IS_MACOS and PREFERENCES["voice_object_commands"]),
         "spoken_edit_commands": bool(
             IS_MACOS and PREFERENCES["spoken_edit_commands"]),
+        "selective_relisten": bool(
+            IS_MACOS and PREFERENCES["selective_relisten"]),
         "face": current_face(),
     }
     atomic_write_text(
@@ -1271,6 +1394,20 @@ def set_spoken_edit_commands_enabled(enabled: bool) -> None:
     """Persist the Mac-only spoken-edit-command opt-in."""
     PREFERENCES["spoken_edit_commands"] = bool(enabled) and IS_MACOS
     save_preferences()
+
+
+def set_selective_relisten_enabled(enabled: bool) -> None:
+    """Persist opt-in only when current physical evidence authorizes it."""
+    desired = bool(enabled) and IS_MACOS
+    if desired and not load_activation_receipt(
+            RELISTEN_ACTIVATION_FILE).ready:
+        raise RuntimeError("Selective Re-listen evidence is unavailable")
+    PREFERENCES["selective_relisten"] = desired
+    refresh_selective_relisten_verifier()
+    save_preferences()
+
+
+atexit.register(close_selective_relisten_verifier)
 
 
 def _voice_object_inbox_bridge() -> VoiceObjectInboxBridge:
@@ -2943,6 +3080,25 @@ class StatusBar(NSObject):
             None, "")
         relisten_summary.setEnabled_(False)
         self.recognition_menu.addItem_(relisten_summary)
+        runtime_relisten = selective_relisten_status_snapshot()
+        runtime_title = {
+            "ready": "Selective Re-listen: On",
+            "warming": "Selective Re-listen: Warming",
+            "enabled-not-ready": "Selective Re-listen: Starting",
+            "receipt-missing": "Selective Re-listen: Evidence required",
+        }.get(
+            runtime_relisten["status"],
+            "Selective Re-listen: Off",
+        )
+        runtime_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            runtime_title, "toggleSelectiveRelisten:", "")
+        runtime_item.setTarget_(self)
+        runtime_item.setState_(
+            1 if runtime_relisten["requested"] else 0)
+        runtime_item.setEnabled_(
+            runtime_relisten["evidence_ready"]
+            or runtime_relisten["requested"])
+        self.recognition_menu.addItem_(runtime_item)
         if consequence["relisten_skipped"]:
             skipped_summary = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                 "Skipped: " + " · ".join(
@@ -2984,6 +3140,14 @@ class StatusBar(NSObject):
         pb.clearContents()
         pb.setString_forType_(alternative, NSPasteboardTypeString)
         print("[confidence] copied alternative to clipboard")
+
+    def toggleSelectiveRelisten_(self, _sender):
+        status = selective_relisten_status_snapshot()
+        try:
+            set_selective_relisten_enabled(not status["requested"])
+        except RuntimeError:
+            print("! Selective Re-listen requires approved local evidence")
+        self.rebuild_recognition()
 
     def togglePause_(self, sender):
         self.set_paused(not PAUSED["on"])
@@ -4787,6 +4951,7 @@ def runtime_status_snapshot() -> dict:
     outbox = INSERTION_COORDINATOR.recoverable()
     acoustic_keywords = acoustic_keyword_memory_status_snapshot()
     acoustic_replay = acoustic_time_machine_status_snapshot()
+    selective_relisten = selective_relisten_status_snapshot()
     voice_object_inbox = voice_object_inbox_status()
     risky_confirmation = risky_action_confirmation_status_snapshot()
     model_wallet_shadow = model_wallet_shadow_status_snapshot()
@@ -4805,6 +4970,7 @@ def runtime_status_snapshot() -> dict:
         "flight_state": flight_state,
         "acoustic_time_machine": acoustic_replay["enabled"],
         "retained_consequence_spans": acoustic_replay["retained_spans"],
+        "selective_relisten": selective_relisten,
         "voice_object_commands": voice_object_inbox["enabled"],
         "voice_object_inbox_count": voice_object_inbox["queued_count"],
         "voice_object_inbox_status": voice_object_inbox["status"],
@@ -9287,7 +9453,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             full_audio,
             sample_rate=SAMPLE_RATE,
             audio_duration=duration,
-            verifier=CONSEQUENCE_VERIFIER,
+            verifier=active_consequence_verifier(),
             plan_sink=consequence_plans.append,
         )
         # A context-free compilation is observed in shadow only. Its receipt
@@ -10027,6 +10193,7 @@ def main():
     lock_fd = ensure_single_instance()      # noqa: F841 — held for lifetime
     load_app_tones()
     load_preferences()
+    refresh_selective_relisten_verifier()
 
     terms = refresh_glossary()
     print(f"Active glossary: {len(terms)} terms "
@@ -10059,6 +10226,7 @@ def main():
             set_face=STATUS["bar"].set_face_choice,
             set_flight_recorder=STATUS["bar"].set_flight_enabled,
             set_acoustic_time_machine=set_acoustic_time_machine_enabled,
+            set_selective_relisten=set_selective_relisten_enabled,
             set_voice_object_commands=set_voice_object_commands_enabled,
             inspect_voice_object_drafts=inspect_voice_object_drafts,
             reveal_voice_object_draft=reveal_voice_object_draft,

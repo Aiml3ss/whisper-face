@@ -35,6 +35,14 @@ from process_verifier import (
     VerificationRequest,
     _validated_result,
 )
+from relisten_activation import (
+    MIN_REAL_SAMPLES,
+    MIN_REAL_SAMPLES_PER_OUTCOME,
+    ActivationError,
+    activation_candidate,
+    build_activation_receipt,
+    write_activation_receipt,
+)
 from whisper_verifier_adapter import (
     MAX_AUDIO_SAMPLES,
     MAX_EXPECTED_CHARACTERS,
@@ -53,8 +61,6 @@ PRIVACY = "transcript-free-aggregate-only"
 EVIDENCE_TYPES = frozenset({"real-recorded", "synthetic-test"})
 EXPECTED_OUTCOMES = frozenset({"confirmed", "contradicted"})
 MAX_CASES = 256
-MIN_REAL_SAMPLES = 40
-MIN_REAL_SAMPLES_PER_OUTCOME = 20
 MAX_DEADLINE_SECONDS = 60.0
 
 _MANIFEST_KEYS = frozenset({"schema_version", "kind", "cases"})
@@ -374,7 +380,7 @@ def evaluate(
         "reason": "no-valid-local-audio-verifier-contract",
         "metrics": None,
     })
-    return {
+    report = {
         "schema_version": SCHEMA_VERSION,
         "report_kind": REPORT_KIND,
         "privacy": PRIVACY,
@@ -397,9 +403,18 @@ def evaluate(
                 else "insufficient-real-samples"
             ),
             "activation_claim": False,
-            "decision": "manual-review-required",
+            "decision": "evidence-required",
         },
     }
+    candidate = activation_candidate(report)
+    report["activation_evidence"]["runtime_candidate"] = candidate.ready
+    report["activation_evidence"]["runtime_candidate_reason"] = \
+        candidate.reason
+    report["activation_evidence"]["decision"] = (
+        "manual-review-required" if candidate.ready
+        else "evidence-required"
+    )
+    return report
 
 
 def render_json(report: Mapping[str, Any]) -> str:
@@ -427,7 +442,21 @@ def main(
         description="Run transcript-free Selective Re-listen evidence")
     parser.add_argument("manifest", type=Path)
     parser.add_argument("--deadline-seconds", type=float, default=10.0)
+    parser.add_argument(
+        "--approve-runtime",
+        type=Path,
+        help="write a content-free activation receipt after all gates pass",
+    )
+    parser.add_argument(
+        "--confirm-manual-review",
+        action="store_true",
+        help="confirm private real-recording cases were manually reviewed",
+    )
     arguments = parser.parse_args(argv)
+    if arguments.confirm_manual_review and arguments.approve_runtime is None:
+        print("re-listen activation approval requires an output path",
+              file=sys.stderr)
+        return 2
     actual_providers = dict(providers) if providers is not None \
         else default_providers()
     try:
@@ -443,6 +472,17 @@ def main(
         return 2
     finally:
         close_providers(actual_providers)
+    if arguments.approve_runtime is not None:
+        try:
+            receipt = build_activation_receipt(
+                report,
+                manual_review_approved=arguments.confirm_manual_review,
+            )
+            write_activation_receipt(arguments.approve_runtime, receipt)
+        except (ActivationError, OSError):
+            print("re-listen activation evidence not approved",
+                  file=sys.stderr)
+            return 2
     print(render_json(report))
     return 0
 

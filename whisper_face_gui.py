@@ -83,6 +83,11 @@ RISKY_ACTION_STATES = frozenset({
     "idle", "awaiting_voice", "awaiting_click", "confirmed", "cancelled",
     "expired",
 })
+SELECTIVE_RELISTEN_STATUSES = frozenset({
+    "off", "ready", "warming", "enabled-not-ready", "receipt-missing",
+    "receipt-invalid", "receipt-policy-mismatch",
+    "receipt-evidence-insufficient",
+})
 POINT_AND_SPEAK_MAX_PHRASE_CHARS = 96
 POINT_AND_SPEAK_ROLES = frozenset({
     "button", "checkbox", "link", "menu_item", "radio_button", "tab",
@@ -375,6 +380,13 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "models.unknown": "Unknown",
         "models.waiting.detail": "Open this window after startup completes",
         "models.guidance": "Models prepare locally and can finish in the background.",
+        "models.relisten.label": "Selective Re-listen",
+        "models.relisten.status.off": "Off",
+        "models.relisten.status.ready": "On · verifier ready",
+        "models.relisten.status.warming": "On · warming locally",
+        "models.relisten.status.enabled-not-ready": "On · starting locally",
+        "models.relisten.status.evidence-required": "Evidence required",
+        "models.relisten.help": "Recheck only uncertain names and numbers with the local Whisper Tiny verifier. Activation requires approved evidence from this Mac.",
         "models.wallet.unavailable": "Model wallet shadow advisory only · No model execution or routing · Exact pin evidence unavailable · Runtime readiness and capability evidence remain separate.",
         "models.wallet.evidence": "Model wallet shadow advisory only · No model execution or routing · Exact files resolved {resolved}/4 · Warm path observed {warm}/4 · Runtime readiness attested 0/4 · Capability bounds available 0/4.",
         "models.wallet.informational": "Model wallet shadow advisory only · No model execution or routing · Eligible ordering is informational.",
@@ -383,6 +395,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "models.accessibility.status": "{name} status",
         "models.accessibility.guidance": "Model guidance",
         "models.accessibility.wallet": "Model wallet shadow advisory; no execution or routing",
+        "models.accessibility.relisten": "Selective Re-listen activation",
         "diagnostics.title": "Diagnostics",
         "diagnostics.subtitle": "A quick health check when something does not feel right.",
         "diagnostics.service": "Service",
@@ -744,6 +757,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "operation.face.change_failed": "Could not change face: {error}",
         "operation.flight.update_failed": "Could not update Flight Recorder: {error}",
         "operation.acoustic.update_failed": "Could not update Acoustic Time Machine: {error}",
+        "operation.relisten.update_failed": "Could not update Selective Re-listen: {error}",
         "operation.voice_objects.update_failed": "Could not update Voice Object Commands: {error}",
         "operation.voice_objects.inspect_failed": "Could not inspect local Voice Object drafts.",
         "operation.voice_objects.reveal_failed": "Could not reveal the selected local draft.",
@@ -924,6 +938,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "choose_face",
             "set_flight_recorder",
             "set_acoustic_time_machine",
+            "set_selective_relisten",
             "set_voice_object_commands",
             "inspect_voice_object_drafts",
             "reveal_voice_object_draft",
@@ -1005,6 +1020,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "results.accessibility.audio",
             "models.accessibility.guidance",
             "models.accessibility.wallet",
+            "models.accessibility.relisten",
             "diagnostics.accessibility.verification",
             "diagnostics.accessibility.open_system_settings",
             "point_and_speak.dialog.input.label",
@@ -1038,6 +1054,7 @@ class GUIActions:
     set_face: Callable[[str], None] = _noop
     set_flight_recorder: Callable[[bool], None] = _noop
     set_acoustic_time_machine: Callable[[bool], None] = _noop
+    set_selective_relisten: Callable[[bool], None] = _noop
     set_voice_object_commands: Callable[[bool], None] = _noop
     inspect_voice_object_drafts: Callable[[], Sequence[Mapping[str, Any]]] = (
         lambda: ())
@@ -1521,6 +1538,9 @@ class GUIState:
     flight_recorder: bool = False
     flight_state: str = localized_string("default.flight.off")
     acoustic_time_machine: bool = False
+    selective_relisten_requested: bool = False
+    selective_relisten_evidence_ready: bool = False
+    selective_relisten_status: str = "receipt-missing"
     voice_object_commands: bool = False
     voice_object_inbox_count: int = 0
     voice_object_inbox_status: str = "Off"
@@ -2916,6 +2936,12 @@ def normalize_snapshot(
         active_engine = localized_string(
             "overview.engine.waiting", locale=locale)
     outbox_count = _nonnegative_int(source.get("outbox_count"))
+    relisten = source.get("selective_relisten")
+    relisten = relisten if isinstance(relisten, Mapping) else {}
+    relisten_status = str(
+        relisten.get("status", "receipt-missing")).strip().casefold()
+    if relisten_status not in SELECTIVE_RELISTEN_STATUSES:
+        relisten_status = "receipt-invalid"
     voice_object_inbox_status = str(
         source.get("voice_object_inbox_status", "Off")).strip().casefold()
     if voice_object_inbox_status not in {"off", "ready", "unavailable"}:
@@ -2985,6 +3011,10 @@ def normalize_snapshot(
             source.get("flight_state"), localized_string(
                 "default.flight.off", locale=locale)),
         acoustic_time_machine=source.get("acoustic_time_machine") is True,
+        selective_relisten_requested=relisten.get("requested") is True,
+        selective_relisten_evidence_ready=(
+            relisten.get("evidence_ready") is True),
+        selective_relisten_status=relisten_status,
         voice_object_commands=source.get("voice_object_commands") is True,
         voice_object_inbox_count=_nonnegative_int(
             source.get("voice_object_inbox_count")),
@@ -3438,6 +3468,21 @@ class WhisperFaceViewModel:
             self.state = replace(
                 self.state, notice=self.localized(
                     "operation.acoustic.update_failed", error=error),
+                notice_level="error")
+        return self.state
+
+    def set_selective_relisten(self, enabled: bool) -> GUIState:
+        desired = bool(enabled)
+        try:
+            self.actions.set_selective_relisten(desired)
+            self.state = replace(
+                self.state, selective_relisten_requested=desired,
+                notice="", notice_level="info")
+            return self.refresh()
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.relisten.update_failed", error=error),
                 notice_level="error")
         return self.state
 
@@ -4745,7 +4790,7 @@ if APPKIT_AVAILABLE:
                     self.dynamic["result_clear_audio_button"],
                 ),
                 "Settings": (self.dynamic["settings_pane_control"],),
-                "Models": (),
+                "Models": (self.dynamic["selective_relisten_toggle"],),
                 "Diagnostics": (
                     self.dynamic["point_and_speak_button"],
                     self.dynamic["drop_target_button"],
@@ -5332,7 +5377,26 @@ if APPKIT_AVAILABLE:
                                     size=22, weight="bold"))
             page.addSubview_(_label(
                 self._l("models.subtitle"),
-                NSMakeRect(5, 326, 650, 20), size=13, color=_SECONDARY))
+                NSMakeRect(5, 326, 525, 20), size=13, color=_SECONDARY))
+            relisten = NSButton.alloc().initWithFrame_(
+                NSMakeRect(552, 349, 206, 28))
+            relisten.setButtonType_(3)
+            relisten.setTitle_(self._l("models.relisten.label"))
+            relisten.setTarget_(self)
+            relisten.setAction_("selectiveRelistenChanged:")
+            relisten.setToolTip_(self._l("models.relisten.help"))
+            _accessible(
+                relisten,
+                self._l("models.accessibility.relisten"),
+                self._l("models.relisten.help"))
+            page.addSubview_(relisten)
+            relisten_status = _label(
+                self._l("models.relisten.status.evidence-required"),
+                NSMakeRect(557, 327, 196, 18), size=10,
+                color=_SECONDARY, alignment=1,
+                accessibility_label=self._l(
+                    "models.accessibility.relisten"))
+            page.addSubview_(relisten_status)
             advisory = _label(
                 self._l("models.wallet.unavailable"),
                 NSMakeRect(5, 298, 740, 20), size=11, color=_SECONDARY,
@@ -5361,6 +5425,8 @@ if APPKIT_AVAILABLE:
                 model_rows=rows,
                 model_wallet_advisory=advisory,
                 model_guidance=guidance,
+                selective_relisten_toggle=relisten,
+                selective_relisten_status=relisten_status,
             )
 
         def _build_diagnostics(self, page: Any) -> None:
@@ -5939,6 +6005,29 @@ if APPKIT_AVAILABLE:
                 self.dynamic["model_wallet_advisory"],
                 state.model_wallet_advisory,
                 label=self._l("models.accessibility.wallet"),
+            )
+            relisten_status_key = state.selective_relisten_status
+            if relisten_status_key not in {
+                    "off", "ready", "warming", "enabled-not-ready"}:
+                relisten_status_key = "evidence-required"
+            relisten_status = self._l(
+                f"models.relisten.status.{relisten_status_key}")
+            relisten_toggle = self.dynamic["selective_relisten_toggle"]
+            relisten_toggle.setState_(
+                NSControlStateValueOn
+                if state.selective_relisten_requested
+                else NSControlStateValueOff)
+            relisten_toggle.setEnabled_(
+                state.selective_relisten_evidence_ready
+                or state.selective_relisten_requested)
+            set_accessible_text(
+                self.dynamic["selective_relisten_status"],
+                relisten_status,
+                label=self._l("models.accessibility.relisten"),
+            )
+            sync_accessibility(
+                relisten_toggle, relisten_status,
+                label=self._l("models.accessibility.relisten"),
             )
             model_issue = next(
                 (issue for issue in state.degraded_issues
@@ -7000,6 +7089,11 @@ if APPKIT_AVAILABLE:
         def acousticTimeMachineChanged_(self, sender: Any) -> None:
             enabled = sender.state() == NSControlStateValueOn
             self.view_model.set_acoustic_time_machine(enabled)
+            self.render()
+
+        def selectiveRelistenChanged_(self, sender: Any) -> None:
+            enabled = sender.state() == NSControlStateValueOn
+            self.view_model.set_selective_relisten(enabled)
             self.render()
 
         def voiceObjectCommandsChanged_(self, sender: Any) -> None:
