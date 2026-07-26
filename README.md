@@ -56,11 +56,11 @@ are never Supporter-only features.
 ## Features
 
 - **A real native Mac app window** — choose **Open Whisper Face…** from the
-  menu-bar face for focused Overview, Results, Settings, Models, and
-  Diagnostics sections. It exposes live latency and usage—including
+  menu-bar face for focused Home, Settings, and Advanced sections. It exposes
+  live latency and usage—including
   Parakeet's own processing time when available—inspectable decision evidence,
   unified personalization/privacy controls, local model health, and one-click
-  installer verification without adding a browser runtime. Diagnostics can
+  installer verification without adding a browser runtime. Advanced can
   also save a private `0600`, transcript-free support bundle to a destination
   you choose; it is never uploaded and contains only allowlisted health,
   permission, model, and aggregate result metadata. First run shows
@@ -74,7 +74,7 @@ are never Supporter-only features.
   insertion to the original application/focused element and surface delivery
   as unverified instead of training from an assumption; if macOS cannot identify any focused
   element at all, the insertion fails closed into the outbox. The count-only
-  **Voice Outbox** menu entry routes directly to Overview; only the existing
+  **Voice Outbox** menu entry routes directly to Home; only the existing
   explicit **Copy & Dismiss** control can recover content.
 - **Flight Recorder (experimental)** — enable it under Settings →
   Privacy, speak
@@ -83,7 +83,8 @@ are never Supporter-only features.
   performs normal push-to-talk.
 - **Acoustic Time Machine (experimental, Mac)** — opt in under Privacy to keep
   only the latest result's short, consequence-selected audio spans in RAM after
-  insertion. Results can play those spans directly from memory or clear them
+  insertion. Home's Last dictation card can play those spans directly from
+  memory or clear them
   immediately; they self-delete after one minute, a new usable result replaces
   them, disabling wipes them, and no replay file is written.
 - **Hold-to-talk anywhere** — hold Right Option, speak, release; text pastes
@@ -128,7 +129,8 @@ are never Supporter-only features.
 - **Consequence receipts before consequence automation** — names, numbers,
   currency, dates, times, recipients, contacts, URLs, paths, commands, and
   actions receive transcript-free risk/uncertainty receipts in Last
-  Recognition and Results. The selective re-listen selector is bounded to two
+  Recognition and the window's evidence inspector. The selective re-listen
+  selector is bounded to two
   native-timed microspans and never a full utterance. A prewarmed,
   process-isolated pinned Whisper Tiny verifier can execute those spans under
   one hard deadline, returning only confirmed, contradicted, or inconclusive.
@@ -141,11 +143,13 @@ are never Supporter-only features.
   silence gaps; malformed or overlapping timing evidence still fails closed.
   After a successful ordinary Mac dictation, a Ping advises you to review
   consequence-sensitive text; it does not block insertion or verify the words.
-  The Results window repeats that guidance without exposing transcript text.
+  The window's evidence inspector repeats that guidance without exposing
+  transcript text.
 - **Counterfactual Context Firewall** — every finalized, insertion-bound
   contextual/personalized compile is compared with a context-free shadow
   compile. Protected influence is quarantined in a transcript-free receipt;
-  benign influence is only a shadow promotion candidate. Results explains the
+  benign influence is only a shadow promotion candidate. The evidence
+  inspector explains the
   bounded receipt without exposing context or transcript text. The comparison
   cannot change the text, cleanup, insertion, or model route.
 - **Six explicit voice modes** — modifier keys turn the same Right Option
@@ -191,7 +195,8 @@ are never Supporter-only features.
   `benchmark_acoustic_calibration_activation.py` after 40 balanced physical
   A/B cases, at least three improvements, zero regressions, and manual review.
   See [Acoustic accuracy activation](docs/acoustic-accuracy-activation.md).
-- **Explicit Point-and-Speak action (Mac)** — from Diagnostics, enter a
+- **Explicit Point-and-Speak action (Mac)** — a developer-invokable harness
+  (no longer surfaced in the app window) takes a
   bounded target phrase for a read-only preview of the focused app. Whisper Face
   reads only bounded Accessibility names, roles, geometry, visibility,
   enablement, focus, and selection metadata; strict confidence/margin gates
@@ -213,7 +218,8 @@ are never Supporter-only features.
   shadow adapter now reports current-pin eligibility and deterministic advisory
   order without executing a model. Warmup caches bounded exact-pin evidence for
   all four providers and separately records process-local warm-path observations;
-  neither is treated as current runtime readiness. The native Models pane labels
+  neither is treated as current runtime readiness. The native Advanced section
+  labels
   both as a shadow advisory with no execution or routing. Because the runtime exposes
   no conservative capability bounds, the current advisory stays fail-closed as
   missing evidence; live routing is intentionally not wired.
@@ -234,8 +240,9 @@ are never Supporter-only features.
   service exactly once. That action can only request a compose window: it has no
   send API, leaves the inbox item queued, and puts no private field in a URL,
   process argument, log, status, or receipt. Drop-to-Target can resolve or refuse a synthetic target
-  behind strict capability and ambiguity gates. Mac Diagnostics now exposes
-  that resolver as an explicit, transient read-only preview: the user declares
+  behind strict capability and ambiguity gates. A developer-invokable Mac
+  harness (no longer surfaced in the app window) exposes
+  that resolver as an explicit, transient read-only preview: the caller declares
   a hypothetical role, source kind, and effect before bounded Accessibility
   role/name/geometry/state and `AXDropEnabled` evidence is inspected. The
   preview returns a no-execution receipt, cannot infer those declared
@@ -387,7 +394,7 @@ the rollback copy. It does not download a candidate or run in the background.
 macOS will prompt for permissions — enable **"uv"** under System Settings →
 Privacy & Security → **Input Monitoring**, **Accessibility**, and
 **Microphone**. The app waits and restarts itself automatically once granted.
-While either evidenced permission is incomplete, Overview and Diagnostics show
+While either evidenced permission is incomplete, Home and Advanced show
 an accessible **Open System Settings** recovery action. It opens the generic
 macOS settings app, never changes a permission, and refreshes the displayed
 evidence while the Whisper Face window remains open.
@@ -428,8 +435,8 @@ The menu bar remains the fastest everyday control, while the window provides a
 clear home for setup health, privacy controls, model status, character choice,
 and Voice Outbox recovery. Closing the window does not stop dictation.
 The **Last Recognition** submenu ends with **Open Last Result…** for a direct
-route to the existing transcript-free Results inspector.
-Diagnostics can copy a fixed support snapshot containing only categorized
+route to the existing transcript-free evidence inspector.
+Advanced can copy a fixed support snapshot containing only categorized
 health/model state and numeric result aggregates; it excludes dictation text,
 context, paths, logs, personal language data, and machine identifiers.
 
@@ -739,7 +746,7 @@ complete community edition open while allowing commercial work to fund the
 free local product.
 
 The Mac window exposes offline **License Notices** and the immutable
-**Exact Source** under Diagnostics. Network-facing installs publish the same
+**Exact Source** under Advanced. Network-facing installs publish the same
 commit-specific source offer at `GET /source` and the shipped notices at
 `GET /license`. Modified deployments should set `WHISPER_FACE_SOURCE_URL` and,
 for packaged builds without Git metadata, `WHISPER_FACE_SOURCE_REVISION` to

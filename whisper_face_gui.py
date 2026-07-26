@@ -14,7 +14,6 @@ import json
 import math
 import subprocess
 import threading
-import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -29,8 +28,8 @@ from whisper_face_theme import (
 
 APP_NAME = "Whisper Face"
 DEFAULTS_SUITE = "com.whisperface.app"
-SECTIONS = ("Overview", "Results", "Settings", "Models", "Diagnostics")
-SETTINGS_PANES = ("Modes", "Personalize", "Privacy")
+SECTIONS = ("Home", "Settings", "Advanced")
+SETTINGS_PANES = ("Personalize", "Privacy")
 MODE_GUIDE = ("capture", "compose", "edit", "reply", "command", "code")
 TONE_CHOICES = ("auto", "casual", "formal", "code", "verbatim", "default")
 CONSEQUENCE_CATEGORIES = frozenset({
@@ -134,17 +133,10 @@ DROP_TARGET_MAX_PHRASE_CHARS = 96
 DROP_TARGET_ROLES = (
     "AXGroup", "AXImage", "AXList", "AXScrollArea",
 )
-DROP_TARGET_ROLE_LABELS = (
-    "Group", "Image", "List", "Scroll area",
-)
 DROP_TARGET_SOURCE_KINDS = (
     "file_reference", "image_reference", "text_selection", "url_reference",
 )
-DROP_TARGET_SOURCE_LABELS = (
-    "File reference", "Image reference", "Text selection", "URL reference",
-)
 DROP_TARGET_EFFECTS = ("copy", "link", "move")
-DROP_TARGET_EFFECT_LABELS = ("Copy", "Link", "Move")
 DROP_TARGET_STATES = frozenset({
     "resolved", "ambiguous", "unavailable", "permission_denied",
 })
@@ -181,11 +173,11 @@ MODEL_WALLET_ELIGIBILITIES = frozenset({
 # catalogs can be added without rewriting view logic or persistence schemas.
 STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
     "en": {
-        "nav.overview": "Overview",
-        "nav.results": "Results",
+        "nav.home": "Home",
         "nav.settings": "Settings",
-        "nav.models": "Models",
-        "nav.diagnostics": "Diagnostics",
+        "nav.advanced": "Advanced",
+        "advanced.accessibility.shortcut": "Advanced section shortcut",
+        "advanced.accessibility.shortcut.help": "Show the Advanced section (Command-D).",
         "app.subtitle": "Private, fast voice input on your Mac",
         "app.local_badge": "LOCAL FIRST",
         "app.version": "BUILD {version}",
@@ -290,8 +282,6 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "onboarding.complete.status": "All set",
         "onboarding.privacy": "Speech and setup stay on this Mac.",
         "onboarding.complete": "Setup is complete — Whisper Face is ready.",
-        "results.title": "Last Result",
-        "results.subtitle": "Inspectable evidence from this session — no transcript history.",
         "results.summary.empty": "No dictation yet",
         "results.summary.words": "{words} words",
         "results.summary.timed": "{words} words in {seconds}s",
@@ -334,7 +324,6 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "results.relisten.inconclusive": "inconclusive",
         "results.relisten.mixed": "mixed",
         "results.relisten.unavailable": "unavailable",
-        "results.empty.kicker": "YOUR LAST RESULT LIVES HERE",
         "results.empty.title": "Nothing to inspect yet",
         "results.empty.detail": "Dictate something and Whisper Face will explain what it heard, protected, changed, and delivered.",
         "results.audio.off": "Acoustic replay is off",
@@ -354,6 +343,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "results.inspect.title": "Latest-result evidence",
         "results.inspect.message": "Revealed only for this session. This detail is not added to transcript history or support exports.",
         "results.inspect.empty": "No detailed evidence was reported for this result.",
+        "results.inspect.summary": "RESULT SUMMARY",
         "results.inspect.alternatives": "ALTERNATIVES",
         "results.inspect.anchors": "PROTECTED ANCHORS",
         "results.inspect.proof": "PROOF EDITS",
@@ -382,21 +372,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "results.accessibility.summary": "Last result summary",
         "results.accessibility.engine": "Last result engine",
         "results.accessibility.mode": "Last result mode",
-        "results.accessibility.stable": "Stable prefix words",
-        "results.accessibility.anchors": "Protected anchors",
-        "results.accessibility.decisions": "Compiler decisions",
-        "results.accessibility.cleanup": "Cleanup edits",
-        "results.accessibility.proof": "Proof review",
-        "results.accessibility.alternatives": "Alternatives considered",
-        "results.accessibility.context": "Context influence",
-        "results.accessibility.firewall": "Context safety shadow receipt",
-        "results.accessibility.consequence": "Consequence decision receipt",
-        "results.accessibility.consequence_advisory": "Review guidance",
         "results.accessibility.audio": "Acoustic replay privacy status",
         "results.accessibility.inspect": "Inspect private latest-result evidence",
         "results.accessibility.inspect.content": "Private latest-result evidence",
-        "models.title": "Your local voice stack",
-        "models.subtitle": "Fast recognition, accurate fallback, and private cleanup.",
         "models.waiting": "Waiting for model status",
         "models.unknown": "Unknown",
         "models.waiting.detail": "Open this window after startup completes",
@@ -417,8 +395,6 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "models.accessibility.guidance": "Model guidance",
         "models.accessibility.wallet": "Model wallet shadow advisory; no execution or routing",
         "models.accessibility.relisten": "Selective Re-listen activation",
-        "diagnostics.title": "Diagnostics",
-        "diagnostics.subtitle": "A quick health check when something does not feel right.",
         "diagnostics.service": "Service",
         "diagnostics.microphone": "Microphone",
         "diagnostics.accessibility": "Accessibility",
@@ -434,10 +410,6 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "diagnostics.action.verify": "Run Verification",
         "diagnostics.action.open_system_settings": "Open System Settings",
         "diagnostics.action.open_system_settings.help": "Open macOS System Settings so you can review Microphone, Accessibility, and Input Monitoring. Whisper Face does not change permissions.",
-        "diagnostics.action.point_and_speak": "Point-and-Speak…",
-        "diagnostics.action.point_and_speak.help": "Enter a short target phrase for a read-only preview or explicitly AXPress one resolved button, checkbox, radio button, tab, menu item, or link once. The action path rechecks the same role plus the exact app, window, and Accessibility element immediately before AXPress; text fields, drift, replay, weak evidence, and unknown roles fail closed.",
-        "diagnostics.action.drop_target": "Preview Drop Target…",
-        "diagnostics.action.drop_target.help": "Declare a hypothetical target role, source kind, and effect for a read-only preview. Whisper Face reads bounded Accessibility capability evidence and never drags, drops, clicks, focuses, pastes, or performs an AX action.",
         "diagnostics.action.licenses": "License Notices",
         "diagnostics.action.source": "Exact Source",
         "diagnostics.verification.not_run": "Not run",
@@ -464,64 +436,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "diagnostics.accessibility.open_system_settings": "Open macOS System Settings",
         "diagnostics.accessibility.guidance": "Diagnostic guidance",
         "diagnostics.accessibility.notice": "Whisper Face notice",
-        "point_and_speak.dialog.title": "Point-and-Speak",
-        "point_and_speak.dialog.message": "Enter a target phrase of at most {limit} characters. Preview is read-only. After a supported control resolves, a separate role-specific confirmation can allow one AXPress only if a fresh strong resolution has the same role and the exact app, window, and element still match; otherwise it does nothing. Text fields are never activated.",
-        "point_and_speak.dialog.input.label": "Point-and-Speak target phrase",
-        "point_and_speak.dialog.input.help": "Describe one visible control by its accessible name, role, position, selection, or focus state.",
-        "point_and_speak.action.preview": "Preview",
-        "point_and_speak.action.confirm.button": "Activate button once…",
-        "point_and_speak.action.confirm.checkbox": "Activate checkbox once…",
-        "point_and_speak.action.confirm.radio_button": "Activate radio button once…",
-        "point_and_speak.action.confirm.tab": "Activate tab once…",
-        "point_and_speak.action.confirm.menu_item": "Activate menu item once…",
-        "point_and_speak.action.confirm.link": "Activate link once…",
-        "point_and_speak.action.cancel": "Cancel",
-        "point_and_speak.result.title.resolved": "Target resolved",
-        "point_and_speak.result.title.ambiguous": "Target is ambiguous",
-        "point_and_speak.result.title.unavailable": "No target available",
-        "point_and_speak.result.title.permission_denied": "Accessibility permission is needed",
-        "point_and_speak.result.selection": "Accessibility name: {name}\nRole: {role}\n\n{receipt}",
-        "point_and_speak.result.receipt": "Read-only receipt: capture {capture}; {observed} elements observed; {emitted} targets emitted; {eligible} eligible; {contradictions} contradictions; confidence {confidence}; margin {margin}; evidence {evidence}; truncated {truncated}.",
-        "point_and_speak.result.none": "none",
         "point_and_speak.result.yes": "yes",
         "point_and_speak.result.no": "no",
-        "point_and_speak.action.result.title.executed.button": "Button activated once",
-        "point_and_speak.action.result.title.executed.checkbox": "Checkbox activated once",
-        "point_and_speak.action.result.title.executed.radio_button": "Radio button activated once",
-        "point_and_speak.action.result.title.executed.tab": "Tab activated once",
-        "point_and_speak.action.result.title.executed.menu_item": "Menu item activated once",
-        "point_and_speak.action.result.title.executed.link": "Link activated once",
-        "point_and_speak.action.result.title.recheck_failed": "Target changed; nothing pressed",
-        "point_and_speak.action.result.title.expired": "Target evidence expired",
-        "point_and_speak.action.result.title.unsupported": "Target role is not AXPress-safe",
-        "point_and_speak.action.result.title.execution_failed": "AXPress was not confirmed",
-        "point_and_speak.action.result.title.unavailable": "Safe control action unavailable",
-        "point_and_speak.action.result.title.ambiguous": "Target is ambiguous",
-        "point_and_speak.action.result.title.permission_denied": "Accessibility permission is needed",
-        "point_and_speak.action.result.receipt": "Content-free action receipt: confirmed role {role}; state {state}; capture {capture}; {observed} elements observed; {emitted} targets emitted; confidence {confidence}; margin {margin}; focus, identity, and role recheck {recheck}; one AXPress attempted {attempted}; truncated {truncated}.",
         "point_and_speak.validation.phrase": "Enter one target phrase between 1 and {limit} characters.",
-        "drop_target.dialog.title": "Preview Drop-to-Target",
-        "drop_target.dialog.message": "Enter a target phrase and explicitly declare the role, source kind, and effect to test. Accessibility cannot prove those source/effect semantics. After you choose Preview, Whisper Face briefly hides and performs read-only capture only—never a drag, drop, write, or Accessibility action.",
-        "drop_target.dialog.input.label": "Drop target phrase",
-        "drop_target.dialog.input.help": "Describe one potential target by its bounded accessible name.",
-        "drop_target.dialog.role.label": "Declared target role",
-        "drop_target.dialog.role.help": "A hypothetical caller policy, not a capability inferred or proven by macOS.",
-        "drop_target.dialog.source.label": "Hypothetical source kind",
-        "drop_target.dialog.source.help": "A content-free source category only; no file, image, selection, URL, path, or payload is read.",
-        "drop_target.dialog.effect.label": "Hypothetical effect",
-        "drop_target.dialog.effect.help": "The effect to evaluate; this preview never executes it.",
-        "drop_target.action.preview": "Preview",
-        "drop_target.action.cancel": "Cancel",
-        "drop_target.result.title.resolved": "Hypothetical target resolved",
-        "drop_target.result.title.ambiguous": "Hypothetical target is ambiguous",
-        "drop_target.result.title.unavailable": "No eligible target available",
-        "drop_target.result.title.permission_denied": "Accessibility permission is needed",
-        "drop_target.result.selection": "Transient Accessibility name: {name}\nDeclared role: {role}\nHypothetical source/effect: {source} / {effect}\n\n{receipt}",
-        "drop_target.result.policy": "Declared role: {role}\nHypothetical source/effect: {source} / {effect}\n\n{receipt}",
-        "drop_target.result.receipt": "Read-only, no-execution receipt: capture {capture}; capability basis {basis}; {observed} elements observed; {emitted} policy-matching targets emitted; {eligible} operationally eligible; {contradictions} contradictions; confidence {confidence}; margin {margin}; evidence {evidence}; truncated {truncated}; execution {execution}.",
-        "drop_target.result.none": "none",
-        "drop_target.result.yes": "yes",
-        "drop_target.result.no": "no",
         "drop_target.validation.phrase": "Enter one target phrase between 1 and {limit} characters.",
         "issue.service.title": "The local service is not ready",
         "issue.service.detail": "Run Verification for a repair path. Your settings and personal data stay on this Mac.",
@@ -534,12 +451,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "issue.fallback.title": "A fallback model needs attention",
         "issue.fallback.detail": "Dictation can continue with a ready engine. Check: {models}.",
         "settings.title": "Settings",
-        "settings.subtitle": "Modes, personal language, appearance, and privacy in one place.",
-        "settings.pane.modes": "Modes",
+        "settings.subtitle": "Personal language, appearance, and privacy in one place.",
         "settings.pane.personalize": "Personalize",
         "settings.pane.privacy": "Privacy",
-        "settings.modes.title": "Hold Right Option with a modifier to choose a mode",
-        "settings.modes.footer": "Shortcuts are fixed so capture behavior stays predictable and safe.",
         "settings.mode.capture.name": "Capture",
         "settings.mode.capture.shortcut": "Right Option",
         "settings.mode.capture.detail": "Faithful dictation",
@@ -568,6 +482,15 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.personalize.corrections.detail": "{count} inspectable mappings",
         "settings.personalize.keywords": "Pronunciation keywords",
         "settings.personalize.keywords.detail": "Open to inspect correction-backed evidence",
+        "settings.personalize.modes": "Voice modes",
+        "settings.personalize.modes.detail": "Six fixed Right Option shortcuts choose capture behavior",
+        "settings.dialog.modes.title": "Voice modes",
+        "settings.dialog.modes.message": "Hold Right Option with a modifier to choose a mode. Shortcuts are fixed so capture behavior stays predictable and safe.",
+        "settings.dialog.modes.row": "{name} · {shortcut}\n    {detail}",
+        "settings.accessibility.modes.label": "Voice mode shortcuts",
+        "settings.accessibility.modes.help": "View the six fixed voice mode shortcuts.",
+        "settings.accessibility.modes_summary.label": "Voice modes summary",
+        "settings.action.view": "View",
         "settings.action.edit": "Edit",
         "settings.action.inspect": "Inspect",
         "settings.action.export": "Copy Export",
@@ -580,7 +503,6 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.action.review": "Review",
         "settings.action.save": "Save",
         "settings.action.cancel": "Cancel",
-        "settings.action.diagnostics": "Open Diagnostics",
         "settings.empty.tones": "No recent apps yet",
         "settings.empty.snippets": "No snippets",
         "settings.empty.corrections": "No learned corrections",
@@ -654,26 +576,6 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.privacy.voice_objects.status": "{status} · {count} local drafts queued",
         "settings.privacy.voice_objects.inspect": "Inspect",
         "settings.privacy.voice_objects.inspect.help": "Open the local Voice Inbox. Draft content stays hidden until you explicitly reveal a selected draft.",
-        "settings.privacy.demonstrations": "Demonstrations",
-        "settings.privacy.demonstrations.detail": "Manually author inert Finder, Mail, Notes, and menu recipes.",
-        "settings.privacy.demonstrations.author": "Author",
-        "settings.privacy.demonstrations.author.help": "Open the private demonstration editor. Step text stays hidden until you explicitly reveal or edit one selected recipe.",
-        "settings.privacy.risky_confirmation": "Risk confirmation (inert)",
-        "settings.privacy.risky_confirmation.detail": "Choose a class, start, say “confirm risky action,” then use the enabled click. Nothing executes.",
-        "settings.privacy.risky_confirmation.risk.external_communication": "External communication",
-        "settings.privacy.risky_confirmation.risk.calendar_commit": "Calendar commit",
-        "settings.privacy.risky_confirmation.risk.file_mutation": "File mutation",
-        "settings.privacy.risky_confirmation.risk.agent_execution": "Agent execution",
-        "settings.privacy.risky_confirmation.state.idle": "Idle — choose a class to start",
-        "settings.privacy.risky_confirmation.state.awaiting_voice": "Awaiting exact voice confirmation",
-        "settings.privacy.risky_confirmation.state.awaiting_click": "Voice received — distinct click required",
-        "settings.privacy.risky_confirmation.state.confirmed": "Confirmed — inert receipt only",
-        "settings.privacy.risky_confirmation.state.cancelled": "Cancelled — blocked",
-        "settings.privacy.risky_confirmation.state.expired": "Expired — blocked",
-        "settings.privacy.risky_confirmation.status": "{risk} · {state}",
-        "settings.privacy.risky_confirmation.start": "Start",
-        "settings.privacy.risky_confirmation.click": "Confirm click",
-        "settings.privacy.risky_confirmation.cancel": "Cancel",
         "settings.privacy.face": "Companion",
         "settings.face.parrot": "Parrot",
         "settings.face.fox": "Fox",
@@ -690,7 +592,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.accessibility.sections.label": "Settings sections",
         "settings.accessibility.sections.help": "Use arrow keys to move between Whisper Face settings sections.",
         "settings.accessibility.category.label": "Settings category",
-        "settings.accessibility.category.help": "Choose modes, personalization, or privacy settings.",
+        "settings.accessibility.category.help": "Choose personalization or privacy settings.",
         "settings.accessibility.edit.help": "Edit {setting}.",
         "settings.accessibility.forget.help": "Inspect or forget {setting}.",
         "settings.accessibility.face.label": "Whisper Face companion",
@@ -706,23 +608,6 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.accessibility.voice_objects.content": "Selected inert draft content",
         "settings.accessibility.voice_objects.copy": "Copy the revealed task or calendar draft after confirmation",
         "settings.accessibility.voice_objects.clear_clipboard": "Clear the copied draft only if the Mac clipboard is still unchanged",
-        "settings.accessibility.demonstrations.inspector": "Demonstration draft editor",
-        "settings.accessibility.demonstrations.chooser": "Demonstration metadata",
-        "settings.accessibility.demonstrations.domain": "New demonstration domain",
-        "settings.accessibility.demonstrations.action": "Demonstration step action",
-        "settings.accessibility.demonstrations.text": "Private demonstration step text",
-        "settings.accessibility.demonstrations.preview": "Selected inert demonstration recipe",
-        "settings.accessibility.risky_confirmation.risk": "Risk class",
-        "settings.accessibility.risky_confirmation.risk.help": "Choose one closed risk class. No action details are collected.",
-        "settings.accessibility.risky_confirmation.start": "Start inert risk confirmation",
-        "settings.accessibility.risky_confirmation.start.help": "Begin a bounded RAM-only ceremony. This creates no action and executes nothing.",
-        "settings.accessibility.risky_confirmation.click": "Distinct confirmation click",
-        "settings.accessibility.risky_confirmation.click.help": "Enabled only after the exact voice receipt. It records an inert confirmation and executes nothing.",
-        "settings.accessibility.risky_confirmation.cancel": "Cancel risk confirmation",
-        "settings.accessibility.risky_confirmation.cancel.help": "Cancel the current ceremony so it remains blocked.",
-        "settings.accessibility.risky_confirmation.status": "Risk confirmation state",
-        "settings.accessibility.privacy_summary.label": "Privacy status",
-        "settings.accessibility.diagnostics.help": "Open local service, permission, model, and installation diagnostics.",
         "settings.accessibility.tones_summary.label": "App tones summary",
         "settings.accessibility.snippets_summary.label": "Snippets summary",
         "settings.accessibility.vocabulary_summary.label": "Vocabulary summary",
@@ -846,29 +731,6 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.notice.voice_object_acknowledged": "Local draft acknowledged",
         "settings.notice.voice_object_cancelled": "Local draft cancelled",
         "settings.notice.voice_objects_purged": "Finished local drafts purged: {count}",
-        "settings.dialog.demonstrations.title": "Demonstration Drafts",
-        "settings.dialog.demonstrations.message": "Only content-free metadata is listed. Create a draft or explicitly Reveal/Edit one recipe. Approved recipes remain inert: nothing replays, automates, clicks, types, pastes, launches, or calls an app.",
-        "settings.dialog.demonstrations.empty": "No demonstration drafts are stored. Create one to describe an inert recipe.",
-        "settings.dialog.demonstrations.row": "Draft {sequence} · {domain} · {state} · {steps} steps",
-        "settings.dialog.demonstrations.new.title": "New Inert Demonstration",
-        "settings.dialog.demonstrations.new.message": "Choose a closed domain. Whisper Face generates the private opaque draft ID; no app is opened or observed.",
-        "settings.dialog.demonstrations.reveal.title": "Draft {sequence} · {domain}",
-        "settings.dialog.demonstrations.reveal.message": "Private described steps only. Editing records text in this local recipe; it does not replay or perform any step.",
-        "settings.dialog.demonstrations.preview.empty": "No steps recorded.",
-        "settings.dialog.demonstrations.step": "{index}. {action}: {text}",
-        "settings.dialog.demonstrations.record.title": "Record Described Step",
-        "settings.dialog.demonstrations.record.message": "Choose a domain-valid action and enter bounded private text. This stores a description only.",
-        "settings.dialog.demonstrations.approve.title": "Approve this inert recipe?",
-        "settings.dialog.demonstrations.approve.message": "Approval only marks Draft {sequence} approved. It does not replay, automate, click, type, paste, launch, or call any app.",
-        "settings.dialog.demonstrations.cancel.title": "Cancel and roll back this recipe?",
-        "settings.dialog.demonstrations.cancel.message": "This atomically removes Draft {sequence} and its private step text. Approved recipes cannot be cancelled.",
-        "settings.dialog.demonstrations.delete.title": "Delete this approved recipe?",
-        "settings.dialog.demonstrations.delete.message": "This atomically removes approved Draft {sequence} and its private step text. Nothing is replayed or performed.",
-        "settings.action.create_draft": "Create Draft",
-        "settings.action.reveal_edit": "Reveal/Edit",
-        "settings.action.record_step": "Record Step",
-        "settings.action.approve": "Approve",
-        "settings.action.delete_approved": "Delete Approved",
         "settings.notice.demonstration_created": "Inert demonstration draft created",
         "settings.notice.demonstration_step_recorded": "Described step recorded; nothing was performed",
         "settings.notice.demonstration_approved": "Recipe approved and remains inert",
@@ -1017,17 +879,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "settings.accessibility.voice_objects.content",
             "settings.accessibility.voice_objects.copy",
             "settings.accessibility.voice_objects.clear_clipboard",
-            "settings.accessibility.demonstrations.inspector",
-            "settings.accessibility.demonstrations.chooser",
-            "settings.accessibility.demonstrations.domain",
-            "settings.accessibility.demonstrations.action",
-            "settings.accessibility.demonstrations.text",
-            "settings.accessibility.demonstrations.preview",
-            "settings.accessibility.risky_confirmation.risk",
-            "settings.accessibility.risky_confirmation.start",
-            "settings.accessibility.risky_confirmation.click",
-            "settings.accessibility.risky_confirmation.cancel",
-            "settings.accessibility.risky_confirmation.status",
+            "settings.accessibility.modes.label",
             "settings.dialog.tone.app.label",
             "settings.dialog.tone.choice.label",
             "settings.dialog.snippet.chooser.label",
@@ -1037,24 +889,18 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "settings.dialog.vocabulary.bans",
             "settings.dialog.correction.chooser.label",
             "settings.dialog.keywords.chooser.label",
-            "results.accessibility.firewall",
             "results.accessibility.audio",
             "models.accessibility.guidance",
             "models.accessibility.wallet",
             "models.accessibility.relisten",
             "diagnostics.accessibility.verification",
             "diagnostics.accessibility.open_system_settings",
-            "point_and_speak.dialog.input.label",
-            "drop_target.dialog.input.label",
-            "drop_target.dialog.role.label",
-            "drop_target.dialog.source.label",
-            "drop_target.dialog.effect.label",
         ),
         onboarding_steps=(
             "permissions", "hotkey", "models", "first_dictation"),
         key_equivalents=(
             "return:continue-setup",
-            "command-d:diagnostics",
+            "command-d:advanced",
             "command-r:verification",
         ),
         locale_fallback="en",
@@ -1494,7 +1340,7 @@ class DegradedIssue:
     key: str
     title: str
     detail: str
-    route: str = "Diagnostics"
+    route: str = "Advanced"
     severity: str = "error"
 
 
@@ -1552,7 +1398,7 @@ class ResultInspection:
 
 @dataclass(frozen=True)
 class GUIState:
-    section: str = "Overview"
+    section: str = "Home"
     capture_state: str = localized_string("default.capture.ready")
     paused: bool = False
     face: str = "parrot"
@@ -1599,7 +1445,7 @@ class GUIState:
     verification: str = localized_string("diagnostics.verification.not_run")
     notice: str = ""
     notice_level: str = "info"
-    settings_pane: str = "Modes"
+    settings_pane: str = "Personalize"
     settings: UnifiedSettings = field(default_factory=UnifiedSettings)
 
 
@@ -2541,7 +2387,6 @@ def _build_degraded_issues(
         issues.append(DegradedIssue(
             "models", copy("issue.models.title"),
             copy("issue.models.detail"),
-            route="Models",
         ))
     elif models:
         unavailable = [model.name for model in models if _status_contains(
@@ -2550,7 +2395,7 @@ def _build_degraded_issues(
             issues.append(DegradedIssue(
                 "fallback", copy("issue.fallback.title"),
                 copy("issue.fallback.detail", models=", ".join(unavailable)),
-                route="Models", severity="warning",
+                severity="warning",
             ))
     return tuple(issues)
 
@@ -2670,17 +2515,68 @@ def normalize_result_evidence(
 def result_evidence_text(
     evidence: ResultEvidenceInspection,
     *,
+    result: ResultInspection | None = None,
     locale: str = "en",
 ) -> str:
-    """Format a transient, selectable latest-result evidence view."""
+    """Format a transient, selectable latest-result evidence view.
+
+    When ``result`` is supplied the header repeats the aggregate trust
+    surface (stable prefix, anchors, decisions, cleanup, proof review,
+    context influence, firewall, and consequence receipts) so nothing the
+    old persistent evidence cards showed is lost from this reveal.
+    """
 
     lines: list[str] = []
+
+    def copy(key: str, **values: Any) -> str:
+        return localized_string(key, locale=locale, **values)
 
     def section(key: str, rows: Sequence[str]) -> None:
         lines.append(localized_string(key, locale=locale))
         lines.extend(rows or (
             localized_string("results.inspect.none", locale=locale),))
         lines.append("")
+
+    if result is not None:
+        confidence = (
+            copy("results.value.confidence",
+                 confidence=f"{result.confidence:.0%}")
+            if result.confidence is not None else "")
+        rejected = (
+            str(result.proof_edits_rejected)
+            if result.proof_edits_rejected is not None
+            else copy("results.value.not_reported"))
+        cleanup_kinds = ", ".join(dict.fromkeys(result.cleanup_edits)) \
+            or copy("results.value.none_reported")
+        summary_rows = [
+            "{}: {}".format(
+                copy("results.evidence.stable"),
+                copy("results.value.words",
+                     count=result.stable_prefix_words)),
+            "{}: {}".format(
+                copy("results.evidence.anchors"),
+                result.protected_anchor_count),
+            "{}: {}{}".format(
+                copy("results.evidence.decisions"),
+                result.compiler_decisions, confidence),
+            "{}: {}".format(
+                copy("results.evidence.alternatives"),
+                result.alternatives_considered),
+            "{}: {}".format(
+                copy("results.evidence.cleanup"), cleanup_kinds),
+            "{}: {}".format(
+                copy("results.evidence.proof"),
+                copy("results.value.proof",
+                     accepted=result.proof_edits_accepted,
+                     rejected=rejected)),
+            copy("results.context.summary",
+                 influence=result.context_influence),
+            result.context_firewall_summary,
+            result.consequence_summary,
+        ]
+        if result.consequence_advisory:
+            summary_rows.append(result.consequence_advisory)
+        section("results.inspect.summary", tuple(summary_rows))
 
     section(
         "results.inspect.alternatives",
@@ -2715,7 +2611,7 @@ def result_evidence_text(
         timing_rows.append(f"{label}: {value}")
     section("results.inspect.timing", tuple(timing_rows))
     rendered = "\n".join(lines).rstrip()
-    if not any((
+    if result is None and not any((
             evidence.alternatives,
             evidence.protected_anchors,
             evidence.proof_edits,
@@ -2928,12 +2824,12 @@ def _localized_verification_copy(value: Any, *, locale: str) -> str:
 def normalize_snapshot(
     snapshot: Mapping[str, Any] | None,
     *,
-    section: str = "Overview",
+    section: str = "Home",
     verification: str | None = None,
     notice: str = "",
     notice_level: str = "info",
     onboarding_acknowledged: bool = False,
-    settings_pane: str = "Modes",
+    settings_pane: str = "Personalize",
     settings: UnifiedSettings | None = None,
     locale: str = "en",
 ) -> GUIState:
@@ -3023,7 +2919,7 @@ def normalize_snapshot(
     )
     normalized_latency = max(0.0, latency) if latency is not None else None
     return GUIState(
-        section=section if section in SECTIONS else "Overview",
+        section=section if section in SECTIONS else "Home",
         capture_state=capture_state,
         paused=paused,
         face=face,
@@ -3087,7 +2983,7 @@ def normalize_snapshot(
         notice_level=(notice_level if notice_level in {
             "info", "success", "error"} else "info"),
         settings_pane=(settings_pane if settings_pane in SETTINGS_PANES
-                       else "Modes"),
+                       else "Personalize"),
         settings=settings or UnifiedSettings(),
     )
 
@@ -3419,20 +3315,16 @@ class WhisperFaceViewModel:
         )
         if step is None:
             self.state = replace(
-                self.state, section="Overview",
+                self.state, section="Home",
                 notice=self.localized("onboarding.complete"),
                 notice_level="success")
-        elif step.key == "permissions":
+        elif step.key in {"permissions", "models"}:
             self.state = replace(
-                self.state, section="Diagnostics", notice=step.detail,
-                notice_level="info")
-        elif step.key == "models":
-            self.state = replace(
-                self.state, section="Models", notice=step.detail,
+                self.state, section="Advanced", notice=step.detail,
                 notice_level="info")
         else:
             self.state = replace(
-                self.state, section="Overview", notice=step.detail,
+                self.state, section="Home", notice=step.detail,
                 notice_level="info")
         return self.state
 
@@ -4397,7 +4289,6 @@ if APPKIT_AVAILABLE:
         0.31, 0.36, 0.95, 1.0)
     _TEXT = NSColor.labelColor()
     _SECONDARY = NSColor.secondaryLabelColor()
-    _REVIEW = NSColor.systemOrangeColor()
     _CARD = NSColor.controlBackgroundColor()
 
     def _theme_color(
@@ -4805,16 +4696,14 @@ if APPKIT_AVAILABLE:
 
             page_frame = NSMakeRect(31, 25, 758, 402)
             builders = {
-                "Overview": self._build_overview,
-                "Results": self._build_results,
+                "Home": self._build_home,
                 "Settings": self._build_settings,
-                "Models": self._build_models,
-                "Diagnostics": self._build_diagnostics,
+                "Advanced": self._build_advanced,
             }
             for section, builder in builders.items():
                 page = NSView.alloc().initWithFrame_(page_frame)
                 builder(page)
-                page.setHidden_(section != "Overview")
+                page.setHidden_(section != "Home")
                 root.addSubview_(page)
                 self.pages[section] = page
             notice = _label("", NSMakeRect(35, 5, 750, 18),
@@ -4822,63 +4711,60 @@ if APPKIT_AVAILABLE:
             root.addSubview_(notice)
             self.dynamic["notice"] = notice
             self.key_views_by_section = {
-                "Overview": (
+                "Home": (
                     self.dynamic["onboarding_action"],
                     self.dynamic["pause_button"],
                     self.dynamic["review_issue_button"],
                     self.dynamic["copy_outbox_button"],
-                ),
-                "Results": (
-                    self.dynamic["result_inspect_button"],
                     self.dynamic["result_play_audio_button"],
                     self.dynamic["result_clear_audio_button"],
+                    self.dynamic["result_inspect_button"],
                 ),
                 "Settings": (self.dynamic["settings_pane_control"],),
-                "Models": (self.dynamic["selective_relisten_toggle"],),
-                "Diagnostics": (
-                    self.dynamic["point_and_speak_button"],
-                    self.dynamic["drop_target_button"],
-                    self.dynamic["open_system_settings_button"],
+                "Advanced": (
+                    self.dynamic["advanced_button"],
+                    self.dynamic["selective_relisten_toggle"],
                     self.dynamic["open_log_button"],
                     self.dynamic["copy_support_snapshot_button"],
-                    self.dynamic["export_support_bundle_button"],
                     self.dynamic["verify_button"],
                     self.dynamic["license_button"],
                     self.dynamic["source_button"],
+                    self.dynamic["open_system_settings_button"],
+                    self.dynamic["export_support_bundle_button"],
                 ),
             }
             self.window.setInitialFirstResponder_(self.section_control)
             self.render()
 
-        def _build_overview(self, page: Any) -> None:
-            hero = _card(NSMakeRect(0, 184, 758, 218))
+        def _build_home(self, page: Any) -> None:
+            hero = _card(NSMakeRect(0, 226, 758, 176))
             phase = _label(
                 self._l("overview.phase.ready"),
-                NSMakeRect(24, 174, 320, 18),
+                NSMakeRect(24, 148, 320, 18),
                 size=11, weight="bold", color=_ACCENT)
             status = _label(
                 self._l("overview.status.ready.title"),
-                NSMakeRect(24, 122, 520, 44), size=32, weight="bold")
-            detail = _label("", NSMakeRect(26, 94, 520, 20),
+                NSMakeRect(24, 100, 520, 44), size=32, weight="bold")
+            detail = _label("", NSMakeRect(26, 76, 520, 20),
                             size=12, color=_SECONDARY)
-            engine = _label("", NSMakeRect(26, 66, 500, 20),
+            engine = _label("", NSMakeRect(26, 50, 500, 20),
                             size=13, color=_SECONDARY)
             outbox = _label(
                 self._l("overview.outbox.empty"),
-                NSMakeRect(26, 36, 500, 20),
+                NSMakeRect(26, 20, 500, 20),
                 size=12, color=_SECONDARY)
             pause = _button(
                 self._l("overview.action.pause"),
-                NSMakeRect(602, 122, 124, 40), self, "pauseChanged:",
+                NSMakeRect(602, 100, 124, 40), self, "pauseChanged:",
                 help_text=self._l("overview.action.pause.help"))
             fix = _button(
                 self._l("overview.action.review"),
-                NSMakeRect(590, 74, 136, 34),
+                NSMakeRect(590, 56, 136, 34),
                 self, "reviewIssue:",
                 help_text=self._l("overview.action.review.help"))
             copy_outbox = _button(
                 self._l("overview.action.copy_outbox"),
-                NSMakeRect(590, 34, 136, 34),
+                NSMakeRect(590, 18, 136, 34),
                 self, "copyOutbox:",
                 help_text=self._l("overview.action.copy_outbox.help"))
             hero.addSubview_(phase)
@@ -4987,13 +4873,13 @@ if APPKIT_AVAILABLE:
                      ("overview.metric.saved.heading", "overview_saved"))
             metric_cards: list[Any] = []
             for index, (heading_key, key) in enumerate(cards):
-                card = _card(NSMakeRect(index * 257, 52, 244, 96))
+                card = _card(NSMakeRect(index * 257, 138, 244, 80))
                 card.addSubview_(_label(
-                    self._l(heading_key), NSMakeRect(18, 66, 208, 18),
+                    self._l(heading_key), NSMakeRect(18, 52, 208, 18),
                     size=11, color=_SECONDARY))
                 value = _label(
                     self._l("overview.metric.last.empty"),
-                    NSMakeRect(18, 20, 208, 31),
+                    NSMakeRect(18, 14, 208, 31),
                     size=21, weight="bold")
                 card.addSubview_(value)
                 page.addSubview_(card)
@@ -5001,95 +4887,45 @@ if APPKIT_AVAILABLE:
                 metric_cards.append(card)
             self.dynamic["overview_metric_cards"] = tuple(metric_cards)
 
-        def _build_results(self, page: Any) -> None:
-            page.addSubview_(_label(
-                self._l("results.title"), NSMakeRect(4, 350, 500, 32),
-                size=22, weight="bold"))
-            page.addSubview_(_label(
-                self._l("results.subtitle"),
-                NSMakeRect(5, 322, 575, 20), size=13, color=_SECONDARY))
+            result_card = _card(NSMakeRect(0, 0, 758, 130))
+            result_summary = _label(
+                self._l("results.summary.empty"), NSMakeRect(20, 94, 430, 27),
+                size=18, weight="bold")
+            result_mode = _label(
+                self._l("results.mode.capture"), NSMakeRect(600, 96, 138, 22),
+                size=12, weight="medium", color=_ACCENT)
+            result_engine = _label(
+                self._l("results.engine.waiting"),
+                NSMakeRect(20, 70, 715, 20),
+                size=12, color=_SECONDARY)
+            result_audio = _label(
+                self._l("results.audio.off"), NSMakeRect(20, 48, 560, 18),
+                size=10, color=_SECONDARY)
+            play_audio = _button(
+                self._l("results.audio.play"), NSMakeRect(372, 8, 102, 30),
+                self, "playRetainedSpan:",
+                help_text=self._l("results.audio.play.help"))
+            clear_audio = _button(
+                self._l("results.audio.clear"), NSMakeRect(480, 8, 92, 30),
+                self, "clearRetainedSpans:",
+                help_text=self._l("results.audio.clear.help"))
             inspect_evidence = _button(
                 self._l("results.inspect.action"),
-                NSMakeRect(598, 347, 160, 34),
+                NSMakeRect(578, 8, 160, 30),
                 self,
                 "inspectResultEvidence:",
                 help_text=self._l("results.inspect.action.help"),
             )
-            page.addSubview_(inspect_evidence)
-
-            summary_card = _card(NSMakeRect(0, 220, 758, 94))
-            result_summary = _label(
-                self._l("results.summary.empty"), NSMakeRect(20, 50, 430, 27),
-                size=18, weight="bold")
-            result_engine = _label(
-                self._l("results.engine.waiting"), NSMakeRect(20, 29, 500, 20),
-                size=12, color=_SECONDARY)
-            result_audio = _label(
-                self._l("results.audio.off"), NSMakeRect(20, 9, 500, 18),
-                size=10, color=_SECONDARY)
-            result_mode = _label(
-                self._l("results.mode.capture"), NSMakeRect(600, 50, 132, 22),
-                size=12, weight="medium", color=_ACCENT)
-            play_audio = _button(
-                self._l("results.audio.play"), NSMakeRect(532, 9, 102, 30),
-                self, "playRetainedSpan:",
-                help_text=self._l("results.audio.play.help"))
-            clear_audio = _button(
-                self._l("results.audio.clear"), NSMakeRect(640, 9, 92, 30),
-                self, "clearRetainedSpans:",
-                help_text=self._l("results.audio.clear.help"))
-            summary_card.addSubview_(result_summary)
-            summary_card.addSubview_(result_engine)
-            summary_card.addSubview_(result_audio)
-            summary_card.addSubview_(result_mode)
-            summary_card.addSubview_(play_audio)
-            summary_card.addSubview_(clear_audio)
-            page.addSubview_(summary_card)
-
-            evidence_card = _card(NSMakeRect(0, 92, 758, 116))
-            evidence_keys = (
-                ("results.evidence.stable", "result_stable"),
-                ("results.evidence.anchors", "result_anchors"),
-                ("results.evidence.decisions", "result_decisions"),
-                ("results.evidence.alternatives", "result_alternatives"),
-                ("results.evidence.cleanup", "result_cleanup"),
-                ("results.evidence.proof", "result_proof"),
-            )
-            for index, (heading_key, key) in enumerate(evidence_keys):
-                x = 20 + (index % 2) * 370
-                y = 82 - (index // 2) * 33
-                evidence_card.addSubview_(_label(
-                    self._l(heading_key), NSMakeRect(x, y, 140, 18),
-                    size=11, color=_SECONDARY))
-                value = _label("—", NSMakeRect(x + 145, y, 190, 18),
-                               size=12, weight="medium")
-                evidence_card.addSubview_(value)
-                self.dynamic[key] = value
-            page.addSubview_(evidence_card)
-            assurance_card = _card(NSMakeRect(0, 0, 758, 80))
-            firewall = _label(
-                self._l("results.firewall.unavailable"),
-                NSMakeRect(18, 60, 722, 16),
-                size=11, weight="medium", color=_ACCENT)
-            assurance_card.addSubview_(firewall)
-            context = _label(
-                self._l("results.context.unreported"),
-                NSMakeRect(18, 44, 722, 16),
-                size=11, color=_SECONDARY)
-            assurance_card.addSubview_(context)
-            consequence = _label(
-                "", NSMakeRect(18, 28, 722, 16), size=10, color=_SECONDARY)
-            assurance_card.addSubview_(consequence)
-            consequence_advisory = _label(
-                "", NSMakeRect(18, 12, 722, 16), size=10, weight="medium",
-                color=_REVIEW)
-            consequence_advisory.setHidden_(True)
-            assurance_card.addSubview_(consequence_advisory)
-            assurance_card.addSubview_(_label(
-                self._l("results.privacy"),
-                NSMakeRect(18, 1, 722, 10), size=8, color=_SECONDARY))
-            page.addSubview_(assurance_card)
+            result_card.addSubview_(result_summary)
+            result_card.addSubview_(result_mode)
+            result_card.addSubview_(result_engine)
+            result_card.addSubview_(result_audio)
+            result_card.addSubview_(play_audio)
+            result_card.addSubview_(clear_audio)
+            result_card.addSubview_(inspect_evidence)
+            page.addSubview_(result_card)
             self.dynamic.update(
+                home_result_card=result_card,
                 result_summary=result_summary,
                 result_engine=result_engine,
                 result_mode=result_mode,
@@ -5097,54 +4933,17 @@ if APPKIT_AVAILABLE:
                 result_inspect_button=inspect_evidence,
                 result_play_audio_button=play_audio,
                 result_clear_audio_button=clear_audio,
-                result_context=context,
-                result_firewall=firewall,
-                result_consequence=consequence,
-                result_consequence_advisory=consequence_advisory,
-            )
-            empty = _card(
-                NSMakeRect(110, 48, 538, 258), treatment="playful")
-            empty_chip = _card(
-                NSMakeRect(205, 118, 128, 118), treatment="control")
-            empty_face = NSImageView.alloc().initWithFrame_(
-                NSMakeRect(224, 137, 90, 82))
-            empty_face.setImageScaling_(
-                NSImageScaleProportionallyUpOrDown)
-            empty.addSubview_(empty_chip)
-            empty.addSubview_(empty_face)
-            empty.addSubview_(_label(
-                self._l("results.empty.kicker"),
-                NSMakeRect(44, 89, 450, 18),
-                size=10, weight="bold", color=_ACCENT,
-                rounded=True, alignment=1))
-            empty.addSubview_(_label(
-                self._l("results.empty.title"),
-                NSMakeRect(44, 54, 450, 31),
-                size=24, weight="bold", rounded=True, alignment=1))
-            empty.addSubview_(_label(
-                self._l("results.empty.detail"),
-                NSMakeRect(54, 14, 430, 38),
-                size=11, color=_SECONDARY, wrap=True, alignment=1))
-            _accessible(
-                empty,
-                self._l("results.empty.title"),
-                self._l("results.empty.detail"))
-            page.addSubview_(empty)
-            self.dynamic.update(
-                result_empty_card=empty,
-                result_empty_chip=empty_chip,
-                result_empty_face=empty_face,
             )
 
         def _build_settings(self, page: Any) -> None:
             page.addSubview_(_label(
                 self._l("settings.title"),
-                NSMakeRect(4, 351, 500, 32), size=22, weight="bold"))
+                NSMakeRect(4, 372, 500, 28), size=20, weight="bold"))
             page.addSubview_(_label(
                 self._l("settings.subtitle"),
-                NSMakeRect(5, 326, 720, 20), size=13, color=_SECONDARY))
+                NSMakeRect(5, 352, 720, 18), size=12, color=_SECONDARY))
             pane_control = NSSegmentedControl.alloc().initWithFrame_(
-                NSMakeRect(0, 284, 758, 32))
+                NSMakeRect(0, 314, 758, 32))
             pane_control.setSegmentCount_(len(SETTINGS_PANES))
             pane_control.setSegmentStyle_(NSSegmentStyleRounded)
             for index, pane in enumerate(SETTINGS_PANES):
@@ -5160,165 +4959,14 @@ if APPKIT_AVAILABLE:
                 self._l("settings.accessibility.category.help"))
             page.addSubview_(pane_control)
 
-            content_frame = NSMakeRect(0, 0, 758, 268)
+            content_frame = NSMakeRect(0, 0, 758, 306)
             panes = {name: NSView.alloc().initWithFrame_(content_frame)
                      for name in SETTINGS_PANES}
             for pane in panes.values():
                 page.addSubview_(pane)
 
-            modes = panes["Modes"]
-            modes.addSubview_(_label(
-                self._l("settings.modes.title"),
-                NSMakeRect(5, 238, 720, 22), size=14, weight="medium"))
-            for index, mode in enumerate(MODE_GUIDE):
-                column, row = index % 2, index // 2
-                card = _card(NSMakeRect(
-                    column * 387, 168 - row * 62, 371, 52))
-                card.addSubview_(_label(
-                    self._l(f"settings.mode.{mode}.name"),
-                    NSMakeRect(14, 27, 98, 18),
-                    size=12, weight="bold"))
-                card.addSubview_(_label(
-                    self._l(f"settings.mode.{mode}.shortcut"),
-                    NSMakeRect(122, 27, 234, 18),
-                    size=11, weight="medium", color=_ACCENT))
-                card.addSubview_(_label(
-                    self._l(f"settings.mode.{mode}.detail"),
-                    NSMakeRect(14, 7, 342, 17),
-                    size=10, color=_SECONDARY))
-                modes.addSubview_(card)
-            modes.addSubview_(_label(
-                self._l("settings.modes.footer"),
-                NSMakeRect(5, 12, 720, 18), size=11, color=_SECONDARY))
-
             personalize = panes["Personalize"]
-            personalize_key_views: list[Any] = []
-            rows = (
-                ("tones", "settings.personalize.tones", "editTone:"),
-                ("snippets", "settings.personalize.snippets", "editSnippets:"),
-                ("vocabulary", "settings.personalize.vocabulary", "editVocabulary:"),
-                ("corrections", "settings.personalize.corrections", "reviewCorrections:"),
-                ("keywords", "settings.personalize.keywords", "inspectKeywords:"),
-            )
-            for index, (key, title_key, selector) in enumerate(rows):
-                y = 216 - index * 52
-                card = _card(NSMakeRect(0, y, 758, 44))
-                card.addSubview_(_label(
-                    self._l(title_key), NSMakeRect(18, 22, 260, 18),
-                    size=13, weight="bold"))
-                detail = _label("", NSMakeRect(18, 4, 550, 17),
-                                size=10, color=_SECONDARY)
-                action_key = (
-                    "settings.action.review" if key == "corrections" else
-                    "settings.action.inspect" if key == "keywords" else
-                    "settings.action.edit")
-                help_key = (
-                    "settings.accessibility.forget.help"
-                    if key in {"corrections", "keywords"}
-                    else "settings.accessibility.edit.help")
-                button = _button(
-                    self._l(action_key), NSMakeRect(645, 6, 94, 32),
-                    self, selector,
-                    help_text=self._l(
-                        help_key,
-                        setting=self._l(title_key).casefold()))
-                card.addSubview_(detail)
-                card.addSubview_(button)
-                personalize.addSubview_(card)
-                personalize_key_views.append(button)
-                self.dynamic[f"settings_{key}_detail"] = detail
-                self.dynamic[f"settings_{key}_button"] = button
-
-            privacy = panes["Privacy"]
-            privacy.addSubview_(_label(
-                self._l("settings.privacy.voice_objects"),
-                NSMakeRect(5, 238, 210, 22), size=13, weight="bold"))
-            voice_object_status = _label(
-                "", NSMakeRect(220, 240, 195, 18),
-                size=10, color=_SECONDARY)
-            voice_objects = NSButton.alloc().initWithFrame_(
-                NSMakeRect(420, 230, 88, 30))
-            voice_objects.setButtonType_(3)
-            voice_objects.setTitle_(self._l("settings.state.enabled"))
-            voice_objects.setTarget_(self)
-            voice_objects.setAction_("voiceObjectCommandsChanged:")
-            _accessible(
-                voice_objects,
-                self._l("settings.accessibility.voice_objects.label"),
-                self._l("settings.accessibility.voice_objects.help"))
-            privacy.addSubview_(voice_object_status)
-            privacy.addSubview_(voice_objects)
-            inspect_voice_objects = _button(
-                self._l("settings.privacy.voice_objects.inspect"),
-                NSMakeRect(515, 230, 92, 30), self, "inspectVoiceObjects:",
-                help_text=self._l(
-                    "settings.privacy.voice_objects.inspect.help"))
-            _accessible(
-                inspect_voice_objects,
-                self._l("settings.accessibility.voice_objects.inspector"),
-                self._l("settings.privacy.voice_objects.inspect.help"))
-            privacy.addSubview_(inspect_voice_objects)
-            privacy.addSubview_(_label(
-                self._l("settings.privacy.demonstrations"),
-                NSMakeRect(5, 204, 150, 20), size=12, weight="bold"))
-            privacy.addSubview_(_label(
-                self._l("settings.privacy.demonstrations.detail"),
-                NSMakeRect(155, 205, 355, 18), size=10, color=_SECONDARY))
-            author_demonstrations = _button(
-                self._l("settings.privacy.demonstrations.author"),
-                NSMakeRect(515, 197, 92, 30), self,
-                "authorDemonstrations:",
-                help_text=self._l(
-                    "settings.privacy.demonstrations.author.help"))
-            _accessible(
-                author_demonstrations,
-                self._l("settings.accessibility.demonstrations.inspector"),
-                self._l("settings.privacy.demonstrations.author.help"))
-            privacy.addSubview_(author_demonstrations)
-
-            risk_card = _card(NSMakeRect(0, 139, 758, 54))
-            risk_card.addSubview_(_label(
-                self._l("settings.privacy.risky_confirmation"),
-                NSMakeRect(14, 31, 270, 18), size=12, weight="bold"))
-            risk_status = _label(
-                self._l("settings.privacy.risky_confirmation.state.idle"),
-                NSMakeRect(14, 8, 278, 18), size=10, color=_SECONDARY)
-            risk_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-                NSMakeRect(300, 12, 145, 30), False)
-            for risk in RISKY_ACTION_CLASSES:
-                risk_popup.addItemWithTitle_(self._l(
-                    f"settings.privacy.risky_confirmation.risk.{risk}"))
-            _accessible(
-                risk_popup,
-                self._l("settings.accessibility.risky_confirmation.risk"),
-                self._l(
-                    "settings.accessibility.risky_confirmation.risk.help"))
-            risk_start = _button(
-                self._l("settings.privacy.risky_confirmation.start"),
-                NSMakeRect(451, 11, 62, 32), self,
-                "startRiskyConfirmation:",
-                help_text=self._l(
-                    "settings.accessibility.risky_confirmation.start.help"))
-            risk_click = _button(
-                self._l("settings.privacy.risky_confirmation.click"),
-                NSMakeRect(519, 11, 112, 32), self,
-                "clickRiskyConfirmation:",
-                help_text=self._l(
-                    "settings.accessibility.risky_confirmation.click.help"))
-            risk_cancel = _button(
-                self._l("settings.privacy.risky_confirmation.cancel"),
-                NSMakeRect(637, 11, 94, 32), self,
-                "cancelRiskyConfirmation:",
-                help_text=self._l(
-                    "settings.accessibility.risky_confirmation.cancel.help"))
-            risk_card.addSubview_(risk_status)
-            risk_card.addSubview_(risk_popup)
-            risk_card.addSubview_(risk_start)
-            risk_card.addSubview_(risk_click)
-            risk_card.addSubview_(risk_cancel)
-            privacy.addSubview_(risk_card)
-
-            face_card = _card(NSMakeRect(0, 94, 758, 40))
+            face_card = _card(NSMakeRect(0, 264, 758, 40))
             picker = NSSegmentedControl.alloc().initWithFrame_(
                 NSMakeRect(18, 4, 720, 32))
             picker.setSegmentCount_(len(FACES))
@@ -5340,16 +4988,90 @@ if APPKIT_AVAILABLE:
                 self._l("settings.accessibility.face.label"),
                 self._l("settings.accessibility.face.help"))
             face_card.addSubview_(picker)
-            privacy.addSubview_(face_card)
+            personalize.addSubview_(face_card)
 
-            flight_card = _card(NSMakeRect(0, 49, 758, 40))
+            personalize_key_views: list[Any] = [picker]
+            rows = (
+                ("tones", "settings.personalize.tones", "editTone:"),
+                ("snippets", "settings.personalize.snippets", "editSnippets:"),
+                ("vocabulary", "settings.personalize.vocabulary", "editVocabulary:"),
+                ("corrections", "settings.personalize.corrections", "reviewCorrections:"),
+                ("keywords", "settings.personalize.keywords", "inspectKeywords:"),
+                ("modes", "settings.personalize.modes", "viewModes:"),
+            )
+            for index, (key, title_key, selector) in enumerate(rows):
+                y = 220 - index * 44
+                card = _card(NSMakeRect(0, y, 758, 44))
+                card.addSubview_(_label(
+                    self._l(title_key), NSMakeRect(18, 22, 260, 18),
+                    size=13, weight="bold"))
+                detail = _label("", NSMakeRect(18, 4, 550, 17),
+                                size=10, color=_SECONDARY)
+                action_key = (
+                    "settings.action.review" if key == "corrections" else
+                    "settings.action.inspect" if key == "keywords" else
+                    "settings.action.view" if key == "modes" else
+                    "settings.action.edit")
+                help_key = (
+                    "settings.accessibility.forget.help"
+                    if key in {"corrections", "keywords"}
+                    else "settings.accessibility.modes.help"
+                    if key == "modes"
+                    else "settings.accessibility.edit.help")
+                button = _button(
+                    self._l(action_key), NSMakeRect(645, 6, 94, 32),
+                    self, selector,
+                    help_text=self._l(
+                        help_key,
+                        setting=self._l(title_key).casefold()))
+                card.addSubview_(detail)
+                card.addSubview_(button)
+                personalize.addSubview_(card)
+                personalize_key_views.append(button)
+                self.dynamic[f"settings_{key}_detail"] = detail
+                self.dynamic[f"settings_{key}_button"] = button
+
+            privacy = panes["Privacy"]
+            voice_card = _card(NSMakeRect(0, 232, 758, 58))
+            voice_card.addSubview_(_label(
+                self._l("settings.privacy.voice_objects"),
+                NSMakeRect(18, 32, 250, 18), size=12, weight="bold"))
+            voice_object_status = _label(
+                "", NSMakeRect(18, 10, 320, 18),
+                size=10, color=_SECONDARY)
+            voice_objects = NSButton.alloc().initWithFrame_(
+                NSMakeRect(505, 14, 100, 30))
+            voice_objects.setButtonType_(3)
+            voice_objects.setTitle_(self._l("settings.state.enabled"))
+            voice_objects.setTarget_(self)
+            voice_objects.setAction_("voiceObjectCommandsChanged:")
+            _accessible(
+                voice_objects,
+                self._l("settings.accessibility.voice_objects.label"),
+                self._l("settings.accessibility.voice_objects.help"))
+            voice_card.addSubview_(voice_object_status)
+            voice_card.addSubview_(voice_objects)
+            inspect_voice_objects = _button(
+                self._l("settings.privacy.voice_objects.inspect"),
+                NSMakeRect(620, 14, 92, 30), self, "inspectVoiceObjects:",
+                help_text=self._l(
+                    "settings.privacy.voice_objects.inspect.help"))
+            _accessible(
+                inspect_voice_objects,
+                self._l("settings.accessibility.voice_objects.inspector"),
+                self._l("settings.privacy.voice_objects.inspect.help"))
+            voice_card.addSubview_(inspect_voice_objects)
+            privacy.addSubview_(voice_card)
+
+            flight_card = _card(NSMakeRect(0, 152, 758, 58))
             flight_card.addSubview_(_label(
                 self._l("settings.privacy.flight"),
-                NSMakeRect(18, 18, 260, 18), size=12, weight="bold"))
+                NSMakeRect(18, 32, 260, 18), size=12, weight="bold"))
             flight_card.addSubview_(_label(
                 self._l("settings.privacy.flight.detail"),
-                NSMakeRect(155, 18, 450, 18), size=10, color=_SECONDARY))
-            flight = NSButton.alloc().initWithFrame_(NSMakeRect(625, 5, 110, 30))
+                NSMakeRect(18, 10, 560, 18), size=10, color=_SECONDARY))
+            flight = NSButton.alloc().initWithFrame_(
+                NSMakeRect(625, 14, 110, 30))
             flight.setButtonType_(3)
             flight.setTitle_(self._l("settings.state.enabled"))
             flight.setTarget_(self)
@@ -5360,15 +5082,16 @@ if APPKIT_AVAILABLE:
                 self._l("settings.accessibility.flight.help"))
             flight_card.addSubview_(flight)
             privacy.addSubview_(flight_card)
-            acoustic_card = _card(NSMakeRect(0, 4, 758, 40))
+
+            acoustic_card = _card(NSMakeRect(0, 72, 758, 58))
             acoustic_card.addSubview_(_label(
                 self._l("settings.privacy.acoustic"),
-                NSMakeRect(18, 18, 280, 18), size=12, weight="bold"))
+                NSMakeRect(18, 32, 280, 18), size=12, weight="bold"))
             acoustic_card.addSubview_(_label(
                 self._l("settings.privacy.acoustic.detail"),
-                NSMakeRect(180, 18, 430, 18), size=10, color=_SECONDARY))
+                NSMakeRect(18, 10, 560, 18), size=10, color=_SECONDARY))
             acoustic = NSButton.alloc().initWithFrame_(
-                NSMakeRect(625, 5, 110, 30))
+                NSMakeRect(625, 14, 110, 30))
             acoustic.setButtonType_(3)
             acoustic.setTitle_(self._l("settings.state.enabled"))
             acoustic.setTarget_(self)
@@ -5379,32 +5102,15 @@ if APPKIT_AVAILABLE:
                 self._l("settings.accessibility.acoustic.help"))
             acoustic_card.addSubview_(acoustic)
             privacy.addSubview_(acoustic_card)
-            privacy_summary = _label(
-                self._l("settings.state.local_processing"),
-                NSMakeRect(615, 202, 123, 14),
-                size=11, weight="medium", color=_ACCENT)
-            privacy.addSubview_(privacy_summary)
-            diagnostics = _button(
-                self._l("settings.action.diagnostics"),
-                NSMakeRect(615, 230, 123, 30), self, "openDiagnostics:",
-                help_text=self._l(
-                    "settings.accessibility.diagnostics.help"))
-            diagnostics.setKeyEquivalent_("d")
-            diagnostics.setKeyEquivalentModifierMask_(
-                NSEventModifierFlagCommand)
-            privacy.addSubview_(diagnostics)
 
             self.dynamic.update(
                 settings_pane_control=pane_control,
                 settings_panes=panes,
                 settings_key_views={
-                    "Modes": (),
                     "Personalize": tuple(personalize_key_views),
                     "Privacy": (
-                        voice_objects, inspect_voice_objects,
-                        author_demonstrations, risk_popup, risk_start,
-                        risk_click, risk_cancel, picker, flight, acoustic,
-                        diagnostics),
+                        voice_objects, inspect_voice_objects, flight,
+                        acoustic),
                 },
                 face_picker=picker,
                 flight_toggle=flight,
@@ -5412,25 +5118,26 @@ if APPKIT_AVAILABLE:
                 voice_object_commands_toggle=voice_objects,
                 voice_object_commands_status=voice_object_status,
                 voice_object_inspect_button=inspect_voice_objects,
-                demonstration_author_button=author_demonstrations,
-                risky_confirmation_status=risk_status,
-                risky_confirmation_popup=risk_popup,
-                risky_confirmation_start=risk_start,
-                risky_confirmation_click=risk_click,
-                risky_confirmation_cancel=risk_cancel,
-                privacy_summary=privacy_summary,
-                diagnostics_button=diagnostics,
             )
 
-        def _build_models(self, page: Any) -> None:
-            page.addSubview_(_label(self._l("models.title"),
-                                    NSMakeRect(4, 351, 500, 32),
-                                    size=22, weight="bold"))
-            page.addSubview_(_label(
-                self._l("models.subtitle"),
-                NSMakeRect(5, 326, 525, 20), size=13, color=_SECONDARY))
+        def _build_advanced(self, page: Any) -> None:
+            page.addSubview_(_label(self._l("nav.advanced"),
+                                    NSMakeRect(4, 372, 200, 26),
+                                    size=18, weight="bold"))
+            # ⌘D lands here: the shortcut that used to live on the parked
+            # Privacy "Open Diagnostics" button now belongs to this section.
+            advanced_shortcut = _accessible(_button(
+                self._l("nav.advanced"),
+                NSMakeRect(210, 371, 100, 28), self, "openAdvanced:",
+                help_text=self._l("advanced.accessibility.shortcut.help")),
+                self._l("advanced.accessibility.shortcut"),
+                self._l("advanced.accessibility.shortcut.help"))
+            advanced_shortcut.setKeyEquivalent_("d")
+            advanced_shortcut.setKeyEquivalentModifierMask_(
+                NSEventModifierFlagCommand)
+            page.addSubview_(advanced_shortcut)
             relisten = NSButton.alloc().initWithFrame_(
-                NSMakeRect(552, 349, 206, 28))
+                NSMakeRect(552, 370, 206, 28))
             relisten.setButtonType_(3)
             relisten.setTitle_(self._l("models.relisten.label"))
             relisten.setTarget_(self)
@@ -5443,65 +5150,38 @@ if APPKIT_AVAILABLE:
             page.addSubview_(relisten)
             relisten_status = _label(
                 self._l("models.relisten.status.evidence-required"),
-                NSMakeRect(557, 327, 196, 18), size=10,
+                NSMakeRect(557, 350, 196, 16), size=10,
                 color=_SECONDARY, alignment=1,
                 accessibility_label=self._l(
                     "models.accessibility.relisten"))
             page.addSubview_(relisten_status)
             advisory = _label(
                 self._l("models.wallet.unavailable"),
-                NSMakeRect(5, 298, 740, 20), size=11, color=_SECONDARY,
+                NSMakeRect(5, 350, 540, 16), size=9, color=_SECONDARY,
                 accessibility_label=self._l(
                     "models.accessibility.wallet"))
             page.addSubview_(advisory)
             rows = []
             for index in range(4):
-                row = _card(NSMakeRect(0, 230 - index * 61, 758, 54))
-                name = _label(self._l("models.waiting"), NSMakeRect(20, 29, 430, 20),
-                              size=14, weight="medium")
-                detail = _label("", NSMakeRect(20, 9, 560, 16),
-                                size=11, color=_SECONDARY)
-                status = _label(self._l("models.unknown"), NSMakeRect(610, 20, 120, 20),
-                                size=12, weight="medium", color=_ACCENT)
+                row = _card(NSMakeRect(0, 306 - index * 36, 758, 32))
+                name = _label(self._l("models.waiting"),
+                              NSMakeRect(16, 7, 300, 18),
+                              size=12, weight="medium")
+                detail = _label("", NSMakeRect(322, 9, 282, 15),
+                                size=9, color=_SECONDARY)
+                status = _label(self._l("models.unknown"),
+                                NSMakeRect(612, 7, 130, 18),
+                                size=11, weight="medium", color=_ACCENT)
                 row.addSubview_(name)
                 row.addSubview_(detail)
                 row.addSubview_(status)
                 page.addSubview_(row)
                 rows.append((row, name, detail, status))
-            guidance = _label(
+            model_guidance = _label(
                 self._l("models.guidance"),
-                NSMakeRect(5, 17, 740, 22), size=11, color=_SECONDARY)
-            page.addSubview_(guidance)
-            self.dynamic.update(
-                model_rows=rows,
-                model_wallet_advisory=advisory,
-                model_guidance=guidance,
-                selective_relisten_toggle=relisten,
-                selective_relisten_status=relisten_status,
-            )
-
-        def _build_diagnostics(self, page: Any) -> None:
-            page.addSubview_(_label(self._l("diagnostics.title"),
-                                    NSMakeRect(4, 351, 500, 32),
-                                    size=22, weight="bold"))
-            point_and_speak = _button(
-                self._l("diagnostics.action.point_and_speak"),
-                NSMakeRect(292, 350, 226, 34), self,
-                "previewPointAndSpeak:",
-                help_text=self._l(
-                    "diagnostics.action.point_and_speak.help"))
-            page.addSubview_(point_and_speak)
-            drop_target = _button(
-                self._l("diagnostics.action.drop_target"),
-                NSMakeRect(530, 350, 228, 34), self,
-                "previewDropTarget:",
-                help_text=self._l(
-                    "diagnostics.action.drop_target.help"))
-            page.addSubview_(drop_target)
-            page.addSubview_(_label(
-                self._l("diagnostics.subtitle"),
-                NSMakeRect(5, 326, 650, 20), size=13, color=_SECONDARY))
-            card = _card(NSMakeRect(0, 151, 758, 157))
+                NSMakeRect(5, 178, 740, 16), size=10, color=_SECONDARY)
+            page.addSubview_(model_guidance)
+            card = _card(NSMakeRect(0, 102, 758, 68))
             keys = (("diagnostics.service", "diag_service"),
                     ("diagnostics.microphone", "diag_microphone"),
                     ("diagnostics.accessibility", "diag_accessibility"),
@@ -5509,47 +5189,55 @@ if APPKIT_AVAILABLE:
                     ("diagnostics.motion", "diag_motion"),
                     ("diagnostics.build", "diag_version"))
             for index, (heading_key, key) in enumerate(keys):
-                y = 129 - index * 22
-                card.addSubview_(_label(self._l(heading_key), NSMakeRect(20, y, 170, 19),
-                                        size=12, color=_SECONDARY))
-                value = _label(self._l("diagnostics.unknown"), NSMakeRect(185, y, 525, 19),
-                               size=12, weight="medium")
+                x = 16 + (index % 2) * 380
+                y = 44 - (index // 2) * 20
+                card.addSubview_(_label(
+                    self._l(heading_key), NSMakeRect(x, y, 118, 17),
+                    size=10, color=_SECONDARY))
+                value = _label(
+                    self._l("diagnostics.unknown"),
+                    NSMakeRect(x + 122, y, 236, 17),
+                    size=11, weight="medium")
                 card.addSubview_(value)
                 self.dynamic[key] = value
             page.addSubview_(card)
-            open_log = _button(self._l("diagnostics.action.log"), NSMakeRect(0, 101, 118, 36),
+            open_log = _button(self._l("diagnostics.action.log"),
+                               NSMakeRect(0, 62, 112, 34),
                                self, "openLog:")
             copy_support_snapshot = _button(
                 self._l("diagnostics.action.copy_support"),
-                NSMakeRect(130, 101, 180, 36), self, "copySupportSnapshot:",
+                NSMakeRect(120, 62, 176, 34), self, "copySupportSnapshot:",
                 help_text=self._l("diagnostics.action.copy_support.help"))
-            verify = _button(self._l("diagnostics.action.verify"), NSMakeRect(322, 101, 154, 36),
+            verify = _button(self._l("diagnostics.action.verify"),
+                             NSMakeRect(304, 62, 148, 34),
                              self, "verify:")
             verify.setKeyEquivalent_("r")
             verify.setKeyEquivalentModifierMask_(NSEventModifierFlagCommand)
             open_system_settings = _accessible(_button(
                 self._l("diagnostics.action.open_system_settings"),
-                NSMakeRect(0, 53, 180, 32), self, "openSystemSettings:",
+                NSMakeRect(0, 24, 176, 32), self, "openSystemSettings:",
                 help_text=self._l(
                     "diagnostics.action.open_system_settings.help")),
                 self._l("diagnostics.accessibility.open_system_settings"),
                 self._l("diagnostics.action.open_system_settings.help"))
             export_support_bundle = _button(
                 self._l("diagnostics.action.export_support"),
-                NSMakeRect(192, 53, 180, 32), self, "exportSupportBundle:",
+                NSMakeRect(184, 24, 184, 32), self, "exportSupportBundle:",
                 help_text=self._l("diagnostics.action.export_support.help"))
             license_notices = _button(
-                self._l("diagnostics.action.licenses"), NSMakeRect(488, 101, 132, 36),
+                self._l("diagnostics.action.licenses"),
+                NSMakeRect(460, 62, 138, 34),
                 self, "openLicense:")
-            source = _button(self._l("diagnostics.action.source"), NSMakeRect(632, 101, 126, 36),
+            source = _button(self._l("diagnostics.action.source"),
+                             NSMakeRect(606, 62, 132, 34),
                              self, "openSource:")
             progress = NSProgressIndicator.alloc().initWithFrame_(
-                NSMakeRect(390, 63, 18, 18))
+                NSMakeRect(382, 31, 18, 18))
             progress.setStyle_(1)
             progress.setDisplayedWhenStopped_(False)
             verification = _label(
                 self._l("diagnostics.verification.not_run"),
-                NSMakeRect(416, 62, 336, 20),
+                NSMakeRect(406, 30, 346, 18),
                 size=11, color=_SECONDARY)
             page.addSubview_(open_log)
             page.addSubview_(copy_support_snapshot)
@@ -5561,15 +5249,19 @@ if APPKIT_AVAILABLE:
             page.addSubview_(progress)
             page.addSubview_(verification)
             guidance = _label(
-                self._l("diagnostics.ready"), NSMakeRect(390, 42, 362, 16),
-                size=10, color=_SECONDARY)
+                self._l("diagnostics.ready"), NSMakeRect(382, 4, 370, 14),
+                size=9, color=_SECONDARY)
             page.addSubview_(guidance)
             page.addSubview_(_label(
                 self._l("diagnostics.license"),
-                NSMakeRect(5, 14, 620, 18), size=11, color=_SECONDARY))
+                NSMakeRect(5, 4, 370, 14), size=9, color=_SECONDARY))
             self.dynamic.update(
-                point_and_speak_button=point_and_speak,
-                drop_target_button=drop_target,
+                model_rows=rows,
+                model_wallet_advisory=advisory,
+                model_guidance=model_guidance,
+                selective_relisten_toggle=relisten,
+                selective_relisten_status=relisten_status,
+                advanced_button=advanced_shortcut,
                 open_system_settings_button=open_system_settings,
                 open_log_button=open_log,
                 copy_support_snapshot_button=copy_support_snapshot,
@@ -5605,16 +5297,18 @@ if APPKIT_AVAILABLE:
 
         @objc.python_method
         def show_results(self) -> None:
-            """Open the existing transcript-free Last Result inspector."""
+            """Open Home and, with a result available, its evidence reveal."""
             self.show()
-            self.view_model.select_section("Results")
+            self.view_model.select_section("Home")
             self.render()
+            if self.view_model.state.last_result.available:
+                self.inspectResultEvidence_(None)
 
         @objc.python_method
         def show_outbox(self) -> None:
             """Route to existing recovery controls without acting on a draft."""
             self.show()
-            self.view_model.select_section("Overview")
+            self.view_model.select_section("Home")
             self.render()
 
         @objc.python_method
@@ -5757,6 +5451,7 @@ if APPKIT_AVAILABLE:
             self.dynamic["onboarding_card"].setHidden_(
                 not presentation.visible)
             self.dynamic["overview_hero"].setHidden_(presentation.visible)
+            self.dynamic["home_result_card"].setHidden_(presentation.visible)
             for card in self.dynamic["overview_metric_cards"]:
                 card.setHidden_(presentation.visible)
             for control, step in zip(
@@ -5823,56 +5518,19 @@ if APPKIT_AVAILABLE:
             self._animate_onboarding_face(presentation)
 
             result = state.last_result
-            self.dynamic["result_empty_card"].setHidden_(result.available)
-            self.dynamic["result_empty_chip"].setFillColor_(
-                _theme_color(FACE_CHIP_COLORS[state.face]))
-            self.dynamic["result_empty_face"].setImage_(
-                self._face_image(state.face, talk=False))
             self.dynamic["result_inspect_button"].setEnabled_(result.available)
-            self.dynamic["result_summary"].setStringValue_(result.summary)
-            self.dynamic["result_engine"].setStringValue_(
-                self._l("results.engine.session", engine=result.engine))
+            if result.available:
+                self.dynamic["result_summary"].setStringValue_(result.summary)
+                self.dynamic["result_engine"].setStringValue_(
+                    self._l("results.engine.session", engine=result.engine))
+            else:
+                # The friendly empty copy moves onto the compact card now
+                # that the playful full-page empty state is gone.
+                self.dynamic["result_summary"].setStringValue_(
+                    self._l("results.empty.title"))
+                self.dynamic["result_engine"].setStringValue_(
+                    self._l("results.empty.detail"))
             self.dynamic["result_mode"].setStringValue_(result.mode)
-            self.dynamic["result_stable"].setStringValue_(
-                self._l(
-                    "results.value.words", count=result.stable_prefix_words))
-            self.dynamic["result_anchors"].setStringValue_(
-                str(result.protected_anchor_count))
-            confidence = (
-                self._l(
-                    "results.value.confidence",
-                    confidence=f"{result.confidence:.0%}")
-                if result.confidence is not None else "")
-            self.dynamic["result_decisions"].setStringValue_(
-                f"{result.compiler_decisions}{confidence}")
-            cleanup_kinds = ", ".join(dict.fromkeys(result.cleanup_edits))
-            self.dynamic["result_cleanup"].setStringValue_(
-                cleanup_kinds or self._l("results.value.none_reported"))
-            rejected = (
-                str(result.proof_edits_rejected)
-                if result.proof_edits_rejected is not None else self._l(
-                    "results.value.not_reported"))
-            self.dynamic["result_proof"].setStringValue_(
-                self._l(
-                    "results.value.proof",
-                    accepted=result.proof_edits_accepted,
-                    rejected=rejected))
-            self.dynamic["result_alternatives"].setStringValue_(
-                str(result.alternatives_considered))
-            self.dynamic["result_context"].setStringValue_(
-                self._l(
-                    "results.context.summary",
-                    influence=result.context_influence))
-            self.dynamic["result_firewall"].setStringValue_(
-                result.context_firewall_summary)
-            self.dynamic["result_consequence"].setStringValue_(
-                result.consequence_summary)
-            self.dynamic["result_consequence_advisory"].setStringValue_(
-                result.consequence_advisory)
-            self.dynamic["result_consequence_advisory"].setHidden_(
-                not bool(result.consequence_advisory))
-            self.dynamic["result_consequence_advisory"].setTextColor_(
-                _REVIEW if result.consequence_advisory else _SECONDARY)
             if not result.acoustic_replay_enabled:
                 replay_copy = self._l("results.audio.off")
             elif result.retained_span_count == 0:
@@ -5893,17 +5551,6 @@ if APPKIT_AVAILABLE:
                 ("result_summary", "results.accessibility.summary"),
                 ("result_engine", "results.accessibility.engine"),
                 ("result_mode", "results.accessibility.mode"),
-                ("result_stable", "results.accessibility.stable"),
-                ("result_anchors", "results.accessibility.anchors"),
-                ("result_decisions", "results.accessibility.decisions"),
-                ("result_cleanup", "results.accessibility.cleanup"),
-                ("result_proof", "results.accessibility.proof"),
-                ("result_alternatives", "results.accessibility.alternatives"),
-                ("result_context", "results.accessibility.context"),
-                ("result_firewall", "results.accessibility.firewall"),
-                ("result_consequence", "results.accessibility.consequence"),
-                ("result_consequence_advisory",
-                 "results.accessibility.consequence_advisory"),
                 ("result_audio", "results.accessibility.audio"),
             ):
                 sync_accessibility(
@@ -5932,6 +5579,8 @@ if APPKIT_AVAILABLE:
                     count=len(settings.corrections)),
                 "keywords": self._l(
                     "settings.personalize.keywords.detail"),
+                "modes": self._l(
+                    "settings.personalize.modes.detail"),
             }
             for key, value in setting_summaries.items():
                 set_accessible_text(
@@ -5983,41 +5632,6 @@ if APPKIT_AVAILABLE:
                 self.dynamic["voice_object_commands_toggle"],
                 voice_object_status,
                 label=self._l("settings.accessibility.voice_objects.label"),
-            )
-            confirmation_state = state.risky_action_confirmation_state
-            confirmation_copy = self._l(
-                f"settings.privacy.risky_confirmation.state."
-                f"{confirmation_state}")
-            if state.risky_action_risk == "none":
-                risk_copy = self._l(
-                    "settings.privacy.risky_confirmation")
-            else:
-                risk_copy = self._l(
-                    "settings.privacy.risky_confirmation.risk."
-                    f"{state.risky_action_risk}")
-            confirmation_status = self._l(
-                "settings.privacy.risky_confirmation.status",
-                risk=risk_copy,
-                state=confirmation_copy,
-            )
-            set_accessible_text(
-                self.dynamic["risky_confirmation_status"],
-                confirmation_status,
-                label=self._l(
-                    "settings.accessibility.risky_confirmation.status"),
-            )
-            pending = confirmation_state in {
-                "awaiting_voice", "awaiting_click"}
-            self.dynamic["risky_confirmation_popup"].setEnabled_(not pending)
-            self.dynamic["risky_confirmation_start"].setEnabled_(not pending)
-            self.dynamic["risky_confirmation_click"].setEnabled_(
-                confirmation_state == "awaiting_click")
-            self.dynamic["risky_confirmation_cancel"].setEnabled_(pending)
-            self.dynamic["privacy_summary"].setStringValue_(state.privacy_summary)
-            sync_accessibility(
-                self.dynamic["privacy_summary"], state.privacy_summary,
-                label=self._l(
-                    "settings.accessibility.privacy_summary.label"),
             )
 
             for index, (row, name, detail, status_label) in enumerate(
@@ -6085,7 +5699,7 @@ if APPKIT_AVAILABLE:
             )
             model_issue = next(
                 (issue for issue in state.degraded_issues
-                 if issue.route == "Models"), None)
+                 if issue.key in {"models", "fallback"}), None)
             self.dynamic["model_guidance"].setStringValue_(
                 model_issue.detail if model_issue else
                 self._l("models.guidance"))
@@ -6641,492 +6255,6 @@ if APPKIT_AVAILABLE:
                 self.view_model.purge_terminal_voice_object_drafts()
             self.render()
 
-        def authorDemonstrations_(self, _sender: Any) -> None:
-            """Manually author descriptions; this method has no app-control API."""
-            try:
-                drafts = self.view_model.inspect_demonstration_drafts()
-            except ValueError:
-                self.render()
-                return
-            alert = NSAlert.alloc().init()
-            alert.setMessageText_(self._l(
-                "settings.dialog.demonstrations.title"))
-            alert.setInformativeText_(self._l(
-                "settings.dialog.demonstrations.message" if drafts else
-                "settings.dialog.demonstrations.empty"))
-            chooser = None
-            if drafts:
-                chooser = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-                    NSMakeRect(0, 0, 540, 28), False)
-                chooser.addItemsWithTitles_([
-                    self._l(
-                        "settings.dialog.demonstrations.row",
-                        sequence=draft.sequence,
-                        domain=draft.domain.title(),
-                        state=draft.state.title(),
-                        steps=draft.step_count,
-                    )
-                    for draft in drafts
-                ])
-                _accessible(
-                    chooser,
-                    self._l(
-                        "settings.accessibility.demonstrations.chooser"),
-                    self._l("settings.dialog.demonstrations.message"))
-                alert.setAccessoryView_(chooser)
-            alert.addButtonWithTitle_(self._l(
-                "settings.action.create_draft"))
-            if drafts:
-                alert.addButtonWithTitle_(self._l(
-                    "settings.action.reveal_edit"))
-                alert.addButtonWithTitle_(self._l(
-                    "settings.action.cancel_draft"))
-                alert.addButtonWithTitle_(self._l(
-                    "settings.action.delete_approved"))
-            alert.addButtonWithTitle_(self._l("settings.action.done"))
-            response = alert.runModal()
-            if response == 1000:
-                create = NSAlert.alloc().init()
-                create.setMessageText_(self._l(
-                    "settings.dialog.demonstrations.new.title"))
-                create.setInformativeText_(self._l(
-                    "settings.dialog.demonstrations.new.message"))
-                domains = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-                    NSMakeRect(0, 0, 360, 28), False)
-                domains.addItemsWithTitles_([
-                    domain.title() for domain in DEMONSTRATION_DOMAINS])
-                _accessible(
-                    domains,
-                    self._l("settings.accessibility.demonstrations.domain"),
-                    self._l("settings.dialog.demonstrations.new.message"))
-                create.setAccessoryView_(domains)
-                create.addButtonWithTitle_(self._l(
-                    "settings.action.create_draft"))
-                create.addButtonWithTitle_(self._l("settings.action.cancel"))
-                if create.runModal() == 1000:
-                    try:
-                        self.view_model.create_demonstration_draft(
-                            DEMONSTRATION_DOMAINS[
-                                domains.indexOfSelectedItem()])
-                    except ValueError:
-                        pass
-            elif drafts and response == 1001:
-                selected = drafts[chooser.indexOfSelectedItem()]
-                try:
-                    revealed = self.view_model.reveal_demonstration_draft(
-                        selected)
-                except ValueError:
-                    self.render()
-                    return
-                detail = NSAlert.alloc().init()
-                detail.setMessageText_(self._l(
-                    "settings.dialog.demonstrations.reveal.title",
-                    sequence=revealed.sequence,
-                    domain=revealed.domain.title()))
-                detail.setInformativeText_(self._l(
-                    "settings.dialog.demonstrations.reveal.message"))
-                accessory = NSView.alloc().initWithFrame_(
-                    NSMakeRect(0, 0, 560, 310))
-                preview_text = "\n".join(
-                    self._l(
-                        "settings.dialog.demonstrations.step",
-                        index=index,
-                        action=step.action.replace("_", " ").title(),
-                        text=step.text,
-                    )
-                    for index, step in enumerate(revealed.steps, 1)
-                ) or self._l(
-                    "settings.dialog.demonstrations.preview.empty")
-                scroll, preview = self._text_editor(
-                    NSMakeRect(0, 90, 560, 220), preview_text,
-                    label=self._l(
-                        "settings.accessibility.demonstrations.preview"),
-                    help_text=self._l(
-                        "settings.dialog.demonstrations.reveal.message"))
-                preview.setEditable_(False)
-                accessory.addSubview_(scroll)
-                action_picker = NSPopUpButton.alloc() \
-                    .initWithFrame_pullsDown_(
-                        NSMakeRect(0, 52, 220, 28), False)
-                actions = DEMONSTRATION_ACTIONS[revealed.domain]
-                action_picker.addItemsWithTitles_([
-                    action.replace("_", " ").title()
-                    for action in actions
-                ])
-                _accessible(
-                    action_picker,
-                    self._l("settings.accessibility.demonstrations.action"),
-                    self._l("settings.dialog.demonstrations.record.message"))
-                step_text = NSTextField.alloc().initWithFrame_(
-                    NSMakeRect(0, 12, 560, 28))
-                _accessible(
-                    step_text,
-                    self._l("settings.accessibility.demonstrations.text"),
-                    self._l("settings.dialog.demonstrations.record.message"))
-                if revealed.state == "recording":
-                    accessory.addSubview_(action_picker)
-                    accessory.addSubview_(step_text)
-                detail.setAccessoryView_(accessory)
-                if revealed.state == "recording":
-                    detail.addButtonWithTitle_(self._l(
-                        "settings.action.record_step"))
-                    if selected.step_count:
-                        detail.addButtonWithTitle_(self._l(
-                            "settings.action.approve"))
-                detail.addButtonWithTitle_(self._l("settings.action.done"))
-                detail_response = detail.runModal()
-                if revealed.state == "recording" and detail_response == 1000:
-                    try:
-                        self.view_model.record_demonstration_step(
-                            selected,
-                            action=actions[
-                                action_picker.indexOfSelectedItem()],
-                            text=str(step_text.stringValue()),
-                        )
-                    except ValueError:
-                        pass
-                elif (revealed.state == "recording"
-                      and selected.step_count
-                      and detail_response == 1001
-                      and self._confirm(
-                          self._l(
-                              "settings.dialog.demonstrations.approve.title"),
-                          self._l(
-                              "settings.dialog.demonstrations.approve.message",
-                              sequence=selected.sequence),
-                          self._l("settings.action.approve"))):
-                    try:
-                        self.view_model.approve_demonstration_draft(selected)
-                    except ValueError:
-                        pass
-            elif (drafts and response == 1002):
-                selected = drafts[chooser.indexOfSelectedItem()]
-                if (selected.state == "recording" and self._confirm(
-                        self._l(
-                            "settings.dialog.demonstrations.cancel.title"),
-                        self._l(
-                            "settings.dialog.demonstrations.cancel.message",
-                            sequence=selected.sequence),
-                        self._l("settings.action.cancel_draft"))):
-                    try:
-                        self.view_model.cancel_demonstration_draft(selected)
-                    except ValueError:
-                        pass
-            elif (drafts and response == 1003):
-                selected = drafts[chooser.indexOfSelectedItem()]
-                if (selected.state == "approved" and self._confirm(
-                        self._l(
-                            "settings.dialog.demonstrations.delete.title"),
-                        self._l(
-                            "settings.dialog.demonstrations.delete.message",
-                            sequence=selected.sequence),
-                        self._l("settings.action.delete_approved"))):
-                    try:
-                        self.view_model.delete_approved_demonstration_draft(
-                            selected)
-                    except ValueError:
-                        pass
-            self.render()
-
-        def previewPointAndSpeak_(self, _sender: Any) -> None:
-            """Collect a phrase, hide, then preview the newly focused app."""
-
-            alert = NSAlert.alloc().init()
-            alert.setMessageText_(self._l(
-                "point_and_speak.dialog.title"))
-            alert.setInformativeText_(self._l(
-                "point_and_speak.dialog.message",
-                limit=POINT_AND_SPEAK_MAX_PHRASE_CHARS))
-            target_phrase = NSTextField.alloc().initWithFrame_(
-                NSMakeRect(0, 0, 520, 26))
-            target_phrase.setUsesSingleLineMode_(True)
-            _accessible(
-                target_phrase,
-                self._l("point_and_speak.dialog.input.label"),
-                self._l("point_and_speak.dialog.input.help"))
-            alert.setAccessoryView_(target_phrase)
-            alert.addButtonWithTitle_(self._l(
-                "point_and_speak.action.preview"))
-            cancel = alert.addButtonWithTitle_(self._l(
-                "point_and_speak.action.cancel"))
-            cancel.setKeyEquivalent_("\x1b")
-            alert.window().setInitialFirstResponder_(target_phrase)
-            response = alert.runModal()
-            if response != 1000:
-                return
-            phrase = str(target_phrase.stringValue())
-            try:
-                if (not phrase.strip()
-                        or len(phrase) > POINT_AND_SPEAK_MAX_PHRASE_CHARS
-                        or any(ord(character) < 32 for character in phrase)):
-                    raise ValueError(self._l(
-                        "point_and_speak.validation.phrase",
-                        limit=POINT_AND_SPEAK_MAX_PHRASE_CHARS))
-            except ValueError as error:
-                invalid = NSAlert.alloc().init()
-                invalid.setMessageText_(self._l(
-                    "point_and_speak.dialog.title"))
-                invalid.setInformativeText_(str(error))
-                invalid.addButtonWithTitle_(self._l(
-                    "settings.action.done"))
-                invalid.runModal()
-                return
-
-            self.window.orderOut_(None)
-            NSApplication.sharedApplication().hide_(None)
-
-            def run() -> None:
-                # Give macOS a brief turn to restore the app behind this one.
-                time.sleep(0.2)
-                result = self.view_model.preview_point_and_speak(phrase)
-                self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                    "pointAndSpeakFinished:", (result, phrase), False)
-
-            threading.Thread(
-                target=run, name="whisper-face-point-preview",
-                daemon=True).start()
-
-        def pointAndSpeakFinished_(self, payload: Any) -> None:
-            result, phrase = payload
-            app = NSApplication.sharedApplication()
-            app.unhide_(None)
-            self.window.makeKeyAndOrderFront_(None)
-            app.activateIgnoringOtherApps_(True)
-            receipt = result.receipt
-            evidence = ", ".join(receipt.evidence) or self._l(
-                "point_and_speak.result.none")
-            receipt_text = self._l(
-                "point_and_speak.result.receipt",
-                capture=receipt.capture_state.replace("_", " "),
-                observed=receipt.observed_elements,
-                emitted=receipt.emitted_targets,
-                eligible=receipt.eligible_targets,
-                contradictions=receipt.contradiction_count,
-                confidence=receipt.confidence_bucket.replace("_", " "),
-                margin=receipt.margin_bucket.replace("_", " "),
-                evidence=evidence,
-                truncated=self._l(
-                    "point_and_speak.result.yes" if receipt.truncated else
-                    "point_and_speak.result.no"),
-            )
-            detail = receipt_text
-            if result.state == "resolved":
-                detail = self._l(
-                    "point_and_speak.result.selection",
-                    name=result.accessibility_name,
-                    role=result.role.replace("_", " "),
-                    receipt=receipt_text,
-                )
-            result_alert = NSAlert.alloc().init()
-            result_alert.setMessageText_(self._l(
-                f"point_and_speak.result.title.{result.state}"))
-            result_alert.setInformativeText_(detail)
-            result_alert.addButtonWithTitle_(self._l(
-                "settings.action.done"))
-            can_press = (result.state == "resolved"
-                         and result.role in POINT_AND_SPEAK_ACTION_ROLES)
-            if can_press:
-                result_alert.addButtonWithTitle_(self._l(
-                    f"point_and_speak.action.confirm.{result.role}"))
-            response = result_alert.runModal()
-            if not can_press or response != 1001:
-                return
-
-            self.window.orderOut_(None)
-            app.hide_(None)
-
-            def run_action() -> None:
-                # The explicit confirmation authorizes one fresh, bounded
-                # capture/resolution/recheck transaction, not the preview.
-                time.sleep(0.2)
-                try:
-                    nonce = self.view_model.issue_point_and_speak_nonce()
-                    action_result = self.view_model.press_point_and_speak(
-                        nonce, phrase, result.role)
-                except Exception:
-                    action_result = unavailable_point_and_speak_action()
-                self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                    "pointAndSpeakActionFinished:",
-                    (action_result, result.role), False)
-
-            threading.Thread(
-                target=run_action, name="whisper-face-point-action",
-                daemon=True).start()
-
-        def pointAndSpeakActionFinished_(self, payload: Any) -> None:
-            result, confirmed_role = payload
-            app = NSApplication.sharedApplication()
-            app.unhide_(None)
-            self.window.makeKeyAndOrderFront_(None)
-            app.activateIgnoringOtherApps_(True)
-            receipt = result.receipt
-            detail = self._l(
-                "point_and_speak.action.result.receipt",
-                role=confirmed_role.replace("_", " "),
-                state=result.state.replace("_", " "),
-                capture=receipt.capture_state.replace("_", " "),
-                observed=receipt.observed_elements,
-                emitted=receipt.emitted_targets,
-                confidence=receipt.confidence_bucket.replace("_", " "),
-                margin=receipt.margin_bucket.replace("_", " "),
-                recheck=receipt.recheck.replace("_", " "),
-                attempted=self._l(
-                    "point_and_speak.result.yes" if receipt.attempted else
-                    "point_and_speak.result.no"),
-                truncated=self._l(
-                    "point_and_speak.result.yes" if receipt.truncated else
-                    "point_and_speak.result.no"),
-            )
-            alert = NSAlert.alloc().init()
-            title_key = f"point_and_speak.action.result.title.{result.state}"
-            if result.state == "executed":
-                title_key += f".{confirmed_role}"
-            alert.setMessageText_(self._l(title_key))
-            alert.setInformativeText_(detail)
-            alert.addButtonWithTitle_(self._l("settings.action.done"))
-            alert.runModal()
-
-        def previewDropTarget_(self, _sender: Any) -> None:
-            """Collect an explicit hypothetical policy, then capture read-only."""
-
-            alert = NSAlert.alloc().init()
-            alert.setMessageText_(self._l("drop_target.dialog.title"))
-            alert.setInformativeText_(self._l("drop_target.dialog.message"))
-            form = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 520, 150))
-            phrase = NSTextField.alloc().initWithFrame_(
-                NSMakeRect(175, 118, 345, 26))
-            phrase.setUsesSingleLineMode_(True)
-            form.addSubview_(_label(
-                self._l("drop_target.dialog.input.label"),
-                NSMakeRect(0, 122, 165, 18), size=12))
-            _accessible(
-                phrase, self._l("drop_target.dialog.input.label"),
-                self._l("drop_target.dialog.input.help"))
-            form.addSubview_(phrase)
-
-            role = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-                NSMakeRect(175, 82, 345, 26), False)
-            role.addItemsWithTitles_(list(DROP_TARGET_ROLE_LABELS))
-            form.addSubview_(_label(
-                self._l("drop_target.dialog.role.label"),
-                NSMakeRect(0, 86, 165, 18), size=12))
-            _accessible(
-                role, self._l("drop_target.dialog.role.label"),
-                self._l("drop_target.dialog.role.help"))
-            form.addSubview_(role)
-
-            source = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-                NSMakeRect(175, 46, 345, 26), False)
-            source.addItemsWithTitles_(list(DROP_TARGET_SOURCE_LABELS))
-            form.addSubview_(_label(
-                self._l("drop_target.dialog.source.label"),
-                NSMakeRect(0, 50, 165, 18), size=12))
-            _accessible(
-                source, self._l("drop_target.dialog.source.label"),
-                self._l("drop_target.dialog.source.help"))
-            form.addSubview_(source)
-
-            effect = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-                NSMakeRect(175, 10, 345, 26), False)
-            effect.addItemsWithTitles_(list(DROP_TARGET_EFFECT_LABELS))
-            form.addSubview_(_label(
-                self._l("drop_target.dialog.effect.label"),
-                NSMakeRect(0, 14, 165, 18), size=12))
-            _accessible(
-                effect, self._l("drop_target.dialog.effect.label"),
-                self._l("drop_target.dialog.effect.help"))
-            form.addSubview_(effect)
-            alert.setAccessoryView_(form)
-            alert.addButtonWithTitle_(self._l("drop_target.action.preview"))
-            cancel = alert.addButtonWithTitle_(self._l(
-                "drop_target.action.cancel"))
-            cancel.setKeyEquivalent_("\x1b")
-            alert.window().setInitialFirstResponder_(phrase)
-            if alert.runModal() != 1000:
-                return
-            target_phrase = str(phrase.stringValue())
-            if (not target_phrase.strip()
-                    or len(target_phrase) > DROP_TARGET_MAX_PHRASE_CHARS
-                    or any(ord(character) < 32
-                           for character in target_phrase)):
-                invalid = NSAlert.alloc().init()
-                invalid.setMessageText_(self._l("drop_target.dialog.title"))
-                invalid.setInformativeText_(self._l(
-                    "drop_target.validation.phrase",
-                    limit=DROP_TARGET_MAX_PHRASE_CHARS))
-                invalid.addButtonWithTitle_(self._l("settings.action.done"))
-                invalid.runModal()
-                return
-            declared_role = DROP_TARGET_ROLES[role.indexOfSelectedItem()]
-            source_kind = DROP_TARGET_SOURCE_KINDS[
-                source.indexOfSelectedItem()]
-            selected_effect = DROP_TARGET_EFFECTS[
-                effect.indexOfSelectedItem()]
-
-            self.window.orderOut_(None)
-            NSApplication.sharedApplication().hide_(None)
-
-            def run() -> None:
-                time.sleep(0.2)
-                result = self.view_model.preview_drop_to_target(
-                    target_phrase, declared_role, source_kind,
-                    selected_effect)
-                self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                    "dropTargetFinished:", result, False)
-
-            threading.Thread(
-                target=run, name="whisper-face-drop-target-preview",
-                daemon=True).start()
-
-        def dropTargetFinished_(self, result: Any) -> None:
-            app = NSApplication.sharedApplication()
-            app.unhide_(None)
-            self.window.makeKeyAndOrderFront_(None)
-            app.activateIgnoringOtherApps_(True)
-            receipt = result.receipt
-            evidence = ", ".join(receipt.evidence) or self._l(
-                "drop_target.result.none")
-            receipt_text = self._l(
-                "drop_target.result.receipt",
-                capture=receipt.capture_state.replace("_", " "),
-                basis=receipt.capability_basis.replace("_", " "),
-                observed=receipt.observed_elements,
-                emitted=receipt.emitted_targets,
-                eligible=receipt.eligible_targets,
-                contradictions=receipt.contradiction_count,
-                confidence=receipt.confidence_bucket.replace("_", " "),
-                margin=receipt.margin_bucket.replace("_", " "),
-                evidence=evidence,
-                truncated=self._l(
-                    "drop_target.result.yes" if receipt.truncated else
-                    "drop_target.result.no"),
-                execution=receipt.execution,
-            )
-            detail = self._l(
-                "drop_target.result.policy",
-                role=(result.declared_role or self._l(
-                    "drop_target.result.none")),
-                source=(result.source_kind or self._l(
-                    "drop_target.result.none")).replace("_", " "),
-                effect=result.effect or self._l("drop_target.result.none"),
-                receipt=receipt_text,
-            )
-            if result.state == "resolved":
-                detail = self._l(
-                    "drop_target.result.selection",
-                    name=result.accessibility_name,
-                    role=result.declared_role,
-                    source=result.source_kind.replace("_", " "),
-                    effect=result.effect,
-                    receipt=receipt_text,
-                )
-            result_alert = NSAlert.alloc().init()
-            result_alert.setMessageText_(self._l(
-                f"drop_target.result.title.{result.state}"))
-            result_alert.setInformativeText_(detail)
-            result_alert.addButtonWithTitle_(self._l("settings.action.done"))
-            result_alert.runModal()
-
         def sectionChanged_(self, sender: Any) -> None:
             self.view_model.select_section(SECTIONS[sender.selectedSegment()])
             self.render()
@@ -7155,21 +6283,29 @@ if APPKIT_AVAILABLE:
             self.view_model.set_voice_object_commands(enabled)
             self.render()
 
-        def startRiskyConfirmation_(self, _sender: Any) -> None:
-            index = int(self.dynamic[
-                "risky_confirmation_popup"].indexOfSelectedItem())
-            if 0 <= index < len(RISKY_ACTION_CLASSES):
-                self.view_model.start_risky_action_confirmation(
-                    RISKY_ACTION_CLASSES[index])
-            self.render()
-
-        def clickRiskyConfirmation_(self, _sender: Any) -> None:
-            self.view_model.click_risky_action_confirmation()
-            self.render()
-
-        def cancelRiskyConfirmation_(self, _sender: Any) -> None:
-            self.view_model.cancel_risky_action_confirmation()
-            self.render()
+        def viewModes_(self, _sender: Any) -> None:
+            """Show the six fixed voice-mode shortcuts in a small dialog."""
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(self._l("settings.dialog.modes.title"))
+            alert.setInformativeText_(self._l("settings.dialog.modes.message"))
+            listing = "\n".join(
+                self._l(
+                    "settings.dialog.modes.row",
+                    name=self._l(f"settings.mode.{mode}.name"),
+                    shortcut=self._l(f"settings.mode.{mode}.shortcut"),
+                    detail=self._l(f"settings.mode.{mode}.detail"),
+                )
+                for mode in MODE_GUIDE
+            )
+            scroll, editor = self._text_editor(
+                NSMakeRect(0, 0, 460, 190), listing,
+                label=self._l("settings.accessibility.modes.label"),
+                help_text=self._l("settings.dialog.modes.message"),
+            )
+            editor.setEditable_(False)
+            alert.setAccessoryView_(scroll)
+            alert.addButtonWithTitle_(self._l("settings.action.done"))
+            alert.runModal()
 
         def inspectResultEvidence_(self, _sender: Any) -> None:
             try:
@@ -7182,7 +6318,10 @@ if APPKIT_AVAILABLE:
             alert.setInformativeText_(self._l("results.inspect.message"))
             scroll, editor = self._text_editor(
                 NSMakeRect(0, 0, 580, 320),
-                result_evidence_text(evidence, locale=self.view_model.locale),
+                result_evidence_text(
+                    evidence,
+                    result=self.view_model.state.last_result,
+                    locale=self.view_model.locale),
                 label=self._l("results.accessibility.inspect.content"),
                 help_text=self._l("results.inspect.message"),
             )
@@ -7219,8 +6358,8 @@ if APPKIT_AVAILABLE:
             self.view_model.open_system_settings()
             self.render()
 
-        def openDiagnostics_(self, _sender: Any) -> None:
-            self.view_model.select_section("Diagnostics")
+        def openAdvanced_(self, _sender: Any) -> None:
+            self.view_model.select_section("Advanced")
             self.render()
 
         def reviewIssue_(self, _sender: Any) -> None:
@@ -7442,27 +6581,6 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         keyword_reads[0] += 1
         return dict(private_keyword_export)
 
-    def start_risky_confirmation(risk: str) -> bool:
-        calls.append(("risk_start", risk))
-        runtime["risky_action_confirmation"] = {
-            "risk": risk,
-            "state": "awaiting_voice",
-            "reason": "proposed",
-        }
-        return True
-
-    def click_risky_confirmation() -> bool:
-        calls.append(("risk_click",))
-        runtime["risky_action_confirmation"].update(
-            state="confirmed", reason="two_factor_confirmed")
-        return True
-
-    def cancel_risky_confirmation() -> bool:
-        calls.append(("risk_cancel",))
-        runtime["risky_action_confirmation"].update(
-            state="cancelled", reason="explicitly_cancelled")
-        return True
-
     def open_system_settings() -> None:
         calls.append(("open_system_settings",))
 
@@ -7484,9 +6602,6 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             calls.append(("forget_acoustic_keyword", keyword, scope)),
         forget_all_acoustic_keywords=lambda:
             calls.append(("forget_all_acoustic_keywords",)),
-        start_risky_action_confirmation=start_risky_confirmation,
-        click_risky_action_confirmation=click_risky_confirmation,
-        cancel_risky_action_confirmation=cancel_risky_confirmation,
         open_system_settings=open_system_settings,
     )
     model = WhisperFaceViewModel(actions, locale="en-US")
@@ -7515,14 +6630,25 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             controller.dynamic["window_face"].image() is not None,
             "themed window face")
         require(
-            not bool(controller.dynamic["result_empty_card"].isHidden()),
+            str(controller.dynamic["result_summary"].stringValue()) ==
+            localized_string("results.empty.title"),
             "results empty state")
         require(
+            str(controller.dynamic["result_engine"].stringValue()) ==
+            localized_string("results.empty.detail"),
+            "results empty state detail")
+        require(
             accessible_value(
-                controller.dynamic["result_empty_card"],
+                controller.dynamic["result_summary"],
                 "accessibilityLabel") == localized_string(
-                    "results.empty.title"),
+                    "results.accessibility.summary"),
             "results empty state accessibility")
+        require(
+            not bool(controller.dynamic["result_inspect_button"].isEnabled()),
+            "results inspect disabled without a result")
+        require(
+            bool(controller.dynamic["home_result_card"].isHidden()),
+            "last-dictation card yields to onboarding")
         require(
             tuple(controller.dynamic["settings_panes"]) == SETTINGS_PANES,
             "settings panes")
@@ -7576,7 +6702,7 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             "permission recovery accessibility")
         controller.continueSetup_(None)
         require(("open_system_settings",) in calls, "permission recovery")
-        require(model.state.section == "Overview", "permission recovery route")
+        require(model.state.section == "Home", "permission recovery route")
         runtime.update(
             service_status="Running",
             microphone_status="Ready",
@@ -7616,8 +6742,12 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         model.refresh()
         controller.render()
         require(
-            bool(controller.dynamic["result_empty_card"].isHidden()),
+            str(controller.dynamic["result_summary"].stringValue()) ==
+            localized_string("results.summary.words", words=4),
             "results empty state clears after dictation")
+        require(
+            bool(controller.dynamic["result_inspect_button"].isEnabled()),
+            "results inspect enabled after dictation")
         require(model.state.onboarding_complete, "onboarding completion")
         require(
             not model.state.onboarding_acknowledged,
@@ -7643,6 +6773,9 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         require(
             not bool(controller.dynamic["overview_hero"].isHidden()),
             "overview visible after onboarding")
+        require(
+            not bool(controller.dynamic["home_result_card"].isHidden()),
+            "last-dictation card visible after onboarding")
         require(
             str(controller.dynamic["overview_phase"].stringValue()) ==
             localized_string("overview.phase.ready"),
@@ -7682,14 +6815,36 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             model.state.last_result.consequence_advisory == localized_string(
                 "results.consequence.review.advisory"),
             "review consequence guidance")
-        require(
-            str(controller.dynamic["result_consequence_advisory"].stringValue())
-            == localized_string("results.consequence.review.advisory"),
-            "review consequence guidance rendering")
-        require(
-            not bool(controller.dynamic[
-                "result_consequence_advisory"].isHidden()),
-            "review consequence guidance visibility")
+        # The persistent evidence/assurance cards are gone; the explicit
+        # evidence reveal must carry the entire trust surface instead.
+        modal_text = result_evidence_text(
+            ResultEvidenceInspection(), result=model.state.last_result)
+        for expected, label in (
+            (localized_string("results.consequence.review.advisory"),
+             "review consequence guidance in evidence reveal"),
+            (model.state.last_result.consequence_summary,
+             "consequence receipt in evidence reveal"),
+            (localized_string("results.firewall.quarantine.one"),
+             "context firewall receipt in evidence reveal"),
+            (localized_string(
+                "results.context.summary",
+                influence=model.state.last_result.context_influence),
+             "context influence in evidence reveal"),
+            (localized_string("results.evidence.stable"),
+             "stable prefix in evidence reveal"),
+            (localized_string("results.evidence.anchors"),
+             "protected anchors in evidence reveal"),
+            (localized_string("results.evidence.decisions"),
+             "compiler decisions in evidence reveal"),
+            (localized_string("results.evidence.alternatives"),
+             "alternatives count in evidence reveal"),
+            (localized_string("results.evidence.cleanup"),
+             "cleanup kinds in evidence reveal"),
+            (localized_string("results.evidence.proof"),
+             "proof review in evidence reveal"),
+        ):
+            require(expected in modal_text, label)
+        require("must never" not in modal_text, "evidence reveal privacy")
         require(
             str(controller.dynamic["result_inspect_button"].action()) ==
             "inspectResultEvidence:",
@@ -7700,6 +6855,18 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                 "accessibilityHelp") == localized_string(
                     "results.inspect.action.help"),
             "latest-result evidence accessibility")
+        require(
+            str(controller.dynamic["result_play_audio_button"].action()) ==
+            "playRetainedSpan:",
+            "retained span play action")
+        require(
+            str(controller.dynamic["result_clear_audio_button"].action()) ==
+            "clearRetainedSpans:",
+            "retained span clear action")
+        require(
+            not bool(controller.dynamic[
+                "result_play_audio_button"].isEnabled()),
+            "retained span play disabled without opt-in")
 
         for index, section in enumerate(SECTIONS):
             controller.section_control.setSelectedSegment_(index)
@@ -7729,89 +6896,61 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             controller.section_control.nextKeyView() == pane_control,
             "settings Tab order")
         require(
-            str(controller.dynamic["diagnostics_button"].keyEquivalent()) ==
-            "d", "diagnostics key equivalent")
-        require(
             str(controller.dynamic["settings_keywords_button"].action()) ==
             "inspectKeywords:", "keyword inspection surface")
         require(
-            str(controller.dynamic["risky_confirmation_start"].action()) ==
-            "startRiskyConfirmation:", "risk start action")
+            str(controller.dynamic["settings_modes_button"].action()) ==
+            "viewModes:", "voice modes surface")
         require(
-            str(controller.dynamic["risky_confirmation_click"].action()) ==
-            "clickRiskyConfirmation:", "risk click action")
+            str(controller.dynamic["settings_modes_button"].title()) ==
+            localized_string("settings.action.view"),
+            "voice modes action title")
         require(
-            not bool(controller.dynamic[
-                "risky_confirmation_click"].isEnabled()),
-            "risk click starts disabled")
-        controller.dynamic[
-            "risky_confirmation_popup"].selectItemAtIndex_(0)
-        controller.startRiskyConfirmation_(None)
+            str(controller.dynamic["settings_modes_detail"].stringValue()) ==
+            localized_string("settings.personalize.modes.detail"),
+            "voice modes summary")
         require(
-            model.state.risky_action_confirmation_state == "awaiting_voice",
-            "risk awaits voice")
+            controller.dynamic["face_picker"] in
+            controller.dynamic["settings_key_views"]["Personalize"],
+            "face picker lives in Personalize")
+
+        def ancestor_views(view: Any) -> tuple[Any, ...]:
+            chain = []
+            while view is not None:
+                chain.append(view)
+                view = view.superview()
+            return tuple(chain)
+
         require(
-            not bool(controller.dynamic[
-                "risky_confirmation_click"].isEnabled()),
-            "risk click disabled before voice")
-        runtime["risky_action_confirmation"].update(
-            state="awaiting_click", reason="voice_confirmed")
-        model.refresh()
-        controller.render()
+            controller.dynamic["settings_panes"]["Personalize"] in
+            ancestor_views(controller.dynamic["face_picker"]),
+            "face picker pane placement")
+        controller.openAdvanced_(None)
+        require(model.state.section == "Advanced", "advanced route")
         require(
-            bool(controller.dynamic[
-                "risky_confirmation_click"].isEnabled()),
-            "risk click enabled after voice")
-        controller.clickRiskyConfirmation_(None)
-        require(
-            model.state.risky_action_confirmation_state == "confirmed",
-            "risk receipt remains inert")
-        require(
-            not bool(controller.dynamic[
-                "risky_confirmation_click"].isEnabled()),
-            "risk click disables after terminal state")
-        require(
-            accessible_value(
-                controller.dynamic["risky_confirmation_status"],
-                "accessibilityLabel") == localized_string(
-                    "settings.accessibility.risky_confirmation.status"),
-            "risk status accessibility")
+            str(controller.dynamic["advanced_button"].keyEquivalent()) ==
+            "d", "advanced key equivalent")
         require(
             int(controller.dynamic[
-                "diagnostics_button"].keyEquivalentModifierMask()) & int(
+                "advanced_button"].keyEquivalentModifierMask()) & int(
                     NSEventModifierFlagCommand),
-            "diagnostics command modifier")
-        controller.openDiagnostics_(None)
-        require(model.state.section == "Diagnostics", "diagnostics route")
+            "advanced command modifier")
         require(
-            str(controller.dynamic[
-                "point_and_speak_button"].action()) ==
-            "previewPointAndSpeak:",
-            "Point-and-Speak preview action")
-        require(
-            accessible_value(
-                controller.dynamic["point_and_speak_button"],
-                "accessibilityHelp") == localized_string(
-                    "diagnostics.action.point_and_speak.help"),
-            "Point-and-Speak preview accessibility")
-        require(
-            str(controller.dynamic["drop_target_button"].action()) ==
-            "previewDropTarget:",
-            "Drop-to-Target preview action")
+            str(controller.dynamic["advanced_button"].action()) ==
+            "openAdvanced:", "advanced shortcut action")
         require(
             str(controller.dynamic["export_support_bundle_button"].action()) ==
             "exportSupportBundle:",
             "local support bundle action")
         require(
-            accessible_value(
-                controller.dynamic["drop_target_button"],
-                "accessibilityHelp") == localized_string(
-                    "diagnostics.action.drop_target.help"),
-            "Drop-to-Target preview accessibility")
+            str(controller.dynamic[
+                "selective_relisten_toggle"].action()) ==
+            "selectiveRelistenChanged:",
+            "selective re-listen surface")
         require(
             controller.section_control.nextKeyView() ==
-            controller.dynamic["point_and_speak_button"],
-            "Point-and-Speak preview Tab order")
+            controller.dynamic["advanced_button"],
+            "advanced Tab order")
         require(
             str(controller.dynamic["verify_button"].keyEquivalent()) == "r",
             "verification key equivalent")
@@ -7820,18 +6959,6 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                 "verify_button"].keyEquivalentModifierMask()) & int(
                     NSEventModifierFlagCommand),
             "verification command modifier")
-        require(
-            accessible_value(
-                controller.dynamic["result_firewall"],
-                "accessibilityLabel") == localized_string(
-                    "results.accessibility.firewall"),
-            "context firewall accessibility")
-        require(
-            accessible_value(
-                controller.dynamic["result_consequence_advisory"],
-                "accessibilityLabel") == localized_string(
-                    "results.accessibility.consequence_advisory"),
-            "review consequence guidance accessibility")
 
         require(
             accessible_value(controller.section_control,
@@ -7910,8 +7037,6 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             ("forget_all_acoustic_keywords",),
             ("face", "owl"),
             ("flight", True),
-            ("risk_start", "external_communication"),
-            ("risk_click",),
         }
         require(expected_calls.issubset(set(calls)), "model actions")
         require(not bool(controller.window.isVisible()), "window activation")
