@@ -599,8 +599,13 @@ trap - EXIT
 echo -n "== waiting for Ollama"
 ollama_ready=0
 for _ in $(seq 1 60); do
-    if curl -fsS --max-time 1 http://127.0.0.1:11434/api/tags \
-            >/dev/null 2>&1; then
+    # Wait for the identity the next line asserts, not merely for the endpoint
+    # to answer. A reload leaves the previous process bound to 11434 while the
+    # replacement starts, so a healthy /api/tags is not yet evidence that the
+    # launchd job owns the sole listener. Polling only the endpoint let the
+    # wait break during that window and hard-failed the install -- which, from
+    # the self-updater, meant a rollback. This check subsumes the health probe.
+    if ollama_process_identity_is_valid; then
         ollama_ready=1
         break
     fi
