@@ -7,8 +7,15 @@ machine without maintaining a second copy of the application.
 ## Single source of truth
 
 `dictate.py`, `parrot_core.py`, `voice_compiler.py`,
+`process_verifier.py`, `prewarmed_verifier.py`,
+`whisper_verifier_adapter.py`, `relisten_activation.py`,
 `insertion_integrity.py`, `personal_regression.py`,
-`cleanup_circuit_breaker.py`, `model_wallet.py`, `model_wallet_shadow.py`,
+`shadow_candidate_gate.py`, `cleanup_circuit_breaker.py`,
+`delayed_cleanup_activation.py`, `delayed_cleanup_merge.py`,
+`macos_delayed_cleanup_destination.py`,
+`acoustic_keyword_memory.py`, `acoustic_keyword_activation.py`,
+`acoustic_calibration.py`, `acoustic_calibration_activation.py`,
+`model_wallet.py`, `model_wallet_shadow.py`,
 `whisper_face_gui.py`, `whisper_face_theme.py`, `support_bundle.py`,
 `voice_object_command_parser.py`, `voice_inbox.py`,
 `voice_object_inbox_bridge.py`, `demonstration_drafts.py`, and
@@ -136,6 +143,11 @@ either service. Reruns retain existing content, reject non-file targets, and
 repair the platform-native current-user-only protection. Mac rejects symbolic
 links; Windows rejects reparse points. Read-only verification fails when an
 expected log is missing or no longer has that private posture.
+
+The optional `delayed_cleanup_activation.json` is evidence-generated private
+state, not a default template. Both installers preserve it when present and
+repair its current-user-only protection; neither installer creates or enables
+it. A missing receipt deliberately leaves delayed cleanup disabled.
 
 Before a normal install performs downloads or service changes, each platform
 creates, privately protects, and removes one unpredictable proof file inside

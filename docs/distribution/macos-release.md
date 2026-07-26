@@ -195,7 +195,8 @@ no automatic access to state in the current folder: before running its installer
 manually copy `dictionary.txt`, `snippets.json`, `tones.json`, `preferences.json`,
 `learned.json`, `acoustic_keyword_memory.json`,
 `acoustic_keyword_activation.json`, `acoustic_calibration_activation.json`,
-and `relisten_activation.json` into it with user-only permissions. Copy
+`relisten_activation.json`, and `delayed_cleanup_activation.json` into it with
+user-only permissions. Copy
 `transcripts.jsonl` only if retaining transcript history is intentional.
 Review the files rather than copying the entire old checkout or its logs.
 

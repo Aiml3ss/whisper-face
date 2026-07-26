@@ -16,7 +16,8 @@ and make a backup of your private files before changing versions.
    `snippets.json`, `tones.json`, `preferences.json`,
    `acoustic_keyword_memory.json`, `acoustic_keyword_activation.json`,
    `acoustic_calibration_activation.json`, `relisten_activation.json`,
-   `dictionary.txt`, `transcripts.jsonl`, `learned.json`,
+   `delayed_cleanup_activation.json`, `dictionary.txt`, `transcripts.jsonl`,
+   `learned.json`,
    `voice_inbox.json`, `demonstrations.json`, and `dictate.log`.
 
 Do not publish that backup: it can contain personal vocabulary, corrections,

@@ -5,7 +5,9 @@
 
 import sys
 import json
+import inspect
 import unittest
+from dataclasses import fields
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +18,13 @@ from personal_regression import (  # noqa: E402
     MAX_MAPPINGS,
     MAX_QUARANTINED,
     PersonalRegressionLab,
+)
+from shadow_candidate_gate import (  # noqa: E402
+    CandidateDisposition,
+    CandidateKind,
+    CandidateShadowReceipt,
+    ShadowCandidateGate,
+    ShadowRegressionCase,
 )
 
 
@@ -168,6 +177,17 @@ class PersonalRegressionLabTests(unittest.TestCase):
             lab.apply("Gwen", app="com.openai.codex"), "Gwen")
         self.assertEqual(len(lab.quarantined), 1)
 
+    def test_candidate_is_shadowed_against_unrelated_private_cases(self):
+        lab = PersonalRegressionLab()
+        lab.record_correction("Gwen", "Qwen")
+        lab.record_correction("Keep Gwen here", "Keep Gwen here")
+
+        result = lab.propose("Gwen", "Qwen")
+
+        self.assertFalse(result.promoted)
+        self.assertIn("1 regressions", result.reasons[0])
+        self.assertEqual(lab.apply("Gwen"), "Gwen")
+
     def test_promoted_mappings_apply_in_one_non_recursive_pass(self):
         lab = PersonalRegressionLab()
         lab.record_correction("Gwen", "Qwen")
@@ -234,6 +254,108 @@ class PersonalRegressionLabTests(unittest.TestCase):
         self.assertEqual(len(quarantine.quarantined), MAX_QUARANTINED)
         self.assertFalse(any(
             item.heard == "q-0" for item in quarantine.quarantined))
+
+
+class ShadowCandidateGateTests(unittest.TestCase):
+    def cases(self):
+        return (
+            ShadowRegressionCase(
+                "case-one", "Gwen", "Qwen", "com.openai.codex"),
+            ShadowRegressionCase(
+                "case-two", "Keep this", "Keep this", None),
+        )
+
+    def test_each_candidate_kind_promotes_only_after_clean_improvement(self):
+        for kind in CandidateKind:
+            with self.subTest(kind=kind):
+                activated = []
+                receipt = ShadowCandidateGate().attempt(
+                    f"candidate-{kind.value.replace('_', '-')}",
+                    kind,
+                    self.cases(),
+                    lambda text, _app: text,
+                    lambda text, _app: "Qwen" if text == "Gwen" else text,
+                    lambda: activated.append(True) or True,
+                )
+                self.assertEqual(
+                    receipt.disposition, CandidateDisposition.PROMOTED)
+                self.assertTrue(receipt.activated)
+                self.assertEqual(receipt.improvement_count, 1)
+                self.assertEqual(receipt.regression_count, 0)
+                self.assertEqual(activated, [True])
+
+    def test_regression_error_and_no_gain_never_call_activation(self):
+        activated = []
+        regressed = ShadowCandidateGate().attempt(
+            "candidate-regression",
+            CandidateKind.PROMPT,
+            self.cases(),
+            lambda text, _app: text,
+            lambda text, _app: "wrong",
+            lambda: activated.append(True) or True,
+        )
+        no_gain = ShadowCandidateGate().attempt(
+            "candidate-no-gain",
+            CandidateKind.MODEL,
+            self.cases(),
+            lambda text, _app: text,
+            lambda text, _app: text,
+            lambda: activated.append(True) or True,
+        )
+
+        self.assertEqual(
+            regressed.disposition, CandidateDisposition.QUARANTINED)
+        self.assertGreater(regressed.regression_count, 0)
+        self.assertEqual(
+            no_gain.disposition,
+            CandidateDisposition.INSUFFICIENT_EVIDENCE)
+        self.assertEqual(activated, [])
+
+    def test_receipt_is_content_free_closed_and_candidate_is_idempotent(self):
+        gate = ShadowCandidateGate()
+        activated = []
+        first = gate.attempt(
+            "candidate-private",
+            CandidateKind.DICTIONARY,
+            self.cases(),
+            lambda text, _app: text,
+            lambda text, _app: "Qwen" if text == "Gwen" else text,
+            lambda: activated.append(True) or True,
+        )
+        second = gate.attempt(
+            "candidate-private",
+            CandidateKind.DICTIONARY,
+            self.cases(),
+            lambda *_args: self.fail("duplicate must not evaluate"),
+            lambda *_args: self.fail("duplicate must not evaluate"),
+            lambda: self.fail("duplicate must not activate"),
+        )
+
+        self.assertIs(first, second)
+        self.assertEqual(activated, [True])
+        self.assertEqual(
+            {field.name for field in fields(CandidateShadowReceipt)},
+            {
+                "schema_version", "candidate_id", "kind", "disposition",
+                "case_count", "improvement_count", "regression_count",
+                "unchanged_count", "error_count", "activation_attempted",
+                "activated",
+            },
+        )
+        encoded = json.dumps(first.__dict__ if hasattr(first, "__dict__")
+                             else {
+                                 field.name: getattr(first, field.name).value
+                                 if hasattr(getattr(first, field.name), "value")
+                                 else getattr(first, field.name)
+                                 for field in fields(first)
+                             })
+        self.assertNotIn("Gwen", encoded)
+        self.assertNotIn("Qwen", encoded)
+        self.assertNotIn("Gwen", repr(self.cases()[0]))
+        source = inspect.getsource(__import__("shadow_candidate_gate")).lower()
+        for forbidden in ("open(", "requests", "subprocess", "socket",
+                          "urllib", "import dictate"):
+            self.assertNotIn(forbidden, source)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,6 @@
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -12,6 +14,14 @@ from delayed_cleanup_merge import (
     DelayedMergeReason,
     DestinationSnapshot,
     merge_delayed_cleanup,
+)
+from delayed_cleanup_activation import (
+    PHYSICAL_SOURCE,
+    SCENARIOS,
+    SURFACES,
+    evaluate_activation,
+    validate_activation_receipt,
+    write_activation_receipt,
 )
 
 
@@ -344,6 +354,123 @@ class DelayedCleanupTransactionTests(unittest.TestCase):
         self.assertEqual(
             apply_error.outcome, DelayedApplyOutcome.ADAPTER_EXCEPTION)
         self.assertFalse(apply_error.applied)
+
+
+class DelayedCleanupActivationTests(unittest.TestCase):
+    def records(self):
+        surfaces = sorted(SURFACES)
+        scenarios = sorted(SCENARIOS)
+        records = []
+        for index in range(60):
+            scenario = scenarios[index % len(scenarios)]
+            expected = "applied" if scenario in {
+                "unchanged", "edit-elsewhere"} else (
+                "proposal_in_flight" if scenario == "duplicate-callback"
+                else "focus_drift" if scenario == "focus-drift"
+                else "no_safe_changes"
+            )
+            records.append({
+                "id": f"physical-{index:03d}",
+                "source": PHYSICAL_SOURCE,
+                "surface": surfaces[index % len(surfaces)],
+                "scenario": scenario,
+                "expected_outcome": expected,
+                "actual_outcome": expected,
+                "wrong_target_write": False,
+                "user_edit_overwritten": False,
+                "selection_disrupted": False,
+                "duplicate_write": False,
+                "apply_ms": 25 + index % 10,
+            })
+        return records
+
+    def test_balanced_reviewed_physical_evidence_activates(self):
+        receipt = evaluate_activation(
+            self.records(), manual_reviewed=True)
+
+        self.assertTrue(receipt["active"])
+        self.assertEqual(receipt["reason"], "physical-evidence-passed")
+        self.assertTrue(validate_activation_receipt(receipt))
+        self.assertEqual(receipt["case_count"], 60)
+        self.assertEqual(
+            receipt["applied_count"] + receipt["rejected_count"], 60)
+
+    def test_any_safety_fault_or_missing_review_fails_closed(self):
+        for field, reason in (
+            ("wrong_target_write", "wrong-target-write"),
+            ("user_edit_overwritten", "user-edit-overwrite"),
+            ("selection_disrupted", "selection-disruption"),
+            ("duplicate_write", "duplicate-write"),
+        ):
+            with self.subTest(field=field):
+                records = self.records()
+                records[0][field] = True
+                receipt = evaluate_activation(
+                    records, manual_reviewed=True)
+                self.assertFalse(receipt["active"])
+                self.assertEqual(receipt["reason"], reason)
+                self.assertFalse(validate_activation_receipt(receipt))
+        unreviewed = evaluate_activation(
+            self.records(), manual_reviewed=False)
+        self.assertEqual(unreviewed["reason"], "manual-review-required")
+        self.assertFalse(validate_activation_receipt(unreviewed))
+
+    def test_schema_is_closed_content_free_and_rejects_mixed_evidence(self):
+        records = self.records()
+        with self.assertRaisesRegex(ValueError, "physical"):
+            evaluate_activation(
+                [{**records[0], "source": "synthetic"}, *records[1:]],
+                manual_reviewed=True,
+            )
+        with self.assertRaisesRegex(ValueError, "closed"):
+            evaluate_activation(
+                [{**records[0], "transcript": "private"}, *records[1:]],
+                manual_reviewed=True,
+            )
+        receipt = evaluate_activation(records, manual_reviewed=True)
+        encoded = json.dumps(receipt, sort_keys=True)
+        self.assertNotIn("transcript", encoded)
+        self.assertNotIn("destination", encoded)
+        self.assertFalse(validate_activation_receipt({
+            **receipt, "extra": "field"}))
+
+    def test_boolean_counts_and_expanded_count_maps_fail_closed(self):
+        receipt = evaluate_activation(
+            self.records(), manual_reviewed=True)
+        for key in (
+                "case_count", "applied_count", "rejected_count",
+                "outcome_mismatches", "wrong_target_writes",
+                "user_edit_overwrites", "selection_disruptions",
+                "duplicate_writes"):
+            with self.subTest(key=key):
+                malformed = dict(receipt)
+                malformed[key] = True
+                self.assertFalse(validate_activation_receipt(malformed))
+        for key in ("surface_counts", "scenario_counts"):
+            with self.subTest(key=key):
+                malformed = dict(receipt)
+                malformed[key] = dict(receipt[key], extra=10)
+                self.assertFalse(validate_activation_receipt(malformed))
+
+    def test_passing_receipt_is_written_atomically_with_owner_only_mode(self):
+        receipt = evaluate_activation(
+            self.records(), manual_reviewed=True)
+        with self.subTest("passing"):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "activation.json"
+                write_activation_receipt(path, receipt)
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(
+                    json.loads(path.read_text(encoding="utf-8")),
+                    receipt,
+                )
+                self.assertEqual(
+                    list(path.parent.glob(f".{path.name}.*")), [])
+        with self.assertRaisesRegex(ValueError, "passing"):
+            write_activation_receipt(
+                Path("must-not-exist.json"),
+                {**receipt, "active": False},
+            )
 
 
 if __name__ == "__main__":

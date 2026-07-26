@@ -377,6 +377,16 @@ from acoustic_calibration_activation import (  # noqa: E402
 )
 from acoustic_time_machine import AcousticTimeMachine  # noqa: E402
 from cleanup_circuit_breaker import CleanupCircuitBreaker  # noqa: E402
+from delayed_cleanup_activation import (  # noqa: E402
+    validate_activation_receipt as validate_delayed_cleanup_activation,
+)
+from delayed_cleanup_merge import (  # noqa: E402
+    DelayedCleanupTransactionAdapter,
+)
+from macos_delayed_cleanup_destination import (  # noqa: E402
+    MacDestinationStateAdapter,
+    SystemMacDestinationStateReader,
+)
 from macos_email_compose import MacEmailComposeAdapter  # noqa: E402
 from macos_voice_draft_clipboard import (  # noqa: E402
     MacVoiceDraftClipboardAdapter,
@@ -571,6 +581,7 @@ ACOUSTIC_CALIBRATION_ACTIVATION_FILE = (
     HERE / "acoustic_calibration_activation.json")
 VOICE_INBOX_FILE = HERE / "voice_inbox.json"
 DEMONSTRATION_DRAFTS_FILE = HERE / "demonstrations.json"
+DELAYED_CLEANUP_ACTIVATION_FILE = HERE / "delayed_cleanup_activation.json"
 
 MIN_SECONDS = 0.4
 TAIL_SECONDS = 0.30          # mic keeps running after release (usually free)
@@ -1061,6 +1072,16 @@ PIPELINE_STATE = {
     "last_word_count": None,
     "last_insertion_state": "legacy",
     "cleanup_status": "Checking",
+    "last_delayed_cleanup_outcome": "not_scheduled",
+    "last_delayed_cleanup_applied": 0,
+    "last_delayed_cleanup_rejected": 0,
+}
+DELAYED_CLEANUP_TRANSACTIONS = DelayedCleanupTransactionAdapter()
+DELAYED_CLEANUP_STATE = {
+    "active": False,
+    "status": "not_loaded",
+    "generation": 0,
+    "lock": threading.Lock(),
 }
 
 # The exact text of the most recent verified insertion, retained only so an
@@ -1432,6 +1453,40 @@ def load_preferences():
         ACOUSTIC_TIME_MACHINE.enable()
     else:
         ACOUSTIC_TIME_MACHINE.disable()
+
+
+def load_delayed_cleanup_activation(
+        path: Path = DELAYED_CLEANUP_ACTIVATION_FILE) -> bool:
+    """Load one strict, content-free physical-evidence receipt."""
+    status = "missing"
+    active = False
+    if IS_MACOS and path.exists():
+        try:
+            info = path.lstat()
+            if (not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600):
+                status = "unsafe_permissions"
+            else:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                active = validate_delayed_cleanup_activation(payload)
+                status = "active" if active else "invalid"
+        except (OSError, ValueError, json.JSONDecodeError):
+            status = "invalid"
+    elif not IS_MACOS:
+        status = "unsupported_platform"
+    with DELAYED_CLEANUP_STATE["lock"]:
+        DELAYED_CLEANUP_STATE["active"] = active
+        DELAYED_CLEANUP_STATE["status"] = status
+    return active
+
+
+def delayed_cleanup_activation_status() -> dict:
+    with DELAYED_CLEANUP_STATE["lock"]:
+        return {
+            "active": bool(DELAYED_CLEANUP_STATE["active"]),
+            "status": str(DELAYED_CLEANUP_STATE["status"]),
+        }
 
 
 def save_preferences():
@@ -5089,6 +5144,15 @@ def runtime_status_snapshot() -> dict:
             "last_context_influence"],
         "last_consequence": consequence_state_snapshot(),
         "last_context_firewall": context_firewall_state_snapshot(),
+        "delayed_cleanup": {
+            **delayed_cleanup_activation_status(),
+            "last_outcome": PIPELINE_STATE[
+                "last_delayed_cleanup_outcome"],
+            "last_applied": PIPELINE_STATE[
+                "last_delayed_cleanup_applied"],
+            "last_rejected": PIPELINE_STATE[
+                "last_delayed_cleanup_rejected"],
+        },
         "prefers_reduced_motion": mac_prefers_reduced_motion(),
         "words_today": words,
         "minutes_saved": saved,
@@ -8576,6 +8640,138 @@ def llm_clean(text: str, tone: str) -> str:
     return llm_clean_with_edits(text, tone)[0]
 
 
+def build_delayed_cleanup_proposal(
+        compiled: str,
+        tone_txt: str,
+        voice_ir: VoiceIR,
+        *,
+        continuing: bool,
+        context_tail: str,
+        context_text: str | None,
+        tone_key: str,
+        snippet_restore: dict[str, str],
+) -> str | None:
+    """Build one proof-checked capture proposal after initial insertion."""
+    candidate, semantic_edits = llm_clean_with_edits(
+        compiled, tone_txt, "capture", None)
+    proof = VOICE_COMPILER.verify_edits(
+        compiled,
+        (EditProposal(edit.kind, edit.before, edit.after)
+         for edit in semantic_edits),
+        voice_ir.context.candidates,
+        mode="capture",
+    )
+    if proof.text != candidate:
+        return None
+    text = quick_clean(
+        proof.text, continuing=continuing)
+    if tone_key == "casual":
+        text = strip_casual_period(text)
+    text = apply_vocabulary_casing(text)
+    if continuing and text:
+        tail40 = context_tail[-40:].lower()
+        if tail40 and text.lower().startswith(tail40):
+            text = text[len(tail40):].lstrip()
+        if (context_text and not context_text[-1].isspace()
+                and text[:1] not in ",.;:!?…"):
+            text = " " + text
+    if snippet_restore:
+        text = _restore_snippet_sentinels(text, snippet_restore)
+    return text
+
+
+def _run_delayed_cleanup(
+        generation: int,
+        proposal_id: str,
+        original: str,
+        compiled: str,
+        tone_txt: str,
+        voice_ir: VoiceIR,
+        continuing: bool,
+        context_tail: str,
+        context_text: str | None,
+        tone_key: str,
+        snippet_restore: dict[str, str],
+) -> None:
+    """Finish cleanup and conditionally replace only an unchanged destination."""
+    outcome = "proposal_failed"
+    applied_count = rejected_count = 0
+    try:
+        proposal = build_delayed_cleanup_proposal(
+            compiled,
+            tone_txt,
+            voice_ir,
+            continuing=continuing,
+            context_tail=context_tail,
+            context_text=context_text,
+            tone_key=tone_key,
+            snippet_restore=snippet_restore,
+        )
+        if proposal is not None:
+            destination = MacDestinationStateAdapter(
+                SystemMacDestinationStateReader())
+            receipt = DELAYED_CLEANUP_TRANSACTIONS.apply(
+                proposal_id,
+                original,
+                proposal,
+                lambda: destination.capture().snapshot,
+                destination.apply_if_unchanged,
+            )
+            outcome = receipt.outcome.value
+            applied_count = receipt.merge_applied_count
+            rejected_count = receipt.merge_rejected_count
+    except Exception:
+        outcome = "adapter_exception"
+    with DELAYED_CLEANUP_STATE["lock"]:
+        if generation != DELAYED_CLEANUP_STATE["generation"]:
+            return
+        PIPELINE_STATE["last_delayed_cleanup_outcome"] = outcome
+        PIPELINE_STATE["last_delayed_cleanup_applied"] = applied_count
+        PIPELINE_STATE["last_delayed_cleanup_rejected"] = rejected_count
+    print("[delayed-cleanup] "
+          f"{outcome}; {applied_count} applied, {rejected_count} held")
+
+
+def schedule_delayed_cleanup(
+        proposal_id: str,
+        original: str,
+        compiled: str,
+        tone_txt: str,
+        voice_ir: VoiceIR,
+        *,
+        continuing: bool,
+        context_tail: str,
+        context_text: str | None,
+        tone_key: str,
+        snippet_restore: dict[str, str],
+        starter=None,
+) -> bool:
+    """Start one daemon proposal only after a verified initial insertion."""
+    with DELAYED_CLEANUP_STATE["lock"]:
+        if not DELAYED_CLEANUP_STATE["active"]:
+            return False
+        DELAYED_CLEANUP_STATE["generation"] += 1
+        generation = DELAYED_CLEANUP_STATE["generation"]
+        PIPELINE_STATE["last_delayed_cleanup_outcome"] = "scheduled"
+        PIPELINE_STATE["last_delayed_cleanup_applied"] = 0
+        PIPELINE_STATE["last_delayed_cleanup_rejected"] = 0
+    args = (
+        generation, proposal_id, original, compiled, tone_txt, voice_ir,
+        continuing, context_tail, context_text, tone_key,
+        dict(snippet_restore),
+    )
+    if starter is not None:
+        starter(_run_delayed_cleanup, args)
+    else:
+        threading.Thread(
+            target=_run_delayed_cleanup,
+            args=args,
+            name="whisper-face-delayed-cleanup",
+            daemon=True,
+        ).start()
+    return True
+
+
 # ------------------------- phone endpoint -------------------------
 
 
@@ -9683,6 +9879,11 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                     and rec.mode in {"capture", "code"})
         needs_llm = needs_llm_cleanup(
             compiled, tone_override, verbatim, rec.mode, plan)
+        delayed_cleanup_requested = bool(
+            needs_llm
+            and rec.mode == "capture"
+            and delayed_cleanup_activation_status()["active"]
+        )
 
         mode_context = None
         press_focus = rec.focus_at_press
@@ -9724,7 +9925,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         semantic_edits = []
         proof_edits = ()
         proof_reconstruction_match = True
-        if needs_llm:
+        if needs_llm and not delayed_cleanup_requested:
             candidate, semantic_edits = llm_clean_with_edits(
                 compiled, tone_txt, rec.mode, mode_context)
             if rec.mode in {"capture", "code"}:
@@ -9848,14 +10049,29 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                   f"({integrity_receipt.reason.value}); text saved in Voice "
                   "Outbox")
             play("Funk")
-        if learn_correction and verified:
+        delayed_cleanup_scheduled = False
+        if verified and delayed_cleanup_requested:
+            delayed_cleanup_scheduled = schedule_delayed_cleanup(
+                event_id,
+                text,
+                compiled,
+                tone_txt,
+                voice_ir,
+                continuing=continuing,
+                context_tail=stripped_ctx,
+                context_text=ctx,
+                tone_key=tone_key,
+                snippet_restore=snippet_restore,
+            )
+        if learn_correction and verified and not delayed_cleanup_scheduled:
             threading.Thread(
                 target=learn_from_corrections,
                 args=(receipt,),
                 daemon=True,
             ).start()
         mark = "*" if tone_override else ""
-        path = f"llm/{tone_key}{mark}" if needs_llm \
+        path = f"delayed/{tone_key}{mark}" if delayed_cleanup_scheduled \
+            else f"llm/{tone_key}{mark}" if needs_llm \
             else f"fast/verbatim{mark}" if verbatim else "fast"
         if rec.mode != "capture":
             path = f"{rec.mode}/{path}"
@@ -10009,6 +10225,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 if integrity_receipt is not None else "unsupported_field"),
             "paste_attempted": attempted,
             "insertion_verified": verified,
+            "delayed_cleanup_scheduled": delayed_cleanup_scheduled,
         }, event_id=event_id)
     finally:
         if rec.recording:
@@ -10290,6 +10507,7 @@ def main():
     lock_fd = ensure_single_instance()      # noqa: F841 — held for lifetime
     load_app_tones()
     load_preferences()
+    load_delayed_cleanup_activation()
     refresh_acoustic_calibration()
     refresh_selective_relisten_verifier()
 

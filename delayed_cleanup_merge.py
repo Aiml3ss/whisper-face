@@ -105,11 +105,13 @@ class DelayedCleanupTransactionAdapter:
     """Apply a delayed merge through an injected compare-and-swap boundary.
 
     ``read_snapshot`` must read the current focused destination without using
-    the clipboard. ``apply_if_unchanged`` must atomically verify every field
-    in the supplied snapshot before applying the replacement, and must leave
-    the destination unchanged when it returns ``False`` or raises. This class
-    does not read or write any application itself and makes no live-runtime
-    claim.
+    the clipboard. ``apply_if_unchanged`` must perform the final exact
+    verification of every field in the supplied snapshot immediately before
+    applying the replacement, and must leave the destination unchanged when it
+    returns ``False`` or raises. A native atomic compare-and-swap is preferred;
+    adapters for APIs without that primitive must disclose and physically test
+    the residual scheduling window. This class does not read or write any
+    application itself and makes no live-runtime claim.
 
     Proposal IDs are single-use for the lifetime of this adapter. A completed
     duplicate returns the original receipt without invoking either callback;
@@ -221,8 +223,8 @@ class DelayedCleanupTransactionAdapter:
                 DelayedApplyOutcome.TEXT_DRIFT, False, **counts)
 
         # This injected callback is the only apply path. It receives the fresh
-        # snapshot so its implementation can atomically compare identity,
-        # revision, and text before writing.
+        # snapshot so its implementation can make its final exact comparison
+        # of identity, revision, and text immediately before writing.
         applied = apply_if_unchanged(current, merged.merged_text)
         if applied is not True:
             return DelayedApplyReceipt(

@@ -157,7 +157,9 @@ $Required = @(
     "process_verifier.py", "prewarmed_verifier.py",
     "whisper_verifier_adapter.py", "relisten_activation.py",
     "insertion_integrity.py", "personal_regression.py",
-    "cleanup_circuit_breaker.py",
+    "shadow_candidate_gate.py", "cleanup_circuit_breaker.py",
+    "delayed_cleanup_activation.py", "delayed_cleanup_merge.py",
+    "macos_delayed_cleanup_destination.py",
     "model_wallet.py", "model_wallet_shadow.py", "model_readiness_evidence.py",
     "acoustic_keyword_memory.py", "acoustic_keyword_activation.py",
     "benchmark_acoustic_keyword_activation.py", "acoustic_time_machine.py",
@@ -432,6 +434,7 @@ foreach ($DestinationName in $PrivateTemplates.Keys) {
 }
 foreach ($PrivateStateName in @(
     "voice_inbox.json", "demonstrations.json",
+    "delayed_cleanup_activation.json",
     "acoustic_keyword_activation.json", "acoustic_calibration_activation.json",
     "relisten_activation.json"
 )) {
