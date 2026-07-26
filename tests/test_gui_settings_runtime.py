@@ -6,6 +6,7 @@
 
 import ast
 import json
+import math
 import os
 import stat
 import sys
@@ -442,6 +443,57 @@ class SettingsSnapshotTests(unittest.TestCase):
             self.assertEqual(result["counts"], {"Private Project": 4})
             self.assertEqual(dictionary.read_bytes(), before_dictionary)
             self.assertEqual(refreshed, [True])
+
+
+class ResultEvidenceRuntimeTests(unittest.TestCase):
+    def test_explicit_snapshot_is_bounded_and_closed(self):
+        ns = load_definitions(
+            "inspect_last_result_evidence",
+            extra={"math": math},
+        )
+        ns["PIPELINE_STATE"] = {
+            "last_result_evidence": {
+                "alternatives": ["private alternative", "", 7],
+                "protected_anchors": ["Qwen", "Whisper Face"],
+                "proof_edits": [{
+                    "kind": "filler",
+                    "before": "um",
+                    "after": "",
+                    "accepted": True,
+                    "reason": "allowlisted filler",
+                }, {
+                    "kind": "malformed",
+                    "before": "ignored",
+                    "after": "ignored",
+                    "accepted": "yes",
+                    "reason": "",
+                }],
+                "timings_ms": {
+                    "release": 842.25,
+                    "asr": 400,
+                    "private_stage": 999,
+                    "cleanup": float("nan"),
+                },
+            },
+            "transcript": "must not escape",
+        }
+
+        snapshot = ns["inspect_last_result_evidence"]()
+
+        self.assertEqual(set(snapshot), {
+            "schema_version", "kind", "alternatives",
+            "protected_anchors", "proof_edits", "timings_ms",
+        })
+        self.assertEqual(snapshot["alternatives"], ["private alternative"])
+        self.assertEqual(
+            snapshot["protected_anchors"], ["Qwen", "Whisper Face"])
+        self.assertEqual(len(snapshot["proof_edits"]), 1)
+        self.assertEqual(snapshot["timings_ms"], {
+            "release": 842.2,
+            "asr": 400.0,
+        })
+        self.assertNotIn("transcript", snapshot)
+        self.assertNotIn("private_stage", snapshot["timings_ms"])
 
 
 if __name__ == "__main__":
