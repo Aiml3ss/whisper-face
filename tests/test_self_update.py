@@ -37,7 +37,9 @@ class FakeRunner:
 
     def __init__(self, *, head="", upstream=None, upstream_ref="@{u}",
                  status="", fetch_rc=0, count=0,
-                 checkout_rc=0, installer_rcs=None):
+                 checkout_rc=0, installer_rcs=None,
+                 branch="", branch_sha=None,
+                 installer_stdout="", installer_stderr=""):
         self.head = head
         self.upstream = upstream
         self.upstream_ref = upstream_ref
@@ -46,6 +48,13 @@ class FakeRunner:
         self.count = count
         self.checkout_rc = checkout_rc
         self.installer_rcs = list(installer_rcs or [])
+        # "" models a detached HEAD, which is what `symbolic-ref` reports by
+        # refusing. `branch_sha` defaults to HEAD: an update moves HEAD alone,
+        # so the branch it started on still points at the pre-update commit.
+        self.branch = branch
+        self.branch_sha = head if branch_sha is None else branch_sha
+        self.installer_stdout = installer_stdout
+        self.installer_stderr = installer_stderr
         self.calls = []
         self.checkouts = []
         self.installer_runs = 0
@@ -61,7 +70,8 @@ class FakeRunner:
         if list(cmd) == ["./Install.command"]:
             self.installer_runs += 1
             rc = self.installer_rcs.pop(0) if self.installer_rcs else 0
-            return self._cp(cmd, rc)
+            return self._cp(cmd, rc, self.installer_stdout,
+                            self.installer_stderr)
         # Everything else is `git -C <checkout> ...`.
         assert list(cmd[:2]) == ["git", "-C"], cmd
         git = list(cmd[3:])
@@ -72,7 +82,12 @@ class FakeRunner:
                     else self._cp(cmd, 1)
             if self.upstream is not None and ref == self.upstream_ref:
                 return self._cp(cmd, 0, self.upstream + "\n")
+            if self.branch and ref == self.branch:
+                return self._cp(cmd, 0, self.branch_sha + "\n")
             return self._cp(cmd, 1)  # upstream ref does not resolve
+        if git == ["symbolic-ref", "--short", "--quiet", "HEAD"]:
+            return self._cp(cmd, 0, self.branch + "\n") if self.branch \
+                else self._cp(cmd, 1)  # detached HEAD
         if git == ["status", "--porcelain"]:
             return self._cp(cmd, 0, self.status)
         if git[:2] == ["fetch", "--quiet"]:
@@ -156,11 +171,14 @@ class ApplyUpdateTests(unittest.TestCase):
         self.assertEqual(outcome["to"], LATEST)
         self.assertEqual(runner.checkouts, [LATEST])
         self.assertEqual(runner.installer_runs, 1)
-        # Ordered: record HEAD, checkout target, run installer.
+        # Ordered: record HEAD, record the branch it is on so a rollback can
+        # return to it, checkout target, run installer.
         self.assertEqual(runner.calls[0][3:], ("rev-parse", "--verify",
                                                "--quiet", "HEAD"))
-        self.assertEqual(runner.calls[1][3:], ("checkout", "--quiet", LATEST))
-        self.assertEqual(runner.calls[2], ("./Install.command",))
+        self.assertEqual(runner.calls[1][3:], ("symbolic-ref", "--short",
+                                               "--quiet", "HEAD"))
+        self.assertEqual(runner.calls[2][3:], ("checkout", "--quiet", LATEST))
+        self.assertEqual(runner.calls[3], ("./Install.command",))
 
     def test_installer_failure_rolls_back_and_never_ends_broken(self):
         # Forward install fails; rollback re-install succeeds.
@@ -174,6 +192,50 @@ class ApplyUpdateTests(unittest.TestCase):
         self.assertEqual(runner.checkouts, [LATEST, CURRENT])
         self.assertEqual(runner.checkouts[-1], CURRENT)  # never left broken
         self.assertEqual(runner.installer_runs, 2)
+
+    def test_rollback_restores_the_branch_not_a_detached_sha(self):
+        # Regression: rolling back to the bare sha left the checkout on a
+        # detached HEAD, so afterwards `git pull` and upstream tracking were
+        # gone and the user's tree was silently off its branch.
+        runner = FakeRunner(head=CURRENT, branch="main",
+                            installer_rcs=[1, 0])
+        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner)
+        self.assertEqual(outcome["status"], "rolled_back")
+        self.assertEqual(runner.checkouts, [LATEST, "main"])
+
+    def test_rollback_uses_the_sha_when_head_was_already_detached(self):
+        # No branch to go back to: the sha remains the only correct target.
+        runner = FakeRunner(head=CURRENT, branch="", installer_rcs=[1, 0])
+        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner)
+        self.assertEqual(outcome["status"], "rolled_back")
+        self.assertEqual(runner.checkouts, [LATEST, CURRENT])
+
+    def test_rollback_uses_the_sha_when_the_branch_has_moved(self):
+        # The branch no longer points at the pre-update commit, so restoring it
+        # would roll back to the wrong revision. Prefer the recorded sha.
+        runner = FakeRunner(head=CURRENT, branch="main", branch_sha=LATEST,
+                            installer_rcs=[1, 0])
+        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner)
+        self.assertEqual(outcome["status"], "rolled_back")
+        self.assertEqual(runner.checkouts, [LATEST, CURRENT])
+
+    def test_rollback_error_carries_the_installers_own_reason(self):
+        # Regression: the error was just "exit 1", so every rollback looked
+        # identical and no failure could ever be diagnosed from the result.
+        runner = FakeRunner(
+            head=CURRENT, installer_rcs=[1, 0],
+            installer_stderr="!! Homebrew is not installed and could not be "
+                             "installed without a terminal")
+        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner)
+        self.assertEqual(outcome["status"], "rolled_back")
+        self.assertIn("exit 1", outcome["error"])
+        self.assertIn("Homebrew is not installed", outcome["error"])
+
+    def test_installer_error_detail_stays_bounded(self):
+        runner = FakeRunner(head=CURRENT, installer_rcs=[1, 0],
+                            installer_stderr="x" * 5000)
+        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner)
+        self.assertLess(len(outcome["error"]), 800)
 
     def test_checkout_failure_stays_on_previous(self):
         # git refuses the checkout: nothing moved, installer must never run.

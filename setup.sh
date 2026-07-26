@@ -399,6 +399,26 @@ verify_install() {
     fi
 }
 
+# Adopt an already-installed Homebrew that is merely absent from PATH, before
+# anything looks for brew-installed tools. The self-updater runs this installer
+# from a detached launchd job, and launchd hands such a job the minimal PATH
+# (/usr/bin:/bin:/usr/sbin:/sbin) rather than the login PATH. Without this,
+# `command -v brew` misses an installed Homebrew, setup tries to reinstall it
+# with no TTY and no sudo, that installer aborts in about a second, and `set -e`
+# ends the run before the recovery below could ever be reached -- which is what
+# turned every background self-update into an unexplained rollback.
+adopt_installed_homebrew() {
+    local candidate
+    for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+        [ -x "$candidate" ] || continue
+        eval "$("$candidate" shellenv)"
+        command -v brew >/dev/null 2>&1 && return 0
+    done
+    return 1
+}
+
+command -v brew >/dev/null 2>&1 || adopt_installed_homebrew || true
+
 if [ "$VERIFY_ONLY" -eq 1 ]; then
     verify_install
     exit 0
@@ -441,11 +461,13 @@ provision_private_log "$ollama_log"
 # --- Homebrew and native dependencies --------------------------------------
 if ! command -v brew >/dev/null 2>&1; then
     step "installing Homebrew (its official installer may request a password)"
+    # Never let a failed bootstrap die silently under `set -e`: the exit code
+    # alone stranded the self-updater with an unexplained rollback.
     /bin/bash -c "$(curl -fsSL \
-        https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-    [ -x /opt/homebrew/bin/brew ] \
-        || fail "Homebrew installed but /opt/homebrew/bin/brew was not found"
-    eval "$(/opt/homebrew/bin/brew shellenv)"
+        https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
+        || fail "the Homebrew installer did not complete (it needs a terminal and an administrator password); open Terminal, run ./setup.sh once to finish it, then retry"
+    adopt_installed_homebrew \
+        || fail "Homebrew installed but its brew binary was not found"
 fi
 
 BREW="$(command -v brew)"
