@@ -608,7 +608,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.dialog.correction.privacy": "Stored locally: the corrected words, app scope, and counts only—never audio or surrounding transcript.",
         "settings.dialog.correction.privacy.snippet": "Stored locally: the snippet name, replacement, and edit count.",
         "settings.dialog.keywords.title": "Pronunciation keywords",
-        "settings.dialog.keywords.message": "These candidates come only from exact corrections you made. They do not affect recognition yet.",
+        "settings.dialog.keywords.message": "These candidates come only from exact corrections you made. Only separately reviewed physical evidence can grant bounded local-ASR prompt priority.",
         "settings.dialog.keywords.empty": "No correction-backed keyword candidates yet.",
         "settings.dialog.keywords.chooser.label": "Pronunciation keyword candidate",
         "settings.dialog.keywords.chooser.help": "Choose a pronunciation keyword to inspect, export, or forget.",

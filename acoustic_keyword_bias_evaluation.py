@@ -7,9 +7,10 @@ accepting audio, transcripts, surrounding text, application identifiers, or
 keyword text in an evidence record.  Returned receipts contain aggregate
 counts only and never echo the candidate keyword or case tokens.
 
-This module has no persistence, model, recognizer, runtime, or activation
-hook.  A ``keep`` verdict means only that a bounded offline candidate survived
-the evaluation policy; it cannot grant recognition authority.
+This module has no persistence, model, recognizer, or runtime hook.  A
+``keep`` verdict means only that a bounded offline candidate survived the
+evaluation policy; the separate activation layer still requires explicit
+manual review before granting bounded prompt priority.
 """
 
 from __future__ import annotations

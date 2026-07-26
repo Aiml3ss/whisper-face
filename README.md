@@ -175,14 +175,20 @@ are never Supporter-only features.
   transcript-free evidence. Synthetic evidence can never earn a keep receipt;
   at least 20 positive and 20 negative caller-attested physical cases must show
   at least three selection gains with no selection or candidate regressions.
-  Receipts contain aggregate counts only, distinguish synthetic from caller-
-  attested physical evidence, and have no runtime or recognition authority.
-- **Conservative acoustic calibration lab** — an offline policy consumes only
+  Receipts contain aggregate counts only and distinguish synthetic from caller-
+  attested physical evidence. `benchmark_acoustic_keyword_activation.py`
+  can grant one eligible term bounded local-ASR prompt priority only after
+  explicit manual review; missing, malformed, forgotten, or regressing
+  evidence has no recognition effect.
+- **Evidence-gated acoustic calibration** — an offline policy consumes only
   the existing closed numeric capture telemetry and emits bounded candidate
   gain, noise-gate, VAD, and end-silence settings. Nonfinite/clipped evidence
   is killed, ambiguous silence/noise/quiet speech or near-saturation headroom
-  stays insufficient, reverb is explicitly unavailable, and no recommendation
-  affects the runtime yet.
+  stays insufficient, and reverb is explicitly unavailable. The runtime
+  applies a candidate only from a private receipt built by
+  `benchmark_acoustic_calibration_activation.py` after 40 balanced physical
+  A/B cases, at least three improvements, zero regressions, and manual review.
+  See [Acoustic accuracy activation](docs/acoustic-accuracy-activation.md).
 - **Explicit Point-and-Speak action (Mac)** — from Diagnostics, enter a
   bounded target phrase for a read-only preview of the focused app. Whisper Face
   reads only bounded Accessibility names, roles, geometry, visibility,
@@ -526,6 +532,10 @@ drafts), and `demonstrations.json` (manually authored inert recipe steps).
 `acoustic_keyword_memory.json` stores bounded
 keyword candidates, hashed app scopes, and evidence digests without raw audio,
 surrounding context, or transcript history.
+`acoustic_keyword_activation.json` and
+`acoustic_calibration_activation.json` are private, content-minimized physical
+evidence receipts. They must travel with the matching machine state if the
+user intentionally migrates those activations.
 `benchmark_acoustic_keyword_bias.py` exercises the keyword-bias evaluator with
 constructed categorical fixtures only. Its physical-shaped fixtures test policy
 branches and are explicitly not physical recognition evidence or an activation

@@ -365,6 +365,16 @@ from insertion_integrity import (  # noqa: E402
 )
 from personal_regression import PersonalRegressionLab  # noqa: E402
 from acoustic_keyword_memory import AcousticKeywordMemory  # noqa: E402
+from acoustic_keyword_activation import (  # noqa: E402
+    ActivationError as AcousticKeywordActivationError,
+    active_keywords as active_acoustic_keywords,
+    clear_activations as clear_acoustic_keyword_activations,
+    remove_activation as remove_acoustic_keyword_activation,
+)
+from acoustic_calibration_activation import (  # noqa: E402
+    CalibrationSettings,
+    load_activation_receipt as load_acoustic_calibration_activation,
+)
 from acoustic_time_machine import AcousticTimeMachine  # noqa: E402
 from cleanup_circuit_breaker import CleanupCircuitBreaker  # noqa: E402
 from macos_email_compose import MacEmailComposeAdapter  # noqa: E402
@@ -555,6 +565,10 @@ DICTIONARY_FILE = HERE / "dictionary.txt"
 TRANSCRIPTS_FILE = HERE / "transcripts.jsonl"   # local-only usage log
 LEARNED_FILE = HERE / "learned.json"            # mined term counts
 ACOUSTIC_KEYWORD_MEMORY_FILE = HERE / "acoustic_keyword_memory.json"
+ACOUSTIC_KEYWORD_ACTIVATION_FILE = (
+    HERE / "acoustic_keyword_activation.json")
+ACOUSTIC_CALIBRATION_ACTIVATION_FILE = (
+    HERE / "acoustic_calibration_activation.json")
 VOICE_INBOX_FILE = HERE / "voice_inbox.json"
 DEMONSTRATION_DRAFTS_FILE = HERE / "demonstrations.json"
 
@@ -966,6 +980,7 @@ POINT_AND_SPEAK_TRANSACTIONS = PointAndSpeakTransactions()
 GLOSS = {
     "terms": [], "prompt": None, "fixes": {}, "confusions": {},
     "regression": PersonalRegressionLab(),
+    "active_keyword_hints": (),
     # Dictionary terms as protected cleanup anchors and a casefold->canonical
     # casing map, rebuilt alongside the prompt by refresh_glossary().
     "anchor_pack": ContextPack(), "vocabulary": {},
@@ -983,9 +998,13 @@ LAST_USE = {"t": 0.0}
 # the correction-observer threads.
 LEARN_LOCK = threading.Lock()
 
-# Acoustic keyword memory is inspection/persistence only.  Nothing on the
-# recognition, cleanup, or insertion path reads this lock or file.
+# Acoustic keyword files are read only while rebuilding the cached glossary.
+# Capture and final processing never touch this lock or persistent state.
 ACOUSTIC_KEYWORD_MEMORY_LOCK = threading.Lock()
+ACOUSTIC_CALIBRATION_STATE = {
+    "settings": None,
+    "status": "not-loaded",
+}
 
 # Serializes snippet edits learned by overlapping correction observers.
 SNIPPETS_LOCK = threading.Lock()
@@ -1216,6 +1235,61 @@ def normalize_face(value) -> str:
 
 def current_face() -> str:
     return normalize_face(PREFERENCES.get("face"))
+
+
+def refresh_acoustic_calibration() -> bool:
+    """Load one approved content-free calibration receipt at startup."""
+    activation = load_acoustic_calibration_activation(
+        ACOUSTIC_CALIBRATION_ACTIVATION_FILE)
+    ACOUSTIC_CALIBRATION_STATE["settings"] = activation.settings
+    ACOUSTIC_CALIBRATION_STATE["status"] = activation.reason
+    return activation.ready
+
+
+def acoustic_calibration_status_snapshot() -> dict:
+    settings = ACOUSTIC_CALIBRATION_STATE["settings"]
+    return {
+        "enabled": isinstance(settings, CalibrationSettings),
+        "status": ACOUSTIC_CALIBRATION_STATE["status"],
+        "controls": (
+            ("gain", "noise", "vad", "end-silence")
+            if isinstance(settings, CalibrationSettings) else ()
+        ),
+        "reverb": "unavailable",
+    }
+
+
+def calibrated_vad_threshold() -> float:
+    settings = ACOUSTIC_CALIBRATION_STATE["settings"]
+    return (
+        settings.vad_threshold
+        if isinstance(settings, CalibrationSettings)
+        else SILENCE_RMS
+    )
+
+
+def calibrated_end_silence_seconds() -> float:
+    settings = ACOUSTIC_CALIBRATION_STATE["settings"]
+    return (
+        settings.end_silence_ms / 1000.0
+        if isinstance(settings, CalibrationSettings)
+        else TAIL_SKIP_SILENCE
+    )
+
+
+def prepare_asr_audio(audio: np.ndarray) -> np.ndarray:
+    """Apply only receipt-authorized front-end controls; defaults are stable."""
+    settings = ACOUSTIC_CALIBRATION_STATE["settings"]
+    prepared = audio
+    gain_ceiling = 25.0
+    if isinstance(settings, CalibrationSettings):
+        prepared = np.where(
+            np.abs(audio) < settings.noise_gate, 0.0, audio)
+        gain_ceiling = settings.gain_ceiling
+    peak = float(np.max(np.abs(prepared))) if len(prepared) else 0.0
+    if 0.0 < peak < 0.25:
+        prepared = prepared * min(0.25 / peak, gain_ceiling)
+    return prepared
 
 
 def close_selective_relisten_verifier() -> None:
@@ -4372,7 +4446,7 @@ class Recorder:
         LEVELS.append(min(1.0, (rms * 14.0) ** 0.5))
         # Rolling ASR: once the current segment is long enough and the
         # speaker pauses solidly, ship it to the pool and keep recording.
-        if rms < SILENCE_RMS:
+        if rms < calibrated_vad_threshold():
             self.silent_samples += n
         else:
             self.silent_samples = 0
@@ -4549,13 +4623,18 @@ def acoustic_keyword_memory_status_snapshot() -> dict:
     """Return bounded aggregates only; keyword text stays out of status."""
     with ACOUSTIC_KEYWORD_MEMORY_LOCK:
         memory, storage_status = _load_acoustic_keyword_memory()
+        active, activation_status = active_acoustic_keywords(
+            ACOUSTIC_KEYWORD_ACTIVATION_FILE, memory)
     candidates = memory.candidates
     return {
         "storage_status": storage_status,
+        "activation_status": activation_status,
         "candidate_count": len(candidates),
         "eligible_count": sum(
             1 for candidate in candidates if candidate.eligible),
-        "recognition_effect": "none",
+        "active_count": len(active),
+        "recognition_effect": (
+            "prompt-priority" if active else "none"),
         "candidate_summaries": [
             {
                 "scope_hash": candidate.app_scope,
@@ -4615,7 +4694,15 @@ def forget_acoustic_keyword(keyword: str, *,
         if removed:
             atomic_write_text(
                 ACOUSTIC_KEYWORD_MEMORY_FILE, memory.dumps() + "\n")
-        return removed
+    if removed:
+        try:
+            remove_acoustic_keyword_activation(
+                ACOUSTIC_KEYWORD_ACTIVATION_FILE, keyword, app_scope)
+        except AcousticKeywordActivationError:
+            clear_acoustic_keyword_activations(
+                ACOUSTIC_KEYWORD_ACTIVATION_FILE)
+        refresh_glossary()
+    return removed
 
 
 def forget_all_acoustic_keywords() -> int:
@@ -4625,7 +4712,9 @@ def forget_all_acoustic_keywords() -> int:
         removed = memory.forget_all() if storage_status != "invalid" else 0
         atomic_write_text(
             ACOUSTIC_KEYWORD_MEMORY_FILE, memory.dumps() + "\n")
-        return removed
+    clear_acoustic_keyword_activations(ACOUSTIC_KEYWORD_ACTIVATION_FILE)
+    refresh_glossary()
+    return removed
 
 
 def copy_acoustic_keyword_memory_export() -> None:
@@ -4950,6 +5039,7 @@ def runtime_status_snapshot() -> dict:
         flight_state = "Off"
     outbox = INSERTION_COORDINATOR.recoverable()
     acoustic_keywords = acoustic_keyword_memory_status_snapshot()
+    acoustic_calibration = acoustic_calibration_status_snapshot()
     acoustic_replay = acoustic_time_machine_status_snapshot()
     selective_relisten = selective_relisten_status_snapshot()
     voice_object_inbox = voice_object_inbox_status()
@@ -5007,6 +5097,7 @@ def runtime_status_snapshot() -> dict:
         "regression_cases": len(lab.cases),
         "regression_quarantined": len(lab.quarantined),
         "acoustic_keyword_memory": acoustic_keywords,
+        "acoustic_calibration": acoustic_calibration,
         "privacy_summary": "Speech, cleanup, and learning stay on this Mac",
         "service_status": "Running" if bar is not None else "Starting",
         "microphone_status": AUDIO_POOL.readiness(),
@@ -5641,9 +5732,17 @@ def refresh_glossary():
         ContextCandidate(t, 3.5, "dictionary")
         for t in vocab_terms[:ANCHOR_MAX_TERMS]))
     vocabulary = {t.casefold(): t for t in vocab_terms}
+    with ACOUSTIC_KEYWORD_MEMORY_LOCK:
+        keyword_memory, keyword_storage_status = \
+            _load_acoustic_keyword_memory()
+        keyword_hints, _activation_status = active_acoustic_keywords(
+            ACOUSTIC_KEYWORD_ACTIVATION_FILE, keyword_memory)
+    if keyword_storage_status == "invalid":
+        keyword_hints = ()
 
     with GLOSS["lock"]:
         GLOSS["terms"] = terms
+        GLOSS["active_keyword_hints"] = keyword_hints
         GLOSS["anchor_pack"] = anchor_pack
         GLOSS["vocabulary"] = vocabulary
         # A complete sentence, not an open list: "Glossary: a, b," invites
@@ -6464,9 +6563,7 @@ def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
     # Whispered/quiet speech: lift the level into the range Whisper decodes
     # confidently. Gain is capped so the noise floor of true near-silence
     # (which the energy gate already rejects) isn't blown up to fake speech.
-    peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
-    if 0.0 < peak < 0.25:
-        audio = audio * min(0.25 / peak, 25.0)
+    audio = prepare_asr_audio(audio)
     if prompt is None:
         with GLOSS["lock"]:
             prompt = GLOSS["prompt"]
@@ -9107,7 +9204,7 @@ def apply_spoken_edit_command(recognized_raw: str, rec, bundle: str) -> bool:
 def release_should_wait_for_tail(rec: Recorder) -> bool:
     """Whether speech was still active at key release."""
     return bool(rec.voiced_since_cut) and (
-        rec.silent_samples < TAIL_SKIP_SILENCE * SAMPLE_RATE
+        rec.silent_samples < calibrated_end_silence_seconds() * SAMPLE_RATE
     )
 
 
@@ -10193,6 +10290,7 @@ def main():
     lock_fd = ensure_single_instance()      # noqa: F841 — held for lifetime
     load_app_tones()
     load_preferences()
+    refresh_acoustic_calibration()
     refresh_selective_relisten_verifier()
 
     terms = refresh_glossary()
@@ -10389,7 +10487,10 @@ def main():
                         ) if IS_MACOS else None
                     )
                     with GLOSS["lock"]:
-                        stable_terms = list(GLOSS["terms"])
+                        stable_terms = [
+                            *GLOSS["active_keyword_hints"],
+                            *GLOSS["terms"],
+                        ]
                     rec.prompt = recognition_prompt(
                         stable_terms, rec.context_terms,
                         GLOSSARY_MAX_TERMS, GLOSSARY_MAX_CHARS)

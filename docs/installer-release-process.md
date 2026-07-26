@@ -64,9 +64,11 @@ uv run tests/test_voice_input_protocol_transport.py
 uv run tests/test_macos_networkless_worker.py
 uv run tests/test_acoustic_keyword_memory.py
 uv run tests/test_acoustic_keyword_bias_evaluation.py
+uv run tests/test_acoustic_keyword_activation.py
 uv run tests/test_acoustic_time_machine.py
 uv run tests/test_acoustic_calibration.py
 uv run tests/test_benchmark_acoustic_calibration.py
+uv run tests/test_acoustic_calibration_activation.py
 uv run tests/test_delayed_cleanup_merge.py
 uv run tests/test_macos_delayed_cleanup_destination.py
 uv run tests/test_model_wallet.py
