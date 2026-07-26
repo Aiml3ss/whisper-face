@@ -144,7 +144,12 @@ def hud_presentation(
         f"Recognition {normalized:.0%}" if normalized is not None else "")
     clean_caption = " ".join(str(caption or "").split())
 
-    if mode == "processing":
+    if mode == "error":
+        eyebrow = "TRY AGAIN"
+        confidence_copy = ""
+        accent = "error"
+        phase = "Dictation needs another try"
+    elif mode == "processing":
         eyebrow = "TIDYING UP"
         accent = "accent"
         phase = "Processing dictation"

@@ -683,6 +683,7 @@ BEAK_MAX_DEG = 26.0          # spec: lower mandible max open
 LEVEL_SMOOTH = 0.35
 NUM_BARS = 16                # LEVELS history buffer length (not the display)
 FPS = 30.0
+DICTATION_ERROR_SECONDS = 2.5
 
 SIMPLE_FILLER_RE = re.compile(
     r"(?:,\s*)?\b(?:um+|uh+|erm|hmm)\b(?:\s*,)?", re.I)
@@ -1837,6 +1838,7 @@ DARK_EYE = (0.043, 0.231, 0.196)        # #0b3b32
 MOUTH = (0.024, 0.145, 0.122)           # #06251f
 MINT = FACE_CHIP_COLORS["owl"]           # #5eead4
 CATCH = (0.918, 1.000, 0.965)           # #eafff6
+CORAL = (1.000, 0.424, 0.353)           # recoverable error #ff6c5a
 # Every non-parrot, non-owl face renders through the shared front-facing
 # companion template. A style names three fills plus optional feature flags:
 #   ears     "pointed" (canine/feline) or "round" (bear family); default pointed
@@ -1902,7 +1904,7 @@ def hud_level_step(raw: float, current: float, mode: str,
     """Advance the HUD audio level, or freeze it completely at zero."""
     if reduce_motion:
         return 0.0
-    target = 0.0 if mode == "processing" else raw
+    target = raw if mode == "recording" else 0.0
     return current + (target - current) * LEVEL_SMOOTH
 
 
@@ -2003,8 +2005,11 @@ class WaveView(NSView):
         _rgb(*palette.line)
         card.stroke()
 
-        accent = palette.accent if presentation.accent == "accent" \
+        accent = (
+            palette.accent if presentation.accent == "accent"
+            else CORAL if presentation.accent == "error"
             else palette.brand
+        )
         eyebrow_type = TYPE_SPECS["hud_eyebrow"]
         status = NSAttributedString.alloc().initWithString_attributes_(
             presentation.eyebrow, {
@@ -2034,7 +2039,7 @@ class WaveView(NSView):
                 (W - 16 - confidence_size.width, 14))
 
         # radial waveform (spec: 60 bars, inner r 134, len 6 + v*66)
-        if self.mode != "processing" or lv > 0.01:
+        if self.mode == "recording" or lv > 0.01:
             for i in range(RADIAL_BARS):
                 ang = (i / RADIAL_BARS) * 2.0 * math.pi - math.pi / 2.0
                 v = max(0.03, lv * (0.4 + 0.6 * abs(
@@ -2059,6 +2064,8 @@ class WaveView(NSView):
         if self.mode == "processing":
             _rgb(*palette.accent,
                  0.18 + 0.18 * abs(math.sin(self.t * 2.2)))
+        elif self.mode == "error":
+            _rgb(*CORAL, 0.42)
         else:
             _rgb(*palette.brand, 0.16 + lv * 0.44)
         ring.stroke()
@@ -2124,7 +2131,7 @@ class WaveView(NSView):
 
     def _update_mouth(self):
         snap = min(1.0, (self.raw ** 2) * 1.8) \
-            if self.mode != "processing" and not self.reduce_motion else 0.0
+            if self.mode == "recording" and not self.reduce_motion else 0.0
         flutter = 3.0 * snap * math.sin(self.frame_n * 0.45)
         target = snap * BEAK_MAX_DEG + flutter
         self.beak = max(0.0, self.beak + (target - self.beak) * 0.6)
@@ -2684,13 +2691,19 @@ class StatusBar(NSObject):
         if icon is None:
             btn.setTitle_(FACE_EMOJI.get(current_face(), "◉"))
         else:
-            suffix = "…" if self.state == "proc" else \
-                ("•" if self.state == "idle" and FLIGHT.is_enabled() else "")
+            if self.state == "proc":
+                suffix = "…"
+            elif self.state == "err":
+                suffix = "!"
+            else:
+                suffix = (
+                    "•" if self.state == "idle" and FLIGHT.is_enabled() else "")
             btn.setTitle_(suffix)
         labels = {
             "idle": APP_NAME,
             "rec": f"{APP_NAME} — listening",
             "proc": f"{APP_NAME} — processing",
+            "err": f"{APP_NAME} — try again",
         }
         state_label = labels.get(self.state, APP_NAME)
         btn.setToolTip_(state_label)
@@ -4118,6 +4131,7 @@ class Recorder:
         self.bundle_at_press = ""
         self.mode = "capture"
         self.uncertain = False
+        self.feedback_seconds = 0.0
         # rolling-ASR state: finished segments already sent to the pool
         self.chunks = []             # ASR futures, chronological
         self.cut_samples = 0         # sample index of the last cut
@@ -4144,6 +4158,7 @@ class Recorder:
         self.captured_via_flight = False
         self.source = "hold"
         self.uncertain = False
+        self.feedback_seconds = 0.0
         self.press_at = press_at or time.perf_counter()
         self.utterance_id = f"{time.time_ns():x}-{id(self):x}"
         self.insertion_lease = None
@@ -8931,6 +8946,37 @@ def release_should_wait_for_tail(rec: Recorder) -> bool:
     )
 
 
+def report_dictation_problem(
+        rec: Recorder, hud: HUD, caption: str, log_message: str,
+        *, seconds: float = DICTATION_ERROR_SECONDS):
+    """Show bounded retry guidance without retaining or inserting content."""
+    CAPTION["text"] = caption
+    CAPTION["confidence"] = None
+    CAPTION["stable_prefix"] = False
+    rec.feedback_seconds = max(
+        float(getattr(rec, "feedback_seconds", 0.0) or 0.0),
+        max(0.0, float(seconds)),
+    )
+    print(log_message)
+    set_status("err")
+    AppHelper.callAfter(hud.showMode_, "error")
+    play("Funk")
+
+
+def dictation_feedback_delay(rec: Recorder) -> float:
+    """How long terminal feedback should remain visible."""
+    try:
+        requested = float(getattr(rec, "feedback_seconds", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        requested = 0.0
+    if not math.isfinite(requested):
+        requested = 0.0
+    return max(
+        3.0 if bool(getattr(rec, "uncertain", False)) else 0.0,
+        min(10.0, max(0.0, requested)),
+    )
+
+
 @dataclass(frozen=True)
 class BoundedRecognitionFuture:
     """A decode future plus the exact capture samples it owns."""
@@ -9147,13 +9193,23 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
 
         duration, peak = audio_gate_measurements(full_audio)
         if duration < MIN_SECONDS:
-            print(f"[dropped] too short ({duration:.2f}s)")
+            report_dictation_problem(
+                rec,
+                hud,
+                "Too short — hold while speaking",
+                f"[dropped] too short ({duration:.2f}s)",
+            )
             return
         if peak < GATE_PEAK_RMS:
             # ~0.000000 here means the mic delivered pure silence (device or
             # permission problem), not just quiet speech.
-            print(f"[dropped] no speech (peak rms {peak:.6f}, "
-                  f"gate {GATE_PEAK_RMS}, {duration:.1f}s)")
+            report_dictation_problem(
+                rec,
+                hud,
+                "I couldn't hear speech — check the microphone",
+                f"[dropped] no speech (peak rms {peak:.6f}, "
+                f"gate {GATE_PEAK_RMS}, {duration:.1f}s)",
+            )
             return
         asr_started_at = time.perf_counter()
         recognition = assemble_raw(
@@ -9165,8 +9221,13 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         DICTATION_PROCESS_ORDER.wait(rec.process_ticket)
         raw = recognition.text
         if not raw or is_hallucination(raw):
-            print("[dropped] ASR gave nothing" if not raw
-                  else "[dropped] ASR hallucination detected")
+            report_dictation_problem(
+                rec,
+                hud,
+                "I couldn't understand that — try again",
+                "[dropped] ASR gave nothing" if not raw
+                else "[dropped] ASR hallucination detected",
+            )
             return
 
         raw, looped = collapse_repeats(raw)
@@ -9176,7 +9237,12 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             recognition.words = ()
         if looks_like_prompt_echo(raw) and (
                 looped or raw.casefold().startswith(("glossary", "common terms"))):
-            print("[dropped] ASR echoed the glossary prompt")
+            report_dictation_problem(
+                rec,
+                hud,
+                "That didn't sound like dictation — try again",
+                "[dropped] ASR echoed the glossary prompt",
+            )
             return
 
         # An exact active confirmation phrase is consumed before compilation,
@@ -9694,9 +9760,12 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 hud.dismiss()
                 STATUS["bar"] and STATUS["bar"].setState_(
                     "off" if PAUSED["on"] else "idle")
-        if rec.uncertain:
+        feedback_delay = dictation_feedback_delay(rec)
+        if feedback_delay > 0.0:
             threading.Timer(
-                3.0, lambda: AppHelper.callAfter(dismiss_if_idle)).start()
+                feedback_delay,
+                lambda: AppHelper.callAfter(dismiss_if_idle),
+            ).start()
         else:
             AppHelper.callAfter(dismiss_if_idle)
 

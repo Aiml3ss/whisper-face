@@ -1774,6 +1774,8 @@ class FacePreferenceTests(unittest.TestCase):
         self.assertEqual(ns["hud_level_step"](0.9, 0.7, "recording", True), 0.0)
         self.assertGreater(
             ns["hud_level_step"](0.9, 0.0, "recording", False), 0.0)
+        self.assertLess(
+            ns["hud_level_step"](0.9, 0.7, "error", False), 0.7)
 
 
 class WhisperFaceThemeTests(unittest.TestCase):
@@ -1811,12 +1813,20 @@ class WhisperFaceThemeTests(unittest.TestCase):
             "recording", "hello world", 0.91, stable_prefix=True)
         processing = hud_presentation(
             "processing", "hello world", 0.61, stable_prefix=True)
+        error = hud_presentation(
+            "error", "I couldn't understand that — try again", 0.61,
+            stable_prefix=True)
 
         self.assertEqual(listening.eyebrow, "HEARD YOU")
         self.assertEqual(listening.confidence, "Recognition 91%")
         self.assertIn("hello world", listening.accessibility_value)
         self.assertEqual(processing.eyebrow, "TIDYING UP")
         self.assertEqual(processing.accent, "accent")
+        self.assertEqual(error.eyebrow, "TRY AGAIN")
+        self.assertEqual(error.confidence, "")
+        self.assertEqual(error.accent, "error")
+        self.assertIn(
+            "Dictation needs another try", error.accessibility_value)
 
     def test_reduce_motion_disables_whole_head_squash(self):
         self.assertEqual(
@@ -5195,6 +5205,61 @@ class HotkeyListenerRecoveryTests(unittest.TestCase):
 
 
 class ReleasePlanTests(unittest.TestCase):
+    def test_dictation_problem_shows_bounded_retry_guidance(self):
+        captions = {"text": ""}
+        statuses = []
+        modes = []
+        sounds = []
+        logs = []
+        ns = load_definitions(
+            "report_dictation_problem",
+            "dictation_feedback_delay",
+            extra={
+                "AppHelper": SimpleNamespace(
+                    callAfter=lambda function, value: function(value)),
+                "CAPTION": captions,
+                "DICTATION_ERROR_SECONDS": 2.5,
+                "math": __import__("math"),
+                "play": sounds.append,
+                "print": logs.append,
+                "set_status": statuses.append,
+            },
+        )
+        recorder = SimpleNamespace(uncertain=False, feedback_seconds=0.0)
+        hud = SimpleNamespace(showMode_=modes.append)
+
+        ns["report_dictation_problem"](
+            recorder,
+            hud,
+            "I couldn't understand that — try again",
+            "[dropped] ASR gave nothing",
+        )
+
+        self.assertEqual(
+            captions["text"], "I couldn't understand that — try again")
+        self.assertIsNone(captions["confidence"])
+        self.assertFalse(captions["stable_prefix"])
+        self.assertEqual(statuses, ["err"])
+        self.assertEqual(modes, ["error"])
+        self.assertEqual(sounds, ["Funk"])
+        self.assertEqual(logs, ["[dropped] ASR gave nothing"])
+        self.assertEqual(ns["dictation_feedback_delay"](recorder), 2.5)
+
+    def test_feedback_delay_preserves_uncertain_and_bounds_bad_values(self):
+        ns = load_definitions(
+            "dictation_feedback_delay",
+            extra={"math": __import__("math")},
+        )
+
+        self.assertEqual(ns["dictation_feedback_delay"](
+            SimpleNamespace(uncertain=True, feedback_seconds=0.0)), 3.0)
+        self.assertEqual(ns["dictation_feedback_delay"](
+            SimpleNamespace(uncertain=False, feedback_seconds=99.0)), 10.0)
+        self.assertEqual(ns["dictation_feedback_delay"](
+            SimpleNamespace(uncertain=False, feedback_seconds=float("nan"))), 0.0)
+        self.assertEqual(ns["dictation_feedback_delay"](
+            SimpleNamespace(uncertain=False, feedback_seconds="bad")), 0.0)
+
     def test_back_to_back_releases_finish_in_order(self):
         ns = load_definitions("ReleaseOrder")
         release_order = ns["ReleaseOrder"]()
@@ -5504,6 +5569,7 @@ class ReleasePlanTests(unittest.TestCase):
 
         pool = Pool()
         assembled = []
+        problems = []
 
         def assemble(chunk_futures, pre_future, remainder, prompt):
             assembled.append((chunk_futures, pre_future, remainder, prompt))
@@ -5529,6 +5595,10 @@ class ReleasePlanTests(unittest.TestCase):
                 "assemble_raw": assemble,
                 "Recognition": Recognition,
                 "is_hallucination": lambda _text: False,
+                "report_dictation_problem": (
+                    lambda _rec, _hud, caption, log, **_kwargs:
+                    problems.append((caption, log))),
+                "dictation_feedback_delay": lambda _rec: 0.0,
                 "DICTATION_PROCESS_ORDER": SimpleNamespace(
                     wait=lambda _ticket: None),
                 "print": lambda *_args: None,
@@ -5579,6 +5649,10 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertIs(scheduled.future, pool.future)
         self.assertEqual((scheduled.start_sample, scheduled.end_sample), (
             8_000, 16_000))
+        self.assertEqual(problems, [(
+            "I couldn't understand that — try again",
+            "[dropped] ASR gave nothing",
+        )])
 
     def test_failed_chunk_downgrades_surviving_word_timing(self):
         class Future:
