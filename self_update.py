@@ -42,6 +42,10 @@ _FETCH_TIMEOUT = 60.0
 _GIT_TIMEOUT = 15.0
 _INSTALL_TIMEOUT = 1800.0
 
+# Enough of a failing installer's tail to name the cause, small enough to sit
+# in a result file and an alert without becoming a wall of text.
+_ERROR_DETAIL_LIMIT = 600
+
 # Runner is any subprocess.run-style callable returning a CompletedProcess.
 Runner = Callable[..., "subprocess.CompletedProcess"]
 
@@ -80,6 +84,33 @@ def _rev_parse(runner: Runner, checkout: Path, ref: str,
         sha = (result.stdout or "").strip()
         return sha or None
     return None
+
+
+def _current_branch(runner: Runner, checkout: Path) -> str:
+    """Return the checked-out branch name, or ``""`` when HEAD is detached."""
+    result = _git(runner, checkout, "symbolic-ref", "--short", "--quiet",
+                  "HEAD")
+    if result.returncode == 0:
+        return (result.stdout or "").strip()
+    return ""
+
+
+def _restore(runner: Runner, checkout: Path, previous: str,
+             branch: str) -> None:
+    """Put the checkout back on ``previous``, preferring its original branch.
+
+    An update moves HEAD alone, so the branch it started on still points at
+    ``previous``. Checking that branch out again rolls back to the same commit
+    *and* leaves the checkout attached; restoring the bare sha instead used to
+    strand the user on a detached HEAD, where ``git pull`` no longer works and
+    upstream tracking is gone. Falls back to the sha when HEAD was already
+    detached or the branch has since moved.
+    """
+    if branch and _rev_parse(runner, checkout, branch) == previous:
+        if _git(runner, checkout, "checkout", "--quiet",
+                branch).returncode == 0:
+            return
+    _git(runner, checkout, "checkout", "--quiet", previous)
 
 
 def check_for_update(checkout, remote: str = DEFAULT_REMOTE, *,
@@ -175,7 +206,19 @@ def _run_installer(runner: Runner, checkout: Path,
 
 def _installer_error(result: "subprocess.CompletedProcess",
                      installer: str) -> str:
-    return f"{installer} failed (exit {result.returncode})"
+    """Summarise an installer failure, keeping the tail of its own output.
+
+    An exit code on its own cannot tell a missing dependency from a failed
+    download, which left every rollback unexplainable. The installer already
+    prints a precise reason before it exits; keep a bounded tail of it so the
+    result, the log, and the user-facing alert can all say what went wrong.
+    """
+    summary = f"{installer} failed (exit {result.returncode})"
+    for stream in (result.stderr, result.stdout):
+        detail = (stream or "").strip()
+        if detail:
+            return f"{summary}: {detail[-_ERROR_DETAIL_LIMIT:]}"
+    return summary
 
 
 def apply_update(checkout, target_rev: str, *, runner: Runner,
@@ -192,12 +235,16 @@ def apply_update(checkout, target_rev: str, *, runner: Runner,
     """
     checkout = Path(checkout)
     result = {"status": "failed", "from": "", "to": target_rev, "error": None}
+    # Bound before the try so the recovery path can still name the branch when
+    # the failure happens partway through reading it.
+    previous_branch = ""
     try:
         previous = _rev_parse(runner, checkout, "HEAD")
         if not previous:
             result["error"] = "not a git checkout"
             return result
         result["from"] = previous
+        previous_branch = _current_branch(runner, checkout)
 
         checked_out = _git(runner, checkout, "checkout", "--quiet", target_rev)
         if checked_out.returncode != 0:
@@ -213,7 +260,7 @@ def apply_update(checkout, target_rev: str, *, runner: Runner,
         # Installer failed on the new revision: restore the old one and
         # re-install so the checkout is never left broken.
         forward_error = _installer_error(installed, installer)
-        _git(runner, checkout, "checkout", "--quiet", previous)
+        _restore(runner, checkout, previous, previous_branch)
         _run_installer(runner, checkout, installer)
         result["status"] = "rolled_back"
         result["error"] = forward_error
@@ -224,7 +271,7 @@ def apply_update(checkout, target_rev: str, *, runner: Runner,
         previous = result.get("from")
         if previous:
             try:
-                _git(runner, checkout, "checkout", "--quiet", previous)
+                _restore(runner, checkout, previous, previous_branch)
                 _run_installer(runner, checkout, installer)
                 result["status"] = "rolled_back"
             except (OSError, subprocess.SubprocessError):
