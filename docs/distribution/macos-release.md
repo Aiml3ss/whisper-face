@@ -192,11 +192,11 @@ and verify its digest against that prior manifest. Rerunning `Install.command`
 inside the **same checkout** preserves private files because the installer does
 not replace an existing destination. A separately extracted rollback folder has
 no automatic access to state in the current folder: before running its installer,
-manually copy `dictionary.txt`, `snippets.json`, `tones.json`, `preferences.json`,
-`learned.json`, and `acoustic_keyword_memory.json` into it with user-only
-permissions. Copy `transcripts.jsonl` only if retaining transcript history is
-intentional. Review the files rather than copying the entire old checkout or
-its logs.
+manually copy `dictionary.txt`, `snippets.json`, `tones.json`,
+`preferences.json`, `learned.json`, `acoustic_keyword_memory.json`, and
+`relisten_activation.json` into it with user-only permissions. Copy
+`transcripts.jsonl` only if retaining transcript history is intentional.
+Review the files rather than copying the entire old checkout or its logs.
 
 Never overwrite the only working checkout before the prior artifact has been
 verified. Keep the failed release folder until diagnostics are collected. If a

@@ -9,6 +9,7 @@ snippets.json
 tones.json
 preferences.json
 acoustic_keyword_memory.json
+relisten_activation.json
 dictionary.txt
 dictate.log
 ollama.log

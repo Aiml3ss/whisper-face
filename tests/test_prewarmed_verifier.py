@@ -132,6 +132,19 @@ class PrewarmedVerifierTests(unittest.TestCase):
         self.assertFalse(hasattr(verifier, "results"))
         verifier.close()
 
+    def test_explicit_prewarm_starts_child_without_request_payload(self):
+        verifier = PrewarmedVerifierSupervisor(fake_provider_factory)
+
+        self.assertFalse(verifier.ready)
+        self.assertTrue(verifier.prewarm(
+            deadline_at=time.monotonic() + 2.0))
+        self.assertTrue(verifier.ready)
+        receipt = self.verify(verifier)
+        self.assertTrue(receipt.accepted)
+        self.assertEqual(receipt.result.confidence, 0.1)
+        verifier.close()
+        self.assertFalse(verifier.ready)
+
     def test_idle_child_does_not_retain_the_previous_request(self):
         verifier = PrewarmedVerifierSupervisor(retention_probe_factory)
 

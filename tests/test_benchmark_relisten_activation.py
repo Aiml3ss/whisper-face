@@ -33,6 +33,12 @@ from process_verifier import (  # noqa: E402
     VerificationReceipt,
     VerificationResult,
 )
+from relisten_activation import (  # noqa: E402
+    ActivationError,
+    build_activation_receipt,
+    load_activation_receipt,
+    validate_activation_receipt,
+)
 
 
 class FakeClock:
@@ -273,6 +279,11 @@ class RelistenActivationBenchmarkTests(unittest.TestCase):
         self.assertEqual(activation["state"], "minimum-sample-count-met")
         self.assertFalse(activation["activation_claim"])
         self.assertEqual(activation["decision"], "manual-review-required")
+        self.assertTrue(activation["runtime_candidate"])
+        self.assertEqual(
+            activation["runtime_candidate_reason"],
+            "manual-review-required",
+        )
 
         synthetic = load_manifest(self._manifest([self._case(999)]))
         insufficient = evaluate(
@@ -285,6 +296,72 @@ class RelistenActivationBenchmarkTests(unittest.TestCase):
             insufficient["activation_evidence"]["state"],
             "insufficient-real-samples",
         )
+        self.assertFalse(
+            insufficient["activation_evidence"]["runtime_candidate"])
+
+    def test_activation_receipt_requires_explicit_review_and_stays_closed(self):
+        cases = []
+        outcomes = []
+        for index in range(MIN_REAL_SAMPLES):
+            expected = "confirmed" \
+                if index < MIN_REAL_SAMPLES_PER_OUTCOME else "contradicted"
+            cases.append(self._case(
+                index, outcome=expected, evidence="real-recorded"))
+            outcomes.append(expected)
+        report = evaluate(
+            load_manifest(self._manifest(cases)),
+            self._providers((outcomes, outcomes, outcomes)),
+            deadline_seconds=1.0,
+            clock=FakeClock(),
+        )
+
+        with self.assertRaises(ActivationError):
+            build_activation_receipt(
+                report, manual_review_approved=False)
+        receipt = build_activation_receipt(
+            report, manual_review_approved=True)
+        self.assertTrue(validate_activation_receipt(receipt).ready)
+        self.assertNotIn("Bluebird", json.dumps(receipt))
+        self.assertEqual(
+            set(receipt["evidence"]),
+            {
+                "real_samples", "real_confirmed_cases",
+                "real_contradicted_cases", "exact_accuracy_pct",
+                "p95_latency_ms", "refusals", "source_report_sha256",
+            },
+        )
+
+        changed = dict(receipt)
+        changed["model_revision"] = "0" * 40
+        self.assertFalse(validate_activation_receipt(changed).ready)
+
+    def test_cli_writes_private_activation_receipt_after_all_gates(self):
+        cases = []
+        outcomes = []
+        for index in range(MIN_REAL_SAMPLES):
+            expected = "confirmed" \
+                if index < MIN_REAL_SAMPLES_PER_OUTCOME else "contradicted"
+            cases.append(self._case(
+                index, outcome=expected, evidence="real-recorded"))
+            outcomes.append(expected)
+        manifest = self._manifest(cases)
+        activation_path = self.root / "relisten_activation.json"
+
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            status = main(
+                [
+                    str(manifest),
+                    "--deadline-seconds", "1",
+                    "--approve-runtime", str(activation_path),
+                    "--confirm-manual-review",
+                ],
+                providers=self._providers((outcomes, outcomes, outcomes)),
+                clock=FakeClock(),
+            )
+
+        self.assertEqual(status, 0)
+        self.assertTrue(load_activation_receipt(activation_path).ready)
+        self.assertEqual(activation_path.stat().st_mode & 0o777, 0o600)
 
     def test_general_llm_audio_is_honestly_unavailable(self):
         manifest = load_manifest(self._manifest([self._case(1)]))

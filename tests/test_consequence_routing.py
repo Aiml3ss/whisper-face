@@ -26,6 +26,11 @@ from voice_compiler import (  # noqa: E402
     consequence_receipt,
     execute_consequence_plan,
 )
+from process_verifier import (  # noqa: E402
+    RefusalReason,
+    VerificationReceipt,
+    VerificationResult,
+)
 
 
 def timed_voice(text, *, confidence=0.64, engine="parakeet-unified",
@@ -72,6 +77,31 @@ class SafeVerifier:
         if self.clock is not None:
             self.clock.value = deadline_at + 0.01
         return MicrospanVerification(self.outcome, 0.91, self.engine)
+
+
+class ProcessSafeVerifier:
+    process_isolated = True
+    strict_deadline = True
+    retains_audio = False
+
+    def __init__(self, outcome="confirmed", engine="mlx-whisper-tiny",
+                 refusal=None):
+        self.outcome = outcome
+        self.engine = engine
+        self.refusal = refusal
+        self.calls = []
+
+    def verify(self, samples, sample_rate, expected, *, deadline_at):
+        self.calls.append({
+            "samples": tuple(samples),
+            "sample_rate": sample_rate,
+            "expected": expected,
+            "deadline_at": deadline_at,
+        })
+        if self.refusal is not None:
+            return VerificationReceipt(refusal=self.refusal)
+        return VerificationReceipt(result=VerificationResult(
+            self.outcome, 0.91, self.engine))
 
 
 class ConsequenceClassifierTests(unittest.TestCase):
@@ -467,6 +497,85 @@ class ReceiptExecutionTests(unittest.TestCase):
         self.assertFalse(verifier.calls)
         self.assertTrue(dict(unsafe.relisten_skipped).get(
             "unsafe-verifier-contract"))
+
+    def test_process_isolated_verifier_confirms_only_selected_microspan(self):
+        class SliceAuditAudio:
+            def __init__(self, count):
+                self.count = count
+                self.slices = []
+
+            def __len__(self):
+                return self.count
+
+            def __getitem__(self, key):
+                if not isinstance(key, slice):
+                    raise AssertionError("audio must be sliced")
+                self.slices.append(key)
+                return [0.1] * (key.stop - key.start)
+
+        audio = SliceAuditAudio(160_000)
+        voice = timed_voice("Send 2042")
+        verifier = ProcessSafeVerifier()
+
+        receipt = consequence_receipt(
+            voice,
+            audio=audio,
+            sample_rate=16_000,
+            audio_duration=10.0,
+            verifier=verifier,
+        )
+
+        self.assertEqual(receipt.route, "verified")
+        self.assertEqual(receipt.relisten_status, "confirmed")
+        self.assertEqual(receipt.relisten_attempted, 1)
+        self.assertEqual(receipt.relisten_confirmed, 1)
+        self.assertEqual(len(verifier.calls), 1)
+        self.assertEqual(verifier.calls[0]["expected"], "Send 2042")
+        self.assertEqual(len(audio.slices), 1)
+        self.assertLess(
+            audio.slices[0].stop - audio.slices[0].start,
+            len(audio),
+        )
+
+    def test_contradiction_and_timeout_remain_review_routes(self):
+        voice = timed_voice("Send 2042")
+        audio = [0.1] * 160_000
+        contradicted = consequence_receipt(
+            voice,
+            audio=audio,
+            sample_rate=16_000,
+            audio_duration=10.0,
+            verifier=ProcessSafeVerifier(outcome="contradicted"),
+        )
+        self.assertEqual(contradicted.route, "review")
+        self.assertEqual(contradicted.relisten_status, "contradicted")
+
+        timed_out = consequence_receipt(
+            voice,
+            audio=audio,
+            sample_rate=16_000,
+            audio_duration=10.0,
+            verifier=ProcessSafeVerifier(refusal=RefusalReason.TIMEOUT),
+        )
+        self.assertEqual(timed_out.route, "review")
+        self.assertEqual(timed_out.relisten_status, "timed-out")
+        self.assertEqual(
+            dict(timed_out.relisten_skipped)["deadline-expired"], 1)
+
+    def test_same_engine_result_cannot_verify_itself(self):
+        voice = timed_voice("Send 2042", engine="mlx-whisper-tiny")
+        verifier = ProcessSafeVerifier(engine="mlx-whisper-tiny")
+        receipt = consequence_receipt(
+            voice,
+            audio=[0.1] * 160_000,
+            sample_rate=16_000,
+            audio_duration=10.0,
+            verifier=verifier,
+        )
+        self.assertEqual(receipt.route, "review")
+        self.assertEqual(receipt.relisten_confirmed, 0)
+        self.assertEqual(
+            dict(receipt.relisten_skipped)["verifier-not-independent"], 1)
 
 if __name__ == "__main__":
     unittest.main()
