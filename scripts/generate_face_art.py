@@ -51,15 +51,17 @@ def _site_module() -> str:
         "//",
         "// The colored character for each face, as inline SVG bodies. The flat",
         "// silhouettes in faces.ts stay hand-authored: they are the menu-bar",
-        "// template artwork and are drawn to survive 18 points.",
+        "// template artwork and are drawn to survive 18 points. `half` is the",
+        "// mid-syllable frame the flap animation passes through.",
         "import type { Animal } from './faces';",
         "",
-        "export const FACE_ART: Record<Animal, { idle: string; talk: string }> = {",
+        "export const FACE_ART: Record<"
+        "Animal, { idle: string; half: string; talk: string }> = {",
     ]
     for face in FACE_ORDER:
         lines.append(f"  {face}: {{")
-        for state, talk in (("idle", False), ("talk", True)):
-            body = character_body(face, talk=talk, whispers=False)
+        for state in ("idle", "half", "talk"):
+            body = character_body(face, frame=state, whispers=False)
             lines.append(f"    {state}: `{body}`,")
         lines.append("  },")
     lines += [
@@ -75,10 +77,10 @@ def rendered_files() -> dict[Path, str]:
     """Map every generated path to the exact bytes it should contain."""
     files: dict[Path, str] = {}
     for face in FACE_ORDER:
-        for state, talk in (("idle", False), ("talk", True)):
+        for state in ("idle", "half", "talk"):
             # The app window shows the character inside a tight chip, where
             # the trailing speech puffs would clip against the chip edge.
-            body = character_svg(face, talk=talk, whispers=False)
+            body = character_svg(face, frame=state, whispers=False)
             files[OUTPUT_DIR / f"{face}-{state}.svg"] = BANNER + body + "\n"
     files[SITE_ART] = _site_module()
     return files
