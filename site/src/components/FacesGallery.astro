@@ -31,23 +31,40 @@ import { FACES, ORDER } from '../data/faces';
 <script>
   const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
+  // A short babble loop, not a metronome: the mouth wanders through the
+  // half-open frame with varied hold times so the greeting reads as a
+  // chatty hello rather than a two-frame puppet snap.
+  const BABBLE: Array<[half: boolean, open: boolean, hold: number]> = [
+    [true, false, 90],
+    [false, true, 150],
+    [true, false, 80],
+    [false, false, 110],
+    [true, false, 90],
+    [false, true, 190],
+    [true, false, 100],
+    [false, true, 130],
+    [false, false, 150],
+  ];
+
   document.querySelectorAll<HTMLElement>('.gallery .card').forEach((card) => {
     const frames = card.querySelector<HTMLElement>('.face-frames');
     let t: number | undefined;
 
     function flapOn() {
       if (reduce || !frames) return;
-      let open = false;
+      let step = 0;
       const tick = () => {
-        open = !open;
+        const [half, open, hold] = BABBLE[step % BABBLE.length];
+        frames!.classList.toggle('mouth-half', half);
         frames!.classList.toggle('mouth', open);
-        t = window.setTimeout(tick, 150);
+        step++;
+        t = window.setTimeout(tick, hold);
       };
       tick();
     }
     function flapOff() {
       window.clearTimeout(t);
-      frames?.classList.remove('mouth');
+      frames?.classList.remove('mouth', 'mouth-half');
     }
 
     card.addEventListener('mouseenter', flapOn);

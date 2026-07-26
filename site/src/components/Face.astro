@@ -1,5 +1,5 @@
 ---
-import { characterPair, framePair, nextId, type Animal } from '../data/faces';
+import { characterFrames, framePair, nextId, type Animal } from '../data/faces';
 
 interface Props {
   animal: Animal;
@@ -14,7 +14,7 @@ interface Props {
 
 const { animal, class: cls = '', variant = 'character' } = Astro.props;
 const uid = nextId();
-const html = variant === 'mark' ? framePair(animal, uid) : characterPair(animal);
+const html = variant === 'mark' ? framePair(animal, uid) : characterFrames(animal);
 ---
 
 <span class={`face-frames ${cls}`.trim()} set:html={html}></span>

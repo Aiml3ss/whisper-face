@@ -9,7 +9,9 @@ permissions:
 
 jobs:
   acceptance-recorded:
-    runs-on: ubuntu-latest
+    # Runs on the self-hosted bergserver runner: the check is a small local
+    # ledger read, and self-hosted minutes stay outside the Actions budget.
+    runs-on: [self-hosted, bergserver]
     steps:
       - name: Read the protected acceptance ledger from the base revision
         uses: actions/checkout@v4
@@ -21,7 +23,7 @@ jobs:
           CONTRIBUTOR: ${{ github.event.pull_request.user.login }}
           CONTRIBUTOR_ID: ${{ github.event.pull_request.user.id }}
         run: |
-          python - <<'PY'
+          python3 - <<'PY'
           import hashlib
           import json
           import os
