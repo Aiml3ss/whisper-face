@@ -29,7 +29,9 @@ import { FACES, ORDER } from '../data/faces';
 </section>
 
 <script>
-  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  import { prefersReducedMotion } from '../data/jelly';
+
+  const reduce = prefersReducedMotion();
 
   // A short babble loop, not a metronome: the mouth wanders through the
   // half-open frame with varied hold times so the greeting reads as a

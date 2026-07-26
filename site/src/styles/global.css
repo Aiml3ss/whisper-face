@@ -14,10 +14,9 @@
   --spark: rgba(255, 255, 255, 0.85);
   --sticker: 6px 6px 0 var(--line);
   --sticker-lg: 10px 10px 0 var(--line);
-  --jelly-press-x: 1.05;
-  --jelly-press-y: 0.94;
-  --jelly-release-x: 0.96;
-  --jelly-release-y: 1.05;
+  /* Squash amounts and durations are no longer hand-written here: they are
+     generated from src/data/motion.ts, which mirrors the Mac app's
+     MOTION_SPECS. See the MOTION section at the end of this file. */
 
   --fox: #ff8a5b;
   --bear: #fbbf24;
@@ -256,16 +255,42 @@ a {
   font-size: 14px;
   border-radius: 12px;
 }
+/* The site's one real Jelly UI element. Its soft body is painted into a canvas,
+   so the sticker treatment goes around the body rather than replacing it: black
+   frame and hard shadow on the host, candy fill on the body. Everything is
+   driven from the site tokens so it themes with the rest of the nav. */
 .theme-toggle {
-  width: 42px;
-  height: 42px;
-  --jelly-button-height: 42px;
-  --jelly-button-min-width: 42px;
+  width: 44px;
+  height: 44px;
+  border: 3px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 3px 3px 0 var(--line);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+  --jelly-button-height: 44px;
+  --jelly-button-min-width: 44px;
   --jelly-button-padding-inline: 0;
-  --jelly-button-radius: 12px;
+  --jelly-button-radius: 10px;
+  --jelly-fill: var(--teal);
+  --jelly-label: var(--line);
 }
 .theme-toggle:hover {
   transform: translate(-1px, -1px);
+  box-shadow: 5px 5px 0 var(--line);
+}
+.theme-toggle:active {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0 var(--line);
+}
+/* Until jelly.js upgrades the element — or if the CDN ever fails — the toggle
+   still has to be a usable, on-brand button. */
+.theme-toggle:not(:defined) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  color: var(--ink);
+  cursor: pointer;
 }
 
 /* ============================================================= HERO */
@@ -1274,36 +1299,53 @@ footer.foot .wrap {
 }
 
 /* ============================================================= MOTION */
+/* The four named motions — press, release, wobble, pop — are generated from
+   src/data/motion.ts, which mirrors whisper_face_theme.MOTION_SPECS. The
+   @keyframes bodies are injected inline by Base.astro; this file only wires
+   them to the interactive objects. Each motion springs the standalone `scale`
+   property from its squash value back to rest, leaving `transform` free for the
+   sticker push and the tilts on the face tiles. */
 [data-jelly] {
   transform-origin: center;
-  will-change: transform;
 }
+[data-jelly]:hover,
+[data-jelly]:focus-visible,
 [data-jelly]:active {
-  animation: jelly-press 0.18s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  will-change: scale;
 }
-[data-jelly][data-jelly-releasing] {
-  animation: jelly-release 0.38s cubic-bezier(0.2, 0.9, 0.25, 1) both;
+[data-jelly][data-jelly-play='press'] {
+  animation: wf-press var(--wf-press-duration) linear both;
 }
-@keyframes jelly-press {
-  to {
-    transform: scale(var(--jelly-press-x), var(--jelly-press-y));
-  }
+[data-jelly][data-jelly-play='release'] {
+  animation: wf-release var(--wf-release-duration) linear both;
 }
-@keyframes jelly-release {
-  0% {
-    transform: scale(var(--jelly-press-x), var(--jelly-press-y));
-  }
-  38% {
-    transform: scale(var(--jelly-release-x), var(--jelly-release-y));
-  }
-  68% {
-    transform: scale(1.025, 0.985);
-  }
-  100% {
-    transform: scale(1);
-  }
+[data-jelly][data-jelly-play='wobble'] {
+  animation: wf-wobble var(--wf-wobble-duration) linear both;
 }
+[data-jelly][data-jelly-play='pop'] {
+  animation: wf-pop var(--wf-pop-duration) linear both;
+}
+
+/* Nav and footer links are inline by default, and inline boxes ignore scale. */
+.nav-links a[data-jelly],
+.foot-links a[data-jelly],
+.brand[data-jelly] {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Reduce Motion switches the squish off, it does not shorten it. The blanket
+   rule below covers every animation on the site; the explicit rule ahead of it
+   documents the guarantee for the jelly hooks and survives any later change to
+   the blanket rule. jelly.js's own canvas physics is gated separately, by the
+   data-jelly-motion="reduce" flag Base.astro puts on <html>. */
 @media (prefers-reduced-motion: reduce) {
+  [data-jelly],
+  [data-jelly][data-jelly-play] {
+    animation: none !important;
+    scale: none !important;
+    will-change: auto !important;
+  }
   *,
   *::before,
   *::after {
