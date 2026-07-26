@@ -633,10 +633,13 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn(".delayed_cleanup_activation.json.*.tmp", gitignore)
         for face in ("parrot", "fox", "owl", "cat", "bear",
                      "dog", "wolf", "pig", "panda", "tiger"):
-            for frame in ("idle", "talk"):
-                # The flat silhouette drives the menu bar; the colored
-                # character drives the app window and onboarding hero.
-                for directory in ("icons/faces", "icons/faces/color"):
+            # The flat silhouette drives the menu bar with two frames; the
+            # colored character adds the mid-syllable half frame the site's
+            # flap animation passes through.
+            for directory, frames in (
+                    ("icons/faces", ("idle", "talk")),
+                    ("icons/faces/color", ("idle", "half", "talk"))):
+                for frame in frames:
                     relative = f"{directory}/{face}-{frame}.svg"
                     with self.subTest(relative=relative):
                         self.assertTrue((ROOT / relative).exists())

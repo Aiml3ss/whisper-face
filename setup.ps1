@@ -191,16 +191,16 @@ $Required = @(
     "icons\faces\pig-idle.svg", "icons\faces\pig-talk.svg",
     "icons\faces\panda-idle.svg", "icons\faces\panda-talk.svg",
     "icons\faces\tiger-idle.svg", "icons\faces\tiger-talk.svg",
-    "icons\faces\color\parrot-idle.svg", "icons\faces\color\parrot-talk.svg",
-    "icons\faces\color\fox-idle.svg", "icons\faces\color\fox-talk.svg",
-    "icons\faces\color\owl-idle.svg", "icons\faces\color\owl-talk.svg",
-    "icons\faces\color\cat-idle.svg", "icons\faces\color\cat-talk.svg",
-    "icons\faces\color\bear-idle.svg", "icons\faces\color\bear-talk.svg",
-    "icons\faces\color\dog-idle.svg", "icons\faces\color\dog-talk.svg",
-    "icons\faces\color\wolf-idle.svg", "icons\faces\color\wolf-talk.svg",
-    "icons\faces\color\pig-idle.svg", "icons\faces\color\pig-talk.svg",
-    "icons\faces\color\panda-idle.svg", "icons\faces\color\panda-talk.svg",
-    "icons\faces\color\tiger-idle.svg", "icons\faces\color\tiger-talk.svg"
+    "icons\faces\color\parrot-idle.svg", "icons\faces\color\parrot-half.svg", "icons\faces\color\parrot-talk.svg",
+    "icons\faces\color\fox-idle.svg", "icons\faces\color\fox-half.svg", "icons\faces\color\fox-talk.svg",
+    "icons\faces\color\owl-idle.svg", "icons\faces\color\owl-half.svg", "icons\faces\color\owl-talk.svg",
+    "icons\faces\color\cat-idle.svg", "icons\faces\color\cat-half.svg", "icons\faces\color\cat-talk.svg",
+    "icons\faces\color\bear-idle.svg", "icons\faces\color\bear-half.svg", "icons\faces\color\bear-talk.svg",
+    "icons\faces\color\dog-idle.svg", "icons\faces\color\dog-half.svg", "icons\faces\color\dog-talk.svg",
+    "icons\faces\color\wolf-idle.svg", "icons\faces\color\wolf-half.svg", "icons\faces\color\wolf-talk.svg",
+    "icons\faces\color\pig-idle.svg", "icons\faces\color\pig-half.svg", "icons\faces\color\pig-talk.svg",
+    "icons\faces\color\panda-idle.svg", "icons\faces\color\panda-half.svg", "icons\faces\color\panda-talk.svg",
+    "icons\faces\color\tiger-idle.svg", "icons\faces\color\tiger-half.svg", "icons\faces\color\tiger-talk.svg"
 )
 foreach ($Relative in $Required) {
     if (-not (Test-Path (Join-Path $Repo $Relative))) {

@@ -127,11 +127,17 @@ export function framePair(animal: Animal, uid: string): string {
 // The colored character, for anywhere the face is big enough to have a face.
 // The silhouettes above stay for menu-bar-sized marks, where they are honest
 // about what macOS actually renders up top.
-export function characterSVG(animal: Animal, state: 'idle' | 'talk', cls = ''): string {
+export function characterSVG(animal: Animal, state: 'idle' | 'half' | 'talk', cls = ''): string {
   return `<svg class="${cls}" viewBox="${FACE_VIEWBOX}" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">${FACE_ART[animal][state]}</svg>`;
 }
 
-// Both colored frames stacked, same flap contract as framePair.
-export function characterPair(animal: Animal): string {
-  return characterSVG(animal, 'idle', 'idle') + characterSVG(animal, 'talk', 'talk');
+// All three colored frames stacked. The flap scripts move between them with
+// the `mouth-half` and `mouth` classes so speech passes through a mid frame
+// instead of snapping between two states.
+export function characterFrames(animal: Animal): string {
+  return (
+    characterSVG(animal, 'idle', 'idle') +
+    characterSVG(animal, 'half', 'half') +
+    characterSVG(animal, 'talk', 'talk')
+  );
 }

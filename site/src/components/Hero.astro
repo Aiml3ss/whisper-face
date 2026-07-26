@@ -1,6 +1,6 @@
 ---
 import Face from './Face.astro';
-import { FACES, ORDER, characterPair, type Animal } from '../data/faces';
+import { FACES, ORDER, characterFrames, type Animal } from '../data/faces';
 
 const initial: Animal = 'parrot';
 ---
@@ -33,7 +33,7 @@ const initial: Animal = 'parrot';
           <path d="M46 24 L60 21" opacity=".6"></path>
           <circle cx="57" cy="9" r="3" fill="var(--spark)" stroke="none" opacity=".7"></circle>
         </svg>
-        <div class="face-frames" id="heroFace" set:html={characterPair(initial)}></div>
+        <div class="face-frames" id="heroFace" set:html={characterFrames(initial)}></div>
       </div>
     </div>
 
@@ -62,7 +62,7 @@ const initial: Animal = 'parrot';
 </section>
 
 <script>
-  import { FACES, ORDER, characterPair, type Animal } from '../data/faces';
+  import { FACES, ORDER, characterFrames, type Animal } from '../data/faces';
 
   const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const stage = document.getElementById('stage')!;
@@ -84,8 +84,13 @@ const initial: Animal = 'parrot';
 
   function render() {
     chip.style.setProperty('--chip', FACES[current].color);
-    heroFace.innerHTML = characterPair(current);
+    heroFace.innerHTML = characterFrames(current);
     setActive();
+  }
+
+  function setMouth(open: 0 | 1 | 2) {
+    heroFace.classList.toggle('mouth-half', open === 1);
+    heroFace.classList.toggle('mouth', open === 2);
   }
 
   function stop() {
@@ -98,14 +103,23 @@ const initial: Animal = 'parrot';
     stream.innerHTML = txt + (cursor ? '<span class="cur"></span>' : '');
   }
 
+  // Rough viseme for one typed character: vowels swing the jaw wide,
+  // consonants half-open it, and pauses close the mouth. Syncing the flap
+  // to the very letters landing in the ticker is what sells the lip sync.
+  function mouthFor(ch: string | undefined): 0 | 1 | 2 {
+    if (!ch || !/[a-z0-9]/i.test(ch)) return 0;
+    if (/[aeiou]/i.test(ch)) return 2;
+    return 1;
+  }
+
   function speak() {
     const text = FACES[current].line;
     let i = 0;
     stage.classList.add('speaking');
 
     function flap() {
-      stage.querySelector('#heroFace')!.classList.toggle('mouth');
-      flapT = window.setTimeout(flap, 90 + Math.floor(Math.abs(Math.sin(i * 1.7)) * 120));
+      setMouth(mouthFor(text[Math.min(i, text.length - 1)]));
+      flapT = window.setTimeout(flap, 72 + Math.floor(Math.abs(Math.sin(i * 2.3)) * 86));
     }
     function type() {
       i++;
@@ -114,7 +128,7 @@ const initial: Animal = 'parrot';
         typeT = window.setTimeout(type, 34 + (text[i - 1] === ' ' ? 55 : 0));
       } else {
         window.clearTimeout(flapT);
-        heroFace.classList.remove('mouth');
+        setMouth(0);
         stage.classList.remove('speaking');
         restT = window.setTimeout(() => {
           current = ORDER[(ORDER.indexOf(current) + 1) % ORDER.length];
@@ -129,6 +143,7 @@ const initial: Animal = 'parrot';
 
   function restart() {
     stop();
+    setMouth(0);
     if (reduce) {
       setStream(FACES[current].line, false);
       return;

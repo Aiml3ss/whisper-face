@@ -721,6 +721,11 @@ PARROT_SCALE = 280.0 / 256.0
 RADIAL_BARS = 60
 BAR_INNER_R = 134.0
 BEAK_MAX_DEG = 26.0          # spec: lower mandible max open
+MOUTH_ATTACK = 0.7           # mouth envelope: open fast on a syllable...
+MOUTH_RELEASE = 0.3          # ...settle noticeably slower, like real speech
+BLINK_FRAMES = (0.55, 1.0, 1.0, 0.6, 0.3, 0.1)
+BLINK_MIN_GAP = 84           # frames between blinks (2.8s at 30fps)...
+BLINK_GAP_JITTER = 66        # ...plus a deterministic 0-2.2s stagger
 LEVEL_SMOOTH = 0.35
 NUM_BARS = 16                # LEVELS history buffer length (not the display)
 FPS = 30.0
@@ -2155,6 +2160,7 @@ class WaveView(NSView):
         self.raw = 0.0               # latest LEVELS entry, set by tick_
         self.lv = 0.0                # smoothed level (spec: 0.35 lerp)
         self.beak = 0.0              # smoothed beak degrees
+        self.blink_started = -42     # first blink lands 1.4-3.6s in
         self.t = 0.0
         self.frame_n = 0
         self.reduce_motion = False
@@ -2285,13 +2291,18 @@ class WaveView(NSView):
         ring.stroke()
 
         # Selected Whisper Face (256 viewBox, centered). Live level drives a
-        # small whole-head squash/stretch as well as the mouth. Reduce Motion
-        # returns an identity transform and freezes both effects.
+        # small whole-head squash/stretch as well as the mouth, and a slow
+        # sub-percent breathing cycle keeps the character alive between
+        # sentences. Reduce Motion freezes all of it to an identity.
         scale_x, scale_y = jelly_face_scale(
             lv,
             processing=self.mode == "processing",
             reduce_motion=self.reduce_motion,
         )
+        if not self.reduce_motion and self.mode == "recording":
+            breath = 0.006 * math.sin(self.t * 1.8)
+            scale_x *= 1.0 - breath * 0.5
+            scale_y *= 1.0 + breath
         ctx = NSGraphicsContext.currentContext()
         ctx.saveGraphicsState()
         tr = NSAffineTransform.transform()
@@ -2344,12 +2355,43 @@ class WaveView(NSView):
             self._draw_companion(face, lv)
 
     def _update_mouth(self):
-        snap = min(1.0, (self.raw ** 2) * 1.8) \
-            if self.mode == "recording" and not self.reduce_motion else 0.0
-        flutter = 3.0 * snap * math.sin(self.frame_n * 0.45)
-        target = snap * BEAK_MAX_DEG + flutter
-        self.beak = max(0.0, self.beak + (target - self.beak) * 0.6)
+        """Advance the mouth envelope one frame; returns openness 0..1.
+
+        Loudness maps through a soft knee (x^0.7) so quiet speech still
+        moves the lips, the jaw opens faster than it settles, and two
+        incommensurate sines add syllable texture instead of a metronome
+        wobble.
+        """
+        if self.mode == "recording" and not self.reduce_motion:
+            loud = min(1.0, max(0.0, self.raw) ** 0.7 * 1.35)
+            flutter = loud * (0.10 * math.sin(self.frame_n * 0.55)
+                              + 0.06 * math.sin(self.frame_n * 0.23 + 1.7))
+            target = min(1.0, max(0.0, loud + flutter)) * BEAK_MAX_DEG
+        else:
+            target = 0.0
+        rate = MOUTH_ATTACK if target > self.beak else MOUTH_RELEASE
+        self.beak = max(0.0, self.beak + (target - self.beak) * rate)
         return min(1.0, self.beak / BEAK_MAX_DEG)
+
+    def _update_blink(self):
+        """Occasional two-frame lid drop; frozen under Reduce Motion.
+
+        The gap between blinks is jittered off the frame the last blink
+        started on, so the rhythm never locks to the flutter sines while
+        staying deterministic for tests.
+        """
+        if self.reduce_motion or self.mode != "recording":
+            return 0.0
+        since = self.frame_n - self.blink_started
+        if since < 0:
+            return 0.0
+        if since < len(BLINK_FRAMES):
+            return BLINK_FRAMES[since]
+        gap = BLINK_MIN_GAP + (self.blink_started * 7919) % BLINK_GAP_JITTER
+        if since >= gap:
+            self.blink_started = self.frame_n
+            return BLINK_FRAMES[0]
+        return 0.0
 
     def _replay_ops(self, ops):
         """Draw a shared character op list through Core Graphics."""
@@ -2396,7 +2438,8 @@ class WaveView(NSView):
                 path.fill()
 
     def _draw_character(self, face, lv):
-        self._replay_ops(character_ops(face, self._update_mouth(), lv))
+        self._replay_ops(character_ops(
+            face, self._update_mouth(), lv, self._update_blink()))
 
     def drawParrot_(self, lv):
         self._draw_character("parrot", lv)

@@ -123,13 +123,18 @@ a {
   height: 100%;
   transition: opacity 0.06s linear;
 }
+.face-frames .half,
 .face-frames .talk {
   opacity: 0;
 }
+.face-frames.mouth-half .half,
 .face-frames.mouth .talk {
   opacity: 1;
 }
-.face-frames.mouth .idle {
+.face-frames.mouth-half .idle,
+.face-frames.mouth-half .talk,
+.face-frames.mouth .idle,
+.face-frames.mouth .half {
   opacity: 0;
 }
 
