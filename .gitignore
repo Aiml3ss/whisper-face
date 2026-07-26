@@ -1,3 +1,6 @@
+# headless window-render probe output (scripts/window_render_probe.py)
+.probe-renders/
+
 # personal data — never ship these to another machine or a repo
 transcripts.jsonl
 learned.json

@@ -176,6 +176,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "nav.home": "Home",
         "nav.settings": "Settings",
         "nav.advanced": "Advanced",
+        "nav.selected": "Selected",
+        "app.face_chip.label": "Whisper Face mascot",
+        "app.face_chip.help": "Gives the mascot a friendly wobble. Nothing else changes.",
         "advanced.accessibility.shortcut": "Advanced section shortcut",
         "advanced.accessibility.shortcut.help": "Show the Advanced section (Command-D).",
         "app.subtitle": "Private, fast voice input on your Mac",
@@ -4251,10 +4254,18 @@ try:  # The view-model above remains usable in headless test environments.
         NSAppearanceNameDarkAqua,
         NSEventModifierFlagCommand,
         NSFont,
+        NSFontAttributeName,
         NSFontDescriptorSystemDesignRounded,
+        NSFontWeightBold,
+        NSFontWeightMedium,
+        NSFontWeightRegular,
+        NSFontWeightSemibold,
+        NSForegroundColorAttributeName,
         NSImage,
+        NSImageLeading,
         NSImageScaleProportionallyUpOrDown,
         NSImageView,
+        NSLayoutConstraint,
         NSLineBorder,
         NSMakeRect,
         NSNoBorder,
@@ -4265,16 +4276,26 @@ try:  # The view-model above remains usable in headless test environments.
         NSScrollView,
         NSSegmentedControl,
         NSSegmentStyleRounded,
+        NSSwitch,
         NSTextField,
         NSTextView,
         NSView,
+        NSViewMaxXMargin,
+        NSViewMinXMargin,
+        NSViewMinYMargin,
+        NSViewWidthSizable,
+        NSVisualEffectBlendingModeBehindWindow,
+        NSVisualEffectMaterialSidebar,
+        NSVisualEffectView,
         NSWindow,
         NSWorkspace,
         NSWindowStyleMaskClosable,
         NSWindowStyleMaskMiniaturizable,
+        NSWindowStyleMaskResizable,
         NSWindowStyleMaskTitled,
     )
-    from Foundation import NSLocale, NSObject, NSTimer, NSUserDefaults
+    from Foundation import (
+        NSAttributedString, NSLocale, NSObject, NSTimer, NSUserDefaults)
     from Quartz import CASpringAnimation
 
     APPKIT_AVAILABLE = True
@@ -4285,11 +4306,138 @@ except ImportError:  # pragma: no cover - exercised only outside macOS installs
 
 
 if APPKIT_AVAILABLE:
-    _ACCENT = NSColor.colorWithCalibratedRed_green_blue_alpha_(
-        0.31, 0.36, 0.95, 1.0)
     _TEXT = NSColor.labelColor()
     _SECONDARY = NSColor.secondaryLabelColor()
-    _CARD = NSColor.controlBackgroundColor()
+
+    # The palette's raw emerald and amber fail WCAG AA as text on light
+    # surfaces, so text-bearing uses swap in these darkened inks while fills
+    # and dark-appearance text keep the shared palette hues.
+    BRAND_TEXT_ON_LIGHT = (0.043, 0.478, 0.341)   # ≈ #0B7A57, 5.3:1 on white
+    AMBER_TEXT_ON_LIGHT = (0.478, 0.310, 0.0)     # ≈ #7A4F00, 6.1:1 on white
+
+    # Quiet work surfaces per the design language: hairline border, radius 12,
+    # no offset shadow. Sticker offsets stay reserved for the playful objects.
+    CARD_RADIUS = 12.0
+    CARD_BORDER_ALPHA = 0.16
+
+    # Window skeleton: fixed vibrancy sidebar, content column capped at a
+    # comfortable reading width and centered when the window grows wider.
+    # At the window minimum the column may shrink to CONTENT_MIN_WIDTH with
+    # slimmer margins; every card interior tolerates that via autoresizing.
+    SIDEBAR_WIDTH = 200.0
+    CONTENT_WIDTH = 720.0
+    CONTENT_MIN_WIDTH = 656.0
+
+    # Mirrored from GUIState by render() so jelly springs on native controls
+    # honor Reduce Motion exactly like the HUD path, without every control
+    # needing a reference back to the view model.
+    _REDUCE_MOTION = False
+
+    _FONT_WEIGHTS = {
+        "regular": NSFontWeightRegular,
+        "medium": NSFontWeightMedium,
+        "semibold": NSFontWeightSemibold,
+        "bold": NSFontWeightBold,
+    }
+
+    def _font(size: float, weight: str = "regular",
+              *, rounded: bool = False) -> Any:
+        font = NSFont.systemFontOfSize_weight_(
+            size, _FONT_WEIGHTS.get(weight, NSFontWeightRegular))
+        if rounded:
+            try:
+                descriptor = font.fontDescriptor().fontDescriptorWithDesign_(
+                    NSFontDescriptorSystemDesignRounded)
+                if descriptor is not None:
+                    rounded_font = NSFont.fontWithDescriptor_size_(
+                        descriptor, size)
+                    if rounded_font is not None:
+                        font = rounded_font
+            except Exception:
+                pass
+        return font
+
+    def _symbol_image(name: str, *, size: float = 13.0,
+                      weight: str = "medium") -> Any:
+        """Return an SF Symbol template image, or None when unavailable."""
+        try:
+            image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                name, None)
+        except Exception:
+            return None
+        if image is None:
+            return None
+        try:
+            import AppKit as _appkit
+            configuration_type = getattr(
+                _appkit, "NSImageSymbolConfiguration", None)
+            if configuration_type is not None:
+                configuration = configuration_type \
+                    .configurationWithPointSize_weight_(
+                        size, _FONT_WEIGHTS.get(weight, NSFontWeightMedium))
+                configured = image.imageWithSymbolConfiguration_(configuration)
+                if configured is not None:
+                    return configured
+        except Exception:
+            pass
+        return image
+
+    def add_jelly_motion(view: Any, motion_name: str,
+                         *, reduced_motion: bool = False) -> bool:
+        """Translate one named motion into two native Core Animation springs.
+
+        This is the same soft-body port the HUD uses in ``dictate.py``: every
+        spring reads the shared ``MOTION_SPECS`` so window, HUD, and site keep
+        one motion source of truth. Reduce Motion skips the springs entirely
+        and reports False so callers can verify the gate.
+        """
+        if reduced_motion or view is None:
+            return False
+        try:
+            view.setWantsLayer_(True)
+            layer = view.layer()
+        except Exception:
+            return False
+        if layer is None:
+            return False
+        spec = MOTION_SPECS[motion_name]
+        for axis, start in (("x", spec.squash_x), ("y", spec.squash_y)):
+            animation = CASpringAnimation.animationWithKeyPath_(
+                f"transform.scale.{axis}")
+            animation.setMass_(spec.mass)
+            animation.setStiffness_(spec.stiffness)
+            animation.setDamping_(spec.damping)
+            animation.setInitialVelocity_(spec.initial_velocity)
+            animation.setFromValue_(start)
+            animation.setToValue_(1.0)
+            animation.setDuration_(spec.duration)
+            layer.addAnimation_forKey_(
+                animation, f"whisper-face-{motion_name}-{axis}")
+        return True
+
+    class JellyButton(NSButton):
+        """Button that squashes on press and springs back on release."""
+
+        def mouseDown_(self, event):
+            add_jelly_motion(self, "press", reduced_motion=_REDUCE_MOTION)
+            objc.super(JellyButton, self).mouseDown_(event)
+            add_jelly_motion(self, "release", reduced_motion=_REDUCE_MOTION)
+
+    class JellySwitch(NSSwitch):
+        """Switch with the same press/release soft-body feedback."""
+
+        def mouseDown_(self, event):
+            add_jelly_motion(self, "press", reduced_motion=_REDUCE_MOTION)
+            objc.super(JellySwitch, self).mouseDown_(event)
+            add_jelly_motion(self, "release", reduced_motion=_REDUCE_MOTION)
+
+    class JellySegmentedControl(NSSegmentedControl):
+        """Segmented control with press/release soft-body feedback."""
+
+        def mouseDown_(self, event):
+            add_jelly_motion(self, "press", reduced_motion=_REDUCE_MOTION)
+            objc.super(JellySegmentedControl, self).mouseDown_(event)
+            add_jelly_motion(self, "release", reduced_motion=_REDUCE_MOTION)
 
     def _theme_color(
             color: tuple[float, float, float], alpha: float = 1.0) -> Any:
@@ -4305,6 +4453,14 @@ if APPKIT_AVAILABLE:
         except Exception:
             return False
 
+    def _brand_text_color(dark: bool) -> Any:
+        palette = palette_for_appearance(dark)
+        return _theme_color(palette.brand if dark else BRAND_TEXT_ON_LIGHT)
+
+    def _amber_text_color(dark: bool) -> Any:
+        palette = palette_for_appearance(dark)
+        return _theme_color(palette.accent if dark else AMBER_TEXT_ON_LIGHT)
+
     def _accessible(view: Any, label: str, help_text: str = "") -> Any:
         """Apply explicit VoiceOver copy without depending on visual text."""
         try:
@@ -4318,24 +4474,22 @@ if APPKIT_AVAILABLE:
     def _label(text: str, frame: Any, *, size: float = 13,
                weight: str = "regular", color: Any = None,
                accessibility_label: str = "", rounded: bool = False,
-               wrap: bool = False, alignment: int | None = None) -> Any:
+               wrap: bool = False, alignment: int | None = None,
+               truncate: bool = False) -> Any:
         label = NSTextField.labelWithString_(text)
         label.setFrame_(frame)
-        font_weight = (
-            0.6 if weight == "bold" else 0.35
-            if weight == "medium" else 0.0)
-        font = NSFont.systemFontOfSize_weight_(size, font_weight)
-        if rounded:
+        label.setFont_(_font(size, weight, rounded=rounded))
+        label.setTextColor_(color or _TEXT)
+        label.setLineBreakMode_(4 if truncate else 0)
+        if truncate:
+            # A truncating label must never widen the layout (or the whole
+            # window) to fit its text: keep its pull below the window's
+            # size-stay-put priority so it shortens with an ellipsis instead.
             try:
-                descriptor = font.fontDescriptor().fontDescriptorWithDesign_(
-                    NSFontDescriptorSystemDesignRounded)
-                if descriptor is not None:
-                    font = NSFont.fontWithDescriptor_size_(descriptor, size)
+                label.setContentCompressionResistancePriority_forOrientation_(
+                    400.0, 0)
             except Exception:
                 pass
-        label.setFont_(font)
-        label.setTextColor_(color or _TEXT)
-        label.setLineBreakMode_(0)
         if wrap:
             label.setUsesSingleLineMode_(False)
             label.setMaximumNumberOfLines_(0)
@@ -4344,49 +4498,61 @@ if APPKIT_AVAILABLE:
         return _accessible(label, accessibility_label or text)
 
     def _button(title: str, frame: Any, target: Any, action: str,
-                *, help_text: str = "") -> Any:
-        button = NSButton.alloc().initWithFrame_(frame)
+                *, help_text: str = "", symbol: str = "") -> Any:
+        button = JellyButton.alloc().initWithFrame_(frame)
         button.setTitle_(title)
         button.setBezelStyle_(NSBezelStyleRounded)
-        font = NSFont.systemFontOfSize_weight_(12.0, 0.45)
-        try:
-            descriptor = font.fontDescriptor().fontDescriptorWithDesign_(
-                NSFontDescriptorSystemDesignRounded)
-            if descriptor is not None:
-                font = NSFont.fontWithDescriptor_size_(descriptor, 12.0)
-        except Exception:
-            pass
-        button.setFont_(font)
+        button.setFont_(_font(13.0, "medium"))
+        if symbol:
+            image = _symbol_image(symbol, size=12.0)
+            if image is not None:
+                button.setImage_(image)
+                button.setImagePosition_(NSImageLeading)
         button.setWantsLayer_(True)
-        if button.layer() is not None:
-            button.layer().setCornerRadius_(
-                SURFACE_SPECS["control"].radius)
         button.setTarget_(target)
         button.setAction_(action)
         return _accessible(button, title, help_text)
 
+    def _hairline(frame: Any) -> Any:
+        """One-pixel separator; themed to the palette line at low alpha."""
+        line = NSBox.alloc().initWithFrame_(frame)
+        line.setBoxType_(NSBoxCustom)
+        line.setBorderType_(NSNoBorder)
+        line.setTitlePosition_(NSNoTitle)
+        line.setBorderWidth_(0.0)
+        line.setCornerRadius_(0.0)
+        return line
+
     def _card(frame: Any, treatment: str = "card") -> Any:
-        spec = SURFACE_SPECS.get(treatment, SURFACE_SPECS["card"])
-        palette = palette_for_appearance(
-            _uses_dark_appearance(NSApplication.sharedApplication()))
         box = NSBox.alloc().initWithFrame_(frame)
         box.setBoxType_(NSBoxCustom)
         box.setBorderType_(NSLineBorder)
         box.setTitlePosition_(NSNoTitle)
+        palette = palette_for_appearance(
+            _uses_dark_appearance(NSApplication.sharedApplication()))
         box.setFillColor_(_theme_color(palette.surface))
-        box.setBorderColor_(_theme_color(palette.line, 0.18))
-        box.setBorderWidth_(spec.border_width)
-        box.setCornerRadius_(spec.radius)
-        box.setWantsLayer_(True)
-        layer = box.layer()
-        if layer is not None and (spec.shadow_x or spec.shadow_y):
-            try:
-                layer.setShadowColor_(_theme_color(palette.line).CGColor())
-                layer.setShadowOpacity_(0.94)
-                layer.setShadowRadius_(0.0)
-                layer.setShadowOffset_((spec.shadow_x, spec.shadow_y))
-            except Exception:
-                pass
+        if treatment in ("playful", "control"):
+            spec = SURFACE_SPECS[treatment]
+            box.setBorderColor_(_theme_color(palette.line))
+            box.setBorderWidth_(spec.border_width)
+            box.setCornerRadius_(spec.radius)
+            box.setWantsLayer_(True)
+            layer = box.layer()
+            if layer is not None and (spec.shadow_x or spec.shadow_y):
+                try:
+                    layer.setShadowColor_(
+                        _theme_color(palette.line).CGColor())
+                    layer.setShadowOpacity_(0.94)
+                    layer.setShadowRadius_(0.0)
+                    layer.setShadowOffset_((spec.shadow_x, spec.shadow_y))
+                except Exception:
+                    pass
+        else:
+            box.setBorderColor_(
+                _theme_color(palette.line, CARD_BORDER_ALPHA))
+            box.setBorderWidth_(1.0)
+            box.setCornerRadius_(CARD_RADIUS)
+            box.setWantsLayer_(True)
         return box
 
     class WhisperFaceWindowController(NSObject):
@@ -4398,6 +4564,9 @@ if APPKIT_AVAILABLE:
             self.view_model = view_model
             self.pages: dict[str, Any] = {}
             self.dynamic: dict[str, Any] = {}
+            # Views that must re-read the palette when the appearance flips.
+            # Roles: card, hairline, ink, ink_soft, brand, cta, pill.
+            self.themed: dict[str, list[Any]] = {}
             self.timer = None
             self.defaults = None
             self._face_images: dict[tuple[str, bool], Any] = {}
@@ -4433,6 +4602,101 @@ if APPKIT_AVAILABLE:
             return self.view_model.localized(key, **values)
 
         @objc.python_method
+        def _register(self, role: str, *views: Any) -> None:
+            self.themed.setdefault(role, []).extend(views)
+
+        @objc.python_method
+        def _ink(self, text: str, frame: Any, **kwargs: Any) -> Any:
+            label = _label(text, frame, **kwargs)
+            self._register("ink", label)
+            return label
+
+        @objc.python_method
+        def _soft(self, text: str, frame: Any, **kwargs: Any) -> Any:
+            label = _label(text, frame, **kwargs)
+            self._register("ink_soft", label)
+            return label
+
+        @objc.python_method
+        def _pill(self, text: str, frame: Any, *, size: float = 11,
+                  accessibility_label: str = "") -> Any:
+            """Small tinted status capsule; colors arrive at render time."""
+            pill = _label(
+                text, frame, size=size, weight="semibold", alignment=2,
+                truncate=True,
+                accessibility_label=accessibility_label or text)
+            pill.setWantsLayer_(True)
+            layer = pill.layer()
+            if layer is not None:
+                layer.setCornerRadius_(frame.size.height / 2.0)
+            return pill
+
+        @objc.python_method
+        def _fit_pill(self, pill: Any) -> None:
+            """Hug the capsule to its text, keeping the right edge pinned."""
+            try:
+                frame = pill.frame()
+                superview = pill.superview()
+                if superview is None:
+                    return
+                pill.sizeToFit()
+                fitted = pill.frame().size.width
+                width = min(200.0, max(56.0, fitted + 24.0))
+                right = superview.bounds().size.width - 16.0
+                pill.setFrame_(NSMakeRect(
+                    right - width, frame.origin.y, width,
+                    frame.size.height))
+            except Exception:
+                pass
+
+        @objc.python_method
+        def _set_pill_tone(self, pill: Any, tone: str, dark: bool) -> None:
+            palette = palette_for_appearance(dark)
+            fill = palette.brand if tone == "good" else palette.accent
+            text_color = (
+                _brand_text_color(dark) if tone == "good"
+                else _amber_text_color(dark))
+            layer = pill.layer()
+            if layer is not None:
+                layer.setBackgroundColor_(
+                    _theme_color(fill, 0.30 if dark else 0.16).CGColor())
+            pill.setTextColor_(text_color)
+
+        @objc.python_method
+        def _set_cta_title(self, button: Any, title: str) -> None:
+            """Filled amber CTA keeps dark ink text in both appearances."""
+            button.setTitle_(title)
+            try:
+                attributes = {
+                    NSFontAttributeName: _font(
+                        13.0, "semibold", rounded=True),
+                    NSForegroundColorAttributeName: _theme_color(
+                        LIGHT_PALETTE.ink),
+                }
+                button.setAttributedTitle_(
+                    NSAttributedString.alloc().initWithString_attributes_(
+                        title, attributes))
+            except Exception:
+                pass
+
+        @objc.python_method
+        def _primary_button(self, title: str, frame: Any, action: str,
+                            *, help_text: str = "") -> Any:
+            """The one sticker-treated call to action a screen may carry."""
+            button = JellyButton.alloc().initWithFrame_(frame)
+            button.setBordered_(False)
+            button.setWantsLayer_(True)
+            layer = button.layer()
+            if layer is not None:
+                layer.setCornerRadius_(SURFACE_SPECS["control"].radius)
+                layer.setBorderWidth_(SURFACE_SPECS["control"].border_width)
+            button.setTarget_(self)
+            button.setAction_(action)
+            self._set_cta_title(button, title)
+            self._register("cta", button)
+            return _accessible(button, title, help_text)
+
+        @objc.python_method
         def _face_image(self, face: str, *, talk: bool) -> Any:
             # The colored character, not the menu-bar silhouette. A template
             # glyph is drawn to survive 18 points; this window shows the face
@@ -4453,17 +4717,17 @@ if APPKIT_AVAILABLE:
         def _apply_onboarding_theme(
                 self, state: GUIState,
                 presentation: OnboardingPresentation) -> None:
-            palette = palette_for_appearance(
-                _uses_dark_appearance(self.window))
+            dark = _uses_dark_appearance(self.window)
+            palette = palette_for_appearance(dark)
             card = self.dynamic["onboarding_card"]
-            card.setFillColor_(_theme_color(palette.bg))
-            card.setBorderColor_(_theme_color(palette.line, 0.22))
+            card.setFillColor_(_theme_color(palette.surface))
+            card.setBorderColor_(_theme_color(palette.line))
             chip = self.dynamic["onboarding_face_chip"]
-            chip.setFillColor_(_theme_color(palette.surface))
+            chip.setFillColor_(_theme_color(palette.bg))
             chip.setBorderColor_(
-                _theme_color(FACE_CHIP_COLORS[state.face], 0.85))
+                _theme_color(FACE_CHIP_COLORS[state.face], 0.9))
             self.dynamic["onboarding_progress"].setTextColor_(
-                _theme_color(palette.brand))
+                _brand_text_color(dark))
             self.dynamic["onboarding_title"].setTextColor_(
                 _theme_color(palette.ink))
             self.dynamic["onboarding_detail"].setTextColor_(
@@ -4471,14 +4735,8 @@ if APPKIT_AVAILABLE:
             self.dynamic["onboarding_face_kicker"].setTextColor_(
                 _theme_color(palette.ink_soft))
             self.dynamic["onboarding_status"].setTextColor_(
-                _theme_color(
-                    palette.brand if presentation.complete
-                    else palette.accent))
-            try:
-                self.dynamic["onboarding_action"].setBezelColor_(
-                    _theme_color(palette.brand))
-            except Exception:
-                pass
+                _brand_text_color(dark) if presentation.complete
+                else _amber_text_color(dark))
             for step, step_card, control in zip(
                     state.onboarding_steps,
                     self.dynamic["onboarding_step_cards"],
@@ -4486,12 +4744,17 @@ if APPKIT_AVAILABLE:
                 current = step.key == presentation.current_key
                 if step.complete:
                     fill = _theme_color(palette.brand, 0.20)
-                    text = _theme_color(palette.brand)
+                    text = _brand_text_color(dark)
                 elif current:
-                    fill = _theme_color(palette.accent, 0.28)
-                    text = _theme_color(palette.ink)
+                    # Amber over deep pine muddies into olive, so dark mode
+                    # uses a lighter wash and lets the text carry the amber.
+                    fill = _theme_color(
+                        palette.accent, 0.18 if dark else 0.28)
+                    text = (_theme_color(palette.accent) if dark
+                            else _theme_color(palette.ink))
                 else:
-                    fill = _theme_color(palette.surface, 0.76)
+                    fill = _theme_color(
+                        palette.bg, 0.55 if dark else 0.76)
                     text = _theme_color(palette.ink_soft)
                 step_card.setFillColor_(fill)
                 control.setTextColor_(text)
@@ -4505,73 +4768,91 @@ if APPKIT_AVAILABLE:
                     or not bool(self.window.isVisible())):
                 return
             self._onboarding_stage = stage
-            if self.view_model.state.prefers_reduced_motion:
-                return
-            layer = self.dynamic["onboarding_face_chip"].layer()
-            if layer is None:
-                return
-            spec = MOTION_SPECS["pop"]
-            spring = CASpringAnimation.animationWithKeyPath_("transform.scale")
-            spring.setFromValue_(spec.squash_x)
-            spring.setToValue_(1.0)
-            spring.setMass_(spec.mass)
-            spring.setStiffness_(spec.stiffness)
-            spring.setDamping_(spec.damping)
-            spring.setInitialVelocity_(spec.initial_velocity)
-            spring.setDuration_(spec.duration)
-            spring.setRemovedOnCompletion_(True)
-            layer.addAnimation_forKey_(spring, "onboarding-soft-pop")
+            add_jelly_motion(
+                self.dynamic["onboarding_face_chip"], "pop",
+                reduced_motion=self.view_model.state.prefers_reduced_motion)
 
         @objc.python_method
         def _apply_window_theme(self, state: GUIState) -> None:
             """Apply the shared palette to the whole working window."""
-            palette = palette_for_appearance(
-                _uses_dark_appearance(self.window))
+            dark = _uses_dark_appearance(self.window)
+            palette = palette_for_appearance(dark)
+            self._dark = dark
             root = self.window.contentView()
             root.setWantsLayer_(True)
             if root.layer() is not None:
                 root.layer().setBackgroundColor_(
                     _theme_color(palette.bg).CGColor())
-
-            def theme_boxes(view: Any) -> None:
-                for child in view.subviews():
+            for box in self.themed.get("card", ()):
+                box.setFillColor_(_theme_color(palette.surface))
+                box.setBorderColor_(
+                    _theme_color(palette.line, CARD_BORDER_ALPHA))
+            for line in self.themed.get("hairline", ()):
+                line.setFillColor_(_theme_color(palette.line, 0.14))
+            for label in self.themed.get("ink", ()):
+                label.setTextColor_(_theme_color(palette.ink))
+            for label in self.themed.get("ink_soft", ()):
+                label.setTextColor_(_theme_color(palette.ink_soft))
+            for label in self.themed.get("brand", ()):
+                label.setTextColor_(_brand_text_color(dark))
+            for button in self.themed.get("cta", ()):
+                layer = button.layer()
+                if layer is not None:
+                    layer.setBackgroundColor_(
+                        _theme_color(palette.accent).CGColor())
+                    layer.setBorderColor_(
+                        _theme_color(palette.line).CGColor())
                     try:
-                        if child.isKindOfClass_(NSBox):
-                            child.setFillColor_(_theme_color(palette.surface))
-                            child.setBorderColor_(
-                                _theme_color(palette.line, 0.18))
+                        layer.setShadowColor_(
+                            _theme_color(palette.line).CGColor())
+                        layer.setShadowOpacity_(0.94)
+                        layer.setShadowRadius_(0.0)
+                        layer.setShadowOffset_((
+                            SURFACE_SPECS["control"].shadow_x,
+                            SURFACE_SPECS["control"].shadow_y))
                     except Exception:
                         pass
-                    if hasattr(child, "subviews"):
-                        theme_boxes(child)
-
-            theme_boxes(root)
-            self.dynamic["window_header"].setFillColor_(
-                _theme_color(palette.surface))
-            self.dynamic["window_header"].setBorderColor_(
-                _theme_color(palette.line))
-            # The chip used to carry the face color because the face on top
-            # was a black silhouette. The character is colored now, so the
-            # color moves onto the character and the chip becomes a quiet
-            # container with a face-tinted ring. Tinting the fill instead
-            # muddies every warm face against the dark panel.
+            # The chip stays a quiet container with a face-tinted ring; the
+            # colored character carries the personality.
             chip = self.dynamic["window_face_chip"]
             chip.setFillColor_(_theme_color(palette.surface))
             chip.setBorderColor_(
-                _theme_color(FACE_CHIP_COLORS[state.face], 0.85))
+                _theme_color(FACE_CHIP_COLORS[state.face], 0.9))
             self.dynamic["window_title"].setTextColor_(
                 _theme_color(palette.ink))
-            self.dynamic["window_subtitle"].setTextColor_(
-                _theme_color(palette.ink_soft))
             self.dynamic["window_badge"].setTextColor_(
-                _theme_color(palette.brand))
-            self.dynamic["window_nav_shell"].setFillColor_(
-                _theme_color(palette.surface, 0.86))
-            try:
-                self.section_control.setSelectedSegmentBezelColor_(
-                    _theme_color(palette.brand))
-            except Exception:
-                pass
+                _brand_text_color(dark))
+            self.dynamic["window_version"].setTextColor_(
+                _theme_color(palette.ink_soft))
+            for index, (row, row_label, row_icon) in enumerate(zip(
+                    self.sidebar_rows, self.dynamic["sidebar_row_labels"],
+                    self.dynamic["sidebar_row_icons"])):
+                selected = SECTIONS[index] == state.section
+                row.setWantsLayer_(True)
+                layer = row.layer()
+                if layer is not None:
+                    layer.setCornerRadius_(8.0)
+                    layer.setBackgroundColor_(
+                        _theme_color(
+                            palette.brand, 0.28 if dark else 0.15).CGColor()
+                        if selected else
+                        NSColor.clearColor().CGColor())
+                text_color = (
+                    _brand_text_color(dark) if selected
+                    else _theme_color(palette.ink))
+                row_label.setTextColor_(text_color)
+                row_label.setFont_(_font(
+                    13.0, "semibold" if selected else "medium"))
+                try:
+                    row_icon.setContentTintColor_(
+                        text_color if selected
+                        else _theme_color(palette.ink_soft))
+                except Exception:
+                    pass
+                sync_accessibility(
+                    row,
+                    self._l("nav.selected") if selected else "",
+                    label=self._l(f"nav.{SECTIONS[index].casefold()}"))
 
         @objc.python_method
         def _animate_section_change(self, state: GUIState) -> None:
@@ -4583,25 +4864,12 @@ if APPKIT_AVAILABLE:
                 return
             page = self.pages[state.section]
             page.setWantsLayer_(True)
-            layer = page.layer()
-            if layer is None:
-                return
-            spec = MOTION_SPECS["release"]
-            spring = CASpringAnimation.animationWithKeyPath_(
-                "transform.scale")
-            spring.setFromValue_(spec.squash_x)
-            spring.setToValue_(1.0)
-            spring.setMass_(spec.mass)
-            spring.setStiffness_(spec.stiffness)
-            spring.setDamping_(spec.damping)
-            spring.setInitialVelocity_(spec.initial_velocity)
-            spring.setDuration_(spec.duration)
-            spring.setRemovedOnCompletion_(True)
-            layer.addAnimation_forKey_(spring, "section-soft-release")
-            face_layer = self.dynamic["window_face_chip"].layer()
-            if face_layer is not None:
-                face_layer.addAnimation_forKey_(
-                    spring, "header-face-soft-release")
+            add_jelly_motion(
+                page, "release",
+                reduced_motion=state.prefers_reduced_motion)
+            add_jelly_motion(
+                self.sidebar_rows[SECTIONS.index(state.section)], "pop",
+                reduced_motion=state.prefers_reduced_motion)
 
         def initWithViewModel_(self, view_model: WhisperFaceViewModel):
             self = objc.super(WhisperFaceWindowController, self).init()
@@ -4617,99 +4885,253 @@ if APPKIT_AVAILABLE:
                 return None
             return self._initialize(view_model, read_system_state=False)
 
+        @objc.python_method
+        def _stack(self, page: Any, view: Any, *, below: Any = None,
+                   gap: float = 0.0, height: float | None = None) -> Any:
+            """Pin a full-width block into a page's vertical rhythm."""
+            view.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            page.addSubview_(view)
+            top = (page.topAnchor() if below is None
+                   else below.bottomAnchor())
+            constraints = [
+                view.topAnchor().constraintEqualToAnchor_constant_(top, gap),
+                view.leadingAnchor().constraintEqualToAnchor_(
+                    page.leadingAnchor()),
+                view.trailingAnchor().constraintEqualToAnchor_(
+                    page.trailingAnchor()),
+            ]
+            if height is not None:
+                constraints.append(
+                    view.heightAnchor().constraintEqualToConstant_(height))
+            NSLayoutConstraint.activateConstraints_(constraints)
+            return view
+
+        @objc.python_method
+        def _page_header(self, page: Any, title: str,
+                         *, subtitle: str = "") -> Any:
+            """Content header: 22pt rounded title, optional 13pt subtitle."""
+            height = 56.0 if subtitle else 32.0
+            header = NSView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, CONTENT_WIDTH, height))
+            title_label = self._ink(
+                title, NSMakeRect(0, height - 28, 520, 28),
+                size=22, weight="semibold", rounded=True)
+            header.addSubview_(title_label)
+            if subtitle:
+                header.addSubview_(self._soft(
+                    subtitle, NSMakeRect(1, height - 50, 620, 18),
+                    size=13, truncate=True))
+            self._stack(page, header, height=height)
+            return header
+
         def _build_window(self) -> None:
             style = (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                     NSWindowStyleMaskMiniaturizable)
+                     NSWindowStyleMaskMiniaturizable |
+                     NSWindowStyleMaskResizable)
             self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-                NSMakeRect(0, 0, 820, 570), style, NSBackingStoreBuffered, False)
+                NSMakeRect(0, 0, 1000, 640), style,
+                NSBackingStoreBuffered, False)
             self.window.setTitle_(APP_NAME)
             self.window.setDelegate_(self)
+            self.window.setContentMinSize_((880.0, 600.0))
             self.window.center()
             root = self.window.contentView()
             root.setWantsLayer_(True)
 
-            header = _card(
-                NSMakeRect(20, 500, 780, 52), treatment="playful")
+            # ---- Left rail: vibrancy sidebar with brand header + nav rows.
+            sidebar = NSVisualEffectView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, SIDEBAR_WIDTH, 640))
+            sidebar.setMaterial_(NSVisualEffectMaterialSidebar)
+            sidebar.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
+            sidebar.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            root.addSubview_(sidebar)
+            self.sidebar = sidebar
+
+            header = NSView.alloc().initWithFrame_(
+                NSMakeRect(0, 560, SIDEBAR_WIDTH, 80))
+            header.setAutoresizingMask_(NSViewMinYMargin)
             face_chip = _card(
-                NSMakeRect(10, 4, 44, 44), treatment="control")
+                NSMakeRect(16, 16, 48, 48), treatment="control")
             face_image = NSImageView.alloc().initWithFrame_(
-                NSMakeRect(15, 9, 34, 34))
+                NSMakeRect(22, 22, 36, 36))
             face_image.setImageScaling_(
                 NSImageScaleProportionallyUpOrDown)
             face_image.setEditable_(False)
+            face_button = JellyButton.alloc().initWithFrame_(
+                NSMakeRect(16, 16, 48, 48))
+            face_button.setTitle_("")
+            face_button.setBordered_(False)
+            face_button.setTransparent_(True)
+            face_button.setTarget_(self)
+            face_button.setAction_("faceChipPressed:")
+            _accessible(
+                face_button,
+                self._l("app.face_chip.label"),
+                self._l("app.face_chip.help"))
             title = _label(
-                APP_NAME, NSMakeRect(66, 24, 300, 23),
-                size=19, weight="bold", rounded=True)
-            subtitle = _label(
-                self._l("app.subtitle"), NSMakeRect(67, 6, 430, 18),
-                size=11, color=_SECONDARY)
+                APP_NAME, NSMakeRect(72, 40, 120, 22),
+                size=17, weight="semibold", rounded=True,
+                accessibility_label=self._l("app.subtitle"))
             badge = _label(
                 self._l("app.local_badge"),
-                NSMakeRect(630, 25, 120, 16),
-                size=10, weight="bold", color=_ACCENT,
-                rounded=True, alignment=2)
+                NSMakeRect(72, 22, 120, 14),
+                size=11, weight="semibold", rounded=True)
+            header.addSubview_(face_chip)
+            header.addSubview_(face_image)
+            header.addSubview_(face_button)
+            header.addSubview_(title)
+            header.addSubview_(badge)
+            sidebar.addSubview_(header)
+
+            rows: list[Any] = []
+            row_labels: list[Any] = []
+            row_icons: list[Any] = []
+            symbols = {
+                "Home": "house.fill",
+                "Settings": "gearshape.fill",
+                "Advanced": "wrench.and.screwdriver.fill",
+            }
+            for index, section in enumerate(SECTIONS):
+                row = JellyButton.alloc().initWithFrame_(
+                    NSMakeRect(12, 508 - index * 40, SIDEBAR_WIDTH - 24, 36))
+                row.setAutoresizingMask_(NSViewMinYMargin)
+                row.setTitle_("")
+                row.setBordered_(False)
+                row.setWantsLayer_(True)
+                row.setTag_(index)
+                row.setTarget_(self)
+                row.setAction_("sectionChanged:")
+                image = _symbol_image(symbols[section], size=14.0)
+                icon = NSImageView.alloc().initWithFrame_(
+                    NSMakeRect(12, 9, 18, 18))
+                if image is not None:
+                    icon.setImage_(image)
+                icon.setEditable_(False)
+                row_label = _label(
+                    self._l(f"nav.{section.casefold()}"),
+                    NSMakeRect(38, 9, 140, 18), size=13, weight="medium")
+                row.addSubview_(icon)
+                row.addSubview_(row_label)
+                _accessible(
+                    row, self._l(f"nav.{section.casefold()}"),
+                    self._l("settings.accessibility.sections.help"))
+                sidebar.addSubview_(row)
+                rows.append(row)
+                row_labels.append(row_label)
+                row_icons.append(icon)
+            self.sidebar_rows = tuple(rows)
+            # ⌘D always routes to Advanced; the sidebar row is visible from
+            # every section, so the shortcut works window-wide.
+            advanced_row = rows[SECTIONS.index("Advanced")]
+            advanced_row.setKeyEquivalent_("d")
+            advanced_row.setKeyEquivalentModifierMask_(
+                NSEventModifierFlagCommand)
+            _accessible(
+                advanced_row, self._l("nav.advanced"),
+                self._l("advanced.accessibility.shortcut.help"))
+            self.dynamic["advanced_button"] = advanced_row
             version = _label(
                 self._l(
                     "app.version", version=application_build_version()),
-                NSMakeRect(630, 9, 120, 14),
-                size=8, weight="semibold", color=_SECONDARY,
-                rounded=True, alignment=2)
-            header.addSubview_(face_chip)
-            header.addSubview_(face_image)
-            header.addSubview_(title)
-            header.addSubview_(subtitle)
-            header.addSubview_(badge)
-            header.addSubview_(version)
-            root.addSubview_(header)
+                NSMakeRect(16, 14, SIDEBAR_WIDTH - 32, 14),
+                size=11, weight="medium", color=_SECONDARY, rounded=True)
+            sidebar.addSubview_(version)
 
-            nav_shell = _card(
-                NSMakeRect(25, 447, 770, 38), treatment="work")
-            root.addSubview_(nav_shell)
+            # ---- Right side: content area with a centered, capped column.
+            content_area = NSView.alloc().initWithFrame_(
+                NSMakeRect(SIDEBAR_WIDTH, 0, 800, 640))
+            content_area.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            root.addSubview_(content_area)
+            notice = _label("", NSMakeRect(0, 0, 720, 16),
+                            size=11, truncate=True)
+            notice.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            content_area.addSubview_(notice)
+            column = NSView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, CONTENT_WIDTH, 580))
+            column.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            content_area.addSubview_(column)
 
-            self.section_control = NSSegmentedControl.alloc().initWithFrame_(
-                NSMakeRect(6, 3, 758, 32))
-            self.section_control.setSegmentCount_(len(SECTIONS))
-            self.section_control.setSegmentStyle_(NSSegmentStyleRounded)
-            for index, section in enumerate(SECTIONS):
-                self.section_control.setLabel_forSegment_(
-                    self._l(f"nav.{section.casefold()}"), index)
-                self.section_control.setWidth_forSegment_(
-                    758.0 / len(SECTIONS), index)
-            self.section_control.setSelectedSegment_(0)
-            self.section_control.setTarget_(self)
-            self.section_control.setAction_("sectionChanged:")
-            _accessible(
-                self.section_control,
-                self._l("settings.accessibility.sections.label"),
-                self._l("settings.accessibility.sections.help"))
-            nav_shell.addSubview_(self.section_control)
+            preferred_width = column.widthAnchor() \
+                .constraintEqualToConstant_(CONTENT_WIDTH)
+            # Below NSLayoutPriorityWindowSizeStayPut (500) so preferring the
+            # full reading width can never grow the window itself.
+            preferred_width.setPriority_(450)
+            NSLayoutConstraint.activateConstraints_([
+                sidebar.leadingAnchor().constraintEqualToAnchor_(
+                    root.leadingAnchor()),
+                sidebar.topAnchor().constraintEqualToAnchor_(
+                    root.topAnchor()),
+                sidebar.bottomAnchor().constraintEqualToAnchor_(
+                    root.bottomAnchor()),
+                sidebar.widthAnchor().constraintEqualToConstant_(
+                    SIDEBAR_WIDTH),
+                content_area.leadingAnchor().constraintEqualToAnchor_(
+                    sidebar.trailingAnchor()),
+                content_area.trailingAnchor().constraintEqualToAnchor_(
+                    root.trailingAnchor()),
+                content_area.topAnchor().constraintEqualToAnchor_(
+                    root.topAnchor()),
+                content_area.bottomAnchor().constraintEqualToAnchor_(
+                    root.bottomAnchor()),
+                column.topAnchor().constraintEqualToAnchor_constant_(
+                    content_area.topAnchor(), 24.0),
+                column.centerXAnchor().constraintEqualToAnchor_(
+                    content_area.centerXAnchor()),
+                column.widthAnchor().constraintLessThanOrEqualToConstant_(
+                    CONTENT_WIDTH),
+                column.widthAnchor().constraintGreaterThanOrEqualToConstant_(
+                    CONTENT_MIN_WIDTH),
+                column.leadingAnchor()
+                .constraintGreaterThanOrEqualToAnchor_constant_(
+                    content_area.leadingAnchor(), 12.0),
+                preferred_width,
+                notice.leadingAnchor().constraintEqualToAnchor_(
+                    column.leadingAnchor()),
+                notice.trailingAnchor().constraintEqualToAnchor_(
+                    column.trailingAnchor()),
+                notice.bottomAnchor().constraintEqualToAnchor_constant_(
+                    content_area.bottomAnchor(), -10.0),
+                column.bottomAnchor().constraintEqualToAnchor_constant_(
+                    notice.topAnchor(), -6.0),
+            ])
+
             self.dynamic.update(
                 window_header=header,
                 window_face_chip=face_chip,
                 window_face=face_image,
+                window_face_button=face_button,
                 window_title=title,
-                window_subtitle=subtitle,
                 window_badge=badge,
                 window_version=version,
-                window_nav_shell=nav_shell,
+                sidebar_row_labels=tuple(row_labels),
+                sidebar_row_icons=tuple(row_icons),
+                notice=notice,
             )
+            self._register("brand", badge)
 
-            page_frame = NSMakeRect(31, 25, 758, 402)
             builders = {
                 "Home": self._build_home,
                 "Settings": self._build_settings,
                 "Advanced": self._build_advanced,
             }
             for section, builder in builders.items():
-                page = NSView.alloc().initWithFrame_(page_frame)
+                page = NSView.alloc().initWithFrame_(
+                    NSMakeRect(0, 0, CONTENT_WIDTH, 580))
+                page.setTranslatesAutoresizingMaskIntoConstraints_(False)
+                column.addSubview_(page)
+                NSLayoutConstraint.activateConstraints_([
+                    page.topAnchor().constraintEqualToAnchor_(
+                        column.topAnchor()),
+                    page.leadingAnchor().constraintEqualToAnchor_(
+                        column.leadingAnchor()),
+                    page.trailingAnchor().constraintEqualToAnchor_(
+                        column.trailingAnchor()),
+                    page.bottomAnchor().constraintEqualToAnchor_(
+                        column.bottomAnchor()),
+                ])
                 builder(page)
                 page.setHidden_(section != "Home")
-                root.addSubview_(page)
                 self.pages[section] = page
-            notice = _label("", NSMakeRect(35, 5, 750, 18),
-                            size=11, color=NSColor.systemRedColor())
-            root.addSubview_(notice)
-            self.dynamic["notice"] = notice
             self.key_views_by_section = {
                 "Home": (
                     self.dynamic["onboarding_action"],
@@ -4722,60 +5144,64 @@ if APPKIT_AVAILABLE:
                 ),
                 "Settings": (self.dynamic["settings_pane_control"],),
                 "Advanced": (
-                    self.dynamic["advanced_button"],
                     self.dynamic["selective_relisten_toggle"],
                     self.dynamic["open_log_button"],
                     self.dynamic["copy_support_snapshot_button"],
                     self.dynamic["verify_button"],
+                    self.dynamic["export_support_bundle_button"],
+                    self.dynamic["open_system_settings_button"],
                     self.dynamic["license_button"],
                     self.dynamic["source_button"],
-                    self.dynamic["open_system_settings_button"],
-                    self.dynamic["export_support_bundle_button"],
                 ),
             }
-            self.window.setInitialFirstResponder_(self.section_control)
+            self.window.setInitialFirstResponder_(self.sidebar_rows[0])
             self.render()
 
         def _build_home(self, page: Any) -> None:
-            hero = _card(NSMakeRect(0, 226, 758, 176))
-            phase = _label(
+            width = CONTENT_WIDTH
+            header = self._page_header(page, self._l("nav.home"))
+
+            # Hero: one calm status group left, the single filled CTA plus
+            # conditional recovery actions in a right-aligned column.
+            hero = _card(NSMakeRect(0, 0, width, 144))
+            self._register("card", hero)
+            phase = self._ink(
                 self._l("overview.phase.ready"),
-                NSMakeRect(24, 148, 320, 18),
-                size=11, weight="bold", color=_ACCENT)
-            status = _label(
+                NSMakeRect(16, 114, 420, 14),
+                size=11, weight="semibold", rounded=True)
+            status = self._ink(
                 self._l("overview.status.ready.title"),
-                NSMakeRect(24, 100, 520, 44), size=32, weight="bold")
-            detail = _label("", NSMakeRect(26, 76, 520, 20),
-                            size=12, color=_SECONDARY)
-            engine = _label("", NSMakeRect(26, 50, 500, 20),
-                            size=13, color=_SECONDARY)
-            outbox = _label(
+                NSMakeRect(16, 86, 440, 24),
+                size=17, weight="semibold", rounded=True, truncate=True)
+            detail = self._soft(
+                "", NSMakeRect(16, 62, 440, 18), size=13, truncate=True)
+            engine = self._soft(
+                "", NSMakeRect(16, 42, 440, 14), size=11, truncate=True)
+            outbox = self._ink(
                 self._l("overview.outbox.empty"),
-                NSMakeRect(26, 20, 500, 20),
-                size=12, color=_SECONDARY)
-            pause = _button(
+                NSMakeRect(16, 16, 536, 18), size=13, truncate=True)
+            outbox.setAutoresizingMask_(NSViewWidthSizable)
+            pause = self._primary_button(
                 self._l("overview.action.pause"),
-                NSMakeRect(602, 100, 124, 40), self, "pauseChanged:",
+                NSMakeRect(width - 16 - 120, 92, 120, 36), "pauseChanged:",
                 help_text=self._l("overview.action.pause.help"))
+            pause.setAutoresizingMask_(NSViewMinXMargin)
             fix = _button(
                 self._l("overview.action.review"),
-                NSMakeRect(590, 56, 136, 34),
+                NSMakeRect(width - 16 - 136, 52, 136, 28),
                 self, "reviewIssue:",
                 help_text=self._l("overview.action.review.help"))
+            fix.setAutoresizingMask_(NSViewMinXMargin)
             copy_outbox = _button(
                 self._l("overview.action.copy_outbox"),
-                NSMakeRect(590, 18, 136, 34),
+                NSMakeRect(width - 16 - 136, 16, 136, 28),
                 self, "copyOutbox:",
                 help_text=self._l("overview.action.copy_outbox.help"))
-            hero.addSubview_(phase)
-            hero.addSubview_(status)
-            hero.addSubview_(detail)
-            hero.addSubview_(engine)
-            hero.addSubview_(outbox)
-            hero.addSubview_(pause)
-            hero.addSubview_(fix)
-            hero.addSubview_(copy_outbox)
-            page.addSubview_(hero)
+            copy_outbox.setAutoresizingMask_(NSViewMinXMargin)
+            for view in (phase, status, detail, engine, outbox, pause,
+                         fix, copy_outbox):
+                hero.addSubview_(view)
+            self._stack(page, hero, below=header, gap=16, height=144)
             self.dynamic.update(
                 overview_hero=hero,
                 overview_phase=phase,
@@ -4788,49 +5214,147 @@ if APPKIT_AVAILABLE:
                 copy_outbox_button=copy_outbox,
             )
 
-            onboarding = _card(NSMakeRect(0, 0, 758, 402))
-            onboarding.setBorderType_(NSLineBorder)
-            onboarding.setBorderWidth_(1.0)
+            # Three quiet stat blocks share one grouped card.
+            metrics = _card(NSMakeRect(0, 0, width, 80))
+            self._register("card", metrics)
+            metric_specs = (
+                ("overview.metric.last.heading", "overview_last"),
+                ("overview.metric.words.heading", "overview_words"),
+                ("overview.metric.saved.heading", "overview_saved"))
+            block = (width - 32.0) / 3.0
+            for index, (heading_key, key) in enumerate(metric_specs):
+                x = 16 + index * block
+                caption = self._soft(
+                    self._l(heading_key),
+                    NSMakeRect(x + (16 if index else 0), 48, block - 32, 14),
+                    size=11)
+                caption.setAutoresizingMask_(
+                    NSViewMinXMargin | NSViewMaxXMargin)
+                value = self._ink(
+                    self._l("overview.metric.last.empty"),
+                    NSMakeRect(x + (16 if index else 0), 16, block - 32, 28),
+                    size=22, weight="semibold", rounded=True, truncate=True)
+                value.setAutoresizingMask_(
+                    NSViewMinXMargin | NSViewMaxXMargin)
+                metrics.addSubview_(caption)
+                metrics.addSubview_(value)
+                self.dynamic[key] = value
+                if index:
+                    separator = _hairline(
+                        NSMakeRect(x - 8, 14, 1, 52))
+                    separator.setAutoresizingMask_(
+                        NSViewMinXMargin | NSViewMaxXMargin)
+                    self._register("hairline", separator)
+                    metrics.addSubview_(separator)
+            self._stack(page, metrics, below=hero, gap=16, height=80)
+            self.dynamic["overview_metric_cards"] = (metrics,)
+
+            # Last dictation: heading + evidence lines, symbol actions below.
+            result_card = _card(NSMakeRect(0, 0, width, 136))
+            self._register("card", result_card)
+            result_summary = self._ink(
+                self._l("results.summary.empty"),
+                NSMakeRect(16, 100, 440, 22),
+                size=17, weight="semibold", rounded=True, truncate=True)
+            result_mode = self._pill(
+                self._l("results.mode.capture"),
+                NSMakeRect(width - 16 - 96, 101, 96, 20),
+                accessibility_label=self._l("results.accessibility.mode"))
+            result_mode.setAutoresizingMask_(NSViewMinXMargin)
+            result_engine = self._soft(
+                self._l("results.engine.waiting"),
+                NSMakeRect(16, 76, 660, 18), size=13, truncate=True)
+            result_engine.setAutoresizingMask_(NSViewWidthSizable)
+            result_audio = self._soft(
+                self._l("results.audio.off"),
+                NSMakeRect(16, 56, 660, 14), size=11, truncate=True)
+            result_audio.setAutoresizingMask_(NSViewWidthSizable)
+            play_audio = _button(
+                self._l("results.audio.play"),
+                NSMakeRect(width - 16 - 160 - 8 - 92 - 8 - 116, 16, 116, 28),
+                self, "playRetainedSpan:", symbol="play.fill",
+                help_text=self._l("results.audio.play.help"))
+            clear_audio = _button(
+                self._l("results.audio.clear"),
+                NSMakeRect(width - 16 - 160 - 8 - 92, 16, 92, 28),
+                self, "clearRetainedSpans:", symbol="xmark.bin",
+                help_text=self._l("results.audio.clear.help"))
+            inspect_evidence = _button(
+                self._l("results.inspect.action"),
+                NSMakeRect(width - 16 - 160, 16, 160, 28),
+                self, "inspectResultEvidence:", symbol="doc.text.magnifyingglass",
+                help_text=self._l("results.inspect.action.help"),
+            )
+            for view in (play_audio, clear_audio, inspect_evidence):
+                view.setAutoresizingMask_(NSViewMinXMargin)
+            for view in (result_summary, result_mode, result_engine,
+                         result_audio, play_audio, clear_audio,
+                         inspect_evidence):
+                result_card.addSubview_(view)
+            self._stack(page, result_card, below=metrics, gap=16, height=136)
+            self.dynamic.update(
+                home_result_card=result_card,
+                result_summary=result_summary,
+                result_engine=result_engine,
+                result_mode=result_mode,
+                result_audio=result_audio,
+                result_inspect_button=inspect_evidence,
+                result_play_audio_button=play_audio,
+                result_clear_audio_button=clear_audio,
+            )
+
+            # First-run onboarding: the one intentionally maximal moment.
+            # It overlays the whole page as a sticker-treated poster card.
+            onboarding = _card(
+                NSMakeRect(0, 0, width, 512), treatment="playful")
             _accessible(
                 onboarding,
                 self._l("overview.accessibility.onboarding.steps"))
-            face_chip = _card(NSMakeRect(28, 138, 196, 196))
-            face_chip.setCornerRadius_(58.0)
+            face_chip = _card(NSMakeRect(48, 232, 180, 180))
+            face_chip.setCornerRadius_(90.0)
             # A hairline reads as an accident at this size; the ring is the
             # only thing carrying the face color on the hero.
             face_chip.setBorderWidth_(2.5)
             face_chip.setWantsLayer_(True)
+            try:
+                face_chip.setFrameCenterRotation_(3.0)
+            except Exception:
+                pass
             face_image = NSImageView.alloc().initWithFrame_(
-                NSMakeRect(53, 163, 146, 146))
+                NSMakeRect(72, 256, 132, 132))
             face_image.setImageScaling_(NSImageScaleProportionallyUpOrDown)
             face_image.setEditable_(False)
             onboarding.addSubview_(face_chip)
             onboarding.addSubview_(face_image)
             face_kicker = _label(
                 self._l("onboarding.privacy"),
-                NSMakeRect(28, 93, 196, 38),
+                NSMakeRect(40, 176, 196, 40),
                 size=11, weight="medium", rounded=True, wrap=True,
-                alignment=1)
+                alignment=2)
             onboarding.addSubview_(face_kicker)
             onboarding_progress = _label(
                 self._l("overview.onboarding.initial_progress"),
-                NSMakeRect(260, 345, 450, 18),
-                size=10, weight="bold", color=_ACCENT, rounded=True)
+                NSMakeRect(280, 452, 400, 16),
+                size=11, weight="semibold", rounded=True)
+            onboarding_progress.setAutoresizingMask_(NSViewWidthSizable)
             onboarding_title = _label(
                 self._l("onboarding.permissions.title"),
-                NSMakeRect(258, 269, 458, 68),
-                size=30, weight="bold", rounded=True, wrap=True)
+                NSMakeRect(278, 376, 412, 72),
+                size=28, weight="bold", rounded=True, wrap=True)
+            onboarding_title.setAutoresizingMask_(NSViewWidthSizable)
             onboarding_detail = _label(
-                "", NSMakeRect(260, 202, 440, 62),
+                "", NSMakeRect(280, 300, 400, 68),
                 size=13, color=_SECONDARY, wrap=True)
+            onboarding_detail.setAutoresizingMask_(NSViewWidthSizable)
             onboarding_status = _label(
-                "", NSMakeRect(260, 170, 310, 22),
-                size=12, weight="bold", rounded=True)
-            onboarding_action = _button(
+                "", NSMakeRect(280, 268, 400, 20),
+                size=13, weight="semibold", rounded=True)
+            onboarding_status.setAutoresizingMask_(NSViewWidthSizable)
+            onboarding_action = self._primary_button(
                 self._l("onboarding.action.open_system_settings"),
-                NSMakeRect(258, 116, 210, 42),
-                self, "continueSetup:",
-                help_text=self._l("onboarding.action.open_system_settings.help"))
+                NSMakeRect(280, 208, 220, 40), "continueSetup:",
+                help_text=self._l(
+                    "onboarding.action.open_system_settings.help"))
             onboarding_action.setKeyEquivalent_("\r")
             onboarding.addSubview_(onboarding_progress)
             onboarding.addSubview_(onboarding_title)
@@ -4839,22 +5363,36 @@ if APPKIT_AVAILABLE:
             onboarding.addSubview_(onboarding_action)
             onboarding_steps: list[Any] = []
             onboarding_step_cards: list[Any] = []
+            step_width = (width - 48.0 - 24.0) / 4.0
             for index, step_key in enumerate((
                     "permissions", "hotkey", "models", "first_dictation")):
                 step_card = _card(NSMakeRect(
-                    18 + index * 181, 18, 171, 58))
-                step_card.setCornerRadius_(13.0)
+                    24 + index * (step_width + 8.0), 24, step_width, 56))
+                step_card.setAutoresizingMask_(
+                    NSViewMinXMargin | NSViewWidthSizable | NSViewMaxXMargin)
                 step = _label(
                     self._l(f"onboarding.step.{step_key}"),
-                    NSMakeRect(11, 8, 149, 42),
-                    size=9.5, weight="medium", color=_SECONDARY,
+                    NSMakeRect(12, 8, step_width - 24, 40),
+                    size=11, weight="medium", color=_SECONDARY,
                     rounded=True, wrap=True)
+                step.setAutoresizingMask_(NSViewWidthSizable)
                 step_card.addSubview_(step)
                 onboarding.addSubview_(step_card)
                 onboarding_steps.append(step)
                 onboarding_step_cards.append(step_card)
+            onboarding.setTranslatesAutoresizingMaskIntoConstraints_(False)
             page.addSubview_(onboarding)
+            NSLayoutConstraint.activateConstraints_([
+                onboarding.topAnchor().constraintEqualToAnchor_(
+                    page.topAnchor()),
+                onboarding.leadingAnchor().constraintEqualToAnchor_(
+                    page.leadingAnchor()),
+                onboarding.trailingAnchor().constraintEqualToAnchor_(
+                    page.trailingAnchor()),
+                onboarding.heightAnchor().constraintEqualToConstant_(512),
+            ])
             self.dynamic.update(
+                home_header=header,
                 onboarding_card=onboarding,
                 onboarding_face_chip=face_chip,
                 onboarding_face=face_image,
@@ -4868,114 +5406,92 @@ if APPKIT_AVAILABLE:
                 onboarding_step_cards=tuple(onboarding_step_cards),
             )
 
-            cards = (("overview.metric.last.heading", "overview_last"),
-                     ("overview.metric.words.heading", "overview_words"),
-                     ("overview.metric.saved.heading", "overview_saved"))
-            metric_cards: list[Any] = []
-            for index, (heading_key, key) in enumerate(cards):
-                card = _card(NSMakeRect(index * 257, 138, 244, 80))
-                card.addSubview_(_label(
-                    self._l(heading_key), NSMakeRect(18, 52, 208, 18),
-                    size=11, color=_SECONDARY))
-                value = _label(
-                    self._l("overview.metric.last.empty"),
-                    NSMakeRect(18, 14, 208, 31),
-                    size=21, weight="bold")
-                card.addSubview_(value)
-                page.addSubview_(card)
-                self.dynamic[key] = value
-                metric_cards.append(card)
-            self.dynamic["overview_metric_cards"] = tuple(metric_cards)
+        @objc.python_method
+        def _group_row(self, group: Any, *, index: int, count: int,
+                       row_height: float, title: str, title_size: float = 13,
+                       detail_size: float = 11,
+                       detail_width: float = 470) -> Any:
+            """One hairline-separated row inside a grouped list card."""
+            width = CONTENT_WIDTH
+            y = (count - 1 - index) * row_height
+            title_label = self._ink(
+                title, NSMakeRect(16, y + row_height / 2 - 1, 300, 18),
+                size=title_size, weight="medium", truncate=True)
+            detail = self._soft(
+                "", NSMakeRect(16, y + row_height / 2 - 17, detail_width, 14),
+                size=detail_size, truncate=True)
+            group.addSubview_(title_label)
+            group.addSubview_(detail)
+            if index < count - 1:
+                separator = _hairline(NSMakeRect(16, y, width - 32, 1))
+                separator.setAutoresizingMask_(NSViewWidthSizable)
+                self._register("hairline", separator)
+                group.addSubview_(separator)
+            return title_label, detail, y
 
-            result_card = _card(NSMakeRect(0, 0, 758, 130))
-            result_summary = _label(
-                self._l("results.summary.empty"), NSMakeRect(20, 94, 430, 27),
-                size=18, weight="bold")
-            result_mode = _label(
-                self._l("results.mode.capture"), NSMakeRect(600, 96, 138, 22),
-                size=12, weight="medium", color=_ACCENT)
-            result_engine = _label(
-                self._l("results.engine.waiting"),
-                NSMakeRect(20, 70, 715, 20),
-                size=12, color=_SECONDARY)
-            result_audio = _label(
-                self._l("results.audio.off"), NSMakeRect(20, 48, 560, 18),
-                size=10, color=_SECONDARY)
-            play_audio = _button(
-                self._l("results.audio.play"), NSMakeRect(372, 8, 102, 30),
-                self, "playRetainedSpan:",
-                help_text=self._l("results.audio.play.help"))
-            clear_audio = _button(
-                self._l("results.audio.clear"), NSMakeRect(480, 8, 92, 30),
-                self, "clearRetainedSpans:",
-                help_text=self._l("results.audio.clear.help"))
-            inspect_evidence = _button(
-                self._l("results.inspect.action"),
-                NSMakeRect(578, 8, 160, 30),
-                self,
-                "inspectResultEvidence:",
-                help_text=self._l("results.inspect.action.help"),
-            )
-            result_card.addSubview_(result_summary)
-            result_card.addSubview_(result_mode)
-            result_card.addSubview_(result_engine)
-            result_card.addSubview_(result_audio)
-            result_card.addSubview_(play_audio)
-            result_card.addSubview_(clear_audio)
-            result_card.addSubview_(inspect_evidence)
-            page.addSubview_(result_card)
-            self.dynamic.update(
-                home_result_card=result_card,
-                result_summary=result_summary,
-                result_engine=result_engine,
-                result_mode=result_mode,
-                result_audio=result_audio,
-                result_inspect_button=inspect_evidence,
-                result_play_audio_button=play_audio,
-                result_clear_audio_button=clear_audio,
-            )
+        @objc.python_method
+        def _switch(self, frame: Any, action: str, *, label: str,
+                    help_text: str) -> Any:
+            switch = JellySwitch.alloc().initWithFrame_(frame)
+            switch.setTarget_(self)
+            switch.setAction_(action)
+            switch.setControlSize_(1)  # small keeps 44pt rows airy
+            return _accessible(switch, label, help_text)
 
         def _build_settings(self, page: Any) -> None:
-            page.addSubview_(_label(
-                self._l("settings.title"),
-                NSMakeRect(4, 372, 500, 28), size=20, weight="bold"))
-            page.addSubview_(_label(
-                self._l("settings.subtitle"),
-                NSMakeRect(5, 352, 720, 18), size=12, color=_SECONDARY))
-            pane_control = NSSegmentedControl.alloc().initWithFrame_(
-                NSMakeRect(0, 314, 758, 32))
+            width = CONTENT_WIDTH
+            header = self._page_header(
+                page, self._l("settings.title"),
+                subtitle=self._l("settings.subtitle"))
+            pane_control = JellySegmentedControl.alloc().initWithFrame_(
+                NSMakeRect(width - 200, 28, 200, 24))
             pane_control.setSegmentCount_(len(SETTINGS_PANES))
             pane_control.setSegmentStyle_(NSSegmentStyleRounded)
+            pane_control.setControlSize_(1)
             for index, pane in enumerate(SETTINGS_PANES):
                 pane_control.setLabel_forSegment_(self._l(
                     f"settings.pane.{pane.casefold()}"), index)
                 pane_control.setWidth_forSegment_(
-                    758.0 / len(SETTINGS_PANES), index)
+                    200.0 / len(SETTINGS_PANES), index)
             pane_control.setTarget_(self)
             pane_control.setAction_("settingsPaneChanged:")
+            pane_control.setAutoresizingMask_(NSViewMinXMargin)
             _accessible(
                 pane_control,
                 self._l("settings.accessibility.category.label"),
                 self._l("settings.accessibility.category.help"))
-            page.addSubview_(pane_control)
+            header.addSubview_(pane_control)
 
-            content_frame = NSMakeRect(0, 0, 758, 306)
-            panes = {name: NSView.alloc().initWithFrame_(content_frame)
-                     for name in SETTINGS_PANES}
-            for pane in panes.values():
+            panes = {}
+            for name in SETTINGS_PANES:
+                pane = NSView.alloc().initWithFrame_(
+                    NSMakeRect(0, 0, width, 460))
+                pane.setTranslatesAutoresizingMaskIntoConstraints_(False)
                 page.addSubview_(pane)
+                NSLayoutConstraint.activateConstraints_([
+                    pane.topAnchor().constraintEqualToAnchor_constant_(
+                        header.bottomAnchor(), 16.0),
+                    pane.leadingAnchor().constraintEqualToAnchor_(
+                        page.leadingAnchor()),
+                    pane.trailingAnchor().constraintEqualToAnchor_(
+                        page.trailingAnchor()),
+                    pane.bottomAnchor().constraintEqualToAnchor_(
+                        page.bottomAnchor()),
+                ])
+                panes[name] = pane
 
             personalize = panes["Personalize"]
-            face_card = _card(NSMakeRect(0, 264, 758, 40))
-            picker = NSSegmentedControl.alloc().initWithFrame_(
-                NSMakeRect(18, 4, 720, 32))
+            face_card = _card(NSMakeRect(0, 0, width, 48))
+            self._register("card", face_card)
+            picker = JellySegmentedControl.alloc().initWithFrame_(
+                NSMakeRect((width - 680.0) / 2.0, 10, 680, 28))
             picker.setSegmentCount_(len(FACES))
             picker.setSegmentStyle_(NSSegmentStyleRounded)
-            # Ten faces no longer fit a labelled row inside the 720pt picker,
-            # so the segments are emoji-forward and share the width evenly.
+            # Ten faces no longer fit a labelled row inside the picker, so
+            # the segments are emoji-forward and share the width evenly.
             # Each segment's animal name stays available through the tooltip
             # and the menu-bar "Choose Face" submenu.
-            seg_width = 720.0 / len(FACES)
+            seg_width = 680.0 / len(FACES)
             for index, face in enumerate(FACES):
                 picker.setLabel_forSegment_(FACE_EMOJI[face], index)
                 picker.setToolTip_forSegment_(
@@ -4983,12 +5499,14 @@ if APPKIT_AVAILABLE:
                 picker.setWidth_forSegment_(seg_width, index)
             picker.setTarget_(self)
             picker.setAction_("faceChanged:")
+            picker.setAutoresizingMask_(
+                NSViewMinXMargin | NSViewWidthSizable | NSViewMaxXMargin)
             _accessible(
                 picker,
                 self._l("settings.accessibility.face.label"),
                 self._l("settings.accessibility.face.help"))
             face_card.addSubview_(picker)
-            personalize.addSubview_(face_card)
+            self._stack(personalize, face_card, height=48)
 
             personalize_key_views: list[Any] = [picker]
             rows = (
@@ -4999,14 +5517,12 @@ if APPKIT_AVAILABLE:
                 ("keywords", "settings.personalize.keywords", "inspectKeywords:"),
                 ("modes", "settings.personalize.modes", "viewModes:"),
             )
+            group = _card(NSMakeRect(0, 0, width, 44.0 * len(rows)))
+            self._register("card", group)
             for index, (key, title_key, selector) in enumerate(rows):
-                y = 220 - index * 44
-                card = _card(NSMakeRect(0, y, 758, 44))
-                card.addSubview_(_label(
-                    self._l(title_key), NSMakeRect(18, 22, 260, 18),
-                    size=13, weight="bold"))
-                detail = _label("", NSMakeRect(18, 4, 550, 17),
-                                size=10, color=_SECONDARY)
+                title_label, detail, y = self._group_row(
+                    group, index=index, count=len(rows), row_height=44,
+                    title=self._l(title_key))
                 action_key = (
                     "settings.action.review" if key == "corrections" else
                     "settings.action.inspect" if key == "keywords" else
@@ -5019,89 +5535,75 @@ if APPKIT_AVAILABLE:
                     if key == "modes"
                     else "settings.accessibility.edit.help")
                 button = _button(
-                    self._l(action_key), NSMakeRect(645, 6, 94, 32),
+                    self._l(action_key),
+                    NSMakeRect(width - 16 - 94, y + 8, 94, 28),
                     self, selector,
                     help_text=self._l(
                         help_key,
                         setting=self._l(title_key).casefold()))
-                card.addSubview_(detail)
-                card.addSubview_(button)
-                personalize.addSubview_(card)
+                button.setAutoresizingMask_(NSViewMinXMargin)
+                group.addSubview_(button)
                 personalize_key_views.append(button)
                 self.dynamic[f"settings_{key}_detail"] = detail
                 self.dynamic[f"settings_{key}_button"] = button
+            self._stack(personalize, group, below=face_card, gap=16,
+                        height=44.0 * len(rows))
 
             privacy = panes["Privacy"]
-            voice_card = _card(NSMakeRect(0, 232, 758, 58))
-            voice_card.addSubview_(_label(
-                self._l("settings.privacy.voice_objects"),
-                NSMakeRect(18, 32, 250, 18), size=12, weight="bold"))
-            voice_object_status = _label(
-                "", NSMakeRect(18, 10, 320, 18),
-                size=10, color=_SECONDARY)
-            voice_objects = NSButton.alloc().initWithFrame_(
-                NSMakeRect(505, 14, 100, 30))
-            voice_objects.setButtonType_(3)
-            voice_objects.setTitle_(self._l("settings.state.enabled"))
-            voice_objects.setTarget_(self)
-            voice_objects.setAction_("voiceObjectCommandsChanged:")
-            _accessible(
-                voice_objects,
-                self._l("settings.accessibility.voice_objects.label"),
-                self._l("settings.accessibility.voice_objects.help"))
-            voice_card.addSubview_(voice_object_status)
-            voice_card.addSubview_(voice_objects)
-            inspect_voice_objects = _button(
-                self._l("settings.privacy.voice_objects.inspect"),
-                NSMakeRect(620, 14, 92, 30), self, "inspectVoiceObjects:",
-                help_text=self._l(
-                    "settings.privacy.voice_objects.inspect.help"))
-            _accessible(
-                inspect_voice_objects,
-                self._l("settings.accessibility.voice_objects.inspector"),
-                self._l("settings.privacy.voice_objects.inspect.help"))
-            voice_card.addSubview_(inspect_voice_objects)
-            privacy.addSubview_(voice_card)
-
-            flight_card = _card(NSMakeRect(0, 152, 758, 58))
-            flight_card.addSubview_(_label(
-                self._l("settings.privacy.flight"),
-                NSMakeRect(18, 32, 260, 18), size=12, weight="bold"))
-            flight_card.addSubview_(_label(
-                self._l("settings.privacy.flight.detail"),
-                NSMakeRect(18, 10, 560, 18), size=10, color=_SECONDARY))
-            flight = NSButton.alloc().initWithFrame_(
-                NSMakeRect(625, 14, 110, 30))
-            flight.setButtonType_(3)
-            flight.setTitle_(self._l("settings.state.enabled"))
-            flight.setTarget_(self)
-            flight.setAction_("flightChanged:")
-            _accessible(
-                flight,
-                self._l("settings.accessibility.flight.label"),
-                self._l("settings.accessibility.flight.help"))
-            flight_card.addSubview_(flight)
-            privacy.addSubview_(flight_card)
-
-            acoustic_card = _card(NSMakeRect(0, 72, 758, 58))
-            acoustic_card.addSubview_(_label(
-                self._l("settings.privacy.acoustic"),
-                NSMakeRect(18, 32, 280, 18), size=12, weight="bold"))
-            acoustic_card.addSubview_(_label(
-                self._l("settings.privacy.acoustic.detail"),
-                NSMakeRect(18, 10, 560, 18), size=10, color=_SECONDARY))
-            acoustic = NSButton.alloc().initWithFrame_(
-                NSMakeRect(625, 14, 110, 30))
-            acoustic.setButtonType_(3)
-            acoustic.setTitle_(self._l("settings.state.enabled"))
-            acoustic.setTarget_(self)
-            acoustic.setAction_("acousticTimeMachineChanged:")
-            _accessible(
-                acoustic,
-                self._l("settings.accessibility.acoustic.label"),
-                self._l("settings.accessibility.acoustic.help"))
-            acoustic_card.addSubview_(acoustic)
-            privacy.addSubview_(acoustic_card)
+            privacy_rows = (
+                ("voice_objects", "settings.privacy.voice_objects",
+                 "voiceObjectCommandsChanged:",
+                 "settings.accessibility.voice_objects.label",
+                 "settings.accessibility.voice_objects.help"),
+                ("flight", "settings.privacy.flight", "flightChanged:",
+                 "settings.accessibility.flight.label",
+                 "settings.accessibility.flight.help"),
+                ("acoustic", "settings.privacy.acoustic",
+                 "acousticTimeMachineChanged:",
+                 "settings.accessibility.acoustic.label",
+                 "settings.accessibility.acoustic.help"),
+            )
+            privacy_group = _card(
+                NSMakeRect(0, 0, width, 44.0 * len(privacy_rows)))
+            self._register("card", privacy_group)
+            privacy_controls: dict[str, Any] = {}
+            for index, (key, title_key, selector, label_key,
+                        help_key) in enumerate(privacy_rows):
+                title_label, detail, y = self._group_row(
+                    privacy_group, index=index, count=len(privacy_rows),
+                    row_height=44, title=self._l(title_key))
+                switch = self._switch(
+                    NSMakeRect(width - 16 - 40, y + 11, 40, 22), selector,
+                    label=self._l(label_key), help_text=self._l(help_key))
+                switch.setAutoresizingMask_(NSViewMinXMargin)
+                privacy_group.addSubview_(switch)
+                privacy_controls[key] = (switch, detail)
+                if key == "voice_objects":
+                    inspect_voice_objects = _button(
+                        self._l("settings.privacy.voice_objects.inspect"),
+                        NSMakeRect(width - 16 - 40 - 16 - 92, y + 8, 92, 28),
+                        self, "inspectVoiceObjects:",
+                        help_text=self._l(
+                            "settings.privacy.voice_objects.inspect.help"))
+                    inspect_voice_objects.setAutoresizingMask_(
+                        NSViewMinXMargin)
+                    _accessible(
+                        inspect_voice_objects,
+                        self._l(
+                            "settings.accessibility.voice_objects.inspector"),
+                        self._l(
+                            "settings.privacy.voice_objects.inspect.help"))
+                    privacy_group.addSubview_(inspect_voice_objects)
+            voice_objects, voice_object_status = privacy_controls[
+                "voice_objects"]
+            flight, flight_detail = privacy_controls["flight"]
+            flight_detail.setStringValue_(
+                self._l("settings.privacy.flight.detail"))
+            acoustic, acoustic_detail = privacy_controls["acoustic"]
+            acoustic_detail.setStringValue_(
+                self._l("settings.privacy.acoustic.detail"))
+            self._stack(privacy, privacy_group,
+                        height=44.0 * len(privacy_rows))
 
             self.dynamic.update(
                 settings_pane_control=pane_control,
@@ -5121,147 +5623,195 @@ if APPKIT_AVAILABLE:
             )
 
         def _build_advanced(self, page: Any) -> None:
-            page.addSubview_(_label(self._l("nav.advanced"),
-                                    NSMakeRect(4, 372, 200, 26),
-                                    size=18, weight="bold"))
-            # ⌘D lands here: the shortcut that used to live on the parked
-            # Privacy "Open Diagnostics" button now belongs to this section.
-            advanced_shortcut = _accessible(_button(
-                self._l("nav.advanced"),
-                NSMakeRect(210, 371, 100, 28), self, "openAdvanced:",
-                help_text=self._l("advanced.accessibility.shortcut.help")),
-                self._l("advanced.accessibility.shortcut"),
-                self._l("advanced.accessibility.shortcut.help"))
-            advanced_shortcut.setKeyEquivalent_("d")
-            advanced_shortcut.setKeyEquivalentModifierMask_(
-                NSEventModifierFlagCommand)
-            page.addSubview_(advanced_shortcut)
-            relisten = NSButton.alloc().initWithFrame_(
-                NSMakeRect(552, 370, 206, 28))
-            relisten.setButtonType_(3)
-            relisten.setTitle_(self._l("models.relisten.label"))
-            relisten.setTarget_(self)
-            relisten.setAction_("selectiveRelistenChanged:")
-            relisten.setToolTip_(self._l("models.relisten.help"))
-            _accessible(
-                relisten,
-                self._l("models.accessibility.relisten"),
-                self._l("models.relisten.help"))
-            page.addSubview_(relisten)
-            relisten_status = _label(
+            width = CONTENT_WIDTH
+            header = self._page_header(page, self._l("nav.advanced"))
+            # ⌘D now lives on the always-visible sidebar row, so the
+            # shortcut reaches Advanced from every section.
+
+            # Grouped model list: Selective Re-listen row on top, then the
+            # four local models with tinted readiness pills at the right.
+            model_count = 4
+            group_height = 48.0 + 36.0 * model_count
+            models_group = _card(NSMakeRect(0, 0, width, group_height))
+            self._register("card", models_group)
+            relisten_title = self._ink(
+                self._l("models.relisten.label"),
+                NSMakeRect(16, group_height - 26, 300, 18),
+                size=13, weight="medium", truncate=True)
+            relisten_status = self._soft(
                 self._l("models.relisten.status.evidence-required"),
-                NSMakeRect(557, 350, 196, 16), size=10,
-                color=_SECONDARY, alignment=1,
+                NSMakeRect(16, group_height - 43, 470, 14), size=11,
+                truncate=True,
                 accessibility_label=self._l(
                     "models.accessibility.relisten"))
-            page.addSubview_(relisten_status)
-            advisory = _label(
+            relisten = self._switch(
+                NSMakeRect(width - 16 - 40, group_height - 37, 40, 22),
+                "selectiveRelistenChanged:",
+                label=self._l("models.accessibility.relisten"),
+                help_text=self._l("models.relisten.help"))
+            relisten.setToolTip_(self._l("models.relisten.help"))
+            relisten.setAutoresizingMask_(NSViewMinXMargin)
+            models_group.addSubview_(relisten_title)
+            models_group.addSubview_(relisten_status)
+            models_group.addSubview_(relisten)
+            top_separator = _hairline(NSMakeRect(
+                16, group_height - 48, width - 32, 1))
+            top_separator.setAutoresizingMask_(NSViewWidthSizable)
+            self._register("hairline", top_separator)
+            models_group.addSubview_(top_separator)
+            rows = []
+            for index in range(model_count):
+                y = (model_count - 1 - index) * 36.0
+                row_view = NSView.alloc().initWithFrame_(
+                    NSMakeRect(0, y, width, 36))
+                row_view.setAutoresizingMask_(NSViewWidthSizable)
+                name = self._ink(
+                    self._l("models.waiting"),
+                    NSMakeRect(16, 17, 330, 16),
+                    size=13, weight="medium", truncate=True)
+                detail = self._soft(
+                    "", NSMakeRect(16, 3, 440, 14), size=11,
+                    truncate=True)
+                status = self._pill(
+                    self._l("models.unknown"),
+                    NSMakeRect(width - 16 - 120, 8, 120, 20))
+                status.setAutoresizingMask_(NSViewMinXMargin)
+                row_view.addSubview_(name)
+                row_view.addSubview_(detail)
+                row_view.addSubview_(status)
+                if index < model_count - 1:
+                    separator = _hairline(NSMakeRect(16, 0, width - 32, 1))
+                    separator.setAutoresizingMask_(NSViewWidthSizable)
+                    self._register("hairline", separator)
+                    row_view.addSubview_(separator)
+                models_group.addSubview_(row_view)
+                rows.append((row_view, name, detail, status))
+            self._stack(page, models_group, below=header, gap=16,
+                        height=group_height)
+            advisory = self._soft(
                 self._l("models.wallet.unavailable"),
-                NSMakeRect(5, 350, 540, 16), size=9, color=_SECONDARY,
+                NSMakeRect(0, 0, width, 14), size=11, truncate=True,
                 accessibility_label=self._l(
                     "models.accessibility.wallet"))
-            page.addSubview_(advisory)
-            rows = []
-            for index in range(4):
-                row = _card(NSMakeRect(0, 306 - index * 36, 758, 32))
-                name = _label(self._l("models.waiting"),
-                              NSMakeRect(16, 7, 300, 18),
-                              size=12, weight="medium")
-                detail = _label("", NSMakeRect(322, 9, 282, 15),
-                                size=9, color=_SECONDARY)
-                status = _label(self._l("models.unknown"),
-                                NSMakeRect(612, 7, 130, 18),
-                                size=11, weight="medium", color=_ACCENT)
-                row.addSubview_(name)
-                row.addSubview_(detail)
-                row.addSubview_(status)
-                page.addSubview_(row)
-                rows.append((row, name, detail, status))
-            model_guidance = _label(
+            self._stack(page, advisory, below=models_group, gap=4, height=14)
+            model_guidance = self._soft(
                 self._l("models.guidance"),
-                NSMakeRect(5, 178, 740, 16), size=10, color=_SECONDARY)
-            page.addSubview_(model_guidance)
-            card = _card(NSMakeRect(0, 102, 758, 68))
+                NSMakeRect(0, 0, width, 14), size=11, truncate=True)
+            self._stack(page, model_guidance, below=advisory, gap=4,
+                        height=14)
+
+            # System status: one quiet two-column list.
+            status_card = _card(NSMakeRect(0, 0, width, 96))
+            self._register("card", status_card)
             keys = (("diagnostics.service", "diag_service"),
                     ("diagnostics.microphone", "diag_microphone"),
                     ("diagnostics.accessibility", "diag_accessibility"),
                     ("diagnostics.regression", "diag_regression"),
                     ("diagnostics.motion", "diag_motion"),
                     ("diagnostics.build", "diag_version"))
+            column_width = (width - 32.0) / 2.0
             for index, (heading_key, key) in enumerate(keys):
-                x = 16 + (index % 2) * 380
-                y = 44 - (index // 2) * 20
-                card.addSubview_(_label(
-                    self._l(heading_key), NSMakeRect(x, y, 118, 17),
-                    size=10, color=_SECONDARY))
-                value = _label(
+                x = 16 + (index % 2) * column_width
+                y = 66 - (index // 2) * 28
+                caption = self._soft(
+                    self._l(heading_key),
+                    NSMakeRect(x, y, 150, 16), size=11)
+                value = self._ink(
                     self._l("diagnostics.unknown"),
-                    NSMakeRect(x + 122, y, 236, 17),
-                    size=11, weight="medium")
-                card.addSubview_(value)
+                    NSMakeRect(x + 158, y, column_width - 166, 16),
+                    size=13, truncate=True)
+                if index % 2:
+                    caption.setAutoresizingMask_(NSViewMinXMargin)
+                    value.setAutoresizingMask_(NSViewMinXMargin)
+                status_card.addSubview_(caption)
+                status_card.addSubview_(value)
                 self.dynamic[key] = value
-            page.addSubview_(card)
+            self._stack(page, status_card, below=model_guidance, gap=16,
+                        height=96)
+
+            # Toolbar-like action rows with symbols, then honest captions.
+            # Widths come from each title's fitted size so nothing truncates
+            # even at the window minimum.
+            actions_row = NSView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, width, 28))
             open_log = _button(self._l("diagnostics.action.log"),
-                               NSMakeRect(0, 62, 112, 34),
-                               self, "openLog:")
+                               NSMakeRect(0, 0, 114, 28),
+                               self, "openLog:", symbol="folder")
             copy_support_snapshot = _button(
                 self._l("diagnostics.action.copy_support"),
-                NSMakeRect(120, 62, 176, 34), self, "copySupportSnapshot:",
+                NSMakeRect(122, 0, 202, 28), self, "copySupportSnapshot:",
+                symbol="doc.on.doc",
                 help_text=self._l("diagnostics.action.copy_support.help"))
             verify = _button(self._l("diagnostics.action.verify"),
-                             NSMakeRect(304, 62, 148, 34),
-                             self, "verify:")
+                             NSMakeRect(332, 0, 152, 28),
+                             self, "verify:",
+                             symbol="arrow.triangle.2.circlepath")
             verify.setKeyEquivalent_("r")
             verify.setKeyEquivalentModifierMask_(NSEventModifierFlagCommand)
+            for view in (open_log, copy_support_snapshot, verify):
+                actions_row.addSubview_(view)
+            self._stack(page, actions_row, below=status_card, gap=16,
+                        height=28)
+
+            secondary_row = NSView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, width, 28))
+            export_support_bundle = _button(
+                self._l("diagnostics.action.export_support"),
+                NSMakeRect(0, 0, 204, 28), self, "exportSupportBundle:",
+                symbol="square.and.arrow.down",
+                help_text=self._l("diagnostics.action.export_support.help"))
             open_system_settings = _accessible(_button(
                 self._l("diagnostics.action.open_system_settings"),
-                NSMakeRect(0, 24, 176, 32), self, "openSystemSettings:",
+                NSMakeRect(212, 0, 192, 28),
+                self, "openSystemSettings:", symbol="gearshape",
                 help_text=self._l(
                     "diagnostics.action.open_system_settings.help")),
                 self._l("diagnostics.accessibility.open_system_settings"),
                 self._l("diagnostics.action.open_system_settings.help"))
-            export_support_bundle = _button(
-                self._l("diagnostics.action.export_support"),
-                NSMakeRect(184, 24, 184, 32), self, "exportSupportBundle:",
-                help_text=self._l("diagnostics.action.export_support.help"))
-            license_notices = _button(
-                self._l("diagnostics.action.licenses"),
-                NSMakeRect(460, 62, 138, 34),
-                self, "openLicense:")
-            source = _button(self._l("diagnostics.action.source"),
-                             NSMakeRect(606, 62, 132, 34),
-                             self, "openSource:")
+            secondary_row.addSubview_(export_support_bundle)
+            secondary_row.addSubview_(open_system_settings)
+            self._stack(page, secondary_row, below=actions_row, gap=8,
+                        height=28)
+
+            evidence_row = NSView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, width, 28))
             progress = NSProgressIndicator.alloc().initWithFrame_(
-                NSMakeRect(382, 31, 18, 18))
+                NSMakeRect(0, 6, 16, 16))
             progress.setStyle_(1)
             progress.setDisplayedWhenStopped_(False)
-            verification = _label(
+            progress.setControlSize_(1)
+            verification = self._soft(
                 self._l("diagnostics.verification.not_run"),
-                NSMakeRect(406, 30, 346, 18),
-                size=11, color=_SECONDARY)
-            page.addSubview_(open_log)
-            page.addSubview_(copy_support_snapshot)
-            page.addSubview_(verify)
-            page.addSubview_(open_system_settings)
-            page.addSubview_(export_support_bundle)
-            page.addSubview_(license_notices)
-            page.addSubview_(source)
-            page.addSubview_(progress)
-            page.addSubview_(verification)
-            guidance = _label(
-                self._l("diagnostics.ready"), NSMakeRect(382, 4, 370, 14),
-                size=9, color=_SECONDARY)
-            page.addSubview_(guidance)
-            page.addSubview_(_label(
+                NSMakeRect(24, 7, 310, 14), size=11, truncate=True)
+            license_notices = _button(
+                self._l("diagnostics.action.licenses"),
+                NSMakeRect(width - 134 - 8 - 152, 0, 152, 28),
+                self, "openLicense:", symbol="checkmark.seal")
+            source = _button(self._l("diagnostics.action.source"),
+                             NSMakeRect(width - 134, 0, 134, 28),
+                             self, "openSource:", symbol="curlybraces")
+            for view in (license_notices, source):
+                view.setAutoresizingMask_(NSViewMinXMargin)
+            for view in (progress, verification, license_notices, source):
+                evidence_row.addSubview_(view)
+            self._stack(page, evidence_row, below=secondary_row, gap=8,
+                        height=28)
+
+            guidance = self._soft(
+                self._l("diagnostics.ready"),
+                NSMakeRect(0, 0, width, 14), size=11, truncate=True)
+            self._stack(page, guidance, below=evidence_row, gap=8,
+                        height=14)
+            license_line = self._soft(
                 self._l("diagnostics.license"),
-                NSMakeRect(5, 4, 370, 14), size=9, color=_SECONDARY))
+                NSMakeRect(0, 0, width, 14), size=11, truncate=True)
+            self._stack(page, license_line, below=guidance, gap=4, height=14)
             self.dynamic.update(
                 model_rows=rows,
                 model_wallet_advisory=advisory,
                 model_guidance=model_guidance,
                 selective_relisten_toggle=relisten,
                 selective_relisten_status=relisten_status,
-                advanced_button=advanced_shortcut,
                 open_system_settings_button=open_system_settings,
                 open_log_button=open_log,
                 copy_support_snapshot_button=copy_support_snapshot,
@@ -5331,7 +5881,7 @@ if APPKIT_AVAILABLE:
                     view = view.superview()
                 return True
 
-            chain = [self.section_control]
+            chain = list(self.sidebar_rows)
             chain.extend(
                 control for control in controls
                 if visible_and_enabled(control))
@@ -5340,12 +5890,14 @@ if APPKIT_AVAILABLE:
             return len(chain)
 
         def render(self) -> None:
+            global _REDUCE_MOTION
             state = self.view_model.state
+            # Jelly controls read this gate on every press so Reduce Motion
+            # silences the springs exactly like the HUD path.
+            _REDUCE_MOTION = bool(state.prefers_reduced_motion)
             self._apply_window_theme(state)
             for section, page in self.pages.items():
                 page.setHidden_(section != state.section)
-            selected = SECTIONS.index(state.section)
-            self.section_control.setSelectedSegment_(selected)
             face_name = self._l(f"settings.face.{state.face}")
             self.dynamic["window_face"].setImage_(self._face_image(
                 state.face, talk=state.status_phase == "recording"))
@@ -5367,6 +5919,19 @@ if APPKIT_AVAILABLE:
                 self._l(phase_keys[state.status_phase])
                 if state.status_phase in phase_keys
                 else state.status_phase.upper())
+            dark = getattr(self, "_dark", False)
+            phase_palette = palette_for_appearance(dark)
+            phase_colors = {
+                "ready": _brand_text_color(dark),
+                "recording": _brand_text_color(dark),
+                "processing": _amber_text_color(dark),
+                "starting": _amber_text_color(dark),
+                "recovery": _amber_text_color(dark),
+                "degraded": _theme_color(phase_palette.error),
+                "paused": _theme_color(phase_palette.ink_soft),
+            }
+            self.dynamic["overview_phase"].setTextColor_(
+                phase_colors.get(state.status_phase, _brand_text_color(dark)))
             self.dynamic["overview_status"].setStringValue_(state.status_title)
             self.dynamic["overview_detail"].setStringValue_(state.status_detail)
             self.dynamic["overview_engine"].setStringValue_(
@@ -5398,7 +5963,7 @@ if APPKIT_AVAILABLE:
             pause_title = self._l(
                 "overview.action.resume" if state.paused
                 else "overview.action.pause")
-            self.dynamic["pause_button"].setTitle_(pause_title)
+            self._set_cta_title(self.dynamic["pause_button"], pause_title)
             sync_accessibility(
                 self.dynamic["pause_button"],
                 self._l(
@@ -5478,8 +6043,8 @@ if APPKIT_AVAILABLE:
                 presentation.detail)
             self.dynamic["onboarding_status"].setStringValue_(
                 presentation.status)
-            self.dynamic["onboarding_action"].setTitle_(
-                presentation.action_title)
+            self._set_cta_title(
+                self.dynamic["onboarding_action"], presentation.action_title)
             try:
                 self.dynamic["onboarding_action"].setAccessibilityHelp_(
                     presentation.action_help)
@@ -5531,6 +6096,8 @@ if APPKIT_AVAILABLE:
                 self.dynamic["result_engine"].setStringValue_(
                     self._l("results.empty.detail"))
             self.dynamic["result_mode"].setStringValue_(result.mode)
+            self._set_pill_tone(self.dynamic["result_mode"], "good", dark)
+            self._fit_pill(self.dynamic["result_mode"])
             if not result.acoustic_replay_enabled:
                 replay_copy = self._l("results.audio.off")
             elif result.retained_span_count == 0:
@@ -5602,7 +6169,6 @@ if APPKIT_AVAILABLE:
             self.dynamic["flight_toggle"].setState_(
                 NSControlStateValueOn if state.flight_recorder
                 else NSControlStateValueOff)
-            self.dynamic["flight_toggle"].setTitle_(state.flight_state)
             sync_accessibility(
                 self.dynamic["flight_toggle"], state.flight_state,
                 label=self._l(
@@ -5642,6 +6208,13 @@ if APPKIT_AVAILABLE:
                     detail.setStringValue_(
                         " · ".join(part for part in (model.role, model.detail) if part))
                     status_label.setStringValue_(model.status)
+                    self._set_pill_tone(
+                        status_label,
+                        "good" if _status_contains(
+                            model.status, ("ready", "running", "installed"))
+                        else "warn",
+                        dark)
+                    self._fit_pill(status_label)
                     sync_accessibility(
                         name, model.name,
                         label=self._l("models.accessibility.name"))
@@ -5669,6 +6242,8 @@ if APPKIT_AVAILABLE:
                         label=self._l(
                             "models.accessibility.status",
                             name=self._l("models.waiting")))
+                    self._set_pill_tone(status_label, "warn", dark)
+                    self._fit_pill(status_label)
             set_accessible_text(
                 self.dynamic["model_wallet_advisory"],
                 state.model_wallet_advisory,
@@ -5750,10 +6325,13 @@ if APPKIT_AVAILABLE:
                     str(self.dynamic[key].stringValue()),
                     label=self._l(label_key),
                 )
+            notice_palette = palette_for_appearance(dark)
             notice_color = (
-                NSColor.systemRedColor() if state.notice_level == "error"
-                else NSColor.systemGreenColor()
-                if state.notice_level == "success" else _SECONDARY)
+                _theme_color(notice_palette.error)
+                if state.notice_level == "error"
+                else _brand_text_color(dark)
+                if state.notice_level == "success"
+                else _theme_color(notice_palette.ink_soft))
             self.dynamic["notice"].setTextColor_(notice_color)
             self._configure_key_view_loop(state)
 
@@ -6255,8 +6833,18 @@ if APPKIT_AVAILABLE:
                 self.view_model.purge_terminal_voice_object_drafts()
             self.render()
 
+        def faceChipPressed_(self, _sender: Any) -> None:
+            """Pure delight: the mascot wobbles, nothing else changes."""
+            reduced = self.view_model.state.prefers_reduced_motion
+            add_jelly_motion(
+                self.dynamic["window_face_chip"], "wobble",
+                reduced_motion=reduced)
+            add_jelly_motion(
+                self.dynamic["window_face"], "wobble",
+                reduced_motion=reduced)
+
         def sectionChanged_(self, sender: Any) -> None:
-            self.view_model.select_section(SECTIONS[sender.selectedSegment()])
+            self.view_model.select_section(SECTIONS[int(sender.tag())])
             self.render()
 
         def faceChanged_(self, sender: Any) -> None:
@@ -6630,6 +7218,44 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             controller.dynamic["window_face"].image() is not None,
             "themed window face")
         require(
+            bool(controller.sidebar.isKindOfClass_(NSVisualEffectView)),
+            "vibrancy sidebar")
+        require(
+            len(controller.sidebar_rows) == len(SECTIONS), "sidebar rows")
+        for index, section in enumerate(SECTIONS):
+            require(
+                accessible_value(
+                    controller.sidebar_rows[index],
+                    "accessibilityLabel") == localized_string(
+                        f"nav.{section.casefold()}"),
+                f"sidebar row label {section}")
+        require(
+            accessible_value(
+                controller.sidebar_rows[0], "accessibilityHelp") ==
+            localized_string("settings.accessibility.sections.help"),
+            "sidebar row help")
+        for switch_key in (
+                "flight_toggle", "acoustic_time_machine_toggle",
+                "voice_object_commands_toggle", "selective_relisten_toggle"):
+            require(
+                bool(controller.dynamic[switch_key].isKindOfClass_(NSSwitch)),
+                f"{switch_key} is a native switch")
+        jelly_probe = controller.dynamic["pause_button"]
+        require(
+            not add_jelly_motion(jelly_probe, "press", reduced_motion=True),
+            "reduce motion silences jelly springs")
+        require(
+            add_jelly_motion(jelly_probe, "press", reduced_motion=False),
+            "jelly springs attach")
+        for axis in ("x", "y"):
+            require(
+                jelly_probe.layer().animationForKey_(
+                    f"whisper-face-press-{axis}") is not None,
+                f"jelly {axis} spring is motion-spec driven")
+        require(
+            {"press", "release", "wobble", "pop"} <= set(MOTION_SPECS),
+            "shared motion specs cover the jelly vocabulary")
+        require(
             str(controller.dynamic["result_summary"].stringValue()) ==
             localized_string("results.empty.title"),
             "results empty state")
@@ -6684,11 +7310,15 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                     status=localized_string("onboarding.status.attention")),
             "onboarding walkthrough accessibility")
         require(
-            int(controller._configure_key_view_loop(model.state)) >= 2,
+            int(controller._configure_key_view_loop(model.state)) >= 4,
             "overview key-view loop")
         require(
-            controller.section_control.nextKeyView() is not None,
+            controller.sidebar_rows[0].nextKeyView() is not None,
             "initial next key view")
+        require(
+            controller.window.initialFirstResponder() ==
+            controller.sidebar_rows[0],
+            "keyboard entry starts at the sidebar")
 
         require(
             not bool(controller.dynamic[
@@ -6869,16 +7499,15 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             "retained span play disabled without opt-in")
 
         for index, section in enumerate(SECTIONS):
-            controller.section_control.setSelectedSegment_(index)
-            controller.sectionChanged_(controller.section_control)
+            controller.sectionChanged_(controller.sidebar_rows[index])
             visible = tuple(
                 name for name, page in controller.pages.items()
                 if not bool(page.isHidden()))
             require(model.state.section == section, f"section {section}")
             require(visible == (section,), f"render {section}")
 
-        controller.section_control.setSelectedSegment_(SECTIONS.index("Settings"))
-        controller.sectionChanged_(controller.section_control)
+        controller.sectionChanged_(
+            controller.sidebar_rows[SECTIONS.index("Settings")])
         pane_control = controller.dynamic["settings_pane_control"]
         for index, pane in enumerate(SETTINGS_PANES):
             pane_control.setSelectedSegment_(index)
@@ -6890,10 +7519,10 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             require(model.state.settings_pane == pane, f"pane {pane}")
             require(visible == (pane,), f"render pane {pane}")
         require(
-            int(controller._configure_key_view_loop(model.state)) >= 2,
+            int(controller._configure_key_view_loop(model.state)) >= 4,
             "settings key-view loop")
         require(
-            controller.section_control.nextKeyView() == pane_control,
+            controller.sidebar_rows[-1].nextKeyView() == pane_control,
             "settings Tab order")
         require(
             str(controller.dynamic["settings_keywords_button"].action()) ==
@@ -6937,7 +7566,10 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             "advanced command modifier")
         require(
             str(controller.dynamic["advanced_button"].action()) ==
-            "openAdvanced:", "advanced shortcut action")
+            "sectionChanged:", "advanced shortcut action")
+        require(
+            int(controller.dynamic["advanced_button"].tag()) ==
+            SECTIONS.index("Advanced"), "advanced shortcut destination")
         require(
             str(controller.dynamic["export_support_bundle_button"].action()) ==
             "exportSupportBundle:",
@@ -6947,9 +7579,11 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                 "selective_relisten_toggle"].action()) ==
             "selectiveRelistenChanged:",
             "selective re-listen surface")
+        # The Selective Re-listen switch stays disabled without evidence, so
+        # the loop hands Tab to the first enabled Advanced control.
         require(
-            controller.section_control.nextKeyView() ==
-            controller.dynamic["advanced_button"],
+            controller.sidebar_rows[-1].nextKeyView() ==
+            controller.dynamic["open_log_button"],
             "advanced Tab order")
         require(
             str(controller.dynamic["verify_button"].keyEquivalent()) == "r",
@@ -6961,9 +7595,9 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             "verification command modifier")
 
         require(
-            accessible_value(controller.section_control,
+            accessible_value(controller.sidebar_rows[0],
                              "accessibilityLabel") == localized_string(
-                                 "settings.accessibility.sections.label"),
+                                 "nav.home"),
             "section accessibility")
         require(
             accessible_value(pane_control, "accessibilityHelp") ==
@@ -7042,6 +7676,7 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         require(not bool(controller.window.isVisible()), "window activation")
         return {
             "sections": len(SECTIONS),
+            "sidebar_rows": len(controller.sidebar_rows),
             "settings_panes": len(SETTINGS_PANES),
             "model_actions": len(expected_calls),
             "onboarding_steps": len(model.state.onboarding_steps),
