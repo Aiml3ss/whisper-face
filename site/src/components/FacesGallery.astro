@@ -16,7 +16,7 @@ import { FACES, ORDER } from '../data/faces';
   <div class="gallery">
     {
       ORDER.map((n) => (
-        <button class="card" data-animal={n} aria-label={`Preview and pick the ${FACES[n].label} face`}>
+        <button class="card" data-animal={n} data-jelly aria-label={`Preview and pick the ${FACES[n].label} face`}>
           <span class="tile" style={`--sc: ${FACES[n].color}`}>
             <Face animal={n} />
           </span>

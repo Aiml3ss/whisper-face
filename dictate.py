@@ -1838,7 +1838,6 @@ DARK_EYE = (0.043, 0.231, 0.196)        # #0b3b32
 MOUTH = (0.024, 0.145, 0.122)           # #06251f
 MINT = FACE_CHIP_COLORS["owl"]           # #5eead4
 CATCH = (0.918, 1.000, 0.965)           # #eafff6
-CORAL = (1.000, 0.424, 0.353)           # recoverable error #ff6c5a
 # Every non-parrot, non-owl face renders through the shared front-facing
 # companion template. A style names three fills plus optional feature flags:
 #   ears     "pointed" (canine/feline) or "round" (bear family); default pointed
@@ -2007,7 +2006,7 @@ class WaveView(NSView):
 
         accent = (
             palette.accent if presentation.accent == "accent"
-            else CORAL if presentation.accent == "error"
+            else palette.error if presentation.accent == "error"
             else palette.brand
         )
         eyebrow_type = TYPE_SPECS["hud_eyebrow"]
@@ -2065,7 +2064,7 @@ class WaveView(NSView):
             _rgb(*palette.accent,
                  0.18 + 0.18 * abs(math.sin(self.t * 2.2)))
         elif self.mode == "error":
-            _rgb(*CORAL, 0.42)
+            _rgb(*palette.error, 0.42)
         else:
             _rgb(*palette.brand, 0.16 + lv * 0.44)
         ring.stroke()

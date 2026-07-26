@@ -15,8 +15,8 @@ const heroUid = nextId();
       text right where your cursor is.
     </p>
     <div class="cta-row">
-      <a class="btn btn-primary" href="/#install">Download for Mac</a>
-      <a class="btn btn-ghost" href="https://github.com/Aiml3ss/whisper-face">Star on GitHub</a>
+      <a class="btn btn-primary" data-jelly href="/#install">Download for Mac</a>
+      <a class="btn btn-ghost" data-jelly href="https://github.com/Aiml3ss/whisper-face">Star on GitHub</a>
     </div>
     <ul class="pills">
       <li><b>◆</b> 100% on-device</li>
@@ -43,6 +43,7 @@ const heroUid = nextId();
         ORDER.map((n) => (
           <button
             class="swatch"
+            data-jelly
             data-animal={n}
             style={`--sc: ${FACES[n].color}`}
             aria-pressed={n === initial ? 'true' : 'false'}

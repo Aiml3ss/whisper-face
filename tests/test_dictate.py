@@ -85,6 +85,7 @@ from whisper_face_theme import (  # noqa: E402
     FACE_CHIP_COLORS,
     LIGHT_PALETTE,
     MOTION_SPECS,
+    SURFACE_SPECS,
     TYPE_SPECS,
     hud_presentation,
     jelly_face_scale,
@@ -1781,6 +1782,7 @@ class FacePreferenceTests(unittest.TestCase):
 class WhisperFaceThemeTests(unittest.TestCase):
     def test_light_and_dark_palettes_share_brand_but_not_work_surfaces(self):
         self.assertEqual(LIGHT_PALETTE.brand, DARK_PALETTE.brand)
+        self.assertEqual(LIGHT_PALETTE.error, DARK_PALETTE.error)
         self.assertNotEqual(LIGHT_PALETTE.bg, DARK_PALETTE.bg)
         self.assertNotEqual(LIGHT_PALETTE.surface, DARK_PALETTE.surface)
         self.assertNotEqual(LIGHT_PALETTE.ink, DARK_PALETTE.ink)
@@ -1799,6 +1801,18 @@ class WhisperFaceThemeTests(unittest.TestCase):
             self.assertLessEqual(motion.duration, 0.5)
             self.assertGreater(motion.squash_x, 0.0)
             self.assertGreater(motion.squash_y, 0.0)
+
+    def test_surface_tokens_keep_work_quiet_and_playful_objects_offset(self):
+        self.assertEqual(
+            set(SURFACE_SPECS), {"work", "card", "playful", "control"})
+        self.assertEqual(SURFACE_SPECS["work"].shadow_x, 0.0)
+        self.assertEqual(SURFACE_SPECS["work"].shadow_y, 0.0)
+        self.assertGreater(SURFACE_SPECS["playful"].shadow_x, 0.0)
+        self.assertLess(SURFACE_SPECS["playful"].shadow_y, 0.0)
+        self.assertGreater(
+            SURFACE_SPECS["playful"].border_width,
+            SURFACE_SPECS["work"].border_width,
+        )
 
     def test_hud_type_tokens_use_compact_rounded_chrome_sizes(self):
         self.assertEqual(
