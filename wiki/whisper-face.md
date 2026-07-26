@@ -37,7 +37,8 @@ and learning run on-device.
   and risky capabilities unlock only through physical-evidence receipts
   ([[activation-receipt]]).
 - **A face, not a dialog** — ten animated companion characters live in
-  the HUD and menu bar ([[whisper-faces]]).
+  the HUD, the [[menu-bar]] and the [[app-window]]
+  ([[whisper-faces]]), all speaking one [[design-language]].
 
 ## The pipeline at a glance
 
@@ -59,10 +60,22 @@ The full walk-through lives on [[dictation-pipeline]] and in
   [[acoustic-personalization]], [[model-wallet]]
 - Actions (inert today): [[voice-objects]], [[point-and-speak]],
   [[inert-foundations]]
-- Presentation: [[whisper-faces]], [[marketing-site]]
+- Presentation: [[whisper-faces]], [[menu-bar]], [[app-window]],
+  [[design-language]], [[marketing-site]]
 - Operations: [[installers-and-services]], [[distribution]],
-  [[benchmarks]], [[windows-support]]
+  [[benchmarks]], [[evidence-capture]], [[windows-support]]
 - Policy: [[governance]], [[privacy-and-security]]
+
+## What changed on 2026-07-26
+
+> 📝 The wiki's first build described the app at `b49699f`. Later the
+> same day the menu shrank to six choices, the window collapsed to
+> Home/Settings/Advanced and was rebuilt around a shared visual language,
+> the site adopted the app's springs, four evidence-capture harnesses
+> landed, two circular activation gates were filed as blockers, three
+> releases shipped, and the repository is public. See
+> [[2026-07-26-interface-rebuild-research]] and
+> [[2026-07-26-evidence-capture-research]].
 
 ## References
 
@@ -70,4 +83,6 @@ The full walk-through lives on [[dictation-pipeline]] and in
 - [[2026-07-26-runtime-pipeline-research]],
   [[2026-07-26-trust-personalization-research]],
   [[2026-07-26-voice-actions-research]],
-  [[2026-07-26-ops-governance-research]]
+  [[2026-07-26-ops-governance-research]],
+  [[2026-07-26-interface-rebuild-research]],
+  [[2026-07-26-evidence-capture-research]]

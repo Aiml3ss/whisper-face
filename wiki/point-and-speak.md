@@ -14,11 +14,17 @@ confidence: high
 
 ## Definition
 
-Point-and-Speak is the explicit Mac Diagnostics action that resolves a
-bounded spoken phrase against the frontmost app's accessibility tree
-and, only after a separate Press-once confirmation, performs exactly one
-`AXPress` on a strongly named button, checkbox, radio button, tab, menu
-item, or link. Text fields and every unlisted role remain inert.
+Point-and-Speak resolves a bounded spoken phrase against the frontmost
+app's accessibility tree and, only after a separate Press-once
+confirmation, performs exactly one `AXPress` on a strongly named button,
+checkbox, radio button, tab, menu item, or link. Text fields and every
+unlisted role remain inert.
+
+Until 2026-07-26 it was reachable as an explicit Mac Diagnostics action.
+#104 removed the preview and press dialogs from the window; the resolver,
+the transaction, the AX snapshot, the `GUIActions` fields and the
+view-model passthroughs all remain, so it is developer-invokable today
+and has no user surface ([[app-window]]).
 
 ## Key Properties
 
@@ -49,6 +55,7 @@ item, or link. Text fields and every unlisted role remain inert.
 - [[inert-foundations]] — drop-to-target, the read-only sibling
 - [[voice-objects]] — the same nonce-ceremony language
 - [[privacy-and-security]] — bounded AX evidence rules
+- [[app-window]] — the window that no longer exposes it
 
 ## References
 

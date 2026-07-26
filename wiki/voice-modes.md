@@ -30,10 +30,10 @@ allowlisted **command** mode.
   only undo, redo, select all, copy, cut, paste, delete selection, new
   line, and escape — it cannot launch shell commands.
 - **Tones**: casual in chat apps (no trailing period), formal in Mail,
-  technical in editors, verbatim in terminals — resolved menu override
-  first, then per-app sets, then default. A spoken override ("Formal
-  tone, …") applies once and requires punctuation after the tone word so
-  "Formal education is…" cannot match.
+  technical in editors, verbatim in terminals — resolved override first
+  (now set in the window, formerly the menu), then per-app sets, then
+  default. A spoken override ("Formal tone, …") applies once and requires
+  punctuation after the tone word so "Formal education is…" cannot match.
 - **Snippets**: "insert my email" pastes saved text. Whole-utterance
   snippets paste directly; inline triggers are masked to sentinel
   characters through cleanup ([[cleanup-pipeline]]). Editing the exact
@@ -41,20 +41,31 @@ allowlisted **command** mode.
   ([[personalization]]).
 - **Spoken structure**: "new line" / "new paragraph" / "scratch that";
   explicit list lead-ins become dash lists.
-- **Flight Recorder**: default-off, menu-toggled, 20-second RAM-only
-  ring buffer; tap Right Option afterwards to paste the latest
-  utterance. A hold consumes and clears the buffer, and a tap selects
-  only speech that ended before key-down so the start cue is never
-  captured. Audio never touches disk.
+- **Flight Recorder**: default-off, 20-second RAM-only ring buffer; tap
+  Right Option afterwards to paste the latest utterance. A hold consumes
+  and clears the buffer, and a tap selects only speech that ended before
+  key-down so the start cue is never captured. Audio never touches disk.
 - Voice Object command diversion ([[voice-objects]]) and the
   risky-action phrase ([[inert-foundations]]) intercept before ordinary
   paste, in capture mode only.
+
+> 📝 **Updated from [[2026-07-26-interface-rebuild-research]]**: the
+> surfaces around these modes moved on 2026-07-26. The six-row mode cheat
+> sheet, the tones submenu and the Flight Recorder toggle left
+> [[menu-bar]]; the mode reference is now Settings → Personalize → **Voice
+> modes**, tones and snippets are rows on the same pane, and Flight
+> Recorder is a switch under Settings → Privacy ([[app-window]]). The
+> resolution logic is untouched: `tone_for` still resolves override →
+> per-app set → default, and `builtin_tone` was removed as dead code with
+> the submenu. Windows keeps its tray Flight Recorder checkbox
+> ([[windows-support]]).
 
 ## Related Concepts
 
 - [[dictation-pipeline]] — where modes resolve
 - [[cleanup-pipeline]] — mode-dependent contracts
-- [[whisper-faces]] — the menu-bar surface for tones and corrections
+- [[app-window]] — where tones, snippets and the mode reference live
+- [[menu-bar]] — the gesture's smallest surface
 
 ## References
 

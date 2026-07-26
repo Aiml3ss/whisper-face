@@ -41,11 +41,22 @@ Outbox instead of the wrong field.
   window vs 0.02 s native because Chromium publishes AX values late.
 - **Voice Outbox**: a bounded (20-item) RAM-only recovery queue that
   distinguishes never-pasted from possibly-landed text; only the
-  explicit Copy & Dismiss control recovers content; the menu shows only
-  a count. Only *verified* receipts may train [[personalization]].
+  explicit Copy & Dismiss control recovers content. Since 2026-07-26 the
+  count-only [[menu-bar]] row appears solely while the queue holds
+  something, and it routes to Home, where the hero card carries the
+  warning line and the Copy & Dismiss control ([[app-window]]). Only
+  *verified* receipts may train [[personalization]].
 - Receipt states: verified, unverifiable, conflict, unresolved — with
   fixed reasons; the same vocabulary is reused by the in-process
   protocol ([[inert-foundations]]) and the compatibility fingerprint.
+- **Read as evidence**: the fifty-app capture session
+  ([[evidence-capture]]) reads exactly these receipts from the
+  transcript-free keys of `transcripts.jsonl`, and treats the runtime's
+  no-receipt sentinels as *not evidence* rather than as a result. Known
+  gap (issue #110): `commit_insertion` computes the target / paste /
+  readback capability buckets the compatibility fingerprint wants but
+  writes them nowhere an external tool can read, so the harness reports
+  `capability_buckets_available: false`.
 
 ## Examples
 

@@ -51,6 +51,15 @@ never change recognition, cleanup, insertion, or model routing.
 - Known gap: the routing benchmark's corpus asserts
   standard/protected/review but not the verified route
   ([[benchmarks]]).
+- The "— Review" title still exists, but on a row that only appears once
+  a first result exists ([[menu-bar]]); the full risk and verification
+  evidence now reads out of the [[app-window]] evidence inspector.
+- Of the three voice corpora, re-listen is the one that is
+  straightforwardly recordable today, because its benchmark drives the
+  verifier directly rather than through a receipt-gated runtime path
+  ([[evidence-capture]]). Recording is capped at the adapter's 2.4 s
+  microspan bound — enforced in code and pinned by a test, though the
+  re-listen runbook still does not state it (issue #108).
 
 ## Related Concepts
 

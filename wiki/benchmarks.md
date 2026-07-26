@@ -51,6 +51,26 @@ were all rejected on lab evidence, and nothing in the runtime moved.
 - Known gap: the consequence-routing corpus asserts three of the four
   routes — `verified` has no corpus case ([[consequence-receipts]]).
 
+## The capture side (added 2026-07-26)
+
+The labs always had evaluators and never had a humane way to feed them
+physical evidence. Four harnesses ([[evidence-capture]]) now record real
+sessions — three voice corpora, a fifty-app insertion matrix, the
+delayed-cleanup grid, and the lifecycle scenarios — and hand their
+output to these same evaluators. They extend the no-runtime-authority
+rule one step earlier: a capture tool cannot import an activation module,
+execute a process, generate audio, or declare an approval flag, and tests
+assert those properties over its own AST. Two consequences for this page:
+
+- `capture_lifecycle_evidence.py` speaks `performance_lab`'s own five
+  lifecycle scenario keys and reports which of its three
+  `requires_physical_validation` ids a session discharges — the honest
+  counterpart to a simulation that reports `real_apps_exercised: 0`.
+- Building the harnesses was itself an audit, and it produced two open
+  gate defects (issues #108, #110) rather than evidence — recorded on
+  [[activation-receipt]], [[delayed-cleanup]] and
+  [[acoustic-personalization]].
+
 ## Related Concepts
 
 - [[activation-receipt]] — benchmarks as evidence producers

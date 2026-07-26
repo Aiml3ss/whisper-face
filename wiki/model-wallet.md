@@ -42,14 +42,17 @@ deliberately withheld.
   attest model readiness — exact-pin success is capped at RESOLVED, and
   readiness/capability/routing authority stay false. Bounded traversal,
   symlink containment, no paths in receipts.
-- The Models pane labels all of this as a shadow advisory with no
-  execution or routing.
+- The window labels all of this as a shadow advisory with no execution or
+  routing. Since 2026-07-26 that label sits on **Advanced**, above the
+  four model rows and their readiness pills — the Models and Diagnostics
+  panes merged into one section ([[app-window]]).
 
 ## Related Concepts
 
 - [[asr-cascade]] — the actual live routing today
 - [[activation-receipt]] — the same layered-authority philosophy
 - [[benchmarks]] — where wallet evidence gets exercised
+- [[app-window]] — where the advisory is shown
 
 ## References
 

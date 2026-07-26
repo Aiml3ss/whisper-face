@@ -30,6 +30,14 @@ focus; Windows is the shared-pipeline sibling.
   are unavailable); Right Alt replaces Right Option and the Windows key
   replaces Command; no word timings by default, so prosody formatting
   and selective re-listen never activate.
+- **The tray did not follow the Mac menu.** #101 shrank the macOS
+  [[menu-bar]] because [[app-window]] could hold what it dropped;
+  Windows has no such window, so its five-entry tray still carries
+  Choose Face, Flight Recorder (RAM only), Pause Dictation, Open Log and
+  Quit. Windows also writes a window title into the same transcript
+  field that holds a macOS bundle id, which is why the evidence harnesses
+  withhold that field entirely on Windows ([[evidence-capture]], issue
+  #110).
 - **macOS-only features** (gated by platform checks): the native
   Parakeet helper, [[voice-objects]], spoken edit commands,
   [[acoustic-personalization]] time machine, [[delayed-cleanup]],

@@ -33,8 +33,12 @@ follows the normal paste path.
   failure so ordinary paste is the uniform fallback.
 - **Durable inbox**: single-owner queue with closed-schema JSON, atomic
   0600 writes, idempotent enqueue, and bounded everything (256 items,
-  100k chars). Listings return only id/sequence/destination/state; the
-  menu shows only a count.
+  100k chars). Listings return only id/sequence/destination/state. Since
+  2026-07-26 the [[menu-bar]] **Voice Inbox** row appears only while
+  drafts are queued — still count-only — and the drafts themselves are
+  inspected from the Voice Object Commands row on Settings → Privacy
+  ([[app-window]]), whose empty state reads "No local drafts are stored…
+  inert until you act on it."
 - **Bridge validation**: payloads round-trip through re-projection on
   decode — a payload that could not have come from a legal projection is
   rejected.

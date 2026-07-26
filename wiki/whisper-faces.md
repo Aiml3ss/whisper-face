@@ -53,11 +53,20 @@ construction.
   the [[stable-prefix]] caption, and honest status copy (LISTENING /
   HEARD YOU / TIDYING UP), with accessibility values kept in sync.
 
+> 📝 **Updated from [[2026-07-26-interface-rebuild-research]]**: the face
+> now also anchors two rebuilt surfaces. A 48pt tilted chip heads
+> [[app-window]]'s sidebar and a 208pt one carries first run, while
+> [[menu-bar]]'s **Choose Face** is the only submenu left in the menu.
+> The HUD pop and the menu-bar mouth wobble run the shared
+> [[design-language]] springs, and both were squashing from the
+> bottom-left corner until #112 centred the layer anchor.
+
 ## Related Concepts
 
 - [[dictation-pipeline]] — the level and caption sources
 - [[marketing-site]] — the same art on the web
-- [[voice-modes]] — the menu-bar surfaces around the face
+- [[menu-bar]], [[app-window]] — the two surfaces the face heads
+- [[design-language]] — the springs the squash comes from
 
 ## References
 

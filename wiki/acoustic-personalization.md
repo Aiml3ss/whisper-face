@@ -52,11 +52,32 @@ storage/policy layers whose runtime effects are gated elsewhere
   consequence-selected spans from memory; disabling wipes them; no
   replay file is ever written.
 
+## Neither acoustic gate can be evidenced today
+
+> ⚠️ **Known blocker (issue #108, open on `main`)**: the two properties
+> above that make these subsystems safe are exactly what makes their
+> evidence circular. Calibrated settings apply *only* from a valid
+> receipt, so a capture session cannot record a calibrated candidate arm;
+> a biased keyword reaches the ASR prompt *only* through the activation
+> file, so the biased arm cannot be measured without the receipt it is
+> meant to justify. The workarounds `docs/evidence/voice-corpora.md`
+> documents — temporarily editing local settings, or approximating the
+> bias with a `dictionary.txt` entry — both require the operator to
+> hand-modify runtime state mid-corpus, which is the unwitnessed step
+> these gates exist to prevent, and neither measures the real shipping
+> path. Three related findings from the same audit: calibration
+> `telemetry` and `cases` are unlinked, so a stale telemetry log plus a
+> fresh corpus passes; the runbook's example case token is sequential and
+> therefore correlatable across manifests; and keyword-memory eligibility
+> (3 observations plus 2 confirmations from real corrections) is
+> separately unreachable and only discovered at approval time.
+
 ## Related Concepts
 
 - [[activation-receipt]] — how any of this gains runtime effect
 - [[asr-cascade]] — where prompt priority lands
 - [[consequence-receipts]] — selects the retained microspans
+- [[evidence-capture]] — the corpora, and why two of them stall
 - [[privacy-and-security]] — the storage posture
 
 ## References
