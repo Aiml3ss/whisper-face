@@ -26,6 +26,9 @@ from benchmark_acoustic_keyword_bias import (  # noqa: E402
     run_synthetic_benchmark,
     synthetic_cases,
 )
+from test_acoustic_keyword_activation import (  # noqa: E402,F401
+    AcousticKeywordActivationTests,
+)
 
 
 class AcousticKeywordBiasEvaluationTests(unittest.TestCase):

@@ -16,6 +16,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable, Protocol, Sequence
 
+from process_verifier import RefusalReason, VerificationReceipt
+
 
 TOKEN_RE = re.compile(
     r"https?://[^\s]+|[\w]+(?:['._+/-][\w]+)*|[^\w\s]",
@@ -393,14 +395,9 @@ class MicrospanVerification:
 
 
 class MicrospanVerifier(Protocol):
-    """Future process-isolated verifier contract for one audio microspan.
+    """Killable process boundary for one ephemeral audio microspan."""
 
-    An in-process implementation cannot safely prove deadline enforcement or
-    audio destruction. Runtime therefore refuses every object implementing
-    this provisional protocol until a killable, quarantined subprocess adapter
-    owns the boundary. The shape remains here to keep selector work testable.
-    """
-
+    process_isolated: bool
     strict_deadline: bool
     retains_audio: bool
 
@@ -411,7 +408,7 @@ class MicrospanVerifier(Protocol):
         expected: str,
         *,
         deadline_at: float,
-    ) -> MicrospanVerification: ...
+    ) -> VerificationReceipt: ...
 
 
 @dataclass(frozen=True)
@@ -1092,11 +1089,110 @@ def execute_consequence_plan(
     if selected and verifier is None:
         skipped["verifier-unavailable"] = selected
     elif selected:
-        # Python threads cannot be killed safely and a timed-out native model
-        # may keep reading or copying audio. Never execute an in-process
-        # verifier. Item 19 owns the prewarmed subprocess boundary that can be
-        # terminated, killed, quarantined, and restarted on its hard deadline.
-        skipped["unsafe-verifier-contract"] = selected
+        safe_contract = (
+            getattr(verifier, "process_isolated", None) is True
+            and getattr(verifier, "strict_deadline", None) is True
+            and getattr(verifier, "retains_audio", None) is False
+        )
+        if not safe_contract:
+            skipped["unsafe-verifier-contract"] = selected
+        elif audio is None:
+            skipped["audio-unavailable"] = selected
+        else:
+            deadline_at = clock() + float(deadline_seconds)
+            try:
+                audio_count = len(audio)
+            except Exception:
+                audio_count = 0
+            primary = voice.hypotheses[0]
+            for request_index, request in enumerate(
+                    plan.relisten_requests):
+                remaining = selected - request_index
+                if clock() >= deadline_at:
+                    skipped["deadline-expired"] = \
+                        skipped.get("deadline-expired", 0) + remaining
+                    break
+                start_index = max(
+                    0, int(math.floor(request.start * sample_rate)))
+                end_index = min(
+                    audio_count, int(math.ceil(request.end * sample_rate)))
+                expected_words = [
+                    word.text for word in primary.words
+                    if word.timing == "native"
+                    and word.end > request.start
+                    and word.start < request.end
+                ]
+                if (audio_count <= 0 or end_index <= start_index
+                        or not expected_words):
+                    skipped["audio-unavailable"] = \
+                        skipped.get("audio-unavailable", 0) + 1
+                    continue
+                try:
+                    samples = tuple(
+                        float(value)
+                        for value in audio[start_index:end_index]
+                    )
+                except Exception:
+                    skipped["audio-unavailable"] = \
+                        skipped.get("audio-unavailable", 0) + 1
+                    continue
+                if not samples:
+                    skipped["audio-unavailable"] = \
+                        skipped.get("audio-unavailable", 0) + 1
+                    continue
+                attempted += 1
+                try:
+                    verification = verifier.verify(
+                        samples,
+                        sample_rate,
+                        " ".join(expected_words),
+                        deadline_at=deadline_at,
+                    )
+                except Exception:
+                    skipped["verifier-error"] = \
+                        skipped.get("verifier-error", 0) + 1
+                    continue
+                finally:
+                    samples = ()
+                if clock() > deadline_at:
+                    skipped["deadline-expired"] = \
+                        skipped.get("deadline-expired", 0) + 1
+                    break
+                if not isinstance(verification, VerificationReceipt):
+                    skipped["invalid-verifier-result"] = skipped.get(
+                        "invalid-verifier-result", 0) + 1
+                    continue
+                if verification.refusal is not None:
+                    reason = (
+                        "deadline-expired"
+                        if verification.refusal is RefusalReason.TIMEOUT
+                        else "invalid-verifier-result"
+                        if verification.refusal
+                            is RefusalReason.MALFORMED_RESULT
+                        else "verifier-error"
+                    )
+                    skipped[reason] = skipped.get(reason, 0) + 1
+                    continue
+                result = verification.result
+                if result is None:
+                    skipped["invalid-verifier-result"] = skipped.get(
+                        "invalid-verifier-result", 0) + 1
+                    continue
+                if result.engine.casefold() == primary.engine.casefold():
+                    skipped["verifier-not-independent"] = skipped.get(
+                        "verifier-not-independent", 0) + 1
+                    continue
+                if result.outcome == "confirmed":
+                    confirmed += 1
+                    confirmed_risks.update(request.risk_indexes)
+                elif result.outcome == "contradicted":
+                    contradicted += 1
+                    contradicted_risks.update(request.risk_indexes)
+                elif result.outcome == "inconclusive":
+                    inconclusive += 1
+                else:
+                    skipped["invalid-verifier-result"] = skipped.get(
+                        "invalid-verifier-result", 0) + 1
 
     risk_counts: dict[str, int] = {}
     for risk in plan.risks:

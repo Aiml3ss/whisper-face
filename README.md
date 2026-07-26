@@ -128,14 +128,16 @@ are never Supporter-only features.
   currency, dates, times, recipients, contacts, URLs, paths, commands, and
   actions receive transcript-free risk/uncertainty receipts in Last
   Recognition and Results. The selective re-listen selector is bounded to two
-  native-timed microspans and never a full utterance. Re-listen execution is
-  intentionally disabled until a killable process-isolated verifier beats the
-  current stack in a public accuracy/latency comparison. Rolling and
-  speculative decodes now retain exact capture-sample bounds, including real
+  native-timed microspans and never a full utterance. A prewarmed,
+  process-isolated pinned Whisper Tiny verifier can execute those spans under
+  one hard deadline, returning only confirmed, contradicted, or inconclusive.
+  It stays off unless a private local benchmark has at least 40 balanced real
+  recordings, meets the closed accuracy/latency/refusal thresholds, receives
+  explicit manual review, writes a content-free activation receipt, and the
+  user opts in. Missing, stale, cold, malformed, timed-out, or same-engine
+  evidence fails closed to review without delaying on model warmup. Rolling
+  and speculative decodes retain exact capture-sample bounds, including real
   silence gaps; malformed or overlapping timing evidence still fails closed.
-  A provider-neutral disposable-process boundary and pinned local Whisper Tiny
-  adapter now supply hard timeouts and transcript-free results. The adapter
-  stays unwired until its cold-start latency and accuracy justify activation.
   After a successful ordinary Mac dictation, a Ping advises you to review
   consequence-sensitive text; it does not block insertion or verify the words.
   The Results window repeats that guidance without exposing transcript text.
@@ -173,14 +175,20 @@ are never Supporter-only features.
   transcript-free evidence. Synthetic evidence can never earn a keep receipt;
   at least 20 positive and 20 negative caller-attested physical cases must show
   at least three selection gains with no selection or candidate regressions.
-  Receipts contain aggregate counts only, distinguish synthetic from caller-
-  attested physical evidence, and have no runtime or recognition authority.
-- **Conservative acoustic calibration lab** — an offline policy consumes only
+  Receipts contain aggregate counts only and distinguish synthetic from caller-
+  attested physical evidence. `benchmark_acoustic_keyword_activation.py`
+  can grant one eligible term bounded local-ASR prompt priority only after
+  explicit manual review; missing, malformed, forgotten, or regressing
+  evidence has no recognition effect.
+- **Evidence-gated acoustic calibration** — an offline policy consumes only
   the existing closed numeric capture telemetry and emits bounded candidate
   gain, noise-gate, VAD, and end-silence settings. Nonfinite/clipped evidence
   is killed, ambiguous silence/noise/quiet speech or near-saturation headroom
-  stays insufficient, reverb is explicitly unavailable, and no recommendation
-  affects the runtime yet.
+  stays insufficient, and reverb is explicitly unavailable. The runtime
+  applies a candidate only from a private receipt built by
+  `benchmark_acoustic_calibration_activation.py` after 40 balanced physical
+  A/B cases, at least three improvements, zero regressions, and manual review.
+  See [Acoustic accuracy activation](docs/acoustic-accuracy-activation.md).
 - **Explicit Point-and-Speak action (Mac)** — from Diagnostics, enter a
   bounded target phrase for a read-only preview of the focused app. Whisper Face
   reads only bounded Accessibility names, roles, geometry, visibility,
@@ -528,6 +536,10 @@ drafts), and `demonstrations.json` (manually authored inert recipe steps).
 `acoustic_keyword_memory.json` stores bounded
 keyword candidates, hashed app scopes, and evidence digests without raw audio,
 surrounding context, or transcript history.
+`acoustic_keyword_activation.json` and
+`acoustic_calibration_activation.json` are private, content-minimized physical
+evidence receipts. They must travel with the matching machine state if the
+user intentionally migrates those activations.
 `benchmark_acoustic_keyword_bias.py` exercises the keyword-bias evaluator with
 constructed categorical fixtures only. Its physical-shaped fixtures test policy
 branches and are explicitly not physical recognition evidence or an activation
@@ -585,6 +597,8 @@ Run `uv run benchmark_consequence_routing.py` for the synthetic selector-only
 consequence corpus. Its closed artifact explicitly says that no audio,
 verifier, runtime ASR backend, or physical device was exercised, and its 5 ms
 gate uses the worst per-case p95 rather than corpus-average throughput.
+The separate real-recording activation workflow is documented in
+`docs/selective-relisten-activation.md`.
 
 Run `uv run benchmark_cleanup_latency.py --run --format json` to compare the
 current pinned Qwen3.5-4B structured-cleanup prompt with smaller prompt,

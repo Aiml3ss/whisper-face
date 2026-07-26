@@ -1,9 +1,9 @@
 """Bounded, inspectable evidence for personal acoustic keywords.
 
 This module is deliberately a storage and eligibility foundation only.  It
-does not bias a recognizer, rewrite a transcript, or insert text.  A future
-integration must make that separate behavior explicit and preserve the Voice
-Compiler's acoustic-evidence rules.
+does not bias a recognizer, rewrite a transcript, or insert text.  The separate
+activation layer can prioritize one eligible term in a local ASR prompt only
+after balanced physical A/B evidence and manual review.
 
 Only the candidate keyword, coarse hashed application scope, and bounded
 digests used to de-duplicate evidence are retained.  Raw audio, surrounding

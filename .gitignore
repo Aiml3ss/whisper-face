@@ -12,6 +12,9 @@ acoustic_keyword_memory.json
 delayed_cleanup_activation.json
 .delayed_cleanup_activation.json.*.tmp
 delayed_cleanup_physical_cases.json
+acoustic_keyword_activation.json
+acoustic_calibration_activation.json
+relisten_activation.json
 dictionary.txt
 dictate.log
 ollama.log

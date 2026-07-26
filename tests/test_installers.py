@@ -437,6 +437,10 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn("dictate.py", installer)
                 self.assertIn("parrot_core.py", installer)
                 self.assertIn("voice_compiler.py", installer)
+                self.assertIn("process_verifier.py", installer)
+                self.assertIn("prewarmed_verifier.py", installer)
+                self.assertIn("whisper_verifier_adapter.py", installer)
+                self.assertIn("relisten_activation.py", installer)
                 self.assertIn("insertion_integrity.py", installer)
                 self.assertIn("personal_regression.py", installer)
                 self.assertIn("shadow_candidate_gate.py", installer)
@@ -448,6 +452,14 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn("model_wallet.py", installer)
                 self.assertIn("model_wallet_shadow.py", installer)
                 self.assertIn("model_readiness_evidence.py", installer)
+                self.assertIn("acoustic_keyword_activation.py", installer)
+                self.assertIn(
+                    "benchmark_acoustic_keyword_activation.py", installer)
+                self.assertIn("acoustic_calibration.py", installer)
+                self.assertIn(
+                    "acoustic_calibration_activation.py", installer)
+                self.assertIn(
+                    "benchmark_acoustic_calibration_activation.py", installer)
                 self.assertIn("acoustic_time_machine.py", installer)
                 self.assertIn("risky_action_confirmation.py", installer)
                 self.assertIn("point_and_speak_resolver.py", installer)
@@ -722,6 +734,10 @@ class InstallerContractTests(unittest.TestCase):
             "tones.json",
             "preferences.json",
             "acoustic_keyword_memory.json",
+            "acoustic_keyword_activation.json",
+            "acoustic_calibration_activation.json",
+            "relisten_activation.json",
+            "delayed_cleanup_activation.json",
             "dictionary.txt",
             "transcripts.jsonl",
             "learned.json",

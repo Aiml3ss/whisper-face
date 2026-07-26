@@ -154,12 +154,17 @@ function Confirm-WritableCheckout {
 
 $Required = @(
     "dictate.py", "dictate.py.lock", "parrot_core.py", "voice_compiler.py",
+    "process_verifier.py", "prewarmed_verifier.py",
+    "whisper_verifier_adapter.py", "relisten_activation.py",
     "insertion_integrity.py", "personal_regression.py",
     "shadow_candidate_gate.py", "cleanup_circuit_breaker.py",
     "delayed_cleanup_activation.py", "delayed_cleanup_merge.py",
     "macos_delayed_cleanup_destination.py",
     "model_wallet.py", "model_wallet_shadow.py", "model_readiness_evidence.py",
-    "acoustic_keyword_memory.py", "acoustic_time_machine.py",
+    "acoustic_keyword_memory.py", "acoustic_keyword_activation.py",
+    "benchmark_acoustic_keyword_activation.py", "acoustic_time_machine.py",
+    "acoustic_calibration.py", "acoustic_calibration_activation.py",
+    "benchmark_acoustic_calibration_activation.py",
     "voice_objects.py", "voice_object_command_parser.py", "voice_inbox.py",
     "voice_object_inbox_bridge.py", "macos_email_compose.py",
     "macos_voice_draft_clipboard.py",
@@ -429,7 +434,9 @@ foreach ($DestinationName in $PrivateTemplates.Keys) {
 }
 foreach ($PrivateStateName in @(
     "voice_inbox.json", "demonstrations.json",
-    "delayed_cleanup_activation.json"
+    "delayed_cleanup_activation.json",
+    "acoustic_keyword_activation.json", "acoustic_calibration_activation.json",
+    "relisten_activation.json"
 )) {
     $PrivateState = Join-Path $Repo $PrivateStateName
     if (Test-Path $PrivateState) {

@@ -19,6 +19,9 @@ from benchmark_acoustic_calibration import (  # noqa: E402
     main,
     run_synthetic_benchmark,
 )
+from test_acoustic_calibration_activation import (  # noqa: E402,F401
+    AcousticCalibrationActivationTests,
+)
 
 
 class AcousticCalibrationSyntheticBenchmarkTests(unittest.TestCase):

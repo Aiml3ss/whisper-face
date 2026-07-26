@@ -7,10 +7,14 @@ machine without maintaining a second copy of the application.
 ## Single source of truth
 
 `dictate.py`, `parrot_core.py`, `voice_compiler.py`,
+`process_verifier.py`, `prewarmed_verifier.py`,
+`whisper_verifier_adapter.py`, `relisten_activation.py`,
 `insertion_integrity.py`, `personal_regression.py`,
 `shadow_candidate_gate.py`, `cleanup_circuit_breaker.py`,
 `delayed_cleanup_activation.py`, `delayed_cleanup_merge.py`,
 `macos_delayed_cleanup_destination.py`,
+`acoustic_keyword_memory.py`, `acoustic_keyword_activation.py`,
+`acoustic_calibration.py`, `acoustic_calibration_activation.py`,
 `model_wallet.py`, `model_wallet_shadow.py`,
 `whisper_face_gui.py`, `whisper_face_theme.py`, `support_bundle.py`,
 `voice_object_command_parser.py`, `voice_inbox.py`,
@@ -67,9 +71,11 @@ uv run tests/test_voice_input_protocol_transport.py
 uv run tests/test_macos_networkless_worker.py
 uv run tests/test_acoustic_keyword_memory.py
 uv run tests/test_acoustic_keyword_bias_evaluation.py
+uv run tests/test_acoustic_keyword_activation.py
 uv run tests/test_acoustic_time_machine.py
 uv run tests/test_acoustic_calibration.py
 uv run tests/test_benchmark_acoustic_calibration.py
+uv run tests/test_acoustic_calibration_activation.py
 uv run tests/test_delayed_cleanup_merge.py
 uv run tests/test_macos_delayed_cleanup_destination.py
 uv run tests/test_model_wallet.py
