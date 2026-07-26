@@ -2610,18 +2610,6 @@ def usage_metrics() -> tuple[int, float]:
     return value
 
 
-def builtin_tone(bundle: str) -> str:
-    if bundle in VERBATIM_APPS:
-        return "verbatim"
-    if bundle in CASUAL_APPS:
-        return "casual"
-    if bundle in FORMAL_APPS:
-        return "formal"
-    if bundle in CODE_APPS:
-        return "code"
-    return "default"
-
-
 def recent_dictation_apps(limit: int = 8) -> list[str]:
     """Apps worth showing in the tone picker: frontmost first, then the
     most recently dictated-into, deduped."""
@@ -2711,6 +2699,10 @@ class StatusBar(NSObject):
                 it.setTarget_(self)
             return it
 
+        # A quick-glance menu, not a control panel. The window owns tones,
+        # learned corrections, voice-mode reference, logs, and every dense
+        # evidence view; rows that have nothing to offer stay hidden instead
+        # of stacking up as noise. The default menu is six choices.
         menu = NSMenu.alloc().init()
         menu.setDelegate_(self)
         self.stat1 = mk("…", None)
@@ -2718,51 +2710,37 @@ class StatusBar(NSObject):
         self.faces_root = mk("Choose Face", None)
         self.faces_menu = NSMenu.alloc().init()
         self.faces_root.setSubmenu_(self.faces_menu)
-        self.tones_root = mk("App Tones", None)
-        self.tones_menu = NSMenu.alloc().init()
-        self.tones_root.setSubmenu_(self.tones_menu)
-        self.learning_root = mk("Learned Corrections", None)
-        self.learning_menu = NSMenu.alloc().init()
-        self.learning_root.setSubmenu_(self.learning_menu)
-        self.recognition_root = mk("Last Recognition", None)
-        self.recognition_menu = NSMenu.alloc().init()
-        self.recognition_root.setSubmenu_(self.recognition_menu)
-        self.modes_root = mk("Voice Modes", None)
-        self.modes_menu = NSMenu.alloc().init()
-        self.modes_root.setSubmenu_(self.modes_menu)
+        self.recognition_item = mk("Last Recognition…", "openResults:")
+        self.recognition_item.setHidden_(True)
         self.voice_inbox_item = mk("Voice Inbox", "openVoiceInbox:")
         self.voice_inbox_item.setEnabled_(False)
+        self.voice_inbox_item.setHidden_(True)
         self.voice_outbox_item = mk("Voice Outbox", "openVoiceOutbox:")
         self.voice_outbox_item.setEnabled_(False)
-        for title in (
-                "Right Option — Capture",
-                "Shift + Right Option — Compose",
-                "Control + Right Option — Reply",
-                "Shift + Control + Right Option — Code",
-                "Command + Right Option — Edit Selection",
-                "Control + Command + Right Option — Command"):
-            mode_item = mk(title, None)
-            mode_item.setEnabled_(False)
-            self.modes_menu.addItem_(mode_item)
+        self.voice_outbox_item.setHidden_(True)
+        # Appears only once a local activation receipt exists; for everyone
+        # else the feature is dormant and a dead toggle would be noise.
+        self.relisten_item = mk(
+            "Selective Re-listen", "toggleSelectiveRelisten:")
+        self.relisten_item.setHidden_(True)
+        # The Flight Recorder toggle lives in Settings → Privacy. The item
+        # object stays alive unattached because the pause path and the
+        # window's toggle still drive its title/state helpers.
         self.flight_item = mk("Flight Recorder", "toggleFlight:")
         self.pause_item = mk("Pause Dictation", "togglePause:")
         menu.addItem_(mk("Open Whisper Face…", "openGUI:"))
-        menu.addItem_(mk("Check for Updates…", "checkForUpdates:"))
         menu.addItem_(NSMenuItem.separatorItem())
         menu.addItem_(self.stat1)
         menu.addItem_(self.stat2)
         menu.addItem_(NSMenuItem.separatorItem())
-        menu.addItem_(self.faces_root)
-        menu.addItem_(self.tones_root)
-        menu.addItem_(self.learning_root)
-        menu.addItem_(self.voice_inbox_item)
-        menu.addItem_(self.voice_outbox_item)
-        menu.addItem_(self.recognition_root)
-        menu.addItem_(self.modes_root)
-        menu.addItem_(self.flight_item)
         menu.addItem_(self.pause_item)
-        menu.addItem_(mk("Open Log", "openLog:"))
+        menu.addItem_(self.faces_root)
+        menu.addItem_(self.recognition_item)
+        menu.addItem_(self.voice_outbox_item)
+        menu.addItem_(self.voice_inbox_item)
+        menu.addItem_(self.relisten_item)
         menu.addItem_(NSMenuItem.separatorItem())
+        menu.addItem_(mk("Check for Updates…", "checkForUpdates:"))
         menu.addItem_(mk(f"Quit {APP_NAME}", "quitApp:"))
         self.item.setMenu_(menu)
         AppHelper.callAfter(self._consume_update_result)
@@ -2827,27 +2805,34 @@ class StatusBar(NSObject):
             )
 
     def menuWillOpen_(self, menu):
+        inbox_count = 0
         try:
-            self.voice_inbox_item.setTitle_(voice_inbox_menu_title(
-                voice_object_inbox_status()))
+            inbox_status = voice_object_inbox_status()
+            inbox_count = int(inbox_status.get("queued_count", 0))
+            self.voice_inbox_item.setTitle_(
+                voice_inbox_menu_title(inbox_status))
         except Exception:
             self.voice_inbox_item.setTitle_("Voice Inbox")
+        # Recovery rows surface themselves exactly when they hold something;
+        # an empty queue earns no menu row.
+        self.voice_inbox_item.setHidden_(inbox_count <= 0)
         self.voice_inbox_item.setEnabled_(self.gui is not None)
+        outbox_count = 0
         try:
-            self.voice_outbox_item.setTitle_(voice_outbox_menu_title(
-                INSERTION_COORDINATOR.recoverable_count()))
+            outbox_count = INSERTION_COORDINATOR.recoverable_count()
+            self.voice_outbox_item.setTitle_(
+                voice_outbox_menu_title(outbox_count))
         except Exception:
             self.voice_outbox_item.setTitle_("Voice Outbox")
+        self.voice_outbox_item.setHidden_(outbox_count <= 0)
         self.voice_outbox_item.setEnabled_(self.gui is not None)
         try:
             s1, s2 = usage_stats()
             self.stat1.setTitle_(s1)
             self.stat2.setTitle_(s2)
             self.rebuild_faces()
-            self.rebuild_tones()
-            self.rebuild_learning()
-            self.rebuild_recognition()
-            self.refresh_flight_item()
+            self.refresh_recognition_item()
+            self.refresh_relisten_item()
         except Exception as e:
             print(f"! menu refresh failed: {e}")   # menu still opens
 
@@ -2923,189 +2908,36 @@ class StatusBar(NSObject):
         else:
             self.start_flight_async()
 
-    def rebuild_tones(self):
-        """One submenu per recent app: Auto (built-in guess) or an explicit
-        tone. Checkmark shows what's in effect; choices persist to
-        tones.json."""
-        self.tones_menu.removeAllItems()
-        choices = [("Casual", "casual"), ("Formal", "formal"),
-                   ("Technical", "code"), ("Verbatim", "verbatim"),
-                   ("Neutral", "default")]
-        for bundle in recent_dictation_apps():
-            override = app_tone_override(bundle)
-            app_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                app_display_name(bundle), None, "")
-            sub = NSMenu.alloc().init()
-            entries = [(f"Auto ({builtin_tone(bundle)})", "")] \
-                + [(t, k) for t, k in choices]
-            for title, key in entries:
-                mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                    title, "setAppTone:", "")
-                mi.setTarget_(self)
-                mi.setRepresentedObject_({"bundle": bundle, "tone": key})
-                selected = (override is None and key == "") \
-                    or (override is not None and key == override)
-                mi.setState_(1 if selected else 0)
-                sub.addItem_(mi)
-            app_item.setSubmenu_(sub)
-            self.tones_menu.addItem_(app_item)
+    def refresh_recognition_item(self):
+        """One shortcut into the Results inspector, flagged for review.
 
-    def setAppTone_(self, sender):
-        d = sender.representedObject()
-        set_app_tone(str(d["bundle"]), str(d["tone"]) or None)
-
-    def rebuild_learning(self):
-        self.learning_menu.removeAllItems()
-        state = load_learned()
-        rows = sorted(
-            state.get("confusions", {}).items(),
-            key=lambda item: -int(item[1].get("n", 0)),
-        )[:12]
-        snippet_rows = sorted(
-            state.get("snippet_edits", {}).items(),
-            key=lambda item: -int(item[1].get("n", 0)),
-        )[:12]
-        if not rows and not snippet_rows:
-            empty = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                "No learned corrections", None, "")
-            empty.setEnabled_(False)
-            self.learning_menu.addItem_(empty)
-            return
-        for key, info in rows:
-            title = (f"{info.get('from', '?')} → {info.get('to', '?')} · "
-                     f"{info.get('n', 0)}×")
-            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                title, "forgetCorrection:", "")
-            item.setTarget_(self)
-            item.setRepresentedObject_(key)
-            self.learning_menu.addItem_(item)
-        if rows and snippet_rows:
-            self.learning_menu.addItem_(NSMenuItem.separatorItem())
-        for name, info in snippet_rows:
-            title = f"Snippet: {name} · {info.get('n', 0)}×"
-            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                title, "forgetSnippetEdit:", "")
-            item.setTarget_(self)
-            item.setRepresentedObject_(name)
-            self.learning_menu.addItem_(item)
-
-    def forgetCorrection_(self, sender):
-        key = str(sender.representedObject())
-        try:
-            forget_gui_correction(key)
-        except KeyError:
-            return
-        self.rebuild_learning()
-
-    def forgetSnippetEdit_(self, sender):
-        if forget_snippet_edit(str(sender.representedObject())):
-            self.rebuild_learning()
-
-    def rebuild_recognition(self):
-        self.recognition_menu.removeAllItems()
-        confidence = float(PIPELINE_STATE["last_confidence"])
-        mode = str(PIPELINE_STATE["last_mode"])
-        summary = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            f"Confidence: {confidence:.0%} · {mode}", None, "")
-        summary.setEnabled_(False)
-        self.recognition_menu.addItem_(summary)
-        compiler_summary = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Compiler: "
-            f"{PIPELINE_STATE['last_compiler_decisions']} decisions · "
-            f"{PIPELINE_STATE['last_protected_anchors']} anchors · "
-            f"{PIPELINE_STATE['last_stable_prefix_words']} stable words",
-            None, "")
-        compiler_summary.setEnabled_(False)
-        self.recognition_menu.addItem_(compiler_summary)
+        The dense per-utterance evidence (confidence, compiler decisions,
+        risk spans, re-listen tallies, alternatives) lives in the window's
+        Results view, which presents it properly instead of as a stack of
+        disabled menu rows. The row hides until a first result exists.
+        """
+        self.recognition_item.setHidden_(
+            not PIPELINE_STATE["last_result_evidence"])
         consequence = consequence_state_snapshot()
-        self.recognition_root.setTitle_(
-            recognition_root_title(consequence["route"]))
-        consequence_summary = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Consequence: "
-            f"{consequence['route'].replace('-', ' ').title()} · "
-            f"{consequence['high_risks']} high-risk · "
-            f"{consequence['uncertain_risks']} uncertain",
-            None, "")
-        consequence_summary.setEnabled_(False)
-        self.recognition_menu.addItem_(consequence_summary)
-        if consequence["risk_counts"]:
-            risk_summary = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                "Risk spans: " + " · ".join(
-                    f"{category} {count}"
-                    for category, count in sorted(
-                        consequence["risk_counts"].items())),
-                None, "")
-            risk_summary.setEnabled_(False)
-            self.recognition_menu.addItem_(risk_summary)
-        relisten_summary = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Re-listen: "
-            f"{consequence['relisten_status'].replace('-', ' ')} · "
-            f"{consequence['relisten_confirmed']}/"
-            f"{consequence['relisten_attempted']} confirmed · "
-            f"{consequence['relisten_contradicted']} contradicted",
-            None, "")
-        relisten_summary.setEnabled_(False)
-        self.recognition_menu.addItem_(relisten_summary)
+        self.recognition_item.setTitle_(
+            recognition_root_title(consequence["route"]) + "…")
+        self.recognition_item.setEnabled_(self.gui is not None)
+
+    def refresh_relisten_item(self):
+        """Expose the evidence-gated toggle only where evidence exists."""
         runtime_relisten = selective_relisten_status_snapshot()
-        runtime_title = {
+        available = (runtime_relisten["evidence_ready"]
+                     or runtime_relisten["requested"])
+        self.relisten_item.setHidden_(not available)
+        if not available:
+            return
+        self.relisten_item.setTitle_({
             "ready": "Selective Re-listen: On",
             "warming": "Selective Re-listen: Warming",
             "enabled-not-ready": "Selective Re-listen: Starting",
-            "receipt-missing": "Selective Re-listen: Evidence required",
-        }.get(
-            runtime_relisten["status"],
-            "Selective Re-listen: Off",
-        )
-        runtime_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            runtime_title, "toggleSelectiveRelisten:", "")
-        runtime_item.setTarget_(self)
-        runtime_item.setState_(
+        }.get(runtime_relisten["status"], "Selective Re-listen: Off"))
+        self.relisten_item.setState_(
             1 if runtime_relisten["requested"] else 0)
-        runtime_item.setEnabled_(
-            runtime_relisten["evidence_ready"]
-            or runtime_relisten["requested"])
-        self.recognition_menu.addItem_(runtime_item)
-        if consequence["relisten_skipped"]:
-            skipped_summary = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                "Skipped: " + " · ".join(
-                    f"{reason} {count}"
-                    for reason, count in sorted(
-                        consequence["relisten_skipped"].items())),
-                None, "")
-            skipped_summary.setEnabled_(False)
-            self.recognition_menu.addItem_(skipped_summary)
-        for detail in PIPELINE_STATE["last_compiler_details"][:6]:
-            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                f"  {detail}", None, "")
-            item.setEnabled_(False)
-            self.recognition_menu.addItem_(item)
-        edits = PIPELINE_STATE["last_cleanup_edits"]
-        if edits:
-            edit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                "Cleanup: " + ", ".join(dict.fromkeys(edits)), None, "")
-            edit_item.setEnabled_(False)
-            self.recognition_menu.addItem_(edit_item)
-        for alternative in PIPELINE_STATE["last_alternatives"]:
-            title = alternative if len(alternative) <= 70 \
-                else alternative[:67] + "…"
-            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                f"Copy alternative: {title}", "copyAlternative:", "")
-            item.setTarget_(self)
-            item.setRepresentedObject_(alternative)
-            self.recognition_menu.addItem_(item)
-        self.recognition_menu.addItem_(NSMenuItem.separatorItem())
-        results_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Open Last Result…", "openResults:", "")
-        results_item.setTarget_(self)
-        results_item.setEnabled_(self.gui is not None)
-        self.recognition_menu.addItem_(results_item)
-
-    def copyAlternative_(self, sender):
-        alternative = str(sender.representedObject())
-        pb = NSPasteboard.generalPasteboard()
-        pb.clearContents()
-        pb.setString_forType_(alternative, NSPasteboardTypeString)
-        print("[confidence] copied alternative to clipboard")
 
     def toggleSelectiveRelisten_(self, _sender):
         status = selective_relisten_status_snapshot()
@@ -3113,7 +2945,7 @@ class StatusBar(NSObject):
             set_selective_relisten_enabled(not status["requested"])
         except RuntimeError:
             print("! Selective Re-listen requires approved local evidence")
-        self.rebuild_recognition()
+        self.refresh_relisten_item()
 
     def togglePause_(self, sender):
         self.set_paused(not PAUSED["on"])
@@ -3128,9 +2960,6 @@ class StatusBar(NSObject):
             "Resume Dictation" if PAUSED["on"] else "Pause Dictation")
         self.refresh_flight_item()
         self.setState_("off" if PAUSED["on"] else "idle")
-
-    def openLog_(self, sender):
-        subprocess.Popen(["open", str(HERE / "dictate.log")])
 
     def openGUI_(self, sender):
         if self.gui is not None:

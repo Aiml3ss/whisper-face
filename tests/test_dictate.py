@@ -1311,9 +1311,16 @@ class RecognitionMenuTitleTests(unittest.TestCase):
             node.name: node for node in status_bar.body
             if isinstance(node, ast.FunctionDef)
         }
-        rebuild_source = ast.unparse(methods["rebuild_recognition"])
-        self.assertIn("Open Last Result…", rebuild_source)
-        self.assertIn("openResults:", rebuild_source)
+        # The quick-glance menu keeps one Results shortcut whose title
+        # carries the review flag and which hides until a result exists;
+        # the dense evidence itself lives in the window's Results view.
+        refresh_source = ast.unparse(methods["refresh_recognition_item"])
+        self.assertIn("recognition_root_title", refresh_source)
+        self.assertIn("last_result_evidence", refresh_source)
+        self.assertIn("setHidden_", refresh_source)
+        init_source = ast.unparse(methods["initWithGUI_"]) \
+            if "initWithGUI_" in methods else ast.unparse(status_bar)
+        self.assertIn("openResults:", init_source)
 
         opener = methods["openResults_"]
         attributes = {
