@@ -3546,6 +3546,8 @@ class AudioPool:
         self.warm_attempted = False
         self.warm_error = None
         self.recovery_pending = False
+        self.recovery_worker = None
+        self.closed = False
 
     def readiness(self) -> str:
         """Expose startup failure without leaking device or exception text."""
@@ -3567,6 +3569,8 @@ class AudioPool:
     def _warm_locked(self):
         """Open the current default device while ``init_lock`` is held."""
         with self.lock:
+            if self.closed:
+                raise RuntimeError("audio pool is closed")
             if self.slots:
                 return
             self.warm_attempted = True
@@ -3659,8 +3663,61 @@ class AudioPool:
                     stale_slots = self._invalidate_locked(
                         reset_error=stop_error is None)
             self._close_slots(stale_slots)
+            if should_recover:
+                self.warm_async()
         if stop_error is not None:
             raise RuntimeError("microphone stream stop failed") from None
+
+    def warm_async(self):
+        """Prewarm an idle recovered device without blocking notification code."""
+
+        with self.lock:
+            worker = self.recovery_worker
+            if (self.closed or self.recovery_pending or self.slots
+                    or (worker is not None and worker.is_alive())):
+                return False
+
+            def recover():
+                try:
+                    self.warm()
+                except RuntimeError:
+                    # Readiness becomes Unavailable; the next keypress retries
+                    # without exposing device or exception details.
+                    pass
+
+            worker = threading.Thread(
+                target=recover,
+                name="whisper-face-audio-prewarm",
+                daemon=True,
+            )
+            self.recovery_worker = worker
+            worker.start()
+            return True
+
+    def wait_for_recovery(self, timeout=1.0):
+        """Wait for a scheduled prewarm; deterministic tests use this seam."""
+
+        with self.lock:
+            worker = self.recovery_worker
+        if worker is None:
+            return self.readiness() == "Ready"
+        if worker is threading.current_thread():
+            return False
+        worker.join(timeout=max(0.0, float(timeout)))
+        return not worker.is_alive() and self.readiness() == "Ready"
+
+    def recover_default_device(self):
+        """Replace and prewarm an idle default input on a recovery worker."""
+
+        self.invalidate()
+        with self.lock:
+            if self.recovery_pending:
+                return False
+        try:
+            self.warm()
+        except RuntimeError:
+            return False
+        return self.readiness() == "Ready"
 
     def invalidate(self):
         """Forget stale default-device streams without cutting off a take."""
@@ -3675,6 +3732,7 @@ class AudioPool:
                 self.slots = []
                 self.busy.clear()
                 self.recovery_pending = False
+                self.closed = True
         self._close_slots(slots)
 
 
@@ -3873,7 +3931,7 @@ AUDIO_POOL = AudioPool(size=2)
 def _invalidate_default_audio_inputs():
     """Refresh every stream bound to the prior macOS default input."""
     try:
-        AUDIO_POOL.invalidate()
+        AUDIO_POOL.recover_default_device()
     finally:
         FLIGHT.invalidate()
 

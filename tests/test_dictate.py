@@ -2132,6 +2132,45 @@ class AudioPoolTests(unittest.TestCase):
         self.assertNotIn(slot.stream, original)
         pool.release(slot)
 
+    def test_idle_recovery_prewarms_before_the_next_keypress(self):
+        streams = []
+
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        pool = self.namespace()["AudioPool"](
+            size=2, stream_factory=factory)
+        pool.warm()
+        original = tuple(streams)
+
+        self.assertTrue(pool.recover_default_device())
+
+        self.assertEqual(pool.readiness(), "Ready")
+        self.assertEqual(len(pool.slots), 2)
+        self.assertEqual(len(streams), 4)
+        self.assertTrue(all(stream.closed for stream in original))
+
+    def test_close_prevents_a_background_reopen(self):
+        streams = []
+
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        pool = self.namespace()["AudioPool"](
+            size=1, stream_factory=factory)
+        pool.warm()
+        pool.close()
+
+        self.assertFalse(pool.warm_async())
+        self.assertEqual(len(streams), 1)
+        self.assertTrue(streams[0].closed)
+        with self.assertRaisesRegex(RuntimeError, "stream unavailable"):
+            pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+
     def test_active_capture_finishes_before_stale_pool_is_replaced(self):
         streams = []
 
@@ -2160,8 +2199,9 @@ class AudioPoolTests(unittest.TestCase):
         self.assertEqual(len(streams), 2)
 
         pool.release(slot)
+        self.assertTrue(pool.wait_for_recovery())
         self.assertTrue(all(stream.closed for stream in original))
-        self.assertEqual(pool.slots, [])
+        self.assertEqual(len(pool.slots), 2)
         replacement = pool.acquire(
             SimpleNamespace(_callback=lambda *_args: None))
         self.assertEqual(len(streams), 4)
@@ -2181,8 +2221,9 @@ class AudioPoolTests(unittest.TestCase):
         pool = self.namespace()["AudioPool"](
             size=1, stream_factory=factory)
         pool.warm()
-        pool.invalidate()
         fail["on"] = True
+
+        self.assertFalse(pool.recover_default_device())
 
         with self.assertRaises(RuntimeError):
             pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
@@ -2231,6 +2272,7 @@ class AudioPoolTests(unittest.TestCase):
             pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
 
         pool.release(second)
+        self.assertTrue(pool.wait_for_recovery())
         self.assertTrue(all(stream.closed for stream in original))
         replacement = pool.acquire(
             SimpleNamespace(_callback=lambda *_args: None))
@@ -2308,7 +2350,7 @@ class MacAudioRecoveryNotificationTests(unittest.TestCase):
             "_invalidate_default_audio_inputs",
             extra={
                 "AUDIO_POOL": SimpleNamespace(
-                    invalidate=lambda: calls.append("pool")),
+                    recover_default_device=lambda: calls.append("pool")),
                 "FLIGHT": SimpleNamespace(
                     invalidate=lambda: calls.append("flight")),
             },
