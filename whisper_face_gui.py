@@ -18,6 +18,11 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from support_bundle import SupportBundleError, write_support_bundle
+from whisper_face_theme import (
+    FACE_CHIP_COLORS,
+    MOTION_SPECS,
+    palette_for_appearance,
+)
 
 
 APP_NAME = "Whisper Face"
@@ -211,19 +216,20 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "overview.accessibility.onboarding.progress": "First run setup progress",
         "overview.accessibility.onboarding.title": "Next setup step",
         "overview.accessibility.onboarding.detail": "Setup step detail",
+        "overview.accessibility.onboarding.face": "{face} face, first-run guide",
         "overview.accessibility.onboarding.steps": "First run setup walkthrough",
         "overview.accessibility.onboarding.step": "Setup step {step}: {status}",
         "overview.notice.outbox.copied": "Latest recoverable dictation copied and dismissed",
         "overview.notice.outbox.error": "Could not copy Voice Outbox: {error}",
         "overview.notice.capture.error": "Could not change capture state: {error}",
         "overview.notice.status.error": "Status unavailable: {error}",
-        "onboarding.permissions.title": "Allow Mac permissions",
+        "onboarding.permissions.title": "First, let your face listen.",
         "onboarding.permissions.detail": "Microphone captures speech; Accessibility safely inserts it into the field you chose. Input Monitoring lets the hotkey listen.",
-        "onboarding.hotkey.title": "Practice {hotkey}",
+        "onboarding.hotkey.title": "Now make it blink with {hotkey}.",
         "onboarding.hotkey.detail": "Hold {hotkey}, speak, then release. This step completes only after Whisper Face observes capture.",
-        "onboarding.models.title": "Confirm local models",
+        "onboarding.models.title": "Meet the local brain.",
         "onboarding.models.detail": "At least one local recognition engine must be ready; fallbacks can finish warming in the background.",
-        "onboarding.first_dictation.title": "Make your first dictation",
+        "onboarding.first_dictation.title": "Say something. Watch it land.",
         "onboarding.first_dictation.detail": "Speak one sentence in a text field. If focus changes, recover it in Voice Outbox with Copy & Dismiss.",
         "onboarding.status.done": "Done",
         "onboarding.status.attention": "Needs attention",
@@ -244,6 +250,13 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "onboarding.action.first_dictation": "Show How",
         "onboarding.action.continue": "Continue Setup",
         "onboarding.action.help": "Open the next incomplete first-run setup step.",
+        "onboarding.action.finish": "Start Dictating",
+        "onboarding.action.finish.help": "Finish first-run setup and show the live dictation overview.",
+        "onboarding.complete.progress": "READY TO DICTATE · {total} OF {total} CONFIRMED",
+        "onboarding.complete.title": "Your face works.",
+        "onboarding.complete.detail": "Permissions, hotkey practice, local model readiness, and your first successful dictation are all confirmed on this Mac.",
+        "onboarding.complete.status": "All set",
+        "onboarding.privacy": "Speech and setup stay on this Mac.",
         "onboarding.complete": "Setup is complete — Whisper Face is ready.",
         "results.title": "Last Result",
         "results.subtitle": "Inspectable evidence from this session — no transcript history.",
@@ -896,6 +909,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "press_point_and_speak",
             "preview_drop_to_target",
             "open_system_settings",
+            "acknowledge_onboarding",
         ),
         accessibility_catalog_keys=(
             "overview.accessibility.phase",
@@ -909,6 +923,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "overview.accessibility.onboarding.progress",
             "overview.accessibility.onboarding.title",
             "overview.accessibility.onboarding.detail",
+            "overview.accessibility.onboarding.face",
             "overview.accessibility.onboarding.steps",
             "overview.accessibility.onboarding.step",
             "settings.accessibility.sections.label",
@@ -1362,6 +1377,21 @@ class OnboardingStep:
     detail: str
     status: str
     complete: bool = False
+
+
+@dataclass(frozen=True)
+class OnboardingPresentation:
+    """Localized first-run card state derived only from readiness evidence."""
+
+    visible: bool
+    complete: bool
+    current_key: str | None
+    progress: str
+    title: str
+    detail: str
+    status: str
+    action_title: str
+    action_help: str
 
 
 @dataclass(frozen=True)
@@ -2193,6 +2223,61 @@ def _build_onboarding_steps(
                 "onboarding.status.turn"),
             first_dictation_complete,
         ),
+    )
+
+
+def onboarding_presentation(
+    steps: Sequence[OnboardingStep],
+    *,
+    acknowledged: bool,
+    locale: str = "en",
+) -> OnboardingPresentation:
+    """Build the active-step or explicit completion presentation."""
+
+    total = len(steps)
+    completed = sum(step.complete for step in steps)
+    next_step = next((step for step in steps if not step.complete), None)
+    if next_step is None:
+        return OnboardingPresentation(
+            visible=not acknowledged,
+            complete=True,
+            current_key=None,
+            progress=localized_string(
+                "onboarding.complete.progress", locale=locale, total=total),
+            title=localized_string(
+                "onboarding.complete.title", locale=locale),
+            detail=localized_string(
+                "onboarding.complete.detail", locale=locale),
+            status=localized_string(
+                "onboarding.complete.status", locale=locale),
+            action_title=localized_string(
+                "onboarding.action.finish", locale=locale),
+            action_help=localized_string(
+                "onboarding.action.finish.help", locale=locale),
+        )
+    action_key = {
+        "permissions": "onboarding.action.open_system_settings",
+        "hotkey": "onboarding.action.hotkey",
+        "models": "onboarding.action.models",
+        "first_dictation": "onboarding.action.first_dictation",
+    }.get(next_step.key, "onboarding.action.continue")
+    help_key = (
+        "onboarding.action.open_system_settings.help"
+        if next_step.key == "permissions"
+        else "onboarding.action.help"
+    )
+    return OnboardingPresentation(
+        visible=not acknowledged,
+        complete=False,
+        current_key=next_step.key,
+        progress=localized_string(
+            "onboarding.progress", locale=locale,
+            completed=completed, total=total),
+        title=next_step.title,
+        detail=next_step.detail,
+        status=next_step.status,
+        action_title=localized_string(action_key, locale=locale),
+        action_help=localized_string(help_key, locale=locale),
     )
 
 
@@ -3864,8 +3949,15 @@ try:  # The view-model above remains usable in headless test environments.
         NSColor,
         NSControlStateValueOff,
         NSControlStateValueOn,
+        NSAppearanceNameAqua,
+        NSAppearanceNameDarkAqua,
         NSEventModifierFlagCommand,
         NSFont,
+        NSFontDescriptorSystemDesignRounded,
+        NSImage,
+        NSImageScaleProportionallyUpOrDown,
+        NSImageView,
+        NSLineBorder,
         NSMakeRect,
         NSNoBorder,
         NSNoTitle,
@@ -3885,6 +3977,7 @@ try:  # The view-model above remains usable in headless test environments.
         NSWindowStyleMaskTitled,
     )
     from Foundation import NSLocale, NSObject, NSTimer, NSUserDefaults
+    from Quartz import CASpringAnimation
 
     APPKIT_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised only outside macOS installs
@@ -3901,6 +3994,20 @@ if APPKIT_AVAILABLE:
     _REVIEW = NSColor.systemOrangeColor()
     _CARD = NSColor.controlBackgroundColor()
 
+    def _theme_color(
+            color: tuple[float, float, float], alpha: float = 1.0) -> Any:
+        return NSColor.colorWithCalibratedRed_green_blue_alpha_(
+            color[0], color[1], color[2], alpha)
+
+    def _uses_dark_appearance(view: Any) -> bool:
+        try:
+            match = view.effectiveAppearance() \
+                .bestMatchFromAppearancesWithNames_(
+                    [NSAppearanceNameAqua, NSAppearanceNameDarkAqua])
+            return str(match) == str(NSAppearanceNameDarkAqua)
+        except Exception:
+            return False
+
     def _accessible(view: Any, label: str, help_text: str = "") -> Any:
         """Apply explicit VoiceOver copy without depending on visual text."""
         try:
@@ -3913,17 +4020,30 @@ if APPKIT_AVAILABLE:
 
     def _label(text: str, frame: Any, *, size: float = 13,
                weight: str = "regular", color: Any = None,
-               accessibility_label: str = "") -> Any:
+               accessibility_label: str = "", rounded: bool = False,
+               wrap: bool = False, alignment: int | None = None) -> Any:
         label = NSTextField.labelWithString_(text)
         label.setFrame_(frame)
-        if weight == "bold":
-            label.setFont_(NSFont.systemFontOfSize_weight_(size, 0.6))
-        elif weight == "medium":
-            label.setFont_(NSFont.systemFontOfSize_weight_(size, 0.35))
-        else:
-            label.setFont_(NSFont.systemFontOfSize_(size))
+        font_weight = (
+            0.6 if weight == "bold" else 0.35
+            if weight == "medium" else 0.0)
+        font = NSFont.systemFontOfSize_weight_(size, font_weight)
+        if rounded:
+            try:
+                descriptor = font.fontDescriptor().fontDescriptorWithDesign_(
+                    NSFontDescriptorSystemDesignRounded)
+                if descriptor is not None:
+                    font = NSFont.fontWithDescriptor_size_(descriptor, size)
+            except Exception:
+                pass
+        label.setFont_(font)
         label.setTextColor_(color or _TEXT)
         label.setLineBreakMode_(0)
+        if wrap:
+            label.setUsesSingleLineMode_(False)
+            label.setMaximumNumberOfLines_(0)
+        if alignment is not None:
+            label.setAlignment_(alignment)
         return _accessible(label, accessibility_label or text)
 
     def _button(title: str, frame: Any, target: Any, action: str,
@@ -3955,6 +4075,9 @@ if APPKIT_AVAILABLE:
             self.dynamic: dict[str, Any] = {}
             self.timer = None
             self.defaults = None
+            self._face_images: dict[tuple[str, bool], Any] = {}
+            self._onboarding_stage: str | None = None
+            self._onboarding_presentation: OnboardingPresentation | None = None
             if read_system_state:
                 try:
                     preferred = NSLocale.preferredLanguages()
@@ -3982,6 +4105,89 @@ if APPKIT_AVAILABLE:
         @objc.python_method
         def _l(self, key: str, **values: Any) -> str:
             return self.view_model.localized(key, **values)
+
+        @objc.python_method
+        def _face_image(self, face: str, *, talk: bool) -> Any:
+            key = (face, talk)
+            if key not in self._face_images:
+                path = Path(__file__).resolve().parent / "icons" / "faces" / (
+                    f"{face}-{'talk' if talk else 'idle'}.svg")
+                image = NSImage.alloc().initWithContentsOfFile_(str(path))
+                if image is not None:
+                    image.setTemplate_(False)
+                self._face_images[key] = image
+            return self._face_images[key]
+
+        @objc.python_method
+        def _apply_onboarding_theme(
+                self, state: GUIState,
+                presentation: OnboardingPresentation) -> None:
+            palette = palette_for_appearance(
+                _uses_dark_appearance(self.window))
+            card = self.dynamic["onboarding_card"]
+            card.setFillColor_(_theme_color(palette.bg))
+            card.setBorderColor_(_theme_color(palette.line, 0.22))
+            chip = self.dynamic["onboarding_face_chip"]
+            chip.setFillColor_(_theme_color(FACE_CHIP_COLORS[state.face]))
+            self.dynamic["onboarding_progress"].setTextColor_(
+                _theme_color(palette.brand))
+            self.dynamic["onboarding_title"].setTextColor_(
+                _theme_color(palette.ink))
+            self.dynamic["onboarding_detail"].setTextColor_(
+                _theme_color(palette.ink_soft))
+            self.dynamic["onboarding_face_kicker"].setTextColor_(
+                _theme_color(palette.ink_soft))
+            self.dynamic["onboarding_status"].setTextColor_(
+                _theme_color(
+                    palette.brand if presentation.complete
+                    else palette.accent))
+            try:
+                self.dynamic["onboarding_action"].setBezelColor_(
+                    _theme_color(palette.brand))
+            except Exception:
+                pass
+            for step, step_card, control in zip(
+                    state.onboarding_steps,
+                    self.dynamic["onboarding_step_cards"],
+                    self.dynamic["onboarding_steps"]):
+                current = step.key == presentation.current_key
+                if step.complete:
+                    fill = _theme_color(palette.brand, 0.20)
+                    text = _theme_color(palette.brand)
+                elif current:
+                    fill = _theme_color(palette.accent, 0.28)
+                    text = _theme_color(palette.ink)
+                else:
+                    fill = _theme_color(palette.surface, 0.76)
+                    text = _theme_color(palette.ink_soft)
+                step_card.setFillColor_(fill)
+                control.setTextColor_(text)
+
+        @objc.python_method
+        def _animate_onboarding_face(
+                self, presentation: OnboardingPresentation) -> None:
+            stage = "complete" if presentation.complete else (
+                presentation.current_key or "hidden")
+            if (not presentation.visible or stage == self._onboarding_stage
+                    or not bool(self.window.isVisible())):
+                return
+            self._onboarding_stage = stage
+            if self.view_model.state.prefers_reduced_motion:
+                return
+            layer = self.dynamic["onboarding_face_chip"].layer()
+            if layer is None:
+                return
+            spec = MOTION_SPECS["pop"]
+            spring = CASpringAnimation.animationWithKeyPath_("transform.scale")
+            spring.setFromValue_(spec.squash_x)
+            spring.setToValue_(1.0)
+            spring.setMass_(spec.mass)
+            spring.setStiffness_(spec.stiffness)
+            spring.setDamping_(spec.damping)
+            spring.setInitialVelocity_(spec.initial_velocity)
+            spring.setDuration_(spec.duration)
+            spring.setRemovedOnCompletion_(True)
+            layer.addAnimation_forKey_(spring, "onboarding-soft-pop")
 
         def initWithViewModel_(self, view_model: WhisperFaceViewModel):
             self = objc.super(WhisperFaceWindowController, self).init()
@@ -4119,59 +4325,99 @@ if APPKIT_AVAILABLE:
             hero.addSubview_(fix)
             hero.addSubview_(copy_outbox)
             page.addSubview_(hero)
-            self.dynamic.update(overview_phase=phase, overview_status=status,
-                                overview_detail=detail, overview_engine=engine,
-                                overview_outbox=outbox,
-                                pause_button=pause,
-                                review_issue_button=fix,
-                                copy_outbox_button=copy_outbox)
+            self.dynamic.update(
+                overview_hero=hero,
+                overview_phase=phase,
+                overview_status=status,
+                overview_detail=detail,
+                overview_engine=engine,
+                overview_outbox=outbox,
+                pause_button=pause,
+                review_issue_button=fix,
+                copy_outbox_button=copy_outbox,
+            )
 
-            onboarding = _card(NSMakeRect(0, 84, 758, 138))
+            onboarding = _card(NSMakeRect(0, 0, 758, 402))
+            onboarding.setBorderType_(NSLineBorder)
+            onboarding.setBorderWidth_(1.0)
             _accessible(
                 onboarding,
                 self._l("overview.accessibility.onboarding.steps"))
+            face_chip = _card(NSMakeRect(28, 138, 196, 196))
+            face_chip.setCornerRadius_(58.0)
+            face_chip.setWantsLayer_(True)
+            face_image = NSImageView.alloc().initWithFrame_(
+                NSMakeRect(53, 163, 146, 146))
+            face_image.setImageScaling_(NSImageScaleProportionallyUpOrDown)
+            face_image.setEditable_(False)
+            onboarding.addSubview_(face_chip)
+            onboarding.addSubview_(face_image)
+            face_kicker = _label(
+                self._l("onboarding.privacy"),
+                NSMakeRect(28, 93, 196, 38),
+                size=11, weight="medium", rounded=True, wrap=True,
+                alignment=1)
+            onboarding.addSubview_(face_kicker)
             onboarding_progress = _label(
                 self._l("overview.onboarding.initial_progress"),
-                NSMakeRect(20, 105, 280, 18),
-                size=10, weight="bold", color=_ACCENT)
+                NSMakeRect(260, 345, 450, 18),
+                size=10, weight="bold", color=_ACCENT, rounded=True)
             onboarding_title = _label(
                 self._l("onboarding.permissions.title"),
-                NSMakeRect(20, 74, 540, 27),
-                size=17, weight="bold")
+                NSMakeRect(258, 269, 458, 68),
+                size=30, weight="bold", rounded=True, wrap=True)
             onboarding_detail = _label(
-                "", NSMakeRect(20, 48, 540, 22), size=11, color=_SECONDARY)
+                "", NSMakeRect(260, 202, 440, 62),
+                size=13, color=_SECONDARY, wrap=True)
+            onboarding_status = _label(
+                "", NSMakeRect(260, 170, 310, 22),
+                size=12, weight="bold", rounded=True)
             onboarding_action = _button(
                 self._l("onboarding.action.open_system_settings"),
-                NSMakeRect(566, 68, 160, 36),
+                NSMakeRect(258, 116, 210, 42),
                 self, "continueSetup:",
                 help_text=self._l("onboarding.action.open_system_settings.help"))
             onboarding_action.setKeyEquivalent_("\r")
             onboarding.addSubview_(onboarding_progress)
             onboarding.addSubview_(onboarding_title)
             onboarding.addSubview_(onboarding_detail)
+            onboarding.addSubview_(onboarding_status)
             onboarding.addSubview_(onboarding_action)
             onboarding_steps: list[Any] = []
+            onboarding_step_cards: list[Any] = []
             for index, step_key in enumerate((
                     "permissions", "hotkey", "models", "first_dictation")):
+                step_card = _card(NSMakeRect(
+                    18 + index * 181, 18, 171, 58))
+                step_card.setCornerRadius_(13.0)
                 step = _label(
                     self._l(f"onboarding.step.{step_key}"),
-                    NSMakeRect(20 + index * 178, 17, 172, 20),
-                    size=10, weight="medium", color=_SECONDARY)
-                onboarding.addSubview_(step)
+                    NSMakeRect(11, 8, 149, 42),
+                    size=9.5, weight="medium", color=_SECONDARY,
+                    rounded=True, wrap=True)
+                step_card.addSubview_(step)
+                onboarding.addSubview_(step_card)
                 onboarding_steps.append(step)
+                onboarding_step_cards.append(step_card)
             page.addSubview_(onboarding)
             self.dynamic.update(
                 onboarding_card=onboarding,
+                onboarding_face_chip=face_chip,
+                onboarding_face=face_image,
+                onboarding_face_kicker=face_kicker,
                 onboarding_progress=onboarding_progress,
                 onboarding_title=onboarding_title,
                 onboarding_detail=onboarding_detail,
+                onboarding_status=onboarding_status,
                 onboarding_action=onboarding_action,
                 onboarding_steps=tuple(onboarding_steps),
+                onboarding_step_cards=tuple(onboarding_step_cards),
             )
 
             cards = (("overview.metric.last.heading", "overview_last"),
                      ("overview.metric.words.heading", "overview_words"),
                      ("overview.metric.saved.heading", "overview_saved"))
+            metric_cards: list[Any] = []
             for index, (heading_key, key) in enumerate(cards):
                 card = _card(NSMakeRect(index * 253, 0, 239, 76))
                 card.addSubview_(_label(
@@ -4184,6 +4430,8 @@ if APPKIT_AVAILABLE:
                 card.addSubview_(value)
                 page.addSubview_(card)
                 self.dynamic[key] = value
+                metric_cards.append(card)
+            self.dynamic["overview_metric_cards"] = tuple(metric_cards)
 
         def _build_results(self, page: Any) -> None:
             page.addSubview_(_label(
@@ -4701,6 +4949,9 @@ if APPKIT_AVAILABLE:
             self.render()
             self.window.makeKeyAndOrderFront_(None)
             NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            if self._onboarding_presentation is not None:
+                self._animate_onboarding_face(
+                    self._onboarding_presentation)
             if self.timer is None:
                 self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                     2.0, self, "refreshTimer:", None, True)
@@ -4758,10 +5009,6 @@ if APPKIT_AVAILABLE:
 
         def render(self) -> None:
             state = self.view_model.state
-            if state.onboarding_complete and not state.onboarding_acknowledged:
-                if self.defaults is not None:
-                    self.defaults.setBool_forKey_(True, "onboardingComplete")
-                state = self.view_model.acknowledge_onboarding()
             for section, page in self.pages.items():
                 page.setHidden_(section != state.section)
             selected = SECTIONS.index(state.section)
@@ -4855,14 +5102,17 @@ if APPKIT_AVAILABLE:
                     label=self._l(label_key),
                 )
 
-            completed = sum(
-                step.complete for step in state.onboarding_steps)
-            next_step = next(
-                (step for step in state.onboarding_steps if not step.complete),
-                None,
+            presentation = onboarding_presentation(
+                state.onboarding_steps,
+                acknowledged=state.onboarding_acknowledged,
+                locale=self.view_model.locale,
             )
+            self._onboarding_presentation = presentation
             self.dynamic["onboarding_card"].setHidden_(
-                next_step is None or state.onboarding_acknowledged)
+                not presentation.visible)
+            self.dynamic["overview_hero"].setHidden_(presentation.visible)
+            for card in self.dynamic["overview_metric_cards"]:
+                card.setHidden_(presentation.visible)
             for control, step in zip(
                     self.dynamic["onboarding_steps"], state.onboarding_steps):
                 step_label = self._l(f"onboarding.step.{step.key}")
@@ -4871,9 +5121,6 @@ if APPKIT_AVAILABLE:
                     step=step_label,
                     status=step.status)
                 control.setStringValue_(summary)
-                control.setTextColor_(
-                    _ACCENT if step.complete
-                    else (_TEXT if step is next_step else _SECONDARY))
                 sync_accessibility(
                     control,
                     summary,
@@ -4882,46 +5129,53 @@ if APPKIT_AVAILABLE:
                         step=step_label,
                         status=step.status),
                 )
-            if next_step is not None:
-                self.dynamic["onboarding_progress"].setStringValue_(
-                    self._l(
-                        "onboarding.progress", completed=completed,
-                        total=len(state.onboarding_steps)))
-                self.dynamic["onboarding_title"].setStringValue_(next_step.title)
-                self.dynamic["onboarding_detail"].setStringValue_(next_step.detail)
-                action_title = {
-                    "permissions": self._l(
-                        "onboarding.action.open_system_settings"),
-                    "hotkey": self._l("onboarding.action.hotkey"),
-                    "models": self._l("onboarding.action.models"),
-                    "first_dictation": self._l(
-                        "onboarding.action.first_dictation"),
-                }.get(next_step.key, self._l("onboarding.action.continue"))
-                self.dynamic["onboarding_action"].setTitle_(action_title)
-                try:
-                    self.dynamic["onboarding_action"].setAccessibilityHelp_(
-                        self._l("onboarding.action.open_system_settings.help")
-                        if next_step.key == "permissions" else self._l(
-                            "onboarding.action.help"))
-                except Exception:
-                    pass
-                for key, label_key in (
-                    ("onboarding_progress",
-                     "overview.accessibility.onboarding.progress"),
-                    ("onboarding_title",
-                     "overview.accessibility.onboarding.title"),
-                    ("onboarding_detail",
-                     "overview.accessibility.onboarding.detail"),
-                ):
-                    sync_accessibility(
-                        self.dynamic[key],
-                        str(self.dynamic[key].stringValue()),
-                        label=self._l(label_key),
-                    )
+            self.dynamic["onboarding_progress"].setStringValue_(
+                presentation.progress)
+            self.dynamic["onboarding_title"].setStringValue_(
+                presentation.title)
+            self.dynamic["onboarding_detail"].setStringValue_(
+                presentation.detail)
+            self.dynamic["onboarding_status"].setStringValue_(
+                presentation.status)
+            self.dynamic["onboarding_action"].setTitle_(
+                presentation.action_title)
+            try:
+                self.dynamic["onboarding_action"].setAccessibilityHelp_(
+                    presentation.action_help)
+            except Exception:
+                pass
+            face_name = self._l(f"settings.face.{state.face}")
+            self.dynamic["onboarding_face"].setImage_(
+                self._face_image(state.face, talk=presentation.complete))
+            sync_accessibility(
+                self.dynamic["onboarding_face"], face_name,
+                label=self._l(
+                    "overview.accessibility.onboarding.face",
+                    face=face_name),
+            )
+            for key, label_key in (
+                ("onboarding_progress",
+                 "overview.accessibility.onboarding.progress"),
+                ("onboarding_title",
+                 "overview.accessibility.onboarding.title"),
+                ("onboarding_detail",
+                 "overview.accessibility.onboarding.detail"),
+            ):
                 sync_accessibility(
-                    self.dynamic["onboarding_action"], next_step.status,
-                    label=action_title,
+                    self.dynamic[key],
+                    str(self.dynamic[key].stringValue()),
+                    label=self._l(label_key),
                 )
+            sync_accessibility(
+                self.dynamic["onboarding_status"], presentation.status,
+                label=presentation.status,
+            )
+            sync_accessibility(
+                self.dynamic["onboarding_action"], presentation.status,
+                label=presentation.action_title,
+            )
+            self._apply_onboarding_theme(state, presentation)
+            self._animate_onboarding_face(presentation)
 
             result = state.last_result
             self.dynamic["result_summary"].setStringValue_(result.summary)
@@ -6246,7 +6500,12 @@ if APPKIT_AVAILABLE:
             self.render()
 
         def continueSetup_(self, _sender: Any) -> None:
-            if self.view_model.permission_recovery_needed():
+            state = self.view_model.state
+            if state.onboarding_complete:
+                if self.defaults is not None:
+                    self.defaults.setBool_forKey_(True, "onboardingComplete")
+                self.view_model.acknowledge_onboarding()
+            elif self.view_model.permission_recovery_needed():
                 self.view_model.open_system_settings()
             else:
                 self.view_model.show_next_onboarding_step()
@@ -6580,7 +6839,7 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                     status=localized_string("onboarding.status.attention")),
             "onboarding walkthrough accessibility")
         require(
-            int(controller._configure_key_view_loop(model.state)) >= 3,
+            int(controller._configure_key_view_loop(model.state)) >= 2,
             "overview key-view loop")
         require(
             controller.section_control.nextKeyView() is not None,
@@ -6638,7 +6897,30 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         model.refresh()
         controller.render()
         require(model.state.onboarding_complete, "onboarding completion")
-        require(model.state.onboarding_acknowledged, "onboarding acknowledgement")
+        require(
+            not model.state.onboarding_acknowledged,
+            "onboarding awaits explicit acknowledgement")
+        require(
+            not bool(controller.dynamic["onboarding_card"].isHidden()),
+            "onboarding completion visible")
+        require(
+            str(controller.dynamic["onboarding_title"].stringValue()) ==
+            localized_string("onboarding.complete.title"),
+            "onboarding completion title")
+        require(
+            str(controller.dynamic["onboarding_action"].title()) ==
+            localized_string("onboarding.action.finish"),
+            "onboarding completion action")
+        controller.continueSetup_(None)
+        require(
+            model.state.onboarding_acknowledged,
+            "onboarding explicit acknowledgement")
+        require(
+            bool(controller.dynamic["onboarding_card"].isHidden()),
+            "onboarding hidden after acknowledgement")
+        require(
+            not bool(controller.dynamic["overview_hero"].isHidden()),
+            "overview visible after onboarding")
         require(
             str(controller.dynamic["overview_phase"].stringValue()) ==
             localized_string("overview.phase.ready"),
@@ -6991,6 +7273,7 @@ __all__ = [
     "GUIState",
     "ModelStatus",
     "NativeAppKitSmokeContract",
+    "OnboardingPresentation",
     "OnboardingStep",
     "POINT_AND_SPEAK_MAX_PHRASE_CHARS",
     "PointAndSpeakActionReceipt",
@@ -7013,6 +7296,7 @@ __all__ = [
     "create_gui",
     "localized_string",
     "native_appkit_smoke_contract",
+    "onboarding_presentation",
     "normalize_snapshot",
     "normalize_acoustic_keyword_inspection",
     "normalize_point_and_speak_preview",
