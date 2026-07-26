@@ -242,7 +242,10 @@ required=(
     dictate.py dictate.py.lock parrot_core.py voice_compiler.py
     insertion_integrity.py personal_regression.py cleanup_circuit_breaker.py
     model_wallet.py model_wallet_shadow.py model_readiness_evidence.py
-    acoustic_keyword_memory.py
+    acoustic_keyword_memory.py acoustic_keyword_activation.py
+    benchmark_acoustic_keyword_activation.py
+    acoustic_calibration.py acoustic_calibration_activation.py
+    benchmark_acoustic_calibration_activation.py
     acoustic_time_machine.py voice_objects.py voice_object_command_parser.py
     voice_inbox.py voice_object_inbox_bridge.py macos_email_compose.py
     macos_voice_draft_clipboard.py
@@ -634,7 +637,7 @@ for name in snippets tones preferences acoustic_keyword_memory dictionary; do
     [ -f "$destination" ] || install -m 600 "$template" "$destination"
     chmod 600 "$destination"
 done
-for private_file in transcripts.jsonl learned.json voice_inbox.json demonstrations.json dictate.log ollama.log \
+for private_file in transcripts.jsonl learned.json voice_inbox.json demonstrations.json acoustic_keyword_activation.json acoustic_calibration_activation.json dictate.log ollama.log \
         .dictate.lock; do
     [ ! -e "$DIR/$private_file" ] || chmod 600 "$DIR/$private_file"
 done

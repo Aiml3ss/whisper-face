@@ -1,14 +1,16 @@
 """Conservative policy over privacy-safe acoustic capture telemetry.
 
-This module is an offline policy foundation only.  It accepts the existing
+This module is a policy foundation only.  It accepts the existing
 closed numeric ``utterance_acoustic`` trace payload, returns bounded candidate
 settings or fixed refusals, and never receives audio, text, device identity, or
-application context.  It does not persist state or change capture behavior.
+application context.  It does not persist state. A separate activation layer
+can apply a candidate only after balanced physical A/B evidence and manual
+review.
 
 The available telemetry cannot measure room impulse response or recognition
 quality.  Reverb therefore remains explicitly unavailable, and a ``keep``
 verdict means only that a synthetic/offline policy candidate survived the
-numeric safety gates.  It is not an activation or quality claim.
+numeric safety gates.  It is not by itself an activation or quality claim.
 """
 
 from __future__ import annotations

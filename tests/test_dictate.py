@@ -56,6 +56,16 @@ from acoustic_keyword_memory import (  # noqa: E402
     AcousticKeywordMemory,
     hash_app_scope,
 )
+from acoustic_keyword_activation import (  # noqa: E402
+    ActivationError as AcousticKeywordActivationError,
+    active_keywords as active_acoustic_keywords,
+    clear_activations as clear_acoustic_keyword_activations,
+    remove_activation as remove_acoustic_keyword_activation,
+)
+from acoustic_calibration_activation import (  # noqa: E402
+    ActivationStatus as AcousticCalibrationActivationStatus,
+    CalibrationSettings,
+)
 from acoustic_time_machine import AcousticTimeMachine  # noqa: E402
 from cleanup_circuit_breaker import CleanupCircuitBreaker  # noqa: E402
 from insertion_integrity import (  # noqa: E402
@@ -1664,6 +1674,7 @@ class ParakeetClientTests(unittest.TestCase):
                 "PARAKEET_ROUTE_CONFIDENCE": 0.9,
                 "SAMPLE_RATE": 16_000,
                 "Recognition": Recognition,
+                "prepare_asr_audio": lambda audio: audio,
             },
         )
 
@@ -1852,12 +1863,22 @@ class AcousticKeywordMemoryRuntimeTests(unittest.TestCase):
             assignments={"ACOUSTIC_KEYWORD_MEMORY_LOCK"},
             extra={
                 "AcousticKeywordMemory": AcousticKeywordMemory,
+                "AcousticKeywordActivationError":
+                    AcousticKeywordActivationError,
+                "active_acoustic_keywords": active_acoustic_keywords,
+                "clear_acoustic_keyword_activations":
+                    clear_acoustic_keyword_activations,
+                "remove_acoustic_keyword_activation":
+                    remove_acoustic_keyword_activation,
+                "refresh_glossary": lambda: None,
                 "os": os,
                 "tempfile": tempfile,
                 "Path": Path,
             },
         )
         namespace["ACOUSTIC_KEYWORD_MEMORY_FILE"] = path
+        namespace["ACOUSTIC_KEYWORD_ACTIVATION_FILE"] = (
+            path.with_name("acoustic_keyword_activation.json"))
         return namespace
 
     def test_exact_correction_signal_populates_global_memory_idempotently(self):
@@ -2665,6 +2686,63 @@ class PerformanceTraceTests(unittest.TestCase):
             [20.0, 50.0, 20.0, 110.0],
         )
         self.assertTrue(all(trace["success"] == 1.0 for trace in traces))
+
+
+class AcousticCalibrationRuntimeTests(unittest.TestCase):
+    @staticmethod
+    def namespace(loader):
+        return load_definitions(
+            "refresh_acoustic_calibration",
+            "acoustic_calibration_status_snapshot",
+            "calibrated_vad_threshold",
+            "calibrated_end_silence_seconds",
+            "prepare_asr_audio",
+            assignments={"SILENCE_RMS", "TAIL_SKIP_SILENCE"},
+            extra={
+                "np": np,
+                "CalibrationSettings": CalibrationSettings,
+                "load_acoustic_calibration_activation": loader,
+                "ACOUSTIC_CALIBRATION_ACTIVATION_FILE":
+                    Path("private-receipt.json"),
+                "ACOUSTIC_CALIBRATION_STATE": {
+                    "settings": None, "status": "not-loaded"},
+            },
+        )
+
+    def test_missing_receipt_preserves_existing_audio_defaults(self):
+        ns = self.namespace(lambda _path:
+            AcousticCalibrationActivationStatus(
+                None, "receipt-missing"))
+        self.assertFalse(ns["refresh_acoustic_calibration"]())
+        audio = np.array([0.001, 0.1], dtype=np.float32)
+
+        prepared = ns["prepare_asr_audio"](audio)
+
+        np.testing.assert_allclose(prepared, audio * 2.5)
+        self.assertEqual(ns["calibrated_vad_threshold"](), 0.008)
+        self.assertEqual(
+            ns["calibrated_end_silence_seconds"](), 0.12)
+        self.assertEqual(
+            ns["acoustic_calibration_status_snapshot"]()["controls"], ())
+
+    def test_approved_receipt_applies_bounded_front_end_controls(self):
+        settings = CalibrationSettings(1.5, 0.01, 0.02, 300)
+        ns = self.namespace(lambda _path:
+            AcousticCalibrationActivationStatus(settings, "ready"))
+        self.assertTrue(ns["refresh_acoustic_calibration"]())
+        audio = np.array([0.005, 0.1], dtype=np.float32)
+
+        prepared = ns["prepare_asr_audio"](audio)
+        status = ns["acoustic_calibration_status_snapshot"]()
+
+        np.testing.assert_allclose(prepared, [0.0, 0.15])
+        self.assertEqual(ns["calibrated_vad_threshold"](), 0.02)
+        self.assertEqual(
+            ns["calibrated_end_silence_seconds"](), 0.3)
+        self.assertTrue(status["enabled"])
+        self.assertEqual(
+            status["controls"], ("gain", "noise", "vad", "end-silence"))
+        self.assertNotIn("0.01", json.dumps(status))
 
 
 class FlightRecorderTests(unittest.TestCase):
@@ -5337,6 +5415,10 @@ class ReleasePlanTests(unittest.TestCase):
         ns = load_definitions(
             "release_should_wait_for_tail",
             assignments={"SAMPLE_RATE", "TAIL_SKIP_SILENCE"},
+            extra={
+                "calibrated_end_silence_seconds":
+                    lambda: 0.12,
+            },
         )
         active = SimpleNamespace(voiced_since_cut=True, silent_samples=0)
         silent = SimpleNamespace(
@@ -5532,6 +5614,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "ContextPack": SimpleNamespace,
                 "LEVELS": [],
                 "SILENCE_RMS": 0.01,
+                "calibrated_vad_threshold": lambda: 0.01,
                 "SAMPLE_RATE": 16_000,
                 "CAPTURE_BLOCK_SECONDS": 8,
                 "should_start_speculation": lambda *_args: False,
@@ -6222,6 +6305,13 @@ class CustomVocabularyTests(unittest.TestCase):
                 "GLOSSARY_MAX_TERMS": 60,
                 "GLOSSARY_MAX_CHARS": 700,
                 "ANCHOR_MAX_TERMS": 256,
+                "ACOUSTIC_KEYWORD_MEMORY_LOCK": threading.Lock(),
+                "_load_acoustic_keyword_memory":
+                    lambda: (AcousticKeywordMemory(), "missing"),
+                "active_acoustic_keywords":
+                    lambda _path, _memory: ((), "missing"),
+                "ACOUSTIC_KEYWORD_ACTIVATION_FILE":
+                    Path("acoustic_keyword_activation.json"),
             },
         )
 
