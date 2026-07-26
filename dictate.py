@@ -3052,12 +3052,17 @@ class StatusBar(NSObject):
             label = (
                 f"com.berg.whisper-face.update.{os.getpid()}."
                 f"{int(time.time())}")
+            # launchctl submit starts the job from launchd's own minimal PATH,
+            # not this process's. The installer needs Homebrew's prefix, so
+            # carry our PATH across explicitly instead of inheriting
+            # /usr/bin:/bin:/usr/sbin:/sbin.
             command = [
                 "/bin/launchctl", "submit",
                 "-l", label,
                 "-o", str(log_path),
                 "-e", str(log_path),
                 "--",
+                "/usr/bin/env", f"PATH={os.environ.get('PATH', '')}",
                 __import__("sys").executable,
                 str(HERE / "self_update.py"),
                 "apply-detached",
@@ -3093,6 +3098,20 @@ class StatusBar(NSObject):
                     "applied", "rolled_back", "failed"}:
                 return
             result_path.unlink(missing_ok=True)
+            # Consuming the result deletes it, which used to erase the only
+            # record that an update was ever attempted. Leave one bounded line
+            # behind so a repeat failure can be compared with the last one.
+            try:
+                with (result_path.parent / "update.log").open(
+                        "a", encoding="utf-8") as history:
+                    history.write(
+                        f"{time.strftime('%Y-%m-%dT%H:%M:%S')} "
+                        f"{outcome.get('status')} "
+                        f"{str(outcome.get('from') or '')[:7]}->"
+                        f"{str(outcome.get('to') or '')[:7]} "
+                        f"{outcome.get('error') or ''}\n")
+            except OSError:
+                pass
             self._present_update_result(outcome)
         except Exception as e:
             print(f"! could not consume update result: {e}")
@@ -3106,10 +3125,16 @@ class StatusBar(NSObject):
                     "Whisper Face is up to date.",
                     f"Now running build {revision}." if revision else "")
             elif status == "rolled_back":
-                self._update_alert(
-                    "Update failed — rolled back.",
+                # Say why. A bare "it failed" gave nobody -- user or
+                # maintainer -- anything to act on, so the same failure kept
+                # recurring undiagnosed.
+                detail = (
                     "The installer failed on the new version, so Whisper Face "
                     "restored your previous version. Nothing was kept.")
+                reason = str(outcome.get("error") or "").strip()
+                if reason:
+                    detail = f"{detail}\n\n{reason}"
+                self._update_alert("Update failed — rolled back.", detail)
             else:
                 error = outcome.get("error") or "unknown error"
                 self._update_alert(

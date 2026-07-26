@@ -380,6 +380,30 @@ class InstallerContractTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, self.powershell)
 
+    def test_mac_installer_adopts_an_installed_homebrew_missing_from_path(self):
+        # The self-updater runs this installer from a detached launchd job, and
+        # launchd hands such a job the minimal PATH rather than the login one.
+        # Concluding Homebrew is absent there sent setup into a TTY-less,
+        # sudo-less reinstall that aborted in about a second; under `set -e`
+        # that killed the update before the existing brew could be adopted.
+        adopt = self.shell.index("adopt_installed_homebrew() {")
+        probe = self.shell.index(
+            "command -v brew >/dev/null 2>&1 || adopt_installed_homebrew")
+        bootstrap = self.shell.index(
+            'step "installing Homebrew (its official installer may request')
+        self.assertLess(adopt, probe)
+        self.assertLess(probe, bootstrap)
+        for required in (
+            "for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do",
+            'eval "$("$candidate" shellenv)"',
+            # A failed bootstrap must name itself, not die silently under -e.
+            '|| fail "the Homebrew installer did not complete',
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, self.shell)
+        # The detached updater must carry a usable PATH across launchctl.
+        self.assertIn('"/usr/bin/env", f"PATH=', self.script)
+
     def test_mac_ollama_identity_helper_fails_closed(self):
         helper_start = self.shell.index("ollama_listener_pid()")
         helper_end = self.shell.index("reload_agent()", helper_start)
