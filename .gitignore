@@ -1,6 +1,11 @@
 # headless window-render probe output (scripts/window_render_probe.py)
 .probe-renders/
 
+# private physical-session capture state and artifacts
+# (scripts/capture_app_matrix.py, scripts/capture_delayed_cleanup_cases.py,
+#  scripts/capture_lifecycle_evidence.py)
+.evidence/
+
 # personal data — never ship these to another machine or a repo
 transcripts.jsonl
 learned.json
