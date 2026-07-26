@@ -385,6 +385,28 @@ class GuiLauncherActivationTests(unittest.TestCase):
 
 
 class DictationSuccessSoundTests(unittest.TestCase):
+    def test_unavailable_system_sound_never_breaks_dictation(self):
+        logs = []
+
+        def fail_to_play(*_args, **_kwargs):
+            raise OSError("missing afplay")
+
+        namespace = load_definitions(
+            "play",
+            extra={
+                "IS_WINDOWS": False,
+                "print": logs.append,
+                "subprocess": SimpleNamespace(
+                    DEVNULL=None,
+                    Popen=fail_to_play,
+                ),
+            },
+        )
+
+        namespace["play"]("Pop")
+
+        self.assertEqual(logs, ["! system feedback sound unavailable"])
+
     def test_mac_review_route_uses_advisory_ping(self):
         select = load_definitions(
             "dictation_success_sound")["dictation_success_sound"]
@@ -5347,6 +5369,21 @@ class HotkeyListenerRecoveryTests(unittest.TestCase):
         self.assertEqual(events.get_nowait(), (
             "listener_recovery", 12.5, frozenset()))
 
+    def test_active_hotkey_recovery_surfaces_retry_feedback(self):
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        main = next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef) and node.name == "main"
+        )
+        segment = ast.get_source_segment(source, main)
+
+        self.assertIn('"Hotkey reset — try again"', segment)
+        self.assertIn('"Listening failed — try again"', segment)
+        self.assertIn(
+            "schedule_dictation_feedback_dismissal(rec, hud, active)",
+            segment,
+        )
+
 
 class ReleasePlanTests(unittest.TestCase):
     def test_dictation_problem_shows_bounded_retry_guidance(self):
@@ -5403,6 +5440,109 @@ class ReleasePlanTests(unittest.TestCase):
             SimpleNamespace(uncertain=False, feedback_seconds=float("nan"))), 0.0)
         self.assertEqual(ns["dictation_feedback_delay"](
             SimpleNamespace(uncertain=False, feedback_seconds="bad")), 0.0)
+
+    def test_feedback_dismissal_does_not_hide_newer_recording(self):
+        timers = []
+        dismissals = []
+        status = []
+
+        class Timer:
+            def __init__(self, seconds, callback):
+                self.seconds = seconds
+                self.callback = callback
+
+            def start(self):
+                timers.append(self)
+
+        ns = load_definitions(
+            "dictation_feedback_delay",
+            "schedule_dictation_feedback_dismissal",
+            extra={
+                "AppHelper": SimpleNamespace(
+                    callAfter=lambda function: function()),
+                "math": __import__("math"),
+                "PAUSED": {"on": False},
+                "STATUS": {
+                    "bar": SimpleNamespace(setState_=status.append),
+                },
+                "threading": SimpleNamespace(Timer=Timer),
+            },
+        )
+        recorder = SimpleNamespace(uncertain=False, feedback_seconds=2.5)
+        hud = SimpleNamespace(dismiss=lambda: dismissals.append(True))
+        active = {"rec": None}
+
+        ns["schedule_dictation_feedback_dismissal"](
+            recorder, hud, active)
+
+        self.assertEqual(len(timers), 1)
+        self.assertEqual(timers[0].seconds, 2.5)
+        active["rec"] = object()
+        timers[0].callback()
+        self.assertEqual(dismissals, [])
+        self.assertEqual(status, [])
+
+    def test_unexpected_release_failure_becomes_visible_retry(self):
+        problems = []
+        dismissals = []
+        ns = load_definitions(
+            "finish_and_process",
+            extra={
+                "AppHelper": SimpleNamespace(
+                    callAfter=lambda function: function()),
+                "LAST_USE": {"t": 0.0},
+                "PAUSED": {"on": False},
+                "STATUS": {"bar": None},
+                "dictation_feedback_delay": lambda _rec: 0.0,
+                "release_should_wait_for_tail": lambda _rec: False,
+                "report_dictation_problem": (
+                    lambda _rec, _hud, caption, log, **_kwargs:
+                    problems.append((caption, log))),
+                "schedule_dictation_feedback_dismissal": (
+                    lambda _rec, hud, _active: hud.dismiss()),
+                "time": SimpleNamespace(
+                    perf_counter=lambda: 10.0,
+                    time=lambda: 10.0,
+                ),
+            },
+        )
+
+        class Recorder:
+            released_at = 1.0
+            recording = False
+
+            def stop(self):
+                raise RuntimeError("private device detail")
+
+        ns["finish_and_process"](
+            Recorder(),
+            SimpleNamespace(dismiss=lambda: dismissals.append(True)),
+            {"rec": None},
+        )
+
+        self.assertEqual(problems, [(
+            "Dictation failed — try again",
+            "! dictation failed during capture-finalize: RuntimeError",
+        )])
+        self.assertEqual(dismissals, [True])
+
+    def test_outbox_failures_use_bounded_error_feedback(self):
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        finish = next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "finish_and_process"
+        )
+        segment = ast.get_source_segment(source, finish)
+
+        self.assertGreaterEqual(segment.count(
+            '"Destination changed — saved in Voice Outbox"'), 2)
+        self.assertGreaterEqual(segment.count(
+            '"Paste unverified — check target; saved in'), 2)
+        self.assertNotIn(
+            'CAPTION["text"] = "Destination changed — saved in Voice Outbox"',
+            segment,
+        )
 
     def test_back_to_back_releases_finish_in_order(self):
         ns = load_definitions("ReleaseOrder")
@@ -5748,6 +5888,8 @@ class ReleasePlanTests(unittest.TestCase):
                     lambda _rec, _hud, caption, log, **_kwargs:
                     problems.append((caption, log))),
                 "dictation_feedback_delay": lambda _rec: 0.0,
+                "schedule_dictation_feedback_dismissal":
+                    lambda _rec, _hud, _active: None,
                 "DICTATION_PROCESS_ORDER": SimpleNamespace(
                     wait=lambda _ticket: None),
                 "print": lambda *_args: None,

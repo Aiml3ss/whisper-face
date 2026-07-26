@@ -6077,15 +6077,19 @@ def keepwarm_loop():
 
 
 def play(sound: str):
-    if IS_WINDOWS:
-        import winsound
-        alias = "SystemAsterisk" if sound == "Tink" else "SystemHand"
-        winsound.PlaySound(alias, winsound.SND_ALIAS | winsound.SND_ASYNC)
-        return
-    subprocess.Popen(
-        ["afplay", f"/System/Library/Sounds/{sound}.aiff"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    """Play advisory feedback without ever interrupting dictation."""
+    try:
+        if IS_WINDOWS:
+            import winsound
+            alias = "SystemAsterisk" if sound == "Tink" else "SystemHand"
+            winsound.PlaySound(alias, winsound.SND_ALIAS | winsound.SND_ASYNC)
+            return
+        subprocess.Popen(
+            ["afplay", f"/System/Library/Sounds/{sound}.aiff"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        print("! system feedback sound unavailable")
 
 
 def dictation_success_sound(consequence_route: str, *, is_macos: bool) -> str:
@@ -9435,6 +9439,25 @@ def dictation_feedback_delay(rec: Recorder) -> float:
     )
 
 
+def schedule_dictation_feedback_dismissal(
+        rec: Recorder, hud: HUD, active: dict):
+    """Dismiss terminal feedback later without hiding a newer recording."""
+    def dismiss_if_idle():
+        if active.get("rec") is None:
+            hud.dismiss()
+            STATUS["bar"] and STATUS["bar"].setState_(
+                "off" if PAUSED["on"] else "idle")
+
+    feedback_delay = dictation_feedback_delay(rec)
+    if feedback_delay > 0.0:
+        threading.Timer(
+            feedback_delay,
+            lambda: AppHelper.callAfter(dismiss_if_idle),
+        ).start()
+    else:
+        AppHelper.callAfter(dismiss_if_idle)
+
+
 @dataclass(frozen=True)
 class BoundedRecognitionFuture:
     """A decode future plus the exact capture samples it owns."""
@@ -9589,6 +9612,8 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
     kick off the remainder in parallel with the tail capture, then join."""
     global LAST_INSERTION
     released_at = rec.released_at or time.perf_counter()
+    phase = "capture-finalize"
+    delivery_reported = False
     try:
         wait_for_tail = release_should_wait_for_tail(rec)
         pre_future = None
@@ -9669,6 +9694,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 f"gate {GATE_PEAK_RMS}, {duration:.1f}s)",
             )
             return
+        phase = "recognition"
         asr_started_at = time.perf_counter()
         recognition = assemble_raw(
             chunk_futs, pre_future, full_audio[cut:], rec.prompt)
@@ -9676,6 +9702,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         # A later take may finish ASR first, but user-visible cleanup, commands,
         # and insertion must follow release order. Capture is already stopped,
         # so waiting here never holds the microphone.
+        phase = "release-order"
         DICTATION_PROCESS_ORDER.wait(rec.process_ticket)
         raw = recognition.text
         if not raw or is_hallucination(raw):
@@ -9726,6 +9753,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         # A new usable result supersedes the previous result's replay audio.
         # This is content-free and does not inspect the current utterance.
         clear_retained_consequence_spans()
+        phase = "voice-compile"
         compiler_started_at = time.perf_counter()
         voice_ir, compiler_result = compile_voice_evidence(
             recognition,
@@ -9831,18 +9859,23 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             if (integrity_receipt is not None
                     and integrity_receipt.state != ReceiptState.VERIFIED):
                 if integrity_receipt.paste_attempted:
-                    CAPTION["text"] = (
-                        "Paste unverified — check target; saved in Outbox")
-                    print("[insertion] snippet paste unverified "
-                          f"({integrity_receipt.reason.value}); saved in "
-                          "Voice Outbox")
+                    report_dictation_problem(
+                        rec,
+                        hud,
+                        "Paste unverified — check target; saved in Outbox",
+                        "[insertion] snippet paste unverified "
+                        f"({integrity_receipt.reason.value}); saved in "
+                        "Voice Outbox",
+                    )
                 else:
-                    CAPTION["text"] = (
-                        "Destination changed — saved in Voice Outbox")
-                    print("[insertion] snippet destination changed "
-                          f"({integrity_receipt.reason.value}); saved in "
-                          "Voice Outbox")
-                play("Funk")
+                    report_dictation_problem(
+                        rec,
+                        hud,
+                        "Destination changed — saved in Voice Outbox",
+                        "[insertion] snippet destination changed "
+                        f"({integrity_receipt.reason.value}); saved in "
+                        "Voice Outbox",
+                    )
             else:
                 play("Pop")
             release_total = time.perf_counter() - released_at
@@ -9921,6 +9954,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 f"existing text: \"...{stripped_ctx[-80:]}\". Continue that "
                 "sentence naturally: no initial capital unless a new "
                 "sentence truly starts, and never repeat the existing text.")
+        phase = "cleanup"
         clean_started_at = time.perf_counter()
         semantic_edits = []
         proof_edits = ()
@@ -9995,6 +10029,15 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         if snippet_restore:
             text = _restore_snippet_sentinels(text, snippet_restore)
 
+        if not text.strip():
+            report_dictation_problem(
+                rec,
+                hud,
+                "I couldn't make text from that — try again",
+                "[dropped] cleanup produced empty text",
+            )
+            return
+
         learn_correction = not verbatim and rec.mode != "edit"
         if rec.insertion_lease is not None:
             insertion_target = resolve_insertion_target(rec)
@@ -10004,6 +10047,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         receipt = make_paste_receipt(
             insertion_target, text, bundle, rec.mode, event_id) \
             if learn_correction else None
+        phase = "insertion"
         insertion_started_at = time.perf_counter()
         integrity_receipt = commit_insertion(
             rec, text, bundle, insertion_target)
@@ -10037,18 +10081,23 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                     "utterance_id": event_id,
                 }
         elif attempted:
-            CAPTION["text"] = (
-                "Paste unverified — check target; saved in Voice Outbox")
-            print("[insertion] paste attempted but unverified "
-                  f"({integrity_receipt.reason.value}); saved in Voice "
-                  "Outbox")
-            play("Funk")
+            report_dictation_problem(
+                rec,
+                hud,
+                "Paste unverified — check target; saved in Voice Outbox",
+                "[insertion] paste attempted but unverified "
+                f"({integrity_receipt.reason.value}); saved in Voice Outbox",
+            )
         else:
-            CAPTION["text"] = "Destination changed — saved in Voice Outbox"
-            print("[insertion] destination changed "
-                  f"({integrity_receipt.reason.value}); text saved in Voice "
-                  "Outbox")
-            play("Funk")
+            report_dictation_problem(
+                rec,
+                hud,
+                "Destination changed — saved in Voice Outbox",
+                "[insertion] destination changed "
+                f"({integrity_receipt.reason.value}); text saved in Voice "
+                "Outbox",
+            )
+        delivery_reported = True
         delayed_cleanup_scheduled = False
         if verified and delayed_cleanup_requested:
             delayed_cleanup_scheduled = schedule_delayed_cleanup(
@@ -10227,6 +10276,17 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "insertion_verified": verified,
             "delayed_cleanup_scheduled": delayed_cleanup_scheduled,
         }, event_id=event_id)
+    except Exception as error:
+        if delivery_reported:
+            print(
+                f"! post-delivery follow-up failed: {type(error).__name__}")
+        else:
+            report_dictation_problem(
+                rec,
+                hud,
+                "Dictation failed — try again",
+                f"! dictation failed during {phase}: {type(error).__name__}",
+            )
     finally:
         if rec.recording:
             try:
@@ -10234,19 +10294,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             except Exception as e:
                 print(f"! microphone cleanup failed: {e}")
         LAST_USE["t"] = time.time()
-        def dismiss_if_idle():
-            if active["rec"] is None:       # don't hide a newer recording's HUD
-                hud.dismiss()
-                STATUS["bar"] and STATUS["bar"].setState_(
-                    "off" if PAUSED["on"] else "idle")
-        feedback_delay = dictation_feedback_delay(rec)
-        if feedback_delay > 0.0:
-            threading.Timer(
-                feedback_delay,
-                lambda: AppHelper.callAfter(dismiss_if_idle),
-            ).start()
-        else:
-            AppHelper.callAfter(dismiss_if_idle)
+        schedule_dictation_feedback_dismissal(rec, hud, active)
 
 
 def finish_in_release_order(rec: Recorder, hud: HUD, active: dict):
@@ -10653,23 +10701,34 @@ def main():
     # callbacks only enqueue; this worker does the actual work.
     events = queue.Queue()
 
-    def abandon_active_recording():
-        rec = active.get("rec")
+    def abandon_active_recording(
+            rec=None, caption="", log_message=""):
+        rec = rec or active.get("rec")
         active["rec"] = None
         if rec is not None:
             try:
                 rec.stop()
             except Exception:
                 pass
+        if rec is not None and caption:
+            report_dictation_problem(rec, hud, caption, log_message)
+            schedule_dictation_feedback_dismissal(rec, hud, active)
+            return
         set_status("off" if PAUSED["on"] else "idle")
         AppHelper.callAfter(hud.dismiss)
 
     def hotkey_worker():
         while True:
             ev, event_at, modifiers = events.get()
+            rec = None
             try:
                 if ev == "listener_recovery":
-                    abandon_active_recording()
+                    abandon_active_recording(
+                        caption="Hotkey reset — try again",
+                        log_message=(
+                            "! active dictation cancelled during hotkey "
+                            "recovery"),
+                    )
                     continue
                 if (ev == "press" and active["rec"] is None
                         and not PAUSED["on"]):
@@ -10748,8 +10807,12 @@ def main():
                         daemon=True,
                     ).start()
             except Exception as e:
-                print(f"! hotkey worker recovered from error: {e}")
-                abandon_active_recording()
+                abandon_active_recording(
+                    rec,
+                    caption="Listening failed — try again",
+                    log_message=(
+                        f"! hotkey worker failed: {type(e).__name__}"),
+                )
 
     threading.Thread(target=hotkey_worker, daemon=True).start()
 
