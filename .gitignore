@@ -1,9 +1,13 @@
 # headless window-render probe output (scripts/window_render_probe.py)
 .probe-renders/
 
-# guided voice-evidence capture output (scripts/capture_voice_evidence.py):
-# recorded WAVs, private manifests, and resumable session state. Audio,
-# transcripts, manifests, and receipts must never enter Git.
+# Private capture output for every evidence session: recorded WAVs, resumable
+# session state, manifests, and artifacts. Audio, transcripts, manifests, and
+# receipts must never enter Git.
+#   scripts/capture_voice_evidence.py
+#   scripts/capture_app_matrix.py
+#   scripts/capture_delayed_cleanup_cases.py
+#   scripts/capture_lifecycle_evidence.py
 .evidence/
 
 # personal data — never ship these to another machine or a repo
