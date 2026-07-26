@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 import json
 import math
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -83,6 +84,25 @@ RISKY_ACTION_STATES = frozenset({
     "idle", "awaiting_voice", "awaiting_click", "confirmed", "cancelled",
     "expired",
 })
+
+
+def application_build_version() -> str:
+    """Return an honest checkout build identifier for the native header."""
+    try:
+        result = subprocess.run(
+            [
+                "git", "-C", str(Path(__file__).resolve().parent),
+                "rev-parse", "--short=7", "HEAD",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip().upper()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "LOCAL"
 SELECTIVE_RELISTEN_STATUSES = frozenset({
     "off", "ready", "warming", "enabled-not-ready", "receipt-missing",
     "receipt-invalid", "receipt-policy-mismatch",
@@ -168,6 +188,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "nav.diagnostics": "Diagnostics",
         "app.subtitle": "Private, fast voice input on your Mac",
         "app.local_badge": "LOCAL FIRST",
+        "app.version": "BUILD {version}",
         "overview.phase.ready": "READY",
         "overview.phase.recording": "RECORDING",
         "overview.phase.processing": "PROCESSING",
@@ -4719,14 +4740,21 @@ if APPKIT_AVAILABLE:
                 size=11, color=_SECONDARY)
             badge = _label(
                 self._l("app.local_badge"),
-                NSMakeRect(630, 17, 120, 18),
+                NSMakeRect(630, 25, 120, 16),
                 size=10, weight="bold", color=_ACCENT,
+                rounded=True, alignment=2)
+            version = _label(
+                self._l(
+                    "app.version", version=application_build_version()),
+                NSMakeRect(630, 9, 120, 14),
+                size=8, weight="semibold", color=_SECONDARY,
                 rounded=True, alignment=2)
             header.addSubview_(face_chip)
             header.addSubview_(face_image)
             header.addSubview_(title)
             header.addSubview_(subtitle)
             header.addSubview_(badge)
+            header.addSubview_(version)
             root.addSubview_(header)
 
             nav_shell = _card(
@@ -4757,6 +4785,7 @@ if APPKIT_AVAILABLE:
                 window_title=title,
                 window_subtitle=subtitle,
                 window_badge=badge,
+                window_version=version,
                 window_nav_shell=nav_shell,
             )
 

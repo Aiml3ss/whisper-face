@@ -2929,6 +2929,7 @@ class StatusBar(NSObject):
         menu.addItem_(NSMenuItem.separatorItem())
         menu.addItem_(mk(f"Quit {APP_NAME}", "quitApp:"))
         self.item.setMenu_(menu)
+        AppHelper.callAfter(self._consume_update_result)
         return self
 
     def setState_(self, state):
@@ -3354,8 +3355,11 @@ class StatusBar(NSObject):
             behind = int(report.get("behind", 0) or 0)
             noun = "commit" if behind == 1 else "commits"
             alert = NSAlert.alloc().init()
+            self._brand_update_alert(alert)
             alert.setMessageText_("An update is available.")
             alert.setInformativeText_(
+                f"Build {str(report.get('current') or '')[:7]} → "
+                f"{str(report.get('latest') or '')[:7]}\n"
                 f"{behind} new {noun} available. Update now?")
             alert.addButtonWithTitle_("Update")
             alert.addButtonWithTitle_("Later")
@@ -3371,21 +3375,71 @@ class StatusBar(NSObject):
                 "No target revision was found.")
             return
 
-        def worker():
-            try:
-                outcome = self_update.apply_update(
-                    HERE, target_rev, runner=subprocess.run)
-            except Exception as e:
-                outcome = {"status": "failed", "error": type(e).__name__}
-            AppHelper.callAfter(self._present_update_result, outcome)
-        threading.Thread(target=worker, daemon=True).start()
+        try:
+            state_dir = (
+                Path.home() / "Library" / "Application Support" /
+                "Whisper Face")
+            state_dir.mkdir(parents=True, exist_ok=True)
+            os.chmod(state_dir, 0o700)
+            result_path = state_dir / "update-result.json"
+            result_path.unlink(missing_ok=True)
+            log_path = state_dir / "update.log"
+            label = (
+                f"com.berg.whisper-face.update.{os.getpid()}."
+                f"{int(time.time())}")
+            command = [
+                "/bin/launchctl", "submit",
+                "-l", label,
+                "-o", str(log_path),
+                "-e", str(log_path),
+                "--",
+                __import__("sys").executable,
+                str(HERE / "self_update.py"),
+                "apply-detached",
+                "--checkout", str(HERE),
+                "--target", target_rev,
+                "--result", str(result_path),
+                "--label", label,
+            ]
+            submitted = subprocess.run(
+                command, capture_output=True, text=True, timeout=15)
+            if submitted.returncode != 0:
+                self._update_alert(
+                    "Couldn't start the update.",
+                    "The detached updater could not be launched.")
+                return
+            self._update_alert(
+                "Updating Whisper Face…",
+                "The update is running safely in the background. "
+                "Whisper Face will restart and report the result.")
+        except Exception as e:
+            self._update_alert(
+                "Couldn't start the update.", type(e).__name__)
+
+    def _consume_update_result(self):
+        result_path = (
+            Path.home() / "Library" / "Application Support" /
+            "Whisper Face" / "update-result.json")
+        try:
+            if not result_path.is_file():
+                return
+            outcome = json.loads(result_path.read_text(encoding="utf-8"))
+            if outcome.get("status") not in {
+                    "applied", "rolled_back", "failed"}:
+                return
+            result_path.unlink(missing_ok=True)
+            self._present_update_result(outcome)
+        except Exception as e:
+            print(f"! could not consume update result: {e}")
 
     def _present_update_result(self, outcome):
         try:
             status = outcome.get("status")
             if status == "applied":
-                self._update_alert("Updated. Restarting…", "")
-                self._restart_service()
+                revision = str(outcome.get("to") or "")[:7]
+                self._update_alert(
+                    "Whisper Face is up to date.",
+                    f"Now running build {revision}." if revision else "")
             elif status == "rolled_back":
                 self._update_alert(
                     "Update failed — rolled back.",
@@ -3410,6 +3464,7 @@ class StatusBar(NSObject):
     def _update_alert(self, message, informative):
         try:
             alert = NSAlert.alloc().init()
+            self._brand_update_alert(alert)
             alert.setMessageText_(message)
             if informative:
                 alert.setInformativeText_(informative)
@@ -3417,6 +3472,12 @@ class StatusBar(NSObject):
             alert.runModal()
         except Exception as e:
             print(f"! could not show alert: {e}")
+
+    def _brand_update_alert(self, alert):
+        icon = NSImage.alloc().initWithContentsOfFile_(
+            str(HERE / "icons" / "WhisperFace.icns"))
+        if icon is not None:
+            alert.setIcon_(icon)
 
 
 if IS_WINDOWS:

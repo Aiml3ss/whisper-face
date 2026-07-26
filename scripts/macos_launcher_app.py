@@ -314,6 +314,19 @@ def _write_receipt(receipt: Path, checkout: Path, app: Path) -> None:
 
 def install_app(app: Path, checkout: Path, receipt: Path, source_app: Path | None, policy: Path) -> None:
     app = app.expanduser().resolve(); checkout = checkout.resolve(); app.parent.mkdir(parents=True, exist_ok=True)
+    if not source_app and app.exists():
+        try:
+            verify_owned_app(app)
+            verify_generic_app(app, policy=policy)
+        except LauncherError:
+            pass
+        else:
+            # Keep the exact working bundle when launcher source is unchanged.
+            # Replacing an ad-hoc app unnecessarily can churn macOS privacy
+            # identity even though the runtime checkout is the source of truth.
+            _write_receipt(receipt, checkout, app)
+            verify_installation(app, checkout, receipt)
+            return
     staging_root = Path(tempfile.mkdtemp(prefix=f".{app.name}.", dir=app.parent)); staging = staging_root / app.name
     try:
         if source_app:
