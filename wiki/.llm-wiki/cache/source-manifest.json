@@ -1,0 +1,43 @@
+{
+  "2fd5bd58eb40e913f9bafb55022e7ef6f6ca602288cbdf1eff01da485b7becf4": {
+    "name": ".raw/ research briefs (whole-app wiki build)",
+    "date": "2026-07-26T18:40:12Z",
+    "language": "en",
+    "pages_created": [
+      "2026-07-26-ops-governance-research",
+      "2026-07-26-runtime-pipeline-research",
+      "2026-07-26-trust-personalization-research",
+      "2026-07-26-voice-actions-research",
+      "acoustic-personalization",
+      "activation-receipt",
+      "asr-cascade",
+      "benchmarks",
+      "cleanup-pipeline",
+      "consequence-receipts",
+      "context-firewall",
+      "delayed-cleanup",
+      "dictation-pipeline",
+      "distribution",
+      "governance",
+      "inert-foundations",
+      "insertion-transaction",
+      "installers-and-services",
+      "marketing-site",
+      "model-wallet",
+      "personalization",
+      "point-and-speak",
+      "privacy-and-security",
+      "proof-edit",
+      "protected-anchor",
+      "stable-prefix",
+      "synth-2026-07-26-what-happens-when-i-dictate",
+      "voice-compiler",
+      "voice-modes",
+      "voice-objects",
+      "whisper-face",
+      "whisper-faces",
+      "windows-support"
+    ],
+    "pages_updated": []
+  }
+}

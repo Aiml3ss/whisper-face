@@ -1,0 +1,68 @@
+---
+title: "Insertion Transaction"
+type: concept
+language: en
+created: 2026-07-26
+modified: 2026-07-26
+tags: [insertion, safety, outbox, core, macos]
+aliases: [insertion-lease, voice-outbox, exactly-once-insertion]
+summary: "Final insertion is an exactly-once local transaction: lease the target at key-down, revalidate before one paste attempt, and route anything unproven to a recoverable RAM-only outbox."
+confidence: high
+---
+
+# Insertion Transaction
+
+## Definition
+
+Insertion is a transaction (ADR-0003), not a hopeful paste. A
+privacy-safe lease of the destination is captured at hotkey press;
+final text may make **one** paste attempt only if the current
+destination still matches; every outcome terminates in an insertion
+receipt; and text that was not proven delivered lands in the Voice
+Outbox instead of the wrong field.
+
+## Key Properties
+
+- **Lease**: destination identity, selection range, and a SHA-256
+  fingerprint of surrounding text (the text itself is never retained).
+  Readable AX fields get a full lease; opaque/terminal targets get an
+  opaque lease sealed at release only if input-event counters are
+  unchanged; no focused element at all fails closed into the outbox.
+- **Exactly-once**: the coordinator (`insertion_integrity.py`) marks an
+  entry terminal *before* invoking platform code, so reentrant or
+  concurrent callbacks cannot double-paste; duplicate stages raise;
+  completed utterances leave tombstones. A mid-paste exception leaves
+  the entry unresolved-and-recoverable — never retried, because
+  delivery may precede failure.
+- **Drift detection**: focus, selection, or surrounding-text drift while
+  recognition ran produces a conflict receipt with no paste attempt.
+- **Readback**: where macOS can safely re-read the pasted range, the
+  observed text verifies delivery; Electron apps get a 0.35 s readback
+  window vs 0.02 s native because Chromium publishes AX values late.
+- **Voice Outbox**: a bounded (20-item) RAM-only recovery queue that
+  distinguishes never-pasted from possibly-landed text; only the
+  explicit Copy & Dismiss control recovers content; the menu shows only
+  a count. Only *verified* receipts may train [[personalization]].
+- Receipt states: verified, unverifiable, conflict, unresolved — with
+  fixed reasons; the same vocabulary is reused by the in-process
+  protocol ([[inert-foundations]]) and the compatibility fingerprint.
+
+## Examples
+
+- You switch windows mid-dictation → conflict receipt, no paste, the
+  text waits in the outbox.
+- A terminal hides its text → the insertion binds to the original
+  app/element and reports delivery as unverified rather than guessing.
+
+## Related Concepts
+
+- [[dictation-pipeline]] — stage 9
+- [[delayed-cleanup]] — requires a verified receipt
+- [[personalization]] — trains only on verified receipts
+- [[privacy-and-security]] — why fingerprints, not text
+
+## References
+
+- insertion_integrity.py; dictate.py `capture_insertion_lease`,
+  `commit_insertion`, `insertion_readback`; docs/adr/0003
+- [[2026-07-26-runtime-pipeline-research]]
