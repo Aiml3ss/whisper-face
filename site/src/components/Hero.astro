@@ -33,7 +33,7 @@ const initial: Animal = 'parrot';
           <path d="M46 24 L60 21" opacity=".6"></path>
           <circle cx="57" cy="9" r="3" fill="var(--spark)" stroke="none" opacity=".7"></circle>
         </svg>
-        <div class="face-frames" id="heroFace" set:html={characterFrames(initial)}></div>
+        <div class="face-frames" id="heroFace" data-jelly set:html={characterFrames(initial)}></div>
       </div>
     </div>
 
@@ -63,8 +63,9 @@ const initial: Animal = 'parrot';
 
 <script>
   import { FACES, ORDER, characterFrames, type Animal } from '../data/faces';
+  import { playJelly, prefersReducedMotion } from '../data/jelly';
 
-  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const reduce = prefersReducedMotion();
   const stage = document.getElementById('stage')!;
   const chip = document.getElementById('chip')!;
   const heroFace = document.getElementById('heroFace')!;
@@ -86,6 +87,17 @@ const initial: Animal = 'parrot';
     chip.style.setProperty('--chip', FACES[current].color);
     heroFace.innerHTML = characterFrames(current);
     setActive();
+  }
+
+  // Only a face the visitor asked for gets the motion. The idle carousel swaps
+  // characters every few seconds and popping on each one would be wallpaper.
+  // The pop lands on the face itself rather than the chip: the chip owns the
+  // permanent `bob` float, and an animation shorthand there would stall it.
+  function renderPicked() {
+    render();
+    playJelly(heroFace, 'pop');
+    const swatch = switcher.querySelector<HTMLElement>(`.swatch[data-animal="${current}"]`);
+    playJelly(swatch, 'wobble');
   }
 
   function setMouth(open: 0 | 1 | 2) {
@@ -156,13 +168,13 @@ const initial: Animal = 'parrot';
     const b = (e.target as HTMLElement).closest<HTMLElement>('.swatch');
     if (!b || !b.dataset.animal) return;
     current = b.dataset.animal as Animal;
-    render();
+    renderPicked();
     restart();
   });
 
   window.addEventListener('wf:setface', (e) => {
     current = (e as CustomEvent).detail as Animal;
-    render();
+    renderPicked();
     restart();
   });
 

@@ -81,7 +81,7 @@ change code that handles release artifacts or precedes signing steps.
 
 | Component | Version/revision | License | How used |
 |---|---|---|---|
-| Jelly UI | 1.1.0 / upstream revision `8e39a8e61b5a43a562ae85e4b01191d333d5b121` | MIT, Copyright 2026 bmson | The public site loads the official bundled Web Components module from `jelly-ui.com` for its theme provider and theme control. Subresource Integrity pins the audited bundle bytes; branded surfaces use first-party CSS motion derived from the same interaction language. [Source and license](https://github.com/jelly-org/ui) |
+| Jelly UI | 1.1.0 / upstream revision `8e39a8e61b5a43a562ae85e4b01191d333d5b121` | MIT, Copyright 2026 bmson | The public site loads the official bundled Web Components module from `jelly-ui.com` for its theme provider (`jelly-theme`) and theme control (`jelly-button`). Subresource Integrity pins the audited bundle bytes; the pin is `sha384-ftCoNMap6OQSid+PyZ/rndaaw9grzCxUOYiXbTN1fxw1OYuI95Gm/HwyjOknBIG5`, last verified against `https://jelly-ui.com/dist/jelly.js` (318,426 bytes) on 2026-07-26. Jelly exposes no physics API, so the site's own branded surfaces run first-party springs generated from `whisper_face_theme.MOTION_SPECS` — the same constants the Mac app hands to `CASpringAnimation`. Reduce Motion is switched off in both: the site sets `data-jelly-motion="reduce"` on `<html>`, which the library's own gate reads. [Source and license](https://github.com/jelly-org/ui) |
 
 ## Binary distribution warning
 

@@ -30,7 +30,11 @@ for (const d of docs) {
             <ul>
               {items.map((d) => (
                 <li>
-                  <a href={`/docs/${d.id}`} aria-current={current === d.id ? 'page' : undefined}>
+                  <a
+                    data-jelly
+                    href={`/docs/${d.id}`}
+                    aria-current={current === d.id ? 'page' : undefined}
+                  >
                     {d.data.title}
                   </a>
                 </li>
