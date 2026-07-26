@@ -10,8 +10,9 @@ Whisper Face installs in one flow and checks its own work along the way. Here is
 ## Install
 
 1. Download the latest build and open it.
-2. Run `Install.command`. It provisions the app, its locked dependencies, the speech models, the native helper, login services, and a round of health checks.
-3. When macOS asks, grant microphone and accessibility access. That is what lets Whisper Face hear you and type on your behalf.
+2. Drag the Whisper Face folder — and the app beside it — out of the disk image into a writable spot like Documents. The installer checks for this and refuses to run from the read-only image.
+3. Run `Install.command` from that copy. It provisions the app, its locked dependencies, the speech models, the native helper, login services, and a round of health checks.
+4. When macOS asks, grant microphone and accessibility access. That is what lets Whisper Face hear you and type on your behalf.
 
 ```bash
 ./Install.command
