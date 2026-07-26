@@ -1,6 +1,11 @@
 ---
+import { RELEASE } from '../data/release';
+
 const steps = [
-  { h: 'Download and open', p: 'Grab the latest build and open it. No account, no sign-up wall.' },
+  {
+    h: 'Download and open',
+    p: 'Grab the disk image and open it. No account, no sign-up wall.',
+  },
   {
     h: 'Run Install.command',
     p: 'One repeatable flow sets up the app, locked dependencies, models, the native helper, login services, and health checks.',
@@ -33,10 +38,26 @@ const steps = [
         ))
       }
       <div class="cta-row" style="margin-top:8px">
-        <a class="btn btn-primary" data-jelly href="https://github.com/Aiml3ss/whisper-face">Get it on GitHub</a>
+        <a class="btn btn-primary" data-jelly href={RELEASE.dmg} download>
+          Download for Mac
+          <span class="btn-meta">{RELEASE.version} &middot; {RELEASE.size}</span>
+        </a>
         <a class="btn btn-ghost" data-jelly href="/docs/getting-started">Read the guide</a>
       </div>
-      <p class="install-note">Building from source today — clone the repo and run <code>Install.command</code>. A signed, notarized release is on the way.</p>
+      <p class="install-note">
+        Apple Silicon, macOS 14 or newer. <a href={RELEASE.notes}>Release notes</a> &middot;
+        <a href="https://github.com/Aiml3ss/whisper-face">Source on GitHub</a>
+      </p>
+      {
+        RELEASE.unsigned && (
+          <p class="install-warn">
+            <b>This build is not notarized yet</b>, so macOS will say it cannot verify the
+            developer. Right-click <code>Install.command</code> and choose <b>Open</b>, then
+            confirm. You can check the download against{' '}
+            <a href={RELEASE.checksums}>SHA256SUMS</a>. A signed release is on the way.
+          </p>
+        )
+      }
     </div>
 
     <div class="terminal" role="img" aria-label="Terminal showing the Install.command setup running and reporting all checks passed">
