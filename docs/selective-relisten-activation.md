@@ -6,6 +6,11 @@ recordings. Synthetic audio cannot authorize runtime behavior.
 
 ## Private manifest
 
+`uv run scripts/capture_voice_evidence.py relisten` records this corpus
+interactively and writes the manifest below; see
+[docs/evidence/voice-corpora.md](evidence/voice-corpora.md). It never approves
+anything. To build the corpus by hand instead:
+
 Create a gitignored directory on the MacBook Pro containing mono 16 kHz PCM16
 WAV microspans and a manifest:
 

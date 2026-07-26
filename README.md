@@ -685,6 +685,15 @@ Missing, synthetic, malformed, mixed, or failing evidence leaves the feature
 off. The physical suite has not been run in this repository, so no live safety
 or application-compatibility claim is made yet.
 
+The guided sessions that would produce that suite, the physical 50-app
+insertion matrix, and the physical lifecycle/stress evidence live in
+[docs/evidence/physical-sessions.md](docs/evidence/physical-sessions.md) with
+`scripts/capture_app_matrix.py`, `scripts/capture_delayed_cleanup_cases.py`,
+and `scripts/capture_lifecycle_evidence.py`. Each session records only what the
+runtime reported or the operator chose from a closed list, writes transcript-free
+artifacts to a private gitignored directory, and reports coverage as measured
+rather than extrapolated. None of them writes an activation receipt.
+
 `voice_objects.py`, `voice_inbox.py`, and `drop_to_target.py` define inert,
 local foundations for the next interaction layer. Typed drafts can now enter
 the local inbox through canonical closed-schema JSON and explicit-read decoding,

@@ -12,6 +12,12 @@ cd ~/dictation
 
 Do not copy audio, transcripts, manifests, or receipts into Git.
 
+`uv run scripts/capture_voice_evidence.py calibration` and
+`… keywords --keyword <term> --near-miss <word>` run these two corpora as guided
+sessions and write the manifests below; see
+[docs/evidence/voice-corpora.md](evidence/voice-corpora.md). Neither approves
+anything. The manual paths remain below.
+
 ## Acoustic calibration
 
 Create a private JSON manifest:
