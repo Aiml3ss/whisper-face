@@ -228,10 +228,14 @@ if IS_MACOS:
         NSAlertFirstButtonReturn,
         NSApplication,
         NSApplicationActivationPolicyAccessory,
+        NSAppearanceNameAqua,
+        NSAppearanceNameDarkAqua,
         NSBackingStoreBuffered,
         NSBezierPath,
+        NSBitmapImageFileTypePNG,
         NSColor,
         NSFont,
+        NSFontDescriptorSystemDesignRounded,
         NSGraphicsContext,
         NSFontAttributeName,
         NSForegroundColorAttributeName,
@@ -262,6 +266,7 @@ if IS_MACOS:
         NSAttributedString, NSData, NSMakeRect, NSMakeSize, NSObject, NSTimer,
     )
     from PyObjCTools import AppHelper
+    from Quartz import CASpringAnimation
 else:
     import pyperclip
     import pystray
@@ -302,6 +307,14 @@ else:
     objc = _ObjCCompat()
     AppHelper = _AppHelperCompat()
 
+from whisper_face_theme import (  # noqa: E402
+    FACE_CHIP_COLORS,
+    MOTION_SPECS,
+    TYPE_SPECS,
+    hud_presentation,
+    jelly_face_scale,
+    palette_for_appearance,
+)
 from parrot_core import (  # noqa: E402
     CleanupEdit,
     Recognition,
@@ -653,16 +666,15 @@ KEEPWARM_MIN_IDLE = 60       # skip the beat if dictating right now
 
 LOCK_FILE = HERE / ".dictate.lock"
 
-# HUD: the "Voice Listening" stage from the design handoff — no panel, no
-# background: the face, bars, ring, and caption float transparently over
-# the screen. Geometry is the spec's times HUD_SCALE.
-HUD_SCALE = 0.28
-HUD_W, HUD_H = 210.0, 142.0
+# HUD: compact native sticker card. Face and waveform retain the existing
+# off-hot-path renderer; shared theme/motion contracts supply the personality.
+HUD_SCALE = 0.30
+HUD_W, HUD_H = 248.0, 178.0
 HUD_BOTTOM_MARGIN = 80.0
 HUD_RADIUS = 20.0
-STAGE = 360.0 * HUD_SCALE    # square stage, centered horizontally
-STAGE_TOP = 8.0             # design y-down coords
-PARROT_SCALE = 300.0 / 256.0
+STAGE = 320.0 * HUD_SCALE    # square stage, centered horizontally
+STAGE_TOP = 31.0             # design y-down coords
+PARROT_SCALE = 280.0 / 256.0
 RADIAL_BARS = 60
 BAR_INNER_R = 134.0
 BEAK_MAX_DEG = 26.0          # spec: lower mandible max open
@@ -1731,18 +1743,57 @@ def _color(r, g, b, a=1.0):
     return NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, a)
 
 
+def _theme_is_dark() -> bool:
+    """Follow effective app appearance; never persist a separate UI setting."""
+    try:
+        appearance = NSApplication.sharedApplication().effectiveAppearance()
+        match = appearance.bestMatchFromAppearancesWithNames_(
+            (NSAppearanceNameAqua, NSAppearanceNameDarkAqua))
+        return match == NSAppearanceNameDarkAqua
+    except Exception:
+        return False
+
+
+def _rounded_font(size: float, weight: float):
+    """Use native SF Rounded, falling back to the system face if unavailable."""
+    base = NSFont.systemFontOfSize_weight_(size, weight)
+    try:
+        descriptor = base.fontDescriptor().fontDescriptorWithDesign_(
+            NSFontDescriptorSystemDesignRounded)
+        rounded = NSFont.fontWithDescriptor_size_(descriptor, size)
+        return rounded or base
+    except Exception:
+        return base
+
+
+def _add_jelly_animation(layer, motion_name: str) -> None:
+    """Translate one named motion into two native Core Animation springs."""
+    if layer is None:
+        return
+    spec = MOTION_SPECS[motion_name]
+    for axis, start in (("x", spec.squash_x), ("y", spec.squash_y)):
+        animation = CASpringAnimation.animationWithKeyPath_(
+            f"transform.scale.{axis}")
+        animation.setMass_(spec.mass)
+        animation.setStiffness_(spec.stiffness)
+        animation.setDamping_(spec.damping)
+        animation.setInitialVelocity_(spec.initial_velocity)
+        animation.setFromValue_(start)
+        animation.setToValue_(1.0)
+        animation.setDuration_(spec.duration)
+        layer.addAnimation_forKey_(
+            animation, f"whisper-face-{motion_name}-{axis}")
+
+
 # Design tokens from the Voice Listening handoff
-ACCENT = (0.204, 0.827, 0.600)          # #34d399
-EMERALD = (0.063, 0.725, 0.506)         # #10b981
+EMERALD = FACE_CHIP_COLORS["parrot"]     # #34d399
 DEEP = (0.016, 0.471, 0.341)            # #047857
 BEAK_UP = (0.984, 0.749, 0.141)         # #fbbf24
 BEAK_LO = (0.941, 0.659, 0.118)         # #f0a81e
 DARK_EYE = (0.043, 0.231, 0.196)        # #0b3b32
 MOUTH = (0.024, 0.145, 0.122)           # #06251f
-MINT = (0.369, 0.918, 0.831)            # #5eead4
+MINT = FACE_CHIP_COLORS["owl"]           # #5eead4
 CATCH = (0.918, 1.000, 0.965)           # #eafff6
-CAPTION_COL = (0.847, 1.000, 0.941)     # #d8fff0
-AMBER = (0.984, 0.573, 0.235)           # processing accent #fb923c
 # Every non-parrot, non-owl face renders through the shared front-facing
 # companion template. A style names three fills plus optional feature flags:
 #   ears     "pointed" (canine/feline) or "round" (bear family); default pointed
@@ -1751,56 +1802,56 @@ AMBER = (0.984, 0.573, 0.235)           # processing accent #fb923c
 #   stripes  forehead stripes (tiger)
 COMPANION_STYLES = {
     "fox": {
-        "head": (0.949, 0.404, 0.188),
+        "head": FACE_CHIP_COLORS["fox"],
         "deep": (0.706, 0.231, 0.075),
         "muzzle": (1.000, 0.878, 0.702),
     },
     "cat": {
-        "head": (0.365, 0.592, 0.824),
+        "head": FACE_CHIP_COLORS["cat"],
         "deep": (0.188, 0.349, 0.573),
         "muzzle": (0.824, 0.914, 1.000),
         "whiskers": True,
     },
     "bear": {
-        "head": (0.647, 0.424, 0.267),
+        "head": FACE_CHIP_COLORS["bear"],
         "deep": (0.373, 0.220, 0.133),
         "muzzle": (0.890, 0.710, 0.514),
         "ears": "round",
     },
     "dog": {
-        "head": (0.855, 0.647, 0.376),
+        "head": FACE_CHIP_COLORS["dog"],
         "deep": (0.573, 0.396, 0.196),
         "muzzle": (0.988, 0.925, 0.816),
     },
     "wolf": {
-        "head": (0.514, 0.565, 0.627),
+        "head": FACE_CHIP_COLORS["wolf"],
         "deep": (0.310, 0.345, 0.400),
         "muzzle": (0.831, 0.859, 0.902),
     },
     "pig": {
-        "head": (0.945, 0.620, 0.694),
+        "head": FACE_CHIP_COLORS["pig"],
         "deep": (0.804, 0.435, 0.533),
         "muzzle": (1.000, 0.859, 0.878),
         "ears": "round",
     },
     "panda": {
-        "head": (0.960, 0.965, 0.975),
+        "head": FACE_CHIP_COLORS["panda"],
         "deep": (0.129, 0.145, 0.161),
         "muzzle": (1.000, 1.000, 1.000),
         "ears": "round",
         "patches": True,
     },
     "tiger": {
-        "head": (0.976, 0.616, 0.235),
+        "head": FACE_CHIP_COLORS["tiger"],
         "deep": (0.816, 0.404, 0.098),
         "muzzle": (1.000, 0.910, 0.784),
         "stripes": True,
     },
 }
 
-# Live caption: rolling-ASR chunks land here as they finish, the full raw
-# transcript lands at release, WaveView reads it every frame.
-CAPTION = {"text": ""}
+# Live presentation evidence. Rolling-ASR chunks add compiler-approved stable
+# text and confidence; WaveView only reads it on the main thread's display tick.
+CAPTION = {"text": "", "confidence": None, "stable_prefix": False}
 
 
 def hud_level_step(raw: float, current: float, mode: str,
@@ -1820,6 +1871,8 @@ def _caption_add(fut, context_terms=(), bundle="", context_pack=None):
                 result, context_terms, bundle, "capture", finalized=False,
                 context_pack=context_pack)
             t = compiled.stable_prefix.strip()
+            CAPTION["confidence"] = getattr(
+                compiled, "confidence", result.confidence)
         else:
             t = str(result or "").strip()
     except Exception:
@@ -1829,6 +1882,7 @@ def _caption_add(fut, context_terms=(), bundle="", context_pack=None):
         if current == "Listening" or current.endswith(" mode"):
             current = ""
         CAPTION["text"] = (current + " " + t).strip()
+        CAPTION["stable_prefix"] = True
 
 
 class WaveView(NSView):
@@ -1845,13 +1899,41 @@ class WaveView(NSView):
         self.t = 0.0
         self.frame_n = 0
         self.reduce_motion = False
+        self.last_accessibility_value = ""
+        try:
+            self.setAccessibilityElement_(True)
+            self.setAccessibilityRole_("AXGroup")
+            self.setAccessibilityLabel_("Whisper Face dictation HUD")
+        except Exception:
+            pass
         return self
 
     def isFlipped(self):
         return True
 
+    def _presentation(self):
+        return hud_presentation(
+            self.mode,
+            CAPTION["text"],
+            CAPTION.get("confidence"),
+            stable_prefix=bool(CAPTION.get("stable_prefix")),
+        )
+
+    def syncAccessibilityState(self):
+        presentation = self._presentation()
+        if presentation.accessibility_value == self.last_accessibility_value:
+            return False
+        self.last_accessibility_value = presentation.accessibility_value
+        try:
+            self.setAccessibilityValue_(presentation.accessibility_value)
+        except Exception:
+            pass
+        return True
+
     def drawRect_(self, rect):
         W = self.bounds().size.width
+        palette = palette_for_appearance(_theme_is_dark())
+        presentation = self._presentation()
         # per-frame state
         S = HUD_SCALE
         if not self.reduce_motion:
@@ -1862,6 +1944,51 @@ class WaveView(NSView):
         lv = max(0.0, min(1.0, self.lv))
         cx = W / 2.0
         cy = STAGE_TOP + STAGE / 2.0
+
+        # Sticker card: calm surface, one hard offset shadow, no wall of
+        # decoration. The face remains the playful object.
+        card_rect = NSMakeRect(5, 3, W - 16, HUD_H - 14)
+        shadow_rect = NSMakeRect(11, 9, W - 16, HUD_H - 14)
+        _rgb(*palette.line, 0.96)
+        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            shadow_rect, HUD_RADIUS, HUD_RADIUS).fill()
+        card = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            card_rect, HUD_RADIUS, HUD_RADIUS)
+        _rgb(*palette.surface)
+        card.fill()
+        card.setLineWidth_(2.0)
+        _rgb(*palette.line)
+        card.stroke()
+
+        accent = palette.accent if presentation.accent == "accent" \
+            else palette.brand
+        eyebrow_type = TYPE_SPECS["hud_eyebrow"]
+        status = NSAttributedString.alloc().initWithString_attributes_(
+            presentation.eyebrow, {
+                NSFontAttributeName: _rounded_font(
+                    eyebrow_type.size, eyebrow_type.weight),
+                NSForegroundColorAttributeName: _color(*palette.line),
+            })
+        status_size = status.size()
+        status_w = status_size.width + 18
+        _rgb(*accent)
+        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            NSMakeRect(15, 11, status_w, 19), 9.5, 9.5).fill()
+        status.drawAtPoint_((24, 14))
+
+        if presentation.confidence:
+            confidence_type = TYPE_SPECS["hud_confidence"]
+            confidence = NSAttributedString.alloc() \
+                .initWithString_attributes_(
+                    presentation.confidence, {
+                        NSFontAttributeName: _rounded_font(
+                            confidence_type.size, confidence_type.weight),
+                        NSForegroundColorAttributeName:
+                            _color(*palette.ink_soft),
+                    })
+            confidence_size = confidence.size()
+            confidence.drawAtPoint_(
+                (W - 16 - confidence_size.width, 14))
 
         # radial waveform (spec: 60 bars, inner r 134, len 6 + v*66)
         if self.mode != "processing" or lv > 0.01:
@@ -1878,7 +2005,7 @@ class WaveView(NSView):
                                   cy + r0 * math.sin(ang)))
                 bar.lineToPoint_((cx + r1 * math.cos(ang),
                                   cy + r1 * math.sin(ang)))
-                _rgb(*ACCENT, 0.3 + 0.65 * v)
+                _rgb(*palette.brand, 0.20 + 0.58 * v)
                 bar.stroke()
 
         # pulse ring (300px, scale 1 + lv*0.16, opacity 0.12 + lv*0.5)
@@ -1887,45 +2014,56 @@ class WaveView(NSView):
             NSMakeRect(cx - rr, cy - rr, rr * 2, rr * 2))
         ring.setLineWidth_(1.5)
         if self.mode == "processing":
-            _rgb(*AMBER, 0.12 + 0.18 * abs(math.sin(self.t * 2.2)))
+            _rgb(*palette.accent,
+                 0.18 + 0.18 * abs(math.sin(self.t * 2.2)))
         else:
-            _rgb(*ACCENT, 0.12 + lv * 0.5)
+            _rgb(*palette.brand, 0.16 + lv * 0.44)
         ring.stroke()
 
-        # Selected Whisper Face (256 viewBox at 300*S, centered). Every face
-        # uses the same measured microphone level for its mouth animation.
-        bob = 0.0 if self.mode == "processing" else \
-            -3.0 * S * (1.0 - math.cos(2.0 * math.pi * self.t / 3.2))
+        # Selected Whisper Face (256 viewBox, centered). Live level drives a
+        # small whole-head squash/stretch as well as the mouth. Reduce Motion
+        # returns an identity transform and freezes both effects.
+        scale_x, scale_y = jelly_face_scale(
+            lv,
+            processing=self.mode == "processing",
+            reduce_motion=self.reduce_motion,
+        )
         ctx = NSGraphicsContext.currentContext()
         ctx.saveGraphicsState()
         tr = NSAffineTransform.transform()
-        tr.translateXBy_yBy_(cx - 150.0 * S, STAGE_TOP + 30.0 * S + bob)
+        tr.translateXBy_yBy_(cx - 140.0 * S, STAGE_TOP + 20.0 * S)
         tr.scaleBy_(PARROT_SCALE * S)
+        tr.translateXBy_yBy_(128.0, 128.0)
+        tr.scaleXBy_yBy_(scale_x, scale_y)
+        tr.translateXBy_yBy_(-128.0, -128.0)
         tr.concat()
         self.drawFace_(lv)
         ctx.restoreGraphicsState()
 
-        # caption (live transcript on a slim chip so it reads over anything)
+        # Stable prefix/result stays readable on a quiet theme surface.
         text = CAPTION["text"].strip()
-        if len(text) > 64:
-            text = "…" + text[-62:]
+        if text == "Listening":
+            text = "Speak naturally"
+        if len(text) > 72:
+            text = "…" + text[-70:]
         if text:
+            caption_type = TYPE_SPECS["hud_caption"]
             para = NSMutableParagraphStyle.alloc().init()
             para.setAlignment_(1)                # NSTextAlignmentCenter
             dim = 0.75 if self.mode == "processing" else 1.0
             cap = NSAttributedString.alloc().initWithString_attributes_(
                 text, {
-                    NSFontAttributeName:
-                        NSFont.systemFontOfSize_weight_(11.5, 0.23),
+                    NSFontAttributeName: _rounded_font(
+                        caption_type.size, caption_type.weight),
                     NSForegroundColorAttributeName:
-                        _color(*CAPTION_COL, dim),
+                        _color(*palette.ink, dim),
                     NSParagraphStyleAttributeName: para,
                 })
             size = cap.size()
-            cw = min(W - 16, size.width + 22)
+            cw = min(W - 30, size.width + 22)
             ch = size.height + 8
-            chip_y = STAGE_TOP + STAGE + 6
-            _rgb(0.016, 0.063, 0.051, 0.82)      # #04100d chip
+            chip_y = STAGE_TOP + STAGE + 12
+            _rgb(*palette.bg)
             NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
                 NSMakeRect((W - cw) / 2.0, chip_y, cw, ch),
                 ch / 2.0, ch / 2.0).fill()
@@ -2113,7 +2251,7 @@ class WaveView(NSView):
 
     def drawOwl_(self, lv):
         mouth = self._update_mouth()
-        purple = (0.455, 0.392, 0.741)
+        purple = FACE_CHIP_COLORS["owl"]
         deep = (0.255, 0.200, 0.506)
         cream = (0.890, 0.855, 1.000)
 
@@ -2162,7 +2300,7 @@ class WaveView(NSView):
 
 
 class HUD(NSObject):
-    """Floating frosted pill. Call only on the main thread (AppHelper.callAfter)."""
+    """Floating Whisper Face card. Main-thread only."""
 
     def init(self):
         self = objc.super(HUD, self).init()
@@ -2188,9 +2326,10 @@ class HUD(NSObject):
             | NSWindowCollectionBehaviorStationary
         )
 
-        # The stage paints its own gradient panel — no frosted effect view.
+        # The stage paints its own themed sticker card — no effect view.
         wave = WaveView.alloc().initWithFrame_(rect)
         wave.setAutoresizingMask_(18)
+        wave.setWantsLayer_(True)
         panel.setContentView_(wave)
 
         self.panel = panel
@@ -2207,6 +2346,10 @@ class HUD(NSObject):
             self.wave.raw = 0.0
             self.wave.lv = 0.0
             self.wave.beak = 0.0
+            layer = self.wave.layer()
+            if layer is not None:
+                layer.removeAllAnimations()
+        self.wave.syncAccessibilityState()
         self.wave.setNeedsDisplay_(True)
         if not self.panel.isVisible():
             screen = NSScreen.mainScreen().visibleFrame()
@@ -2214,18 +2357,25 @@ class HUD(NSObject):
             y = screen.origin.y + HUD_BOTTOM_MARGIN
             self.panel.setFrame_display_(NSMakeRect(x, y, HUD_W, HUD_H), True)
             self.panel.orderFrontRegardless()
+            if not self.wave.reduce_motion:
+                _add_jelly_animation(self.wave.layer(), "pop")
 
     def dismiss(self):
         self.panel.orderOut_(None)
         LEVELS.extend([0.0] * NUM_BARS)
         CAPTION["text"] = ""
+        CAPTION["confidence"] = None
+        CAPTION["stable_prefix"] = False
         self.wave.lv = 0.0
         self.wave.beak = 0.0
 
     def tick_(self, timer):
         if not self.panel.isVisible():
             return
+        accessibility_changed = self.wave.syncAccessibilityState()
         if self.wave.reduce_motion:
+            if accessibility_changed:
+                self.wave.setNeedsDisplay_(True)
             return
         self.wave.raw = LEVELS[-1] if LEVELS else 0.0
         bar = STATUS.get("bar")
@@ -2377,6 +2527,12 @@ class StatusBar(NSObject):
             return None
         self.item = NSStatusBar.systemStatusBar().statusItemWithLength_(
             NSVariableStatusItemLength)
+        button = self.item.button()
+        button.setWantsLayer_(True)
+        try:
+            button.setAccessibilityLabel_("Whisper Face menu")
+        except Exception:
+            pass
         # Two cached template frames per character. The open-mouth frame is
         # selected from the live mic level, so the tiny menu-bar face talks
         # along with the larger HUD without decoding or storing extra audio.
@@ -2474,6 +2630,10 @@ class StatusBar(NSObject):
             btn.setImage_(None)
             btn.setTitle_("⏸")
             btn.setToolTip_(f"{APP_NAME} — paused")
+            try:
+                btn.setAccessibilityValue_(f"{APP_NAME} — paused")
+            except Exception:
+                pass
             return
         frame = "talk" if self.state == "rec" and self.mouth_open else "idle"
         icon = self.face_icons.get(current_face(), {}).get(frame)
@@ -2489,7 +2649,12 @@ class StatusBar(NSObject):
             "rec": f"{APP_NAME} — listening",
             "proc": f"{APP_NAME} — processing",
         }
-        btn.setToolTip_(labels.get(self.state, APP_NAME))
+        state_label = labels.get(self.state, APP_NAME)
+        btn.setToolTip_(state_label)
+        try:
+            btn.setAccessibilityValue_(state_label)
+        except Exception:
+            pass
 
     def setMouthLevel_(self, level):
         if self.state != "rec" or self.reduce_motion:
@@ -2498,6 +2663,10 @@ class StatusBar(NSObject):
         if mouth_open != self.mouth_open:
             self.mouth_open = mouth_open
             self._refresh_face_icon()
+            _add_jelly_animation(
+                self.item.button().layer(),
+                "wobble" if mouth_open else "release",
+            )
 
     def menuWillOpen_(self, menu):
         try:
@@ -8701,6 +8870,8 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             compiler_result.anchors)
         PIPELINE_STATE["last_stable_prefix_words"] = len(
             compiler_result.stable_prefix.split())
+        CAPTION["confidence"] = compiler_result.confidence
+        CAPTION["stable_prefix"] = bool(compiler_result.stable_prefix.strip())
         rec.uncertain = bool(
             PIPELINE_STATE["last_alternatives"]
             and compiler_result.confidence < 0.65)
@@ -9302,6 +9473,54 @@ def check_parakeet_model_revision():
                     f"Parakeet model revision drift: {path.name} is {revision}")
 
 
+def run_native_hud_smoke_test() -> dict[str, int]:
+    """Exercise Phase 1 AppKit surfaces without showing UI or reading state."""
+    if not IS_MACOS:
+        raise RuntimeError("native HUD smoke requires macOS")
+
+    saved_caption = dict(CAPTION)
+    hud = status_bar = None
+    try:
+        NSApplication.sharedApplication()
+        hud = HUD.alloc().init()
+        for mode, confidence, stable in (
+                ("recording", 0.91, True),
+                ("processing", 0.61, True)):
+            hud.wave.mode = mode
+            hud.wave.raw = 0.72
+            hud.wave.reduce_motion = False
+            CAPTION.update({
+                "text": "Local smoke transcript",
+                "confidence": confidence,
+                "stable_prefix": stable,
+            })
+            hud.wave.syncAccessibilityState()
+            hud.wave.setNeedsDisplay_(True)
+            hud.wave.displayIfNeeded()
+            bounds = hud.wave.bounds()
+            bitmap = hud.wave.bitmapImageRepForCachingDisplayInRect_(bounds)
+            hud.wave.cacheDisplayInRect_toBitmapImageRep_(bounds, bitmap)
+            data = bitmap.representationUsingType_properties_(
+                NSBitmapImageFileTypePNG, {})
+            if data is None or data.length() == 0:
+                raise RuntimeError(f"could not render {mode} HUD smoke frame")
+
+        status_bar = StatusBar.alloc().init()
+        status_bar.setState_("rec")
+        status_bar.setMouthLevel_(0.5)
+        status_bar.setMouthLevel_(0.0)
+        status_bar.setState_("proc")
+        return {"states": 2, "motions": len(MOTION_SPECS)}
+    finally:
+        CAPTION.clear()
+        CAPTION.update(saved_caption)
+        if status_bar is not None:
+            NSStatusBar.systemStatusBar().removeStatusItem_(status_bar.item)
+        if hud is not None:
+            hud.timer.invalidate()
+            hud.panel.close()
+
+
 def platform_smoke_test():
     """Import-only validation used by installers and cross-platform CI."""
     expected = (
@@ -9465,6 +9684,8 @@ def main():
                         and not PAUSED["on"]):
                     LAST_USE["t"] = time.time()
                     CAPTION["text"] = ""
+                    CAPTION["confidence"] = None
+                    CAPTION["stable_prefix"] = False
                     rec = Recorder()
                     active["rec"] = rec
                     rec.start(event_at)
@@ -9594,12 +9815,15 @@ if __name__ == "__main__":
             try:
                 from whisper_face_gui import run_native_appkit_smoke
 
+                hud_result = run_native_hud_smoke_test()
                 result = run_native_appkit_smoke()
             except Exception:
                 print("Whisper Face native GUI smoke failed.", file=sys.stderr)
                 raise SystemExit(1)
             print(
                 "Whisper Face native GUI smoke passed: "
+                f"{hud_result['states']} HUD states, "
+                f"{hud_result['motions']} named motions, "
                 f"{result['sections']} sections, "
                 f"{result['settings_panes']} settings panes.")
     elif "--preload-models" in sys.argv:
