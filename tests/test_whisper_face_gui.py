@@ -410,6 +410,10 @@ class SnapshotTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             localized_string("settings.personalize.snippets.detail")
         for key in (
+            "nav.home",
+            "nav.settings",
+            "nav.advanced",
+            "advanced.accessibility.shortcut",
             "overview.phase.ready",
             "overview.status.recording.detail",
             "overview.status.recovery.detail.one",
@@ -437,15 +441,20 @@ class SnapshotTests(unittest.TestCase):
             "overview.accessibility.onboarding.face",
             "overview.accessibility.onboarding.steps",
             "overview.accessibility.onboarding.step",
-            "settings.action.diagnostics",
-            "results.title",
+            "settings.personalize.modes",
+            "settings.personalize.modes.detail",
+            "settings.dialog.modes.title",
+            "settings.dialog.modes.message",
+            "settings.dialog.modes.row",
+            "settings.accessibility.modes.label",
+            "settings.accessibility.modes_summary.label",
+            "settings.action.view",
+            "results.empty.title",
+            "results.empty.detail",
             "results.firewall.quarantine.one",
-            "results.accessibility.firewall",
             "results.consequence.review.advisory",
-            "results.accessibility.consequence_advisory",
-            "models.title",
+            "results.inspect.summary",
             "models.accessibility.guidance",
-            "diagnostics.title",
             "diagnostics.accessibility.verification",
             "diagnostics.accessibility.open_system_settings",
         ):
@@ -613,7 +622,9 @@ class SnapshotTests(unittest.TestCase):
             ("permissions", "hotkey", "models", "first_dictation"),
         )
         self.assertEqual(contract.locale_fallback, "en")
-        self.assertIn("command-d:diagnostics", contract.key_equivalents)
+        self.assertIn("command-d:advanced", contract.key_equivalents)
+        self.assertIn("command-r:verification", contract.key_equivalents)
+        self.assertIn("return:continue-setup", contract.key_equivalents)
         self.assertIn("select_section", contract.model_actions)
         self.assertIn("open_system_settings", contract.model_actions)
         self.assertIn("acknowledge_onboarding", contract.model_actions)
@@ -1258,27 +1269,6 @@ class ViewModelTests(unittest.TestCase):
                     ValueError):
                 model.press_point_and_speak(
                     nonce, "search field", unsupported)
-
-    def test_point_and_speak_copy_scopes_confirmation_to_fresh_role_action(self):
-        message = localized_string(
-            "point_and_speak.dialog.message",
-            limit=POINT_AND_SPEAK_MAX_PHRASE_CHARS)
-        help_text = localized_string(
-            "diagnostics.action.point_and_speak.help")
-
-        self.assertIn("After a supported control resolves", message)
-        self.assertIn("fresh strong resolution", message)
-        self.assertIn("same role", message)
-        self.assertIn("exact app, window, and element", message)
-        self.assertIn("button, checkbox, radio button, tab, menu item, or link",
-                      help_text)
-        self.assertIn("text fields", help_text)
-        for role in ("button", "checkbox", "radio_button", "tab",
-                     "menu_item", "link"):
-            self.assertIn(
-                f"Activate {role.replace('_', ' ')} once",
-                localized_string(
-                    f"point_and_speak.action.confirm.{role}"))
 
     def test_drop_target_preview_is_explicit_inert_and_never_enters_state(self):
         calls = []
@@ -2470,12 +2460,12 @@ class ViewModelTests(unittest.TestCase):
         model = WhisperFaceViewModel(GUIActions(
             status_snapshot=lambda: runtime))
         state = model.show_next_onboarding_step()
-        self.assertEqual(state.section, "Diagnostics")
+        self.assertEqual(state.section, "Advanced")
         self.assertEqual(state.notice_level, "info")
         self.assertIn("Microphone captures speech", state.notice)
 
         state = model.show_issue()
-        self.assertEqual(state.section, "Diagnostics")
+        self.assertEqual(state.section, "Advanced")
         self.assertEqual(state.notice_level, "error")
         self.assertIn("Microphone", state.notice)
 

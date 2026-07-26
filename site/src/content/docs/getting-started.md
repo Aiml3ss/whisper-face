@@ -33,5 +33,5 @@ The first time you open the app, the window walks you through Permissions, Hotke
 ## Where things live
 
 - The **menu-bar face** is your quick control. Click it to open the full window or reach the Voice Outbox.
-- The **main window** has Overview, Results, Settings, Models, and Diagnostics.
-- **Diagnostics** can save a private support bundle if you ever need help. It stays on your disk and holds no transcripts.
+- The **main window** has Home, Settings, and Advanced.
+- **Advanced** can save a private support bundle if you ever need help. It stays on your disk and holds no transcripts.
