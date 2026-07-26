@@ -5529,10 +5529,10 @@ def permission_recheck_attempt(environ=None) -> int:
 
 
 def permission_recheck_delay(attempt: int, environ=None) -> float:
-    """Seconds to wait before re-execing to re-read the frozen TCC verdict.
+    """Seconds to wait between fresh-process TCC probes.
 
     Poll every few seconds while the user is plausibly still in the Privacy
-    pane, then back off so an unattended Mac isn't re-execing forever at that
+    pane, then back off so an unattended Mac does not keep probing at that
     rate."""
     values = os.environ if environ is None else environ
     interval = PERMISSION_RECHECK_SECONDS
@@ -5551,29 +5551,70 @@ def permission_recheck_delay(attempt: int, environ=None) -> float:
     return max(interval, PERMISSION_RECHECK_BACKOFF_SECONDS)
 
 
-def ensure_event_permissions():
+def _fresh_event_permissions_granted(*, runner=None) -> bool:
+    """Read TCC from a short-lived process so the visible app stays stable."""
+    run = runner or subprocess.run
+    probe = (
+        "from Quartz import CGPreflightListenEventAccess,"
+        "CGPreflightPostEventAccess;"
+        "raise SystemExit(0 if CGPreflightListenEventAccess() and "
+        "CGPreflightPostEventAccess() else 1)"
+    )
+    try:
+        result = run(
+            [sys.executable, "-c", probe],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def _wait_for_permission_grant_and_reexec(
+        attempt: int, *, sleeper=time.sleep,
+        preflight=_fresh_event_permissions_granted, execv=os.execv) -> None:
+    """Poll fresh TCC evidence, then replace the process exactly once."""
+    current_attempt = attempt
+    while True:
+        sleeper(permission_recheck_delay(current_attempt))
+        if not preflight():
+            current_attempt += 1
+            continue
+        try:
+            os.environ[PERMISSION_ATTEMPT_ENV] = str(current_attempt + 1)
+        except (OSError, ValueError):
+            pass
+        execv(sys.executable, [sys.executable] + sys.argv)
+        return
+
+
+def ensure_event_permissions() -> bool:
     """Under the signed launcher chain, TCC attributes these grants to the
     launcher app ("Whisper Face"), the responsible process this fork+exec child
     rolls up to. Ask for Input Monitoring (hotkey listening) and Accessibility
-    (paste keystroke posting) up front; if missing, wait for the user to flip
-    the toggles and then re-exec so the listener starts trusted."""
+    (paste keystroke posting) up front. If either is missing, schedule a re-exec
+    while AppKit keeps the menu and main window reachable."""
     if IS_WINDOWS:
-        return
+        return True
     try:
         from Quartz import (
             CGPreflightListenEventAccess, CGRequestListenEventAccess,
             CGPreflightPostEventAccess, CGRequestPostEventAccess,
         )
     except ImportError:
-        return                              # older pyobjc: fall back to luck
+        return True                         # older pyobjc: fall back to luck
     if CGPreflightListenEventAccess() and CGPreflightPostEventAccess():
-        return
+        return True
     attempt = permission_recheck_attempt()
     if attempt == 0:
         # Ask exactly once. Every Request/prompt call pops a system dialog, and
-        # the re-exec loop below revisits this function every few seconds, so
-        # prompting on each pass buries the user in dialogs. Later generations
-        # only preflight (above) and wait quietly for the toggle.
+        # later process generations revisit this function, so prompting on each
+        # pass buries the user in dialogs. The fresh probe below only preflights
+        # and waits quietly for the toggle.
         CGRequestListenEventAccess()
         CGRequestPostEventAccess()
         try:
@@ -5588,17 +5629,21 @@ def ensure_event_permissions():
         print("Waiting for permissions: enable 'Whisper Face' under System "
               "Settings -> Privacy & Security -> Input Monitoring AND "
               "Accessibility. Re-checking every few seconds...")
-    # TCC verdicts are effectively frozen for a running process — polling
-    # preflight here never sees the user's grant. Re-exec for a fresh image;
-    # the loop continues across exec generations until both grants stick. The
-    # attempt counter rides the environment through execv, so the wait starts
-    # short (the user is at the toggle) and backs off on an unattended Mac.
+    # TCC verdicts are effectively frozen for a running process. Short-lived
+    # probes see fresh evidence while this AppKit process stays stable; only a
+    # confirmed grant triggers one re-exec. The counter rides the environment
+    # so a manual restart does not prompt again.
     try:
         os.environ[PERMISSION_ATTEMPT_ENV] = str(attempt + 1)
     except (OSError, ValueError):
         pass                                # the counter is a nicety, not a gate
-    time.sleep(permission_recheck_delay(attempt))
-    os.execv(sys.executable, [sys.executable] + sys.argv)
+    threading.Thread(
+        target=_wait_for_permission_grant_and_reexec,
+        args=(attempt,),
+        name="whisper-face-permission-recheck",
+        daemon=True,
+    ).start()
+    return False
 
 
 # ------------------------- native Mac ASR helper -------------------------
@@ -9555,45 +9600,11 @@ def main():
         phone_server()                      # blocks forever
         return
 
-    ensure_event_permissions()
-
-    if AUDIO_RECOVERY is not None:
-        try:
-            AUDIO_RECOVERY.start()
-            atexit.register(AUDIO_RECOVERY.close)
-        except Exception:
-            print("! Automatic microphone recovery notifications unavailable")
-
     if IS_MACOS:
         app = NSApplication.sharedApplication()
         app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
     hud = HUD.alloc().init()
     STATUS["bar"] = StatusBar.alloc().init()
-
-    # Open and exercise both reusable streams before enabling the hotkey. This
-    # deliberately pays CoreAudio's cold-start cost at launch, never after the
-    # user has heard the recording cue and begun speaking.
-    try:
-        trace_operation("warmup_audio_pool", AUDIO_POOL.warm)
-    except Exception as e:
-        print(f"! Microphone unavailable: {e}")
-        if IS_MACOS:
-            print("  Enable 'Whisper Face' under System Settings -> Privacy &"
-                  " Security -> Microphone. A keypress will retry"
-                  " initialization.")
-        else:
-            print("  Enable microphone access under Windows Settings -> "
-                  "Privacy & security. A keypress will retry initialization.")
-    if PREFERENCES["flight_recorder"]:
-        try:
-            FLIGHT.enable()
-            print("[flight] active: 20s RAM-only buffer; tap Right Option "
-                  "after speaking")
-            STATUS["bar"].setState_("idle")
-        except Exception as e:
-            PREFERENCES["flight_recorder"] = False
-            save_preferences()
-            print(f"! Flight Recorder could not start: {e}")
 
     # One Recorder per hold. A fresh press during the previous take's 0.3s
     # tail just opens a second short-lived stream instead of being swallowed.
@@ -9664,6 +9675,46 @@ def main():
             rerun_verification=verify_mac_installation,
         ))
         start_gui_activation_server(STATUS["bar"].gui)
+
+    if not ensure_event_permissions():
+        # Keep AppKit alive while TCC recovery waits. The signed launcher can
+        # now request this existing GUI even when its menu-bar item is hidden by
+        # a notch or a full menu bar. The background recheck replaces this
+        # process once macOS can report the newly granted permissions.
+        AppHelper.runEventLoop(installInterrupt=True)
+        return
+
+    if AUDIO_RECOVERY is not None:
+        try:
+            AUDIO_RECOVERY.start()
+            atexit.register(AUDIO_RECOVERY.close)
+        except Exception:
+            print("! Automatic microphone recovery notifications unavailable")
+
+    # Open and exercise both reusable streams before enabling the hotkey. This
+    # deliberately pays CoreAudio's cold-start cost at launch, never after the
+    # user has heard the recording cue and begun speaking.
+    try:
+        trace_operation("warmup_audio_pool", AUDIO_POOL.warm)
+    except Exception as e:
+        print(f"! Microphone unavailable: {e}")
+        if IS_MACOS:
+            print("  Enable 'Whisper Face' under System Settings -> Privacy &"
+                  " Security -> Microphone. A keypress will retry"
+                  " initialization.")
+        else:
+            print("  Enable microphone access under Windows Settings -> "
+                  "Privacy & security. A keypress will retry initialization.")
+    if PREFERENCES["flight_recorder"]:
+        try:
+            FLIGHT.enable()
+            print("[flight] active: 20s RAM-only buffer; tap Right Option "
+                  "after speaking")
+            STATUS["bar"].setState_("idle")
+        except Exception as e:
+            PREFERENCES["flight_recorder"] = False
+            save_preferences()
+            print(f"! Flight Recorder could not start: {e}")
 
     threading.Thread(target=warmup, daemon=True).start()
     threading.Thread(target=learn_scheduler, daemon=True).start()
