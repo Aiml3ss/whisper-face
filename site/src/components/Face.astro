@@ -1,13 +1,20 @@
 ---
-import { framePair, nextId, type Animal } from '../data/faces';
+import { characterPair, framePair, nextId, type Animal } from '../data/faces';
 
 interface Props {
   animal: Animal;
   class?: string;
+  /**
+   * `character` draws the full colored animal; `mark` draws the flat menu-bar
+   * silhouette. Use `mark` only where the face is small enough that detail
+   * would be lost anyway, so the site stays honest about what macOS renders.
+   */
+  variant?: 'character' | 'mark';
 }
 
-const { animal, class: cls = '' } = Astro.props;
+const { animal, class: cls = '', variant = 'character' } = Astro.props;
 const uid = nextId();
+const html = variant === 'mark' ? framePair(animal, uid) : characterPair(animal);
 ---
 
-<span class={`face-frames ${cls}`.trim()} set:html={framePair(animal, uid)}></span>
+<span class={`face-frames ${cls}`.trim()} set:html={html}></span>

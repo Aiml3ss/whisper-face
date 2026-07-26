@@ -258,7 +258,8 @@ required=(
     point_and_speak_resolver.py point_and_speak_transaction.py
     macos_point_and_speak_snapshot.py
     macos_drop_to_target_snapshot.py drop_to_target.py
-    whisper_face_gui.py whisper_face_theme.py support_bundle.py self_update.py
+    whisper_face_gui.py whisper_face_theme.py whisper_face_characters.py
+    support_bundle.py self_update.py
     scripts/macos_launcher_app.py scripts/side_by_side_update.py
     scripts/safe_update_advisor.py scripts/release_manifest.py
     config/macos-signing-policy.json
@@ -279,6 +280,16 @@ required=(
     icons/faces/pig-idle.svg icons/faces/pig-talk.svg
     icons/faces/panda-idle.svg icons/faces/panda-talk.svg
     icons/faces/tiger-idle.svg icons/faces/tiger-talk.svg
+    icons/faces/color/parrot-idle.svg icons/faces/color/parrot-talk.svg
+    icons/faces/color/fox-idle.svg icons/faces/color/fox-talk.svg
+    icons/faces/color/owl-idle.svg icons/faces/color/owl-talk.svg
+    icons/faces/color/cat-idle.svg icons/faces/color/cat-talk.svg
+    icons/faces/color/bear-idle.svg icons/faces/color/bear-talk.svg
+    icons/faces/color/dog-idle.svg icons/faces/color/dog-talk.svg
+    icons/faces/color/wolf-idle.svg icons/faces/color/wolf-talk.svg
+    icons/faces/color/pig-idle.svg icons/faces/color/pig-talk.svg
+    icons/faces/color/panda-idle.svg icons/faces/color/panda-talk.svg
+    icons/faces/color/tiger-idle.svg icons/faces/color/tiger-talk.svg
 )
 for file in "${required[@]}"; do
     [ -f "$DIR/$file" ] || fail "repository is incomplete: missing $file"

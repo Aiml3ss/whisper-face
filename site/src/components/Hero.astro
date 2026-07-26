@@ -1,9 +1,8 @@
 ---
 import Face from './Face.astro';
-import { FACES, ORDER, framePair, nextId, type Animal } from '../data/faces';
+import { FACES, ORDER, characterPair, type Animal } from '../data/faces';
 
 const initial: Animal = 'parrot';
-const heroUid = nextId();
 ---
 
 <section class="hero wrap">
@@ -34,7 +33,7 @@ const heroUid = nextId();
           <path d="M46 24 L60 21" opacity=".6"></path>
           <circle cx="57" cy="9" r="3" fill="var(--spark)" stroke="none" opacity=".7"></circle>
         </svg>
-        <div class="face-frames" id="heroFace" set:html={framePair(initial, heroUid)}></div>
+        <div class="face-frames" id="heroFace" set:html={characterPair(initial)}></div>
       </div>
     </div>
 
@@ -63,7 +62,7 @@ const heroUid = nextId();
 </section>
 
 <script>
-  import { FACES, ORDER, framePair, type Animal } from '../data/faces';
+  import { FACES, ORDER, characterPair, type Animal } from '../data/faces';
 
   const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const stage = document.getElementById('stage')!;
@@ -73,7 +72,6 @@ const heroUid = nextId();
   const switcher = document.getElementById('switcher')!;
 
   let current: Animal = 'parrot';
-  let uid = 0;
   let flapT: number | undefined;
   let typeT: number | undefined;
   let restT: number | undefined;
@@ -86,7 +84,7 @@ const heroUid = nextId();
 
   function render() {
     chip.style.setProperty('--chip', FACES[current].color);
-    heroFace.innerHTML = framePair(current, 'h' + uid++);
+    heroFace.innerHTML = characterPair(current);
     setActive();
   }
 

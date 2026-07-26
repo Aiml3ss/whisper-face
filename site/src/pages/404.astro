@@ -26,8 +26,10 @@ import Face from '../components/Face.astro';
       height: 132px;
       border-radius: 30px;
       border: 4px solid var(--line);
-      background: var(--owl);
-      box-shadow: var(--sticker-lg);
+      background: var(--surface);
+      box-shadow:
+        inset 0 0 0 4px color-mix(in oklab, var(--owl) 60%, transparent),
+        var(--sticker-lg);
       transform: rotate(-3deg);
     }
     .notfound-face .face-frames {

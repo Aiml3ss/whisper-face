@@ -608,6 +608,8 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn('"voice_object_commands": false', template)
         self.assertIn("whisper_face_theme.py", self.shell)
         self.assertIn("whisper_face_theme.py", self.powershell)
+        self.assertIn("whisper_face_characters.py", self.shell)
+        self.assertIn("whisper_face_characters.py", self.powershell)
         for runtime_module in (
                 "voice_objects.py", "voice_object_command_parser.py",
                 "voice_inbox.py", "voice_object_inbox_bridge.py",
@@ -632,11 +634,15 @@ class InstallerContractTests(unittest.TestCase):
         for face in ("parrot", "fox", "owl", "cat", "bear",
                      "dog", "wolf", "pig", "panda", "tiger"):
             for frame in ("idle", "talk"):
-                relative = f"icons/faces/{face}-{frame}.svg"
-                with self.subTest(relative=relative):
-                    self.assertTrue((ROOT / relative).exists())
-                    self.assertIn(relative, self.shell)
-                    self.assertIn(relative.replace("/", "\\"), self.powershell)
+                # The flat silhouette drives the menu bar; the colored
+                # character drives the app window and onboarding hero.
+                for directory in ("icons/faces", "icons/faces/color"):
+                    relative = f"{directory}/{face}-{frame}.svg"
+                    with self.subTest(relative=relative):
+                        self.assertTrue((ROOT / relative).exists())
+                        self.assertIn(relative, self.shell)
+                        self.assertIn(
+                            relative.replace("/", "\\"), self.powershell)
         for expected in (
             'APP_NAME = "Whisper Face"',
             "FACE_CHOICES = (",
