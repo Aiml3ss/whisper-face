@@ -286,6 +286,16 @@ class InstallerContractTests(unittest.TestCase):
         self.assertNotIn(
             '"$BREW" services stop ollama', self.shell[:branch_start])
         postamble = self.shell[branch_end:]
+        # The wait must poll the identity the next line asserts. A reload keeps
+        # the previous process bound to 11434 while its replacement starts, so
+        # two listeners briefly exist; ollama_listener_pid refuses a non-unique
+        # result. Waiting on /api/tags alone broke out during that window and
+        # hard-failed the install -- a rollback when run from the self-updater.
+        wait_end = self.shell.index(
+            'fail "Ollama did not become ready', branch_end)
+        wait = self.shell[branch_end:wait_end]
+        self.assertIn('if ollama_process_identity_is_valid; then', wait)
+        self.assertNotIn('curl -fsS --max-time 1 http://127.0.0.1:11434', wait)
         self.assertIn('ollama-service.sha256', self.shell)
         for required in (
             'install -d -m 700 "$service_receipt_dir"',
