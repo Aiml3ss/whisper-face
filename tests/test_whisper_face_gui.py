@@ -916,7 +916,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertTrue(active.visible)
         self.assertFalse(active.complete)
         self.assertEqual(active.current_key, "permissions")
-        self.assertEqual(active.title, "First, let your face listen.")
+        self.assertEqual(active.title, "First, let me hear you")
         self.assertEqual(active.action_title, "Open System Settings")
 
         complete = normalize_snapshot({
@@ -931,7 +931,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertTrue(celebration.visible)
         self.assertTrue(celebration.complete)
         self.assertIsNone(celebration.current_key)
-        self.assertEqual(celebration.title, "Your face works.")
+        self.assertEqual(celebration.title, "Nice. You’re ready.")
         self.assertEqual(celebration.action_title, "Start Dictating")
         self.assertFalse(onboarding_presentation(
             complete.onboarding_steps, acknowledged=True).visible)
@@ -2153,7 +2153,8 @@ class ViewModelTests(unittest.TestCase):
         self.assertNotIn("private", model.state.notice)
 
     def test_keyword_forget_rejects_uninspected_identity(self):
-        with self.assertRaisesRegex(ValueError, "unknown pronunciation"):
+        with self.assertRaisesRegex(
+                ValueError, "no evidence for that pronunciation keyword"):
             self.model.forget_acoustic_keyword("Qwen")
 
     def test_personalization_actions_validate_and_call_runtime(self):
@@ -2320,7 +2321,8 @@ class ViewModelTests(unittest.TestCase):
         model = WhisperFaceViewModel(GUIActions(
             status_snapshot=lambda: {}, set_face=fail_face,
             rerun_verification=lambda: False), locale="fr-CA")
-        with self.assertRaisesRegex(ValueError, "unknown section: Billing"):
+        with self.assertRaisesRegex(
+                ValueError, "no section called Billing"):
             model.select_section("Billing")
         self.assertEqual(
             model.choose_face("owl").notice,
@@ -2462,7 +2464,7 @@ class ViewModelTests(unittest.TestCase):
         state = model.show_next_onboarding_step()
         self.assertEqual(state.section, "Advanced")
         self.assertEqual(state.notice_level, "info")
-        self.assertIn("Microphone captures speech", state.notice)
+        self.assertIn("Microphone so I can hear you", state.notice)
 
         state = model.show_issue()
         self.assertEqual(state.section, "Advanced")

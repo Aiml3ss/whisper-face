@@ -17,8 +17,11 @@ Usage:
     uv run scripts/window_render_probe.py [output-dir]
 
 Writes window-{home,settings-personalize,settings-privacy,advanced}-
-{light,dark}.png (plus a first-run onboarding bonus pair) into
-``.probe-renders/`` by default.
+{light,dark}.png plus window-onboarding-{stage}-{light,dark}.png for every
+first-run stage, into ``.probe-renders/`` by default.
+
+Pass ``--size WIDTHxHEIGHT`` to review a different window size; the window's
+880x600 minimum is where truncation shows up first.
 """
 
 from __future__ import annotations
@@ -28,7 +31,14 @@ from dataclasses import replace
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else REPO / ".probe-renders"
+ARGS = list(sys.argv[1:])
+SIZE = None
+if "--size" in ARGS:
+    index = ARGS.index("--size")
+    width, _, height = ARGS.pop(index + 1).partition("x")
+    ARGS.pop(index)
+    SIZE = (float(width), float(height))
+OUT = Path(ARGS[0]) if ARGS else REPO / ".probe-renders"
 sys.path.insert(0, str(REPO))
 
 import whisper_face_gui as gui  # noqa: E402
@@ -84,9 +94,11 @@ STATE = GUIState(
     ),
 )
 
-# The first-run fixture drives the onboarding poster from real runtime
-# evidence, the same way the smoke gate builds its checklist.
-ONBOARDING_STATE = gui.normalize_snapshot({
+# The first-run fixtures drive the onboarding poster from real runtime
+# evidence, the same way the smoke gate builds its checklist. Each entry
+# advances exactly one readiness signal, so the four steps and the explicit
+# completion state can all be reviewed as images.
+ONBOARDING_RUNTIME = {
     "service_status": "Running",
     "microphone_status": "Not requested",
     "accessibility_status": "Not requested",
@@ -97,13 +109,49 @@ ONBOARDING_STATE = gui.normalize_snapshot({
         "role": "primary recognition",
         "status": "Warming",
     }],
-})
+}
+ONBOARDING_STAGES = (
+    ("permissions", {}),
+    ("hotkey", {
+        "microphone_status": "Ready",
+        "accessibility_status": "Granted",
+    }),
+    ("models", {
+        "microphone_status": "Ready",
+        "accessibility_status": "Granted",
+        "hotkey_practiced": True,
+    }),
+    ("first-dictation", {
+        "microphone_status": "Ready",
+        "accessibility_status": "Granted",
+        "hotkey_practiced": True,
+        "models": [{
+            "name": "Parakeet Unified",
+            "role": "primary recognition",
+            "status": "Ready",
+        }],
+    }),
+    ("complete", {
+        "microphone_status": "Ready",
+        "accessibility_status": "Granted",
+        "hotkey_practiced": True,
+        "models": [{
+            "name": "Parakeet Unified",
+            "role": "primary recognition",
+            "status": "Ready",
+        }],
+        "last_word_count": 9,
+    }),
+)
+ONBOARDING_STATE = gui.normalize_snapshot(ONBOARDING_RUNTIME)
 
 model = WhisperFaceViewModel(GUIActions())
 model.state = STATE
 controller = WhisperFaceWindowController.alloc() \
     .initForSmokeWithViewModel_(model)
 window = controller.window
+if SIZE is not None:
+    window.setContentSize_(SIZE)
 
 
 def snapshot(name: str) -> None:
@@ -140,8 +188,11 @@ for appearance_name, suffix in (
     controller.render()
     snapshot(f"window-advanced-{suffix}")
 
-    model.state = replace(ONBOARDING_STATE, section="Home")
-    controller.render()
-    snapshot(f"window-onboarding-{suffix}")
+    for stage, overrides in ONBOARDING_STAGES:
+        model.state = replace(
+            gui.normalize_snapshot({**ONBOARDING_RUNTIME, **overrides}),
+            section="Home")
+        controller.render()
+        snapshot(f"window-onboarding-{stage}-{suffix}")
 
 print(f"done → {OUT}")

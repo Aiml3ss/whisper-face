@@ -20,6 +20,7 @@ from typing import Any, Callable, Mapping, Sequence
 from support_bundle import SupportBundleError, write_support_bundle
 from whisper_face_theme import (
     FACE_CHIP_COLORS,
+    LIGHT_PALETTE,
     MOTION_SPECS,
     SURFACE_SPECS,
     palette_for_appearance,
@@ -250,40 +251,41 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "overview.notice.outbox.error": "Could not copy Voice Outbox: {error}",
         "overview.notice.capture.error": "Could not change capture state: {error}",
         "overview.notice.status.error": "Status unavailable: {error}",
-        "onboarding.permissions.title": "First, let your face listen.",
-        "onboarding.permissions.detail": "Microphone captures speech; Accessibility safely inserts it into the field you chose. Input Monitoring lets the hotkey listen.",
-        "onboarding.hotkey.title": "Now make it blink with {hotkey}.",
-        "onboarding.hotkey.detail": "Hold {hotkey}, speak, then release. This step completes only after Whisper Face observes capture.",
-        "onboarding.models.title": "Meet the local brain.",
-        "onboarding.models.detail": "At least one local recognition engine must be ready; fallbacks can finish warming in the background.",
-        "onboarding.first_dictation.title": "Say something. Watch it land.",
-        "onboarding.first_dictation.detail": "Speak one sentence in a text field. If focus changes, recover it in Voice Outbox with Copy & Dismiss.",
+        "onboarding.permissions.title": "First, let me hear you",
+        "onboarding.permissions.detail": "Microphone so I can hear you, Accessibility so I can type for you, Input Monitoring so your key works. You grant them in System Settings — I never change them myself.",
+        "onboarding.hotkey.title": "Now try your key",
+        "onboarding.hotkey.detail": "Hold {hotkey}, say a few words, then let go. This step only ticks once Whisper Face observes capture on this Mac — no pretending.",
+        "onboarding.models.title": "Getting your models ready",
+        "onboarding.models.detail": "The recognition models unpack here the first time you run. One ready engine is all you need; the rest can keep warming in the background.",
+        "onboarding.first_dictation.title": "Say something",
+        "onboarding.first_dictation.detail": "Click into any text field, hold your key, and speak one sentence. If the focus moves before it lands, your words wait in the Voice Outbox under Copy & Dismiss.",
         "onboarding.status.done": "Done",
         "onboarding.status.attention": "Needs attention",
         "onboarding.status.try": "Try it now",
         "onboarding.status.warming": "Warming up",
         "onboarding.status.turn": "Your turn",
-        "onboarding.progress": "FIRST-RUN SETUP · {completed} OF {total} COMPLETE",
-        "onboarding.step.permissions": "1 Permissions",
-        "onboarding.step.hotkey": "2 Hotkey",
-        "onboarding.step.models": "3 Models",
-        "onboarding.step.first_dictation": "4 Dictate",
-        "onboarding.step.summary": "{step} · {status}",
+        "onboarding.progress": "SETTING UP · {completed} OF {total} DONE",
+        "onboarding.step.permissions": "Permissions",
+        "onboarding.step.hotkey": "Your key",
+        "onboarding.step.models": "Models",
+        "onboarding.step.first_dictation": "First words",
+        "onboarding.step.summary": "{step}\n{status}",
         "onboarding.action.permissions": "Review Permissions",
         "onboarding.action.open_system_settings": "Open System Settings",
         "onboarding.action.open_system_settings.help": "Open macOS System Settings so you can review Microphone, Accessibility, and Input Monitoring. Whisper Face does not change permissions.",
-        "onboarding.action.hotkey": "Show Practice",
-        "onboarding.action.models": "View Models",
-        "onboarding.action.first_dictation": "Show How",
-        "onboarding.action.continue": "Continue Setup",
+        "onboarding.action.hotkey": "Show Me How",
+        "onboarding.action.models": "Check On Them",
+        "onboarding.action.first_dictation": "Show Me How",
+        "onboarding.action.continue": "Keep Going",
         "onboarding.action.help": "Open the next incomplete first-run setup step.",
         "onboarding.action.finish": "Start Dictating",
         "onboarding.action.finish.help": "Finish first-run setup and show the live dictation overview.",
-        "onboarding.complete.progress": "READY TO DICTATE · {total} OF {total} CONFIRMED",
-        "onboarding.complete.title": "Your face works.",
-        "onboarding.complete.detail": "Permissions, hotkey practice, local model readiness, and your first successful dictation are all confirmed on this Mac.",
-        "onboarding.complete.status": "All set",
-        "onboarding.privacy": "Speech and setup stay on this Mac.",
+        "onboarding.complete.progress": "ALL SET · {total} OF {total} CONFIRMED",
+        "onboarding.complete.title": "Nice. You’re ready.",
+        "onboarding.complete.detail": "Permissions, your key, a local model, and one real dictation — all four confirmed on this Mac. Hold your key anywhere you can type and just talk.",
+        "onboarding.complete.status": "Every step confirmed",
+        "onboarding.accessibility.progress_track": "First run setup progress",
+        "onboarding.privacy": "Everything you say stays on this Mac.",
         "onboarding.complete": "Setup is complete — Whisper Face is ready.",
         "results.summary.empty": "No dictation yet",
         "results.summary.words": "{words} words",
@@ -327,10 +329,10 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "results.relisten.inconclusive": "inconclusive",
         "results.relisten.mixed": "mixed",
         "results.relisten.unavailable": "unavailable",
-        "results.empty.title": "Nothing to inspect yet",
-        "results.empty.detail": "Dictate something and Whisper Face will explain what it heard, protected, changed, and delivered.",
+        "results.empty.title": "Your first dictation lands here",
+        "results.empty.detail": "Say a sentence and I’ll show what I heard, protected, and delivered.",
         "results.audio.off": "Acoustic replay is off",
-        "results.audio.empty": "No consequential span retained; expired audio is cleared automatically",
+        "results.audio.empty": "Nothing held for replay right now — retained spans clear themselves the moment they expire",
         "results.audio.available.one": "1 consequential span retained in RAM for at most one minute",
         "results.audio.available.many": "{count} consequential spans retained in RAM for at most one minute",
         "results.audio.play": "Play Span",
@@ -380,7 +382,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "results.accessibility.inspect.content": "Private latest-result evidence",
         "models.waiting": "Waiting for model status",
         "models.unknown": "Unknown",
-        "models.waiting.detail": "Open this window after startup completes",
+        "models.waiting.detail": "Leave this window open — each model appears as startup reports it",
         "models.guidance": "Models prepare locally and can finish in the background.",
         "models.relisten.label": "Selective Re-listen",
         "models.relisten.status.off": "Off",
@@ -477,12 +479,16 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.mode.code.detail": "Technical dictation",
         "settings.personalize.tones": "App tones",
         "settings.personalize.tones.detail": "{count} recent or configured apps",
+        "settings.personalize.tones.empty": "Dictate somewhere and that app shows up here",
         "settings.personalize.snippets": "Snippets",
         "settings.personalize.snippets.detail": "{count} saved phrases",
+        "settings.personalize.snippets.empty": "Save a phrase you type all the time",
         "settings.personalize.vocabulary": "Vocabulary",
         "settings.personalize.vocabulary.detail": "{terms} terms · {bans} exclusions",
+        "settings.personalize.vocabulary.empty": "Teach me the names I keep getting wrong",
         "settings.personalize.corrections": "Learned corrections",
         "settings.personalize.corrections.detail": "{count} inspectable mappings",
+        "settings.personalize.corrections.empty": "Fix the same word a few times and I’ll remember it",
         "settings.personalize.keywords": "Pronunciation keywords",
         "settings.personalize.keywords.detail": "Open to inspect correction-backed evidence",
         "settings.personalize.modes": "Voice modes",
@@ -506,9 +512,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.action.review": "Review",
         "settings.action.save": "Save",
         "settings.action.cancel": "Cancel",
-        "settings.empty.tones": "No recent apps yet",
-        "settings.empty.snippets": "No snippets",
-        "settings.empty.corrections": "No learned corrections",
+        "settings.empty.tones": "No apps yet — dictate somewhere first",
+        "settings.empty.snippets": "No snippets yet — add your first",
+        "settings.empty.corrections": "Nothing learned yet — correct a word a few times",
         "settings.dialog.tone.title": "App tone",
         "settings.dialog.tone.message": "Choose how cleanup should sound in this app.",
         "settings.dialog.tone.app.label": "Application",
@@ -555,7 +561,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.dialog.correction.privacy.snippet": "Stored locally: the snippet name, replacement, and edit count.",
         "settings.dialog.keywords.title": "Pronunciation keywords",
         "settings.dialog.keywords.message": "These candidates come only from exact corrections you made. Only separately reviewed physical evidence can grant bounded local-ASR prompt priority.",
-        "settings.dialog.keywords.empty": "No correction-backed keyword candidates yet.",
+        "settings.dialog.keywords.empty": "No keyword candidates yet. Correct a name Whisper Face mishears and it will appear here with its evidence.",
         "settings.dialog.keywords.chooser.label": "Pronunciation keyword candidate",
         "settings.dialog.keywords.chooser.help": "Choose a pronunciation keyword to inspect, export, or forget.",
         "settings.dialog.keywords.row": "{keyword} · {observations} observations · {confirmations} confirmations · {status} · {scope}",
@@ -633,69 +639,73 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "default.privacy.local": "Local processing",
         "default.build.development": "Development build",
         "results.consequence.empty": "Consequence: Standard · no protected spans",
-        "validation.tone.selection": "app tone selection is out of range",
-        "validation.section.unknown": "unknown section: {section}",
-        "validation.settings_pane.unknown": "unknown settings pane: {pane}",
-        "validation.app.bundle": "app identifier must be a non-empty bundle ID",
-        "validation.tone.unsupported": "unsupported tone: {tone}",
-        "validation.snippet.name": "snippet name must be 1–80 characters on one line",
-        "validation.snippet.text": "snippet text must be 1–4000 characters",
-        "validation.snippet.required": "snippet name is required",
-        "validation.snippet.expected": "expected snippet text must be a string",
+        # Validation copy is user-facing: it names the field that stopped the
+        # save and the change that will let it through.
+        "validation.tone.selection": "That app tone selection is out of range. Pick an app from the list and try again.",
+        "validation.section.unknown": "There is no section called {section}. Pick Home, Settings, or Advanced.",
+        "validation.settings_pane.unknown": "There is no settings pane called {pane}. Pick Personalize or Privacy.",
+        "validation.app.bundle": "That app needs a real bundle ID. Pick an app from the list instead of typing one.",
+        "validation.tone.unsupported": "Whisper Face has no tone called {tone}. Pick one of the listed tones.",
+        "validation.snippet.name": "A snippet name must be 1–80 characters on one line. Shorten it and save again.",
+        "validation.snippet.text": "Snippet text must be 1–4000 characters. Add the text you want inserted, then save again.",
+        "validation.snippet.required": "This snippet still needs a name. Give it one and save again.",
+        "validation.snippet.expected": "That snippet could not be read as text, so nothing was saved. Reopen it and try again.",
         "validation.vocabulary.preferred": "preferred vocabulary",
         "validation.vocabulary.excluded": "excluded vocabulary",
-        "validation.vocabulary.list": "{label} must be a list of terms",
-        "validation.vocabulary.term_length": "{label} terms must be at most 80 characters",
-        "validation.vocabulary.reserved": "{label} terms cannot start with reserved '-' or '#'",
-        "validation.vocabulary.maximum": "{label} supports at most 500 terms",
-        "validation.vocabulary.overlap": "a term cannot also be excluded",
-        "validation.correction.kind": "unknown learned correction kind",
-        "validation.correction.unknown": "unknown learned correction",
-        "validation.correction.stale_snippet": "the learned snippet edit no longer exists",
-        "validation.keyword.unknown": "unknown pronunciation keyword",
-        "validation.face.unsupported": "unsupported face: {face}",
-        "operation.settings.load_failed": "Could not load settings: {error}",
-        "operation.tone.save_failed": "Could not save app tone: {error}",
-        "operation.snippet.save_failed": "Could not save snippet: {error}",
-        "operation.snippet.delete_failed": "Could not delete snippet: {error}",
-        "operation.vocabulary.save_failed": "Could not save vocabulary: {error}",
-        "operation.correction.forget_failed": "Could not forget correction: {error}",
-        "operation.keyword.inspect_failed": "Could not inspect pronunciation keywords: {error}",
-        "operation.keyword.export_failed": "Could not export pronunciation keywords: {error}",
-        "operation.keyword.forget_failed": "Could not forget pronunciation keyword: {error}",
-        "operation.face.change_failed": "Could not change face: {error}",
-        "operation.flight.update_failed": "Could not update Flight Recorder: {error}",
-        "operation.acoustic.update_failed": "Could not update Acoustic Time Machine: {error}",
-        "operation.relisten.update_failed": "Could not update Selective Re-listen: {error}",
-        "operation.voice_objects.update_failed": "Could not update Voice Object Commands: {error}",
-        "operation.voice_objects.inspect_failed": "Could not inspect local Voice Object drafts.",
-        "operation.voice_objects.reveal_failed": "Could not reveal the selected local draft.",
-        "operation.voice_objects.transition_failed": "Could not update the selected local draft.",
-        "operation.voice_objects.purge_failed": "Could not purge finished local drafts.",
-        "operation.voice_objects.compose_failed": "Could not request the email compose draft.",
-        "operation.voice_objects.copy_failed": "Could not copy the selected task or calendar draft.",
-        "operation.voice_objects.clear_failed": "Could not clear the copied draft from the Mac clipboard.",
-        "operation.demonstrations.inspect_failed": "Could not inspect local demonstration drafts.",
-        "operation.demonstrations.create_failed": "Could not create the local demonstration draft.",
-        "operation.demonstrations.reveal_failed": "Could not reveal the selected demonstration draft.",
-        "operation.demonstrations.record_failed": "Could not record that demonstration step.",
-        "operation.demonstrations.approve_failed": "Could not approve the selected demonstration draft.",
-        "operation.demonstrations.cancel_failed": "Could not cancel the selected demonstration draft.",
-        "operation.demonstrations.delete_failed": "Could not delete the selected approved demonstration recipe.",
-        "operation.risky_confirmation.start_failed": "Could not start the inert confirmation ceremony.",
-        "operation.risky_confirmation.click_failed": "Confirmation stayed blocked; no valid voice receipt was followed by this click.",
-        "operation.risky_confirmation.cancel_failed": "Could not cancel the inert confirmation ceremony.",
-        "operation.acoustic.play_failed": "Could not play retained audio: {error}",
-        "operation.acoustic.clear_failed": "Could not clear retained audio: {error}",
-        "operation.log.open_failed": "Could not open log: {error}",
-        "operation.system_settings.open_failed": "Could not open System Settings: {error}",
-        "operation.support_snapshot.copy_failed": "Could not copy support snapshot: {error}",
-        "operation.support_bundle.export_failed": "Could not save support bundle: {error}",
-        "operation.source.open_failed": "Could not open source and license: {error}",
-        "operation.licenses.open_failed": "Could not open local license notices: {error}",
+        "validation.vocabulary.list": "Your {label} could not be read as a list of terms. Put one term per line and save again.",
+        "validation.vocabulary.term_length": "Every {label} term must be at most 80 characters. Shorten the long one and save again.",
+        "validation.vocabulary.reserved": "A {label} term cannot start with the reserved '-' or '#'. Remove that first character and save again.",
+        "validation.vocabulary.maximum": "Your {label} holds at most 500 terms. Remove a few and save again.",
+        "validation.vocabulary.overlap": "A term cannot also be excluded. Remove it from one of the two lists and save again.",
+        "validation.correction.kind": "That is not a kind of learned correction Whisper Face stores. Reopen Learned corrections and pick one from the list.",
+        "validation.correction.unknown": "That learned correction is no longer stored on this Mac. Reopen Learned corrections for the current list.",
+        "validation.correction.stale_snippet": "That learned snippet edit no longer exists, so nothing was forgotten. Reopen Learned corrections for the current list.",
+        "validation.keyword.unknown": "Whisper Face holds no evidence for that pronunciation keyword. Open Pronunciation keywords and pick one from the list.",
+        "validation.face.unsupported": "There is no companion called {face}. Pick one of the ten faces.",
+        # Failure copy names what did not happen, what is still true, and the
+        # one move that gets the person unstuck.
+        "operation.settings.load_failed": "Could not load your settings: {error}. Nothing was changed — reopen this window to try again.",
+        "operation.tone.save_failed": "Could not save that app tone: {error}. The previous tone is still in effect — try saving again.",
+        "operation.snippet.save_failed": "Could not save that snippet: {error}. Nothing on this Mac changed — try saving again.",
+        "operation.snippet.delete_failed": "Could not delete that snippet: {error}. It is still saved — try deleting it again.",
+        "operation.vocabulary.save_failed": "Could not save your vocabulary: {error}. Your previous terms are still in effect — try saving again.",
+        "operation.correction.forget_failed": "Could not forget that correction: {error}. It is still active — reopen Learned corrections and try again.",
+        "operation.keyword.inspect_failed": "Could not inspect your pronunciation keywords: {error}. Nothing was changed — try Inspect again.",
+        "operation.keyword.export_failed": "Could not copy the pronunciation keyword export: {error}. Nothing reached the clipboard — try Copy Export again.",
+        "operation.keyword.forget_failed": "Could not forget that pronunciation keyword: {error}. Its evidence is unchanged — try Forget again.",
+        "operation.face.change_failed": "Could not change your companion: {error}. The current face stays — pick it again.",
+        "operation.flight.update_failed": "Could not update Flight Recorder: {error}. It stayed exactly as it was — try the switch again.",
+        "operation.acoustic.update_failed": "Could not update Acoustic Time Machine: {error}. It stayed exactly as it was — try the switch again.",
+        "operation.relisten.update_failed": "Could not update Selective Re-listen: {error}. It stayed exactly as it was — try the switch again.",
+        "operation.voice_objects.update_failed": "Could not update Voice Object Commands: {error}. It stayed exactly as it was — try the switch again.",
+        "operation.voice_objects.inspect_failed": "Could not open the local Voice Inbox. No draft was read or changed — try Inspect again.",
+        "operation.voice_objects.reveal_failed": "Could not reveal that local draft. It stays queued and unread — try Reveal again.",
+        "operation.voice_objects.transition_failed": "Could not update that local draft. It stays exactly as it was — try the same action again.",
+        "operation.voice_objects.purge_failed": "Could not purge the finished local drafts. They are all still listed — try Purge Finished again.",
+        "operation.voice_objects.compose_failed": "Could not hand that email draft to macOS. Nothing was sent and the draft stays queued — try Open Compose Draft again.",
+        "operation.voice_objects.copy_failed": "Could not copy that draft. Your clipboard is unchanged and the draft stays queued — try Copy Draft again.",
+        "operation.voice_objects.clear_failed": "Could not clear the copied draft from the Mac clipboard. Copy something else to overwrite it yourself.",
+        "operation.demonstrations.inspect_failed": "Could not open your local demonstration drafts. Nothing was changed — try Inspect again.",
+        "operation.demonstrations.create_failed": "Could not create that local demonstration draft. Nothing was recorded — try creating it again.",
+        "operation.demonstrations.reveal_failed": "Could not reveal that demonstration draft. It stays stored and unread — try Reveal again.",
+        "operation.demonstrations.record_failed": "Could not record that demonstration step. Nothing was performed and the draft is unchanged — describe the step again.",
+        "operation.demonstrations.approve_failed": "Could not approve that demonstration draft. It stays a draft — try Approve again.",
+        "operation.demonstrations.cancel_failed": "Could not cancel that demonstration draft. It stays exactly as it was — try Cancel again.",
+        "operation.demonstrations.delete_failed": "Could not delete that approved demonstration recipe. It is still stored — try Delete again.",
+        "operation.risky_confirmation.start_failed": "Could not start the inert confirmation ceremony. Nothing was confirmed — try the action again.",
+        "operation.risky_confirmation.click_failed": "Confirmation stayed blocked: this click was not preceded by a valid voice receipt. Say the confirmation phrase again, then click.",
+        "operation.risky_confirmation.cancel_failed": "Could not cancel the inert confirmation ceremony. It stays blocked and nothing was confirmed — try Cancel again.",
+        "operation.acoustic.play_failed": "Could not play that retained span: {error}. The span stays in memory until it expires — try Play Span again.",
+        "operation.acoustic.clear_failed": "Could not clear the retained audio: {error}. It still expires on its own within one minute — try Clear again.",
+        "operation.log.open_failed": "Could not open the log: {error}. Copy Support Snapshot works without file access if you need the details now.",
+        "operation.system_settings.open_failed": "Could not open System Settings: {error}. Open it from the Apple menu, then go to Privacy & Security.",
+        "operation.support_snapshot.copy_failed": "Could not copy the support snapshot: {error}. Nothing reached the clipboard — try Export Support Bundle instead.",
+        "operation.support_bundle.export_failed": "Could not save the support bundle: {error}. Nothing was written — choose a different folder and try again.",
+        "operation.source.open_failed": "Could not open the corresponding source: {error}. Check your default browser, then try Exact Source again.",
+        "operation.licenses.open_failed": "Could not open the local license notices: {error}. They also sit beside dictate.py as LICENSE_POLICY.md and THIRD_PARTY_NOTICES.md.",
         "settings.dialog.voice_objects.title": "Voice Inbox",
         "settings.dialog.voice_objects.message": "Only bounded draft metadata is listed. Select Reveal to read one draft. A revealed queued email can request a native compose window; a revealed queued task or calendar draft can be copied. Each action requires a separate confirmation.",
-        "settings.dialog.voice_objects.empty": "No local Voice Object drafts are stored.",
+        "settings.dialog.voice_objects.empty": "No local drafts are stored. Speak an exact task, email, or calendar command and it queues here — inert until you act on it.",
         "settings.dialog.voice_objects.row": "Draft {sequence} · {destination} · {state}",
         "settings.dialog.voice_objects.reveal.title": "Draft {sequence} · {destination}",
         "settings.dialog.voice_objects.reveal.message": "Private local content only. Nothing is sent. A queued email can offer native compose; a queued task or calendar draft can offer clipboard copy. Either requires a separate confirmation.",
@@ -871,6 +881,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "overview.accessibility.onboarding.face",
             "overview.accessibility.onboarding.steps",
             "overview.accessibility.onboarding.step",
+            "onboarding.accessibility.progress_track",
             "settings.accessibility.sections.label",
             "settings.accessibility.category.label",
             "settings.accessibility.face.label",
@@ -4240,6 +4251,7 @@ def set_accessible_text(view: Any, value: str, *, label: str) -> None:
 try:  # The view-model above remains usable in headless test environments.
     import objc
     from AppKit import (
+        NSAnimationContext,
         NSApplication,
         NSAlert,
         NSBackingStoreBuffered,
@@ -4279,6 +4291,10 @@ try:  # The view-model above remains usable in headless test environments.
         NSSwitch,
         NSTextField,
         NSTextView,
+        NSTrackingActiveInActiveApp,
+        NSTrackingArea,
+        NSTrackingInVisibleRect,
+        NSTrackingMouseEnteredAndExited,
         NSView,
         NSViewMaxXMargin,
         NSViewMinXMargin,
@@ -4296,7 +4312,11 @@ try:  # The view-model above remains usable in headless test environments.
     )
     from Foundation import (
         NSAttributedString, NSLocale, NSObject, NSTimer, NSUserDefaults)
-    from Quartz import CASpringAnimation
+    from Quartz import (
+        CAMediaTimingFunction,
+        CASpringAnimation,
+        kCAMediaTimingFunctionEaseOut,
+    )
 
     APPKIT_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised only outside macOS installs
@@ -4327,6 +4347,19 @@ if APPKIT_AVAILABLE:
     SIDEBAR_WIDTH = 200.0
     CONTENT_WIDTH = 720.0
     CONTENT_MIN_WIDTH = 656.0
+
+    # The first-run poster is the one full-page object in the window, so its
+    # geometry is named here and shared by the builder, the constraint, and
+    # the per-step re-flow.
+    ONBOARDING_HEIGHT = 460.0
+    ONBOARDING_TEXT_X = 288.0
+    ONBOARDING_CHIPS_TOP = 80.0
+
+    # The notice band reserves one 11pt line; a two-line failure message
+    # grows upward into the column's bottom padding rather than pushing the
+    # page and clipping its last row at the 880x600 minimum.
+    NOTICE_LINE_HEIGHT = 16.0
+    NOTICE_WRAPPED_HEIGHT = 28.0
 
     # Mirrored from GUIState by render() so jelly springs on native controls
     # honor Reduce Motion exactly like the HUD path, without every control
@@ -4382,6 +4415,34 @@ if APPKIT_AVAILABLE:
             pass
         return image
 
+    def center_layer_anchor(layer: Any) -> bool:
+        """Move a layer's anchor to its middle without moving the layer.
+
+        AppKit hands view-backed layers an anchor of (0, 0), so a scale
+        animation grows out of the bottom-left corner and the squash reads as
+        a slide. Re-anchoring at the center makes squash-and-stretch behave
+        the way the shared motion specs describe it; the position is shifted
+        by the same amount the anchor moved so nothing jumps on screen, and
+        later ``setFrame:`` calls from AppKit recompute the position from the
+        new anchor on their own.
+        """
+        if layer is None:
+            return False
+        try:
+            anchor = layer.anchorPoint()
+            if abs(anchor.x - 0.5) < 1e-6 and abs(anchor.y - 0.5) < 1e-6:
+                return True
+            size = layer.bounds().size
+            position = layer.position()
+            layer.setAnchorPoint_((0.5, 0.5))
+            layer.setPosition_((
+                position.x + (0.5 - anchor.x) * size.width,
+                position.y + (0.5 - anchor.y) * size.height,
+            ))
+        except Exception:
+            return False
+        return True
+
     def add_jelly_motion(view: Any, motion_name: str,
                          *, reduced_motion: bool = False) -> bool:
         """Translate one named motion into two native Core Animation springs.
@@ -4400,6 +4461,7 @@ if APPKIT_AVAILABLE:
             return False
         if layer is None:
             return False
+        center_layer_anchor(layer)
         spec = MOTION_SPECS[motion_name]
         for axis, start in (("x", spec.squash_x), ("y", spec.squash_y)):
             animation = CASpringAnimation.animationWithKeyPath_(
@@ -4415,6 +4477,40 @@ if APPKIT_AVAILABLE:
                 animation, f"whisper-face-{motion_name}-{axis}")
         return True
 
+    # Window chrome only: content crossfades and the notice fade never touch
+    # the dictation hot path, and Reduce Motion drops straight to the final
+    # opacity instead of shortening the fade.
+    CROSSFADE_SECONDS = 0.15
+
+    def fade_in(view: Any, *, reduced_motion: bool = False,
+                duration: float = CROSSFADE_SECONDS) -> bool:
+        """Fade one chrome view up from transparent, ease-out and quick."""
+        if view is None:
+            return False
+        try:
+            if reduced_motion:
+                view.setAlphaValue_(1.0)
+                return False
+            view.setAlphaValue_(0.0)
+            NSAnimationContext.beginGrouping()
+            context = NSAnimationContext.currentContext()
+            context.setDuration_(duration)
+            try:
+                context.setTimingFunction_(
+                    CAMediaTimingFunction.functionWithName_(
+                        kCAMediaTimingFunctionEaseOut))
+            except Exception:
+                pass
+            view.animator().setAlphaValue_(1.0)
+            NSAnimationContext.endGrouping()
+        except Exception:
+            try:
+                view.setAlphaValue_(1.0)
+            except Exception:
+                pass
+            return False
+        return True
+
     class JellyButton(NSButton):
         """Button that squashes on press and springs back on release."""
 
@@ -4422,6 +4518,50 @@ if APPKIT_AVAILABLE:
             add_jelly_motion(self, "press", reduced_motion=_REDUCE_MOTION)
             objc.super(JellyButton, self).mouseDown_(event)
             add_jelly_motion(self, "release", reduced_motion=_REDUCE_MOTION)
+
+    class SidebarRow(JellyButton):
+        """Source-list row that also reports pointer hover to the window.
+
+        ``NSTrackingInVisibleRect`` keeps the region correct through scrolls
+        and resizes without rebuilding it, and the row only repaints when the
+        hovered flag actually flips, so moving across the rail cannot flicker.
+        """
+
+        def initWithFrame_(self, frame):
+            self = objc.super(SidebarRow, self).initWithFrame_(frame)
+            if self is None:
+                return None
+            self.hovered = False
+            self.hover_delegate = None
+            return self
+
+        def updateTrackingAreas(self):
+            objc.super(SidebarRow, self).updateTrackingAreas()
+            for area in list(self.trackingAreas()):
+                self.removeTrackingArea_(area)
+            area = NSTrackingArea.alloc() \
+                .initWithRect_options_owner_userInfo_(
+                    self.bounds(),
+                    NSTrackingMouseEnteredAndExited
+                    | NSTrackingActiveInActiveApp
+                    | NSTrackingInVisibleRect,
+                    self, None)
+            self.addTrackingArea_(area)
+
+        @objc.python_method
+        def _set_hovered(self, hovered: bool) -> None:
+            if bool(getattr(self, "hovered", False)) == hovered:
+                return
+            self.hovered = hovered
+            delegate = getattr(self, "hover_delegate", None)
+            if delegate is not None:
+                delegate.sidebarHoverChanged_(self)
+
+        def mouseEntered_(self, event):
+            self._set_hovered(True)
+
+        def mouseExited_(self, event):
+            self._set_hovered(False)
 
     class JellySwitch(NSSwitch):
         """Switch with the same press/release soft-body feedback."""
@@ -4474,25 +4614,41 @@ if APPKIT_AVAILABLE:
     def _label(text: str, frame: Any, *, size: float = 13,
                weight: str = "regular", color: Any = None,
                accessibility_label: str = "", rounded: bool = False,
-               wrap: bool = False, alignment: int | None = None,
+               wrap: bool = False, lines: int = 0,
+               alignment: int | None = None,
                truncate: bool = False) -> Any:
         label = NSTextField.labelWithString_(text)
         label.setFrame_(frame)
         label.setFont_(_font(size, weight, rounded=rounded))
         label.setTextColor_(color or _TEXT)
         label.setLineBreakMode_(4 if truncate else 0)
-        if truncate:
-            # A truncating label must never widen the layout (or the whole
-            # window) to fit its text: keep its pull below the window's
-            # size-stay-put priority so it shortens with an ellipsis instead.
+        if truncate or wrap:
+            # Neither a truncating nor a wrapping label may widen the layout
+            # (or the whole window) to fit one line of text: keep the pull
+            # below the window's size-stay-put priority so the text shortens
+            # or wraps instead of forcing the window past its minimum.
             try:
                 label.setContentCompressionResistancePriority_forOrientation_(
                     400.0, 0)
+                if wrap:
+                    label.setPreferredMaxLayoutWidth_(frame.size.width)
             except Exception:
                 pass
         if wrap:
             label.setUsesSingleLineMode_(False)
-            label.setMaximumNumberOfLines_(0)
+            # A bounded line count keeps a long string wrapping inside its
+            # card instead of overflowing the layout below it; the last line
+            # then tail-truncates rather than disappearing. Setting a
+            # truncating break mode clears the cell's wrap flag, so it is
+            # restored right after.
+            label.setMaximumNumberOfLines_(lines)
+            if lines:
+                label.setLineBreakMode_(4)
+                try:
+                    label.cell().setWraps_(True)
+                    label.cell().setScrollable_(False)
+                except Exception:
+                    label.setLineBreakMode_(0)
         if alignment is not None:
             label.setAlignment_(alignment)
         return _accessible(label, accessibility_label or text)
@@ -4572,7 +4728,9 @@ if APPKIT_AVAILABLE:
             self._face_images: dict[tuple[str, bool], Any] = {}
             self._onboarding_stage: str | None = None
             self._onboarding_presentation: OnboardingPresentation | None = None
+            self._onboarding_completed: frozenset[str] = frozenset()
             self._rendered_section: str | None = None
+            self._rendered_notice: str | None = None
             if read_system_state:
                 try:
                     preferred = NSLocale.preferredLanguages()
@@ -4714,6 +4872,80 @@ if APPKIT_AVAILABLE:
             return self._face_images[key]
 
         @objc.python_method
+        def _wrapped_height(self, label: Any, width: float) -> float:
+            """Height this label needs for its current text at ``width``."""
+            try:
+                size = label.cell().cellSizeForBounds_(
+                    NSMakeRect(0, 0, width, 10_000.0))
+                return float(size.height)
+            except Exception:
+                return float(label.frame().size.height)
+
+        @objc.python_method
+        def _layout_onboarding(self) -> None:
+            """Re-flow the poster around whatever this step actually says.
+
+            The copy changes length from step to step and the window can be
+            dragged down to its minimum width, so the right-hand column is
+            measured, stacked upward from the fixed step-chip row, and the
+            card's height constraint follows it. Building from the bottom
+            keeps every frame correct even in the moment before the new
+            height lands, and the poster never opens a hole under a short
+            step or clips a long one.
+            """
+            card = self.dynamic["onboarding_card"]
+            width = float(card.frame().size.width) or CONTENT_WIDTH
+            text_x = ONBOARDING_TEXT_X
+            text_width = max(240.0, width - text_x - 36.0)
+            title = self.dynamic["onboarding_title"]
+            detail = self.dynamic["onboarding_detail"]
+            title_height = min(
+                92.0, max(38.0, self._wrapped_height(title, text_width + 4.0)))
+            detail_height = min(
+                96.0, max(18.0, self._wrapped_height(detail, text_width)))
+
+            # Stacked upward: action, status, detail, title, progress bar,
+            # eyebrow. Every gap sits on the 8pt grid except the 10pt
+            # optical tuck that keeps the bar reading with its own label.
+            cursor = ONBOARDING_CHIPS_TOP + 40.0
+
+            def place(view: Any, view_height: float, gap: float = 0.0,
+                      *, x: float = text_x, w: float | None = None) -> None:
+                nonlocal cursor
+                cursor += gap
+                view.setFrame_(NSMakeRect(
+                    x, cursor, text_width if w is None else w, view_height))
+                cursor += view_height
+
+            place(self.dynamic["onboarding_action"], 40.0, w=240.0)
+            place(self.dynamic["onboarding_status"], 20.0, 16.0)
+            place(detail, detail_height, 8.0)
+            place(title, title_height, 8.0,
+                  x=text_x - 2.0, w=text_width + 4.0)
+            place(self.dynamic["onboarding_progress_track"], 6.0, 16.0)
+            place(self.dynamic["onboarding_progress"], 16.0, 10.0)
+
+            height = cursor + 40.0
+            constraint = self.dynamic.get("onboarding_height")
+            if constraint is not None:
+                constraint.setConstant_(height)
+
+            # The character owns the left column and centers itself against
+            # the text block rather than the card, so the two halves of the
+            # poster always share one optical midline.
+            chip = self.dynamic["onboarding_face_chip"]
+            face = self.dynamic["onboarding_face"]
+            kicker = self.dynamic["onboarding_face_kicker"]
+            centre = (ONBOARDING_CHIPS_TOP + 40.0 + cursor) / 2.0 + 22.0
+            chip.setFrame_(NSMakeRect(40, centre - 104.0, 208, 208))
+            face.setFrame_(NSMakeRect(72, centre - 72.0, 144, 144))
+            kicker.setFrame_(NSMakeRect(32, centre - 156.0, 224, 40))
+            try:
+                chip.setFrameCenterRotation_(3.0)
+            except Exception:
+                pass
+
+        @objc.python_method
         def _apply_onboarding_theme(
                 self, state: GUIState,
                 presentation: OnboardingPresentation) -> None:
@@ -4737,40 +4969,103 @@ if APPKIT_AVAILABLE:
             self.dynamic["onboarding_status"].setTextColor_(
                 _brand_text_color(dark) if presentation.complete
                 else _amber_text_color(dark))
-            for step, step_card, control in zip(
+            track = self.dynamic["onboarding_progress_track"]
+            fill_bar = self.dynamic["onboarding_progress_fill"]
+            track.setFillColor_(
+                _theme_color(palette.brand, 0.26 if dark else 0.18))
+            fill_bar.setFillColor_(_theme_color(palette.brand))
+            total = len(state.onboarding_steps) or 1
+            completed = sum(step.complete for step in state.onboarding_steps)
+            track_frame = track.frame()
+            fraction = min(1.0, max(0.0, completed / float(total)))
+            fill_bar.setFrame_(NSMakeRect(
+                track_frame.origin.x, track_frame.origin.y,
+                track_frame.size.width * fraction, track_frame.size.height))
+            fill_bar.setHidden_(fraction <= 0.0)
+            try:
+                fill_bar.setAccessibilityElement_(False)
+            except Exception:
+                pass
+            sync_accessibility(
+                track, presentation.progress,
+                label=self._l("onboarding.accessibility.progress_track"))
+            for index, (step, step_card, control, icon) in enumerate(zip(
                     state.onboarding_steps,
                     self.dynamic["onboarding_step_cards"],
-                    self.dynamic["onboarding_steps"]):
+                    self.dynamic["onboarding_steps"],
+                    self.dynamic["onboarding_step_icons"])):
                 current = step.key == presentation.current_key
                 if step.complete:
-                    fill = _theme_color(palette.brand, 0.20)
+                    fill = _theme_color(palette.brand, 0.24 if dark else 0.18)
+                    border = _theme_color(palette.brand, 0.55)
                     text = _brand_text_color(dark)
+                    tint = _theme_color(palette.brand)
+                    symbol = "checkmark.circle.fill"
                 elif current:
                     # Amber over deep pine muddies into olive, so dark mode
-                    # uses a lighter wash and lets the text carry the amber.
-                    fill = _theme_color(
-                        palette.accent, 0.18 if dark else 0.28)
-                    text = (_theme_color(palette.accent) if dark
-                            else _theme_color(palette.ink))
+                    # lifts the chip with a neutral ink wash and lets the
+                    # border, glyph, and text carry the accent instead.
+                    fill = (_theme_color(palette.ink, 0.08) if dark
+                            else _theme_color(palette.accent, 0.26))
+                    border = _theme_color(palette.accent, 0.75)
+                    text = _amber_text_color(dark)
+                    tint = _theme_color(palette.accent)
+                    symbol = f"{index + 1}.circle.fill"
                 else:
                     fill = _theme_color(
                         palette.bg, 0.55 if dark else 0.76)
+                    border = _theme_color(palette.line, CARD_BORDER_ALPHA)
                     text = _theme_color(palette.ink_soft)
+                    tint = _theme_color(palette.ink_soft, 0.8)
+                    symbol = f"{index + 1}.circle"
                 step_card.setFillColor_(fill)
+                step_card.setBorderColor_(border)
                 control.setTextColor_(text)
+                image = _symbol_image(symbol, size=16.0, weight="semibold")
+                if image is not None:
+                    icon.setImage_(image)
+                try:
+                    icon.setContentTintColor_(tint)
+                    # The chip's own text already says the step and its
+                    # status, so the marker stays out of the VoiceOver tree
+                    # rather than repeating it.
+                    icon.setAccessibilityElement_(False)
+                except Exception:
+                    pass
 
         @objc.python_method
         def _animate_onboarding_face(
                 self, presentation: OnboardingPresentation) -> None:
+            """Wobble the character once when a new step takes the stage."""
             stage = "complete" if presentation.complete else (
                 presentation.current_key or "hidden")
             if (not presentation.visible or stage == self._onboarding_stage
                     or not bool(self.window.isVisible())):
                 return
             self._onboarding_stage = stage
+            reduced = self.view_model.state.prefers_reduced_motion
             add_jelly_motion(
-                self.dynamic["onboarding_face_chip"], "pop",
-                reduced_motion=self.view_model.state.prefers_reduced_motion)
+                self.dynamic["onboarding_face_chip"], "wobble",
+                reduced_motion=reduced)
+            add_jelly_motion(
+                self.dynamic["onboarding_face"], "wobble",
+                reduced_motion=reduced)
+
+        @objc.python_method
+        def _animate_onboarding_steps(self, state: GUIState) -> None:
+            """Pop only the chips that just turned complete — never a loop."""
+            completed = frozenset(
+                step.key for step in state.onboarding_steps if step.complete)
+            newly = completed - self._onboarding_completed
+            self._onboarding_completed = completed
+            if not newly or not bool(self.window.isVisible()):
+                return
+            reduced = state.prefers_reduced_motion
+            for step, card in zip(
+                    state.onboarding_steps,
+                    self.dynamic["onboarding_step_cards"]):
+                if step.key in newly:
+                    add_jelly_motion(card, "pop", reduced_motion=reduced)
 
         @objc.python_method
         def _apply_window_theme(self, state: GUIState) -> None:
@@ -4824,38 +5119,67 @@ if APPKIT_AVAILABLE:
                 _brand_text_color(dark))
             self.dynamic["window_version"].setTextColor_(
                 _theme_color(palette.ink_soft))
-            for index, (row, row_label, row_icon) in enumerate(zip(
-                    self.sidebar_rows, self.dynamic["sidebar_row_labels"],
-                    self.dynamic["sidebar_row_icons"])):
+            for index in range(len(self.sidebar_rows)):
                 selected = SECTIONS[index] == state.section
-                row.setWantsLayer_(True)
-                layer = row.layer()
-                if layer is not None:
-                    layer.setCornerRadius_(8.0)
-                    layer.setBackgroundColor_(
-                        _theme_color(
-                            palette.brand, 0.28 if dark else 0.15).CGColor()
-                        if selected else
-                        NSColor.clearColor().CGColor())
-                text_color = (
-                    _brand_text_color(dark) if selected
-                    else _theme_color(palette.ink))
-                row_label.setTextColor_(text_color)
-                row_label.setFont_(_font(
-                    13.0, "semibold" if selected else "medium"))
-                try:
-                    row_icon.setContentTintColor_(
-                        text_color if selected
-                        else _theme_color(palette.ink_soft))
-                except Exception:
-                    pass
+                self._apply_sidebar_row_theme(index, selected=selected)
                 sync_accessibility(
-                    row,
+                    self.sidebar_rows[index],
                     self._l("nav.selected") if selected else "",
                     label=self._l(f"nav.{SECTIONS[index].casefold()}"))
 
         @objc.python_method
+        def _apply_sidebar_row_theme(
+                self, index: int, *, selected: bool) -> None:
+            """Paint one rail row for its selection, hover, and appearance."""
+            dark = getattr(self, "_dark", False)
+            palette = palette_for_appearance(dark)
+            row = self.sidebar_rows[index]
+            row_label = self.dynamic["sidebar_row_labels"][index]
+            row_icon = self.dynamic["sidebar_row_icons"][index]
+            hovered = bool(getattr(row, "hovered", False))
+            row.setWantsLayer_(True)
+            layer = row.layer()
+            if layer is not None:
+                layer.setCornerRadius_(8.0)
+                if selected:
+                    # Hover sits under selection so a hovered selected row
+                    # deepens slightly instead of competing with it.
+                    fill = _theme_color(
+                        palette.brand,
+                        (0.34 if hovered else 0.28) if dark
+                        else (0.20 if hovered else 0.15))
+                elif hovered:
+                    fill = _theme_color(
+                        palette.brand, 0.14 if dark else 0.07)
+                else:
+                    fill = NSColor.clearColor()
+                layer.setBackgroundColor_(fill.CGColor())
+            text_color = (
+                _brand_text_color(dark) if selected
+                else _theme_color(palette.ink))
+            row_label.setTextColor_(text_color)
+            row_label.setFont_(_font(
+                13.0, "semibold" if selected else "medium"))
+            try:
+                row_icon.setContentTintColor_(
+                    text_color if selected
+                    else _theme_color(palette.ink_soft))
+            except Exception:
+                pass
+
+        def sidebarHoverChanged_(self, row: Any) -> None:
+            """Repaint only the row whose hover state actually changed."""
+            try:
+                index = self.sidebar_rows.index(row)
+            except ValueError:
+                return
+            self._apply_sidebar_row_theme(
+                index, selected=SECTIONS[index] ==
+                self.view_model.state.section)
+
+        @objc.python_method
         def _animate_section_change(self, state: GUIState) -> None:
+            """Crossfade the incoming section instead of hard-cutting it."""
             previous = self._rendered_section
             self._rendered_section = state.section
             if (previous is None or previous == state.section
@@ -4864,12 +5188,31 @@ if APPKIT_AVAILABLE:
                 return
             page = self.pages[state.section]
             page.setWantsLayer_(True)
-            add_jelly_motion(
-                page, "release",
-                reduced_motion=state.prefers_reduced_motion)
+            fade_in(page, reduced_motion=state.prefers_reduced_motion)
             add_jelly_motion(
                 self.sidebar_rows[SECTIONS.index(state.section)], "pop",
                 reduced_motion=state.prefers_reduced_motion)
+
+        @objc.python_method
+        def _animate_notice(self, state: GUIState) -> None:
+            """Size the notice to its copy, then fade a fresh one up."""
+            notice = self.dynamic["notice"]
+            text = state.notice
+            constraint = self.dynamic.get("notice_height")
+            if constraint is not None:
+                needed = self._wrapped_height(
+                    notice, float(notice.frame().size.width) or CONTENT_WIDTH)
+                constraint.setConstant_(
+                    NOTICE_WRAPPED_HEIGHT
+                    if needed > NOTICE_LINE_HEIGHT + 1.0
+                    else NOTICE_LINE_HEIGHT)
+            if text == getattr(self, "_rendered_notice", None):
+                return
+            self._rendered_notice = text
+            if not text or not bool(self.window.isVisible()):
+                notice.setAlphaValue_(1.0)
+                return
+            fade_in(notice, reduced_motion=state.prefers_reduced_motion)
 
         def initWithViewModel_(self, view_model: WhisperFaceViewModel):
             self = objc.super(WhisperFaceWindowController, self).init()
@@ -4992,12 +5335,13 @@ if APPKIT_AVAILABLE:
                 "Advanced": "wrench.and.screwdriver.fill",
             }
             for index, section in enumerate(SECTIONS):
-                row = JellyButton.alloc().initWithFrame_(
+                row = SidebarRow.alloc().initWithFrame_(
                     NSMakeRect(12, 508 - index * 40, SIDEBAR_WIDTH - 24, 36))
                 row.setAutoresizingMask_(NSViewMinYMargin)
                 row.setTitle_("")
                 row.setBordered_(False)
                 row.setWantsLayer_(True)
+                row.hover_delegate = self
                 row.setTag_(index)
                 row.setTarget_(self)
                 row.setAction_("sectionChanged:")
@@ -5016,6 +5360,10 @@ if APPKIT_AVAILABLE:
                     row, self._l(f"nav.{section.casefold()}"),
                     self._l("settings.accessibility.sections.help"))
                 sidebar.addSubview_(row)
+                # AppKit only calls this once the row is laid out in a
+                # visible window; installing it now means hover works from
+                # the first mouse move after the window opens.
+                row.updateTrackingAreas()
                 rows.append(row)
                 row_labels.append(row_label)
                 row_icons.append(icon)
@@ -5042,8 +5390,13 @@ if APPKIT_AVAILABLE:
                 NSMakeRect(SIDEBAR_WIDTH, 0, 800, 640))
             content_area.setTranslatesAutoresizingMaskIntoConstraints_(False)
             root.addSubview_(content_area)
-            notice = _label("", NSMakeRect(0, 0, 720, 16),
-                            size=11, truncate=True)
+            # Failure copy now names the next move, so the notice takes a
+            # second line when it needs one. The reserved band stays one
+            # line tall: the column keeps a fixed bottom so a two-line
+            # notice grows into the padding instead of shoving every page
+            # up and clipping the last row at the window minimum.
+            notice = _label("", NSMakeRect(0, 0, 720, NOTICE_LINE_HEIGHT),
+                            size=11, wrap=True, lines=2)
             notice.setTranslatesAutoresizingMaskIntoConstraints_(False)
             content_area.addSubview_(notice)
             column = NSView.alloc().initWithFrame_(
@@ -5051,6 +5404,8 @@ if APPKIT_AVAILABLE:
             column.setTranslatesAutoresizingMaskIntoConstraints_(False)
             content_area.addSubview_(column)
 
+            notice_height = notice.heightAnchor() \
+                .constraintEqualToConstant_(NOTICE_LINE_HEIGHT)
             preferred_width = column.widthAnchor() \
                 .constraintEqualToConstant_(CONTENT_WIDTH)
             # Below NSLayoutPriorityWindowSizeStayPut (500) so preferring the
@@ -5089,11 +5444,14 @@ if APPKIT_AVAILABLE:
                     column.leadingAnchor()),
                 notice.trailingAnchor().constraintEqualToAnchor_(
                     column.trailingAnchor()),
+                notice_height,
                 notice.bottomAnchor().constraintEqualToAnchor_constant_(
                     content_area.bottomAnchor(), -10.0),
                 column.bottomAnchor().constraintEqualToAnchor_constant_(
-                    notice.topAnchor(), -6.0),
+                    content_area.bottomAnchor(),
+                    -(10.0 + NOTICE_LINE_HEIGHT + 6.0)),
             ])
+            self.dynamic["notice_height"] = notice_height
 
             self.dynamic.update(
                 window_header=header,
@@ -5163,32 +5521,36 @@ if APPKIT_AVAILABLE:
 
             # Hero: one calm status group left, the single filled CTA plus
             # conditional recovery actions in a right-aligned column.
-            hero = _card(NSMakeRect(0, 0, width, 144))
+            hero = _card(NSMakeRect(0, 0, width, 156))
             self._register("card", hero)
             phase = self._ink(
                 self._l("overview.phase.ready"),
-                NSMakeRect(16, 114, 420, 14),
+                NSMakeRect(16, 126, 420, 14),
                 size=11, weight="semibold", rounded=True)
             status = self._ink(
                 self._l("overview.status.ready.title"),
-                NSMakeRect(16, 86, 440, 24),
+                NSMakeRect(16, 98, 440, 24),
                 size=17, weight="semibold", rounded=True, truncate=True)
             detail = self._soft(
-                "", NSMakeRect(16, 62, 440, 18), size=13, truncate=True)
+                "", NSMakeRect(16, 76, 440, 18), size=13, truncate=True)
             engine = self._soft(
-                "", NSMakeRect(16, 42, 440, 14), size=11, truncate=True)
+                "", NSMakeRect(16, 58, 440, 14), size=11, truncate=True)
+            # The recovery warning is the most consequential line on Home,
+            # so it wraps to a second line rather than losing its ending at
+            # the window's minimum width. Its frame top stays fixed, so the
+            # one-line case sits exactly where it always did.
             outbox = self._ink(
                 self._l("overview.outbox.empty"),
-                NSMakeRect(16, 16, 536, 18), size=13, truncate=True)
+                NSMakeRect(16, 14, 504, 40), size=13, wrap=True, lines=2)
             outbox.setAutoresizingMask_(NSViewWidthSizable)
             pause = self._primary_button(
                 self._l("overview.action.pause"),
-                NSMakeRect(width - 16 - 120, 92, 120, 36), "pauseChanged:",
+                NSMakeRect(width - 16 - 120, 104, 120, 36), "pauseChanged:",
                 help_text=self._l("overview.action.pause.help"))
             pause.setAutoresizingMask_(NSViewMinXMargin)
             fix = _button(
                 self._l("overview.action.review"),
-                NSMakeRect(width - 16 - 136, 52, 136, 28),
+                NSMakeRect(width - 16 - 136, 62, 136, 28),
                 self, "reviewIssue:",
                 help_text=self._l("overview.action.review.help"))
             fix.setAutoresizingMask_(NSViewMinXMargin)
@@ -5201,7 +5563,7 @@ if APPKIT_AVAILABLE:
             for view in (phase, status, detail, engine, outbox, pause,
                          fix, copy_outbox):
                 hero.addSubview_(view)
-            self._stack(page, hero, below=header, gap=16, height=144)
+            self._stack(page, hero, below=header, gap=16, height=156)
             self.dynamic.update(
                 overview_hero=hero,
                 overview_phase=phase,
@@ -5304,55 +5666,75 @@ if APPKIT_AVAILABLE:
             )
 
             # First-run onboarding: the one intentionally maximal moment.
-            # It overlays the whole page as a sticker-treated poster card.
+            # It overlays the whole page as a sticker-treated poster card —
+            # oversized character on the left, one thing to read and one
+            # thing to press on the right, and the whole route across the
+            # bottom so progress is legible without counting.
             onboarding = _card(
-                NSMakeRect(0, 0, width, 512), treatment="playful")
+                NSMakeRect(0, 0, width, ONBOARDING_HEIGHT),
+                treatment="playful")
             _accessible(
                 onboarding,
                 self._l("overview.accessibility.onboarding.steps"))
-            face_chip = _card(NSMakeRect(48, 232, 180, 180))
-            face_chip.setCornerRadius_(90.0)
+            face_chip = _card(NSMakeRect(40, 196, 208, 208))
+            face_chip.setCornerRadius_(104.0)
             # A hairline reads as an accident at this size; the ring is the
             # only thing carrying the face color on the hero.
-            face_chip.setBorderWidth_(2.5)
+            face_chip.setBorderWidth_(3.0)
             face_chip.setWantsLayer_(True)
             try:
                 face_chip.setFrameCenterRotation_(3.0)
             except Exception:
                 pass
             face_image = NSImageView.alloc().initWithFrame_(
-                NSMakeRect(72, 256, 132, 132))
+                NSMakeRect(72, 228, 144, 144))
             face_image.setImageScaling_(NSImageScaleProportionallyUpOrDown)
             face_image.setEditable_(False)
             onboarding.addSubview_(face_chip)
             onboarding.addSubview_(face_image)
             face_kicker = _label(
                 self._l("onboarding.privacy"),
-                NSMakeRect(40, 176, 196, 40),
+                NSMakeRect(32, 148, 224, 40),
                 size=11, weight="medium", rounded=True, wrap=True,
-                alignment=2)
+                lines=2, alignment=2)
             onboarding.addSubview_(face_kicker)
+            text_x = ONBOARDING_TEXT_X
+            text_width = width - text_x - 36.0
             onboarding_progress = _label(
                 self._l("overview.onboarding.initial_progress"),
-                NSMakeRect(280, 452, 400, 16),
-                size=11, weight="semibold", rounded=True)
+                NSMakeRect(text_x, 404, text_width, 16),
+                size=11, weight="semibold", rounded=True, truncate=True)
             onboarding_progress.setAutoresizingMask_(NSViewWidthSizable)
+            # A real bar makes "2 of 4" something you feel instead of read.
+            progress_track = _card(
+                NSMakeRect(text_x, 388, text_width, 6))
+            progress_track.setCornerRadius_(3.0)
+            progress_track.setBorderWidth_(0.0)
+            progress_track.setAutoresizingMask_(NSViewWidthSizable)
+            progress_fill = _card(NSMakeRect(text_x, 388, 0, 6))
+            progress_fill.setCornerRadius_(3.0)
+            progress_fill.setBorderWidth_(0.0)
+            _accessible(
+                progress_track,
+                self._l("onboarding.accessibility.progress_track"))
+            onboarding.addSubview_(progress_track)
+            onboarding.addSubview_(progress_fill)
             onboarding_title = _label(
                 self._l("onboarding.permissions.title"),
-                NSMakeRect(278, 376, 412, 72),
-                size=28, weight="bold", rounded=True, wrap=True)
+                NSMakeRect(text_x - 2, 294, text_width + 4, 78),
+                size=30, weight="bold", rounded=True, wrap=True, lines=2)
             onboarding_title.setAutoresizingMask_(NSViewWidthSizable)
             onboarding_detail = _label(
-                "", NSMakeRect(280, 300, 400, 68),
-                size=13, color=_SECONDARY, wrap=True)
+                "", NSMakeRect(text_x, 218, text_width, 68),
+                size=13, color=_SECONDARY, wrap=True, lines=4)
             onboarding_detail.setAutoresizingMask_(NSViewWidthSizable)
             onboarding_status = _label(
-                "", NSMakeRect(280, 268, 400, 20),
-                size=13, weight="semibold", rounded=True)
+                "", NSMakeRect(text_x, 190, text_width, 20),
+                size=13, weight="semibold", rounded=True, truncate=True)
             onboarding_status.setAutoresizingMask_(NSViewWidthSizable)
             onboarding_action = self._primary_button(
                 self._l("onboarding.action.open_system_settings"),
-                NSMakeRect(280, 208, 220, 40), "continueSetup:",
+                NSMakeRect(text_x, 134, 240, 40), "continueSetup:",
                 help_text=self._l(
                     "onboarding.action.open_system_settings.help"))
             onboarding_action.setKeyEquivalent_("\r")
@@ -5363,25 +5745,35 @@ if APPKIT_AVAILABLE:
             onboarding.addSubview_(onboarding_action)
             onboarding_steps: list[Any] = []
             onboarding_step_cards: list[Any] = []
+            onboarding_step_icons: list[Any] = []
             step_width = (width - 48.0 - 24.0) / 4.0
             for index, step_key in enumerate((
                     "permissions", "hotkey", "models", "first_dictation")):
                 step_card = _card(NSMakeRect(
-                    24 + index * (step_width + 8.0), 24, step_width, 56))
+                    24 + index * (step_width + 8.0), 28, step_width, 52))
                 step_card.setAutoresizingMask_(
                     NSViewMinXMargin | NSViewWidthSizable | NSViewMaxXMargin)
+                step_icon = NSImageView.alloc().initWithFrame_(
+                    NSMakeRect(12, 24, 18, 18))
+                step_icon.setImageScaling_(
+                    NSImageScaleProportionallyUpOrDown)
+                step_icon.setEditable_(False)
                 step = _label(
                     self._l(f"onboarding.step.{step_key}"),
-                    NSMakeRect(12, 8, step_width - 24, 40),
+                    NSMakeRect(38, 11, step_width - 50, 30),
                     size=11, weight="medium", color=_SECONDARY,
-                    rounded=True, wrap=True)
+                    rounded=True, wrap=True, lines=2)
                 step.setAutoresizingMask_(NSViewWidthSizable)
+                step_card.addSubview_(step_icon)
                 step_card.addSubview_(step)
                 onboarding.addSubview_(step_card)
                 onboarding_steps.append(step)
                 onboarding_step_cards.append(step_card)
+                onboarding_step_icons.append(step_icon)
             onboarding.setTranslatesAutoresizingMaskIntoConstraints_(False)
             page.addSubview_(onboarding)
+            onboarding_height = onboarding.heightAnchor() \
+                .constraintEqualToConstant_(ONBOARDING_HEIGHT)
             NSLayoutConstraint.activateConstraints_([
                 onboarding.topAnchor().constraintEqualToAnchor_(
                     page.topAnchor()),
@@ -5389,21 +5781,25 @@ if APPKIT_AVAILABLE:
                     page.leadingAnchor()),
                 onboarding.trailingAnchor().constraintEqualToAnchor_(
                     page.trailingAnchor()),
-                onboarding.heightAnchor().constraintEqualToConstant_(512),
+                onboarding_height,
             ])
             self.dynamic.update(
                 home_header=header,
                 onboarding_card=onboarding,
+                onboarding_height=onboarding_height,
                 onboarding_face_chip=face_chip,
                 onboarding_face=face_image,
                 onboarding_face_kicker=face_kicker,
                 onboarding_progress=onboarding_progress,
+                onboarding_progress_track=progress_track,
+                onboarding_progress_fill=progress_fill,
                 onboarding_title=onboarding_title,
                 onboarding_detail=onboarding_detail,
                 onboarding_status=onboarding_status,
                 onboarding_action=onboarding_action,
                 onboarding_steps=tuple(onboarding_steps),
                 onboarding_step_cards=tuple(onboarding_step_cards),
+                onboarding_step_icons=tuple(onboarding_step_icons),
             )
 
         @objc.python_method
@@ -5631,7 +6027,7 @@ if APPKIT_AVAILABLE:
             # Grouped model list: Selective Re-listen row on top, then the
             # four local models with tinted readiness pills at the right.
             model_count = 4
-            group_height = 48.0 + 36.0 * model_count
+            group_height = 44.0 + 36.0 * model_count
             models_group = _card(NSMakeRect(0, 0, width, group_height))
             self._register("card", models_group)
             relisten_title = self._ink(
@@ -5655,7 +6051,7 @@ if APPKIT_AVAILABLE:
             models_group.addSubview_(relisten_status)
             models_group.addSubview_(relisten)
             top_separator = _hairline(NSMakeRect(
-                16, group_height - 48, width - 32, 1))
+                16, group_height - 44, width - 32, 1))
             top_separator.setAutoresizingMask_(NSViewWidthSizable)
             self._register("hairline", top_separator)
             models_group.addSubview_(top_separator)
@@ -5686,22 +6082,25 @@ if APPKIT_AVAILABLE:
                     row_view.addSubview_(separator)
                 models_group.addSubview_(row_view)
                 rows.append((row_view, name, detail, status))
-            self._stack(page, models_group, below=header, gap=16,
+            self._stack(page, models_group, below=header, gap=12,
                         height=group_height)
+            # Shadow-advisory and model guidance are trust copy: they wrap
+            # rather than truncate so the whole claim survives the window's
+            # minimum width.
             advisory = self._soft(
                 self._l("models.wallet.unavailable"),
-                NSMakeRect(0, 0, width, 14), size=11, truncate=True,
+                NSMakeRect(0, 0, width, 28), size=11, wrap=True, lines=2,
                 accessibility_label=self._l(
                     "models.accessibility.wallet"))
-            self._stack(page, advisory, below=models_group, gap=4, height=14)
+            self._stack(page, advisory, below=models_group, gap=2, height=28)
             model_guidance = self._soft(
                 self._l("models.guidance"),
                 NSMakeRect(0, 0, width, 14), size=11, truncate=True)
-            self._stack(page, model_guidance, below=advisory, gap=4,
+            self._stack(page, model_guidance, below=advisory, gap=2,
                         height=14)
 
             # System status: one quiet two-column list.
-            status_card = _card(NSMakeRect(0, 0, width, 96))
+            status_card = _card(NSMakeRect(0, 0, width, 88))
             self._register("card", status_card)
             keys = (("diagnostics.service", "diag_service"),
                     ("diagnostics.microphone", "diag_microphone"),
@@ -5712,7 +6111,7 @@ if APPKIT_AVAILABLE:
             column_width = (width - 32.0) / 2.0
             for index, (heading_key, key) in enumerate(keys):
                 x = 16 + (index % 2) * column_width
-                y = 66 - (index // 2) * 28
+                y = 60 - (index // 2) * 26
                 caption = self._soft(
                     self._l(heading_key),
                     NSMakeRect(x, y, 150, 16), size=11)
@@ -5726,8 +6125,8 @@ if APPKIT_AVAILABLE:
                 status_card.addSubview_(caption)
                 status_card.addSubview_(value)
                 self.dynamic[key] = value
-            self._stack(page, status_card, below=model_guidance, gap=16,
-                        height=96)
+            self._stack(page, status_card, below=model_guidance, gap=12,
+                        height=88)
 
             # Toolbar-like action rows with symbols, then honest captions.
             # Widths come from each title's fitted size so nothing truncates
@@ -5750,7 +6149,7 @@ if APPKIT_AVAILABLE:
             verify.setKeyEquivalentModifierMask_(NSEventModifierFlagCommand)
             for view in (open_log, copy_support_snapshot, verify):
                 actions_row.addSubview_(view)
-            self._stack(page, actions_row, below=status_card, gap=16,
+            self._stack(page, actions_row, below=status_card, gap=12,
                         height=28)
 
             secondary_row = NSView.alloc().initWithFrame_(
@@ -5770,7 +6169,7 @@ if APPKIT_AVAILABLE:
                 self._l("diagnostics.action.open_system_settings.help"))
             secondary_row.addSubview_(export_support_bundle)
             secondary_row.addSubview_(open_system_settings)
-            self._stack(page, secondary_row, below=actions_row, gap=8,
+            self._stack(page, secondary_row, below=actions_row, gap=6,
                         height=28)
 
             evidence_row = NSView.alloc().initWithFrame_(
@@ -5794,18 +6193,18 @@ if APPKIT_AVAILABLE:
                 view.setAutoresizingMask_(NSViewMinXMargin)
             for view in (progress, verification, license_notices, source):
                 evidence_row.addSubview_(view)
-            self._stack(page, evidence_row, below=secondary_row, gap=8,
+            self._stack(page, evidence_row, below=secondary_row, gap=6,
                         height=28)
 
             guidance = self._soft(
                 self._l("diagnostics.ready"),
-                NSMakeRect(0, 0, width, 14), size=11, truncate=True)
-            self._stack(page, guidance, below=evidence_row, gap=8,
-                        height=14)
+                NSMakeRect(0, 0, width, 28), size=11, wrap=True, lines=2)
+            self._stack(page, guidance, below=evidence_row, gap=6,
+                        height=28)
             license_line = self._soft(
                 self._l("diagnostics.license"),
                 NSMakeRect(0, 0, width, 14), size=11, truncate=True)
-            self._stack(page, license_line, below=guidance, gap=4, height=14)
+            self._stack(page, license_line, below=guidance, gap=2, height=14)
             self.dynamic.update(
                 model_rows=rows,
                 model_wallet_advisory=advisory,
@@ -6050,8 +6449,13 @@ if APPKIT_AVAILABLE:
                     presentation.action_help)
             except Exception:
                 pass
+            # The character opens its mouth exactly where the copy asks the
+            # person to speak, and again for the celebration.
             self.dynamic["onboarding_face"].setImage_(
-                self._face_image(state.face, talk=presentation.complete))
+                self._face_image(
+                    state.face,
+                    talk=(presentation.complete
+                          or presentation.current_key == "first_dictation")))
             sync_accessibility(
                 self.dynamic["onboarding_face"], face_name,
                 label=self._l(
@@ -6079,8 +6483,10 @@ if APPKIT_AVAILABLE:
                 self.dynamic["onboarding_action"], presentation.status,
                 label=presentation.action_title,
             )
+            self._layout_onboarding()
             self._apply_onboarding_theme(state, presentation)
             self._animate_onboarding_face(presentation)
+            self._animate_onboarding_steps(state)
 
             result = state.last_result
             self.dynamic["result_inspect_button"].setEnabled_(result.available)
@@ -6130,20 +6536,30 @@ if APPKIT_AVAILABLE:
             for pane, view in self.dynamic["settings_panes"].items():
                 view.setHidden_(pane != state.settings_pane)
             settings = state.settings
+            # An empty personalization row is an invitation, not a zero: the
+            # count only earns the line once there is something to count.
             setting_summaries = {
                 "tones": self._l(
                     "settings.personalize.tones.detail",
-                    count=len(settings.app_tones)),
+                    count=len(settings.app_tones))
+                if settings.app_tones else self._l(
+                    "settings.personalize.tones.empty"),
                 "snippets": self._l(
                     "settings.personalize.snippets.detail",
-                    count=len(settings.snippets)),
+                    count=len(settings.snippets))
+                if settings.snippets else self._l(
+                    "settings.personalize.snippets.empty"),
                 "vocabulary": self._l(
                     "settings.personalize.vocabulary.detail",
                     terms=len(settings.manual_vocabulary),
-                    bans=len(settings.banned_vocabulary)),
+                    bans=len(settings.banned_vocabulary))
+                if (settings.manual_vocabulary or settings.banned_vocabulary)
+                else self._l("settings.personalize.vocabulary.empty"),
                 "corrections": self._l(
                     "settings.personalize.corrections.detail",
-                    count=len(settings.corrections)),
+                    count=len(settings.corrections))
+                if settings.corrections else self._l(
+                    "settings.personalize.corrections.empty"),
                 "keywords": self._l(
                     "settings.personalize.keywords.detail"),
                 "modes": self._l(
@@ -6333,6 +6749,7 @@ if APPKIT_AVAILABLE:
                 if state.notice_level == "success"
                 else _theme_color(notice_palette.ink_soft))
             self.dynamic["notice"].setTextColor_(notice_color)
+            self._animate_notice(state)
             self._configure_key_view_loop(state)
 
         @objc.python_method
@@ -7033,6 +7450,16 @@ if APPKIT_AVAILABLE:
             self.view_model.refresh()
             self.render()
 
+        def windowDidResize_(self, _notification: Any) -> None:
+            """Re-flow the first-run poster for the new content width."""
+            if self._onboarding_presentation is None:
+                return
+            if not self._onboarding_presentation.visible:
+                return
+            self._layout_onboarding()
+            self._apply_onboarding_theme(
+                self.view_model.state, self._onboarding_presentation)
+
         def windowWillClose_(self, _notification: Any) -> None:
             if self.timer is not None:
                 self.timer.invalidate()
@@ -7252,9 +7679,25 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                 jelly_probe.layer().animationForKey_(
                     f"whisper-face-press-{axis}") is not None,
                 f"jelly {axis} spring is motion-spec driven")
+        anchor = jelly_probe.layer().anchorPoint()
+        require(
+            abs(anchor.x - 0.5) < 1e-6 and abs(anchor.y - 0.5) < 1e-6,
+            "jelly springs squash around the layer centre")
         require(
             {"press", "release", "wobble", "pop"} <= set(MOTION_SPECS),
             "shared motion specs cover the jelly vocabulary")
+        require(
+            not fade_in(controller.dynamic["notice"], reduced_motion=True),
+            "reduce motion silences the chrome crossfade")
+        require(
+            all(bool(row.trackingAreas()) for row in controller.sidebar_rows),
+            "sidebar rows track pointer hover")
+        require(
+            len(controller.dynamic["onboarding_step_icons"]) == 4,
+            "onboarding step chips carry progress markers")
+        require(
+            bool(controller.dynamic["onboarding_progress_fill"].isHidden()),
+            "onboarding progress bar starts empty")
         require(
             str(controller.dynamic["result_summary"].stringValue()) ==
             localized_string("results.empty.title"),
