@@ -26,3 +26,5 @@ __pycache__/
 .build/
 # Local ASR corpora and generated bakeoff hypotheses are never repository data.
 benchmarks/asr-local/
+# Local design-linter cache.
+.impeccable/

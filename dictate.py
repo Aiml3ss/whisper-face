@@ -315,6 +315,15 @@ from whisper_face_theme import (  # noqa: E402
     jelly_face_scale,
     palette_for_appearance,
 )
+from whisper_face_characters import (  # noqa: E402
+    Arc,
+    Curve,
+    Ellipse,
+    Polygon,
+    RoundedRect,
+    Stroke,
+    character_ops,
+)
 from parrot_core import (  # noqa: E402
     CleanupEdit,
     Recognition,
@@ -2095,69 +2104,9 @@ def _add_jelly_animation(layer, motion_name: str) -> None:
             animation, f"whisper-face-{motion_name}-{axis}")
 
 
-# Design tokens from the Voice Listening handoff
-EMERALD = FACE_CHIP_COLORS["parrot"]     # #34d399
-DEEP = (0.016, 0.471, 0.341)            # #047857
-BEAK_UP = (0.984, 0.749, 0.141)         # #fbbf24
-BEAK_LO = (0.941, 0.659, 0.118)         # #f0a81e
-DARK_EYE = (0.043, 0.231, 0.196)        # #0b3b32
-MOUTH = (0.024, 0.145, 0.122)           # #06251f
-MINT = FACE_CHIP_COLORS["owl"]           # #5eead4
-CATCH = (0.918, 1.000, 0.965)           # #eafff6
-# Every non-parrot, non-owl face renders through the shared front-facing
-# companion template. A style names three fills plus optional feature flags:
-#   ears     "pointed" (canine/feline) or "round" (bear family); default pointed
-#   whiskers draw the three-per-side cat whiskers
-#   patches  dark eye patches (panda)
-#   stripes  forehead stripes (tiger)
-COMPANION_STYLES = {
-    "fox": {
-        "head": FACE_CHIP_COLORS["fox"],
-        "deep": (0.706, 0.231, 0.075),
-        "muzzle": (1.000, 0.878, 0.702),
-    },
-    "cat": {
-        "head": FACE_CHIP_COLORS["cat"],
-        "deep": (0.188, 0.349, 0.573),
-        "muzzle": (0.824, 0.914, 1.000),
-        "whiskers": True,
-    },
-    "bear": {
-        "head": FACE_CHIP_COLORS["bear"],
-        "deep": (0.373, 0.220, 0.133),
-        "muzzle": (0.890, 0.710, 0.514),
-        "ears": "round",
-    },
-    "dog": {
-        "head": FACE_CHIP_COLORS["dog"],
-        "deep": (0.573, 0.396, 0.196),
-        "muzzle": (0.988, 0.925, 0.816),
-    },
-    "wolf": {
-        "head": FACE_CHIP_COLORS["wolf"],
-        "deep": (0.310, 0.345, 0.400),
-        "muzzle": (0.831, 0.859, 0.902),
-    },
-    "pig": {
-        "head": FACE_CHIP_COLORS["pig"],
-        "deep": (0.804, 0.435, 0.533),
-        "muzzle": (1.000, 0.859, 0.878),
-        "ears": "round",
-    },
-    "panda": {
-        "head": FACE_CHIP_COLORS["panda"],
-        "deep": (0.129, 0.145, 0.161),
-        "muzzle": (1.000, 1.000, 1.000),
-        "ears": "round",
-        "patches": True,
-    },
-    "tiger": {
-        "head": FACE_CHIP_COLORS["tiger"],
-        "deep": (0.816, 0.404, 0.098),
-        "muzzle": (1.000, 0.910, 0.784),
-        "stripes": True,
-    },
-}
+# Character geometry lives in whisper_face_characters so the HUD, the app
+# window, and the site all draw the same ten characters from one spec. This
+# module only replays the ops through Core Graphics.
 
 # Live presentation evidence. Rolling-ASR chunks add compiler-approved stable
 # text and confidence; WaveView only reads it on the main thread's display tick.
@@ -2402,217 +2351,61 @@ class WaveView(NSView):
         self.beak = max(0.0, self.beak + (target - self.beak) * 0.6)
         return min(1.0, self.beak / BEAK_MAX_DEG)
 
-    def _draw_whispers(self, lv):
-        ga = 0.35 + lv * 0.6
-        for (x1, y1, x2, y2, a) in ((212, 62, 232, 52, 1.0),
-                                    (224, 88, 246, 84, 0.6)):
-            puff = NSBezierPath.bezierPath()
-            puff.setLineWidth_(12.0)
-            puff.setLineCapStyle_(1)
-            puff.moveToPoint_((x1, y1))
-            puff.lineToPoint_((x2, y2))
-            _rgb(*MINT, ga * a)
-            puff.stroke()
-        _rgb(*MINT, ga * 0.55)
-        NSBezierPath.bezierPathWithOvalInRect_(
-            NSMakeRect(232, 32, 16, 16)).fill()
+    def _replay_ops(self, ops):
+        """Draw a shared character op list through Core Graphics."""
+        for op in ops:
+            if isinstance(op, Ellipse):
+                _rgb(*op.color, op.alpha)
+                NSBezierPath.bezierPathWithOvalInRect_(
+                    NSMakeRect(op.x, op.y, op.w, op.h)).fill()
+            elif isinstance(op, Polygon):
+                _rgb(*op.color, op.alpha)
+                _poly(op.points).fill()
+            elif isinstance(op, Stroke):
+                _rgb(*op.color, op.alpha)
+                path = NSBezierPath.bezierPath()
+                path.setLineWidth_(op.width)
+                path.setLineCapStyle_(1)
+                path.setLineJoinStyle_(1)
+                path.moveToPoint_(op.points[0])
+                for point in op.points[1:]:
+                    path.lineToPoint_(point)
+                path.stroke()
+            elif isinstance(op, RoundedRect):
+                _rgb(*op.color, op.alpha)
+                NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                    NSMakeRect(op.x, op.y, op.w, op.h),
+                    op.radius, min(op.radius, op.h / 2.0)).fill()
+            elif isinstance(op, Arc):
+                _rgb(*op.color, op.alpha)
+                path = NSBezierPath.bezierPath()
+                path.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_(
+                    (op.cx, op.cy), op.radius,
+                    op.start_degrees, op.end_degrees)
+                path.setLineWidth_(op.width)
+                path.setLineCapStyle_(1)
+                path.stroke()
+            elif isinstance(op, Curve):
+                _rgb(*op.color, op.alpha)
+                path = NSBezierPath.bezierPath()
+                path.moveToPoint_(op.start)
+                for control_one, control_two, end in op.segments:
+                    path.curveToPoint_controlPoint1_controlPoint2_(
+                        end, control_one, control_two)
+                path.closePath()
+                path.fill()
+
+    def _draw_character(self, face, lv):
+        self._replay_ops(character_ops(face, self._update_mouth(), lv))
 
     def drawParrot_(self, lv):
-        # The parrot now faces straight ahead like every other character, so
-        # the whole set shares one front-on axis. It keeps its signature: an
-        # emerald head, a gold crest, and a hooked beak whose lower mandible
-        # drops with the microphone level.
-        mouth = self._update_mouth()
-
-        # crest feathers poke up from behind the head
-        _rgb(*BEAK_UP)
-        _poly([(120, 60), (136, 60), (128, 22)]).fill()
-        _rgb(*DEEP)
-        _poly([(104, 68), (120, 60), (112, 30)]).fill()
-        _poly([(136, 60), (152, 68), (144, 30)]).fill()
-
-        # head
-        _rgb(*EMERALD)
-        NSBezierPath.bezierPathWithOvalInRect_(
-            NSMakeRect(34, 55, 188, 172)).fill()
-
-        # eyes + catch-lights, on the shared front-facing layout
-        _rgb(*DARK_EYE)
-        for x in (82, 156):
-            NSBezierPath.bezierPathWithOvalInRect_(
-                NSMakeRect(x, 96, 19, 23)).fill()
-        _rgb(*CATCH)
-        for x in (92, 166):
-            NSBezierPath.bezierPathWithOvalInRect_(
-                NSMakeRect(x, 99, 6, 7)).fill()
-
-        # mouth cavity, revealed as the beak opens
-        _rgb(*MOUTH)
-        _poly([(114, 150), (142, 150), (128, 170 + mouth * 16)]).fill()
-
-        # upper mandible — a static, centered hook
-        up = NSBezierPath.bezierPath()
-        up.moveToPoint_((106, 148))
-        up.curveToPoint_controlPoint1_controlPoint2_(
-            (128, 188), (110, 178), (120, 188))
-        up.curveToPoint_controlPoint1_controlPoint2_(
-            (150, 148), (136, 188), (146, 178))
-        up.closePath()
-        _rgb(*BEAK_UP)
-        up.fill()
-
-        # lower mandible tucks under and drops with the mic level
-        lo = NSBezierPath.bezierPath()
-        lo.moveToPoint_((116, 168))
-        lo.curveToPoint_controlPoint1_controlPoint2_(
-            (140, 168), (122, 172), (134, 172))
-        lo.curveToPoint_controlPoint1_controlPoint2_(
-            (116, 168), (132, 184), (120, 184))
-        lo.closePath()
-        shift = NSAffineTransform.transform()
-        shift.translateXBy_yBy_(0, mouth * 12)
-        lo.transformUsingAffineTransform_(shift)
-        _rgb(*BEAK_LO)
-        lo.fill()
-
-        self._draw_whispers(lv)
+        self._draw_character("parrot", lv)
 
     def _draw_companion(self, face, lv):
-        style = COMPANION_STYLES.get(face, COMPANION_STYLES["fox"])
-        mouth = self._update_mouth()
-
-        # Ears sit behind the shared rounded head. Pointed ears cover the
-        # canine and feline characters; the bear family uses round ears.
-        _rgb(*style["deep"])
-        if style.get("ears") == "round":
-            NSBezierPath.bezierPathWithOvalInRect_(
-                NSMakeRect(40, 42, 58, 58)).fill()
-            NSBezierPath.bezierPathWithOvalInRect_(
-                NSMakeRect(158, 42, 58, 58)).fill()
-        else:
-            _poly([(42, 96), (55, 28), (105, 78)]).fill()
-            _poly([(151, 78), (201, 28), (214, 96)]).fill()
-            _rgb(*style["muzzle"])
-            _poly([(58, 78), (63, 48), (88, 75)]).fill()
-            _poly([(168, 75), (193, 48), (198, 78)]).fill()
-
-        _rgb(*style["head"])
-        NSBezierPath.bezierPathWithOvalInRect_(
-            NSMakeRect(34, 55, 188, 172)).fill()
-
-        # Cheeks and muzzle keep the same soft, toy-like visual language as
-        # the original parrot while leaving a clean cavity for lip sync.
-        _rgb(*style["muzzle"])
-        NSBezierPath.bezierPathWithOvalInRect_(
-            NSMakeRect(61, 123, 78, 68)).fill()
-        NSBezierPath.bezierPathWithOvalInRect_(
-            NSMakeRect(117, 123, 78, 68)).fill()
-
-        # Dark eye patches (panda) sit behind the eyes.
-        if style.get("patches"):
-            _rgb(*style["deep"])
-            for x in (76, 150):
-                NSBezierPath.bezierPathWithOvalInRect_(
-                    NSMakeRect(x, 90, 31, 36)).fill()
-
-        _rgb(*DARK_EYE)
-        for x in (82, 156):
-            NSBezierPath.bezierPathWithOvalInRect_(
-                NSMakeRect(x, 96, 19, 23)).fill()
-        _rgb(*CATCH)
-        for x in (92, 166):
-            NSBezierPath.bezierPathWithOvalInRect_(
-                NSMakeRect(x, 99, 6, 7)).fill()
-
-        # Forehead stripes (tiger) read over the head above the eyes.
-        if style.get("stripes"):
-            _rgb(*style["deep"], 0.85)
-            for x0, y0, x1, y1 in ((128, 60, 128, 90),
-                                   (104, 66, 112, 92),
-                                   (152, 66, 144, 92)):
-                stripe = NSBezierPath.bezierPath()
-                stripe.setLineWidth_(6)
-                stripe.setLineCapStyle_(1)
-                stripe.moveToPoint_((x0, y0))
-                stripe.lineToPoint_((x1, y1))
-                stripe.stroke()
-
-        _rgb(*style["deep"])
-        _poly([(116, 137), (140, 137), (128, 150)]).fill()
-        cavity_h = 5.0 + mouth * 28.0
-        _rgb(*MOUTH)
-        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            NSMakeRect(111, 153, 34, cavity_h), 15, 15).fill()
-        if mouth > 0.32:
-            _rgb(0.941, 0.447, 0.525)
-            NSBezierPath.bezierPathWithOvalInRect_(
-                NSMakeRect(119, 160 + mouth * 10, 18, 9)).fill()
-
-        if style.get("whiskers"):
-            _rgb(*style["deep"], 0.75)
-            for y, dy in ((149, -5), (158, 0), (167, 5)):
-                left = NSBezierPath.bezierPath()
-                left.setLineWidth_(3)
-                left.moveToPoint_((91, y))
-                left.lineToPoint_((39, y + dy))
-                left.stroke()
-                right = NSBezierPath.bezierPath()
-                right.setLineWidth_(3)
-                right.moveToPoint_((165, y))
-                right.lineToPoint_((217, y + dy))
-                right.stroke()
-
-        self._draw_whispers(lv)
+        self._draw_character(face, lv)
 
     def drawOwl_(self, lv):
-        mouth = self._update_mouth()
-        purple = FACE_CHIP_COLORS["owl"]
-        deep = (0.255, 0.200, 0.506)
-        cream = (0.890, 0.855, 1.000)
-
-        _rgb(*deep)
-        _poly([(39, 104), (62, 31), (104, 79)]).fill()
-        _poly([(152, 79), (194, 31), (217, 104)]).fill()
-        _rgb(*purple)
-        NSBezierPath.bezierPathWithOvalInRect_(
-            NSMakeRect(32, 52, 192, 180)).fill()
-
-        _rgb(*cream)
-        for x in (57, 129):
-            NSBezierPath.bezierPathWithOvalInRect_(
-                NSMakeRect(x, 88, 70, 70)).fill()
-        _rgb(*DARK_EYE)
-        for x in (82, 154):
-            NSBezierPath.bezierPathWithOvalInRect_(
-                NSMakeRect(x, 108, 24, 28)).fill()
-        _rgb(*CATCH)
-        for x in (94, 166):
-            NSBezierPath.bezierPathWithOvalInRect_(
-                NSMakeRect(x, 111, 7, 8)).fill()
-
-        _rgb(*MOUTH)
-        _poly([(111, 151), (145, 151),
-               (128, 167 + mouth * 16)]).fill()
-        _rgb(*BEAK_UP)
-        _poly([(105, 145), (151, 145), (128, 163)]).fill()
-        _rgb(*BEAK_LO)
-        lower = _poly([(111, 164), (145, 164), (128, 178)])
-        shift = NSAffineTransform.transform()
-        shift.translateXBy_yBy_(0, mouth * 13)
-        lower.transformUsingAffineTransform_(shift)
-        lower.fill()
-
-        # Chest crescent gives the owl the same single-swoosh signature as
-        # the parrot's wing without making the characters visually identical.
-        chest = NSBezierPath.bezierPath()
-        chest.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_(
-            (128, 165), 45, 20, 160)
-        chest.setLineWidth_(13)
-        chest.setLineCapStyle_(1)
-        _rgb(*deep, 0.8)
-        chest.stroke()
-        self._draw_whispers(lv)
-
+        self._draw_character("owl", lv)
 
 class HUD(NSObject):
     """Floating Whisper Face card. Main-thread only."""

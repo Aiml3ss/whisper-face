@@ -3,6 +3,8 @@
 // "MASK" is a placeholder swapped for a unique id per rendered instance so
 // multiple faces on one page never collide on the same <mask> id.
 
+import { FACE_ART, FACE_VIEWBOX } from './face-art';
+
 const INK = '#0B0F0D';
 
 export type Animal =
@@ -117,7 +119,19 @@ export function faceSVG(animal: Animal, state: 'idle' | 'talk', uid: string, cls
   return `<svg class="${cls}" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">${inner}</svg>`;
 }
 
-// Both frames stacked (idle + talk) for a flap-able face.
+// Both silhouette frames stacked (idle + talk) for a flap-able face.
 export function framePair(animal: Animal, uid: string): string {
   return faceSVG(animal, 'idle', uid, 'idle') + faceSVG(animal, 'talk', uid, 'talk');
+}
+
+// The colored character, for anywhere the face is big enough to have a face.
+// The silhouettes above stay for menu-bar-sized marks, where they are honest
+// about what macOS actually renders up top.
+export function characterSVG(animal: Animal, state: 'idle' | 'talk', cls = ''): string {
+  return `<svg class="${cls}" viewBox="${FACE_VIEWBOX}" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">${FACE_ART[animal][state]}</svg>`;
+}
+
+// Both colored frames stacked, same flap contract as framePair.
+export function characterPair(animal: Animal): string {
+  return characterSVG(animal, 'idle', 'idle') + characterSVG(animal, 'talk', 'talk');
 }

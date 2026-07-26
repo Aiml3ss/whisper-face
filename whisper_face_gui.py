@@ -4543,10 +4543,15 @@ if APPKIT_AVAILABLE:
 
         @objc.python_method
         def _face_image(self, face: str, *, talk: bool) -> Any:
+            # The colored character, not the menu-bar silhouette. A template
+            # glyph is drawn to survive 18 points; this window shows the face
+            # at 34 and the onboarding hero at 146, where a flat silhouette is
+            # just a blob.
             key = (face, talk)
             if key not in self._face_images:
-                path = Path(__file__).resolve().parent / "icons" / "faces" / (
-                    f"{face}-{'talk' if talk else 'idle'}.svg")
+                path = (Path(__file__).resolve().parent / "icons" / "faces"
+                        / "color"
+                        / f"{face}-{'talk' if talk else 'idle'}.svg")
                 image = NSImage.alloc().initWithContentsOfFile_(str(path))
                 if image is not None:
                     image.setTemplate_(False)
@@ -4563,7 +4568,9 @@ if APPKIT_AVAILABLE:
             card.setFillColor_(_theme_color(palette.bg))
             card.setBorderColor_(_theme_color(palette.line, 0.22))
             chip = self.dynamic["onboarding_face_chip"]
-            chip.setFillColor_(_theme_color(FACE_CHIP_COLORS[state.face]))
+            chip.setFillColor_(_theme_color(palette.surface))
+            chip.setBorderColor_(
+                _theme_color(FACE_CHIP_COLORS[state.face], 0.85))
             self.dynamic["onboarding_progress"].setTextColor_(
                 _theme_color(palette.brand))
             self.dynamic["onboarding_title"].setTextColor_(
@@ -4652,8 +4659,15 @@ if APPKIT_AVAILABLE:
                 _theme_color(palette.surface))
             self.dynamic["window_header"].setBorderColor_(
                 _theme_color(palette.line))
-            self.dynamic["window_face_chip"].setFillColor_(
-                _theme_color(FACE_CHIP_COLORS[state.face]))
+            # The chip used to carry the face color because the face on top
+            # was a black silhouette. The character is colored now, so the
+            # color moves onto the character and the chip becomes a quiet
+            # container with a face-tinted ring. Tinting the fill instead
+            # muddies every warm face against the dark panel.
+            chip = self.dynamic["window_face_chip"]
+            chip.setFillColor_(_theme_color(palette.surface))
+            chip.setBorderColor_(
+                _theme_color(FACE_CHIP_COLORS[state.face], 0.85))
             self.dynamic["window_title"].setTextColor_(
                 _theme_color(palette.ink))
             self.dynamic["window_subtitle"].setTextColor_(
@@ -4896,6 +4910,9 @@ if APPKIT_AVAILABLE:
                 self._l("overview.accessibility.onboarding.steps"))
             face_chip = _card(NSMakeRect(28, 138, 196, 196))
             face_chip.setCornerRadius_(58.0)
+            # A hairline reads as an accident at this size; the ring is the
+            # only thing carrying the face color on the hero.
+            face_chip.setBorderWidth_(2.5)
             face_chip.setWantsLayer_(True)
             face_image = NSImageView.alloc().initWithFrame_(
                 NSMakeRect(53, 163, 146, 146))
