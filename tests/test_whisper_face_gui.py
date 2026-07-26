@@ -28,6 +28,7 @@ from whisper_face_gui import (
     STRING_CATALOGS,
     SUPPORTED_LOCALES,
     WhisperFaceViewModel,
+    correction_review_text,
     create_gui,
     localized_string,
     native_appkit_smoke_contract,
@@ -335,7 +336,14 @@ class SnapshotTests(unittest.TestCase):
             "banned_vocabulary": "not a list",
             "corrections": [
                 {"key": "gwen", "source": "Gwen", "target": "Qwen",
-                 "count": "3", "kind": "correction"},
+                 "count": "3", "kind": "correction",
+                 "global_decision": "active",
+                 "app_scopes": [{
+                     "bundle": "com.example.mail",
+                     "name": "Mail",
+                     "count": 2,
+                     "decision": "active",
+                 }]},
                 {"key": "bad", "source": "", "target": "ignored"},
             ],
         })
@@ -346,6 +354,44 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(settings.manual_vocabulary, ("Qwen", "Whisper Face"))
         self.assertEqual(settings.banned_vocabulary, ())
         self.assertEqual(settings.corrections[0].count, 3)
+        self.assertEqual(settings.corrections[0].global_decision, "active")
+        self.assertEqual(settings.corrections[0].app_scopes[0].name, "Mail")
+
+    def test_correction_review_explains_scope_reason_and_local_storage(self):
+        active = normalize_settings({"corrections": [{
+            "key": "gwen",
+            "source": "Gwen",
+            "target": "Qwen",
+            "count": 2,
+            "kind": "correction",
+            "global_decision": "learning",
+            "app_scopes": [{
+                "bundle": "com.example.mail",
+                "name": "Mail",
+                "count": 2,
+                "decision": "active",
+            }],
+        }]}).corrections[0]
+
+        review = correction_review_text(active)
+
+        self.assertIn("Applies: Whole-word matches in Mail.", review)
+        self.assertIn("passed the local safety checks in Mail", review)
+        self.assertIn("Observed in: Mail 2×.", review)
+        self.assertIn("never audio or surrounding transcript", review)
+
+        held = normalize_settings({"corrections": [{
+            "key": "gwen",
+            "source": "Gwen",
+            "target": "Qwen",
+            "count": 3,
+            "kind": "correction",
+            "global_decision": "held_back",
+        }]}).corrections[0]
+        self.assertIn(
+            "Held back because the local correction cases disagree",
+            correction_review_text(held),
+        )
 
     def test_localization_catalog_formats_and_falls_back_to_english(self):
         self.assertEqual(SUPPORTED_LOCALES, ("en",))

@@ -512,6 +512,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.action.add": "Add",
         "settings.action.delete": "Delete",
         "settings.action.forget": "Forget",
+        "settings.action.forget_mapping": "Forget This Mapping",
+        "settings.action.review": "Review",
         "settings.action.save": "Save",
         "settings.action.cancel": "Cancel",
         "settings.action.diagnostics": "Open Diagnostics",
@@ -546,10 +548,22 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.dialog.vocabulary.bans.help": "Enter words that Whisper Face must not learn, one per line.",
         "settings.dialog.delete.title": "Delete snippet?",
         "settings.dialog.delete.message": "This removes “{name}” from this Mac.",
-        "settings.dialog.forget.title": "Forget learned correction?",
-        "settings.dialog.forget.message": "Whisper Face will stop applying “{source} → {target}”.",
         "settings.dialog.correction.chooser.label": "Learned correction",
-        "settings.dialog.correction.chooser.help": "Choose a learned correction to inspect and forget.",
+        "settings.dialog.correction.chooser.help": "Choose a learned correction to review.",
+        "settings.dialog.correction.chooser.message": "Choose a mapping to see what was learned, where it applies, and why.",
+        "settings.dialog.correction.scope.global": "Applies: Whole-word matches in every app.",
+        "settings.dialog.correction.scope.apps": "Applies: Whole-word matches in {apps}.",
+        "settings.dialog.correction.scope.inactive": "Applies: Not active yet.",
+        "settings.dialog.correction.scope.snippet": "Applies: This saved snippet now uses the replacement shown above.",
+        "settings.dialog.correction.why.global": "Why: {count} exact corrections passed the local safety checks.",
+        "settings.dialog.correction.why.apps": "Why: Repeated corrections passed the local safety checks in {apps}.",
+        "settings.dialog.correction.why.held": "Why: Held back because the local correction cases disagree.",
+        "settings.dialog.correction.why.learning": "Why: Still learning. Three matching corrections activate everywhere; two in one app activate there.",
+        "settings.dialog.correction.why.snippet": "Why: You explicitly edited this snippet {count} time(s).",
+        "settings.dialog.correction.observed": "Observed in: {apps}.",
+        "settings.dialog.correction.observed.none": "Observed in: App information unavailable.",
+        "settings.dialog.correction.privacy": "Stored locally: the corrected words, app scope, and counts only—never audio or surrounding transcript.",
+        "settings.dialog.correction.privacy.snippet": "Stored locally: the snippet name, replacement, and edit count.",
         "settings.dialog.keywords.title": "Pronunciation keywords",
         "settings.dialog.keywords.message": "These candidates come only from exact corrections you made. They do not affect recognition yet.",
         "settings.dialog.keywords.empty": "No correction-backed keyword candidates yet.",
@@ -1208,12 +1222,22 @@ class SnippetSetting:
 
 
 @dataclass(frozen=True)
+class CorrectionScopeSetting:
+    bundle: str
+    name: str
+    count: int = 0
+    decision: str = "learning"
+
+
+@dataclass(frozen=True)
 class CorrectionSetting:
     key: str
     source: str
     target: str
     count: int = 0
     kind: str = "correction"
+    global_decision: str = "learning"
+    app_scopes: tuple[CorrectionScopeSetting, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -2063,12 +2087,43 @@ def normalize_settings(snapshot: Mapping[str, Any] | None) -> UnifiedSettings:
             if (not key or not original or not replacement
                     or kind not in {"correction", "snippet"}):
                 continue
+            default_decision = "saved" if kind == "snippet" else "learning"
+            global_decision = str(
+                item.get("global_decision", default_decision)
+            ).strip().casefold()
+            if global_decision not in {
+                    "active", "held_back", "learning", "saved"}:
+                global_decision = default_decision
+            app_scopes: list[CorrectionScopeSetting] = []
+            raw_scopes = item.get("app_scopes")
+            if isinstance(raw_scopes, Sequence) and not isinstance(
+                    raw_scopes, (str, bytes)):
+                for scope in raw_scopes[:100]:
+                    if not isinstance(scope, Mapping):
+                        continue
+                    bundle = _clean_text(scope.get("bundle"), "")
+                    name = _clean_text(scope.get("name"), bundle)
+                    decision = str(
+                        scope.get("decision", "learning")
+                    ).strip().casefold()
+                    if (not bundle or len(bundle) > 255
+                            or decision not in {
+                                "active", "held_back", "learning"}):
+                        continue
+                    app_scopes.append(CorrectionScopeSetting(
+                        bundle=bundle,
+                        name=name,
+                        count=_nonnegative_int(scope.get("count")),
+                        decision=decision,
+                    ))
             corrections.append(CorrectionSetting(
                 key=key,
                 source=original,
                 target=replacement,
                 count=_nonnegative_int(item.get("count")),
                 kind=kind,
+                global_decision=global_decision,
+                app_scopes=tuple(app_scopes),
             ))
     return UnifiedSettings(
         app_tones=tuple(tones),
@@ -2077,6 +2132,81 @@ def normalize_settings(snapshot: Mapping[str, Any] | None) -> UnifiedSettings:
         banned_vocabulary=_text_items(source.get("banned_vocabulary")),
         corrections=tuple(corrections),
     )
+
+
+def correction_review_text(
+    correction: CorrectionSetting,
+    *,
+    locale: str = "en",
+) -> str:
+    """Explain one local learned mapping without exposing correction cases."""
+
+    if correction.kind == "snippet":
+        return "\n".join((
+            localized_string(
+                "settings.dialog.correction.scope.snippet", locale=locale),
+            localized_string(
+                "settings.dialog.correction.why.snippet",
+                locale=locale,
+                count=correction.count,
+            ),
+            localized_string(
+                "settings.dialog.correction.privacy.snippet", locale=locale),
+        ))
+
+    active_apps = [
+        scope.name for scope in correction.app_scopes
+        if scope.decision == "active"
+    ]
+    held_back = (
+        correction.global_decision == "held_back"
+        or any(scope.decision == "held_back"
+               for scope in correction.app_scopes)
+    )
+    if correction.global_decision == "active":
+        scope_line = localized_string(
+            "settings.dialog.correction.scope.global", locale=locale)
+        why_line = localized_string(
+            "settings.dialog.correction.why.global",
+            locale=locale,
+            count=correction.count,
+        )
+    elif active_apps:
+        app_names = ", ".join(active_apps)
+        scope_line = localized_string(
+            "settings.dialog.correction.scope.apps",
+            locale=locale,
+            apps=app_names,
+        )
+        why_line = localized_string(
+            "settings.dialog.correction.why.apps",
+            locale=locale,
+            apps=app_names,
+        )
+    else:
+        scope_line = localized_string(
+            "settings.dialog.correction.scope.inactive", locale=locale)
+        why_line = localized_string(
+            "settings.dialog.correction.why.held"
+            if held_back else "settings.dialog.correction.why.learning",
+            locale=locale,
+        )
+
+    observations = ", ".join(
+        f"{scope.name} {scope.count}×" for scope in correction.app_scopes)
+    observed_line = localized_string(
+        "settings.dialog.correction.observed"
+        if observations else "settings.dialog.correction.observed.none",
+        locale=locale,
+        **({"apps": observations} if observations else {}),
+    )
+    return "\n".join((
+        scope_line,
+        why_line,
+        observed_line,
+        localized_string(
+            "settings.dialog.correction.privacy", locale=locale),
+    ))
 
 
 def normalize_acoustic_keyword_inspection(
@@ -4583,7 +4713,7 @@ if APPKIT_AVAILABLE:
                 ("tones", "settings.personalize.tones", "editTone:"),
                 ("snippets", "settings.personalize.snippets", "editSnippets:"),
                 ("vocabulary", "settings.personalize.vocabulary", "editVocabulary:"),
-                ("corrections", "settings.personalize.corrections", "forgetCorrection:"),
+                ("corrections", "settings.personalize.corrections", "reviewCorrections:"),
                 ("keywords", "settings.personalize.keywords", "inspectKeywords:"),
             )
             for index, (key, title_key, selector) in enumerate(rows):
@@ -4595,7 +4725,7 @@ if APPKIT_AVAILABLE:
                 detail = _label("", NSMakeRect(18, 4, 550, 17),
                                 size=10, color=_SECONDARY)
                 action_key = (
-                    "settings.action.forget" if key == "corrections" else
+                    "settings.action.review" if key == "corrections" else
                     "settings.action.inspect" if key == "keywords" else
                     "settings.action.edit")
                 help_key = (
@@ -5665,13 +5795,15 @@ if APPKIT_AVAILABLE:
                     str(ban_editor.string()).splitlines())
                 self.render()
 
-        def forgetCorrection_(self, _sender: Any) -> None:
+        def reviewCorrections_(self, _sender: Any) -> None:
             corrections = self.view_model.state.settings.corrections
             if not corrections:
                 return
             alert = NSAlert.alloc().init()
             alert.setMessageText_(self._l(
                 "settings.personalize.corrections"))
+            alert.setInformativeText_(self._l(
+                "settings.dialog.correction.chooser.message"))
             chooser = NSPopUpButton.alloc().initWithFrame_pullsDown_(
                 NSMakeRect(0, 0, 500, 28), False)
             chooser.addItemsWithTitles_([
@@ -5684,17 +5816,20 @@ if APPKIT_AVAILABLE:
                 self._l(
                     "settings.dialog.correction.chooser.help"))
             alert.setAccessoryView_(chooser)
-            alert.addButtonWithTitle_(self._l("settings.action.forget"))
-            alert.addButtonWithTitle_(self._l("settings.action.cancel"))
+            alert.addButtonWithTitle_(self._l("settings.action.review"))
+            alert.addButtonWithTitle_(self._l("settings.action.done"))
             if alert.runModal() != 1000:
                 return
             selected = corrections[chooser.indexOfSelectedItem()]
-            if self._confirm(
-                    self._l("settings.dialog.forget.title"),
-                    self._l("settings.dialog.forget.message",
-                                     source=selected.source,
-                                     target=selected.target),
-                    self._l("settings.action.forget")):
+            review = NSAlert.alloc().init()
+            review.setMessageText_(
+                f"{selected.source} → {selected.target}")
+            review.setInformativeText_(correction_review_text(
+                selected, locale=self.locale))
+            review.addButtonWithTitle_(
+                self._l("settings.action.forget_mapping"))
+            review.addButtonWithTitle_(self._l("settings.action.done"))
+            if review.runModal() == 1000:
                 self.view_model.forget_learned(selected.kind, selected.key)
                 self.render()
 
@@ -7260,6 +7395,7 @@ __all__ = [
     "AcousticKeywordCandidate",
     "AcousticKeywordInspection",
     "AppToneSetting",
+    "CorrectionScopeSetting",
     "CorrectionSetting",
     "DROP_TARGET_MAX_PHRASE_CHARS",
     "DropTargetPreview",
@@ -7293,6 +7429,7 @@ __all__ = [
     "VoiceDraftCopyReceipt",
     "WhisperFaceGUI",
     "WhisperFaceViewModel",
+    "correction_review_text",
     "create_gui",
     "localized_string",
     "native_appkit_smoke_contract",
