@@ -68,6 +68,10 @@ RECEIPT_REASONS = frozenset(reason.value for reason in ReceiptReason)
 # utterance whose insertion never resolved, which has no outcome bucket.
 COMPATIBILITY_REASON_BY_RECEIPT_REASON = {
     ReceiptReason.COMMIT_VERIFIED.value: "success",
+    # Delivery proven where only leading/trailing whitespace differed. For
+    # compatibility purposes that is a success -- every character arrived in
+    # order -- while the receipt keeps its own distinct reason.
+    ReceiptReason.COMMIT_VERIFIED_EDGE_WHITESPACE.value: "success",
     ReceiptReason.FOCUS_DRIFT.value: "destination-drift",
     ReceiptReason.SELECTION_DRIFT.value: "destination-drift",
     ReceiptReason.SURROUNDING_TEXT_DRIFT.value: "destination-drift",

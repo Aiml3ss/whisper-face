@@ -25,6 +25,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from unittest import mock
 from dataclasses import dataclass
@@ -6759,6 +6760,65 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
             "load_delayed_cleanup_activation()",
             ast.get_source_segment(source, main),
         )
+
+
+class ReadbackEdgeWhitespaceTests(unittest.TestCase):
+    """A trimmed edge newline is proven delivery, not a conflict."""
+
+    def _namespace(self):
+        import re
+        import unicodedata
+        from insertion_integrity import ReadbackResult
+        return load_definitions(
+            "insertion_readback", "classify_readback_conflict",
+            extra={"ReadbackResult": ReadbackResult, "re": re,
+                   "unicodedata": unicodedata},
+        )
+
+    @staticmethod
+    def _snapshot():
+        return types.SimpleNamespace(
+            text="", selection=(0, 0), element=object())
+
+    def _run(self, inserted, observed):
+        ns = self._namespace()
+        return ns["insertion_readback"](
+            self._snapshot(), inserted, timeout=0.0,
+            reader=lambda _element: observed,
+            clock=lambda: 0.0, sleeper=lambda _s: None)
+
+    def test_trailing_newline_difference_is_verified(self):
+        result = self._run("hello there", "hello there\n")
+        self.assertEqual(result.state.value, "verified")
+        self.assertEqual(result.reason.value,
+                         "commit_verified_edge_whitespace")
+
+    def test_byte_exact_match_keeps_the_plain_verified_reason(self):
+        result = self._run("hello there", "hello there")
+        self.assertEqual(result.reason.value, "commit_verified")
+
+    def test_reordered_content_is_still_a_conflict(self):
+        result = self._run("alpha beta", "beta alpha")
+        self.assertEqual(result.state.value, "conflict")
+
+    def test_partial_delivery_is_still_a_conflict(self):
+        result = self._run("alpha beta", "alpha")
+        self.assertEqual(result.state.value, "conflict")
+        self.assertEqual(result.detail, "observed-is-prefix")
+
+    def test_whitespace_only_insert_cannot_verify_trivially(self):
+        result = self._run("   ", "\n\n")
+        self.assertEqual(result.state.value, "conflict")
+
+    def test_classifier_separates_the_shapes_that_need_opposite_fixes(self):
+        classify = self._namespace()["classify_readback_conflict"]
+        self.assertEqual(classify("abc\n", "abc"), "trailing-whitespace")
+        self.assertEqual(classify("ab", "abcd"), "observed-is-prefix")
+        self.assertEqual(classify("xx abc xx", "abc"),
+                         "expected-is-substring")
+        self.assertEqual(classify("totally other", "abc"), "divergent")
+        self.assertEqual(classify(None, "abc"), "observed-empty")
+        self.assertEqual(classify("", "abc"), "observed-empty")
 
 
 if __name__ == "__main__":

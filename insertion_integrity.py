@@ -25,6 +25,7 @@ class ReceiptState(str, Enum):
 class ReceiptReason(str, Enum):
     PENDING = "pending"
     COMMIT_VERIFIED = "commit_verified"
+    COMMIT_VERIFIED_EDGE_WHITESPACE = "commit_verified_edge_whitespace"
     FOCUS_DRIFT = "focus_drift"
     SELECTION_DRIFT = "selection_drift"
     SURROUNDING_TEXT_DRIFT = "surrounding_text_drift"
@@ -136,6 +137,21 @@ class ReadbackResult:
     @classmethod
     def verified(cls) -> "ReadbackResult":
         return cls(ReceiptState.VERIFIED, ReceiptReason.COMMIT_VERIFIED)
+
+    @classmethod
+    def verified_edge_whitespace(cls) -> "ReadbackResult":
+        """Delivery proven where only leading/trailing whitespace differs.
+
+        Some editors trim or add an edge newline when text arrives. Every
+        character of the intended mutation is present and in order, so
+        delivery is proven; the receipt keeps its own reason so the
+        difference stays visible and is never mistaken for a byte-exact
+        match. A wrong target, a partial paste, or reordered content cannot
+        reach this state: they survive stripping and stay conflicts.
+        """
+        return cls(ReceiptState.VERIFIED,
+                   ReceiptReason.COMMIT_VERIFIED_EDGE_WHITESPACE,
+                   "trailing-whitespace")
 
     @classmethod
     def unverifiable(cls) -> "ReadbackResult":

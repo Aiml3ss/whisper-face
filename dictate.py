@@ -7807,10 +7807,17 @@ def insertion_readback(snapshot: FocusSnapshot, inserted: str,
     deadline = clock() + max(0.0, timeout)
     observed_any = False
     last_observed = None
+    stripped_expected = expected.strip()
     while True:
         current = reader(snapshot.element)
         if current == expected:
             return ReadbackResult.verified()
+        # An editor that trims or adds an edge newline still delivered every
+        # character in order. Requiring non-empty content keeps a field that
+        # reads back as pure whitespace from passing trivially.
+        if (current is not None and stripped_expected
+                and current.strip() == stripped_expected):
+            return ReadbackResult.verified_edge_whitespace()
         if current is not None:
             observed_any = True
             last_observed = current
