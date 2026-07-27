@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from insertion_integrity import (
+    READBACK_CONFLICT_SHAPES,
     DestinationObservation,
     InsertionCoordinator,
     InsertionLease,
@@ -303,6 +304,28 @@ class InsertionIntegrityTests(unittest.TestCase):
         self.assertEqual(pasted, ["terminal command"])
         self.assertTrue(receipt.paste_attempted)
         self.assertEqual(receipt.state, ReceiptState.UNVERIFIABLE)
+
+
+class ReadbackConflictShapeTests(unittest.TestCase):
+    """A conflict has to say how it differed, without ever saying what."""
+
+    def test_conflict_shape_must_come_from_the_closed_vocabulary(self):
+        with self.assertRaises(ValueError):
+            ReadbackResult.conflict("something-invented")
+
+    def test_conflict_defaults_to_unclassified_for_older_callers(self):
+        result = ReadbackResult.conflict()
+        self.assertEqual(result.detail, "unclassified")
+        self.assertEqual(result.state, ReceiptState.CONFLICT)
+
+    def test_non_conflict_results_carry_no_detail(self):
+        self.assertEqual(ReadbackResult.verified().detail, "")
+        self.assertEqual(ReadbackResult.unverifiable().detail, "")
+
+    def test_every_shape_is_constructible(self):
+        for shape in READBACK_CONFLICT_SHAPES:
+            with self.subTest(shape=shape):
+                self.assertEqual(ReadbackResult.conflict(shape).detail, shape)
 
 
 if __name__ == "__main__":
