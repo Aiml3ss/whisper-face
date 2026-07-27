@@ -17,16 +17,27 @@ spctl --assess --type open --context context:primary-signature -vv \
     WhisperFace-<version>-macOS-arm64.dmg
 xcrun stapler validate WhisperFace-<version>-macOS-arm64.dmg
 
-# 3. A specific workflow run in this repository produced these artifacts.
-gh attestation verify SHA256SUMS --repo Aiml3ss/whisper-face
+# 3. A specific workflow run in this repository produced this artifact.
+gh attestation verify WhisperFace-<version>-macOS-arm64.dmg \
+    --repo Aiml3ss/whisper-face
 ```
 
 The third command reads a signed [SLSA](https://slsa.dev/) build-provenance
 statement. It reports the repository, the workflow file, the commit SHA, and
 the trigger that produced the artifacts, and fails if any of them cannot be
-established. Because `SHA256SUMS` binds the source archive, the disk image,
-and `update-manifest.json`, one verified statement covers all three: check the
-attestation, then check the checksums, and every artifact is accounted for.
+established.
+
+Verification names the artifact you downloaded, not the checksum file. The
+release attests over `subject-checksums: dist/SHA256SUMS`, which makes each
+file *listed in* `SHA256SUMS` — the disk image, the source archive, and
+`update-manifest.json` — an attested subject under its own digest; the
+listing file itself is not a subject, so verifying `SHA256SUMS` would find
+nothing. Each of the three verifies independently:
+
+```sh
+gh attestation verify WhisperFace-<version>-source.zip --repo Aiml3ss/whisper-face
+gh attestation verify update-manifest.json --repo Aiml3ss/whisper-face
+```
 
 ## What each control actually proves
 

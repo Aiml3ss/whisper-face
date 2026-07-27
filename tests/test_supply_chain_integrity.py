@@ -158,16 +158,39 @@ def _runtime_pins() -> dict[str, str]:
 
 
 def _wallet_pins() -> dict[str, str]:
+    """Every ModelIdentity the wallet declares, however it is spelled.
+
+    Positional and keyword forms are both valid dataclass calls, so both are
+    parsed; a call this extractor cannot read is a hard failure rather than a
+    silent omission, because a skipped identity is exactly how an absent or
+    drifted pin would evade the audit while the wallet looks populated.
+    """
     pins = {}
     for node in ast.walk(ast.parse(_read("model_wallet.py"))):
         if not isinstance(node, ast.Call):
             continue
         name = node.func.id if isinstance(node.func, ast.Name) else None
-        if name != "ModelIdentity" or len(node.args) != 2:
+        if name != "ModelIdentity":
             continue
-        repository, revision = (ast.literal_eval(argument)
-                                for argument in node.args)
-        pins[repository] = revision
+        values = {}
+        try:
+            for field, argument in zip(("model_id", "revision"), node.args):
+                values[field] = ast.literal_eval(argument)
+            for keyword in node.keywords:
+                if keyword.arg is None:
+                    raise ValueError("**kwargs is not auditable")
+                values[keyword.arg] = ast.literal_eval(keyword.value)
+        except ValueError as error:
+            raise AssertionError(
+                f"model_wallet.py line {node.lineno}: ModelIdentity call "
+                f"cannot be audited statically ({error}); write literal "
+                "model_id and revision") from error
+        if set(values) < {"model_id", "revision"}:
+            raise AssertionError(
+                f"model_wallet.py line {node.lineno}: ModelIdentity call "
+                f"names only {sorted(values)}; the audit needs both "
+                "model_id and revision as literals")
+        pins[values["model_id"]] = values["revision"]
     return pins
 
 
@@ -322,7 +345,11 @@ class WorkflowSupplyChainTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.workflows = sorted(WORKFLOWS.glob("*.yml"))
+        # Both suffixes: GitHub executes *.yml and *.yaml alike, so a
+        # workflow added under the other extension must not slip past the
+        # pinning and permissions assertions.
+        cls.workflows = sorted(
+            list(WORKFLOWS.glob("*.yml")) + list(WORKFLOWS.glob("*.yaml")))
         cls.sources = {path.name: path.read_text(encoding="utf-8")
                        for path in cls.workflows}
 
@@ -343,12 +370,16 @@ class WorkflowSupplyChainTests(unittest.TestCase):
                         "release the commit is")
 
     def test_every_pinned_action_is_recorded_in_the_notices(self):
+        # Accumulate every occurrence rather than keeping the last one per
+        # action: the same action pinned differently in two workflows is
+        # exactly the drift this test exists to catch.
         used = {}
         for source in self.sources.values():
             for reference, comment in USES_LINE.findall(source):
                 match = PINNED_USES.match(reference)
                 if match:
-                    used[match.group(1)] = (match.group(2), comment)
+                    used.setdefault(match.group(1), set()).add(
+                        (match.group(2), comment))
         documented = {}
         for cells in _table_rows(_read("THIRD_PARTY_NOTICES.md"),
                                  "Release automation actions"):
@@ -361,12 +392,12 @@ class WorkflowSupplyChainTests(unittest.TestCase):
             "the actions CI runs and the actions the notices record differ: "
             f"undocumented {sorted(set(used) - set(documented))}, "
             f"unused {sorted(set(documented) - set(used))}")
-        for action, (revision, version) in used.items():
+        for action, occurrences in used.items():
             with self.subTest(action=action):
                 self.assertEqual(
-                    (revision, version), documented[action],
-                    f"{action} runs at a different revision or release than "
-                    "the notices record")
+                    occurrences, {documented[action]},
+                    f"{action} runs at a revision or release the notices do "
+                    f"not record (or at two different ones): {occurrences}")
 
     def test_every_workflow_states_its_token_permissions(self):
         for name, source in self.sources.items():

@@ -183,7 +183,9 @@ publication; it has no Apple credentials.
 4. Require the macOS release workflow to pass signing, notarization, stapling,
    logical package verification, manifest verification, and checksum generation.
 5. Download the published assets on a different Mac. Verify `SHA256SUMS`, run
-   `gh attestation verify SHA256SUMS --repo Aiml3ss/whisper-face` to
+   `gh attestation verify WhisperFace-<version>-macOS-arm64.dmg --repo
+   Aiml3ss/whisper-face` (the attested subjects are the files *listed in*
+   `SHA256SUMS`, not the listing itself) to
    confirm which workflow run and commit produced them, mount the DMG, and run
    `spctl`/`stapler` verification before install. What each of those checks
    does and does not prove is set out in

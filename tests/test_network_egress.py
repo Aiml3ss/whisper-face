@@ -95,7 +95,8 @@ AUDITED_CALL_SITES = {
     # source address; it transmits nothing. Server-only mode reaches it.
     "lan_ip": frozenset({"socket.socket", "s.connect"}),
     # The inbound compatibility endpoint. Loopback unless --server-only.
-    "phone_server": frozenset({"ThreadingHTTPServer", "srv.serve_forever"}),
+    "phone_server": frozenset(
+        {"http.server.ThreadingHTTPServer", "srv.serve_forever"}),
     # A private AF_UNIX activation socket. No IP family is involved.
     "start_gui_activation_server": frozenset(
         {"socket.socket", "listener.bind", "listener.listen"}),
@@ -177,6 +178,39 @@ def _dotted(node: ast.AST) -> str | None:
     return None
 
 
+def _import_aliases(tree: ast.AST) -> dict[str, str]:
+    """Map every name an import binds to the dotted path it stands for.
+
+    ``import requests as client`` binds ``client`` to ``requests``;
+    ``from requests import post as send`` binds ``send`` to ``requests.post``.
+    Without this table, an ordinary alias would walk a call straight past the
+    audit: the alias's written name matches no client root, and the audit
+    would conclude the module makes no outbound calls at all.
+    """
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                target = alias.name if alias.asname else alias.name.split(".")[0]
+                aliases[bound] = target
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                bound = alias.asname or alias.name
+                aliases[bound] = f"{node.module}.{alias.name}"
+    return aliases
+
+
+def _resolve(dotted: str, aliases: dict[str, str]) -> str:
+    root, _, rest = dotted.partition(".")
+    canonical = aliases.get(root)
+    if canonical is None:
+        return dotted
+    return f"{canonical}.{rest}" if rest else canonical
+
+
 def _call_sites(path: Path) -> dict[str, set[str]]:
     """Map each enclosing function name to the socket-capable calls it makes.
 
@@ -184,7 +218,15 @@ def _call_sites(path: Path) -> dict[str, set[str]]:
     ``post`` says nothing about who is calling out or where it goes;
     ``ollama_chat.post`` is reviewable, and lifting a call into a closure no
     longer silently renames an audited entry into an unaudited one.
+
+    Calls are classified by their *resolved* name: ``client.post`` after
+    ``import requests as client`` is audited as ``requests.post``, and a bare
+    ``urlopen`` from ``from urllib.request import urlopen`` is audited as
+    ``urllib.request.urlopen``. The recorded entry keeps the resolved form, so
+    renaming an import cannot move a call out of the audited set.
     """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    aliases = _import_aliases(tree)
     sites: dict[str, set[str]] = {}
 
     def visit(node: ast.AST, owner: str) -> None:
@@ -196,15 +238,16 @@ def _call_sites(path: Path) -> dict[str, set[str]]:
             if isinstance(child, ast.Call):
                 dotted = _dotted(child.func)
                 if dotted is not None:
-                    parts = dotted.split(".")
+                    resolved = _resolve(dotted, aliases)
+                    parts = resolved.split(".")
                     if (parts[0] in _CLIENT_CALL_ROOTS
                             or ".".join(parts[:2]) in _CLIENT_CALL_PREFIXES
                             or parts[-1] in _SOCKET_VERBS
-                            or dotted in _SERVER_TYPES):
-                        sites.setdefault(name, set()).add(dotted)
+                            or resolved in _SERVER_TYPES):
+                        sites.setdefault(name, set()).add(resolved)
             visit(child, name)
 
-    visit(ast.parse(path.read_text(encoding="utf-8")), "<module>")
+    visit(tree, "<module>")
     return sites
 
 
@@ -276,10 +319,14 @@ class RuntimeOutboundCallSiteTests(unittest.TestCase):
             "reviewed against the privacy promise; a new one has not.")
 
     def test_the_only_outbound_http_target_is_the_local_model(self):
+        # Match by resolved name so `import requests as client` cannot hide a
+        # post from this check, and cover every client verb while at it.
+        aliases = _import_aliases(self.tree)
         posts = [
             node for node in ast.walk(self.tree)
             if isinstance(node, ast.Call)
-            and _dotted(node.func) == "requests.post"
+            and (dotted := _dotted(node.func)) is not None
+            and _resolve(dotted, aliases).startswith("requests.")
         ]
         self.assertTrue(posts)
         for call in posts:
