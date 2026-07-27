@@ -86,6 +86,10 @@ FACE_CHIP_COLORS: Mapping[str, Color] = {
     "rabbit": _hex_color("#F6A2BC"),
     "hedgehog": _hex_color("#BE9E7F"),
     "penguin": _hex_color("#86CDF0"),
+    # The two English cream goldens are deliberately near-twins: they are a
+    # real pair of litter-mates, told apart by accessories, not by palette.
+    "pickles": _hex_color("#F6E8C9"),
+    "olive": _hex_color("#F2E7D4"),
 }
 
 

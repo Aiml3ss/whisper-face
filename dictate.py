@@ -860,6 +860,7 @@ FACE_CHOICES = (
     "parrot", "fox", "owl", "cat", "bear",
     "dog", "wolf", "pig", "panda", "tiger",
     "frog", "rabbit", "hedgehog", "penguin",
+    "pickles", "olive",
 )
 FACE_LABELS = {
     "parrot": "Parrot",
@@ -876,6 +877,8 @@ FACE_LABELS = {
     "rabbit": "Rabbit",
     "hedgehog": "Hedgehog",
     "penguin": "Penguin",
+    "pickles": "Pickles",
+    "olive": "Olive",
 }
 FACE_EMOJI = {
     "parrot": "🦜",
@@ -892,6 +895,8 @@ FACE_EMOJI = {
     "rabbit": "🐰",
     "hedgehog": "🦔",
     "penguin": "🐧",
+    "pickles": "🐶",
+    "olive": "🎀",
 }
 DEFAULT_FACE = "parrot"
 
