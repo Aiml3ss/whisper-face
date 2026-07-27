@@ -59,17 +59,19 @@ DARK_PALETTE = ThemePalette(
     error=_hex_color("#FF6C5A"),
 )
 
+# Chibi-clay pastels: every chip color is the old hue relaxed toward cream so
+# the characters read as soft vinyl toys instead of stickers.
 FACE_CHIP_COLORS: Mapping[str, Color] = {
-    "fox": _hex_color("#FF8A5B"),
-    "bear": _hex_color("#FBBF24"),
-    "owl": _hex_color("#5EEAD4"),
-    "parrot": _hex_color("#34D399"),
-    "cat": _hex_color("#C4B5FD"),
-    "dog": _hex_color("#DAA560"),
-    "wolf": _hex_color("#9AA7B8"),
-    "pig": _hex_color("#F6A9BD"),
-    "panda": _hex_color("#DCE0E8"),
-    "tiger": _hex_color("#FBA13F"),
+    "fox": _hex_color("#FFB899"),
+    "bear": _hex_color("#FDD779"),
+    "owl": _hex_color("#A2EFDF"),
+    "parrot": _hex_color("#89E2BD"),
+    "cat": _hex_color("#DDD1F7"),
+    "dog": _hex_color("#EAC79C"),
+    "wolf": _hex_color("#C4C9CF"),
+    "pig": _hex_color("#FACAD2"),
+    "panda": _hex_color("#EBEAEB"),
+    "tiger": _hex_color("#FDC589"),
 }
 
 

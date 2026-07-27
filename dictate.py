@@ -3229,32 +3229,34 @@ if IS_WINDOWS:
             face = current_face()
             talking = state == "rec"
             disabled = state == "off"
+            # Pastel chibi palettes, mirroring FACE_CHIP_COLORS in
+            # whisper_face_theme.py at 8-bit depth.
             palettes = {
-                "fox": ((236, 102, 45, 255), (255, 224, 179, 255)),
-                "cat": ((92, 151, 210, 255), (210, 233, 255, 255)),
-                "bear": ((165, 108, 68, 255), (227, 181, 131, 255)),
-                "owl": ((116, 100, 189, 255), (227, 218, 255, 255)),
-                "dog": ((218, 165, 96, 255), (252, 236, 208, 255)),
-                "wolf": ((131, 144, 160, 255), (212, 219, 230, 255)),
-                "pig": ((241, 158, 177, 255), (255, 219, 224, 255)),
-                "panda": ((245, 246, 249, 255), (255, 255, 255, 255)),
-                "tiger": ((249, 157, 60, 255), (255, 232, 200, 255)),
+                "fox": ((255, 184, 153, 255), (255, 239, 214, 255)),
+                "cat": ((221, 209, 247, 255), (231, 241, 255, 255)),
+                "bear": ((253, 215, 121, 255), (242, 212, 177, 255)),
+                "owl": ((162, 239, 223, 255), (237, 231, 255, 255)),
+                "dog": ((234, 199, 156, 255), (254, 244, 228, 255)),
+                "wolf": ((196, 201, 207, 255), (230, 235, 242, 255)),
+                "pig": ((250, 202, 210, 255), (255, 232, 235, 255)),
+                "panda": ((235, 234, 235, 255), (255, 255, 255, 255)),
+                "tiger": ((253, 197, 137, 255), (255, 241, 221, 255)),
             }
             if face == "parrot":
-                # front-facing: emerald head, gold crest, centered beak
+                # front-facing: pastel emerald head, gold crest, centered beak
                 head = (135, 135, 145, 255) if disabled \
-                    else (55, 170, 92, 255)
+                    else (137, 226, 189, 255)
                 if not disabled:
                     draw.polygon(((28, 9), (36, 9), (32, 1)),
-                                 fill=(244, 174, 46, 255))
+                                 fill=(247, 206, 115, 255))
                 draw.ellipse((8, 8, 56, 58), fill=head)
-                draw.ellipse((19, 24, 27, 33), fill=(20, 25, 30, 255))
-                draw.ellipse((37, 24, 45, 33), fill=(20, 25, 30, 255))
+                draw.ellipse((19, 24, 27, 33), fill=(42, 33, 28, 255))
+                draw.ellipse((37, 24, 45, 33), fill=(42, 33, 28, 255))
                 gap = 6 if talking else 1
                 draw.polygon(((26, 34), (38, 34), (32, 42)),
-                             fill=(244, 174, 46, 255))
+                             fill=(247, 206, 115, 255))
                 draw.polygon(((28, 42), (36, 42), (32, 42 + gap)),
-                             fill=(225, 137, 33, 255))
+                             fill=(240, 183, 90, 255))
                 return image
 
             head, muzzle = palettes.get(face, palettes["fox"])
@@ -3262,7 +3264,7 @@ if IS_WINDOWS:
                 head = (135, 135, 145, 255)
                 muzzle = (205, 205, 210, 255)
             round_ears = face in ("bear", "pig", "panda")
-            ear_fill = (30, 32, 38, 255) \
+            ear_fill = (85, 89, 93, 255) \
                 if (face == "panda" and not disabled) else head
             if not round_ears:
                 draw.polygon(((9, 23), (16, 2), (29, 18)), fill=ear_fill)
@@ -3272,30 +3274,30 @@ if IS_WINDOWS:
                 draw.ellipse((39, 5, 57, 23), fill=ear_fill)
             draw.ellipse((7, 10, 57, 60), fill=head)
             if face == "panda" and not disabled:
-                draw.ellipse((16, 22, 28, 36), fill=(30, 32, 38, 255))
-                draw.ellipse((36, 22, 48, 36), fill=(30, 32, 38, 255))
+                draw.ellipse((16, 22, 28, 36), fill=(85, 89, 93, 255))
+                draw.ellipse((36, 22, 48, 36), fill=(85, 89, 93, 255))
             if face == "owl":
                 draw.ellipse((13, 19, 35, 41), fill=muzzle)
                 draw.ellipse((29, 19, 51, 41), fill=muzzle)
-                draw.ellipse((23, 27, 29, 35), fill=(20, 25, 30, 255))
-                draw.ellipse((35, 27, 41, 35), fill=(20, 25, 30, 255))
+                draw.ellipse((23, 27, 29, 35), fill=(42, 33, 28, 255))
+                draw.ellipse((35, 27, 41, 35), fill=(42, 33, 28, 255))
                 gap = 8 if talking else 2
                 draw.polygon(((26, 38), (38, 38), (32, 45 + gap)),
-                             fill=(244, 174, 46, 255))
+                             fill=(247, 206, 115, 255))
             else:
                 draw.ellipse((15, 34, 37, 54), fill=muzzle)
                 draw.ellipse((27, 34, 49, 54), fill=muzzle)
-                draw.ellipse((20, 25, 26, 32), fill=(20, 25, 30, 255))
-                draw.ellipse((38, 25, 44, 32), fill=(20, 25, 30, 255))
+                draw.ellipse((20, 25, 26, 32), fill=(42, 33, 28, 255))
+                draw.ellipse((38, 25, 44, 32), fill=(42, 33, 28, 255))
                 draw.polygon(((27, 38), (37, 38), (32, 44)),
-                             fill=(45, 36, 36, 255))
+                             fill=(66, 52, 44, 255))
                 mouth_h = 10 if talking else 2
                 draw.ellipse((27, 45, 37, 45 + mouth_h),
-                             fill=(35, 24, 28, 255))
+                             fill=(51, 40, 31, 255))
             if face == "tiger" and not disabled:
                 for x0, x1 in ((32, 32), (25, 27), (39, 37)):
                     draw.line(((x0, 12), (x1, 22)),
-                              fill=(208, 103, 25, 255), width=2)
+                              fill=(222, 142, 81, 255), width=2)
             return image
 
         def init(self):

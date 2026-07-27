@@ -102,6 +102,20 @@ class CharacterSpecTests(unittest.TestCase):
                 # The default keeps exported frames blink-free.
                 self.assertEqual(awake, character_ops(face, 0.0, 0.0, 0.0))
 
+    def test_gaze_drifts_eyes_only_in_the_live_path(self):
+        for face in FACE_ORDER:
+            with self.subTest(face=face):
+                ahead = character_ops(face, 0.0, 0.0)
+                glance = character_ops(face, 0.0, 0.0, 0.0, gaze=(3.0, -2.0))
+                self.assertNotEqual(ahead, glance)
+                # The default keeps exported frames looking straight ahead.
+                self.assertEqual(
+                    ahead, character_ops(face, 0.0, 0.0, 0.0, gaze=(0.0, 0.0)))
+                # A closed lid ignores the glance, so blinks cannot jitter.
+                self.assertEqual(
+                    character_ops(face, 0.0, 0.0, 1.0),
+                    character_ops(face, 0.0, 0.0, 1.0, gaze=(3.0, -2.0)))
+
     def test_pig_has_a_snout_and_dog_has_floppy_ears(self):
         # Without these the pig renders as a pink bear and the dog disagrees
         # with its own menu-bar silhouette, which has always had hanging ears.
@@ -130,6 +144,14 @@ class CharacterSVGTests(unittest.TestCase):
                     markup = character_svg(face, frame=frame)
                     ElementTree.fromstring(markup)
                     self.assertIn(f'viewBox="0 0 {DESIGN_SIZE:g}', markup)
+
+    def test_markup_carries_no_element_ids(self):
+        # The site inlines every face and frame into shared documents, so
+        # the markup must stay id-free (which also rules out gradient defs).
+        for face in FACE_ORDER:
+            for frame in ("idle", "half", "talk"):
+                with self.subTest(face=face, frame=frame):
+                    self.assertNotIn("id=", character_svg(face, frame=frame))
 
     def test_chip_variant_drops_the_speech_puffs(self):
         # The puffs trail off the shoulder and would clip inside the app
