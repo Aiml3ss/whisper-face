@@ -22,8 +22,19 @@ than one utterance, or logged no integrity receipt at all, the app is recorded
 as blocked with a closed reason instead of being scored. Coverage is reported
 as measured: 31 recorded apps are reported as 31, never scaled to 50.
 
+`observe` fills the same session from ordinary use instead of a scripted
+sitting. It asks nothing, because there is nobody to ask: it reads the same
+transcript-free keys for utterances the owner already dictated and records the
+operator verdict as `not-asked-machine-observed`. That is not a weaker pass —
+for a readable destination a `verified` receipt is mechanically proven
+delivery — but it is a *different* kind of evidence, so it is counted apart
+from operator-attested cases everywhere and never merged into them. Passive
+evidence only covers the apps the owner actually dictates into, which is why
+the summary names every category that still has none.
+
     uv run scripts/capture_app_matrix.py plan
     uv run scripts/capture_app_matrix.py run
+    uv run scripts/capture_app_matrix.py observe
     uv run scripts/capture_app_matrix.py emit --out app_matrix.json
 """
 
@@ -32,6 +43,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -40,11 +52,14 @@ from typing import Any, Mapping, Sequence, TextIO
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from capture_session_support import (  # noqa: E402
+    ATTESTED_EVIDENCE_SCOPE,
     CAPABILITY_METRIC_KEYS,
     CAPABILITY_UNAVAILABLE_REASON,
     COMPATIBILITY_REASON_BY_RECEIPT_REASON,
     DEFAULT_EVIDENCE_DIR,
     DEFAULT_TRANSCRIPTS,
+    NOT_ASKED_VERDICT,
+    OBSERVED_EVIDENCE_SCOPE,
     RECEIPT_STATES,
     ROOT,
     CaptureError,
@@ -56,6 +71,7 @@ from capture_session_support import (  # noqa: E402
     identifier,
     new_transcript_receipts,
     progress_line,
+    read_transcript_receipts,
     transcript_baseline,
     utc_now,
     wait_for_enter,
@@ -66,9 +82,22 @@ TOOL = "capture_app_matrix"
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_ID = "physical-app-insertion-matrix"
 EVIDENCE_SCOPE = "operator-attested-physical-session"
+OBSERVED_ARTIFACT_SCOPE = "runtime-observed-passive-use"
+MIXED_ARTIFACT_SCOPE = "mixed-operator-attested-and-runtime-observed"
 DEFAULT_SESSION = DEFAULT_EVIDENCE_DIR / "app-matrix-session.json"
 FIFTY_APP_TARGET = 50
 PROFILE_CORPUS = ROOT / "benchmarks" / "insertion_reliability_cases.json"
+
+# Why a logged utterance could not become passive evidence. Each is a fact
+# about the record, never a judgement about the app.
+OBSERVE_SKIP_REASONS = frozenset({
+    "no-event-id",
+    "app-identity-withheld",
+    "no-app-identity",
+    "runtime-reported-no-receipt",
+    "already-observed",
+    "operator-already-answered",
+})
 
 CATEGORIES = (
     "native-cocoa",
@@ -461,6 +490,7 @@ def run_session(apps: Sequence[Mapping[str, Any]], session: Session, *,
             bundle = receipt.app_bundle
             expected = app["bundle_id"]
             session.record(case_id, {
+                "evidence_scope": ATTESTED_EVIDENCE_SCOPE,
                 "category": app["category"],
                 "phrase": app["phrase"],
                 "recorded_utc": utc_now(),
@@ -490,22 +520,305 @@ def run_session(apps: Sequence[Mapping[str, Any]], session: Session, *,
     return 0
 
 
+# --------------------------- passive observation --------------------------
+
+
+def bundle_index(apps: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Map each unambiguous bundle id onto the curated app that claims it.
+
+    A bundle two curated cases share names no single surface: Terminal hosts
+    both a bare shell prompt and a full-screen TUI editor, and those behave
+    differently under Accessibility. Passive evidence cannot say which of them
+    the caret was in, so such a bundle claims neither case and is recorded
+    off-plan instead of being guessed into one.
+    """
+    counts = Counter(str(app["bundle_id"]) for app in apps
+                     if app["bundle_id"] is not None)
+    return {
+        str(app["bundle_id"]): dict(app)
+        for app in apps
+        if app["bundle_id"] is not None and counts[str(app["bundle_id"])] == 1
+    }
+
+
+def observed_case_id(bundle: str) -> str:
+    """Name an off-plan case after the bundle that produced it.
+
+    The digest keeps two bundles that slugify alike from merging into one
+    case, which would silently overstate how many apps were exercised.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", bundle.lower()).strip("-")[:40]
+    digest = hashlib.sha256(bundle.encode("utf-8")).hexdigest()[:8]
+    return f"observed-{slug}-{digest}" if slug else f"observed-{digest}"
+
+
+def _consumed_event_ids(session: Session) -> set[str]:
+    """Every transcript id already folded into this session."""
+    consumed: set[str] = set()
+    for record in session.records.values():
+        runtime = record.get("runtime")
+        if isinstance(runtime, Mapping):
+            consumed.update(
+                str(item) for item in runtime.get("observed_event_ids") or ())
+    return consumed
+
+
+def _merged_counts(existing: Mapping[str, Any] | None, key: str,
+                   fresh: Counter) -> dict[str, int]:
+    base: Counter = Counter()
+    if existing is not None:
+        stored = existing.get(key)
+        if isinstance(stored, Mapping):
+            base.update({str(name): int(count)
+                         for name, count in stored.items()})
+    base.update(fresh)
+    return dict(sorted(base.items()))
+
+
+def _observed_payload(app: Mapping[str, Any] | None, bundle: str,
+                      fresh: Sequence[Any],
+                      existing: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Aggregate every observed utterance for one app into one case.
+
+    An app is dictated into many times, so the case keeps counts rather than
+    the last utterance: keeping only the newest would quietly discard every
+    earlier outcome, including every failure.
+    """
+    previous = (existing or {}).get("runtime")
+    previous = previous if isinstance(previous, Mapping) else None
+
+    states = Counter(str(item.insertion_state) for item in fresh)
+    reasons = Counter(str(item.insertion_reason) for item in fresh)
+    shapes = Counter(str(item.readback_shape) for item in fresh
+                     if item.readback_shape is not None)
+    attempted = Counter(
+        "attempted" if item.paste_attempted is True
+        else "not-attempted" if item.paste_attempted is False
+        else "unreported" for item in fresh)
+
+    outcomes = list((existing or {}).get("compatibility_outcomes") or ())
+    observations = list((existing or {}).get("capability_observations") or ())
+    for item in fresh:
+        outcome = item.compatibility_outcome()
+        if outcome is None:
+            continue
+        outcomes.append(outcome)
+        if item.capabilities:
+            observations.append({
+                "capabilities": item.capabilities,
+                "outcome": outcome,
+                "count": 1,
+            })
+
+    event_ids = sorted(
+        set(str(item) for item in (previous or {}).get("observed_event_ids")
+            or ())
+        | {str(item.event_id) for item in fresh})
+    latencies = [item.insertion_ms for item in fresh
+                 if item.insertion_ms is not None]
+    if previous is not None and previous.get("insertion_ms_max") is not None:
+        latencies.append(float(previous["insertion_ms_max"]))
+
+    expected = app["bundle_id"] if app is not None else None
+    return {
+        "category": app["category"] if app is not None else None,
+        "observed_utc": utc_now(),
+        "runtime": {
+            "source": "transcripts-jsonl-passive",
+            "expected_bundle_id": expected,
+            "bundle_matches_plan": None if expected is None else (
+                bundle == expected),
+            "app_bundle": bundle,
+            "app_identity_withheld": False,
+            "utterances_observed": len(event_ids),
+            "insertion_states": _merged_counts(
+                previous, "insertion_states", states),
+            "insertion_reasons": _merged_counts(
+                previous, "insertion_reasons", reasons),
+            "readback_shapes": _merged_counts(
+                previous, "readback_shapes", shapes),
+            "paste_attempts": _merged_counts(
+                previous, "paste_attempts", attempted),
+            "route_outbox": (
+                int((previous or {}).get("route_outbox") or 0)
+                + sum(1 for item in fresh if item.route_outbox is True)),
+            "insertion_ms_max": max(latencies) if latencies else None,
+            "observed_event_ids": event_ids,
+        },
+        "compatibility_outcomes": outcomes,
+        "capability_observations": observations,
+        # Passive use cannot ask the operator anything. The verdict is a third
+        # value meaning "not asked", never one of the real human answers.
+        "operator": {
+            "text_verdict": NOT_ASKED_VERDICT,
+            "app_behavior": NOT_ASKED_VERDICT,
+        },
+        "machine_verdict": _machine_verdict(
+            _merged_counts(previous, "insertion_states", states)),
+    }
+
+
+def _machine_verdict(states: Mapping[str, int]) -> dict[str, Any]:
+    """State plainly what the runtime proved, and what it did not.
+
+    A `verified` receipt is mechanically proven delivery into a readable
+    destination — stronger than an eyeball, not weaker. A `conflict` is a
+    proven failure to land as intended. An `unverifiable` receipt is not a
+    failure: it says the destination could not be read, so delivery stayed
+    unproven in either direction, and it is reported as exactly that.
+    """
+    return {
+        "basis": "runtime-insertion-receipts",
+        "operator_asked": False,
+        "proven_delivery": int(states.get("verified", 0)),
+        "proven_not_delivered_as_intended": int(states.get("conflict", 0)),
+        "delivery_unproven": int(states.get("unverifiable", 0)),
+        "unresolved": int(states.get("unresolved", 0)),
+    }
+
+
+def observe_transcript(apps: Sequence[Mapping[str, Any]], session: Session, *,
+                       transcripts: Path) -> dict[str, Any]:
+    """Fold every not-yet-observed insertion in the transcript into a session.
+
+    The transcript is re-read by path, never followed through a held handle:
+    `dictate.py` atomically replaces the file when it trims history, so ids
+    vanish from it over time. De-duplication is therefore by transcript id
+    against what the session already consumed, which makes re-running this
+    idempotent and makes a replaced file lose nothing already recorded.
+    """
+    receipts = read_transcript_receipts(transcripts)
+    index = bundle_index(apps)
+    consumed = _consumed_event_ids(session)
+    skipped: Counter = Counter()
+    grouped: dict[str, list[Any]] = {}
+    bundles: dict[str, str] = {}
+    fresh_ids: set[str] = set()
+
+    for receipt in receipts:
+        if receipt.event_id is None:
+            # The phone endpoint writes no id, so this utterance cannot be
+            # de-duplicated and must not be counted at all.
+            skipped["no-event-id"] += 1
+            continue
+        if receipt.event_id in consumed or receipt.event_id in fresh_ids:
+            skipped["already-observed"] += 1
+            continue
+        if receipt.app_identity_withheld:
+            # On Windows the runtime writes a window title here, which can
+            # carry a document name. Withheld identity means no app to name.
+            skipped["app-identity-withheld"] += 1
+            continue
+        if receipt.app_bundle is None:
+            skipped["no-app-identity"] += 1
+            continue
+        if not receipt.has_receipt:
+            skipped["runtime-reported-no-receipt"] += 1
+            continue
+        bundle = str(receipt.app_bundle)
+        planned = index.get(bundle)
+        case_id = str(planned["id"]) if planned is not None else (
+            observed_case_id(bundle))
+        fresh_ids.add(str(receipt.event_id))
+        grouped.setdefault(case_id, []).append(receipt)
+        bundles[case_id] = bundle
+
+    merged: list[str] = []
+    protected: list[str] = []
+    for case_id in sorted(grouped):
+        existing = session.observed(case_id)
+        if existing is None and session.answered(case_id):
+            # An operator answered this app. Passive evidence cannot answer
+            # the same question, so it never displaces the answer.
+            protected.append(case_id)
+            skipped["operator-already-answered"] += len(grouped[case_id])
+            continue
+        payload = _observed_payload(
+            index.get(bundles[case_id]), bundles[case_id],
+            grouped[case_id], existing)
+        if session.observe(case_id, payload):
+            merged.append(case_id)
+        else:  # pragma: no cover - observed() already proved it is mergeable
+            protected.append(case_id)
+
+    if merged:
+        session.save()
+    unknown = set(skipped) - OBSERVE_SKIP_REASONS
+    if unknown:  # pragma: no cover - guards the closed set against drift
+        raise CaptureError(
+            f"skip reason outside the closed set: {sorted(unknown)}")
+    return {
+        "utterances_read": len(receipts),
+        "utterances_observed": sum(
+            len(grouped[case_id]) for case_id in merged),
+        "cases_merged": merged,
+        "cases_protected_by_operator": protected,
+        "skipped": dict(sorted(skipped.items())),
+    }
+
+
+def render_observation(outcome: Mapping[str, Any]) -> str:
+    lines = [
+        "PASSIVE OBSERVATION",
+        f"utterances read: {outcome['utterances_read']} · newly observed: "
+        f"{outcome['utterances_observed']} · cases written: "
+        f"{len(outcome['cases_merged'])}",
+    ]
+    if outcome["cases_protected_by_operator"]:
+        lines.append(
+            "left alone (an operator already answered): "
+            + ", ".join(outcome["cases_protected_by_operator"]))
+    if outcome["skipped"]:
+        lines.append("not usable as evidence: " + ", ".join(
+            f"{key} {value}" for key, value in outcome["skipped"].items()))
+    return "\n".join(lines)
+
+
 # ------------------------------- artifacts --------------------------------
 
 
 def build_artifact(apps: Sequence[Mapping[str, Any]],
                    session_payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Turn a recorded session into a coverage-honest matrix artifact."""
+    """Turn a recorded session into a coverage-honest matrix artifact.
+
+    A session may hold both kinds of case. An operator-attested case answers
+    "did the correct text appear in the intended target"; a runtime-observed
+    case answers only what the runtime's own receipts prove. The two are
+    counted separately everywhere, and never summed into one verdict.
+    """
     records = list(session_payload.get("records") or ())
     blocked = list(session_payload.get("blocked") or ())
     planned = category_plan(apps)
-    recorded_by_category = Counter(str(item["category"]) for item in records)
+
+    attested = [item for item in records if not _is_observed(item)]
+    observed = [item for item in records if _is_observed(item)]
+    # A case only counts against the curated matrix when it names one of the
+    # plan's categories. An app the owner happens to dictate into that is not
+    # on the list is real evidence, but it fills no planned slot.
+    curated = [item for item in records if item.get("category") in planned]
+    off_plan = [item for item in records if item.get("category") not in planned]
+
+    recorded_by_category = Counter(str(item["category"]) for item in curated)
     blocked_by_category = Counter(str(item["category"]) for item in blocked)
 
-    states = Counter(
-        str(item["runtime"]["insertion_state"]) for item in records)
-    reasons = Counter(
-        str(item["runtime"]["insertion_reason"]) for item in records)
+    states: Counter = Counter()
+    reasons: Counter = Counter()
+    for item in attested:
+        states[str(item["runtime"]["insertion_state"])] += 1
+        reasons[str(item["runtime"]["insertion_reason"])] += 1
+    observed_states: Counter = Counter()
+    observed_reasons: Counter = Counter()
+    observed_shapes: Counter = Counter()
+    observed_utterances = 0
+    for item in observed:
+        runtime = item["runtime"]
+        observed_states.update(_int_counts(runtime.get("insertion_states")))
+        observed_reasons.update(_int_counts(runtime.get("insertion_reasons")))
+        observed_shapes.update(_int_counts(runtime.get("readback_shapes")))
+        observed_utterances += int(runtime.get("utterances_observed") or 0)
+    states.update(observed_states)
+    reasons.update(observed_reasons)
+
     verdicts = Counter(
         str(item["operator"]["text_verdict"]) for item in records)
     behaviors = Counter(
@@ -513,11 +826,11 @@ def build_artifact(apps: Sequence[Mapping[str, Any]],
     blocked_reasons = Counter(str(item["reason"]) for item in blocked)
 
     agreed = sum(
-        1 for item in records
+        1 for item in attested
         if item["operator"]["text_verdict"] == "correct-text-in-intended-target"
         and item["runtime"]["insertion_state"] == "verified")
     disagreed = sum(
-        1 for item in records
+        1 for item in attested
         if (item["operator"]["text_verdict"]
             == "correct-text-in-intended-target")
         != (item["runtime"]["insertion_state"] == "verified"))
@@ -525,6 +838,10 @@ def build_artifact(apps: Sequence[Mapping[str, Any]],
     outcomes = []
     capability_pairs = []
     for item in records:
+        if _is_observed(item):
+            outcomes.extend(item.get("compatibility_outcomes") or ())
+            capability_pairs.extend(item.get("capability_observations") or ())
+            continue
         outcome = item.get("compatibility_outcome")
         if outcome is None:
             outcome = _compatibility_outcome(item["runtime"])
@@ -534,15 +851,19 @@ def build_artifact(apps: Sequence[Mapping[str, Any]],
                 capability_pairs.append({
                     "capabilities": item["capabilities"],
                     "outcome": outcome,
+                    "count": 1,
                 })
 
-    recorded = len(records)
+    recorded = len(curated)
+    exercised = len(records)
+    empty_categories = sorted(
+        name for name in planned if not recorded_by_category[name])
     return {
         "schema_version": ARTIFACT_SCHEMA_VERSION,
         "artifact": ARTIFACT_ID,
         "privacy": "transcript-free",
-        "evidence_scope": EVIDENCE_SCOPE,
-        "physical_evidence": recorded > 0,
+        "evidence_scope": _artifact_scope(attested, observed),
+        "physical_evidence": exercised > 0,
         "generated_utc": utc_now(),
         "plan_digest": session_payload.get("plan_digest"),
         "receipt_vocabulary": "insertion_integrity.ReceiptState/ReceiptReason",
@@ -553,7 +874,9 @@ def build_artifact(apps: Sequence[Mapping[str, Any]],
             "apps_recorded": recorded,
             "apps_blocked": len(blocked),
             "apps_not_attempted": len(apps) - recorded - len(blocked),
+            "apps_observed_off_plan": len(off_plan),
             "extrapolated": False,
+            "categories_without_evidence": empty_categories,
             "by_category": {
                 name: {
                     "planned": planned[name],
@@ -567,11 +890,14 @@ def build_artifact(apps: Sequence[Mapping[str, Any]],
             },
         },
         "claims": {
-            "real_apps_exercised": recorded,
-            "fifty_app_claim": recorded >= FIFTY_APP_TARGET,
+            "real_apps_exercised": exercised,
+            "real_apps_exercised_definition": (
+                "distinct apps with at least one recorded insertion, whether "
+                "the app was on the curated plan or merely used"),
+            "fifty_app_claim": exercised >= FIFTY_APP_TARGET,
             "fifty_app_claim_reason": (
-                "fifty-apps-recorded" if recorded >= FIFTY_APP_TARGET
-                else f"{recorded}-of-{FIFTY_APP_TARGET}-apps-recorded"),
+                "fifty-apps-recorded" if exercised >= FIFTY_APP_TARGET
+                else f"{exercised}-of-{FIFTY_APP_TARGET}-apps-recorded"),
             "four_nines_claim": False,
             "four_nines_claim_reason": (
                 "one-attempt-per-app-cannot-support-a-four-nines-rate"),
@@ -581,8 +907,22 @@ def build_artifact(apps: Sequence[Mapping[str, Any]],
             "reasons": dict(sorted(reasons.items())),
         },
         "operator_observations": {
+            "attested_cases": len(attested),
             "text_verdicts": dict(sorted(verdicts.items())),
             "app_behaviors": dict(sorted(behaviors.items())),
+            "not_asked_verdict": NOT_ASKED_VERDICT,
+        },
+        "machine_observed": {
+            "definition": (
+                "cases harvested from ordinary use, where no operator was "
+                "asked anything; a verified receipt is mechanically proven "
+                "delivery into a readable destination, an unverifiable one "
+                "means the destination could not be read either way"),
+            "cases": len(observed),
+            "utterances": observed_utterances,
+            "insertion_states": dict(sorted(observed_states.items())),
+            "insertion_reasons": dict(sorted(observed_reasons.items())),
+            "readback_shapes": dict(sorted(observed_shapes.items())),
         },
         "agreement": {
             "definition": (
@@ -590,6 +930,9 @@ def build_artifact(apps: Sequence[Mapping[str, Any]],
                 "runtime receipt state was verified"),
             "both": agreed,
             "disagreements": disagreed,
+            "not_comparable": len(observed),
+            "not_comparable_reason": (
+                "no-operator-verdict-exists-for-a-machine-observed-case"),
         },
         "blocked": {
             "count": len(blocked),
@@ -607,6 +950,35 @@ def build_artifact(apps: Sequence[Mapping[str, Any]],
     }
 
 
+def _is_observed(record: Mapping[str, Any]) -> bool:
+    """True for a case harvested from use rather than answered by a human.
+
+    A record written before this distinction existed carries no scope at all,
+    and every such record came from a guided session, so absence means
+    attested.
+    """
+    return record.get("evidence_scope") == OBSERVED_EVIDENCE_SCOPE
+
+
+def _int_counts(value: object) -> dict[str, int]:
+    if not isinstance(value, Mapping):
+        return {}
+    counts: dict[str, int] = {}
+    for name, count in value.items():
+        if isinstance(count, bool) or not isinstance(count, int):
+            continue
+        counts[str(name)] = count
+    return counts
+
+
+def _artifact_scope(attested: Sequence[Any], observed: Sequence[Any]) -> str:
+    if observed and attested:
+        return MIXED_ARTIFACT_SCOPE
+    if observed:
+        return OBSERVED_ARTIFACT_SCOPE
+    return EVIDENCE_SCOPE
+
+
 def _compatibility_outcome(runtime: Mapping[str, Any]) -> dict[str, Any] | None:
     """Translate one recorded receipt into closed compatibility buckets."""
     state = runtime.get("insertion_state")
@@ -622,31 +994,48 @@ def _compatibility_outcome(runtime: Mapping[str, Any]) -> dict[str, Any] | None:
 def render_summary(artifact: Mapping[str, Any]) -> str:
     coverage = artifact["coverage"]
     claims = artifact["claims"]
+    machine = artifact["machine_observed"]
+    operator = artifact["operator_observations"]
     lines = [
         "PHYSICAL APP INSERTION MATRIX",
+        f"evidence scope: {artifact['evidence_scope']}",
         f"apps recorded: {coverage['apps_recorded']}/"
         f"{coverage['apps_planned']} · blocked: {coverage['apps_blocked']} · "
-        f"not attempted: {coverage['apps_not_attempted']}",
+        f"not attempted: {coverage['apps_not_attempted']} · off-plan apps "
+        f"observed: {coverage['apps_observed_off_plan']}",
         f"real apps exercised: {claims['real_apps_exercised']} · "
         f"50-app claim: {'yes' if claims['fifty_app_claim'] else 'no'} "
         f"({claims['fifty_app_claim_reason']}) · four-nines claim: no",
+        f"operator-attested cases: {operator['attested_cases']} · "
+        f"machine-observed cases: {machine['cases']} "
+        f"({machine['utterances']} utterances, no operator asked)",
     ]
     for name, counts in coverage["by_category"].items():
         lines.append(
             f"  {name:<18} recorded {counts['recorded']}/{counts['planned']}"
             f" · blocked {counts['blocked']}")
+    lines.append("categories with no evidence at all: " + (", ".join(
+        coverage["categories_without_evidence"]) or "none"))
     lines.append("receipt states: " + (", ".join(
         f"{key} {value}"
         for key, value in artifact["runtime_receipts"]["states"].items())
         or "none"))
     lines.append("operator verdicts: " + (", ".join(
         f"{key} {value}"
-        for key, value in
-        artifact["operator_observations"]["text_verdicts"].items()) or "none"))
+        for key, value in operator["text_verdicts"].items()) or "none"))
+    if machine["cases"]:
+        lines.append("machine-observed states: " + (", ".join(
+            f"{key} {value}"
+            for key, value in machine["insertion_states"].items()) or "none"))
+        lines.append("machine-observed readback shapes: " + (", ".join(
+            f"{key} {value}"
+            for key, value in machine["readback_shapes"].items()) or "none"))
     agreement = artifact["agreement"]
     lines.append(
         f"operator and runtime both clean: {agreement['both']} · "
-        f"disagreements: {agreement['disagreements']}")
+        f"disagreements: {agreement['disagreements']} · "
+        f"not comparable (no operator verdict): "
+        f"{agreement['not_comparable']}")
     if artifact["blocked"]["reasons"]:
         lines.append("blocked: " + ", ".join(
             f"{key} {value}"
@@ -711,6 +1100,13 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--out", type=Path, required=True)
     run = commands.add_parser("run", help="run or resume the guided session")
     run.add_argument("--transcripts", type=Path, default=DEFAULT_TRANSCRIPTS)
+    observe = commands.add_parser(
+        "observe",
+        help="harvest evidence from ordinary use, asking the operator nothing")
+    observe.add_argument("--transcripts", type=Path,
+                         default=DEFAULT_TRANSCRIPTS)
+    observe.add_argument("--out", type=Path, default=None,
+                         help="also write the matrix artifact here")
     emit = commands.add_parser(
         "emit", help="build the matrix artifact from a recorded session")
     emit.add_argument("--out", type=Path, required=True)
@@ -739,6 +1135,25 @@ def main(argv: Sequence[str] | None = None, *,
                 blocked_reasons=BLOCKED_REASONS)
             return run_session(apps, session, transcripts=args.transcripts,
                                reader=reader, writer=writer)
+        if args.command == "observe":
+            session = Session.load(
+                args.session, TOOL, plan_digest=plan_digest(apps),
+                blocked_reasons=BLOCKED_REASONS)
+            if not Path(args.transcripts).exists():
+                writer.write(
+                    f"\n{args.transcripts} does not exist yet. Use Whisper "
+                    "Face normally, then run this again.\n")
+                return 2
+            outcome = observe_transcript(
+                apps, session, transcripts=args.transcripts)
+            artifact = build_artifact(apps, session.payload())
+            writer.write(render_observation(outcome) + "\n\n")
+            writer.write(render_summary(artifact) + "\n")
+            if args.out is not None:
+                atomic_write_json(args.out, artifact)
+                writer.write(f"\nwrote {args.out}\n")
+            writer.write(f"session saved to {session.path}\n")
+            return 0
         payload = _load_session_payload(args.session)
         artifact = build_artifact(apps, payload)
         if args.command == "emit":

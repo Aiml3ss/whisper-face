@@ -29,24 +29,37 @@ POISON_TONE = "my-secret-tone-name"
 
 
 def transcript_line(event_id, *, state="verified", reason="commit_verified",
-                    route="fast"):
+                    route="fast", ts=1_800_000_000.0, press_s=None):
+    metrics = {
+        "insertion_state": state,
+        "insertion_reason": reason,
+        "paste_attempted": True,
+        "insertion_verified": state == "verified",
+        "delayed_cleanup_scheduled": False,
+        "insertion_s": 0.0202,
+    }
+    if press_s is not None:
+        metrics["press_s"] = press_s
     return json.dumps({
-        "ts": 1_800_000_000.0,
+        "ts": ts,
         "app": "com.apple.TextEdit",
         "raw": POISON_RAW,
         "clean": POISON_CLEAN,
         "observed_text": POISON_CLEAN,
         "path": route,
         "id": event_id,
-        "metrics": {
-            "insertion_state": state,
-            "insertion_reason": reason,
-            "paste_attempted": True,
-            "insertion_verified": state == "verified",
-            "delayed_cleanup_scheduled": False,
-            "insertion_s": 0.0202,
-        },
+        "metrics": metrics,
     })
+
+
+def trace_line(event):
+    payload = {"event": event, "schema_version": 1}
+    if event == support.RUNTIME_START_TRACE_EVENT:
+        payload.update({"duration_ms": 1.0, "success": 1.0})
+    else:
+        payload.update({"release_ms": 1.0, "asr_ms": 1.0})
+    return support.PERFORMANCE_TRACE_PREFIX + json.dumps(
+        payload, sort_keys=True, separators=(",", ":"))
 
 
 class ScriptedReader:
@@ -330,6 +343,326 @@ class ArtifactTests(unittest.TestCase):
         self.assertIn("runs recorded: 1/16", summary)
         self.assertIn("discharges: physical-audio-device-switch", summary)
         self.assertIn("physical-long-audio-memory-thermal", summary)
+
+
+class PassiveSignalTests(unittest.TestCase):
+    """Only a signal the runtime actually leaves may be claimed."""
+
+    def test_the_five_scenarios_split_into_observable_and_blind(self):
+        self.assertEqual(
+            set(lifecycle.PASSIVE_OBSERVABLE_SCENARIOS)
+            | set(lifecycle.PASSIVE_BLIND_SCENARIOS),
+            set(lifecycle.SCENARIOS))
+        self.assertEqual(
+            set(lifecycle.PASSIVE_OBSERVABLE_SCENARIOS)
+            & set(lifecycle.PASSIVE_BLIND_SCENARIOS), set())
+        self.assertEqual(set(lifecycle.PASSIVE_BLIND_SCENARIOS),
+                         {"sleep-wake", "audio-device-switch"})
+        for entry in lifecycle.PASSIVE_BLIND_SCENARIOS.values():
+            self.assertTrue(entry["reason"].strip())
+            self.assertTrue(entry["detail"].strip())
+
+    def test_the_recovery_path_really_is_silent(self):
+        """The refusal above is only honest while these classes stay quiet.
+
+        `sleep-wake` and `audio-device-switch` are declared unobservable
+        because the wake notification and the CoreAudio default-input
+        listener both run through handlers that print nothing. If that ever
+        changes there *is* a signal, and this refusal must be revisited
+        rather than left standing out of habit.
+        """
+        tree = ast.parse((ROOT / "dictate.py").read_text(encoding="utf-8"))
+        silent = {"MacAudioRecoveryNotifications",
+                  "_CoreAudioDefaultInputListener"}
+        found = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef) or node.name not in silent:
+                continue
+            found.add(node.name)
+            for inner in ast.walk(node):
+                if (isinstance(inner, ast.Call)
+                        and isinstance(inner.func, ast.Name)):
+                    self.assertNotEqual(inner.func.id, "print", node.name)
+        self.assertEqual(found, silent)
+
+    def test_the_trace_events_are_ones_the_runtime_emits(self):
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        for event in (support.RUNTIME_START_TRACE_EVENT,
+                      support.UTTERANCE_TRACE_EVENT):
+            self.assertIn(f'"{event}"', source, event)
+        self.assertIn(support.PERFORMANCE_TRACE_PREFIX, source)
+
+    def test_long_form_needs_a_hold_of_at_least_the_threshold(self):
+        just_under = lifecycle.LONG_FORM_MIN_PRESS_MS / 1000.0 - 1
+        receipts = [
+            support.project_transcript_record(json.loads(transcript_line(
+                "evt-1", press_s=just_under))),
+            support.project_transcript_record(json.loads(transcript_line(
+                "evt-2", press_s=lifecycle.LONG_FORM_MIN_PRESS_MS / 1000.0))),
+        ]
+        signal = lifecycle.observe_long_form(receipts)
+        self.assertEqual(signal["long_form_captures"], 1)
+        self.assertEqual(signal["utterances_with_a_hold_duration"], 2)
+        self.assertEqual(signal["insertion_states"], {"verified": 1})
+        self.assertEqual(
+            signal["unobservable_half"], "memory-growth-and-thermal-behaviour")
+
+    def test_long_form_reports_nothing_when_no_hold_was_long(self):
+        receipts = [support.project_transcript_record(json.loads(
+            transcript_line("evt-1", press_s=4.2)))]
+        signal = lifecycle.observe_long_form(receipts)
+        self.assertEqual(signal["long_form_captures"], 0)
+        self.assertEqual(signal["insertion_states"], {})
+
+    def test_back_to_back_needs_a_run_of_utterances_without_a_pause(self):
+        base = 1_800_000_000.0
+        spacing = [0, 2, 2, 2, 600, 2]
+        receipts = []
+        stamp = base
+        for index, gap in enumerate(spacing):
+            stamp += gap
+            receipts.append(support.project_transcript_record(json.loads(
+                transcript_line(f"evt-{index}", ts=stamp, press_s=1.0))))
+        signal = lifecycle.observe_back_to_back(receipts)
+
+        self.assertEqual(signal["bursts"], 1)
+        self.assertEqual(signal["longest_burst"], 4)
+        self.assertEqual(signal["utterances_in_bursts"], 4)
+        self.assertEqual(
+            signal["unobservable_half"],
+            "how-many-utterances-the-operator-actually-spoke")
+
+    def test_a_long_pause_never_counts_as_back_to_back(self):
+        base = 1_800_000_000.0
+        receipts = [
+            support.project_transcript_record(json.loads(transcript_line(
+                f"evt-{index}", ts=base + index * 600, press_s=1.0)))
+            for index in range(4)]
+        self.assertEqual(lifecycle.observe_back_to_back(receipts)["bursts"], 0)
+
+    def test_a_restart_needs_utterances_on_both_sides_of_it(self):
+        start = support.RUNTIME_START_TRACE_EVENT
+        utterance = support.UTTERANCE_TRACE_EVENT
+        signal = lifecycle.observe_process_restart(
+            [start, utterance, start, utterance, start])
+        self.assertEqual(signal["runtime_starts"], 3)
+        self.assertEqual(signal["utterance_traces"], 2)
+        # Only the middle start has utterances before and after it.
+        self.assertEqual(signal["restarts_with_utterances_on_both_sides"], 1)
+        self.assertEqual(signal["utterances_after_the_last_start"], 0)
+
+    def test_a_runtime_that_never_restarted_evidences_no_restart(self):
+        signal = lifecycle.observe_process_restart(
+            [support.RUNTIME_START_TRACE_EVENT]
+            + [support.UTTERANCE_TRACE_EVENT] * 5)
+        self.assertEqual(signal["restarts_with_utterances_on_both_sides"], 0)
+        self.assertEqual(signal["utterances_after_the_last_start"], 5)
+
+
+class PassiveObservationTests(unittest.TestCase):
+    """Passive lifecycle evidence must never discharge a physical id."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.transcripts = self.dir / "transcripts.jsonl"
+        self.transcripts.write_text("", encoding="utf-8")
+        self.log = self.dir / "dictate.log"
+        self.log.write_text("", encoding="utf-8")
+        self.session_path = self.dir / "session.json"
+        self.runs = lifecycle.build_plan()
+
+    def session(self):
+        return support.Session.load(
+            self.session_path, lifecycle.TOOL,
+            plan_digest=lifecycle.plan_digest(self.runs),
+            blocked_reasons=lifecycle.BLOCKED_REASONS)
+
+    def write(self, *lines):
+        with self.transcripts.open("a", encoding="utf-8") as handle:
+            for line in lines:
+                handle.write(line + "\n")
+
+    def write_log(self, *events):
+        with self.log.open("a", encoding="utf-8") as handle:
+            for event in events:
+                handle.write(trace_line(event) + "\n")
+
+    def observe(self):
+        return lifecycle.observe_runtime(
+            self.session(), transcripts=self.transcripts,
+            runtime_log=self.log)
+
+    def artifact(self):
+        return lifecycle.build_artifact(self.runs, self.session().payload())
+
+    def test_passive_observation_discharges_nothing_at_all(self):
+        self.write(transcript_line("evt-1", press_s=600.0))
+        self.write_log(support.RUNTIME_START_TRACE_EVENT,
+                       support.UTTERANCE_TRACE_EVENT,
+                       support.RUNTIME_START_TRACE_EVENT,
+                       support.UTTERANCE_TRACE_EVENT)
+        self.observe()
+        artifact = self.artifact()
+
+        self.assertEqual(artifact["discharges_physical_validation"], [])
+        self.assertEqual(
+            artifact["still_requires_physical_validation"],
+            ["physical-audio-device-switch",
+             "physical-long-audio-memory-thermal",
+             "physical-operating-system-sleep-wake"])
+        self.assertEqual(artifact["passive_observation"]["discharges"], [])
+        self.assertEqual(
+            artifact["discharges_physical_validation_basis"],
+            "operator-attested-runs-only")
+        # A long capture really was observed; it still discharges nothing.
+        self.assertEqual(
+            artifact["scenarios"]["long-form"]["passive_observation"][
+                "long_form_captures"], 1)
+        self.assertEqual(artifact["scenarios"]["long-form"]["runs_recorded"], 0)
+
+    def test_a_blind_scenario_never_gets_a_case_or_a_number(self):
+        self.write(transcript_line("evt-1", press_s=600.0))
+        self.observe()
+        session = self.session()
+        for scenario in lifecycle.PASSIVE_BLIND_SCENARIOS:
+            self.assertNotIn(
+                lifecycle.observed_case_id(scenario), session.records)
+            entry = self.artifact()["scenarios"][scenario]
+            self.assertIs(entry["passively_observable"], False)
+            self.assertIsNone(entry["passive_observation"])
+            self.assertTrue(entry["passively_not_observable_reason"])
+        summary = lifecycle.render_summary(self.artifact())
+        self.assertIn("not observable", summary)
+
+    def test_an_operator_attested_run_still_discharges_its_id(self):
+        self.write(transcript_line("evt-1", press_s=600.0))
+        self.observe()
+        session = self.session()
+        session.record("sleep-wake-1", {
+            "evidence_scope": support.ATTESTED_EVIDENCE_SCOPE,
+            "scenario": "sleep-wake",
+            "expected_utterances": 2,
+            "recorded_utc": "2026-07-27T00:00:00+00:00",
+            "runtime": {"source": "transcripts-jsonl+dictate-log",
+                        "utterances_logged": 2,
+                        "insertion_states": {"verified": 2},
+                        "outbox_diversions": 0, "capture_ready_events": 1,
+                        "insertion_ms_max": 20.2},
+            "operator": {"utterance_survival": "all-utterances-produced-text",
+                         "recovery": "recovered-without-intervention",
+                         "machine_behavior": "normal"}})
+        artifact = self.artifact()
+
+        self.assertEqual(artifact["discharges_physical_validation"],
+                         ["physical-operating-system-sleep-wake"])
+        self.assertEqual(artifact["coverage"]["runs_recorded"], 1)
+        self.assertEqual(artifact["evidence_scope"],
+                         lifecycle.MIXED_ARTIFACT_SCOPE)
+
+    def test_passive_runs_never_inflate_the_recorded_run_count(self):
+        self.write(transcript_line("evt-1", press_s=1.0))
+        self.observe()
+        coverage = self.artifact()["coverage"]
+
+        self.assertEqual(coverage["runs_recorded"], 0)
+        self.assertEqual(coverage["runs_not_attempted"], 16)
+        self.assertIs(coverage["extrapolated"], False)
+        self.assertEqual(coverage["scenarios_passively_observed"],
+                         sorted(lifecycle.PASSIVE_OBSERVABLE_SCENARIOS))
+        self.assertEqual(self.artifact()["evidence_scope"],
+                         lifecycle.OBSERVED_ARTIFACT_SCOPE)
+
+    def test_an_attested_run_is_never_replaced_by_a_passive_one(self):
+        session = self.session()
+        session.record(lifecycle.observed_case_id("long-form"), {
+            "evidence_scope": support.ATTESTED_EVIDENCE_SCOPE,
+            "scenario": "long-form",
+            "operator": {"utterance_survival": "all-utterances-produced-text",
+                         "recovery": "recovered-without-intervention",
+                         "machine_behavior": "chassis-hot"}})
+        self.write(transcript_line("evt-1", press_s=600.0))
+        outcome = self.observe()
+
+        self.assertIn(lifecycle.observed_case_id("long-form"),
+                      outcome["cases_protected_by_operator"])
+        record = self.session().records[
+            lifecycle.observed_case_id("long-form")]
+        self.assertEqual(record["evidence_scope"],
+                         support.ATTESTED_EVIDENCE_SCOPE)
+        self.assertEqual(record["operator"]["machine_behavior"], "chassis-hot")
+
+    def test_the_operator_answers_are_the_not_asked_value(self):
+        self.write(transcript_line("evt-1", press_s=1.0))
+        self.observe()
+        record = self.session().records[
+            lifecycle.observed_case_id("process-restart")]
+
+        self.assertEqual(record["evidence_scope"],
+                         support.OBSERVED_EVIDENCE_SCOPE)
+        for answer in record["operator"].values():
+            self.assertEqual(answer, support.NOT_ASKED_VERDICT)
+        for choices in (lifecycle.SURVIVAL, lifecycle.RECOVERY,
+                        lifecycle.MACHINE_BEHAVIOR):
+            for choice in choices:
+                self.assertNotEqual(choice.value, support.NOT_ASKED_VERDICT)
+
+    def test_re_observing_restates_rather_than_doubling(self):
+        self.write(transcript_line("evt-1", press_s=600.0))
+        self.write_log(support.RUNTIME_START_TRACE_EVENT,
+                       support.UTTERANCE_TRACE_EVENT,
+                       support.RUNTIME_START_TRACE_EVENT,
+                       support.UTTERANCE_TRACE_EVENT)
+        first = self.observe()["signals"]
+        second = self.observe()["signals"]
+
+        self.assertEqual(first["process-restart"], second["process-restart"])
+        self.assertEqual(first["long-form"]["long_form_captures"],
+                         second["long-form"]["long_form_captures"])
+        self.assertEqual(len(self.session().records),
+                         len(lifecycle.PASSIVE_OBSERVABLE_SCENARIOS))
+
+    def test_the_passive_artifact_carries_no_dictated_text(self):
+        self.write(transcript_line(
+            "evt-1", press_s=600.0, route=f"llm/{POISON_TONE}"))
+        self.write_log(support.RUNTIME_START_TRACE_EVENT,
+                       support.UTTERANCE_TRACE_EVENT)
+        self.observe()
+        blob = json.dumps(self.artifact())
+
+        for poison in (POISON_RAW, POISON_CLEAN, POISON_TONE):
+            self.assertNotIn(poison, blob)
+        for key in support.TEXT_BEARING_TRANSCRIPT_KEYS:
+            self.assertNotIn(f'"{key}"', blob)
+        self.assertNotIn('"path"', blob)
+
+    def test_the_observe_command_writes_an_owner_only_artifact(self):
+        self.write(transcript_line("evt-1", press_s=600.0))
+        target = self.dir / "artifact.json"
+        writer = io.StringIO()
+        code = lifecycle.main(
+            ["--session", str(self.session_path), "observe",
+             "--transcripts", str(self.transcripts),
+             "--runtime-log", str(self.log), "--out", str(target)],
+            reader=ScriptedReader([]), writer=writer)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+        output = writer.getvalue()
+        self.assertIn("PASSIVE LIFECYCLE OBSERVATION", output)
+        self.assertIn("not observable passively", output)
+        self.assertIn("discharges: nothing yet", output)
+
+    def test_observe_refuses_a_transcript_that_does_not_exist(self):
+        writer = io.StringIO()
+        code = lifecycle.main(
+            ["--session", str(self.session_path), "observe",
+             "--transcripts", str(self.dir / "missing.jsonl"),
+             "--runtime-log", str(self.log)],
+            reader=ScriptedReader([]), writer=writer)
+        self.assertEqual(code, 2)
+        self.assertIn("does not exist yet", writer.getvalue())
 
 
 class NoReceiptWritingTests(unittest.TestCase):
