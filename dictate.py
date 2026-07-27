@@ -9526,6 +9526,31 @@ def release_should_wait_for_tail(rec: Recorder) -> bool:
     )
 
 
+def wait_for_tail_silence(rec, *, max_seconds: float | None = None,
+                          poll_seconds: float = 0.02,
+                          sleep=time.sleep,
+                          now=time.perf_counter) -> float:
+    """Hold the mic only until the tail goes quiet, never past the cap.
+
+    The fixed post-release tail paid its full duration whenever speech was
+    still active at the key-up instant, even though the speaker usually
+    finishes the word within a few tens of milliseconds. The capture
+    callback keeps counting silence during the tail, so poll that counter
+    and stop as soon as the calibrated end-of-speech run exists. Returns
+    the seconds actually waited.
+    """
+    cap = TAIL_SECONDS if max_seconds is None else max_seconds
+    started = now()
+    while True:
+        elapsed = now() - started
+        if elapsed >= cap:
+            return elapsed
+        needed = calibrated_end_silence_seconds() * SAMPLE_RATE
+        if rec.silent_samples >= needed:
+            return elapsed
+        sleep(min(poll_seconds, cap - elapsed))
+
+
 def report_dictation_problem(
         rec: Recorder, hud: HUD, caption: str, log_message: str,
         *, seconds: float = DICTATION_ERROR_SECONDS):
@@ -9738,7 +9763,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         if wait_for_tail:
             # Do not start a decode that would be discarded if the tail adds
             # speech. Capture first, then decode the expanded remainder once.
-            time.sleep(TAIL_SECONDS)
+            wait_for_tail_silence(rec)
             full_audio = rec.stop()
             cut = rec.cut_samples
             chunk_futs = list(rec.chunks)

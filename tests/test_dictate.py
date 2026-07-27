@@ -7278,6 +7278,52 @@ class InsertionJoinPrefixTests(unittest.TestCase):
         self.assertEqual(join(replacing, "dog"), "")
 
 
+class TailSilencePollTests(unittest.TestCase):
+    """The post-release tail ends as soon as the silence run exists."""
+
+    @staticmethod
+    def waited(silent_samples_curve, *, end_silence=0.12, cap=0.30):
+        clock = {"t": 0.0}
+        curve = list(silent_samples_curve)
+        rec = SimpleNamespace(silent_samples=curve.pop(0))
+
+        def now():
+            return clock["t"]
+
+        def sleep(seconds):
+            clock["t"] += seconds
+            if curve:
+                rec.silent_samples = curve.pop(0)
+
+        ns = load_definitions(
+            "wait_for_tail_silence",
+            extra={
+                "TAIL_SECONDS": cap,
+                "SAMPLE_RATE": 16_000,
+                "calibrated_end_silence_seconds": lambda: end_silence,
+                "time": SimpleNamespace(
+                    sleep=sleep, perf_counter=now),
+            },
+        )
+        return ns["wait_for_tail_silence"](
+            rec, sleep=sleep, now=now)
+
+    def test_quiet_tail_exits_at_the_first_silence_run(self):
+        # Silence run completes after two polls: 40 ms, not 300 ms.
+        waited = self.waited([0, 500, 16_000 * 0.13])
+        self.assertLess(waited, 0.05)
+
+    def test_continuing_speech_still_caps_at_the_full_tail(self):
+        waited = self.waited([0] * 100)
+        self.assertAlmostEqual(waited, 0.30, places=2)
+
+    def test_calibrated_end_silence_shortens_the_wait(self):
+        # A 60 ms calibrated run is satisfied by the second sample.
+        waited = self.waited(
+            [0, 16_000 * 0.07, 16_000 * 0.07], end_silence=0.06)
+        self.assertLess(waited, 0.05)
+
+
 class ParakeetCrosscheckTests(unittest.TestCase):
     """Agreement-derived route confidence on the Parakeet primary path."""
 
