@@ -2941,6 +2941,7 @@ class WaveView(NSView):
             caption_type = TYPE_SPECS["hud_caption"]
             para = NSMutableParagraphStyle.alloc().init()
             para.setAlignment_(1)                # NSTextAlignmentCenter
+            para.setLineBreakMode_(0)            # NSLineBreakByWordWrapping
             dim = 0.75 if self.mode == "processing" else 1.0
             cap = NSAttributedString.alloc().initWithString_attributes_(
                 text, {
@@ -2951,15 +2952,29 @@ class WaveView(NSView):
                     NSParagraphStyleAttributeName: para,
                 })
             size = cap.size()
-            cw = min(W - 30, size.width + 22)
-            ch = size.height + 8
+            # A message wider than the card wraps instead of losing its tail:
+            # "Paste unverified — check target; saved in Voice Outbox" was
+            # drawing one clipped line, and the clipped half was the half
+            # that says what to do. Wrapped height comes from measuring at
+            # the pill's real text width; the 72-char cap above bounds it to
+            # two lines of this type size.
+            max_text_width = W - 30 - 22
+            if size.width > max_text_width:
+                wrapped = cap.boundingRectWithSize_options_(
+                    (max_text_width, 4 * size.height), 1)  # line-fragment origin
+                cw = W - 30
+                th = wrapped.size.height
+            else:
+                cw = size.width + 22
+                th = size.height
+            ch = th + 8
             chip_y = STAGE_TOP + STAGE + 12
             _rgb(*palette.bg)
             NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
                 NSMakeRect((W - cw) / 2.0, chip_y, cw, ch),
-                ch / 2.0, ch / 2.0).fill()
-            cap.drawInRect_(NSMakeRect((W - cw) / 2.0 + 4, chip_y + 4,
-                                       cw - 8, size.height))
+                min(ch / 2.0, 14.0), min(ch / 2.0, 14.0)).fill()
+            cap.drawInRect_(NSMakeRect((W - cw) / 2.0 + 11, chip_y + 4,
+                                       cw - 22, th))
 
     def drawFace_(self, lv):
         face = current_face()
