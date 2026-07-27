@@ -156,6 +156,7 @@ PHYSICAL_EVIDENCE_KINDS: tuple[PhysicalEvidenceKind, ...] = (
             "mixed-operator-attested-and-runtime-observed",
         }),
         required_values=(
+            ("schema_version", 1),
             ("privacy", "transcript-free"),
             ("physical_evidence", True),
             ("coverage.extrapolated", False),
@@ -185,6 +186,7 @@ PHYSICAL_EVIDENCE_KINDS: tuple[PhysicalEvidenceKind, ...] = (
         scope_path="evidence_scope",
         allowed_scopes=frozenset({"operator-attested-physical-session"}),
         required_values=(
+            ("schema_version", 1),
             ("privacy", "transcript-free"),
             ("physical_evidence", True),
             ("coverage.extrapolated", False),
@@ -212,6 +214,7 @@ PHYSICAL_EVIDENCE_KINDS: tuple[PhysicalEvidenceKind, ...] = (
         # available.  Both are required rather than either.
         allowed_scopes=frozenset({"operator-attested-physical-session"}),
         required_values=(
+            ("schema_version", 1),
             ("privacy", "transcript-free"),
             ("receipt_written_by_this_tool", False),
             ("manual_review_flag_set_by_this_tool", False),
@@ -236,6 +239,7 @@ PHYSICAL_EVIDENCE_KINDS: tuple[PhysicalEvidenceKind, ...] = (
         scope_path="evidence_scope",
         allowed_scopes=frozenset({"explicit-local-wav-manifest"}),
         required_values=(
+            ("schema_version", 1),
             ("activation_evidence.activation_claim", False),
         ),
         # A re-listen report that counted even one synthetic sample is not
@@ -260,6 +264,7 @@ PHYSICAL_EVIDENCE_KINDS: tuple[PhysicalEvidenceKind, ...] = (
         scope_path=None,
         allowed_scopes=frozenset(),
         required_values=(
+            ("schema_version", 1),
             ("privacy", "aggregate-categorical-and-numeric-only"),
             ("activation_claim", False),
             ("quality_claim", False),
@@ -645,6 +650,7 @@ def _synthetic_section() -> dict[str, Any]:
 def _physical_section(
     artifacts: Sequence[Mapping[str, Any]],
     environments: Sequence[Mapping[str, Any]],
+    artifact_environment_ids: Sequence[str | None] | None = None,
 ) -> dict[str, Any]:
     known = {
         environment["environment_id"]: environment
@@ -655,17 +661,35 @@ def _physical_section(
     if artifacts and not known:
         raise PublicationError(
             "physical artifacts require at least one named environment")
+    # Explicit pairings come from the publisher's command line, aligned by
+    # position. None of the registered producers writes an environment_id
+    # into its artifact -- and mutating an artifact to add one would change
+    # the digest being published -- so with several environments the pairing
+    # has to arrive beside the artifact, not inside it.
+    if artifact_environment_ids is None:
+        artifact_environment_ids = [None] * len(artifacts)
+    if len(artifact_environment_ids) != len(artifacts):
+        raise PublicationError(
+            "each physical artifact needs exactly one environment pairing")
     sources = []
-    for artifact in artifacts:
-        if len(known) == 1:
-            environment = next(iter(known.values()))
-        else:
-            declared = _at(artifact, "environment_id")
+    for artifact, paired in zip(artifacts, artifact_environment_ids):
+        declared = paired
+        if declared is None:
+            in_artifact = _at(artifact, "environment_id")
+            if in_artifact is not _MISSING:
+                declared = in_artifact
+        if declared is not None:
             if declared not in known:
                 raise PublicationError(
-                    "each physical artifact needs a resolvable environment_id "
-                    "when more than one environment is published")
+                    f"artifact names environment {declared!r}, which is not "
+                    "a published environment")
             environment = known[declared]
+        elif len(known) == 1:
+            environment = next(iter(known.values()))
+        else:
+            raise PublicationError(
+                "with more than one environment, pair each artifact "
+                "explicitly: --physical-artifact <environment_id>=<path>")
         sources.append(_physical_source(artifact, environment))
     digests = [source["artifact_sha256"] for source in sources]
     if len(set(digests)) != len(digests):
@@ -694,6 +718,32 @@ def _physical_section(
     }
 
 
+def _assert_publication_header(document: Mapping[str, Any]) -> None:
+    """Re-validate the top-level claims, not only the evidence sections.
+
+    The renderers promise that a hand-assembled document is checked by the
+    same rules as the builders. Without this, a caller could mutate
+    ``published_on`` or ``repository_revision`` after building and both
+    renderers would publish it.
+    """
+    schema = document.get("schema_version")
+    if schema != PUBLICATION_SCHEMA_VERSION or isinstance(schema, bool):
+        raise PublicationError("unsupported publication schema")
+    if document.get("report_kind") != PUBLICATION_KIND:
+        raise PublicationError("unsupported report kind")
+    revision = document.get("repository_revision")
+    if not isinstance(revision, str) or not _REVISION.match(revision):
+        raise PublicationError(
+            "publication must name the full 40-character repository revision")
+    published_on = document.get("published_on")
+    if not isinstance(published_on, str) or not _DATE.match(published_on):
+        raise PublicationError("published_on must be an ISO YYYY-MM-DD date")
+    try:
+        datetime.strptime(published_on, "%Y-%m-%d")
+    except ValueError as error:
+        raise PublicationError("published_on is not a real date") from error
+
+
 def assert_evidence_separation(document: Mapping[str, Any]) -> None:
     """Fail loudly if any published entry blurs the two evidence classes.
 
@@ -703,6 +753,7 @@ def assert_evidence_separation(document: Mapping[str, Any]) -> None:
     """
     if not isinstance(document, Mapping):
         raise PublicationError("publication must be a JSON object")
+    _assert_publication_header(document)
     evidence = document.get("evidence")
     if not isinstance(evidence, Mapping) or set(evidence) != {
             "synthetic", "physical"}:
@@ -809,6 +860,7 @@ def build_publication(
     published_on: str | None = None,
     physical_artifacts: Sequence[Mapping[str, Any]] = (),
     environments: Sequence[Mapping[str, Any]] = (),
+    artifact_environment_ids: Sequence[str | None] | None = None,
 ) -> dict[str, Any]:
     """Assemble the dated public report and verify it before returning it."""
     if not isinstance(revision, str) or not _REVISION.match(revision):
@@ -838,7 +890,9 @@ def build_publication(
             "synthetic number cannot be published as a physical one."),
         "evidence": {
             "synthetic": _synthetic_section(),
-            "physical": _physical_section(physical_artifacts, validated),
+            "physical": _physical_section(
+                physical_artifacts, validated,
+                artifact_environment_ids),
         },
     }
     assert_evidence_separation(document)
@@ -904,7 +958,7 @@ def render_publication_markdown(document: Mapping[str, Any]) -> str:
             lines.append(
                 f"| `{source['kind_id']}` | `{source['environment_id']}` "
                 f"| {source['volume_metric']} | {source['volume']} "
-                f"| `{source['artifact_sha256'][:16]}…` |")
+                f"| `{source['artifact_sha256']}` |")
         lines += ["", "### Environments", ""]
         for environment in physical["environments"]:
             software = ", ".join(
@@ -946,9 +1000,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     publish.add_argument(
         "--published-on", help="ISO date; defaults to today in UTC")
     publish.add_argument(
-        "--physical-artifact", type=Path, action="append", default=[],
-        metavar="PATH",
-        help="artifact from a capture harness or activation benchmark")
+        "--physical-artifact", action="append", default=[],
+        metavar="[ENVIRONMENT_ID=]PATH",
+        help="artifact from a capture harness or activation benchmark; "
+             "with more than one --environment, prefix the id of the "
+             "environment that produced it")
     publish.add_argument(
         "--environment", type=Path, action="append", default=[],
         metavar="PATH",
@@ -963,13 +1019,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     try:
+        artifact_paths: list[Path] = []
+        artifact_environment_ids: list[str | None] = []
+        for value in args.physical_artifact:
+            paired, separator, path = value.partition("=")
+            if separator and paired and not paired.startswith((".", "/", "~")):
+                artifact_environment_ids.append(paired)
+                artifact_paths.append(Path(path))
+            else:
+                artifact_environment_ids.append(None)
+                artifact_paths.append(Path(value))
         document = build_publication(
             revision=args.revision,
             published_on=args.published_on,
             physical_artifacts=[
-                _read_json_file(path) for path in args.physical_artifact],
+                _read_json_file(path) for path in artifact_paths],
             environments=[
                 _read_json_file(path) for path in args.environment],
+            artifact_environment_ids=artifact_environment_ids,
         )
         rendered = (
             render_publication_json(document) if args.format == "json"

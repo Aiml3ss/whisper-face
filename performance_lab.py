@@ -679,10 +679,22 @@ MODEL_SCORECARD_SCHEMA_VERSION = 2
 _MEASUREMENT_KEYS = frozenset({
     "measurement_id", "measured_on", "hardware", "os_name", "os_version",
     "dataset", "sample", "command", "artifacts_preserved", "summary_sha256",
+    "harness_script_sha256", "record_sha256_by_engine",
     "independently_recalculable", "notes",
 })
 _MEASUREMENT_ID = re.compile(r"\A[a-z0-9][a-z0-9._-]{0,95}\Z")
 _MEASUREMENT_DATE = re.compile(r"\A[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
+
+
+def _is_calendar_date(value: object) -> bool:
+    """True only for a real ISO calendar date; 2026-02-31 is not one."""
+    if not isinstance(value, str) or not _MEASUREMENT_DATE.match(value):
+        return False
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return False
+    return True
 _SHA256 = re.compile(r"\A[0-9a-f]{64}\Z")
 _METRIC_STATES = frozenset({"measured", "unmeasured"})
 
@@ -738,6 +750,28 @@ def _load_measurements(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
             raise ValueError(
                 f"{identifier}: a run with no preserved artifact cannot be "
                 "called independently recalculable")
+        harness_digest = record["harness_script_sha256"]
+        if harness_digest is not None and (
+                not isinstance(harness_digest, str)
+                or not _SHA256.match(harness_digest)):
+            raise ValueError(
+                f"{identifier}: harness_script_sha256 must be a SHA-256")
+        records_by_engine = record["record_sha256_by_engine"]
+        if records_by_engine is not None and (
+                not isinstance(records_by_engine, dict)
+                or not records_by_engine
+                or not all(
+                    isinstance(engine, str) and isinstance(digest, str)
+                    and _SHA256.match(digest)
+                    for engine, digest in records_by_engine.items())):
+            raise ValueError(
+                f"{identifier}: record_sha256_by_engine must map engines to "
+                "SHA-256 digests")
+        if recalculable and records_by_engine is None:
+            raise ValueError(
+                f"{identifier}: independently recalculable requires the "
+                "preserved per-utterance record digests; a summary alone is "
+                "an aggregate")
         known[identifier] = record
     return known
 
@@ -974,7 +1008,8 @@ def refresh_model_scorecard(
         measurement_id: str, hardware: str, measured_on: str, command: str,
         summary_sha256: str, os_name: str = "macOS",
         os_version: str | None = None,
-        notes: str | None = None) -> dict[str, Any]:
+        notes: str | None = None,
+        preserved_records: dict[str, str] | None = None) -> dict[str, Any]:
     """Rewrite measured metrics from a real, preserved benchmark_asr run.
 
     Nothing is invented. Only the metrics the summary actually contains are
@@ -984,13 +1019,23 @@ def refresh_model_scorecard(
     """
     if not isinstance(summary, dict) or summary.get("schema_version") != 1:
         raise ValueError("unsupported benchmark_asr summary schema")
+    harness = summary.get("harness")
+    if (not isinstance(harness, dict)
+            or harness.get("script") != "benchmark_asr.py"
+            or not _SHA256.match(str(harness.get("script_sha256") or ""))
+            or not _SHA256.match(
+                str(harness.get("model_scorecard_sha256") or ""))):
+        raise ValueError(
+            "summary carries no benchmark_asr harness provenance; a document "
+            "without the script and scorecard digests the harness always "
+            "records is not evidence of a run")
     engines = summary.get("engines")
     if not isinstance(engines, list) or not engines:
         raise ValueError("benchmark_asr summary contains no engine results")
     if not _MEASUREMENT_ID.match(measurement_id):
         raise ValueError("invalid measurement identifier")
-    if not _MEASUREMENT_DATE.match(measured_on):
-        raise ValueError("measured_on must be an ISO date")
+    if not _is_calendar_date(measured_on):
+        raise ValueError("measured_on must be a real ISO date, not merely the shape of one")
     if not _SHA256.match(summary_sha256):
         raise ValueError("summary_sha256 must be a SHA-256 digest")
     for label, value in (("hardware", hardware), ("command", command),
@@ -1018,6 +1063,18 @@ def refresh_model_scorecard(
             raise ValueError(
                 f"{engine}: the run targeted a different model or revision "
                 "than the reviewed pin")
+        # Requesting the pin is an intention; resolving it immutably is the
+        # proof. A run whose executor could not verify what it loaded must
+        # not overwrite published measurements.
+        if (result.get("model_revision_status")
+                != "verified-immutable-snapshot"
+                or result.get("resolved_model_id") != candidate["model_id"]
+                or result.get("resolved_model_revision")
+                != candidate["revision"]):
+            raise ValueError(
+                f"{engine}: the run did not prove it executed the pinned "
+                "revision (model_revision_status must be "
+                "verified-immutable-snapshot with matching resolved pins)")
         for metric in _REFRESHABLE_METRICS:
             value = _number(result.get(metric))
             if value is None:
@@ -1036,6 +1093,15 @@ def refresh_model_scorecard(
             "refusing a partial refresh; the run must cover every reviewed "
             "candidate, missing: " + ", ".join(stale))
 
+    # The summary holds only aggregates. "Independently recalculable" is a
+    # claim about the per-utterance records beside it, so it is made only
+    # when every engine's records were preserved and digested; a summary on
+    # its own is a preserved aggregate, stated as exactly that.
+    recalculable = (
+        preserved_records is not None
+        and set(preserved_records) >= set(by_engine)
+        and all(_SHA256.match(str(digest or ""))
+                for digest in preserved_records.values()))
     record = {
         "measurement_id": measurement_id,
         "measured_on": measured_on,
@@ -1049,7 +1115,11 @@ def refresh_model_scorecard(
         "command": command,
         "artifacts_preserved": True,
         "summary_sha256": summary_sha256,
-        "independently_recalculable": True,
+        "harness_script_sha256": harness["script_sha256"],
+        "record_sha256_by_engine": (
+            {engine: preserved_records[engine]
+             for engine in sorted(by_engine)} if recalculable else None),
+        "independently_recalculable": recalculable,
         "notes": notes,
     }
     refreshed["measurements"] = [
@@ -1062,7 +1132,12 @@ def refresh_model_scorecard(
     evidence["metric_verification"] = (
         "Refreshed from a preserved benchmark_asr summary artifact "
         f"(sha256 {summary_sha256}); every published metric can be "
-        "recalculated from that artifact.")
+        "recalculated from the preserved per-utterance records."
+        if recalculable else
+        "Refreshed from a preserved benchmark_asr summary artifact "
+        f"(sha256 {summary_sha256}). The per-utterance records were not "
+        "preserved, so the aggregates are documented-run evidence and are "
+        "not independently recalculable.")
     return refreshed
 
 
@@ -1618,10 +1693,13 @@ def render_scorecard(report: dict[str, Any]) -> str:
             f"{candidate['license_status']}")
     lines.append("MEASURED ON NAMED HARDWARE")
     for record in report.get("measurements", ()):
-        recalculable = (
-            "recalculable from a preserved artifact"
-            if record["independently_recalculable"]
-            else "artifact not preserved; documented-run evidence only")
+        if record["independently_recalculable"]:
+            recalculable = "recalculable from a preserved artifact"
+        elif record["artifacts_preserved"]:
+            recalculable = (
+                "preserved aggregate; not independently recalculable")
+        else:
+            recalculable = "artifact not preserved; documented-run evidence only"
         os_version = record["os_version"] or "version unrecorded"
         lines.append(
             f"  {record['measurement_id']}: {record['hardware']}, "
@@ -1769,6 +1847,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     refresh.add_argument("--os-version")
     refresh.add_argument("--notes")
     refresh.add_argument(
+        "--run-command", default=None,
+        help="exact benchmark_asr invocation, only for summaries old enough "
+             "to lack a recorded one; never a placeholder")
+    refresh.add_argument(
         "--output", type=Path,
         help="defaults to rewriting --scorecard in place")
     refresh.add_argument(
@@ -1856,24 +1938,56 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "refresh-model-scorecard":
             summary_path = args.summary.expanduser().resolve()
             summary_bytes = summary_path.read_bytes()
+            summary = json.loads(summary_bytes.decode("utf-8"))
+            # The reproducing command is evidence, never a fabricated
+            # placeholder: the harness records its own invocation, and an
+            # older summary without one must have it stated explicitly.
+            run_command = summary.get("invocation") or args.run_command
+            if not isinstance(run_command, str) or not run_command.strip():
+                raise ValueError(
+                    "the summary records no invocation; pass --run-command "
+                    "with the exact benchmark_asr command that produced it")
+            # "Recalculable" is a claim about the per-utterance records, so
+            # look for them where the harness writes them, beside the summary.
+            preserved: dict[str, str] = {}
+            for result in summary.get("engines") or []:
+                engine = result.get("engine") if isinstance(result, dict) \
+                    else None
+                if not engine:
+                    continue
+                records_path = summary_path.parent / f"{engine}.jsonl"
+                if records_path.is_file():
+                    preserved[engine] = hashlib.sha256(
+                        records_path.read_bytes()).hexdigest()
             refreshed = refresh_model_scorecard(
                 load_model_scorecard(args.scorecard),
-                json.loads(summary_bytes.decode("utf-8")),
+                summary,
                 measurement_id=args.measurement_id,
                 hardware=args.hardware,
                 measured_on=args.measured_on,
-                command=(
-                    "uv run benchmark_asr.py ... "
-                    "--output-dir <preserved artifact directory>"),
+                command=run_command,
                 summary_sha256=hashlib.sha256(summary_bytes).hexdigest(),
                 os_name=args.os_name,
                 os_version=args.os_version,
                 notes=args.notes,
+                preserved_records=preserved or None,
             )
-            destination = args.output or args.scorecard
-            write_json_artifact(destination, refreshed)
-            payload = generate_model_scorecard(
-                load_model_scorecard(destination))
+            # Validate the refreshed scorecard through the real loader before
+            # it replaces anything: with the default destination a validation
+            # failure after writing would leave the checked-in scorecard
+            # replaced by a file the loader refuses.
+            destination = Path(args.output or args.scorecard)
+            staging = destination.with_name(destination.name + ".staging")
+            write_json_artifact(staging, refreshed)
+            try:
+                payload = generate_model_scorecard(
+                    load_model_scorecard(staging))
+            except (OSError, ValueError, KeyError) as error:
+                staging.unlink(missing_ok=True)
+                raise ValueError(
+                    f"refusing to replace {destination.name}: the refreshed "
+                    f"scorecard fails validation ({error})") from error
+            os.replace(staging, destination)
             rendered = render_scorecard(payload)
             status = 0
         else:

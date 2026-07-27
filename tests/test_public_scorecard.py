@@ -270,6 +270,7 @@ class PublicationSeparationTests(unittest.TestCase):
 
     def test_a_relisten_report_carrying_synthetic_samples_is_refused(self):
         report = {
+            "schema_version": 1,
             "report_kind": "whisper-face/relisten-activation-report",
             "evidence_scope": "explicit-local-wav-manifest",
             "evidence_counts": {"real-recorded": 40, "synthetic-test": 1},
@@ -292,6 +293,7 @@ class PublicationSeparationTests(unittest.TestCase):
 
     def test_zero_volume_physical_work_is_refused(self):
         report = {
+            "schema_version": 1,
             "report_kind": "whisper-face/relisten-activation-report",
             "evidence_scope": "explicit-local-wav-manifest",
             "evidence_counts": {"real-recorded": 0, "synthetic-test": 0},

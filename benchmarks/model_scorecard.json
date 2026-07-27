@@ -27,18 +27,68 @@
       "artifacts_preserved": false,
       "summary_sha256": null,
       "independently_recalculable": false,
-      "notes": "Documented-run evidence. The raw JSONL and summary.json were not preserved, so the numbers cannot be recomputed from a stored artifact; the operating-system version of that run was not recorded and is left null rather than guessed. Re-run the command above and refresh with performance_lab.py refresh-model-scorecard to replace this record with a recalculable one."
+      "notes": "Documented-run evidence. The raw JSONL and summary.json were not preserved, so the numbers cannot be recomputed from a stored artifact; the operating-system version of that run was not recorded and is left null rather than guessed. Re-run the command above and refresh with performance_lab.py refresh-model-scorecard to replace this record with a recalculable one.",
+      "harness_script_sha256": null,
+      "record_sha256_by_engine": null
     }
   ],
   "criteria": [
-    {"metric": "wer_pct", "dimension": "quality", "direction": "min", "weight": 0.25, "required": true},
-    {"metric": "exact_pct", "dimension": "quality", "direction": "max", "weight": 0.1, "required": true},
-    {"metric": "utterance_p90_wer_pct", "dimension": "quality", "direction": "min", "weight": 0.15, "required": true},
-    {"metric": "proc_p95_s", "dimension": "latency", "direction": "min", "weight": 0.15, "required": true},
-    {"metric": "rtfx", "dimension": "throughput", "direction": "max", "weight": 0.15, "required": true},
-    {"metric": "peak_memory_mb", "dimension": "memory", "direction": "min", "weight": 0.075, "required": false},
-    {"metric": "energy_j_per_audio_minute", "dimension": "energy", "direction": "min", "weight": 0.075, "required": false},
-    {"metric": "startup_ms", "dimension": "startup", "direction": "min", "weight": 0.05, "required": false}
+    {
+      "metric": "wer_pct",
+      "dimension": "quality",
+      "direction": "min",
+      "weight": 0.25,
+      "required": true
+    },
+    {
+      "metric": "exact_pct",
+      "dimension": "quality",
+      "direction": "max",
+      "weight": 0.1,
+      "required": true
+    },
+    {
+      "metric": "utterance_p90_wer_pct",
+      "dimension": "quality",
+      "direction": "min",
+      "weight": 0.15,
+      "required": true
+    },
+    {
+      "metric": "proc_p95_s",
+      "dimension": "latency",
+      "direction": "min",
+      "weight": 0.15,
+      "required": true
+    },
+    {
+      "metric": "rtfx",
+      "dimension": "throughput",
+      "direction": "max",
+      "weight": 0.15,
+      "required": true
+    },
+    {
+      "metric": "peak_memory_mb",
+      "dimension": "memory",
+      "direction": "min",
+      "weight": 0.075,
+      "required": false
+    },
+    {
+      "metric": "energy_j_per_audio_minute",
+      "dimension": "energy",
+      "direction": "min",
+      "weight": 0.075,
+      "required": false
+    },
+    {
+      "metric": "startup_ms",
+      "dimension": "startup",
+      "direction": "min",
+      "weight": 0.05,
+      "required": false
+    }
   ],
   "candidates": [
     {
@@ -50,7 +100,10 @@
       "pinned_is_current_head": true,
       "model_card_url": "https://huggingface.co/mlx-community/whisper-tiny",
       "revision_api_url": "https://huggingface.co/api/models/mlx-community/whisper-tiny/revision/78c52ab98ca87f570bc57ad852e15ef7060f9f76",
-      "expected_hub_metadata": {"license": null, "base_models": []},
+      "expected_hub_metadata": {
+        "license": null,
+        "base_models": []
+      },
       "upstream_model_id": null,
       "provenance": "The conversion card says it was converted from `tiny` with ml-explore/mlx-examples, but does not identify a content-addressed upstream artifact.",
       "artifact_license": "not-declared",
@@ -68,14 +121,38 @@
         "startup_ms": null
       },
       "metric_provenance": {
-        "wer_pct": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
-        "exact_pct": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
-        "utterance_p90_wer_pct": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
-        "proc_p95_s": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
-        "rtfx": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
-        "peak_memory_mb": {"state": "unmeasured", "measurement_id": null},
-        "energy_j_per_audio_minute": {"state": "unmeasured", "measurement_id": null},
-        "startup_ms": {"state": "unmeasured", "measurement_id": null}
+        "wer_pct": {
+          "state": "measured",
+          "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"
+        },
+        "exact_pct": {
+          "state": "measured",
+          "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"
+        },
+        "utterance_p90_wer_pct": {
+          "state": "measured",
+          "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"
+        },
+        "proc_p95_s": {
+          "state": "measured",
+          "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"
+        },
+        "rtfx": {
+          "state": "measured",
+          "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"
+        },
+        "peak_memory_mb": {
+          "state": "unmeasured",
+          "measurement_id": null
+        },
+        "energy_j_per_audio_minute": {
+          "state": "unmeasured",
+          "measurement_id": null
+        },
+        "startup_ms": {
+          "state": "unmeasured",
+          "measurement_id": null
+        }
       }
     },
     {
@@ -87,7 +164,10 @@
       "pinned_is_current_head": true,
       "model_card_url": "https://huggingface.co/mlx-community/whisper-large-v3-turbo",
       "revision_api_url": "https://huggingface.co/api/models/mlx-community/whisper-large-v3-turbo/revision/a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb",
-      "expected_hub_metadata": {"license": null, "base_models": []},
+      "expected_hub_metadata": {
+        "license": null,
+        "base_models": []
+      },
       "upstream_model_id": null,
       "provenance": "The conversion card says it was converted from `large-v3-turbo`, but does not identify a content-addressed upstream artifact.",
       "artifact_license": "not-declared",
@@ -105,14 +185,38 @@
         "startup_ms": null
       },
       "metric_provenance": {
-        "wer_pct": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
-        "exact_pct": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
-        "utterance_p90_wer_pct": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
-        "proc_p95_s": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
-        "rtfx": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
-        "peak_memory_mb": {"state": "unmeasured", "measurement_id": null},
-        "energy_j_per_audio_minute": {"state": "unmeasured", "measurement_id": null},
-        "startup_ms": {"state": "unmeasured", "measurement_id": null}
+        "wer_pct": {
+          "state": "measured",
+          "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"
+        },
+        "exact_pct": {
+          "state": "measured",
+          "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"
+        },
+        "utterance_p90_wer_pct": {
+          "state": "measured",
+          "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"
+        },
+        "proc_p95_s": {
+          "state": "measured",
+          "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"
+        },
+        "rtfx": {
+          "state": "measured",
+          "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"
+        },
+        "peak_memory_mb": {
+          "state": "unmeasured",
+          "measurement_id": null
+        },
+        "energy_j_per_audio_minute": {
+          "state": "unmeasured",
+          "measurement_id": null
+        },
+        "startup_ms": {
+          "state": "unmeasured",
+          "measurement_id": null
+        }
       }
     },
     {
@@ -126,7 +230,9 @@
       "revision_api_url": "https://huggingface.co/api/models/FluidInference/parakeet-unified-en-0.6b-coreml/revision/4252711f6f060f9a2f91e5f081a806d7f45eebd8",
       "expected_hub_metadata": {
         "license": "cc-by-4.0",
-        "base_models": ["nvidia/parakeet-tdt-0.6b-v2"]
+        "base_models": [
+          "nvidia/parakeet-tdt-0.6b-v2"
+        ]
       },
       "upstream_model_id": null,
       "declared_upstream_models": [
@@ -149,14 +255,38 @@
         "startup_ms": null
       },
       "metric_provenance": {
-        "wer_pct": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
-        "exact_pct": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
-        "utterance_p90_wer_pct": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
-        "proc_p95_s": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
-        "rtfx": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
-        "peak_memory_mb": {"state": "unmeasured", "measurement_id": null},
-        "energy_j_per_audio_minute": {"state": "unmeasured", "measurement_id": null},
-        "startup_ms": {"state": "unmeasured", "measurement_id": null}
+        "wer_pct": {
+          "state": "measured",
+          "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"
+        },
+        "exact_pct": {
+          "state": "measured",
+          "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"
+        },
+        "utterance_p90_wer_pct": {
+          "state": "measured",
+          "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"
+        },
+        "proc_p95_s": {
+          "state": "measured",
+          "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"
+        },
+        "rtfx": {
+          "state": "measured",
+          "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"
+        },
+        "peak_memory_mb": {
+          "state": "unmeasured",
+          "measurement_id": null
+        },
+        "energy_j_per_audio_minute": {
+          "state": "unmeasured",
+          "measurement_id": null
+        },
+        "startup_ms": {
+          "state": "unmeasured",
+          "measurement_id": null
+        }
       }
     }
   ]

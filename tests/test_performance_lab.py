@@ -822,12 +822,24 @@ class RefreshModelScorecardTests(unittest.TestCase):
                 "proc_p95_s": metrics["proc_p95_s"],
                 "requested_model_id": candidate["model_id"],
                 "requested_model_revision": candidate["revision"],
+                # What a real run proves, not merely requests: the executor
+                # resolved the pinned revision immutably.
+                "resolved_model_id": candidate["model_id"],
+                "resolved_model_revision": candidate["revision"],
+                "model_revision_status": "verified-immutable-snapshot",
             })
         payload = {
             "schema_version": 1,
             "dataset": "LibriSpeech test-clean",
             "selection": "deterministic-evenly-spaced",
             "samples": 100,
+            # The provenance the real harness always writes beside its
+            # results; a summary without it is not evidence of a run.
+            "harness": {
+                "script": "benchmark_asr.py",
+                "script_sha256": "c" * 64,
+                "model_scorecard_sha256": "d" * 64,
+            },
             "engines": engines,
         }
         payload.update(overrides)
@@ -846,7 +858,11 @@ class RefreshModelScorecardTests(unittest.TestCase):
         return refresh_model_scorecard(self.source, summary, **arguments)
 
     def test_a_real_run_rebinds_metrics_to_a_recalculable_measurement(self):
-        refreshed = self.refresh(self.summary())
+        engines = [candidate["benchmark_engine"]
+                   for candidate in self.source["candidates"]]
+        refreshed = self.refresh(
+            self.summary(),
+            preserved_records={engine: "e" * 64 for engine in engines})
 
         record = refreshed["measurements"][-1]
         self.assertTrue(record["artifacts_preserved"])
@@ -863,14 +879,36 @@ class RefreshModelScorecardTests(unittest.TestCase):
             self.assertIsNone(candidate["metrics"]["startup_ms"])
 
     def test_the_refreshed_scorecard_still_validates(self):
+        engines = [candidate["benchmark_engine"]
+                   for candidate in self.source["candidates"]]
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "scorecard.json"
             path.write_text(
-                json.dumps(self.refresh(self.summary())), encoding="utf-8")
+                json.dumps(self.refresh(
+                    self.summary(),
+                    preserved_records={
+                        engine: "e" * 64 for engine in engines})),
+                encoding="utf-8")
             report = generate_model_scorecard(load_model_scorecard(path))
 
         for candidate in report["ranked"]:
             self.assertTrue(candidate["independently_recalculable"])
+
+    def test_a_summary_alone_is_an_aggregate_not_a_recalculable_run(self):
+        # The summary holds only aggregates; without the per-utterance
+        # records beside it, the refresh must say so rather than promote it.
+        refreshed = self.refresh(self.summary())
+        record = refreshed["measurements"][-1]
+        self.assertTrue(record["artifacts_preserved"])
+        self.assertFalse(record["independently_recalculable"])
+        self.assertIsNone(record["record_sha256_by_engine"])
+        self.assertIn("not independently recalculable",
+                      refreshed["evidence"]["metric_verification"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "scorecard.json"
+            path.write_text(json.dumps(refreshed), encoding="utf-8")
+            load_model_scorecard(path)  # still a valid scorecard
 
     def test_a_run_against_a_different_model_is_refused(self):
         summary = self.summary()
@@ -1190,14 +1228,25 @@ class PerformanceLabCliTests(unittest.TestCase):
         source = load_model_scorecard(DEFAULT_MODEL_SCORECARD)
         summary = {
             "schema_version": 1,
+            "invocation": "uv run benchmark_asr.py --dataset .evidence/"
+                          "librispeech/test-clean --limit 100 --output-dir "
+                          ".evidence/asr-bakeoff",
             "dataset": "LibriSpeech test-clean",
             "selection": "deterministic-evenly-spaced",
             "samples": 100,
+            "harness": {
+                "script": "benchmark_asr.py",
+                "script_sha256": "c" * 64,
+                "model_scorecard_sha256": "d" * 64,
+            },
             "engines": [
                 {
                     "engine": candidate["benchmark_engine"],
                     "requested_model_id": candidate["model_id"],
                     "requested_model_revision": candidate["revision"],
+                    "resolved_model_id": candidate["model_id"],
+                    "resolved_model_revision": candidate["revision"],
+                    "model_revision_status": "verified-immutable-snapshot",
                     **{
                         metric: candidate["metrics"][metric]
                         for metric in (
@@ -1212,6 +1261,12 @@ class PerformanceLabCliTests(unittest.TestCase):
             summary_path = Path(directory) / "summary.json"
             destination = Path(directory) / "model_scorecard.json"
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            # The per-utterance records the harness writes beside the summary;
+            # their presence is what earns "independently recalculable".
+            for candidate in source["candidates"]:
+                (Path(directory)
+                 / f"{candidate['benchmark_engine']}.jsonl").write_text(
+                    '{"id": "u1"}\n', encoding="utf-8")
 
             output = io.StringIO()
             with contextlib.redirect_stdout(output):

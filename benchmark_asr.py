@@ -48,6 +48,8 @@ import select
 import shutil
 import statistics
 import struct
+import shlex
+import sys
 import subprocess
 import tempfile
 import time
@@ -956,6 +958,11 @@ def main() -> int:
 
     report = {
         "schema_version": 1,
+        # The exact reproducing command, recorded by the run itself so a
+        # later scorecard refresh publishes what actually happened rather
+        # than a reconstructed placeholder.
+        "invocation": shlex.join(
+            ["uv", "run", "benchmark_asr.py", *sys.argv[1:]]),
         "hardware": {
             "machine": platform.machine(),
             "macos": platform.mac_ver()[0],
