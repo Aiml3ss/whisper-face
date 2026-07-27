@@ -65,6 +65,7 @@ uv run public_scorecard.py
 | `competitor_tasks.json` | `needs-external-observations` | The six-task protocol is reproducible; the runs are not. A real observation file needs clean machines, the other products, and a human observer. |
 | `model_scorecard.json` | `needs-apple-silicon` | Ranking the checked-in evidence is clone-only. Regenerating the metrics needs a LibriSpeech download, an Apple Silicon Mac, the MLX snapshots, and the installed Parakeet helper. |
 | `performance_budgets.json` | `reference-data` | Only the `ci_warm_path` profile is reachable from a clone. `product_quality`, `warm_path_stage`, and `startup_readiness` all need private runtime logs from an installed machine. |
+| `quality_baseline.json` | `reference-data` | Not a corpus: the pinned deterministic quality metrics that `uv run quality_gate.py` re-measures from the corpora above and fails on any difference. `--rebaseline` rewrites it, and the diff rides the change that moved the numbers. |
 | `reproducibility.json` | `reference-data` | The manifest itself. |
 
 The `needs-download` class exists for the LibriSpeech dependency described in
