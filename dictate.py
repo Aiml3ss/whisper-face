@@ -8829,12 +8829,15 @@ def llm_clean_with_edits(text: str, tone: str, mode: str = "capture",
         print(f"! LLM cleanup failed ({e}); pasting quick-cleaned text")
         return fallback, []
 
-    LLM_CLEANUP_BREAKER.record_success()
-
     reject = _guard_cleaned_output(text, out, done, mode)
     if reject:
+        # The transport answered; the content failed. Releasing (instead of
+        # recording success) keeps a guard rejection from resetting the
+        # doubled cooldown a flaky transport has already earned.
+        LLM_CLEANUP_BREAKER.release()
         print(f"! LLM output rejected ({reject}); pasting quick-cleaned text")
         return fallback, []
+    LLM_CLEANUP_BREAKER.record_success()
     return out, edits
 
 

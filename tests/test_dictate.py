@@ -3431,6 +3431,36 @@ class CleanupGuardTests(unittest.TestCase):
         self.assertFalse(any("second private dictation" in line
                              for line in lines))
 
+    def test_guard_rejection_releases_without_resetting_the_cooldown(self):
+        breaker = CleanupCircuitBreaker(cooldown_seconds=60)
+
+        def refusing(*_args, **_kwargs):
+            return json.dumps({
+                "text": "I cannot help with that.", "edits": [],
+            }), "stop"
+
+        ns = load_definitions(
+            "_guard_cleaned_output", "llm_clean_with_edits",
+            assignments={
+                "BASE_PROMPT", "FEW_SHOT", "LLM_CLEANUP_TIMEOUT",
+                "LLM_CLEANUP_TOTAL_DEADLINES", "CLEANUP_RESPONSE_SCHEMA",
+                "MODE_INSTRUCTIONS", "REFUSAL_RE", "STRUCTURED_OUTPUT",
+            },
+            extra={
+                "CleanupEdit": object,
+                "LLM_CLEANUP_BREAKER": breaker,
+                "ollama_chat": refusing,
+                "quick_clean": lambda text: f"fallback:{text}",
+                "STRUCTURED_FEW_SHOT": [],
+                "print": lambda *_: None,
+            },
+        )
+        cleaned, _ = ns["llm_clean_with_edits"](
+            "please clean this dictation", "neutral")
+        self.assertEqual(cleaned, "fallback:please clean this dictation")
+        # Released, not stuck in flight, and not opened either.
+        self.assertTrue(breaker.acquire().allowed)
+
     def test_structured_output_guard_rejects_destructive_results(self):
         ns = load_definitions(
             "_guard_cleaned_output",
