@@ -101,6 +101,8 @@ uv run tests/test_support_bundle.py
 uv run tests/test_whisper_face_gui.py
 uv run tests/test_whisper_face_characters.py
 uv run --locked --script dictate.py --native-gui-smoke-test
+uv run tests/test_network_egress.py
+uv run tests/test_supply_chain_integrity.py
 uv run tests/test_installers.py
 uv run tests/test_repository_governance.py
 uv run tests/test_macos_distribution.py

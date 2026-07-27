@@ -7,5 +7,6 @@
   "hotkey": "alt_r",
   "undo_hotkey": "",
   "sounds": "system",
-  "recent_dictations": false
+  "recent_dictations": false,
+  "language": "en"
 }

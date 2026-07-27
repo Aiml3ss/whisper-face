@@ -15,6 +15,7 @@ their own license metadata and files.
 | Component | Locked version | License | Upstream |
 |---|---:|---|---|
 | mlx-whisper | 0.4.3 | MIT | [ml-explore/mlx-examples](https://github.com/ml-explore/mlx-examples) |
+| tqdm | 4.69.0 | MPL-2.0 AND MIT | [tqdm/tqdm](https://github.com/tqdm/tqdm) |
 | faster-whisper | 1.2.1 | MIT | [SYSTRAN/faster-whisper](https://github.com/SYSTRAN/faster-whisper) |
 | sounddevice | 0.5.5 | MIT | [python-sounddevice](https://github.com/spatialaudio/python-sounddevice) |
 | pynput | 1.8.2 | LGPL-3.0 | [moses-palmer/pynput](https://github.com/moses-palmer/pynput) |
@@ -29,6 +30,11 @@ their own license metadata and files.
 Transitive packages and platform markers are authoritative in
 `dictate.py.lock`. Regenerate the lock and this table together whenever the
 PEP 723 dependency block changes.
+`tests/test_supply_chain_integrity.py` compares every row above against the
+lock on each pull request, so an undocumented or misversioned direct
+dependency fails the gate rather than shipping quietly. tqdm is direct because
+`dictate.py` imports it to give MLX a thread lock before the first
+transcription; it is also a transitive dependency of both Whisper backends.
 
 ## Native Mac recognition helper
 
@@ -66,9 +72,11 @@ hash the local manifest and reject any unreviewed change.
 
 ## Release automation actions
 
-The macOS release workflow executes these actions on GitHub-hosted runners.
+Every workflow in this repository executes these actions, and only these.
 They are pinned to full commit IDs so a moving major-version tag cannot silently
 change code that handles release artifacts or precedes signing steps.
+`tests/test_supply_chain_integrity.py` fails if CI ever runs an action that is
+not pinned to a full commit, or one this table does not record.
 
 | Component | Pinned revision | License | How used |
 |---|---|---|---|
@@ -76,6 +84,7 @@ change code that handles release artifacts or precedes signing steps.
 | `astral-sh/setup-uv` v8.1.0 | `08807647e7069bb48b6ef5acd8ec9567f424441b` | MIT | Installs uv for repository release gates. |
 | `actions/upload-artifact` v7 | `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` | MIT | Transfers verified assets out of the read-only packaging job. |
 | `actions/download-artifact` v8 | `3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c` | MIT | Retrieves verified assets in the isolated release-publishing job. |
+| `actions/attest-build-provenance` v4.1.1 | `0f67c3f4856b2e3261c31976d6725780e5e4c373` | MIT | Signs a SLSA build-provenance statement for the published artifacts with a workflow-scoped OIDC identity. See [docs/security/release-provenance.md](docs/security/release-provenance.md). |
 
 ## Marketing-site interface library
 

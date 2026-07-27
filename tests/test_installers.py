@@ -131,6 +131,8 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_whisper_face_gui.py",
             "uv run tests/test_whisper_face_characters.py",
             "uv run --locked --script dictate.py --native-gui-smoke-test",
+            "uv run tests/test_network_egress.py",
+            "uv run tests/test_supply_chain_integrity.py",
             "uv run tests/test_installers.py",
             "uv run tests/test_macos_distribution.py",
             "uv run tests/test_safe_update_advisor.py",
@@ -166,6 +168,8 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_whisper_face_characters.py",
             "uv run tests/test_acoustic_keyword_activation.py",
             "uv run tests/test_acoustic_calibration_activation.py",
+            "uv run tests/test_network_egress.py",
+            "uv run tests/test_supply_chain_integrity.py",
         ):
             with self.subTest(batch_gate=batch_gate):
                 self.assertIn(batch_gate, pull_request)
@@ -1016,6 +1020,9 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn('"hotkey": "alt_r"', template)
         self.assertIn('"sounds": "system"', template)
         self.assertIn('"recent_dictations": false', template)
+        # The dictation language ships defaulted to English, so an existing
+        # install keeps the fast native recognizer without touching anything.
+        self.assertIn('"language": "en"', template)
         self.assertIn("whisper_face_theme.py", self.shell)
         self.assertIn("whisper_face_theme.py", self.powershell)
         self.assertIn("whisper_face_characters.py", self.shell)

@@ -61,8 +61,9 @@ application alone can prevent. They remain important deployment risks.
 | Wrong or duplicate paste | Mac Insertion Lease, one attempt, bounded readback, terminal receipt, and RAM-only Voice Outbox. Reviewed OpenAI opaque editors also require a stable window and unchanged input counters from hotkey press through commit. | Opaque compatibility cannot detect a programmatic same-window focus change; its result is unverified, excluded from learning, and is not generalized to other apps. |
 | Persistent audio | Hold-to-talk and Flight Recorder keep audio in RAM; recorder is opt-in and visibly indicated. | OS/audio drivers and unrelated software are outside the process boundary. |
 | Private-state disclosure | Gitignored files, installer-created user-only permissions, bounded state. | The logged-in user, backups, and privileged software can read the files. |
-| Model drift | Whisper, Parakeet, FluidAudio, and Qwen artifacts/revisions are pinned and verified. | Upstream package installers and first download remain supply-chain dependencies. |
-| Release substitution | Exact Git archive, SHA-256 manifest, SHA256SUMS, Apple Developer ID signature, notarization, and stapling for public Mac releases. | The update manifest is not yet independently threshold-signed. |
+| Model or dependency drift | Whisper, Parakeet, FluidAudio, and Qwen artifacts/revisions are pinned and verified; `dictate.py.lock` pins Python packages and is verified on every pull request; `tests/test_supply_chain_integrity.py` fails closed when the runtime, model wallet, benchmark scorecard, and third-party notices disagree about a revision or a locked version, or when CI runs an action that is not pinned to a full commit. | Upstream package installers and first download remain supply-chain dependencies. The weekly `model-audit.yml` check is the only thing that notices an upstream repository changing underneath a pinned revision. |
+| Release substitution | Exact Git archive, SHA-256 manifest, SHA256SUMS, Apple Developer ID signature, notarization, stapling, and a signed SLSA build-provenance attestation over the checksum file for public Mac releases. See [release-provenance.md](release-provenance.md). | The update manifest is not yet independently threshold-signed. Provenance identifies the workflow and commit that built an artifact, not whether that commit is trustworthy. |
+| Speech leaving the machine | `tests/test_network_egress.py` proves no first-party module on the dictation path imports a network client, enumerates every socket call site in the runtime, and drives a synthetic utterance through the compile path against an instrumented socket, `urllib`, and `http.client`. | A dynamic check only covers the code a test executes; a structural check cannot see through `getattr`. Neither observes the operating system, the installed model processes, or a compromised dependency's own traffic. |
 | Source/license mismatch | Artifact includes exact corresponding source and notices; manifest binds its full revision and source URLs. | A distributor can violate policy; recipients can compare the digest and source. |
 | LAN endpoint abuse | Desktop mode is loopback-only. Explicit `--server-only` is intended for a trusted local network; source and license endpoints disclose the running revision. | The headless port 8787 endpoint is unauthenticated and not safe to expose to the internet. |
 
@@ -84,11 +85,26 @@ application alone can prevent. They remain important deployment risks.
 
 - bind or authenticate the experimental network endpoint before presenting it
   as safe outside a trusted LAN;
-- sandbox model and capture work into least-privilege processes;
-- add independent update-manifest signing and key-rotation/revocation policy;
-- publish repeatable dependency/model provenance attestations;
-- add automated privacy regression tests for network egress beyond the existing
-  routine-log redaction contract;
+- sandbox model and capture work into least-privilege processes. The
+  `macos_networkless_worker` foundation exists and proves the OS denies it IP
+  networking, but no runtime path uses it yet;
+- add independent update-manifest signing and key-rotation/revocation policy.
+  Build provenance now identifies what produced a release artifact, but the
+  update metadata itself still carries no independent signature;
 - commission an external review of capture lifecycle and insertion adapters.
+
+## Closed since the last revision
+
+- **Repeatable dependency and model provenance.**
+  `tests/test_supply_chain_integrity.py` gates every pull request on the lock,
+  the model revisions agreeing across the runtime, wallet, scorecard, and
+  notices, and every CI action being pinned to a full commit and recorded.
+  Published releases carry a signed SLSA build-provenance attestation;
+  [release-provenance.md](release-provenance.md) states what it does and does
+  not prove.
+- **Automated privacy regression tests for network egress.**
+  `tests/test_network_egress.py` enforces the structural and dynamic contracts
+  described in the controls table above, and its own tripwire is tested so a
+  green run is evidence rather than an unarmed alarm.
 
 Report possible invariant violations privately through [SECURITY.md](../../SECURITY.md).

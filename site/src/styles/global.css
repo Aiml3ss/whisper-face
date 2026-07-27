@@ -169,12 +169,15 @@ a {
   position: relative;
   display: block;
 }
+/* Frames snap, they do not crossfade: mid-fade both stacked frames sit at
+   partial opacity, the composite dips below full alpha, and the background
+   bleeds through as a grey flash on every mouth flap. The app's lip sync is
+   frame-snapped for the same reason. */
 .face-frames svg {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
-  transition: opacity 0.06s linear;
 }
 .face-frames .half,
 .face-frames .talk {
