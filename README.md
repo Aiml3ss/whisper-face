@@ -276,7 +276,7 @@ are never Supporter-only features.
   value is saved for next time and listed under Settings → Personalize →
   **Learned corrections**.
 - **Whispering works** — quiet speech is gain-normalized before recognition.
-- **Choose your Whisper Face** — sixteen characters (Parrot, Fox, Owl, Cat,
+- **Choose your Whisper Face** — ten characters (Parrot, Fox, Owl, Cat,
   Bear, Dog, Wolf, Pig, Panda, Tiger, Frog, Rabbit, Hedgehog, Penguin, and
   the two English cream goldens, Pickles and Olive) share one pastel
   chibi-clay style. Pick one from the menu bar and it
