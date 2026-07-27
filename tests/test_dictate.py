@@ -6684,6 +6684,9 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
         )
         return namespace, state
 
+    @unittest.skipUnless(
+        hasattr(os, "getuid"),
+        "receipt ownership and mode checks need POSIX uids")
     def test_activation_receipt_is_mac_only_and_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "activation.json"
@@ -6713,6 +6716,12 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
                 namespace["load_delayed_cleanup_activation"](path))
             self.assertEqual(state["status"], "missing")
 
+    def test_activation_receipt_is_refused_off_mac(self):
+        # Split from the POSIX test above so the fails-closed non-mac
+        # behavior stays covered on Windows CI, where os.getuid does not
+        # exist and the ownership assertions cannot run.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activation.json"
             other, other_state = self.activation_namespace(is_macos=False)
             path.write_text('{"valid": true}', encoding="utf-8")
             self.assertFalse(other["load_delayed_cleanup_activation"](path))
