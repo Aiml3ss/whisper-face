@@ -18,7 +18,11 @@ The release produces:
   executable bits, symlink targets, and file hashes;
 - `update-manifest.json`, binding version, full Git revision, source offer,
   artifact sizes and SHA-256 hashes, Apple trust state, and rollback target;
-- `SHA256SUMS`, covering both artifacts and the update manifest.
+- `SHA256SUMS`, covering both artifacts and the update manifest;
+- a signed SLSA build-provenance attestation over `SHA256SUMS`, which by
+  extension covers everything that file names. It is stored by GitHub rather
+  than uploaded as a release asset, and is retrieved by
+  `gh attestation verify`.
 
 The disk image and ZIP contain the same exact source. The DMG additionally
 contains `Whisper Face.app`. A DMG user copies both the source folder and its
@@ -178,8 +182,14 @@ publication; it has no Apple credentials.
 3. Create an annotated `vX.Y.Z` tag on the approved full revision and push it.
 4. Require the macOS release workflow to pass signing, notarization, stapling,
    logical package verification, manifest verification, and checksum generation.
-5. Download the published assets on a different Mac. Verify `SHA256SUMS`, mount
-   the DMG, and run `spctl`/`stapler` verification before install.
+5. Download the published assets on a different Mac. Verify `SHA256SUMS`, run
+   `gh attestation verify WhisperFace-<version>-macOS-arm64.dmg --repo
+   Aiml3ss/whisper-face` (the attested subjects are the files *listed in*
+   `SHA256SUMS`, not the listing itself) to
+   confirm which workflow run and commit produced them, mount the DMG, and run
+   `spctl`/`stapler` verification before install. What each of those checks
+   does and does not prove is set out in
+   [release provenance](../security/release-provenance.md).
 6. Install from the extracted source and run `./setup.sh --verify`.
 7. Confirm Diagnostics -> Exact Source and `GET /source` name the tagged
    revision. Do not announce availability before all checks pass.

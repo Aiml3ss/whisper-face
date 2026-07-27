@@ -60,6 +60,13 @@ and dependency installation contacts Homebrew, Astral, Ollama, Hugging Face,
 GitHub, Apple, and their delivery infrastructure as documented in
 `THIRD_PARTY_NOTICES.md` and the installer.
 
+That is a testable claim, so it is tested. `tests/test_network_egress.py` runs
+on every pull request. It fails if any module on the dictation path gains the
+ability to open a socket, if a new outbound call site appears in the runtime,
+or if driving a synthetic utterance through the compile path touches the
+network at all. Its own alarm is tested too, so a passing run means the check
+was armed.
+
 The current runtime also exposes an unauthenticated HTTP transcription endpoint
 on port 8787 for experimental phone/headless integration. Ordinary desktop mode
 binds it to loopback. Only the explicit `--server-only` mode binds reachable

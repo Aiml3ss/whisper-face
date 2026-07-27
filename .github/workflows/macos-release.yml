@@ -152,6 +152,8 @@ jobs:
           uv run tests/test_whisper_face_gui.py
           python3 -c 'import subprocess, sys; subprocess.run(sys.argv[1:], check=True, timeout=30)' \
             uv run --locked --script dictate.py --native-gui-smoke-test
+          uv run tests/test_network_egress.py
+          uv run tests/test_supply_chain_integrity.py
           uv run tests/test_installers.py
           uv run tests/test_repository_governance.py
           uv run tests/test_macos_distribution.py
@@ -305,15 +307,34 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: package-macos
     runs-on: ubuntu-latest
+    # Attesting here, not in the packaging job, keeps the OIDC identity that
+    # signs provenance in a job that never holds Apple credentials.
     permissions:
       actions: read
+      attestations: write
       contents: write
+      id-token: write
     steps:
       - name: Download verified release artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: WhisperFace-${{ needs.package-macos.outputs.version }}-macOS
           path: dist
+
+      - name: Confirm the downloaded artifacts match their checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum --check SHA256SUMS
+
+      # SHA256SUMS already binds the source zip, the disk image, and the
+      # update manifest. Attesting the checksum file makes one signed
+      # statement cover all three, and the check above fails closed if any
+      # digest moved between packaging and publication.
+      - name: Attest build provenance for the published artifacts
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-checksums: dist/SHA256SUMS
 
       - name: Publish tagged release without Apple credentials
         env:
@@ -330,4 +351,4 @@ jobs:
             dist/SHA256SUMS \
             --verify-tag \
             --title "Whisper Face $RELEASE_VERSION" \
-            --notes "Signed and notarized Mac release from $SOURCE_REVISION. Verify SHA256SUMS before installation; exact corresponding source is included and linked by update-manifest.json."
+            --notes "Signed and notarized Mac release from $SOURCE_REVISION. Verify SHA256SUMS before installation; exact corresponding source is included and linked by update-manifest.json. Build provenance: \`gh attestation verify <file> --repo $GITHUB_REPOSITORY\` names the workflow and commit that produced each artifact. See docs/security/release-provenance.md for what that does and does not prove."
