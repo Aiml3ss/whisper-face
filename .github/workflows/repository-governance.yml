@@ -26,9 +26,12 @@ jobs:
           # its boundary commit, proves that commit is still an ancestor, and
           # resolves the mit-last tag. A shallow clone fails all three.
           fetch-depth: 0
-          # Nothing after checkout speaks to GitHub, and this runner's
-          # workspace outlives the job.
-          persist-credentials: false
+          # persist-credentials is deliberately left at its default. Turning it
+          # off moves the action's auth teardown into this step, where it runs
+          # `git submodule foreach` and dies on the stale `whispering-parrot`
+          # gitlink this repository still carries with no `.gitmodules` entry.
+          # cla-check.yml hits the same fatal in its post step, where it is
+          # only logged. Fix the gitlink and this can be tightened.
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Check the governance invariants
         run: uv run tests/test_repository_governance.py
