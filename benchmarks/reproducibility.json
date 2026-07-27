@@ -125,7 +125,7 @@
    "case_key": null,
    "cases": null,
    "content": "aggregate-metrics",
-   "requirement": "clone-only",
+   "requirement": "reference-data",
    "command": "uv run quality_gate.py",
    "notes": "Pinned deterministic quality metrics, not a corpus: the release gate replays the golden, scorecard, proof-recovery and stress collectors and fails on any difference. --rebaseline rewrites it; the diff rides the causing PR."
   }

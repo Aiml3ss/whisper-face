@@ -48,17 +48,35 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_BASELINE = HERE / "benchmarks" / "quality_baseline.json"
 SCHEMA_VERSION = 1
 
-# Deterministic, clone-only stress: enough cycles to cross a compiler
-# restart so lifecycle regressions surface, small enough for every PR.
+# Deterministic, clone-only stress: two passes over the corpus with a
+# restart interval low enough that the warmed compiler is genuinely torn
+# down and replaced mid-run (44 operations / every 15 -> restarts at 15
+# and 30 beyond the initial construction). The default interval of 50
+# would never be reached, and a lifecycle regression that only appears
+# when a warm compiler is replaced would sail through.
 STRESS_CYCLES = 2
+STRESS_RESTART_EVERY = 15
+
+# The gate never reads private runtime history. benchmark_voice_compiler
+# defaults its transcript half to the live transcripts.jsonl, so point it
+# at a path that cannot exist; only the checked-in golden half is used.
+NO_TRANSCRIPTS = "quality-gate-uses-no-private-transcripts.jsonl.absent"
 
 
-def _run_json(script: str, *args: str) -> dict[str, Any]:
-    """Run a repository collector and parse its JSON report."""
+def _run_json(script: str, *args: str,
+              allow_nonzero: bool = False) -> dict[str, Any]:
+    """Run a repository collector and parse its JSON report.
+
+    ``allow_nonzero`` is for collectors whose exit code also enforces their
+    own hardware-dependent latency budgets: on a slow runner they exit
+    non-zero with a perfectly valid report. This gate tracks deterministic
+    counts only, so for those collectors the report is authoritative and
+    the exit code is not -- but an unparseable report still fails.
+    """
     result = subprocess.run(
         [sys.executable, str(HERE / script), *args],
         capture_output=True, text=True, timeout=600)
-    if result.returncode != 0:
+    if result.returncode != 0 and not allow_nonzero:
         raise RuntimeError(
             f"{script} exited {result.returncode}: "
             f"{(result.stderr or result.stdout).strip()[-400:]}")
@@ -72,7 +90,14 @@ def _run_json(script: str, *args: str) -> dict[str, Any]:
 
 
 def collect_voice_compiler() -> dict[str, Any]:
-    report = _run_json("benchmark_voice_compiler.py", "--format", "json")
+    report = _run_json(
+        "benchmark_voice_compiler.py", "--format", "json",
+        "--transcripts", str(HERE / NO_TRANSCRIPTS),
+        allow_nonzero=True)
+    if report.get("transcripts", {}).get("available") is not False:
+        raise RuntimeError(
+            "the voice-compiler collector read a transcript file; the "
+            "quality gate must never consume private runtime history")
     golden = report.get("golden")
     if not isinstance(golden, dict):
         raise RuntimeError("voice compiler report has no golden section")
@@ -109,20 +134,31 @@ def collect_synthetic_scorecard() -> dict[str, Any]:
 def collect_proof_recovery() -> dict[str, Any]:
     report = _run_json("benchmark_cleanup_proof_recovery.py",
                        "--format", "json")
-    return {
+    metrics = {
         "proof_recovery.cases": report["cases"],
         "proof_recovery.recovered": report["recovered"],
         "proof_recovery.rejected": report["rejected"],
         "proof_recovery.replay_verified": report["replay_verified"],
         "proof_recovery.abandoned_anchor_count":
             report["abandoned_anchor_count"],
+        # Edit and anchor granularity: the same 27/3 split can hide a
+        # materially different mediator, so the finer deterministic
+        # counters are pinned too.
+        "proof_recovery.edit_count": report["edit_count"],
+        "proof_recovery.anchor_count": report["anchor_count"],
     }
+    for reason, count in sorted(report.get("reason_counts", {}).items()):
+        metrics[f"proof_recovery.reason.{reason}"] = count
+    return metrics
 
 
 def collect_compiler_stress() -> dict[str, Any]:
     report = _run_json(
         "performance_lab.py", "stress",
-        "--cycles", str(STRESS_CYCLES), "--format", "json")
+        "--cycles", str(STRESS_CYCLES),
+        "--restart-every", str(STRESS_RESTART_EVERY),
+        "--format", "json",
+        allow_nonzero=True)
     return {
         "stress.operations": report["operations"],
         "stress.failures": report["failures"],
