@@ -90,7 +90,7 @@ for required in LICENSE LICENSE_POLICY.md NOTICE THIRD_PARTY_NOTICES.md setup.sh
 done
 
 if [ -z "$DOWNLOAD_BASE_URL" ]; then
-    DOWNLOAD_BASE_URL="https://github.com/Aiml3ss/whispering-parrot/releases/download/v$VERSION"
+    DOWNLOAD_BASE_URL="https://github.com/Aiml3ss/whisper-face/releases/download/v$VERSION"
 fi
 [[ "$DOWNLOAD_BASE_URL" = https://* ]] \
     || fail "--download-base-url must use HTTPS"
@@ -149,7 +149,7 @@ git -C "$BUNDLE_DIR" symbolic-ref HEAD refs/heads/packaged-release
 git -C "$BUNDLE_DIR" read-tree "$FULL_REVISION"
 rm -f "$BUNDLE_DIR/.git/FETCH_HEAD"
 git -C "$BUNDLE_DIR" remote add origin \
-    "https://github.com/Aiml3ss/whispering-parrot.git"
+    "https://github.com/Aiml3ss/whisper-face.git"
 [ "$(git -C "$BUNDLE_DIR" rev-parse HEAD)" = "$FULL_REVISION" ] \
     || fail "packaged checkout lost its immutable source revision"
 if [ "$SIGN_RELEASE" -eq 1 ]; then

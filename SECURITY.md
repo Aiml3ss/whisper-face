@@ -18,7 +18,7 @@ report.
 
 Use GitHub's private vulnerability-reporting form:
 
-<https://github.com/Aiml3ss/whispering-parrot/security/advisories/new>
+<https://github.com/Aiml3ss/whisper-face/security/advisories/new>
 
 Include the affected revision, macOS or Windows version, reproduction steps,
 impact, and the least-sensitive evidence that demonstrates the problem. Please

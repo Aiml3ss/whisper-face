@@ -70,7 +70,7 @@ willingness-to-pay evidence. Reports must:
 
 No payment, cloud, scheduling, or customer-management infrastructure should be
 built from stated interest alone. Open the
-[Supporter and concierge interest form](https://github.com/Aiml3ss/whispering-parrot/issues/new?template=supporter-concierge-interest.yml)
+[Supporter and concierge interest form](https://github.com/Aiml3ss/whisper-face/issues/new?template=supporter-concierge-interest.yml)
 only if you are comfortable making the response public.
 
 Commercial/OEM licensing is separate from this pilot and grants rights only

@@ -4439,7 +4439,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(metadata["license"], "AGPL-3.0-only")
         self.assertEqual(
             metadata["source"],
-            "https://github.com/Aiml3ss/whispering-parrot/tree/"
+            "https://github.com/Aiml3ss/whisper-face/tree/"
             "0123456789abcdef0123456789abcdef01234567",
         )
         self.assertEqual(

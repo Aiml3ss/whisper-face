@@ -38,7 +38,7 @@ microphone → warm ASR cascade → VoiceIR → protected anchors + proof edits
            → confirmed correction → personal regression case
 ```
 
-The public [product roadmap](https://github.com/Aiml3ss/whispering-parrot/issues/1)
+The public [product roadmap](https://github.com/Aiml3ss/whisper-face/issues/1)
 tracks the Mac trust/performance work, future native iPhone architecture, and a
 sustainable business that never sells speech, transcripts, or behavioral
 profiles.
