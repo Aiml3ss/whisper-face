@@ -1963,6 +1963,80 @@ class WhisperFaceThemeTests(unittest.TestCase):
                     contrast_ratio(ink, surface), 4.5, f"{ink} on {surface}")
 
 
+class IdleLifeDriverTests(unittest.TestCase):
+    """The shared face schedules must stay deterministic and gated."""
+
+    @staticmethod
+    def _run(frames, **calls):
+        from whisper_face_render import IdleLifeDriver
+
+        driver = IdleLifeDriver()
+        trace = []
+        for _ in range(frames):
+            driver.advance()
+            trace.append(tuple(
+                getattr(driver, name)(*args) for name, args in calls.items()))
+        return trace
+
+    def test_schedules_are_deterministic(self):
+        first = self._run(400, blink=(True,), mouth=(0.6, True),
+                          breath=(True,), gaze=(True,))
+        second = self._run(400, blink=(True,), mouth=(0.6, True),
+                           breath=(True,), gaze=(True,))
+        self.assertEqual(first, second)
+
+    def test_inactive_schedules_rest(self):
+        for blink, mouth, breath, gaze in self._run(
+                240, blink=(False,), mouth=(0.9, False),
+                breath=(False,), gaze=(False,)):
+            self.assertEqual(blink, 0.0)
+            self.assertEqual(breath, 0.0)
+            self.assertLess(mouth, 0.05)
+            self.assertLess(abs(gaze[0]) + abs(gaze[1]), 0.05)
+
+    def test_blinks_recur_and_first_lands_early(self):
+        blinks = [frame for frame, (value,) in enumerate(
+            self._run(600, blink=(True,))) if value >= 1.0]
+        self.assertGreaterEqual(len(blinks), 2)
+        self.assertLess(blinks[0], 120)
+
+    def test_speaking_opens_the_mouth_and_silence_closes_it(self):
+        from whisper_face_render import IdleLifeDriver
+
+        driver = IdleLifeDriver()
+        for _ in range(30):
+            driver.advance()
+            speaking = driver.mouth(0.8, True)
+        self.assertGreater(speaking, 0.3)
+        for _ in range(60):
+            driver.advance()
+            resting = driver.mouth(0.0, False)
+        self.assertLess(resting, 0.02)
+
+    def test_gaze_wanders_within_the_clamp(self):
+        drifted = False
+        for (gaze,) in self._run(900, gaze=(True,)):
+            self.assertLessEqual(abs(gaze[0]), 3.0)
+            self.assertLessEqual(abs(gaze[1]), 3.0)
+            if abs(gaze[0]) > 0.5 or abs(gaze[1]) > 0.5:
+                drifted = True
+        self.assertTrue(drifted)
+
+    def test_micro_wobble_is_rare_but_present(self):
+        wobbles = sum(
+            1 for (value,) in self._run(3600, should_wobble=(True,)) if value)
+        self.assertGreaterEqual(wobbles, 2)
+        self.assertLessEqual(wobbles, 12)
+
+    def test_moods_map_processing_and_error(self):
+        from whisper_face_render import mood_overrides
+
+        self.assertGreaterEqual(mood_overrides("processing")["blink"], 0.75)
+        self.assertGreater(mood_overrides("error")["gaze"][1], 0.0)
+        self.assertEqual(mood_overrides("idle"), {})
+        self.assertEqual(mood_overrides("recording"), {})
+
+
 class AcousticKeywordMemoryRuntimeTests(unittest.TestCase):
     @staticmethod
     def runtime_namespace(path: Path):

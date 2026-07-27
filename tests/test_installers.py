@@ -669,6 +669,8 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("whisper_face_theme.py", self.powershell)
         self.assertIn("whisper_face_characters.py", self.shell)
         self.assertIn("whisper_face_characters.py", self.powershell)
+        self.assertIn("whisper_face_render.py", self.shell)
+        self.assertIn("whisper_face_render.py", self.powershell)
         for runtime_module in (
                 "voice_objects.py", "voice_object_command_parser.py",
                 "voice_inbox.py", "voice_object_inbox_bridge.py",
