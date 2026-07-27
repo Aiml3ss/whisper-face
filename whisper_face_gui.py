@@ -784,20 +784,6 @@ FACES = (
     "parrot", "fox", "owl", "cat", "bear",
     "dog", "wolf", "pig", "panda", "tiger",
 )
-FACE_EMOJI = {
-    "parrot": "🦜",
-    "fox": "🦊",
-    "owl": "🦉",
-    "cat": "🐱",
-    "bear": "🐻",
-    "dog": "🐶",
-    "wolf": "🐺",
-    "pig": "🐷",
-    "panda": "🐼",
-    "tiger": "🐯",
-}
-
-
 @dataclass(frozen=True)
 class NativeAppKitSmokeContract:
     """Static contract Windows can validate without importing AppKit."""
@@ -4291,18 +4277,11 @@ try:  # The view-model above remains usable in headless test environments.
         NSSwitch,
         NSTextField,
         NSTextView,
-        NSTrackingActiveInActiveApp,
-        NSTrackingArea,
-        NSTrackingInVisibleRect,
-        NSTrackingMouseEnteredAndExited,
         NSView,
         NSViewMaxXMargin,
         NSViewMinXMargin,
         NSViewMinYMargin,
         NSViewWidthSizable,
-        NSVisualEffectBlendingModeBehindWindow,
-        NSVisualEffectMaterialSidebar,
-        NSVisualEffectView,
         NSWindow,
         NSWindowOcclusionStateVisible,
         NSWorkspace,
@@ -4522,50 +4501,6 @@ if APPKIT_AVAILABLE:
             add_jelly_motion(self, "press", reduced_motion=_REDUCE_MOTION)
             objc.super(JellyButton, self).mouseDown_(event)
             add_jelly_motion(self, "release", reduced_motion=_REDUCE_MOTION)
-
-    class SidebarRow(JellyButton):
-        """Source-list row that also reports pointer hover to the window.
-
-        ``NSTrackingInVisibleRect`` keeps the region correct through scrolls
-        and resizes without rebuilding it, and the row only repaints when the
-        hovered flag actually flips, so moving across the rail cannot flicker.
-        """
-
-        def initWithFrame_(self, frame):
-            self = objc.super(SidebarRow, self).initWithFrame_(frame)
-            if self is None:
-                return None
-            self.hovered = False
-            self.hover_delegate = None
-            return self
-
-        def updateTrackingAreas(self):
-            objc.super(SidebarRow, self).updateTrackingAreas()
-            for area in list(self.trackingAreas()):
-                self.removeTrackingArea_(area)
-            area = NSTrackingArea.alloc() \
-                .initWithRect_options_owner_userInfo_(
-                    self.bounds(),
-                    NSTrackingMouseEnteredAndExited
-                    | NSTrackingActiveInActiveApp
-                    | NSTrackingInVisibleRect,
-                    self, None)
-            self.addTrackingArea_(area)
-
-        @objc.python_method
-        def _set_hovered(self, hovered: bool) -> None:
-            if bool(getattr(self, "hovered", False)) == hovered:
-                return
-            self.hovered = hovered
-            delegate = getattr(self, "hover_delegate", None)
-            if delegate is not None:
-                delegate.sidebarHoverChanged_(self)
-
-        def mouseEntered_(self, event):
-            self._set_hovered(True)
-
-        def mouseExited_(self, event):
-            self._set_hovered(False)
 
     class JellySwitch(NSSwitch):
         """Switch with the same press/release soft-body feedback."""

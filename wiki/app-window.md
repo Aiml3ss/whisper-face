@@ -86,14 +86,18 @@ and Drop-to-Target view-model layers are covered in
 
 ## Shape, keyboard, and proof
 
-- Resizable, opens at 1000×640, minimum 880×600; a 200pt vibrancy sidebar
-  with SF Symbol rows, a face chip, a `LOCAL FIRST` badge and a
-  `BUILD {version}` tag; content in a centred column capped at 720pt
-  whose width constraint sits *below* the window's stay-put priority so
-  long trust copy can never inflate the window ([[design-language]]).
+- Resizable, opens at 1000×640, minimum 880×600; since the chibi-clay
+  rebuild the sidebar is gone — a 64pt top bar carries the face chip,
+  the `LOCAL FIRST` badge, Home/Settings pills and an Advanced tool
+  button, with a `BUILD {version}` tag in the lower corner; Home leads
+  with a live `LiveFaceView` character that breathes, blinks, glances,
+  and lip-syncs the mic level while recording; content sits in a
+  centred column capped at 720pt whose width constraint stays *below*
+  the window's stay-put priority so long trust copy can never inflate
+  the window ([[design-language]]).
 - Keyboard contract: `return:continue-setup`, `command-d:advanced`,
   `command-r:verification`. ⌘D lives on the always-visible Advanced
-  sidebar row, so it works from every section.
+  tool button, so it works from every section.
 - **First run** is four steps plus a completion — "First, let me hear
   you", "Now try your key", "Getting your models ready", "Say something",
   "Nice. You’re ready." — on a poster with a 208pt tilted face chip, a
@@ -111,7 +115,7 @@ and Drop-to-Target view-model layers are covered in
 
 - [[menu-bar]] — the surface that routes here
 - [[design-language]] — the type, colour and motion this is built from
-- [[whisper-faces]] — the character in the sidebar chip and the poster
+- [[whisper-faces]] — the character in the top-bar chip and the poster
 - [[privacy-and-security]] — the support snapshot and bundle rules
 
 ## References
