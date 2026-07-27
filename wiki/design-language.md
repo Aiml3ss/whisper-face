@@ -91,11 +91,11 @@ any revision of the code.)
 ## Chrome motion, and what it never touches
 
 Section switches crossfade at 150 ms ease-out and pop the newly selected
-sidebar row; a fresh notice fades in; sidebar rows hover through an
-`NSTrackingArea` with `NSTrackingInVisibleRect`, repainting only the row
-whose state flipped. All of it is Reduce-Motion gated and all of it is
-window chrome — the code comment is explicit that none of it touches the
-dictation hot path ([[dictation-pipeline]]).
+nav pill; a fresh notice fades in. The old sidebar hover tracking left
+with the sidebar itself in the chibi-clay rebuild. All of it is
+Reduce-Motion gated and all of it is window chrome — the code comment is
+explicit that none of it touches the dictation hot path
+([[dictation-pipeline]]).
 
 ## The site runs the same numbers
 

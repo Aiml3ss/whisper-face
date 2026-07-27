@@ -69,7 +69,10 @@ class AcousticKeywordActivationTests(unittest.TestCase):
 
         self.assertEqual(status, "ready")
         self.assertEqual(active, ("PrivateProjectName",))
-        self.assertEqual(os.stat(self.state_path).st_mode & 0o777, 0o600)
+        if os.name == "posix":
+            # Mode bits are POSIX-only; Windows privacy is ACL-based.
+            self.assertEqual(
+                os.stat(self.state_path).st_mode & 0o777, 0o600)
         encoded = self.state_path.read_text(encoding="utf-8")
         self.assertNotIn("case-", encoded)
         self.assertNotIn("observation_tokens", encoded)

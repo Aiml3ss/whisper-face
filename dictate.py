@@ -268,6 +268,8 @@ if IS_MACOS:
     )
     from PyObjCTools import AppHelper
     from Quartz import CASpringAnimation
+
+    from whisper_face_render import replay_ops  # noqa: E402
 else:
     import pyperclip
     import pystray
@@ -317,13 +319,10 @@ from whisper_face_theme import (  # noqa: E402
     palette_for_appearance,
 )
 from whisper_face_characters import (  # noqa: E402
-    Arc,
-    Curve,
-    Ellipse,
-    Polygon,
-    RoundedRect,
-    Stroke,
     character_ops,
+)
+from whisper_face_render import (  # noqa: E402
+    IdleLifeDriver,
 )
 from parrot_core import (  # noqa: E402
     CleanupEdit,
@@ -729,12 +728,8 @@ STAGE_TOP = 31.0             # design y-down coords
 PARROT_SCALE = 280.0 / 256.0
 RADIAL_BARS = 60
 BAR_INNER_R = 134.0
-BEAK_MAX_DEG = 26.0          # spec: lower mandible max open
-MOUTH_ATTACK = 0.7           # mouth envelope: open fast on a syllable...
-MOUTH_RELEASE = 0.3          # ...settle noticeably slower, like real speech
-BLINK_FRAMES = (0.55, 1.0, 1.0, 0.6, 0.3, 0.1)
-BLINK_MIN_GAP = 84           # frames between blinks (2.8s at 30fps)...
-BLINK_GAP_JITTER = 66        # ...plus a deterministic 0-2.2s stagger
+# Mouth, blink, breath, and gaze schedules live in whisper_face_render's
+# IdleLifeDriver so the HUD and the window face cannot drift apart.
 LEVEL_SMOOTH = 0.35
 NUM_BARS = 16                # LEVELS history buffer length (not the display)
 FPS = 30.0
@@ -2256,8 +2251,7 @@ class WaveView(NSView):
         self.mode = "recording"
         self.raw = 0.0               # latest LEVELS entry, set by tick_
         self.lv = 0.0                # smoothed level (spec: 0.35 lerp)
-        self.beak = 0.0              # smoothed beak degrees
-        self.blink_started = -42     # first blink lands 1.4-3.6s in
+        self.life = IdleLifeDriver()  # shared mouth/blink/breath schedules
         self.t = 0.0
         self.frame_n = 0
         self.reduce_motion = False
@@ -2301,6 +2295,7 @@ class WaveView(NSView):
         if not self.reduce_motion:
             self.t += 1.0 / FPS
             self.frame_n += 1
+            self.life.advance()
         self.lv = hud_level_step(
             self.raw, self.lv, self.mode, self.reduce_motion)
         lv = max(0.0, min(1.0, self.lv))
@@ -2452,87 +2447,20 @@ class WaveView(NSView):
             self._draw_companion(face, lv)
 
     def _update_mouth(self):
-        """Advance the mouth envelope one frame; returns openness 0..1.
-
-        Loudness maps through a soft knee (x^0.7) so quiet speech still
-        moves the lips, the jaw opens faster than it settles, and two
-        incommensurate sines add syllable texture instead of a metronome
-        wobble.
-        """
-        if self.mode == "recording" and not self.reduce_motion:
-            loud = min(1.0, max(0.0, self.raw) ** 0.7 * 1.35)
-            flutter = loud * (0.10 * math.sin(self.frame_n * 0.55)
-                              + 0.06 * math.sin(self.frame_n * 0.23 + 1.7))
-            target = min(1.0, max(0.0, loud + flutter)) * BEAK_MAX_DEG
-        else:
-            target = 0.0
-        rate = MOUTH_ATTACK if target > self.beak else MOUTH_RELEASE
-        self.beak = max(0.0, self.beak + (target - self.beak) * rate)
-        return min(1.0, self.beak / BEAK_MAX_DEG)
+        """Advance the shared mouth envelope one frame; openness 0..1."""
+        return self.life.mouth(
+            self.raw,
+            self.mode == "recording" and not self.reduce_motion)
 
     def _update_blink(self):
-        """Occasional two-frame lid drop; frozen under Reduce Motion.
-
-        The gap between blinks is jittered off the frame the last blink
-        started on, so the rhythm never locks to the flutter sines while
-        staying deterministic for tests.
-        """
-        if self.reduce_motion or self.mode != "recording":
-            return 0.0
-        since = self.frame_n - self.blink_started
-        if since < 0:
-            return 0.0
-        if since < len(BLINK_FRAMES):
-            return BLINK_FRAMES[since]
-        gap = BLINK_MIN_GAP + (self.blink_started * 7919) % BLINK_GAP_JITTER
-        if since >= gap:
-            self.blink_started = self.frame_n
-            return BLINK_FRAMES[0]
-        return 0.0
+        """Occasional lid drop whenever the HUD is up; frozen under
+        Reduce Motion.  The HUD only shows while dictation is active, so
+        the face blinks in every visible mode, not just recording."""
+        return self.life.blink(not self.reduce_motion)
 
     def _replay_ops(self, ops):
         """Draw a shared character op list through Core Graphics."""
-        for op in ops:
-            if isinstance(op, Ellipse):
-                _rgb(*op.color, op.alpha)
-                NSBezierPath.bezierPathWithOvalInRect_(
-                    NSMakeRect(op.x, op.y, op.w, op.h)).fill()
-            elif isinstance(op, Polygon):
-                _rgb(*op.color, op.alpha)
-                _poly(op.points).fill()
-            elif isinstance(op, Stroke):
-                _rgb(*op.color, op.alpha)
-                path = NSBezierPath.bezierPath()
-                path.setLineWidth_(op.width)
-                path.setLineCapStyle_(1)
-                path.setLineJoinStyle_(1)
-                path.moveToPoint_(op.points[0])
-                for point in op.points[1:]:
-                    path.lineToPoint_(point)
-                path.stroke()
-            elif isinstance(op, RoundedRect):
-                _rgb(*op.color, op.alpha)
-                NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                    NSMakeRect(op.x, op.y, op.w, op.h),
-                    op.radius, min(op.radius, op.h / 2.0)).fill()
-            elif isinstance(op, Arc):
-                _rgb(*op.color, op.alpha)
-                path = NSBezierPath.bezierPath()
-                path.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_(
-                    (op.cx, op.cy), op.radius,
-                    op.start_degrees, op.end_degrees)
-                path.setLineWidth_(op.width)
-                path.setLineCapStyle_(1)
-                path.stroke()
-            elif isinstance(op, Curve):
-                _rgb(*op.color, op.alpha)
-                path = NSBezierPath.bezierPath()
-                path.moveToPoint_(op.start)
-                for control_one, control_two, end in op.segments:
-                    path.curveToPoint_controlPoint1_controlPoint2_(
-                        end, control_one, control_two)
-                path.closePath()
-                path.fill()
+        replay_ops(ops)
 
     def _draw_character(self, face, lv):
         self._replay_ops(character_ops(
@@ -2629,6 +2557,11 @@ class HUD(NSObject):
         bar = STATUS.get("bar")
         if bar is not None and hasattr(bar, "setMouthLevel_"):
             bar.setMouthLevel_(self.wave.raw)
+        # Same seam, third consumer: the window face flaps along when the
+        # app window is open. The facade no-ops when it is closed.
+        gui = getattr(bar, "gui", None)
+        if gui is not None and hasattr(gui, "feed_level"):
+            gui.feed_level(self.wave.raw, self.wave.mode)
         self.wave.setNeedsDisplay_(True)
 
 
@@ -2769,13 +2702,15 @@ class StatusBar(NSObject):
             button.setAccessibilityLabel_("Whisper Face menu")
         except Exception:
             pass
-        # Two cached template frames per character. The open-mouth frame is
-        # selected from the live mic level, so the tiny menu-bar face talks
-        # along with the larger HUD without decoding or storing extra audio.
+        # Three cached template frames per character. The open-mouth frame
+        # is selected from the live mic level, so the tiny menu-bar face
+        # talks along with the larger HUD without decoding or storing extra
+        # audio; the blink frame flashes on a rare jittered timer so the
+        # face stays alive at rest without continuous animation.
         self.face_icons = {}
         for face in FACE_CHOICES:
             frames = {}
-            for frame in ("idle", "talk"):
+            for frame in ("idle", "talk", "blink"):
                 icon = NSImage.alloc().initWithContentsOfFile_(str(
                     HERE / "icons" / "faces" / f"{face}-{frame}.svg"))
                 if icon is not None:
@@ -2785,9 +2720,13 @@ class StatusBar(NSObject):
             self.face_icons[face] = frames
         self.state = "idle"
         self.mouth_open = False
+        self.blinking = False
+        self._blink_timer = None
+        self._blink_cycle = 0
         self.reduce_motion = mac_prefers_reduced_motion()
         self.gui = None
         self.setState_("idle")
+        self._schedule_blink()
 
         def mk(title, action):
             it = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -2858,6 +2797,45 @@ class StatusBar(NSObject):
             self.mouth_open = False
         self._refresh_face_icon()
 
+    def _schedule_blink(self):
+        """Queue the next rare menu-bar blink, deterministically jittered.
+
+        One two-image swap every 4-7 seconds; no continuous animation, no
+        work while paused, frozen entirely under Reduce Motion.  The timer
+        merely schedules — construction without a runloop (the smoke test
+        path) never fires it.
+        """
+        if self._blink_timer is not None:
+            self._blink_timer.invalidate()
+        delay = 4.0 + ((self._blink_cycle * 7919) % 300) / 100.0
+        self._blink_cycle += 1
+        self._blink_timer = \
+            NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                delay, self, "blinkTick:", None, False)
+
+    def blinkTick_(self, _timer):
+        self._blink_timer = None
+        if (self.state in ("idle", "rec") and not self.blinking
+                and not mac_prefers_reduced_motion()):
+            self.blinking = True
+            self._refresh_face_icon()
+            self._blink_timer = \
+                NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                    0.13, self, "blinkOpen:", None, False)
+            return
+        self._schedule_blink()
+
+    def blinkOpen_(self, _timer):
+        self._blink_timer = None
+        self.blinking = False
+        self._refresh_face_icon()
+        self._schedule_blink()
+
+    def removeBlinkTimer(self):
+        if self._blink_timer is not None:
+            self._blink_timer.invalidate()
+            self._blink_timer = None
+
     def _refresh_face_icon(self):
         btn = self.item.button()
         if self.state == "off":
@@ -2869,8 +2847,15 @@ class StatusBar(NSObject):
             except Exception:
                 pass
             return
-        frame = "talk" if self.state == "rec" and self.mouth_open else "idle"
+        if self.state == "rec" and self.mouth_open:
+            frame = "talk"
+        elif self.blinking:
+            frame = "blink"
+        else:
+            frame = "idle"
         icon = self.face_icons.get(current_face(), {}).get(frame)
+        if frame == "blink" and icon is None:
+            icon = self.face_icons.get(current_face(), {}).get("idle")
         btn.setImage_(icon)
         if icon is None:
             btn.setTitle_(FACE_EMOJI.get(current_face(), "◉"))
@@ -3303,32 +3288,34 @@ if IS_WINDOWS:
             face = current_face()
             talking = state == "rec"
             disabled = state == "off"
+            # Pastel chibi palettes, mirroring FACE_CHIP_COLORS in
+            # whisper_face_theme.py at 8-bit depth.
             palettes = {
-                "fox": ((236, 102, 45, 255), (255, 224, 179, 255)),
-                "cat": ((92, 151, 210, 255), (210, 233, 255, 255)),
-                "bear": ((165, 108, 68, 255), (227, 181, 131, 255)),
-                "owl": ((116, 100, 189, 255), (227, 218, 255, 255)),
-                "dog": ((218, 165, 96, 255), (252, 236, 208, 255)),
-                "wolf": ((131, 144, 160, 255), (212, 219, 230, 255)),
-                "pig": ((241, 158, 177, 255), (255, 219, 224, 255)),
-                "panda": ((245, 246, 249, 255), (255, 255, 255, 255)),
-                "tiger": ((249, 157, 60, 255), (255, 232, 200, 255)),
+                "fox": ((255, 184, 153, 255), (255, 239, 214, 255)),
+                "cat": ((221, 209, 247, 255), (231, 241, 255, 255)),
+                "bear": ((253, 215, 121, 255), (242, 212, 177, 255)),
+                "owl": ((162, 239, 223, 255), (237, 231, 255, 255)),
+                "dog": ((234, 199, 156, 255), (254, 244, 228, 255)),
+                "wolf": ((196, 201, 207, 255), (230, 235, 242, 255)),
+                "pig": ((250, 202, 210, 255), (255, 232, 235, 255)),
+                "panda": ((235, 234, 235, 255), (255, 255, 255, 255)),
+                "tiger": ((253, 197, 137, 255), (255, 241, 221, 255)),
             }
             if face == "parrot":
-                # front-facing: emerald head, gold crest, centered beak
+                # front-facing: pastel emerald head, gold crest, centered beak
                 head = (135, 135, 145, 255) if disabled \
-                    else (55, 170, 92, 255)
+                    else (137, 226, 189, 255)
                 if not disabled:
                     draw.polygon(((28, 9), (36, 9), (32, 1)),
-                                 fill=(244, 174, 46, 255))
+                                 fill=(247, 206, 115, 255))
                 draw.ellipse((8, 8, 56, 58), fill=head)
-                draw.ellipse((19, 24, 27, 33), fill=(20, 25, 30, 255))
-                draw.ellipse((37, 24, 45, 33), fill=(20, 25, 30, 255))
+                draw.ellipse((19, 24, 27, 33), fill=(42, 33, 28, 255))
+                draw.ellipse((37, 24, 45, 33), fill=(42, 33, 28, 255))
                 gap = 6 if talking else 1
                 draw.polygon(((26, 34), (38, 34), (32, 42)),
-                             fill=(244, 174, 46, 255))
+                             fill=(247, 206, 115, 255))
                 draw.polygon(((28, 42), (36, 42), (32, 42 + gap)),
-                             fill=(225, 137, 33, 255))
+                             fill=(240, 183, 90, 255))
                 return image
 
             head, muzzle = palettes.get(face, palettes["fox"])
@@ -3336,7 +3323,7 @@ if IS_WINDOWS:
                 head = (135, 135, 145, 255)
                 muzzle = (205, 205, 210, 255)
             round_ears = face in ("bear", "pig", "panda")
-            ear_fill = (30, 32, 38, 255) \
+            ear_fill = (85, 89, 93, 255) \
                 if (face == "panda" and not disabled) else head
             if not round_ears:
                 draw.polygon(((9, 23), (16, 2), (29, 18)), fill=ear_fill)
@@ -3346,30 +3333,30 @@ if IS_WINDOWS:
                 draw.ellipse((39, 5, 57, 23), fill=ear_fill)
             draw.ellipse((7, 10, 57, 60), fill=head)
             if face == "panda" and not disabled:
-                draw.ellipse((16, 22, 28, 36), fill=(30, 32, 38, 255))
-                draw.ellipse((36, 22, 48, 36), fill=(30, 32, 38, 255))
+                draw.ellipse((16, 22, 28, 36), fill=(85, 89, 93, 255))
+                draw.ellipse((36, 22, 48, 36), fill=(85, 89, 93, 255))
             if face == "owl":
                 draw.ellipse((13, 19, 35, 41), fill=muzzle)
                 draw.ellipse((29, 19, 51, 41), fill=muzzle)
-                draw.ellipse((23, 27, 29, 35), fill=(20, 25, 30, 255))
-                draw.ellipse((35, 27, 41, 35), fill=(20, 25, 30, 255))
+                draw.ellipse((23, 27, 29, 35), fill=(42, 33, 28, 255))
+                draw.ellipse((35, 27, 41, 35), fill=(42, 33, 28, 255))
                 gap = 8 if talking else 2
                 draw.polygon(((26, 38), (38, 38), (32, 45 + gap)),
-                             fill=(244, 174, 46, 255))
+                             fill=(247, 206, 115, 255))
             else:
                 draw.ellipse((15, 34, 37, 54), fill=muzzle)
                 draw.ellipse((27, 34, 49, 54), fill=muzzle)
-                draw.ellipse((20, 25, 26, 32), fill=(20, 25, 30, 255))
-                draw.ellipse((38, 25, 44, 32), fill=(20, 25, 30, 255))
+                draw.ellipse((20, 25, 26, 32), fill=(42, 33, 28, 255))
+                draw.ellipse((38, 25, 44, 32), fill=(42, 33, 28, 255))
                 draw.polygon(((27, 38), (37, 38), (32, 44)),
-                             fill=(45, 36, 36, 255))
+                             fill=(66, 52, 44, 255))
                 mouth_h = 10 if talking else 2
                 draw.ellipse((27, 45, 37, 45 + mouth_h),
-                             fill=(35, 24, 28, 255))
+                             fill=(51, 40, 31, 255))
             if face == "tiger" and not disabled:
                 for x0, x1 in ((32, 32), (25, 27), (39, 37)):
                     draw.line(((x0, 12), (x1, 22)),
-                              fill=(208, 103, 25, 255), width=2)
+                              fill=(222, 142, 81, 255), width=2)
             return image
 
         def init(self):
@@ -10589,6 +10576,7 @@ def run_native_hud_smoke_test() -> dict[str, int]:
         CAPTION.clear()
         CAPTION.update(saved_caption)
         if status_bar is not None:
+            status_bar.removeBlinkTimer()
             NSStatusBar.systemStatusBar().removeStatusItem_(status_bar.item)
         if hud is not None:
             hud.timer.invalidate()

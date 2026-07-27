@@ -433,7 +433,10 @@ currently provide the same task-to-listener identity binding.
 Click the selected animal in the menu bar and choose **Open Whisper Face…**.
 The menu bar remains the fastest everyday control, while the window provides a
 clear home for setup health, privacy controls, model status, character choice,
-and Voice Outbox recovery. Closing the window does not stop dictation.
+and Voice Outbox recovery. Home leads with your character, drawn live: it
+breathes and blinks while idle and mouths along with the mic while you
+dictate (System Settings Reduce Motion keeps it still). Closing the window
+does not stop dictation.
 The **Last Recognition** submenu ends with **Open Last Result…** for a direct
 route to the existing transcript-free evidence inspector.
 Advanced can copy a fixed support snapshot containing only categorized

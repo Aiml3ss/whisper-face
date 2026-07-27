@@ -274,6 +274,7 @@ required=(
     macos_point_and_speak_snapshot.py
     macos_drop_to_target_snapshot.py drop_to_target.py
     whisper_face_gui.py whisper_face_theme.py whisper_face_characters.py
+    whisper_face_render.py
     support_bundle.py self_update.py
     scripts/macos_launcher_app.py scripts/side_by_side_update.py
     scripts/safe_update_advisor.py scripts/release_manifest.py
@@ -285,16 +286,16 @@ required=(
     com.berg.dictate.plist.template com.berg.ollama.plist.template
     snippets.template.json tones.template.json preferences.template.json
     acoustic_keyword_memory.template.json dictionary.template.txt
-    icons/faces/parrot-idle.svg icons/faces/parrot-talk.svg
-    icons/faces/fox-idle.svg icons/faces/fox-talk.svg
-    icons/faces/owl-idle.svg icons/faces/owl-talk.svg
-    icons/faces/cat-idle.svg icons/faces/cat-talk.svg
-    icons/faces/bear-idle.svg icons/faces/bear-talk.svg
-    icons/faces/dog-idle.svg icons/faces/dog-talk.svg
-    icons/faces/wolf-idle.svg icons/faces/wolf-talk.svg
-    icons/faces/pig-idle.svg icons/faces/pig-talk.svg
-    icons/faces/panda-idle.svg icons/faces/panda-talk.svg
-    icons/faces/tiger-idle.svg icons/faces/tiger-talk.svg
+    icons/faces/parrot-idle.svg icons/faces/parrot-blink.svg icons/faces/parrot-talk.svg
+    icons/faces/fox-idle.svg icons/faces/fox-blink.svg icons/faces/fox-talk.svg
+    icons/faces/owl-idle.svg icons/faces/owl-blink.svg icons/faces/owl-talk.svg
+    icons/faces/cat-idle.svg icons/faces/cat-blink.svg icons/faces/cat-talk.svg
+    icons/faces/bear-idle.svg icons/faces/bear-blink.svg icons/faces/bear-talk.svg
+    icons/faces/dog-idle.svg icons/faces/dog-blink.svg icons/faces/dog-talk.svg
+    icons/faces/wolf-idle.svg icons/faces/wolf-blink.svg icons/faces/wolf-talk.svg
+    icons/faces/pig-idle.svg icons/faces/pig-blink.svg icons/faces/pig-talk.svg
+    icons/faces/panda-idle.svg icons/faces/panda-blink.svg icons/faces/panda-talk.svg
+    icons/faces/tiger-idle.svg icons/faces/tiger-blink.svg icons/faces/tiger-talk.svg
     icons/faces/color/parrot-idle.svg icons/faces/color/parrot-half.svg icons/faces/color/parrot-talk.svg
     icons/faces/color/fox-idle.svg icons/faces/color/fox-half.svg icons/faces/color/fox-talk.svg
     icons/faces/color/owl-idle.svg icons/faces/color/owl-half.svg icons/faces/color/owl-talk.svg

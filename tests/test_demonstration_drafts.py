@@ -75,7 +75,9 @@ class DemonstrationDraftStoreTests(unittest.TestCase):
                 self.assertEqual(preview.steps[0].text, text)
                 self.assertEqual(preview.state, DemonstrationState.RECORDING)
         if os.name != "nt":
-            self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+            if os.name == "posix":
+                self.assertEqual(
+                    self.path.stat().st_mode & 0o777, 0o600)
 
     def test_receipts_and_reprs_do_not_leak_private_step_text(self):
         secret = "Unreleased acquisition plan for Casey"

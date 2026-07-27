@@ -295,7 +295,11 @@ def write_activation_receipt(path: Path, receipt: Mapping[str, object]) -> None:
     fd, temporary = tempfile.mkstemp(
         prefix=f".{destination.name}.", dir=destination.parent)
     try:
-        os.fchmod(fd, 0o600)
+        if hasattr(os, "fchmod"):
+            # POSIX owner-only mode. Windows has no fchmod; mkstemp already
+            # creates the file readable only by the current user there, and
+            # installed checkouts rely on the installer's private ACLs.
+            os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             fd = -1
             json.dump(receipt, handle, indent=2, sort_keys=True)
