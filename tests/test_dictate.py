@@ -2138,6 +2138,96 @@ class WhisperFaceThemeTests(unittest.TestCase):
         self.assertEqual(set(FACE_CHIP_COLORS), set(FACE_ORDER))
         self.assertEqual(set(FACE_CHIP_COLORS), set(face_choices))
 
+    # The chip map argues for itself in CIELAB, and that argument went false
+    # in silence when the goldens landed: the comment still claimed a dE 12.5
+    # floor while olive sat 11.0 from panda. A comment cannot check its own
+    # arithmetic, so the two claims it rests on are pinned here instead.
+    CHIP_TWINS = frozenset({"pickles", "olive"})
+    CHIP_HUE_FLOOR = 12.5
+    # Named pairs may sit below the floor, each pinned at the distance it may
+    # not close further. Exempting a *face* rather than a pair would let a new
+    # look-alike in behind the golden that is already exempt, so the key is
+    # the pair. pickles/olive is the design: litter-mates, told apart by
+    # accessory. panda/olive is not designed -- olive's cream simply landed
+    # near panda's -- and is pinned at its measured distance so the accident
+    # cannot deepen while the palette waits on a decision.
+    CHIP_EXEMPT_PAIRS = {
+        frozenset({"pickles", "olive"}): 6.2,
+        frozenset({"panda", "olive"}): 10.9,
+    }
+
+    @staticmethod
+    def _cielab(color):
+        """CIE L*a*b* under D65 for a linear-decoded sRGB triple."""
+        linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+                  for c in color]
+        r, g, b = linear
+        xyz = (
+            (r * 0.4124564 + g * 0.3575761 + b * 0.1804375) / 0.95047,
+            (r * 0.2126729 + g * 0.7151522 + b * 0.0721750),
+            (r * 0.0193339 + g * 0.1191920 + b * 0.9503041) / 1.08883,
+        )
+        fx, fy, fz = (
+            t ** (1 / 3) if t > 216 / 24389 else (841 / 108) * t + 4 / 29
+            for t in xyz
+        )
+        return (116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz))
+
+    def test_chip_colors_stay_nameable_apart_except_for_the_twins(self):
+        """Hue names the chip, and only named pairs may opt out.
+
+        Every pair stays at least as far apart as wolf/panda, the pair that
+        set the floor, unless it appears in CHIP_EXEMPT_PAIRS -- and an
+        exempt pair still may not drift closer than the distance recorded
+        for it. Being one of the goldens buys a face nothing on its own, so
+        a new chip that lands near pickles is caught like any other. On top
+        of that the litter-mates must stay the closest pair in the map: an
+        accidental look-alike tighter than the designed one is a bug even if
+        it clears every other rule here.
+        """
+        labs = {face: self._cielab(color)
+                for face, color in FACE_CHIP_COLORS.items()}
+        self.assertEqual(
+            self.CHIP_TWINS & set(labs), self.CHIP_TWINS,
+            "the sanctioned near-twins are no longer in the chip map")
+
+        def distance(one, two):
+            return sum((a - b) ** 2
+                       for a, b in zip(labs[one], labs[two])) ** 0.5
+
+        pairs = [(distance(a, b), a, b)
+                 for index, a in enumerate(sorted(labs))
+                 for b in sorted(labs)[index + 1:]]
+        self.assertTrue(pairs, "expected a chip roster to compare")
+
+        for gap, one, two in pairs:
+            pinned = self.CHIP_EXEMPT_PAIRS.get(frozenset({one, two}))
+            if pinned is None:
+                self.assertGreaterEqual(
+                    gap, self.CHIP_HUE_FLOOR,
+                    f"{one} and {two} are only dE {gap:.1f} apart; hue-named "
+                    f"chips owe each other dE {self.CHIP_HUE_FLOOR}. Add the "
+                    "pair to CHIP_EXEMPT_PAIRS only if the collision is a "
+                    "deliberate design decision")
+            else:
+                self.assertGreaterEqual(
+                    gap, pinned,
+                    f"{one} and {two} are a sanctioned near-pair, but they "
+                    f"have closed from dE {pinned} to dE {gap:.1f}")
+
+        unused = set(self.CHIP_EXEMPT_PAIRS) - {frozenset(p[1:]) for p in pairs}
+        self.assertFalse(
+            unused,
+            f"CHIP_EXEMPT_PAIRS still excuses pairs that left the map: "
+            f"{sorted(sorted(pair) for pair in unused)}")
+
+        closest = min(pairs)
+        self.assertEqual(
+            frozenset(closest[1:]), self.CHIP_TWINS,
+            f"{closest[1]}/{closest[2]} (dE {closest[0]:.1f}) are now the "
+            "closest chips in the map, closer than the goldens meant to be "
+            "the only near-twins")
+
     def test_all_named_jelly_motions_have_bounded_fast_springs(self):
         self.assertEqual(
             set(MOTION_SPECS), {"press", "release", "wobble", "pop"})

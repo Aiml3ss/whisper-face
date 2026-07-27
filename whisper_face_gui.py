@@ -5065,7 +5065,7 @@ if APPKIT_AVAILABLE:
             path.stroke()
 
     class ArtFacePicker(NSView):
-        """Ten colored character chips standing in for a segmented control.
+        """Colored character chips standing in for a segmented control.
 
         Speaks the two segment methods the render path and the smoke test
         already use (``setSelectedSegment_`` / ``selectedSegment``), so
@@ -5090,9 +5090,10 @@ if APPKIT_AVAILABLE:
             self.target = target
             self.pick_action = action
             chip_side = 44.0
-            # One row until the chips would crowd. Fourteen across a 704pt
-            # card leaves 5.9pt between them; the roster is meant to grow, so
-            # wrap instead of letting the breathing room collapse.
+            # One row until the chips would crowd. Sixteen across a 704pt
+            # card leaves exactly nothing between them -- 16 * 44 is 704 to
+            # the point -- and the roster is meant to keep growing, so wrap
+            # instead of letting the breathing room collapse.
             width = self.frame().size.width
             per_row = len(faces)
             while per_row > 1 and (
@@ -6584,7 +6585,7 @@ if APPKIT_AVAILABLE:
             face_card_height = 64.0 + (face_rows - 1) * 52.0
             face_card = _card(NSMakeRect(0, 0, width, face_card_height))
             self._register("card", face_card)
-            # Ten colored chibi chips instead of emoji segments; each chip
+            # Colored chibi chips instead of emoji segments; each chip
             # shows the real character art, and the selected chip wears a
             # ring in its own face color. Animal names stay available
             # through tooltips and the menu-bar "Choose Face" submenu.
