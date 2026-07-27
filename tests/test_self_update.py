@@ -47,8 +47,12 @@ class FakeRunner:
     def __init__(self, *, head="", upstream=None, upstream_ref="@{u}",
                  status="", fetch_rc=0, count=0,
                  checkout_rc=0, installer_rcs=None,
-                 branch="", branch_sha=None, resolvable=(),
+                 branch="", branch_sha=None, resolvable=(), ancestry=None,
                  installer_stdout="", installer_stderr=""):
+        # Default ancestry: HEAD is simply behind upstream, which is the shape
+        # every pre-existing case assumes.
+        if ancestry is None:
+            ancestry = {(head, upstream)} if head and upstream else set()
         self.head = head
         self.upstream = upstream
         self.upstream_ref = upstream_ref
@@ -66,6 +70,10 @@ class FakeRunner:
         # left out of this set models a receipt naming a commit the checkout has
         # never fetched.
         self.resolvable = set(resolvable)
+        # (older, newer) pairs `git merge-base --is-ancestor` accepts. Anything
+        # not listed is treated as unrelated or newer, which is how a diverged
+        # or locally-ahead checkout is modelled.
+        self.ancestry = set(ancestry)
         self.installer_stdout = installer_stdout
         self.installer_stderr = installer_stderr
         self.calls = []
@@ -103,6 +111,10 @@ class FakeRunner:
                     return self._cp(cmd, 0, sha + "\n")
                 return self._cp(cmd, 1)  # unknown object
             return self._cp(cmd, 1)  # upstream ref does not resolve
+        if git[:2] == ["merge-base", "--is-ancestor"]:
+            older, newer = git[2], git[3]
+            same_or_known = older == newer or (older, newer) in self.ancestry
+            return self._cp(cmd, 0 if same_or_known else 1)
         if git == ["symbolic-ref", "--short", "--quiet", "HEAD"]:
             return self._cp(cmd, 0, self.branch + "\n") if self.branch \
                 else self._cp(cmd, 1)  # detached HEAD
@@ -210,7 +222,8 @@ class InstalledRevisionTests(unittest.TestCase):
         # HEAD already sits at upstream -- someone pulled -- but the installer
         # last provisioned INSTALLED, so that is the app the user is running.
         runner = FakeRunner(head=LATEST, upstream=LATEST, count=6,
-                            resolvable={INSTALLED})
+                            resolvable={INSTALLED},
+                            ancestry={(INSTALLED, LATEST)})
         report = self_update.check_for_update(
             CHECKOUT, runner=runner,
             install_receipt=self.receipt({"source_revision": INSTALLED}))
@@ -263,6 +276,41 @@ class InstalledRevisionTests(unittest.TestCase):
         self.assertIn(("git", "-C", str(CHECKOUT), "rev-list", "--count",
                        f"{CURRENT}..{LATEST}"), runner.calls)
 
+    def test_a_receipt_newer_than_head_is_ignored(self):
+        """A checkout rolled *back* runs the older code, whatever was installed.
+
+        Install B, check out the older A, let launchd restart the service: the
+        process is running A while the receipt still names B. Trusting the
+        receipt here would compare B against upstream and answer "up to date"
+        to someone running A.
+        """
+        runner = FakeRunner(head=CURRENT, upstream=INSTALLED, count=4,
+                            resolvable={INSTALLED},
+                            ancestry={(CURRENT, INSTALLED)})
+        report = self_update.check_for_update(
+            CHECKOUT, runner=runner,
+            install_receipt=self.receipt({"source_revision": INSTALLED}))
+        self.assertTrue(report["available"])
+        self.assertEqual(report["current"], CURRENT)
+        self.assertEqual(report["behind"], 4)
+
+    def test_a_checkout_with_its_own_commits_is_refused_not_rewound(self):
+        """Never offer an "update" that would move a tree backwards.
+
+        A clean checkout carrying local commits is not behind upstream; applying
+        would `git checkout <upstream>` straight off that work. Fail closed and
+        say so rather than counting from the receipt and calling it an update.
+        """
+        runner = FakeRunner(head=CURRENT, upstream=LATEST, count=9,
+                            resolvable={INSTALLED}, ancestry=set())
+        report = self_update.check_for_update(
+            CHECKOUT, runner=runner,
+            install_receipt=self.receipt({"source_revision": INSTALLED}))
+        self.assertFalse(report["available"])
+        self.assertEqual(report["error"], "checkout has commits upstream does not")
+        self.assertFalse(any(c[3:5] == ("rev-list", "--count")
+                             for c in runner.calls))
+
     def test_a_dirty_tree_still_refuses_before_the_network(self):
         runner = FakeRunner(head=LATEST, upstream=LATEST,
                             status=" M dictate.py\n", resolvable={INSTALLED})
@@ -274,10 +322,70 @@ class InstalledRevisionTests(unittest.TestCase):
         self.assertFalse(any("fetch" in c for c in runner.calls))
 
 
+class ApplyRecoversTheWorkingBuildTests(unittest.TestCase):
+    """Recovery has to land on a build that installed cleanly once.
+
+    When the checkout has been moved forward without a reinstall, HEAD is the
+    revision that has never been installed and the receipt names the one that
+    has. Treating HEAD as the rollback target would "recover" onto the revision
+    that just failed, and this update path has already produced real installer
+    failures, so the difference is whether a failed update leaves a working app.
+    """
+
+    def receipt(self, revision) -> Path:
+        directory = Path(tempfile.mkdtemp())
+        path = directory / "launcher-install.json"
+        path.write_text(json.dumps({"source_revision": revision}),
+                        encoding="utf-8")
+        self.addCleanup(directory.rmdir)
+        self.addCleanup(path.unlink)
+        return path
+
+    def test_rollback_restores_the_installed_build_not_the_failing_head(self):
+        # HEAD already sits at the target; only the installer needs to run, and
+        # it fails. Recovery must go back to INSTALLED, not to LATEST.
+        runner = FakeRunner(head=LATEST, checkout_rc=0, installer_rcs=[1, 0],
+                            resolvable={INSTALLED},
+                            ancestry={(INSTALLED, LATEST)})
+        outcome = self_update.apply_update(
+            CHECKOUT, LATEST, runner=runner,
+            install_receipt=self.receipt(INSTALLED))
+
+        self.assertEqual(outcome["status"], "rolled_back")
+        self.assertEqual(outcome["from"], INSTALLED)
+        self.assertEqual(runner.checkouts, [INSTALLED])
+        self.assertEqual(runner.installer_runs, 2)
+
+    def test_head_already_at_target_is_installed_without_detaching(self):
+        runner = FakeRunner(head=LATEST, branch="main", installer_rcs=[0],
+                            resolvable={INSTALLED},
+                            ancestry={(INSTALLED, LATEST)})
+        outcome = self_update.apply_update(
+            CHECKOUT, LATEST, runner=runner,
+            install_receipt=self.receipt(INSTALLED))
+
+        self.assertEqual(outcome["status"], "applied")
+        self.assertEqual(outcome["from"], INSTALLED)
+        # No checkout at all: the files are already right, and `git checkout
+        # <sha>` would have detached HEAD off `main` for nothing.
+        self.assertEqual(runner.checkouts, [])
+        self.assertEqual(runner.installer_runs, 1)
+
+    def test_a_receipt_newer_than_head_is_not_a_rollback_target(self):
+        runner = FakeRunner(head=CURRENT, checkout_rc=0, installer_rcs=[1, 0],
+                            resolvable={INSTALLED},
+                            ancestry={(CURRENT, INSTALLED)})
+        outcome = self_update.apply_update(
+            CHECKOUT, LATEST, runner=runner,
+            install_receipt=self.receipt(INSTALLED))
+        self.assertEqual(outcome["from"], CURRENT)
+        self.assertEqual(runner.checkouts, [LATEST, CURRENT])
+
+
 class ApplyUpdateTests(unittest.TestCase):
     def test_happy_path_checks_out_then_installs_in_order(self):
         runner = FakeRunner(head=CURRENT, checkout_rc=0, installer_rcs=[0])
-        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner)
+        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner, install_receipt=NO_RECEIPT)
         self.assertEqual(outcome["status"], "applied")
         self.assertEqual(outcome["from"], CURRENT)
         self.assertEqual(outcome["to"], LATEST)
@@ -295,7 +403,7 @@ class ApplyUpdateTests(unittest.TestCase):
     def test_installer_failure_rolls_back_and_never_ends_broken(self):
         # Forward install fails; rollback re-install succeeds.
         runner = FakeRunner(head=CURRENT, checkout_rc=0, installer_rcs=[1, 0])
-        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner)
+        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner, install_receipt=NO_RECEIPT)
         self.assertEqual(outcome["status"], "rolled_back")
         self.assertEqual(outcome["from"], CURRENT)
         self.assertEqual(outcome["to"], LATEST)
@@ -311,14 +419,14 @@ class ApplyUpdateTests(unittest.TestCase):
         # gone and the user's tree was silently off its branch.
         runner = FakeRunner(head=CURRENT, branch="main",
                             installer_rcs=[1, 0])
-        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner)
+        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner, install_receipt=NO_RECEIPT)
         self.assertEqual(outcome["status"], "rolled_back")
         self.assertEqual(runner.checkouts, [LATEST, "main"])
 
     def test_rollback_uses_the_sha_when_head_was_already_detached(self):
         # No branch to go back to: the sha remains the only correct target.
         runner = FakeRunner(head=CURRENT, branch="", installer_rcs=[1, 0])
-        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner)
+        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner, install_receipt=NO_RECEIPT)
         self.assertEqual(outcome["status"], "rolled_back")
         self.assertEqual(runner.checkouts, [LATEST, CURRENT])
 
@@ -327,7 +435,7 @@ class ApplyUpdateTests(unittest.TestCase):
         # would roll back to the wrong revision. Prefer the recorded sha.
         runner = FakeRunner(head=CURRENT, branch="main", branch_sha=LATEST,
                             installer_rcs=[1, 0])
-        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner)
+        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner, install_receipt=NO_RECEIPT)
         self.assertEqual(outcome["status"], "rolled_back")
         self.assertEqual(runner.checkouts, [LATEST, CURRENT])
 
@@ -338,7 +446,7 @@ class ApplyUpdateTests(unittest.TestCase):
             head=CURRENT, installer_rcs=[1, 0],
             installer_stderr="!! Homebrew is not installed and could not be "
                              "installed without a terminal")
-        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner)
+        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner, install_receipt=NO_RECEIPT)
         self.assertEqual(outcome["status"], "rolled_back")
         self.assertIn("exit 1", outcome["error"])
         self.assertIn("Homebrew is not installed", outcome["error"])
@@ -346,13 +454,13 @@ class ApplyUpdateTests(unittest.TestCase):
     def test_installer_error_detail_stays_bounded(self):
         runner = FakeRunner(head=CURRENT, installer_rcs=[1, 0],
                             installer_stderr="x" * 5000)
-        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner)
+        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner, install_receipt=NO_RECEIPT)
         self.assertLess(len(outcome["error"]), 800)
 
     def test_checkout_failure_stays_on_previous(self):
         # git refuses the checkout: nothing moved, installer must never run.
         runner = FakeRunner(head=CURRENT, checkout_rc=1)
-        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner)
+        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner, install_receipt=NO_RECEIPT)
         self.assertEqual(outcome["status"], "failed")
         self.assertEqual(outcome["from"], CURRENT)
         self.assertIsNotNone(outcome["error"])
@@ -361,7 +469,7 @@ class ApplyUpdateTests(unittest.TestCase):
 
     def test_missing_repo_returns_clean_failure(self):
         runner = FakeRunner(head="")
-        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner)
+        outcome = self_update.apply_update(CHECKOUT, LATEST, runner=runner, install_receipt=NO_RECEIPT)
         self.assertEqual(outcome["status"], "failed")
         self.assertEqual(outcome["error"], "not a git checkout")
         self.assertEqual(runner.checkouts, [])

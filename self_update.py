@@ -8,12 +8,20 @@ narrow and fail-closed:
   * user-initiated only -- no background polling, no auto-updates;
   * the only network access is one explicit ``git fetch`` inside
     :func:`check_for_update`;
-  * any git/network problem, a dirty working tree, or an unverifiable upstream
-    yields ``available=False`` with an ``error`` string -- never a claimed
-    update it cannot prove;
-  * :func:`apply_update` records the pre-update HEAD and, if the installer
-    fails on the new revision, restores that HEAD and re-installs, so the
-    checkout is never left on a broken revision.
+  * any git/network problem, a dirty working tree, an unverifiable upstream, or
+    a checkout carrying commits upstream does not have yields
+    ``available=False`` with an ``error`` string -- never a claimed update it
+    cannot prove, and never one that would rewind the tree;
+  * :func:`apply_update` records the last revision the installer provisioned
+    and, if the installer fails, restores *that* and re-installs, so recovery
+    lands on a build that installed cleanly once rather than on whatever
+    happened to be checked out.
+
+"What is installed" and "what is checked out" are different questions, and this
+module is careful to ask the first one. The app's code comes from the checkout
+at process start, but its dependencies, models, launcher and services come from
+the installer, so a checkout moved by anything other than an update leaves the
+two out of step -- see :func:`check_for_update`.
 
 Everything is driven through an injected ``runner`` (a ``subprocess.run``-style
 callable) and an explicit ``checkout`` path, so the logic is unit-testable
@@ -109,6 +117,13 @@ def _installed_revision(receipt) -> str:
     return revision if isinstance(revision, str) and revision.strip() else ""
 
 
+def _is_ancestor(runner: Runner, checkout: Path, older: str,
+                 newer: str) -> bool:
+    """True when ``older`` is reachable from ``newer``. Unknown counts as no."""
+    return _git(runner, checkout, "merge-base", "--is-ancestor", older,
+                newer).returncode == 0
+
+
 def _current_branch(runner: Runner, checkout: Path) -> str:
     """Return the checked-out branch name, or ``""`` when HEAD is detached."""
     result = _git(runner, checkout, "symbolic-ref", "--short", "--quiet",
@@ -145,34 +160,32 @@ def check_for_update(checkout, remote: str = DEFAULT_REMOTE, *,
     ``available=False`` with a human-readable ``error`` and never raises. The
     only network access is the single ``git fetch``.
 
-    ``current`` is the revision the installer last provisioned, not the
-    checkout's HEAD. The two are identical for anyone whose checkout only ever
-    moves through this module, but they diverge the moment something else moves
-    it -- a developer pulling, a script, a rolled-back update. HEAD then
-    describes files on disk while the user is still running the older build, and
-    comparing HEAD to upstream would answer "up to date" to someone who is
-    demonstrably not. Comparing the installed revision answers the question the
-    user actually asked. Applying the update re-runs the installer, which
-    refreshes the receipt, so a stale receipt corrects itself on first use.
+    ``current`` is the older of the checkout's HEAD and the revision the
+    installer last provisioned, because the build in use can be no newer than
+    either. The two are identical for anyone whose checkout only ever moves
+    through this module, but they diverge the moment something else moves it --
+    a developer pulling, a script, a rolled-back update. HEAD then describes
+    files on disk while the user is still running the older build, and comparing
+    HEAD to upstream would answer "up to date" to someone who is demonstrably
+    not.
+
+    Taking the older of the two is what keeps that safe in both directions. A
+    receipt *newer* than HEAD means the checkout was moved back and the service
+    restarted on the older code, so the receipt is ignored and HEAD wins. A
+    stale receipt can then only ever over-offer an update, and applying one
+    re-runs the installer and refreshes the receipt, so it self-corrects on
+    first use.
     """
     checkout = Path(checkout)
     receipt = DEFAULT_INSTALL_RECEIPT if install_receipt is None else install_receipt
     result = {"available": False, "current": "", "latest": "",
               "behind": 0, "error": None}
     try:
-        current = _rev_parse(runner, checkout, "HEAD")
-        if not current:
+        head = _rev_parse(runner, checkout, "HEAD")
+        if not head:
             result["error"] = "not a git checkout"
             return result
-
-        # Prefer what was installed over what is checked out. Resolve it through
-        # git so an unknown or garbage revision falls back to HEAD rather than
-        # poisoning the comparison.
-        installed = _installed_revision(receipt)
-        if installed and installed != current:
-            resolved = _rev_parse(runner, checkout, f"{installed}^{{commit}}")
-            if resolved:
-                current = resolved
+        current = head
         result["current"] = current
 
         # Refuse when the working tree carries uncommitted changes: applying an
@@ -206,6 +219,27 @@ def check_for_update(checkout, remote: str = DEFAULT_REMOTE, *,
             result["error"] = "no tracked upstream branch"
             return result
         result["latest"] = latest
+
+        # Refuse when the checkout is not simply behind upstream. Applying would
+        # `git checkout <upstream>` and move a diverged or locally-ahead tree
+        # backwards onto it, discarding work nobody asked us to discard. There
+        # is no safe fast-forward here, so say so instead of offering one.
+        if latest != head and not _is_ancestor(runner, checkout, head, latest):
+            result["error"] = "checkout has commits upstream does not"
+            return result
+
+        # The build in use is no newer than either what git has checked out or
+        # what the installer last provisioned, so compare the older of the two.
+        # Requiring the receipt to be an ancestor of HEAD is what makes this
+        # safe in both directions: a receipt newer than HEAD (the checkout was
+        # moved *back* and the service restarted on the older code) is ignored,
+        # so the running code is never overstated.
+        installed = _installed_revision(receipt)
+        if installed and installed != head:
+            resolved = _rev_parse(runner, checkout, f"{installed}^{{commit}}")
+            if resolved and _is_ancestor(runner, checkout, resolved, head):
+                current = resolved
+                result["current"] = current
 
         if latest == current:
             return result  # up to date: available stays False, behind 0
@@ -265,35 +299,57 @@ def _installer_error(result: "subprocess.CompletedProcess",
 
 
 def apply_update(checkout, target_rev: str, *, runner: Runner,
-                 installer: str = DEFAULT_INSTALLER) -> dict:
-    """Move the checkout to ``target_rev`` and re-run the installer.
+                 installer: str = DEFAULT_INSTALLER,
+                 install_receipt=None) -> dict:
+    """Bring the checkout to ``target_rev`` and re-run the installer.
 
-    Records the pre-update HEAD as ``from``. On success returns
-    ``{"status": "applied", "from", "to"}``. If the installer fails on the new
-    revision, restores the previous HEAD, re-runs the installer, and returns
+    Records the last known-good revision as ``from`` -- the one the installer
+    provisioned, which is only HEAD when the two have not drifted apart. On
+    success returns ``{"status": "applied", "from", "to"}``. If the installer
+    fails, restores ``from`` and re-installs it, returning
     ``{"status": "rolled_back", "from", "to", "error"}``. If the checkout cannot
     even be switched (or this is not a repo), nothing moved and it returns
     ``{"status": "failed", ...}``. The checkout is never left on a broken
-    revision.
+    revision, and recovery always lands on a build that installed cleanly once.
     """
     checkout = Path(checkout)
+    receipt = DEFAULT_INSTALL_RECEIPT if install_receipt is None else install_receipt
     result = {"status": "failed", "from": "", "to": target_rev, "error": None}
     # Bound before the try so the recovery path can still name the branch when
     # the failure happens partway through reading it.
     previous_branch = ""
     try:
-        previous = _rev_parse(runner, checkout, "HEAD")
-        if not previous:
+        head = _rev_parse(runner, checkout, "HEAD")
+        if not head:
             result["error"] = "not a git checkout"
             return result
+
+        # Roll back to the build that was last known to work, which is the one
+        # the installer provisioned -- not merely whatever HEAD happens to be.
+        # They differ exactly when the checkout moved without a reinstall, and
+        # there restoring HEAD would "recover" onto the revision that just
+        # failed to install, leaving no working app at all.
+        previous = head
+        installed = _installed_revision(receipt)
+        if installed and installed != head:
+            resolved = _rev_parse(runner, checkout, f"{installed}^{{commit}}")
+            if resolved and _is_ancestor(runner, checkout, resolved, head):
+                previous = resolved
         result["from"] = previous
         previous_branch = _current_branch(runner, checkout)
 
-        checked_out = _git(runner, checkout, "checkout", "--quiet", target_rev)
-        if checked_out.returncode != 0:
-            # Never moved off `previous`; there is nothing to roll back.
-            result["error"] = f"could not checkout {target_rev}"
-            return result
+        # Only move the checkout when it is not already there. `git checkout
+        # <sha>` against a branch that already points at that sha still detaches
+        # HEAD, stranding the user with no upstream to pull from, and buys
+        # nothing -- the files are already correct and only the installer needs
+        # to run.
+        if head != target_rev:
+            checked_out = _git(runner, checkout, "checkout", "--quiet",
+                               target_rev)
+            if checked_out.returncode != 0:
+                # Never moved off `head`; there is nothing to roll back.
+                result["error"] = f"could not checkout {target_rev}"
+                return result
 
         installed = _run_installer(runner, checkout, installer)
         if installed.returncode == 0:
