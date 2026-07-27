@@ -5,6 +5,7 @@
 
 import ast
 import contextlib
+import hashlib
 import io
 import json
 import sys
@@ -33,6 +34,7 @@ from performance_lab import (
     load_corpus,
     load_model_scorecard,
     main,
+    refresh_model_scorecard,
     RUNTIME_TRACE_SCHEMAS,
     run_compiler_stress,
     run_lifecycle_simulation,
@@ -716,6 +718,242 @@ class ModelScorecardTests(unittest.TestCase):
         self.assertLess(report["measurement_coverage"], 1.0)
 
 
+class MeasurementProvenanceTests(unittest.TestCase):
+    """A metric is measured on a named machine, or it is not measured."""
+
+    def setUp(self):
+        self.source = load_model_scorecard(DEFAULT_MODEL_SCORECARD)
+
+    def write(self, payload):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "scorecard.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_committed_scorecard_binds_every_measured_metric_to_a_run(self):
+        report = generate_model_scorecard(self.source)
+        known = {
+            record["measurement_id"] for record in self.source["measurements"]}
+
+        for candidate in report["ranked"]:
+            self.assertEqual(
+                candidate["measured_on_hardware"],
+                ["Apple M4 Pro MacBook Pro"])
+            self.assertEqual(
+                set(candidate["unmeasured_metrics"]),
+                {"energy_j_per_audio_minute", "peak_memory_mb", "startup_ms"})
+            self.assertTrue(set(candidate["measurement_ids"]).issubset(known))
+            # The 2026-07-21 run's artifacts were not preserved, so nothing
+            # published today may claim to be recalculable.
+            self.assertFalse(candidate["independently_recalculable"])
+
+    def test_a_measured_metric_without_a_value_is_rejected(self):
+        payload = json.loads(json.dumps(self.source))
+        payload["candidates"][0]["metrics"]["peak_memory_mb"] = None
+        payload["candidates"][0]["metric_provenance"]["peak_memory_mb"] = {
+            "state": "measured",
+            "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21",
+        }
+
+        with self.assertRaises(ValueError) as caught:
+            load_model_scorecard(self.write(payload))
+        self.assertIn("provenance disagrees", str(caught.exception))
+
+    def test_a_value_without_a_named_run_is_rejected(self):
+        payload = json.loads(json.dumps(self.source))
+        payload["candidates"][0]["metrics"]["startup_ms"] = 1234.0
+
+        with self.assertRaises(ValueError) as caught:
+            load_model_scorecard(self.write(payload))
+        self.assertIn("provenance disagrees", str(caught.exception))
+
+    def test_an_unknown_measurement_reference_is_rejected(self):
+        payload = json.loads(json.dumps(self.source))
+        payload["candidates"][0]["metric_provenance"]["wer_pct"][
+            "measurement_id"] = "a-run-that-never-happened"
+
+        with self.assertRaises(ValueError) as caught:
+            load_model_scorecard(self.write(payload))
+        self.assertIn("unknown measurement", str(caught.exception))
+
+    def test_a_run_cannot_claim_recalculability_without_an_artifact(self):
+        payload = json.loads(json.dumps(self.source))
+        payload["measurements"][0]["independently_recalculable"] = True
+
+        with self.assertRaises(ValueError) as caught:
+            load_model_scorecard(self.write(payload))
+        self.assertIn("independently recalculable", str(caught.exception))
+
+    def test_a_preserved_artifact_must_publish_its_digest(self):
+        payload = json.loads(json.dumps(self.source))
+        payload["measurements"][0]["artifacts_preserved"] = True
+
+        with self.assertRaises(ValueError) as caught:
+            load_model_scorecard(self.write(payload))
+        self.assertIn("needs its digest", str(caught.exception))
+
+    def test_a_measurement_must_name_its_hardware(self):
+        payload = json.loads(json.dumps(self.source))
+        payload["measurements"][0]["hardware"] = "  "
+
+        with self.assertRaises(ValueError) as caught:
+            load_model_scorecard(self.write(payload))
+        self.assertIn("hardware must be named", str(caught.exception))
+
+
+class RefreshModelScorecardTests(unittest.TestCase):
+    """Refreshing copies from a real run; it never invents a number."""
+
+    def setUp(self):
+        self.source = load_model_scorecard(DEFAULT_MODEL_SCORECARD)
+
+    def summary(self, **overrides):
+        engines = []
+        for candidate in self.source["candidates"]:
+            metrics = candidate["metrics"]
+            engines.append({
+                "engine": candidate["benchmark_engine"],
+                "utterances": 100,
+                "wer_pct": metrics["wer_pct"],
+                "exact_pct": metrics["exact_pct"],
+                "utterance_p90_wer_pct": metrics["utterance_p90_wer_pct"],
+                "rtfx": metrics["rtfx"],
+                "proc_p95_s": metrics["proc_p95_s"],
+                "requested_model_id": candidate["model_id"],
+                "requested_model_revision": candidate["revision"],
+                # What a real run proves, not merely requests: the executor
+                # resolved the pinned revision immutably.
+                "resolved_model_id": candidate["model_id"],
+                "resolved_model_revision": candidate["revision"],
+                "model_revision_status": "verified-immutable-snapshot",
+            })
+        payload = {
+            "schema_version": 1,
+            "dataset": "LibriSpeech test-clean",
+            "selection": "deterministic-evenly-spaced",
+            "samples": 100,
+            # The provenance the real harness always writes beside its
+            # results; a summary without it is not evidence of a run.
+            "harness": {
+                "script": "benchmark_asr.py",
+                "script_sha256": "c" * 64,
+                "model_scorecard_sha256": "d" * 64,
+            },
+            "engines": engines,
+        }
+        payload.update(overrides)
+        return payload
+
+    def refresh(self, summary, **overrides):
+        arguments = {
+            "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-27",
+            "hardware": "Apple M4 Pro MacBook Pro",
+            "measured_on": "2026-07-27",
+            "command": "uv run benchmark_asr.py ...",
+            "summary_sha256": "b" * 64,
+            "os_version": "26.0.1",
+        }
+        arguments.update(overrides)
+        return refresh_model_scorecard(self.source, summary, **arguments)
+
+    def test_a_real_run_rebinds_metrics_to_a_recalculable_measurement(self):
+        engines = [candidate["benchmark_engine"]
+                   for candidate in self.source["candidates"]]
+        refreshed = self.refresh(
+            self.summary(),
+            preserved_records={engine: "e" * 64 for engine in engines})
+
+        record = refreshed["measurements"][-1]
+        self.assertTrue(record["artifacts_preserved"])
+        self.assertTrue(record["independently_recalculable"])
+        self.assertEqual(record["summary_sha256"], "b" * 64)
+        self.assertEqual(record["hardware"], "Apple M4 Pro MacBook Pro")
+        for candidate in refreshed["candidates"]:
+            provenance = candidate["metric_provenance"]
+            self.assertEqual(
+                provenance["wer_pct"]["measurement_id"],
+                "librispeech-test-clean-100-m4-pro-2026-07-27")
+            # Resources the harness does not measure stay unmeasured.
+            self.assertEqual(provenance["startup_ms"]["state"], "unmeasured")
+            self.assertIsNone(candidate["metrics"]["startup_ms"])
+
+    def test_the_refreshed_scorecard_still_validates(self):
+        engines = [candidate["benchmark_engine"]
+                   for candidate in self.source["candidates"]]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "scorecard.json"
+            path.write_text(
+                json.dumps(self.refresh(
+                    self.summary(),
+                    preserved_records={
+                        engine: "e" * 64 for engine in engines})),
+                encoding="utf-8")
+            report = generate_model_scorecard(load_model_scorecard(path))
+
+        for candidate in report["ranked"]:
+            self.assertTrue(candidate["independently_recalculable"])
+
+    def test_a_summary_alone_is_an_aggregate_not_a_recalculable_run(self):
+        # The summary holds only aggregates; without the per-utterance
+        # records beside it, the refresh must say so rather than promote it.
+        refreshed = self.refresh(self.summary())
+        record = refreshed["measurements"][-1]
+        self.assertTrue(record["artifacts_preserved"])
+        self.assertFalse(record["independently_recalculable"])
+        self.assertIsNone(record["record_sha256_by_engine"])
+        self.assertIn("not independently recalculable",
+                      refreshed["evidence"]["metric_verification"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "scorecard.json"
+            path.write_text(json.dumps(refreshed), encoding="utf-8")
+            load_model_scorecard(path)  # still a valid scorecard
+
+    def test_a_run_against_a_different_model_is_refused(self):
+        summary = self.summary()
+        summary["engines"][0]["requested_model_revision"] = "c" * 40
+
+        with self.assertRaises(ValueError) as caught:
+            self.refresh(summary)
+        self.assertIn("different model or revision", str(caught.exception))
+
+    def test_a_partial_run_is_refused_rather_than_half_refreshed(self):
+        summary = self.summary()
+        summary["engines"] = summary["engines"][:1]
+
+        with self.assertRaises(ValueError) as caught:
+            self.refresh(summary)
+        self.assertIn("partial refresh", str(caught.exception))
+
+    def test_a_summary_missing_a_metric_is_refused(self):
+        summary = self.summary()
+        summary["engines"][0]["rtfx"] = None
+
+        with self.assertRaises(ValueError) as caught:
+            self.refresh(summary)
+        self.assertIn("no usable rtfx", str(caught.exception))
+
+    def test_an_unnamed_machine_or_forged_digest_is_refused(self):
+        for overrides, expected in (
+            ({"hardware": "   "}, "hardware must be named"),
+            ({"summary_sha256": "not-a-digest"}, "SHA-256"),
+            ({"measured_on": "27-07-2026"}, "ISO date"),
+        ):
+            with self.subTest(overrides=overrides):
+                with self.assertRaises(ValueError) as caught:
+                    self.refresh(self.summary(), **overrides)
+                self.assertIn(expected, str(caught.exception))
+
+    def test_an_unknown_engine_is_refused(self):
+        summary = self.summary()
+        summary["engines"][0]["engine"] = "some-other-engine"
+
+        with self.assertRaises(ValueError) as caught:
+            self.refresh(summary)
+        self.assertIn("not a reviewed candidate", str(caught.exception))
+
+
 class ScheduledModelAuditTests(unittest.TestCase):
     @staticmethod
     def _reviewed_fetcher(source, *, drifting_model=None):
@@ -986,6 +1224,80 @@ class CompilerLifecycleStressTests(unittest.TestCase):
 
 
 class PerformanceLabCliTests(unittest.TestCase):
+    def test_cli_refreshes_the_scorecard_from_a_preserved_summary(self):
+        source = load_model_scorecard(DEFAULT_MODEL_SCORECARD)
+        summary = {
+            "schema_version": 1,
+            "invocation": "uv run benchmark_asr.py --dataset .evidence/"
+                          "librispeech/test-clean --limit 100 --output-dir "
+                          ".evidence/asr-bakeoff",
+            "dataset": "LibriSpeech test-clean",
+            "selection": "deterministic-evenly-spaced",
+            "samples": 100,
+            "harness": {
+                "script": "benchmark_asr.py",
+                "script_sha256": "c" * 64,
+                "model_scorecard_sha256": "d" * 64,
+            },
+            "engines": [
+                {
+                    "engine": candidate["benchmark_engine"],
+                    "requested_model_id": candidate["model_id"],
+                    "requested_model_revision": candidate["revision"],
+                    "resolved_model_id": candidate["model_id"],
+                    "resolved_model_revision": candidate["revision"],
+                    "model_revision_status": "verified-immutable-snapshot",
+                    **{
+                        metric: candidate["metrics"][metric]
+                        for metric in (
+                            "wer_pct", "exact_pct", "utterance_p90_wer_pct",
+                            "rtfx", "proc_p95_s")
+                    },
+                }
+                for candidate in source["candidates"]
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            summary_path = Path(directory) / "summary.json"
+            destination = Path(directory) / "model_scorecard.json"
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            # The per-utterance records the harness writes beside the summary;
+            # their presence is what earns "independently recalculable".
+            for candidate in source["candidates"]:
+                (Path(directory)
+                 / f"{candidate['benchmark_engine']}.jsonl").write_text(
+                    '{"id": "u1"}\n', encoding="utf-8")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                status = main([
+                    "refresh-model-scorecard",
+                    "--summary", str(summary_path),
+                    "--measurement-id", "cli-refresh-check",
+                    "--hardware", "Apple M4 Pro MacBook Pro",
+                    "--measured-on", "2026-07-27",
+                    "--os-version", "26.0.1",
+                    "--output", str(destination),
+                ])
+            self.assertEqual(status, 0)
+            self.assertIn("MEASURED ON NAMED HARDWARE", output.getvalue())
+            self.assertIn("cli-refresh-check", output.getvalue())
+            self.assertIn(
+                "recalculable from a preserved artifact", output.getvalue())
+
+            refreshed = load_model_scorecard(destination)
+            record = next(
+                item for item in refreshed["measurements"]
+                if item["measurement_id"] == "cli-refresh-check")
+            self.assertEqual(
+                record["summary_sha256"],
+                hashlib.sha256(summary_path.read_bytes()).hexdigest())
+            # Copying, not inventing: the replayed run must reproduce the
+            # committed numbers exactly.
+            for candidate, original in zip(
+                    refreshed["candidates"], source["candidates"]):
+                self.assertEqual(candidate["metrics"], original["metrics"])
+
     def test_cli_exposes_corpus_stress_dashboard_and_model_scorecard(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):

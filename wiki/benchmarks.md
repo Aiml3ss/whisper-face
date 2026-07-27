@@ -5,7 +5,7 @@ language: en
 created: 2026-07-26
 modified: 2026-07-27
 tags: [benchmarks, evidence, performance, labs]
-aliases: [performance-lab, no-runtime-authority, public-scorecard]
+aliases: [performance-lab, no-runtime-authority, public-scorecard, evidence-publication]
 summary: "A family of offline, transcript-free labs whose shared rule is no runtime authority: evidence can reject changes and build activation receipts, but nothing in the runtime moves on a benchmark's say-so."
 confidence: high
 ---
@@ -46,8 +46,12 @@ were all rejected on lab evidence, and nothing in the runtime moved.
 - **competitor_benchmark.py**: a neutral task protocol over externally
   collected observations; it never runs products, ranks, or treats
   marketing claims as measured evidence (measured / unavailable /
-  claimed-only per task).
-- Corpora live in `benchmarks/` with case counts and privacy stamps.
+  claimed-only per task). `benchmarks/competitor_run_template.json` is a
+  zero-measurement template so the evaluator is runnable from a clone.
+- Corpora live in `benchmarks/` with case counts and privacy stamps,
+  and `benchmarks/reproducibility.json` declares per corpus what a third
+  party can actually re-run — a test fails if a case count, command, or
+  corpus stops matching the repository.
 - Known gap: the consequence-routing corpus asserts three of the four
   routes — `verified` has no corpus case ([[consequence-receipts]]).
 
@@ -72,6 +76,37 @@ assert those properties over its own AST. Two consequences for this page:
   history and the fix are recorded on [[activation-receipt]],
   [[delayed-cleanup]] and [[acoustic-personalization]].
 
+## The publication side (added 2026-07-27)
+
+The labs could measure but had no way to *publish* without a reviewer
+holding the two evidence classes apart by hand. `public_scorecard.py
+publish` makes that separation structural rather than editorial:
+
+- Synthetic suites and physical sources are built by different
+  functions. The synthetic builder has no parameter capable of marking a
+  suite physical; the physical builder cannot run without a concretely
+  named machine (hardware, OS version, 40-character repository
+  revision — placeholders like `unknown` or `tbd` are rejected).
+- A physical source is admitted only from a **registered** producer
+  artifact that stamped itself physical, reports non-zero physical work,
+  and satisfies that producer's honesty fields. A genuine but *empty*
+  capture artifact still carries a physical-sounding `evidence_scope`,
+  so scope alone is never sufficient. A re-listen report that counted a
+  single synthetic sample is refused outright.
+- A separation invariant re-checks the finished document, and runs again
+  inside both renderers, so a hand-assembled report is held to the same
+  rule as a built one. There is no combined total anywhere.
+- The model scorecard became the enforced single source for the bakeoff
+  table: every metric binds to a named measurement record or the
+  explicit `unmeasured` state, no run may claim to be independently
+  recalculable without a preserved artifact digest, and
+  `performance_lab.py refresh-model-scorecard` copies metrics from a
+  real `benchmark_asr` summary rather than accepting a hand edit.
+- The 2026-07-21 M4 Pro run's raw artifacts were never preserved, so it
+  is published as documented-run evidence with
+  `independently_recalculable: false` rather than quietly implied to be
+  reproducible.
+
 ## Related Concepts
 
 - [[activation-receipt]] — benchmarks as evidence producers
@@ -82,4 +117,6 @@ assert those properties over its own AST. Two consequences for this page:
 
 - benchmark_*.py, performance_lab.py, public_scorecard.py,
   competitor_benchmark.py; benchmarks/; docs/benchmarks/
+- docs/contributor-interfaces.md,
+  docs/benchmarks/reproducible-corpora.md
 - [[2026-07-26-ops-governance-research]]

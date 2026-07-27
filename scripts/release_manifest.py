@@ -21,7 +21,7 @@ from urllib.parse import quote
 
 PRODUCT = "Whisper Face"
 SCHEMA_VERSION = 1
-DEFAULT_REPOSITORY = "https://github.com/Aiml3ss/whispering-parrot"
+DEFAULT_REPOSITORY = "https://github.com/Aiml3ss/whisper-face"
 SEMVER = re.compile(
     r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
     r"(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$"

@@ -412,7 +412,7 @@ class MacDistributionContractTests(unittest.TestCase):
             "fetch -q --depth 1",
             "config core.logAllRefUpdates false",
             "packaged checkout lost its immutable source revision",
-            "https://github.com/Aiml3ss/whispering-parrot.git",
+            "https://github.com/Aiml3ss/whisper-face.git",
             "RELEASE-METADATA.json",
             "SOURCE_DATE_EPOCH",
             "verify_macos_package.py\" stamp",

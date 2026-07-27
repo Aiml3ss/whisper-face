@@ -116,7 +116,7 @@ scripts/package_macos.sh --version 1.2.3 --sign --notarize \
   --previous-version 1.2.2 \
   --previous-revision FULL_40_CHARACTER_GIT_SHA \
   --previous-manifest-url \
-    https://github.com/Aiml3ss/whispering-parrot/releases/download/v1.2.2/update-manifest.json
+    https://github.com/Aiml3ss/whisper-face/releases/download/v1.2.2/update-manifest.json
 ```
 
 As an alternative to a keychain profile, notarization reads `APPLE_ID`,

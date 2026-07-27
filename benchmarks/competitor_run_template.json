@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "protocol_id": "voice-input-neutral-v1",
+  "product_id": "template-not-a-product",
+  "run_id": "template-zero-measurements",
+  "environment_id": "template-no-machine-recorded",
+  "observations": [
+    {
+      "task_id": "fresh-install",
+      "evidence_state": "unavailable",
+      "completed": null,
+      "error_count": null,
+      "latency_ms": null,
+      "interaction_count": null,
+      "unavailable_reason": "not_run",
+      "source_reference": null
+    },
+    {
+      "task_id": "ready-from-launch",
+      "evidence_state": "unavailable",
+      "completed": null,
+      "error_count": null,
+      "latency_ms": null,
+      "interaction_count": null,
+      "unavailable_reason": "not_run",
+      "source_reference": null
+    },
+    {
+      "task_id": "short-message",
+      "evidence_state": "unavailable",
+      "completed": null,
+      "error_count": null,
+      "latency_ms": null,
+      "interaction_count": null,
+      "unavailable_reason": "not_run",
+      "source_reference": null
+    },
+    {
+      "task_id": "numbers-and-units",
+      "evidence_state": "unavailable",
+      "completed": null,
+      "error_count": null,
+      "latency_ms": null,
+      "interaction_count": null,
+      "unavailable_reason": "not_run",
+      "source_reference": null
+    },
+    {
+      "task_id": "spoken-correction",
+      "evidence_state": "unavailable",
+      "completed": null,
+      "error_count": null,
+      "latency_ms": null,
+      "interaction_count": null,
+      "unavailable_reason": "not_run",
+      "source_reference": null
+    },
+    {
+      "task_id": "two-sentences",
+      "evidence_state": "unavailable",
+      "completed": null,
+      "error_count": null,
+      "latency_ms": null,
+      "interaction_count": null,
+      "unavailable_reason": "not_run",
+      "source_reference": null
+    }
+  ]
+}
