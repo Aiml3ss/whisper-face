@@ -91,7 +91,7 @@ Last reviewed: **26 July 2026**.
   files.
 - **Native Mac window** with three sections — Home, Settings, Advanced —
   covering status, personalization, privacy, models, and diagnostics.
-- **Menu-bar presence** with fourteen animated companion characters whose mouths
+- **Menu-bar presence** with sixteen animated companion characters whose mouths
   move with your speech; recovery rows appear only when they have something.
 - **Guided first run** through permissions, hotkey practice, model readiness,
   and a first real dictation, each confirmed by evidence rather than assumed.
