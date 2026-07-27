@@ -1959,11 +1959,15 @@ class FacePreferenceTests(unittest.TestCase):
             "normalize_face",
             assignments={"FACE_CHOICES", "DEFAULT_FACE"},
         )
+        # The property, not the roster: every supported face normalizes to
+        # itself, so adding a companion does not fail this test.
         self.assertEqual(
             tuple(ns["normalize_face"](face) for face in ns["FACE_CHOICES"]),
-            ("parrot", "fox", "owl", "cat", "bear",
-             "dog", "wolf", "pig", "panda", "tiger"),
+            tuple(ns["FACE_CHOICES"]),
         )
+        self.assertIn(ns["DEFAULT_FACE"], ns["FACE_CHOICES"])
+        self.assertEqual(
+            ns["normalize_face"]("not-an-animal"), ns["DEFAULT_FACE"])
 
     def test_reduce_motion_freezes_hud_audio_animation(self):
         ns = load_definitions(
