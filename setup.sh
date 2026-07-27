@@ -614,6 +614,8 @@ required=(
     icons/faces/rabbit-idle.svg icons/faces/rabbit-blink.svg icons/faces/rabbit-talk.svg
     icons/faces/hedgehog-idle.svg icons/faces/hedgehog-blink.svg icons/faces/hedgehog-talk.svg
     icons/faces/penguin-idle.svg icons/faces/penguin-blink.svg icons/faces/penguin-talk.svg
+    icons/faces/pickles-idle.svg icons/faces/pickles-blink.svg icons/faces/pickles-talk.svg
+    icons/faces/olive-idle.svg icons/faces/olive-blink.svg icons/faces/olive-talk.svg
     icons/faces/color/parrot-idle.svg icons/faces/color/parrot-half.svg icons/faces/color/parrot-talk.svg
     icons/faces/color/fox-idle.svg icons/faces/color/fox-half.svg icons/faces/color/fox-talk.svg
     icons/faces/color/owl-idle.svg icons/faces/color/owl-half.svg icons/faces/color/owl-talk.svg
@@ -628,6 +630,8 @@ required=(
     icons/faces/color/rabbit-idle.svg icons/faces/color/rabbit-half.svg icons/faces/color/rabbit-talk.svg
     icons/faces/color/hedgehog-idle.svg icons/faces/color/hedgehog-half.svg icons/faces/color/hedgehog-talk.svg
     icons/faces/color/penguin-idle.svg icons/faces/color/penguin-half.svg icons/faces/color/penguin-talk.svg
+    icons/faces/color/pickles-idle.svg icons/faces/color/pickles-half.svg icons/faces/color/pickles-talk.svg
+    icons/faces/color/olive-idle.svg icons/faces/color/olive-half.svg icons/faces/color/olive-talk.svg
 )
 for file in "${required[@]}"; do
     [ -f "$DIR/$file" ] || fail "repository is incomplete: missing $file"

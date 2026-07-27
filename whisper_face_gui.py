@@ -737,6 +737,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.face.rabbit": "Rabbit",
         "settings.face.hedgehog": "Hedgehog",
         "settings.face.penguin": "Penguin",
+        "settings.face.pickles": "Pickles",
+        "settings.face.olive": "Olive",
         "settings.state.enabled": "Enabled",
         "settings.state.disabled": "Off",
         "settings.state.local_processing": "Local processing",
@@ -933,6 +935,7 @@ FACES = (
     "parrot", "fox", "owl", "cat", "bear",
     "dog", "wolf", "pig", "panda", "tiger",
     "frog", "rabbit", "hedgehog", "penguin",
+    "pickles", "olive",
 )
 @dataclass(frozen=True)
 class NativeAppKitSmokeContract:

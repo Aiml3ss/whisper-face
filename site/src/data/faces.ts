@@ -12,7 +12,8 @@ const INK = '#33281f';
 export type Animal =
   | 'fox' | 'bear' | 'owl' | 'parrot' | 'cat'
   | 'dog' | 'wolf' | 'pig' | 'panda' | 'tiger'
-  | 'frog' | 'rabbit' | 'hedgehog' | 'penguin';
+  | 'frog' | 'rabbit' | 'hedgehog' | 'penguin'
+  | 'pickles' | 'olive';
 
 export interface FaceDef {
   color: string; // CSS custom property for the chip behind the face
@@ -109,32 +110,48 @@ export const FACES: Record<Animal, FaceDef> = {
     label: 'Frog',
     role: 'leaps at it',
     line: 'todo: water the plants, answer greg, and leap on that invoice',
-    idle: `<mask id="MASK"><rect width="64" height="64" fill="#fff"/><circle cx="18" cy="24" r="6"/><circle cx="46" cy="24" r="6"/><circle cx="18" cy="25" r="2.7" fill="#fff"/><circle cx="46" cy="25" r="2.7" fill="#fff"/><ellipse cx="32" cy="49" rx="14" ry="2"/></mask><g fill="${INK}" mask="url(#MASK)"><circle cx="18" cy="24" r="10"/><circle cx="46" cy="24" r="10"/><circle cx="32" cy="41" r="22"/></g>`,
-    talk: `<mask id="MASK"><rect width="64" height="64" fill="#fff"/><circle cx="18" cy="23" r="6"/><circle cx="46" cy="23" r="6"/><circle cx="18" cy="24" r="2.7" fill="#fff"/><circle cx="46" cy="24" r="2.7" fill="#fff"/><ellipse cx="32" cy="49" rx="14" ry="6"/></mask><g fill="${INK}" mask="url(#MASK)"><circle cx="18" cy="24" r="10"/><circle cx="46" cy="24" r="10"/><circle cx="32" cy="41" r="22"/></g><rect fill="${INK}" x="48" y="8" width="11" height="5" rx="2.5"/><rect fill="${INK}" x="52" y="17" width="10" height="5" rx="2.5"/>`,
+    idle: `<mask id="MASK"><rect width="64" height="64" fill="#fff"/><circle cx="23" cy="31" r="2.6"/><circle cx="41" cy="31" r="2.6"/><ellipse cx="32" cy="45" rx="4" ry="1.7"/><rect x="30.9" y="11" width="2.2" height="9" rx="1.1"/><rect x="24.4" y="13" width="2.2" height="8" rx="1.1"/><rect x="37.4" y="13" width="2.2" height="8" rx="1.1"/></mask><g fill="${INK}" mask="url(#MASK)"><path d="M7.5 25 C4.5 11.5 9.5 1.5 14 3 C19 4.7 27 13 30.5 18.5 C24 23 15 25 7.5 25 Z"/><path d="M56.5 25 C59.5 11.5 54.5 1.5 50 3 C45 4.7 37 13 33.5 18.5 C40 23 49 25 56.5 25 Z"/><circle cx="32" cy="36" r="25"/></g>`,
+    talk: `<mask id="MASK"><rect width="64" height="64" fill="#fff"/><circle cx="23" cy="30" r="2.6"/><circle cx="41" cy="30" r="2.6"/><ellipse cx="32" cy="47" rx="5" ry="6"/><rect x="30.9" y="11" width="2.2" height="9" rx="1.1"/><rect x="24.4" y="13" width="2.2" height="8" rx="1.1"/><rect x="37.4" y="13" width="2.2" height="8" rx="1.1"/></mask><g fill="${INK}" mask="url(#MASK)"><path d="M7.5 25 C4.5 11.5 9.5 1.5 14 3 C19 4.7 27 13 30.5 18.5 C24 23 15 25 7.5 25 Z"/><path d="M56.5 25 C59.5 11.5 54.5 1.5 50 3 C45 4.7 37 13 33.5 18.5 C40 23 49 25 56.5 25 Z"/><circle cx="32" cy="36" r="25"/></g><rect fill="${INK}" x="48" y="8" width="11" height="5" rx="2.5"/><rect fill="${INK}" x="52" y="17" width="10" height="5" rx="2.5"/>`,
   },
   rabbit: {
     color: 'var(--rabbit)',
     label: 'Rabbit',
     role: 'all ears',
     line: 'shopping list: carrots, more carrots, one very fast pair of shoes',
-    idle: `<mask id="MASK"><rect width="64" height="64" fill="#fff"/><circle cx="23" cy="36" r="2.6"/><circle cx="41" cy="36" r="2.6"/><rect x="28" y="43" width="8" height="8.5" rx="1.6"/><rect x="31.6" y="43" width="0.9" height="8.5" fill="#fff"/></mask><g fill="${INK}" mask="url(#MASK)"><ellipse cx="22" cy="15" rx="6.5" ry="14"/><ellipse cx="42" cy="15" rx="6.5" ry="14"/><circle cx="32" cy="39" r="23"/></g>`,
-    talk: `<mask id="MASK"><rect width="64" height="64" fill="#fff"/><circle cx="23" cy="35" r="2.6"/><circle cx="41" cy="35" r="2.6"/><rect x="28" y="42" width="8" height="8.5" rx="1.6"/><rect x="31.6" y="42" width="0.9" height="8.5" fill="#fff"/><ellipse cx="32" cy="55" rx="5" ry="4"/></mask><g fill="${INK}" mask="url(#MASK)"><ellipse cx="22" cy="15" rx="6.5" ry="14"/><ellipse cx="42" cy="15" rx="6.5" ry="14"/><circle cx="32" cy="39" r="23"/></g><rect fill="${INK}" x="48" y="8" width="11" height="5" rx="2.5"/><rect fill="${INK}" x="52" y="17" width="10" height="5" rx="2.5"/>`,
+    idle: `<mask id="MASK"><rect width="64" height="64" fill="#fff"/><circle cx="23" cy="31" r="2.6"/><circle cx="41" cy="31" r="2.6"/><ellipse cx="32" cy="45" rx="4" ry="1.7"/><rect x="30.9" y="11" width="2.2" height="9" rx="1.1"/><rect x="24.4" y="13" width="2.2" height="8" rx="1.1"/><rect x="37.4" y="13" width="2.2" height="8" rx="1.1"/></mask><g fill="${INK}" mask="url(#MASK)"><path d="M7.5 25 C4.5 11.5 9.5 1.5 14 3 C19 4.7 27 13 30.5 18.5 C24 23 15 25 7.5 25 Z"/><path d="M56.5 25 C59.5 11.5 54.5 1.5 50 3 C45 4.7 37 13 33.5 18.5 C40 23 49 25 56.5 25 Z"/><circle cx="32" cy="36" r="25"/></g>`,
+    talk: `<mask id="MASK"><rect width="64" height="64" fill="#fff"/><circle cx="23" cy="30" r="2.6"/><circle cx="41" cy="30" r="2.6"/><ellipse cx="32" cy="47" rx="5" ry="6"/><rect x="30.9" y="11" width="2.2" height="9" rx="1.1"/><rect x="24.4" y="13" width="2.2" height="8" rx="1.1"/><rect x="37.4" y="13" width="2.2" height="8" rx="1.1"/></mask><g fill="${INK}" mask="url(#MASK)"><path d="M7.5 25 C4.5 11.5 9.5 1.5 14 3 C19 4.7 27 13 30.5 18.5 C24 23 15 25 7.5 25 Z"/><path d="M56.5 25 C59.5 11.5 54.5 1.5 50 3 C45 4.7 37 13 33.5 18.5 C40 23 49 25 56.5 25 Z"/><circle cx="32" cy="36" r="25"/></g><rect fill="${INK}" x="48" y="8" width="11" height="5" rx="2.5"/><rect fill="${INK}" x="52" y="17" width="10" height="5" rx="2.5"/>`,
   },
   hedgehog: {
     color: 'var(--hedgehog)',
     label: 'Hedgehog',
     role: 'spiky but sweet',
     line: 'note to self: softer in the standup, sharper in the doc',
-    idle: `<mask id="MASK"><rect width="64" height="64" fill="#fff"/><circle cx="24" cy="34" r="2.6"/><circle cx="40" cy="34" r="2.6"/><circle cx="32" cy="50" r="2.4"/><ellipse cx="32" cy="56" rx="3.6" ry="1.5"/></mask><g fill="${INK}" mask="url(#MASK)"><path d="M13.4 35 C7.5 34.6 6.4 29.8 3.9 26.9 C7.6 26 11.3 22.7 16.4 25.9 Z"/><path d="M15.4 27.5 C10.2 24.7 11.1 19.9 10.1 16.3 C13.8 16.9 18.5 15.5 21.8 20.4 Z"/><path d="M20.3 21.5 C16.6 16.8 19.5 12.8 20 9.1 C23.2 11.2 28 11.8 29.1 17.6 Z"/><path d="M27.2 18 C25.8 12.2 30 9.7 32 6.5 C34 9.7 38.2 12.2 36.8 18 Z"/><path d="M34.9 17.6 C36 11.8 40.8 11.2 44 9.1 C44.5 12.8 47.4 16.8 43.7 21.5 Z"/><path d="M42.2 20.4 C45.5 15.5 50.2 16.9 53.9 16.3 C52.9 19.9 53.8 24.7 48.6 27.5 Z"/><path d="M47.6 25.9 C52.7 22.7 56.4 26 60.1 26.9 C57.6 29.8 56.5 34.6 50.6 35 Z"/><circle cx="32" cy="36" r="21"/><path d="M24 46 C25.5 55 28 61 32 62 C36 61 38.5 55 40 46 C34.5 48 29.5 48 24 46 Z"/></g>`,
-    talk: `<mask id="MASK"><rect width="64" height="64" fill="#fff"/><circle cx="24" cy="33" r="2.6"/><circle cx="40" cy="33" r="2.6"/><circle cx="32" cy="49" r="2.4"/><ellipse cx="32" cy="56" rx="4.4" ry="3.8"/></mask><g fill="${INK}" mask="url(#MASK)"><path d="M13.4 35 C7.5 34.6 6.4 29.8 3.9 26.9 C7.6 26 11.3 22.7 16.4 25.9 Z"/><path d="M15.4 27.5 C10.2 24.7 11.1 19.9 10.1 16.3 C13.8 16.9 18.5 15.5 21.8 20.4 Z"/><path d="M20.3 21.5 C16.6 16.8 19.5 12.8 20 9.1 C23.2 11.2 28 11.8 29.1 17.6 Z"/><path d="M27.2 18 C25.8 12.2 30 9.7 32 6.5 C34 9.7 38.2 12.2 36.8 18 Z"/><path d="M34.9 17.6 C36 11.8 40.8 11.2 44 9.1 C44.5 12.8 47.4 16.8 43.7 21.5 Z"/><path d="M42.2 20.4 C45.5 15.5 50.2 16.9 53.9 16.3 C52.9 19.9 53.8 24.7 48.6 27.5 Z"/><path d="M47.6 25.9 C52.7 22.7 56.4 26 60.1 26.9 C57.6 29.8 56.5 34.6 50.6 35 Z"/><circle cx="32" cy="36" r="21"/><path d="M24 46 C25.5 55 28 61 32 62 C36 61 38.5 55 40 46 C34.5 48 29.5 48 24 46 Z"/></g><rect fill="${INK}" x="48" y="8" width="11" height="5" rx="2.5"/><rect fill="${INK}" x="52" y="17" width="10" height="5" rx="2.5"/>`,
+    idle: `<mask id="MASK"><rect width="64" height="64" fill="#fff"/><circle cx="23" cy="31" r="2.6"/><circle cx="41" cy="31" r="2.6"/><ellipse cx="32" cy="45" rx="4" ry="1.7"/><rect x="30.9" y="11" width="2.2" height="9" rx="1.1"/><rect x="24.4" y="13" width="2.2" height="8" rx="1.1"/><rect x="37.4" y="13" width="2.2" height="8" rx="1.1"/></mask><g fill="${INK}" mask="url(#MASK)"><path d="M7.5 25 C4.5 11.5 9.5 1.5 14 3 C19 4.7 27 13 30.5 18.5 C24 23 15 25 7.5 25 Z"/><path d="M56.5 25 C59.5 11.5 54.5 1.5 50 3 C45 4.7 37 13 33.5 18.5 C40 23 49 25 56.5 25 Z"/><circle cx="32" cy="36" r="25"/></g>`,
+    talk: `<mask id="MASK"><rect width="64" height="64" fill="#fff"/><circle cx="23" cy="30" r="2.6"/><circle cx="41" cy="30" r="2.6"/><ellipse cx="32" cy="47" rx="5" ry="6"/><rect x="30.9" y="11" width="2.2" height="9" rx="1.1"/><rect x="24.4" y="13" width="2.2" height="8" rx="1.1"/><rect x="37.4" y="13" width="2.2" height="8" rx="1.1"/></mask><g fill="${INK}" mask="url(#MASK)"><path d="M7.5 25 C4.5 11.5 9.5 1.5 14 3 C19 4.7 27 13 30.5 18.5 C24 23 15 25 7.5 25 Z"/><path d="M56.5 25 C59.5 11.5 54.5 1.5 50 3 C45 4.7 37 13 33.5 18.5 C40 23 49 25 56.5 25 Z"/><circle cx="32" cy="36" r="25"/></g><rect fill="${INK}" x="48" y="8" width="11" height="5" rx="2.5"/><rect fill="${INK}" x="52" y="17" width="10" height="5" rx="2.5"/>`,
   },
   penguin: {
     color: 'var(--penguin)',
     label: 'Penguin',
     role: 'dressed for dinner',
     line: 'rsvp yes to the dinner. black tie. i am already wearing it.',
-    idle: `<mask id="MASK"><rect width="64" height="64" fill="#fff"/><ellipse cx="32" cy="46" rx="14" ry="19"/><circle cx="25" cy="33" r="2.8" fill="#fff"/><circle cx="39" cy="33" r="2.8" fill="#fff"/><path d="M25 40 Q32 38.4 39 40 Q36 48.5 32 50.5 Q28 48.5 25 40 Z" fill="#fff"/></mask><g fill="${INK}" mask="url(#MASK)"><ellipse cx="32" cy="34" rx="22" ry="27"/></g>`,
-    talk: `<mask id="MASK"><rect width="64" height="64" fill="#fff"/><ellipse cx="32" cy="46" rx="14" ry="19"/><circle cx="25" cy="32" r="2.8" fill="#fff"/><circle cx="39" cy="32" r="2.8" fill="#fff"/><path d="M25 39 Q32 37.4 39 39 Q36 45 32 46.6 Q28 45 25 39 Z" fill="#fff"/><path d="M26.5 50.6 Q32 49.4 37.5 50.6 Q35 55.6 32 57 Q29 55.6 26.5 50.6 Z" fill="#fff"/></mask><g fill="${INK}" mask="url(#MASK)"><ellipse cx="32" cy="34" rx="22" ry="27"/></g><rect fill="${INK}" x="48" y="8" width="11" height="5" rx="2.5"/><rect fill="${INK}" x="52" y="17" width="10" height="5" rx="2.5"/>`,
+    idle: `<mask id="MASK"><rect width="64" height="64" fill="#fff"/><circle cx="23" cy="31" r="2.6"/><circle cx="41" cy="31" r="2.6"/><ellipse cx="32" cy="45" rx="4" ry="1.7"/><rect x="30.9" y="11" width="2.2" height="9" rx="1.1"/><rect x="24.4" y="13" width="2.2" height="8" rx="1.1"/><rect x="37.4" y="13" width="2.2" height="8" rx="1.1"/></mask><g fill="${INK}" mask="url(#MASK)"><path d="M7.5 25 C4.5 11.5 9.5 1.5 14 3 C19 4.7 27 13 30.5 18.5 C24 23 15 25 7.5 25 Z"/><path d="M56.5 25 C59.5 11.5 54.5 1.5 50 3 C45 4.7 37 13 33.5 18.5 C40 23 49 25 56.5 25 Z"/><circle cx="32" cy="36" r="25"/></g>`,
+    talk: `<mask id="MASK"><rect width="64" height="64" fill="#fff"/><circle cx="23" cy="30" r="2.6"/><circle cx="41" cy="30" r="2.6"/><ellipse cx="32" cy="47" rx="5" ry="6"/><rect x="30.9" y="11" width="2.2" height="9" rx="1.1"/><rect x="24.4" y="13" width="2.2" height="8" rx="1.1"/><rect x="37.4" y="13" width="2.2" height="8" rx="1.1"/></mask><g fill="${INK}" mask="url(#MASK)"><path d="M7.5 25 C4.5 11.5 9.5 1.5 14 3 C19 4.7 27 13 30.5 18.5 C24 23 15 25 7.5 25 Z"/><path d="M56.5 25 C59.5 11.5 54.5 1.5 50 3 C45 4.7 37 13 33.5 18.5 C40 23 49 25 56.5 25 Z"/><circle cx="32" cy="36" r="25"/></g><rect fill="${INK}" x="48" y="8" width="11" height="5" rx="2.5"/><rect fill="${INK}" x="52" y="17" width="10" height="5" rx="2.5"/>`,
+  },
+  pickles: {
+    color: 'var(--pickles)',
+    label: 'Pickles',
+    role: 'professional good boy',
+    line: 'note to self: the tennis ball is under the couch. this is urgent.',
+    idle: `<mask id="MASK"><rect width="64" height="64" fill="#fff"/><circle cx="24" cy="31" r="2.8"/><circle cx="40" cy="31" r="2.8"/><ellipse cx="32" cy="45" rx="5" ry="1.8"/><ellipse cx="32" cy="48.5" rx="2.8" ry="3.4"/></mask><g fill="${INK}" mask="url(#MASK)"><ellipse cx="10.5" cy="36" rx="7.5" ry="14"/><ellipse cx="53.5" cy="36" rx="7.5" ry="14"/><circle cx="32" cy="35" r="23"/></g>`,
+    talk: `<mask id="MASK"><rect width="64" height="64" fill="#fff"/><circle cx="24" cy="30" r="2.8"/><circle cx="40" cy="30" r="2.8"/><ellipse cx="32" cy="46" rx="6" ry="6"/></mask><g fill="${INK}" mask="url(#MASK)"><ellipse cx="10.5" cy="36" rx="7.5" ry="14"/><ellipse cx="53.5" cy="36" rx="7.5" ry="14"/><circle cx="32" cy="35" r="23"/></g><rect fill="${INK}" x="48" y="8" width="11" height="5" rx="2.5"/><rect fill="${INK}" x="52" y="17" width="10" height="5" rx="2.5"/>`,
+  },
+  olive: {
+    color: 'var(--olive)',
+    label: 'Olive',
+    role: 'bow stays on',
+    line: 'remind me: spa day thursday. the bow does not come off. ever.',
+    idle: `<mask id="MASK"><rect width="64" height="64" fill="#fff"/><circle cx="24" cy="31" r="2.8"/><circle cx="40" cy="31" r="2.8"/><ellipse cx="32" cy="45" rx="5" ry="1.8"/></mask><g fill="${INK}" mask="url(#MASK)"><ellipse cx="10.5" cy="36" rx="7.5" ry="14"/><ellipse cx="53.5" cy="36" rx="7.5" ry="14"/><circle cx="32" cy="35" r="23"/></g><path fill="${INK}" d="M50 16 C46 11 40 8.5 37.5 11.5 C35.5 14 38.5 18 44 19.5 C41 21.5 40.5 25 43 26.5 C46 28 49.5 25 50.5 20.5 Z"/><path fill="${INK}" d="M52 16 C56 10 62 7.5 64 10.5 C65.5 13 62.5 17.5 57 19 C60 21 60.5 24.5 58 26 C55 27.5 51.5 24.5 51 20 Z"/><circle fill="${INK}" cx="50.5" cy="18" r="4.6"/>`,
+    talk: `<mask id="MASK"><rect width="64" height="64" fill="#fff"/><circle cx="24" cy="30" r="2.8"/><circle cx="40" cy="30" r="2.8"/><ellipse cx="32" cy="46" rx="6" ry="6"/></mask><g fill="${INK}" mask="url(#MASK)"><ellipse cx="10.5" cy="36" rx="7.5" ry="14"/><ellipse cx="53.5" cy="36" rx="7.5" ry="14"/><circle cx="32" cy="35" r="23"/></g><path fill="${INK}" d="M50 16 C46 11 40 8.5 37.5 11.5 C35.5 14 38.5 18 44 19.5 C41 21.5 40.5 25 43 26.5 C46 28 49.5 25 50.5 20.5 Z"/><path fill="${INK}" d="M52 16 C56 10 62 7.5 64 10.5 C65.5 13 62.5 17.5 57 19 C60 21 60.5 24.5 58 26 C55 27.5 51.5 24.5 51 20 Z"/><circle fill="${INK}" cx="50.5" cy="18" r="4.6"/><rect fill="${INK}" x="5" y="8" width="11" height="5" rx="2.5"/><rect fill="${INK}" x="2" y="17" width="10" height="5" rx="2.5"/>`,
   },
 };
 
@@ -142,6 +159,7 @@ export const ORDER: Animal[] = [
   'parrot', 'fox', 'bear', 'owl', 'cat',
   'dog', 'wolf', 'pig', 'panda', 'tiger',
   'frog', 'rabbit', 'hedgehog', 'penguin',
+  'pickles', 'olive',
 ];
 
 let _uid = 0;

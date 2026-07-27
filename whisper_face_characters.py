@@ -130,6 +130,11 @@ class CharacterStyle:
     ``buck_teeth`` pairs with the rabbit's long ears, ``quills`` fans the
     hedgehog's spines past the head outline, and ``hood`` swaps the paired
     cheeks for the penguin's single face bib under a dark cap.
+
+    ``bow`` and ``blep`` carry the two English cream goldens, who are
+    litter-mates and share one coat: Olive wears a white bow at her ear,
+    and Pickles rests the tip of his tongue past the closed smile the way
+    the real dog does.  Accessories, not palette, tell the pair apart.
     """
     head: Color
     deep: Color
@@ -154,6 +159,8 @@ class CharacterStyle:
     snout_point: bool = False
     hood: bool = False
     beak: bool = False
+    bow: bool = False
+    blep: bool = False
 
 
 COMPANIONS: Mapping[str, CharacterStyle] = {
@@ -251,12 +258,29 @@ COMPANIONS: Mapping[str, CharacterStyle] = {
         beak=True,
         blush_alpha=0.45,
     ),
+    "pickles": CharacterStyle(
+        head=FACE_CHIP_COLORS["pickles"],
+        deep=(0.804, 0.647, 0.412),
+        muzzle=(1.000, 0.976, 0.925),
+        ears="floppy",
+        big_tongue=True,
+        blep=True,
+        blush_alpha=0.45,
+    ),
+    "olive": CharacterStyle(
+        head=FACE_CHIP_COLORS["olive"],
+        deep=(0.808, 0.686, 0.502),
+        muzzle=(1.000, 0.984, 0.949),
+        ears="floppy",
+        bow=True,
+        blush_alpha=0.45,
+    ),
 }
 
-# Parrot and owl keep bespoke geometry; the other twelve share one template.
+# Parrot and owl keep bespoke geometry; the other fourteen share one template.
 FACE_ORDER: tuple[str, ...] = (
     "parrot", "fox", "bear", "owl", "cat", "dog", "wolf", "pig", "panda",
-    "tiger", "frog", "rabbit", "hedgehog", "penguin",
+    "tiger", "frog", "rabbit", "hedgehog", "penguin", "pickles", "olive",
 )
 
 
@@ -676,6 +700,44 @@ def _companion_ops(face: str, mouth: float, level: float, blink: float,
             Stroke(((150, 62), (146, 86)), style.deep, 5.0, 0.9),
         ]
 
+    if style.bow:
+        # Olive's white grosgrain bow, clipped sideways over the right ear
+        # the way the real dog wears hers: inner loop lying on the crown,
+        # outer loop breaking the head outline over the ear.  Every white
+        # shape sits on a deep-gold rim copy of itself, so the porcelain
+        # keeps a crisp edge on head, ear, and background alike.
+        ops.append(Curve(
+            (190, 102),
+            (((170, 109), (144, 102), (142, 88)),
+             ((140, 69), (170, 71), (190, 80)),
+             ((196, 86), (196, 96), (190, 102))),
+            style.deep,
+        ))
+        ops.append(Curve(
+            (202, 100),
+            (((222, 105), (248, 96), (250, 78)),
+             ((252, 61), (220, 67), (200, 78)),
+             ((196, 86), (197, 96), (202, 100))),
+            style.deep,
+        ))
+        ops.append(Curve(
+            (188, 98),
+            (((172, 104), (150, 98), (148, 88)),
+             ((146, 74), (170, 76), (188, 84)),
+             ((192, 88), (192, 94), (188, 98))),
+            CATCH,
+        ))
+        ops.append(Curve(
+            (204, 96),
+            (((220, 100), (242, 92), (244, 80)),
+             ((246, 66), (220, 72), (204, 82)),
+             ((200, 87), (200, 92), (204, 96))),
+            CATCH,
+        ))
+        ops.append(Ellipse(185, 79, 26, 26, style.deep))
+        ops.append(Ellipse(188, 82, 20, 20, CATCH))
+        ops.append(Ellipse(193, 90, 8, 6, style.deep, 0.20))
+
     if style.snout:
         # A flat disc with two nostrils, and the mouth pushed below it.
         # Without this the pig is a pink bear.
@@ -705,6 +767,14 @@ def _companion_ops(face: str, mouth: float, level: float, blink: float,
             tongue_scale=1.4 if style.big_tongue else 1.0,
             fangs=style.fangs,
         )
+
+    if style.blep and mouth < 0.18:
+        # Pickles' resting blep: a tongue tip parked past the closed smile.
+        # It fades on the same ramp the smile does, so the open jaw's rising
+        # tongue takes over without two tongues ever showing.
+        fade = 1.0 - mouth / 0.18
+        ops.append(Ellipse(117, 167, 22, 21, TONGUE, fade))
+        ops.append(Stroke(((128, 174), (128, 184)), BLUSH, 2.5, fade * 0.55))
 
     if style.buck_teeth:
         # Two incisors on their own dark pad: cream teeth on a cream cheek
