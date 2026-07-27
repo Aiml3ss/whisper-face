@@ -162,7 +162,8 @@ class SnippetPersistenceTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.path = Path(self.directory.name) / "snippets.json"
-        self.ns = settings_namespace("save_gui_snippet", "delete_gui_snippet")
+        self.ns = settings_namespace(
+            "save_gui_snippet", "delete_gui_snippet", "snippet_name_key")
         self.ns.update(
             SNIPPETS_FILE=self.path,
             SNIPPETS_LOCK=threading.Lock(),
@@ -191,6 +192,19 @@ class SnippetPersistenceTests(unittest.TestCase):
             self.ns["save_gui_snippet"]("bad\nname", None, "text")
         with self.assertRaises(ValueError):
             self.ns["save_gui_snippet"]("empty", None, " ")
+
+    def test_distinct_non_latin_names_are_not_a_collision(self):
+        # The old normalized_key stripped [^a-z0-9 ], so "住所" and "адрес"
+        # both collapsed to "" and the editor refused the second one as a
+        # duplicate of the first.
+        self.ns["save_gui_snippet"]("住所", None, "1-2-3 Chiyoda")
+        self.ns["save_gui_snippet"]("адрес", None, "Tverskaya 7")
+        saved = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["住所"], "1-2-3 Chiyoda")
+        self.assertEqual(saved["адрес"], "Tverskaya 7")
+        # Same-script near-duplicates still collide through the key.
+        with self.assertRaises(ValueError):
+            self.ns["save_gui_snippet"]("Адрес", None, "different")
 
     def test_compare_and_swap_rejects_stale_edits_and_create_collisions(self):
         self.path.write_text(json.dumps({"signature": "Cheers"}))

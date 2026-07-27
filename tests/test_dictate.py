@@ -4511,7 +4511,7 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_wrong_shaped_snippets_file_is_ignored(self):
         ns = load_definitions(
-            "match_snippet",
+            "match_snippet", "snippet_name_key",
             assignments={"SNIPPET_RE"},
         )
         with tempfile.TemporaryDirectory() as td:
@@ -4519,6 +4519,46 @@ class ConfigurationTests(unittest.TestCase):
             snippets.write_text("[]")
             ns["SNIPPETS_FILE"] = snippets
             self.assertIsNone(ns["match_snippet"]("insert email"))
+
+    def test_snippet_names_work_in_any_script(self):
+        # The old key stripped [^a-z0-9 ], so every non-Latin name
+        # collapsed to "" and matched whichever snippet came first.
+        ns = load_definitions(
+            "match_snippet", "snippet_name_key",
+            assignments={"SNIPPET_RE"},
+        )
+        with tempfile.TemporaryDirectory() as td:
+            snippets = Path(td) / "snippets.json"
+            snippets.write_text(json.dumps({
+                "住所": "1-2-3 Chiyoda",
+                "адрес": "Tverskaya 7",
+                "café": "Rue de Rivoli 12",
+            }), encoding="utf-8")
+            ns["SNIPPETS_FILE"] = snippets
+            self.assertEqual(
+                ns["match_snippet"]("insert 住所"),
+                ("住所", "1-2-3 Chiyoda"))
+            self.assertEqual(
+                ns["match_snippet"]("insert адрес"),
+                ("адрес", "Tverskaya 7"))
+            # Accented Latin no longer loses its accents to the key.
+            self.assertEqual(
+                ns["match_snippet"]("insert café"),
+                ("café", "Rue de Rivoli 12"))
+            # A different non-Latin name is not a match for any of them.
+            self.assertIsNone(ns["match_snippet"]("insert 이메일"))
+
+    def test_a_name_that_normalizes_to_nothing_matches_nothing(self):
+        ns = load_definitions(
+            "match_snippet", "snippet_name_key",
+            assignments={"SNIPPET_RE"},
+        )
+        with tempfile.TemporaryDirectory() as td:
+            snippets = Path(td) / "snippets.json"
+            snippets.write_text(json.dumps({"!!!": "boom"}), encoding="utf-8")
+            ns["SNIPPETS_FILE"] = snippets
+            # Empty key on both sides must never count as equality.
+            self.assertIsNone(ns["match_snippet"]("insert ..."))
 
     def test_network_source_offer_names_license_and_corresponding_source(self):
         ns = load_definitions(
