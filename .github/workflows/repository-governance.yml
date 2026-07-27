@@ -1,0 +1,54 @@
+name: Repository governance
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  repository-governance:
+    # Runs on the self-hosted bergserver runner for the same reason the CLA
+    # check does: the hosted-minutes budget is exhausted, and a required check
+    # that cannot start is a required check that blocks every pull request.
+    #
+    # windows-smoke.yml already runs this suite, but only as one line inside a
+    # long hosted job that is not a required status check. That is how #139
+    # merged with the face-roster prose still claiming fourteen companions.
+    # This job exists to be small enough to require: it needs no models, no
+    # audio, and no platform runtime, and the suite itself takes ~0.1s.
+    runs-on: [self-hosted, bergserver]
+    steps:
+      # Everything below executes the merge result's own Python on a persistent
+      # personal machine, so the merge result has to be trusted code. From a
+      # fork it is not, and CODEOWNERS does not help: a contributor never has
+      # to touch a protected file, because adding `tests/ast.py` shadows this
+      # suite's own `import ast` and runs before the first assertion.
+      #
+      # So fail closed rather than run it. Outside contributions already need a
+      # Project Owner entry in the CLA ledger to pass acceptance-recorded, so a
+      # maintainer is in the loop for any fork PR that could merge anyway; they
+      # re-run the suite from a same-repository branch. The principled fix is a
+      # validator that runs from a trusted revision outside the candidate tree,
+      # which the suite is not written for today.
+      - name: Refuse to execute fork code on the self-hosted runner
+        if: github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "::error title=Fork pull request::The governance suite is not run on the self-hosted runner for pull requests from forks, because it would execute this PR's Python there. A maintainer must review the diff and re-run it from a same-repository branch."
+          exit 1
+      - name: Check out the merge result
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # The suite reads history directly: it replays the MIT LICENSE out of
+          # its boundary commit, proves that commit is still an ancestor, and
+          # resolves the mit-last tag. A shallow clone fails all three.
+          fetch-depth: 0
+          # persist-credentials is deliberately left at its default. Turning it
+          # off moves the action's auth teardown into this step, where it runs
+          # `git submodule foreach` and dies on the stale `whispering-parrot`
+          # gitlink this repository still carries with no `.gitmodules` entry.
+          # cla-check.yml hits the same fatal in its post step, where it is
+          # only logged. Fix the gitlink and this can be tightened.
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Check the governance invariants
+        run: uv run tests/test_repository_governance.py

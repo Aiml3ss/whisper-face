@@ -27,8 +27,13 @@ option, and the historical MIT grant.
 6. Do not promise commercial rights, pricing, warranties, trademark rights, or
    patent protection without a written agreement approved by the Project
    Owner and, where appropriate, counsel.
-7. Keep the CLA check required in GitHub and run
+7. Keep both checks required on `main` in GitHub: `acceptance-recorded` from
+   `.github/workflows/cla-check.yml`, and `repository-governance` from
+   `.github/workflows/repository-governance.yml`, which runs
    `uv run tests/test_repository_governance.py` on every pull request.
+   Requiring the governance suite is the point. Running it only inside a
+   larger workflow that nothing blocks on is how #139 merged with the face
+   roster already stale.
 8. Keep the native **License Notices** and **Exact Source** controls plus the
    network `GET /source` and `GET /license` responses accurate. Source offers
    must contain the running immutable commit, not a moving branch. A packaged

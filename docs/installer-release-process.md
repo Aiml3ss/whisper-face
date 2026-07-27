@@ -131,6 +131,34 @@ relisten seams — because a Windows runner cannot execute what they describe.
 Do not add a gate to the Windows workflow without first confirming it passes
 with no macOS runtime present.
 
+## Which of those gates GitHub actually blocks a merge on
+
+The list above is what a release must pass. It is not what GitHub blocks a
+merge on, and the difference is where #139 got through. `main` requires
+exactly two checks, and both run on the self-hosted `bergserver` runner:
+
+| Required check | Workflow | What it holds |
+|---|---|---|
+| `acceptance-recorded` | `.github/workflows/cla-check.yml` | the contributor has a CLA acceptance recorded in the base revision's ledger |
+| `repository-governance` | `.github/workflows/repository-governance.yml` | `uv run tests/test_repository_governance.py`: the license boundary, the CLA wiring, and the published prose that counts the shipped faces |
+
+Both are set under branch protection for `main`, with *Require branches to be
+up to date* on and administrators included.
+
+Everything else is advisory. `windows-smoke.yml` carries most of the gate list,
+including the governance suite, but it is not a required check and it runs on
+a GitHub-hosted runner, whose availability depends on a minutes budget that
+has been exhausted before. That is exactly how #139 merged with the face
+roster stale: the suite's only enforced home was a job nothing blocked on. A
+gate reported by a workflow nobody blocks on is reporting, not enforcement.
+
+A suite earns a required check here by being cheap and self-contained — no
+models, no audio device, no platform runtime, seconds not minutes — because
+every required check queues on the one self-hosted machine. The governance
+suite qualifies at about 0.1s. Suites that do not qualify stay in the release
+gate list above, which is the weaker guarantee: it depends on a person running
+it before a release, not on GitHub refusing the merge.
+
 ## Deliberate gate exclusions
 
 Every `tests/test_*.py` file is either in the gate list above or named here.
