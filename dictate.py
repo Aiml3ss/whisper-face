@@ -3784,7 +3784,7 @@ class StatusBar(NSObject):
                 return
             outcome = json.loads(result_path.read_text(encoding="utf-8"))
             if outcome.get("status") not in {
-                    "applied", "rolled_back", "failed"}:
+                    "applied", "rolled_back", "rollback_failed", "failed"}:
                 return
             result_path.unlink(missing_ok=True)
             # Consuming the result deletes it, which used to erase the only
@@ -3824,6 +3824,21 @@ class StatusBar(NSObject):
                 if reason:
                     detail = f"{detail}\n\n{reason}"
                 self._update_alert("Update failed — rolled back.", detail)
+            elif status == "rollback_failed":
+                # The one state that must never be dressed up: the new build
+                # failed AND restoring the old one could not be verified.
+                # Saying "rolled back" here would leave someone relying on an
+                # app that may not be running at all.
+                detail = (
+                    "The installer failed on the new version, and restoring "
+                    "your previous version also failed, so Whisper Face may "
+                    "not be working right now. Run Install.command from the "
+                    "checkout to repair it.")
+                reason = str(outcome.get("error") or "").strip()
+                if reason:
+                    detail = f"{detail}\n\n{reason}"
+                self._update_alert(
+                    "Update failed — and recovery failed.", detail)
             else:
                 error = outcome.get("error") or "unknown error"
                 self._update_alert(

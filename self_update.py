@@ -15,7 +15,9 @@ narrow and fail-closed:
   * :func:`apply_update` records the last revision the installer provisioned
     and, if the installer fails, restores *that* and re-installs, so recovery
     lands on a build that installed cleanly once rather than on whatever
-    happened to be checked out.
+    happened to be checked out -- and "rolled_back" is only reported after the
+    restore is verified and the reinstall exits cleanly. Recovery that cannot
+    be proven reports ``rollback_failed`` instead of claiming success.
 
 "What is installed" and "what is checked out" are different questions, and this
 module is careful to ask the first one. The app's code comes from the checkout
@@ -134,7 +136,7 @@ def _current_branch(runner: Runner, checkout: Path) -> str:
 
 
 def _restore(runner: Runner, checkout: Path, previous: str,
-             branch: str) -> None:
+             branch: str) -> bool:
     """Put the checkout back on ``previous``, preferring its original branch.
 
     An update moves HEAD alone, so the branch it started on still points at
@@ -143,12 +145,15 @@ def _restore(runner: Runner, checkout: Path, previous: str,
     strand the user on a detached HEAD, where ``git pull`` no longer works and
     upstream tracking is gone. Falls back to the sha when HEAD was already
     detached or the branch has since moved.
+
+    Returns whether HEAD verifiably points at ``previous`` afterwards. The
+    caller reports recovery to the user, so it must not take it on faith.
     """
     if branch and _rev_parse(runner, checkout, branch) == previous:
-        if _git(runner, checkout, "checkout", "--quiet",
-                branch).returncode == 0:
-            return
-    _git(runner, checkout, "checkout", "--quiet", previous)
+        _git(runner, checkout, "checkout", "--quiet", branch)
+    if _rev_parse(runner, checkout, "HEAD") != previous:
+        _git(runner, checkout, "checkout", "--quiet", previous)
+    return _rev_parse(runner, checkout, "HEAD") == previous
 
 
 def check_for_update(checkout, remote: str = DEFAULT_REMOTE, *,
@@ -357,25 +362,56 @@ def apply_update(checkout, target_rev: str, *, runner: Runner,
             return result
 
         # Installer failed on the new revision: restore the old one and
-        # re-install so the checkout is never left broken.
+        # re-install so the checkout is never left broken. "Rolled back" is a
+        # claim the user acts on -- it must mean the previous build is
+        # verifiably present and reinstalled, not that recovery was attempted.
         forward_error = _installer_error(installed, installer)
-        _restore(runner, checkout, previous, previous_branch)
-        _run_installer(runner, checkout, installer)
-        result["status"] = "rolled_back"
-        result["error"] = forward_error
+        restored = _restore(runner, checkout, previous, previous_branch)
+        if not restored:
+            # Do not run the installer here: HEAD is still on the failed
+            # revision, and an installer run can restart services and rewrite
+            # the install receipt against exactly the build being rolled away
+            # from -- or quietly succeed on retry while the outcome says the
+            # opposite.
+            result["status"] = "rollback_failed"
+            result["error"] = (
+                f"{forward_error}; recovery also failed: could not restore "
+                f"revision {previous[:7]}")
+            return result
+        reinstalled = _run_installer(runner, checkout, installer)
+        if reinstalled.returncode == 0:
+            result["status"] = "rolled_back"
+            result["error"] = forward_error
+            return result
+        result["status"] = "rollback_failed"
+        result["error"] = (
+            f"{forward_error}; recovery also failed: "
+            f"{_installer_error(reinstalled, installer)}")
         return result
     except (OSError, subprocess.SubprocessError) as exc:
         # Unexpected failure mid-apply (e.g. a git timeout). Best-effort restore
         # to the recorded previous revision so we do not strand a broken tree.
         previous = result.get("from")
+        recovery_error = None
         if previous:
             try:
-                _restore(runner, checkout, previous, previous_branch)
-                _run_installer(runner, checkout, installer)
-                result["status"] = "rolled_back"
-            except (OSError, subprocess.SubprocessError):
-                result["status"] = "failed"
-        result["error"] = _describe(exc)
+                if _restore(runner, checkout, previous, previous_branch):
+                    reinstalled = _run_installer(runner, checkout, installer)
+                    if reinstalled.returncode == 0:
+                        result["status"] = "rolled_back"
+                    else:
+                        result["status"] = "rollback_failed"
+                        recovery_error = _installer_error(
+                            reinstalled, installer)
+                else:
+                    result["status"] = "rollback_failed"
+                    recovery_error = (
+                        f"could not restore revision {previous[:7]}")
+            except (OSError, subprocess.SubprocessError) as recovery_exc:
+                result["status"] = "rollback_failed"
+                recovery_error = _describe(recovery_exc)
+        result["error"] = _describe(exc) if recovery_error is None else (
+            f"{_describe(exc)}; recovery also failed: {recovery_error}")
         return result
 
 
