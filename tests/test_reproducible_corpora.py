@@ -40,6 +40,44 @@ def load(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+class ReadmeCorpusClaimTests(unittest.TestCase):
+    """Prose that quotes a corpus size has to quote the real one.
+
+    The README described the cleanup corpus as "six checked-in synthetic
+    cases" and the mediator as recovering "five of six" long after the corpus
+    had grown to thirty. Nothing caught it, because no test read the README.
+    Numbers in the front door are the ones a reader is most likely to repeat,
+    so bind them to the manifest that already tracks the truth.
+    """
+
+    NUMBER_WORDS = {
+        6: "six", 10: "ten", 11: "eleven", 16: "sixteen", 17: "seventeen",
+        22: "twenty-two", 30: "thirty",
+    }
+
+    def test_the_cleanup_corpus_size_matches_the_manifest(self):
+        manifest = load(MANIFEST)
+        declared = {
+            entry["path"]: entry["cases"] for entry in manifest["corpora"]}
+        cases = declared["benchmarks/cleanup_latency_cases.json"]
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        spelled = self.NUMBER_WORDS.get(cases)
+        self.assertIsNotNone(
+            spelled, f"add {cases} to NUMBER_WORDS to keep this check honest")
+        self.assertIn(
+            f"{spelled} checked-in synthetic cases", readme,
+            f"the README no longer states the real corpus size ({cases})")
+
+        # The stale claim itself, in either spelling, must not come back.
+        for wrong, count in self.NUMBER_WORDS.items():
+            if wrong == cases:
+                continue
+            self.assertNotIn(
+                f"{count} checked-in synthetic cases", readme,
+                f"the README claims {count} cases; the corpus holds {cases}")
+
+
 class ReproducibilityManifestTests(unittest.TestCase):
     def setUp(self):
         self.manifest = load(MANIFEST)

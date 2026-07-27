@@ -677,23 +677,27 @@ The separate real-recording activation workflow is documented in
 
 Run `uv run benchmark_cleanup_latency.py --run --format json` to compare the
 current pinned Qwen3.5-4B structured-cleanup prompt with smaller prompt,
-few-shot, and token-budget variants against six checked-in synthetic cases.
+few-shot, and token-budget variants against thirty checked-in synthetic cases.
 It contacts only local Ollama after the explicit `--run` opt-in, never reads
 transcript logs, and independently compares each eligible model-provided edit
 proof with the bounded standalone proof mediator. Its content-free report
 includes baseline/recovered overlap, acceptance delta, fixed rejection reasons,
 and recovery latency. One local run improved the current prompt from 2/6 to
 4/6 proof-accepted cases with zero baseline-only losses and about 1.3 ms
-recovery p95; the three-shot variant reached 5/6. Six synthetic cases on one
-machine are not activation evidence, so the benchmark has no runtime authority.
+recovery p95, and a three-shot variant reached 5/6 — but that was recorded
+when the corpus held six cases, and it has not been re-run since the corpus
+grew to thirty. Synthetic cases on one machine are not activation evidence
+either way, so the benchmark has no runtime authority.
 
 Run `uv run benchmark_cleanup_proof_recovery.py --format json` to exercise a
 standalone exact-proof mediator over the same public synthetic cases. It
 requires the existing output and semantic guards, independently limits lexical
 changes and protected-anchor abandonment, emits only content-free aggregate
-receipts, and currently recovers five of six cases. The meaningful phrase
-`you know` remains deliberately ineligible, so the mediator has no runtime
-authority and the benchmark makes no no-worse quality claim.
+receipts, and currently recovers 27 of its 30 cases — the other three are
+rejected as an unproved transformation or a removed protected anchor, which is
+the mediator refusing rather than failing. The meaningful phrase `you know`
+remains deliberately ineligible, so the mediator has no runtime authority and
+the benchmark makes no no-worse quality claim.
 
 Run `uv run benchmark_insertion_reliability.py` for deterministic focus,
 typing, duplicate-callback, destination-relaunch, clipboard, readback, and
