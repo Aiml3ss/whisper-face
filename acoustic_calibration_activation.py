@@ -1,4 +1,12 @@
-"""Closed runtime receipt for physically reviewed acoustic calibration."""
+"""Closed runtime receipt for physically reviewed acoustic calibration.
+
+The candidate half of the A/B this receipt rests on can only be recorded while
+the runtime is applying the candidate settings, which before measurement mode
+required the very receipt the A/B was meant to authorize.  A corpus whose
+candidate pass ran under measurement mode measures the real calibrated front
+end, so it is acceptable evidence; the receipt records that it did, so an
+override-derived receipt is visibly distinct from an ordinary-path one.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +25,13 @@ from acoustic_calibration import (
     NOISE_GATE_BOUNDS,
     VAD_THRESHOLD_BOUNDS,
 )
+from measurement_mode import (
+    CALIBRATION_LABEL,
+    EVIDENCE_KEY,
+    ORDINARY_PATH,
+    MeasurementModeError,
+    evidence_label,
+)
 
 
 SCHEMA_VERSION = 1
@@ -28,7 +43,7 @@ CONDITIONS = ("clean", "quiet", "noisy", "long-pause")
 
 _ROOT_KEYS = frozenset({
     "schema_version", "kind", "settings", "evidence", "policy",
-    "manual_review", "source_report_sha256",
+    "manual_review", "measurement_mode", "source_report_sha256",
 })
 _SETTING_KEYS = frozenset({
     "gain_ceiling", "noise_gate", "vad_threshold", "end_silence_ms",
@@ -61,6 +76,7 @@ class CalibrationSettings:
 class ActivationStatus:
     settings: CalibrationSettings | None
     reason: str
+    measurement_mode: str = ORDINARY_PATH
 
     @property
     def ready(self) -> bool:
@@ -118,6 +134,12 @@ def build_activation_receipt(
             or not isinstance(evidence, Mapping)
             or set(evidence) != _EVIDENCE_KEYS):
         raise ActivationError("calibration report is invalid")
+    try:
+        measurement = evidence_label(
+            report.get(EVIDENCE_KEY), arm=CALIBRATION_LABEL)
+    except MeasurementModeError as exc:
+        raise ActivationError("calibration measurement label is invalid") \
+            from exc
     receipt = {
         "schema_version": SCHEMA_VERSION,
         "kind": RECEIPT_KIND,
@@ -130,6 +152,9 @@ def build_activation_receipt(
             "conditions": list(CONDITIONS),
         },
         "manual_review": True,
+        # Disclosure, not a threshold: a candidate pass recorded under
+        # measurement mode measured the real calibrated front end.
+        "measurement_mode": measurement,
         "source_report_sha256": sha256(
             _canonical_bytes(report)).hexdigest(),
     }
@@ -150,6 +175,9 @@ def validate_activation_receipt(value: Any) -> ActivationStatus:
         evidence = value["evidence"]
         policy = value["policy"]
         digest = value["source_report_sha256"]
+        measurement = value["measurement_mode"]
+        if measurement not in (ORDINARY_PATH, CALIBRATION_LABEL):
+            raise ActivationError
         if (not isinstance(settings, Mapping)
                 or set(settings) != _SETTING_KEYS
                 or not isinstance(evidence, Mapping)
@@ -195,7 +223,7 @@ def validate_activation_receipt(value: Any) -> ActivationStatus:
                     < MIN_IMPROVEMENTS):
             raise ActivationError
         return ActivationStatus(
-            CalibrationSettings(gain, noise, vad, end), "ready")
+            CalibrationSettings(gain, noise, vad, end), "ready", measurement)
     except Exception:
         return ActivationStatus(None, "receipt-invalid")
 

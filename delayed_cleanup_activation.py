@@ -4,6 +4,14 @@ The evaluator accepts only content-free caller-attested case records.  It does
 not operate applications or claim that synthetic tests are physical evidence.
 The runtime may load the resulting closed receipt, but an absent, malformed,
 mixed, or failing receipt keeps delayed cleanup disabled.
+
+A case may be recorded while the runtime is in measurement mode, which is the
+only way this corpus can exist at all: without a receipt the shipped runtime
+schedules no delayed pass, so the evidence the receipt needs could never be
+produced.  Measurement mode runs the real transaction against the real
+destination, so such a case measures the shipping path and the gate accepts
+it.  Every record carries its own label and the receipt reports how many cases
+came from it, so a measured corpus is never mistaken for an ordinary-path one.
 """
 
 from __future__ import annotations
@@ -19,6 +27,14 @@ from collections import Counter
 from pathlib import Path
 from typing import Iterable, Mapping
 
+from measurement_mode import (
+    DELAYED_CLEANUP_LABEL,
+    EVIDENCE_KEY,
+    MeasurementModeError,
+    evidence_label,
+    used_measurement_mode,
+)
+
 
 SCHEMA_VERSION = 1
 SUITE_ID = "mac-delayed-cleanup-v1"
@@ -30,9 +46,16 @@ MAX_P95_APPLY_MS = 150.0
 SURFACES = frozenset({
     "native-text", "web-text", "electron-editor", "terminal-editor",
 })
+# `duplicate-callback` is deliberately absent. The runtime derives a proposal
+# id from the per-utterance event id, so two delayed passes never share one and
+# the adapter's in-flight and completed-duplicate paths cannot be reached by
+# any operator action. Demanding physical cases for it made the gate
+# unearnable while proving nothing: reaching those paths would require
+# injecting a duplicate id the shipped runtime cannot emit, which is a
+# synthetic condition this gate exists to refuse. `test_delayed_cleanup_merge`
+# covers the single-use-id contract deterministically instead.
 SCENARIOS = frozenset({
     "unchanged", "edit-elsewhere", "edit-overlap", "focus-drift",
-    "duplicate-callback",
 })
 OUTCOMES = frozenset({
     "applied", "unreadable_target", "focus_drift", "revision_drift",
@@ -51,7 +74,8 @@ _RECEIPT_KEYS = frozenset({
     "case_count", "surface_counts", "scenario_counts", "applied_count",
     "rejected_count", "outcome_mismatches", "wrong_target_writes",
     "user_edit_overwrites", "selection_disruptions", "duplicate_writes",
-    "p95_apply_ms", "records_sha256", "active", "reason",
+    "p95_apply_ms", "measurement_mode_cases", "records_sha256", "active",
+    "reason",
 })
 
 
@@ -73,9 +97,19 @@ def _plain_count(value: object, minimum: int = 0) -> bool:
 
 
 def _validated_record(record: Mapping[str, object]) -> dict[str, object]:
-    if not isinstance(record, Mapping) or set(record) != _RECORD_KEYS:
+    # `measurement_mode` is the only optional key. Absent means the ordinary
+    # path, the same fail-closed default a missing receipt gets; every other
+    # unexpected key is still a closed-schema violation.
+    if not isinstance(record, Mapping) \
+            or set(record) - {EVIDENCE_KEY} != _RECORD_KEYS:
         raise ValueError("delayed-cleanup case schema is not closed")
     normalized = dict(record)
+    try:
+        normalized[EVIDENCE_KEY] = evidence_label(
+            record.get(EVIDENCE_KEY), arm=DELAYED_CLEANUP_LABEL)
+    except MeasurementModeError as error:
+        raise ValueError("invalid delayed-cleanup measurement label") \
+            from error
     if not isinstance(normalized["id"], str) or not _IDENTIFIER.fullmatch(
             normalized["id"]):
         raise ValueError("invalid delayed-cleanup case identifier")
@@ -130,6 +164,8 @@ def evaluate_activation(
     applied_count = sum(
         item["actual_outcome"] == "applied" for item in items)
     rejected_count = len(items) - applied_count
+    measurement_mode_cases = sum(
+        used_measurement_mode(item[EVIDENCE_KEY]) for item in items)
     p95_apply_ms = _p95([
         float(item["apply_ms"]) for item in items
     ]) if items else 0.0
@@ -178,6 +214,10 @@ def evaluate_activation(
         "selection_disruptions": selection_disruptions,
         "duplicate_writes": duplicate_writes,
         "p95_apply_ms": p95_apply_ms,
+        # Disclosure, not a threshold. Measurement mode exercises the real
+        # transaction, so a measured case is real evidence; the count exists
+        # so a reviewer can see how the corpus was produced.
+        "measurement_mode_cases": measurement_mode_cases,
         "records_sha256": hashlib.sha256(canonical).hexdigest(),
         "active": active,
         "reason": reason,
@@ -233,6 +273,10 @@ def validate_activation_receipt(value: object) -> bool:
             and value["duplicate_writes"] == 0
             and _plain_number(value["p95_apply_ms"])
             and float(value["p95_apply_ms"]) <= MAX_P95_APPLY_MS
+            # A receipt must disclose how much of its corpus was measured.
+            # Any count is acceptable; an undeclared count is not.
+            and _plain_count(value["measurement_mode_cases"])
+            and value["measurement_mode_cases"] <= value["case_count"]
             and isinstance(value["records_sha256"], str)
             and re.fullmatch(r"[0-9a-f]{64}", value["records_sha256"])
             and value["active"] is True
@@ -293,7 +337,9 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "delayed cleanup activation receipt installed: "
             f"{receipt['case_count']} cases, "
-            f"p95 {receipt['p95_apply_ms']:.1f} ms")
+            f"p95 {receipt['p95_apply_ms']:.1f} ms, "
+            f"{receipt['measurement_mode_cases']} recorded in measurement "
+            "mode")
         return 0
     except (OSError, ValueError, json.JSONDecodeError):
         print("delayed cleanup remains disabled: invalid evidence file")

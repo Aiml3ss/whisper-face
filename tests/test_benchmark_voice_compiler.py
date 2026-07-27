@@ -130,7 +130,8 @@ class TranscriptMetricTests(unittest.TestCase):
                     "compiler_s": 0.004,
                     "cleanup_s": 0.01,
                     "confidence": 0.8,
-                    "verified": True,
+                    "asr_verified": True,
+                    "insertion_verified": False,
                 },
             }
         ])
@@ -139,7 +140,18 @@ class TranscriptMetricTests(unittest.TestCase):
         self.assertFalse(result["correction_burden"]["available"])
         self.assertEqual(result["performance"]["release_s"]["p50"], 0.2)
         self.assertEqual(result["performance"]["compiler_s"]["p95"], 0.004)
-        self.assertEqual(result["performance"]["verified_rate"]["rate"], 1.0)
+        # The rate is second-pass ASR agreement only. Insertion truth lives in
+        # `insertion_verified` and is deliberately not aggregated here.
+        self.assertEqual(
+            result["performance"]["asr_verified_rate"]["rate"], 1.0)
+        self.assertNotIn("verified_rate", result["performance"])
+
+    def test_an_ambiguous_legacy_verified_key_is_not_reinterpreted(self):
+        path = self._write_jsonl([
+            {"clean": "Ship now", "metrics": {"verified": True}}])
+        result = evaluate_transcripts(path)
+        self.assertNotIn("asr_verified_rate", result["performance"])
+        self.assertNotIn("verified_rate", result["performance"])
 
     def test_explicit_accepted_text_enables_quality_metrics(self):
         path = self._write_jsonl([

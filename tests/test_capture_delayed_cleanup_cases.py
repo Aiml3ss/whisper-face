@@ -32,6 +32,10 @@ from delayed_cleanup_activation import (  # noqa: E402
     validate_activation_receipt,
 )
 from delayed_cleanup_merge import DelayedApplyOutcome  # noqa: E402
+from measurement_mode import (  # noqa: E402
+    DELAYED_CLEANUP_LABEL,
+    ORDINARY_PATH,
+)
 
 
 class ScriptedReader:
@@ -56,8 +60,11 @@ def appender(path, *lines):
     return _append
 
 
-def runtime_line(outcome="applied", applied=2, held=0, apply_ms=42.5):
+def runtime_line(outcome="applied", applied=2, held=0, apply_ms=42.5,
+                 measured=False):
     tail = "" if apply_ms is None else f"; {apply_ms} ms"
+    if measured:
+        tail += "; measurement-mode"
     return f"[delayed-cleanup] {outcome}; {applied} applied, {held} held{tail}"
 
 
@@ -93,12 +100,21 @@ class PlanTests(unittest.TestCase):
         with self.assertRaises(support.CaptureError):
             capture.validate_plan(list(self.cases)[:10])
 
-    def test_the_unreachable_scenario_is_declared_not_hidden(self):
-        self.assertIn("duplicate-callback", capture.UNREACHABLE_SCENARIOS)
+    def test_the_unreachable_scenario_is_gone_from_plan_and_gate(self):
+        # `duplicate-callback` was demanded by the gate and reachable by no
+        # operator action. It is dropped from both, not quietly tolerated.
+        self.assertNotIn("duplicate-callback", SCENARIOS)
+        self.assertNotIn("duplicate-callback", capture.SCENARIO_ORDER)
+        self.assertNotIn("duplicate-callback", capture.SCENARIO_EXPECTATION)
+        self.assertEqual(capture.UNREACHABLE_SCENARIOS, {})
+        self.assertNotIn(
+            "duplicate-callback", capture.render_plan(self.cases))
+
+    def test_the_plan_tells_the_operator_how_to_make_the_feature_run(self):
         plan = capture.render_plan(self.cases)
-        self.assertIn("unreachable", plan)
-        self.assertIn("no apply duration", plan)
-        self.assertIn("activation receipt is already valid", plan)
+        self.assertIn("--measure delayed-cleanup", plan)
+        self.assertIn("grants no authority", plan)
+        self.assertIn("no-runtime-line", plan)
 
 
 class RuntimeLineTests(unittest.TestCase):
@@ -111,7 +127,17 @@ class RuntimeLineTests(unittest.TestCase):
         source = (ROOT / "dictate.py").read_text(encoding="utf-8")
         self.assertIn('print("[delayed-cleanup] "', source)
         self.assertIn('f"{outcome}; {applied_count} applied, '
-                      '{rejected_count} held")', source)
+                      '{rejected_count} held"', source)
+        self.assertIn('f"; {apply_ms:.3f} ms"', source)
+        self.assertIn('"; measurement-mode"', source)
+
+    def test_a_measured_line_is_distinguished_from_an_ordinary_one(self):
+        measured = capture.RUNTIME_LINE.search(runtime_line(measured=True))
+        ordinary = capture.RUNTIME_LINE.search(runtime_line())
+        self.assertEqual(measured.group("measured"), "measurement-mode")
+        self.assertIsNone(ordinary.group("measured"))
+        # The apply duration still parses either way.
+        self.assertEqual(measured.group("apply_ms"), "42.5")
 
     def test_only_closed_fields_are_lifted_from_a_log_line(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -122,7 +148,8 @@ class RuntimeLineTests(unittest.TestCase):
                 encoding="utf-8")
             parsed = capture.read_runtime_lines(path)
         self.assertEqual(parsed, [{
-            "outcome": "applied", "applied": 2, "held": 0, "apply_ms": 42.5}])
+            "outcome": "applied", "applied": 2, "held": 0, "apply_ms": 42.5,
+            "measurement_mode": ORDINARY_PATH}])
 
 
 class SessionTests(unittest.TestCase):
@@ -225,7 +252,7 @@ class SessionTests(unittest.TestCase):
 class GateConformanceTests(unittest.TestCase):
     """The emitted records file must be exactly what the gate parses."""
 
-    def complete_session(self, *, apply_ms=40.0):
+    def complete_session(self, *, apply_ms=40.0, measured=False):
         cases = capture.build_plan()
         records = []
         for case in cases:
@@ -241,6 +268,8 @@ class GateConformanceTests(unittest.TestCase):
                     "merge_applied": 1,
                     "merge_held": 0,
                     "apply_ms": apply_ms,
+                    "measurement_mode": (DELAYED_CLEANUP_LABEL if measured
+                                         else ORDINARY_PATH),
                 },
                 "operator": {
                     "wrong_target_write": False,
@@ -282,8 +311,44 @@ class GateConformanceTests(unittest.TestCase):
                 "id", "source", "surface", "scenario", "expected_outcome",
                 "actual_outcome", "wrong_target_write",
                 "user_edit_overwritten", "selection_disrupted",
-                "duplicate_write", "apply_ms"})
+                "duplicate_write", "apply_ms", "measurement_mode"})
             self.assertEqual(record["source"], "caller-attested-physical")
+            self.assertEqual(record["measurement_mode"], ORDINARY_PATH)
+
+    def test_a_measured_corpus_passes_the_gate_and_says_it_was_measured(self):
+        # Measurement mode runs the real transaction against the real
+        # destination, so the gate accepts the corpus -- and the receipt
+        # discloses exactly how much of it came from there.
+        payload = capture.build_records(
+            self.complete_session(measured=True))
+        for record in payload["records"]:
+            self.assertEqual(
+                record["measurement_mode"], DELAYED_CLEANUP_LABEL)
+        receipt = evaluate_activation(
+            payload["records"], manual_reviewed=True)
+        self.assertIs(receipt["active"], True)
+        self.assertEqual(
+            receipt["measurement_mode_cases"], len(payload["records"]))
+        self.assertIs(validate_activation_receipt(receipt), True)
+
+    def test_an_ordinary_corpus_declares_zero_measured_cases(self):
+        payload = capture.build_records(self.complete_session())
+        receipt = evaluate_activation(
+            payload["records"], manual_reviewed=True)
+        self.assertEqual(receipt["measurement_mode_cases"], 0)
+        self.assertIs(validate_activation_receipt(receipt), True)
+
+    def test_a_receipt_that_hides_the_measured_count_is_refused(self):
+        payload = capture.build_records(
+            self.complete_session(measured=True))
+        receipt = evaluate_activation(
+            payload["records"], manual_reviewed=True)
+        stripped = {key: value for key, value in receipt.items()
+                    if key != "measurement_mode_cases"}
+        self.assertIs(validate_activation_receipt(stripped), False)
+        self.assertIs(validate_activation_receipt(
+            {**receipt, "measurement_mode_cases":
+             receipt["case_count"] + 1}), False)
 
 
 class CoverageTests(unittest.TestCase):

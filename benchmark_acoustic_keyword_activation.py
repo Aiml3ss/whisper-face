@@ -25,6 +25,12 @@ from acoustic_keyword_activation import (
 )
 from acoustic_keyword_bias_evaluation import evaluate_keyword_bias
 from acoustic_keyword_memory import AcousticKeywordMemory
+from measurement_mode import (
+    EVIDENCE_KEY,
+    KEYWORD_LABEL,
+    MeasurementModeError,
+    evidence_label,
+)
 
 
 SCHEMA_VERSION = 1
@@ -41,7 +47,7 @@ class BenchmarkError(ValueError):
 def load_inputs(
     manifest_path: Path,
     memory_path: Path,
-) -> tuple[Any, tuple[Mapping[str, Any], ...]]:
+) -> tuple[Any, tuple[Mapping[str, Any], ...], str]:
     try:
         root = json.loads(manifest_path.read_text(encoding="utf-8"))
         memory = AcousticKeywordMemory.loads(
@@ -49,11 +55,19 @@ def load_inputs(
     except Exception as exc:
         raise BenchmarkError("activation inputs are unavailable or invalid") \
             from exc
-    if (not isinstance(root, Mapping) or set(root) != _ROOT_KEYS
+    # `measurement_mode` is the only optional root key: absent means the
+    # biased pass ran on the ordinary path.
+    if (not isinstance(root, Mapping)
+            or set(root) - {EVIDENCE_KEY} != _ROOT_KEYS
             or root["schema_version"] != SCHEMA_VERSION
             or root["kind"] != MANIFEST_KIND
             or not isinstance(root["records"], list)):
         raise BenchmarkError("activation manifest is invalid")
+    try:
+        measurement = evidence_label(
+            root.get(EVIDENCE_KEY), arm=KEYWORD_LABEL)
+    except MeasurementModeError as exc:
+        raise BenchmarkError("activation manifest is invalid") from exc
     matches = [
         candidate for candidate in memory.candidates
         if candidate.keyword == root["keyword"]
@@ -61,7 +75,7 @@ def load_inputs(
     ]
     if len(matches) != 1:
         raise BenchmarkError("eligible keyword memory is unavailable")
-    return matches[0], tuple(root["records"])
+    return matches[0], tuple(root["records"]), measurement
 
 
 def render_json(report: Mapping[str, Any]) -> str:
@@ -77,8 +91,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--confirm-manual-review", action="store_true")
     args = parser.parse_args(argv)
     try:
-        candidate, records = load_inputs(args.manifest, args.memory)
-        report = evaluate_keyword_bias(candidate, records)
+        candidate, records, measurement = load_inputs(
+            args.manifest, args.memory)
+        # The label rides in the printed report and is bound into the entry's
+        # source digest, so it cannot be dropped between report and receipt.
+        report = {
+            **evaluate_keyword_bias(candidate, records),
+            EVIDENCE_KEY: measurement,
+        }
         if args.approve_runtime is not None:
             entry = build_activation_entry(
                 candidate, report,

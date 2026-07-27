@@ -54,6 +54,15 @@ import wave
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from measurement_mode import (  # noqa: E402
+    CALIBRATION_LABEL,
+    EVIDENCE_KEY,
+    KEYWORD_LABEL,
+    ORDINARY_PATH,
+)
 
 SESSION_SCHEMA_VERSION = 1
 SESSION_KIND = "whisper-face/voice-evidence-capture-session"
@@ -227,6 +236,12 @@ class CorpusSpec:
     benchmark: str
     receipt: str
     extra_arguments: tuple[str, ...] = ()
+    # The arm whose behavior the shipped runtime only produces from a receipt,
+    # and the label a manifest carries when it was recorded in measurement
+    # mode. `None` means the corpus has no such arm (re-listen drives its
+    # verifier directly, so its manifest schema stays untouched).
+    measurement_arm: str | None = None
+    measurement_label: str = ORDINARY_PATH
 
     @property
     def multi_arm(self) -> bool:
@@ -270,8 +285,10 @@ CALIBRATION_SPEC = CorpusSpec(
             "until the pass is finished."
         ),
         "candidate": (
-            "CANDIDATE PASS. Apply the candidate front-end settings printed "
-            "above, restart Whisper Face, then repeat the same task set."
+            "CANDIDATE PASS. Restart Whisper Face with the measurement-mode "
+            "command printed below, then repeat the same task set. The "
+            "runtime applies those settings through its own calibrated front "
+            "end for this session only."
         ),
     },
     questions=(
@@ -287,6 +304,8 @@ CALIBRATION_SPEC = CorpusSpec(
     ),
     benchmark="benchmark_acoustic_calibration_activation.py",
     receipt="acoustic_calibration_activation.json",
+    measurement_arm="candidate",
+    measurement_label=CALIBRATION_LABEL,
 )
 
 KEYWORDS_SPEC = CorpusSpec(
@@ -302,12 +321,13 @@ KEYWORDS_SPEC = CorpusSpec(
         "unbiased": (
             "UNBIASED PASS. The keyword must NOT be in the Whisper prompt for "
             "this pass. Remove it from dictionary.txt if it is there, and "
-            "restart Whisper Face."
+            "restart Whisper Face with no --measure argument."
         ),
         "biased": (
-            "BIASED PASS. Put the keyword in the Whisper prompt for this pass "
-            "(add it to dictionary.txt above the managed marker), restart "
-            "Whisper Face, then repeat the same sentences."
+            "BIASED PASS. Restart Whisper Face with the measurement-mode "
+            "command printed below, then repeat the same sentences. The term "
+            "enters the real Whisper prompt for this session only; do not "
+            "add it to dictionary.txt, which would measure a different path."
         ),
     },
     questions=(
@@ -323,6 +343,8 @@ KEYWORDS_SPEC = CorpusSpec(
     benchmark="benchmark_acoustic_keyword_activation.py",
     receipt="acoustic_keyword_activation.json",
     extra_arguments=("--memory acoustic_keyword_memory.json",),
+    measurement_arm="biased",
+    measurement_label=KEYWORD_LABEL,
 )
 
 CORPORA: Mapping[str, CorpusSpec] = {
@@ -646,6 +668,11 @@ class Session:
             "sample_rate_hz": SAMPLE_RATE_HZ,
             "settings": dict(settings),
             "telemetry": [],
+            # How each arm was actually produced. Answered once by the
+            # operator, at the point they start the arm, and carried into the
+            # manifest so a measured corpus is never mistaken for one recorded
+            # on the ordinary path.
+            "measurement_mode": {},
             "cases": [
                 {"plan": dict(item), "arms": {}}
                 for item in plan
@@ -745,6 +772,30 @@ class Session:
         self.write_manifest()
         return record
 
+    # -- measurement mode ------------------------------------------------
+    def measurement_label(self) -> str:
+        """Return the label this corpus's manifest should carry.
+
+        Absent means the ordinary path, exactly as a missing flag does
+        everywhere else. Only the arm the runtime cannot otherwise produce is
+        ever labelled; a baseline or unbiased pass is by definition ordinary.
+        """
+        arm = self.spec.measurement_arm
+        if arm is None:
+            return ORDINARY_PATH
+        recorded = self.state.get("measurement_mode") or {}
+        return (self.spec.measurement_label
+                if recorded.get(arm) is True else ORDINARY_PATH)
+
+    def record_measurement_answer(self, arm: str, used: bool) -> None:
+        recorded = dict(self.state.get("measurement_mode") or {})
+        recorded[arm] = bool(used)
+        self.state["measurement_mode"] = recorded
+        self.save()
+
+    def measurement_answered(self, arm: str) -> bool:
+        return arm in (self.state.get("measurement_mode") or {})
+
     def reopen(self, identity: str) -> dict[str, Any]:
         for case in self.cases:
             if self.case_identity(case) == identity:
@@ -826,6 +877,7 @@ class Session:
             return {
                 "schema_version": MANIFEST_SCHEMA_VERSION,
                 "kind": self.spec.manifest_kind,
+                EVIDENCE_KEY: self.measurement_label(),
                 "telemetry": list(self.state.get("telemetry") or []),
                 "cases": [
                     {
@@ -842,6 +894,7 @@ class Session:
         return {
             "schema_version": MANIFEST_SCHEMA_VERSION,
             "kind": self.spec.manifest_kind,
+            EVIDENCE_KEY: self.measurement_label(),
             "keyword": settings["keyword"],
             "app_scope": settings.get("app_scope"),
             "records": [
@@ -1400,7 +1453,29 @@ def run_capture(session: Session, arguments: argparse.Namespace) -> int:
         print(spec.arm_headers[arm])
         if spec.name == "calibration" and arm == "candidate":
             print(render_candidate_settings(session))
+        elif spec.name == "keywords" and arm == "biased":
+            command = measurement_command(session)
+            if command:
+                print()
+                print("  Run the biased pass with the term in the real "
+                      "Whisper prompt, for this")
+                print("  session only:")
+                print()
+                print(f"    {command}")
+                print()
+                print("  That is not an activation: nothing is persisted and "
+                      "it ends when you quit")
+                print("  the runtime. The manifest records that the biased "
+                      "pass used it.")
         print(RULE)
+        if arm == spec.measurement_arm and not session.measurement_answered(
+                arm):
+            print()
+            print("  This answer goes into the manifest and is visible to the "
+                  "activation gate.")
+            session.record_measurement_answer(arm, ask_yes_no(
+                f"Is Whisper Face running in measurement mode for the {arm} "
+                "pass right now?"))
         stopped = False
         captured = 0
         for case in pending:
@@ -1475,6 +1550,35 @@ def run_review(session: Session, arguments: argparse.Namespace) -> int:
     return 0
 
 
+def measurement_command(session: Session) -> str | None:
+    """Return the exact runtime command for this corpus's measured arm.
+
+    The candidate/biased arm only exists inside the runtime, so the operator
+    is given the literal command rather than a description of one. Measurement
+    mode applies the real code path for that session and grants no authority.
+    """
+    spec = session.spec
+    if spec.name == "calibration":
+        recommendation = calibration_recommendation(
+            session.state.get("telemetry") or [])
+        if recommendation is None or recommendation["verdict"] != "keep":
+            return None
+        decisions = recommendation["decisions"]
+        return (
+            "uv run --locked --script dictate.py --measure "
+            f"calibration:gain={decisions['gain_ceiling']['value']},"
+            f"noise={decisions['noise_gate']['value']},"
+            f"vad={decisions['vad_threshold']['value']},"
+            f"end-silence={decisions['end_silence']['value']}")
+    if spec.name == "keywords":
+        keyword = (session.state.get("settings") or {}).get("keyword")
+        if not keyword:
+            return None
+        return ("uv run --locked --script dictate.py --measure "
+                f"keyword:{keyword}")
+    return None
+
+
 def render_candidate_settings(session: Session) -> str:
     telemetry = session.state.get("telemetry") or []
     recommendation = calibration_recommendation(telemetry)
@@ -1498,11 +1602,14 @@ def render_candidate_settings(session: Session) -> str:
         f"    end_silence   {decisions['end_silence']['value']} ms",
         "    reverb        unavailable (no metric exists)",
         "",
-        "  Runtime only applies these from an approved receipt, so the "
-        "candidate pass",
-        "  needs you to set them locally for the duration of the pass and put "
-        "them back",
-        "  afterwards. See docs/evidence/voice-corpora.md.",
+        "  Run the candidate pass with the runtime applying exactly these,",
+        "  for this session only, through its own calibrated front end:",
+        "",
+        f"    {measurement_command(session)}",
+        "",
+        "  That is not a receipt: it is never persisted, it ends when you "
+        "quit the",
+        "  runtime, and the manifest records that the candidate pass used it.",
     ])
 
 

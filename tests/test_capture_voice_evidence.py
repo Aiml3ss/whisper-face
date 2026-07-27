@@ -36,6 +36,12 @@ import benchmark_acoustic_keyword_activation as keyword_benchmark  # noqa: E402
 import benchmark_relisten_activation as relisten_benchmark  # noqa: E402
 from acoustic_keyword_bias_evaluation import evaluate_keyword_bias  # noqa: E402
 from acoustic_keyword_memory import AcousticKeywordMemory  # noqa: E402
+from measurement_mode import (  # noqa: E402
+    CALIBRATION_LABEL,
+    EVIDENCE_KEY,
+    ORDINARY_PATH,
+    parse_measurement_mode,
+)
 from whisper_verifier_adapter import (  # noqa: E402
     MAX_AUDIO_SAMPLES,
     MAX_EXPECTED_CHARACTERS,
@@ -198,7 +204,11 @@ class ManifestContractTests(CaptureHarness):
         manifest = json.loads(session.manifest_path.read_text(encoding="utf-8"))
         self.assertEqual(
             set(manifest),
-            {"schema_version", "kind", "telemetry", "cases"})
+            {"schema_version", "kind", "measurement_mode", "telemetry",
+             "cases"})
+        # No answer recorded means the ordinary path, the same fail-closed
+        # default a missing receipt gets.
+        self.assertEqual(manifest["measurement_mode"], "ordinary-path")
         self.assertEqual(manifest["kind"], calibration_benchmark.MANIFEST_KIND)
         case = manifest["cases"][0]
         self.assertEqual(
@@ -234,8 +244,9 @@ class ManifestContractTests(CaptureHarness):
                 "Qwen", evidence_id=f"physical-case-{index}")
         memory_path.write_text(memory.dumps(), encoding="utf-8")
 
-        candidate, records = keyword_benchmark.load_inputs(
+        candidate, records, measurement = keyword_benchmark.load_inputs(
             session.manifest_path, memory_path)
+        self.assertEqual(measurement, "ordinary-path")
         self.assertEqual(candidate.keyword, "Qwen")
         self.assertTrue(candidate.eligible)
         self.assertEqual(len(records), 40)
@@ -263,7 +274,9 @@ class ManifestContractTests(CaptureHarness):
         manifest = json.loads(session.manifest_path.read_text(encoding="utf-8"))
         self.assertEqual(
             set(manifest),
-            {"schema_version", "kind", "keyword", "app_scope", "records"})
+            {"schema_version", "kind", "measurement_mode", "keyword",
+             "app_scope", "records"})
+        self.assertEqual(manifest["measurement_mode"], "ordinary-path")
         self.assertEqual(manifest["kind"], keyword_benchmark.MANIFEST_KIND)
         self.assertIsNone(manifest["app_scope"])
         record = manifest["records"][0]
@@ -641,6 +654,82 @@ class NextCommandTests(CaptureHarness):
             self.assertTrue((ROOT / spec.benchmark).is_file(), spec.benchmark)
             entries = capture.gitignore_entries(ROOT)
             self.assertIn(spec.receipt, entries, spec.receipt)
+
+
+class MeasurementModeTests(CaptureHarness):
+    """The measured arm must be runnable and must label its own evidence."""
+
+    def test_the_candidate_pass_gets_a_literal_runtime_command(self):
+        session = self.session("calibration", count=4)
+        session.state["telemetry"] = capture.extract_utterance_telemetry(
+            "\n".join(trace_line() for _ in range(8)))
+        command = capture.measurement_command(session)
+        self.assertIsNotNone(command)
+        self.assertIn("--measure calibration:", command)
+        for field in ("gain=", "noise=", "vad=", "end-silence="):
+            self.assertIn(field, command)
+        # The runtime must actually accept what the tool prints.
+        mode = parse_measurement_mode(["dictate.py"] + command.split()[-2:])
+        self.assertIsNotNone(mode.calibration)
+        self.assertEqual(mode.arms, ("calibration",))
+        printed = capture.render_candidate_settings(session)
+        self.assertIn(command, printed)
+        self.assertIn("not a receipt", printed)
+
+    def test_the_biased_pass_command_names_the_keyword_arm(self):
+        session = self.session("keywords", count=2)
+        command = capture.measurement_command(session)
+        self.assertEqual(
+            command,
+            "uv run --locked --script dictate.py --measure keyword:Qwen")
+        mode = parse_measurement_mode(["dictate.py", "--measure",
+                                       "keyword:Qwen"])
+        self.assertEqual(mode.keyword, "Qwen")
+
+    def test_relisten_has_no_measured_arm_and_no_manifest_flag(self):
+        session = self.session("relisten", count=2)
+        self.assertIsNone(session.spec.measurement_arm)
+        self.assertIsNone(capture.measurement_command(session))
+        for case in session.cases:
+            session.record_arm(case, "take", samples=[0.1, -0.1])
+        self.assertNotIn(EVIDENCE_KEY, session.manifest())
+
+    def test_an_answered_candidate_pass_labels_the_manifest(self):
+        session = self.session("calibration", count=4)
+        session.record_measurement_answer("candidate", True)
+        for case in session.cases:
+            for arm in ("baseline", "candidate"):
+                session.record_arm(case, arm, samples=None, labels={
+                    "recognition_correct": True, "endpoint_correct": True})
+        manifest = json.loads(
+            session.manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest[EVIDENCE_KEY], CALIBRATION_LABEL)
+
+    def test_a_declined_answer_leaves_the_ordinary_label(self):
+        session = self.session("keywords", count=2)
+        session.record_measurement_answer("biased", False)
+        for case in session.cases:
+            for arm in ("unbiased", "biased"):
+                session.record_arm(case, arm, samples=None, labels={
+                    "keyword_candidate_present": False,
+                    "keyword_selected": False})
+        manifest = json.loads(
+            session.manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest[EVIDENCE_KEY], ORDINARY_PATH)
+
+    def test_the_label_survives_the_real_manifest_loader(self):
+        session = self.session("calibration", count=4)
+        session.record_measurement_answer("candidate", True)
+        session.state["telemetry"] = capture.extract_utterance_telemetry(
+            "\n".join(trace_line() for _ in range(8)))
+        for case in session.cases:
+            for arm in ("baseline", "candidate"):
+                session.record_arm(case, arm, samples=None, labels={
+                    "recognition_correct": True, "endpoint_correct": True})
+        loaded = calibration_benchmark.load_manifest(session.manifest_path)
+        self.assertEqual(loaded[EVIDENCE_KEY], CALIBRATION_LABEL)
+        report = calibration_benchmark.evaluate(loaded)
+        self.assertEqual(report[EVIDENCE_KEY], CALIBRATION_LABEL)
 
 
 class NoApprovalAuthorityTests(unittest.TestCase):
