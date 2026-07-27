@@ -326,8 +326,10 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "onboarding.privacy": "Everything you say stays on this Mac.",
         "onboarding.complete": "Setup is complete — Whisper Face is ready.",
         "results.summary.empty": "No dictation yet",
-        "results.summary.words": "{words} words",
-        "results.summary.timed": "{words} words in {seconds}s",
+        "results.summary.words.one": "1 word",
+        "results.summary.words.many": "{words} words",
+        "results.summary.timed.one": "1 word in {seconds}s",
+        "results.summary.timed.many": "{words} words in {seconds}s",
         "results.engine.waiting": "Waiting for a result",
         "results.engine.session": "{engine} · session-only evidence",
         "results.mode.capture": "Capture",
@@ -401,7 +403,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "results.inspect.stage.cleanup": "Cleanup",
         "results.inspect.stage.insertion": "Insertion",
         "results.inspect.none": "None reported",
-        "results.value.words": "{count} words",
+        "results.value.words.one": "1 word",
+        "results.value.words.many": "{count} words",
         "results.value.confidence": " · {confidence} confidence",
         "results.value.none_reported": "None reported",
         "results.value.not_reported": "not reported",
@@ -464,7 +467,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "diagnostics.notice.support_bundle.saved": "Transcript-free support bundle saved locally",
         "diagnostics.ready": "Everything looks ready.",
         "diagnostics.license": "AGPL-3.0-only · no warranty · corresponding source available",
-        "diagnostics.regression.cases": "{count} cases",
+        "diagnostics.regression.cases.one": "1 case",
+        "diagnostics.regression.cases.many": "{count} cases",
         "diagnostics.regression.quarantined": " · {count} quarantined",
         "diagnostics.motion.reduced": "Reduced motion",
         "diagnostics.motion.standard": "Standard motion",
@@ -615,16 +619,23 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.language.ko": "한국어",
         "settings.language.zh": "中文",
         "settings.personalize.tones": "App tones",
-        "settings.personalize.tones.detail": "{count} recent or configured apps",
+        "settings.personalize.tones.detail.one": "1 recent or configured app",
+        "settings.personalize.tones.detail.many": "{count} recent or configured apps",
         "settings.personalize.tones.empty": "Dictate somewhere and that app shows up here",
         "settings.personalize.snippets": "Snippets",
-        "settings.personalize.snippets.detail": "{count} saved phrases",
+        "settings.personalize.snippets.detail.one": "1 saved phrase",
+        "settings.personalize.snippets.detail.many": "{count} saved phrases",
         "settings.personalize.snippets.empty": "Save a phrase you type all the time",
         "settings.personalize.vocabulary": "Vocabulary",
-        "settings.personalize.vocabulary.detail": "{terms} terms · {bans} exclusions",
+        "settings.personalize.vocabulary.detail": "{terms} · {bans}",
+        "settings.personalize.vocabulary.terms.one": "1 term",
+        "settings.personalize.vocabulary.terms.many": "{count} terms",
+        "settings.personalize.vocabulary.exclusions.one": "1 exclusion",
+        "settings.personalize.vocabulary.exclusions.many": "{count} exclusions",
         "settings.personalize.vocabulary.empty": "Teach me the names I keep getting wrong",
         "settings.personalize.corrections": "Learned corrections",
-        "settings.personalize.corrections.detail": "{count} inspectable mappings",
+        "settings.personalize.corrections.detail.one": "1 inspectable mapping",
+        "settings.personalize.corrections.detail.many": "{count} inspectable mappings",
         "settings.personalize.corrections.empty": "Fix the same word a few times and I’ll remember it",
         "settings.personalize.keywords": "Pronunciation keywords",
         "settings.personalize.keywords.detail": "Open to inspect correction-backed evidence",
@@ -691,7 +702,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.dialog.correction.why.apps": "Why: Repeated corrections passed the local safety checks in {apps}.",
         "settings.dialog.correction.why.held": "Why: Held back because the local correction cases disagree.",
         "settings.dialog.correction.why.learning": "Why: Still learning. Three matching corrections activate everywhere; two in one app activate there.",
-        "settings.dialog.correction.why.snippet": "Why: You explicitly edited this snippet {count} time(s).",
+        "settings.dialog.correction.why.snippet.one": "Why: You explicitly edited this snippet 1 time.",
+        "settings.dialog.correction.why.snippet.many": "Why: You explicitly edited this snippet {count} times.",
         "settings.dialog.correction.observed": "Observed in: {apps}.",
         "settings.dialog.correction.observed.none": "Observed in: App information unavailable.",
         "settings.dialog.correction.privacy": "Stored locally: the corrected words, app scope, and counts only—never audio or surrounding transcript.",
@@ -701,7 +713,11 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.dialog.keywords.empty": "No keyword candidates yet. Correct a name Whisper Face mishears and it will appear here with its evidence.",
         "settings.dialog.keywords.chooser.label": "Pronunciation keyword candidate",
         "settings.dialog.keywords.chooser.help": "Choose a pronunciation keyword to inspect, export, or forget.",
-        "settings.dialog.keywords.row": "{keyword} · {observations} observations · {confirmations} confirmations · {status} · {scope}",
+        "settings.dialog.keywords.row": "{keyword} · {observations} · {confirmations} · {status} · {scope}",
+        "settings.dialog.keywords.observations.one": "1 observation",
+        "settings.dialog.keywords.observations.many": "{count} observations",
+        "settings.dialog.keywords.confirmations.one": "1 confirmation",
+        "settings.dialog.keywords.confirmations.many": "{count} confirmations",
         "settings.dialog.keywords.status.eligible": "eligible for evaluation",
         "settings.dialog.keywords.status.gathering": "gathering evidence",
         "settings.dialog.keywords.scope.global": "Global",
@@ -719,7 +735,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.privacy.acoustic.detail": "Opt in to keep selected latest-result spans in RAM for at most one minute.",
         "settings.privacy.voice_objects": "Voice Object Commands",
         "settings.privacy.voice_objects.detail": "Exact task, email, and calendar commands queue inert local drafts instead of pasting.",
-        "settings.privacy.voice_objects.status": "{status} · {count} local drafts queued",
+        "settings.privacy.voice_objects.status.one": "{status} · 1 local draft queued",
+        "settings.privacy.voice_objects.status.many": "{status} · {count} local drafts queued",
         "settings.privacy.voice_objects.inspect": "Inspect",
         "settings.privacy.voice_objects.inspect.help": "Open the local Voice Inbox. Draft content stays hidden until you explicitly reveal a selected draft.",
         "settings.privacy.face": "Companion",
@@ -931,6 +948,17 @@ def localized_string(key: str, *, locale: str = "en", **values: Any) -> str:
         return template.format(**values)
     except (KeyError, ValueError) as error:
         raise ValueError(f"invalid values for localized string {key!r}") from error
+
+
+def plural_key(base: str, count: int) -> str:
+    """Select the ``.one``/``.many`` catalog variant for a count.
+
+    Pluralized copy lives entirely in the catalog as explicit key pairs
+    (``overview.metric.last.words.one`` / ``.many``), so each language
+    catalog can phrase both forms; the caller only picks which key applies.
+    """
+
+    return f"{base}.one" if count == 1 else f"{base}.many"
 FACES = (
     "parrot", "fox", "owl", "cat", "bear",
     "dog", "wolf", "pig", "panda", "tiger",
@@ -2367,7 +2395,8 @@ def correction_review_text(
             localized_string(
                 "settings.dialog.correction.scope.snippet", locale=locale),
             localized_string(
-                "settings.dialog.correction.why.snippet",
+                plural_key("settings.dialog.correction.why.snippet",
+                           correction.count),
                 locale=locale,
                 count=correction.count,
             ),
@@ -2827,7 +2856,8 @@ def result_evidence_text(
         summary_rows = [
             "{}: {}".format(
                 copy("results.evidence.stable"),
-                copy("results.value.words",
+                copy(plural_key("results.value.words",
+                                result.stable_prefix_words),
                      count=result.stable_prefix_words)),
             "{}: {}".format(
                 copy("results.evidence.anchors"),
@@ -2917,11 +2947,14 @@ def _build_result_inspection(
     available = word_count is not None and word_count > 0
     if latency_ms is not None:
         summary = copy(
-            "results.summary.timed", words=word_count or 0,
+            plural_key("results.summary.timed", word_count or 0),
+            words=word_count or 0,
             seconds=f"{latency_ms / 1000:.2f}")
         available = True
     elif available:
-        summary = copy("results.summary.words", words=word_count)
+        summary = copy(
+            plural_key("results.summary.words", word_count),
+            words=word_count)
     else:
         summary = copy("results.summary.empty")
     cleanup_edits = sequence_items("last_cleanup_edits")
@@ -4784,6 +4817,7 @@ try:  # The view-model above remains usable in headless test environments.
     from Quartz import (
         CAMediaTimingFunction,
         CASpringAnimation,
+        CGPathCreateWithRoundedRect,
         kCAMediaTimingFunctionEaseOut,
     )
 
@@ -5064,6 +5098,20 @@ if APPKIT_AVAILABLE:
             self.line_color.set()
             path.stroke()
 
+    def _face_grid_columns(count: int, width: float,
+                           chip_side: float = 44.0) -> tuple[int, int]:
+        """Chip columns and rows ``ArtFacePicker`` wraps to at ``width``.
+
+        Shared with the Personalize builder so the face card's height always
+        matches the rows the picker actually produces, instead of guessing a
+        chips-per-row constant that drifts as the roster grows.
+        """
+        per_row = count
+        while per_row > 1 and (
+                width - chip_side * per_row) / (per_row + 1) < 14.0:
+            per_row = -(-count // (-(-count // per_row) + 1))
+        return per_row, -(-count // per_row)
+
     class ArtFacePicker(NSView):
         """Colored character chips standing in for a segmented control.
 
@@ -5095,11 +5143,8 @@ if APPKIT_AVAILABLE:
             # the point -- and the roster is meant to keep growing, so wrap
             # instead of letting the breathing room collapse.
             width = self.frame().size.width
-            per_row = len(faces)
-            while per_row > 1 and (
-                    width - chip_side * per_row) / (per_row + 1) < 14.0:
-                per_row = -(-len(faces) // (-(-len(faces) // per_row) + 1))
-            rows = -(-len(faces) // per_row)
+            per_row, rows = _face_grid_columns(
+                len(faces), width, chip_side)
             # Cap the gap so a wrapped row keeps the same rhythm the
             # ten-face row had, rather than scattering across the card.
             gap = min((width - chip_side * per_row) / (per_row + 1),
@@ -5385,8 +5430,11 @@ if APPKIT_AVAILABLE:
         def _pill(self, text: str, frame: Any, *, size: float = 11,
                   accessibility_label: str = "") -> Any:
             """Small tinted status capsule; colors arrive at render time."""
+            # NSTextAlignmentCenter is 1 in the unified enum this SDK ships;
+            # 2 is right-alignment and pushed the copy against the capsule's
+            # trailing edge instead of centering it between the paddings.
             pill = _label(
-                text, frame, size=size, weight="semibold", alignment=2,
+                text, frame, size=size, weight="semibold", alignment=1,
                 truncate=True,
                 accessibility_label=accessibility_label or text)
             pill.setWantsLayer_(True)
@@ -6163,13 +6211,12 @@ if APPKIT_AVAILABLE:
             width = CONTENT_WIDTH
 
             # Backdrop: three huge soft pastel blobs so the page reads as a
-            # playground instead of a report. Tinted at theme time.
+            # playground instead of a report. Tinted at theme time; anchored
+            # below, once the cluster they decorate exists.
             blobs = []
-            for frame, radius in (
-                    (NSMakeRect(-150, 30, 360, 360), 180.0),
-                    (NSMakeRect(width - 190, 140, 340, 340), 170.0),
-                    (NSMakeRect(width / 2.0 - 110, 360, 280, 280), 140.0)):
-                blob = NSView.alloc().initWithFrame_(frame)
+            for radius in (180.0, 170.0, 140.0):
+                blob = NSView.alloc().initWithFrame_(
+                    NSMakeRect(0, 0, radius * 2.0, radius * 2.0))
                 blob.setWantsLayer_(True)
                 blob_layer = blob.layer()
                 if blob_layer is not None:
@@ -6177,6 +6224,60 @@ if APPKIT_AVAILABLE:
                 page.addSubview_(blob)
                 blobs.append(blob)
             self.dynamic["home_blobs"] = tuple(blobs)
+
+            # Everything the live overview stacks sits in one cluster that
+            # centers itself in whatever height the window offers: a tall
+            # window balances the page instead of cramming the top half and
+            # leaving a dead field under it.
+            cluster = NSView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, width, 484))
+            cluster.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            page.addSubview_(cluster)
+            cluster_center = cluster.centerYAnchor() \
+                .constraintEqualToAnchor_(page.centerYAnchor())
+            cluster_center.setPriority_(725)
+            cluster_bottom = cluster.bottomAnchor() \
+                .constraintLessThanOrEqualToAnchor_(page.bottomAnchor())
+            cluster_bottom.setPriority_(999)
+            NSLayoutConstraint.activateConstraints_([
+                cluster.leadingAnchor().constraintEqualToAnchor_(
+                    page.leadingAnchor()),
+                cluster.trailingAnchor().constraintEqualToAnchor_(
+                    page.trailingAnchor()),
+                cluster.topAnchor()
+                .constraintGreaterThanOrEqualToAnchor_(page.topAnchor()),
+                cluster_center,
+                cluster_bottom,
+            ])
+
+            # The huge circles keep the same composition around the cluster
+            # at every window size: teal grounds the bottom-left, amber
+            # brushes the right edge of the hero, and the blush circle backs
+            # the face, bleeding past the cluster the way it bled past the
+            # page at the design size.
+            blob_teal, blob_amber, blob_blush = blobs
+            for blob in blobs:
+                blob.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            NSLayoutConstraint.activateConstraints_([
+                blob_teal.widthAnchor().constraintEqualToConstant_(360.0),
+                blob_teal.heightAnchor().constraintEqualToConstant_(360.0),
+                blob_teal.leadingAnchor().constraintEqualToAnchor_constant_(
+                    page.leadingAnchor(), -150.0),
+                blob_teal.bottomAnchor().constraintEqualToAnchor_constant_(
+                    cluster.bottomAnchor(), -4.0),
+                blob_amber.widthAnchor().constraintEqualToConstant_(340.0),
+                blob_amber.heightAnchor().constraintEqualToConstant_(340.0),
+                blob_amber.trailingAnchor().constraintEqualToAnchor_constant_(
+                    page.trailingAnchor(), 150.0),
+                blob_amber.topAnchor().constraintEqualToAnchor_constant_(
+                    cluster.topAnchor(), 30.0),
+                blob_blush.widthAnchor().constraintEqualToConstant_(280.0),
+                blob_blush.heightAnchor().constraintEqualToConstant_(280.0),
+                blob_blush.centerXAnchor().constraintEqualToAnchor_constant_(
+                    page.centerXAnchor(), 30.0),
+                blob_blush.topAnchor().constraintEqualToAnchor_constant_(
+                    cluster.topAnchor(), -130.0),
+            ])
 
             # The living face, tilted a touch like a sticker on a notebook.
             face_stage = NSView.alloc().initWithFrame_(
@@ -6192,7 +6293,7 @@ if APPKIT_AVAILABLE:
             except Exception:
                 pass
             face_stage.addSubview_(face_view)
-            self._stack(page, face_stage, height=160)
+            self._stack(cluster, face_stage, height=160)
             header = face_stage
 
             # The face speaks: status copy lives in a sticker speech bubble
@@ -6220,7 +6321,7 @@ if APPKIT_AVAILABLE:
                 alignment=1)
             for view in (phase, status, detail, engine):
                 bubble.addSubview_(view)
-            self._stack(page, hero, below=face_stage, gap=2, height=96)
+            self._stack(cluster, hero, below=face_stage, gap=2, height=96)
 
             # One chunky CTA, recovery actions only when they earn a spot.
             actions = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, 42))
@@ -6246,7 +6347,7 @@ if APPKIT_AVAILABLE:
             actions.addSubview_(pause)
             actions.addSubview_(fix)
             actions.addSubview_(copy_outbox)
-            self._stack(page, actions, below=hero, gap=4, height=42)
+            self._stack(cluster, actions, below=hero, gap=4, height=42)
 
             outbox = self._ink(
                 self._l("overview.outbox.empty"),
@@ -6256,7 +6357,7 @@ if APPKIT_AVAILABLE:
             outbox_row = NSView.alloc().initWithFrame_(
                 NSMakeRect(0, 0, width, 28))
             outbox_row.addSubview_(outbox)
-            self._stack(page, outbox_row, below=actions, gap=2, height=28)
+            self._stack(cluster, outbox_row, below=actions, gap=2, height=28)
 
             self.dynamic.update(
                 home_face_view=face_view,
@@ -6288,17 +6389,41 @@ if APPKIT_AVAILABLE:
                               treatment="playful")
                 badge.setAutoresizingMask_(
                     NSViewMinXMargin | NSViewMaxXMargin)
+                # Subviews land in the box's content view, which NSBox
+                # insets by default margins on top of the border; centered
+                # text then drifts toward the bottom-trailing inset. Zero
+                # margins and span the content bounds so the copy truly
+                # centers in the pill.
+                badge.setContentViewMargins_((0.0, 0.0))
                 try:
                     badge.setFrameCenterRotation_(tilt)
                 except Exception:
                     pass
+                # The sticker shadow must come from the pill's shape, never
+                # the layer silhouette: this fill is translucent, and a
+                # silhouette-derived shadow re-draws every glyph 5pt
+                # down-right as ghost text under the live compositor.
+                badge_layer = badge.layer()
+                if badge_layer is not None:
+                    try:
+                        badge_layer.setShadowPath_(
+                            CGPathCreateWithRoundedRect(
+                                NSMakeRect(0, 0, badge_width, 50),
+                                SURFACE_SPECS["playful"].radius,
+                                SURFACE_SPECS["playful"].radius, None))
+                    except Exception:
+                        pass
+                inner_width = badge_width
+                content = badge.contentView()
+                if content is not None:
+                    inner_width = float(content.bounds().size.width)
                 caption = self._soft(
                     self._l(heading_key),
-                    NSMakeRect(0, 30, badge_width, 12), size=9.5,
+                    NSMakeRect(0, 29, inner_width, 12), size=9.5,
                     weight="semibold", rounded=True, alignment=1)
                 value = self._ink(
                     self._l("overview.metric.last.empty"),
-                    NSMakeRect(0, 6, badge_width, 22),
+                    NSMakeRect(0, 5, inner_width, 22),
                     size=16, weight="semibold", rounded=True, truncate=True,
                     alignment=1)
                 value.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(
@@ -6308,7 +6433,7 @@ if APPKIT_AVAILABLE:
                 metrics.addSubview_(badge)
                 badges.append(badge)
                 self.dynamic[key] = value
-            self._stack(page, metrics, below=outbox_row, gap=4, height=54)
+            self._stack(cluster, metrics, below=outbox_row, gap=4, height=54)
             self.dynamic["overview_metric_cards"] = (metrics,)
             self.dynamic["home_stat_badges"] = tuple(badges)
 
@@ -6354,7 +6479,13 @@ if APPKIT_AVAILABLE:
                          result_audio, play_audio, clear_audio,
                          inspect_evidence):
                 result_card.addSubview_(view)
-            self._stack(page, result_card, below=metrics, gap=4, height=88)
+            self._stack(cluster, result_card, below=metrics, gap=4, height=88)
+            # The last block closes the cluster so its height is exactly the
+            # stacked content; center-Y then balances the whole column.
+            NSLayoutConstraint.activateConstraints_([
+                result_card.bottomAnchor().constraintEqualToAnchor_(
+                    cluster.bottomAnchor()),
+            ])
             self.dynamic.update(
                 home_result_card=result_card,
                 result_summary=result_summary,
@@ -6393,11 +6524,13 @@ if APPKIT_AVAILABLE:
             face_image.setEditable_(False)
             onboarding.addSubview_(face_chip)
             onboarding.addSubview_(face_image)
+            # Centered (alignment 1) under the chip: the kicker's frame
+            # shares the chip's midline, so its copy should too.
             face_kicker = _label(
                 self._l("onboarding.privacy"),
                 NSMakeRect(32, 148, 224, 40),
                 size=11, weight="medium", rounded=True, wrap=True,
-                lines=2, alignment=2)
+                lines=2, alignment=1)
             onboarding.addSubview_(face_kicker)
             text_x = ONBOARDING_TEXT_X
             text_width = width - text_x - 36.0
@@ -6475,14 +6608,25 @@ if APPKIT_AVAILABLE:
             page.addSubview_(onboarding)
             onboarding_height = onboarding.heightAnchor() \
                 .constraintEqualToConstant_(ONBOARDING_HEIGHT)
+            # The poster centers in the page the same way the live cluster
+            # does, so a tall first-run window balances instead of pinning
+            # the card to the top of a mostly empty field.
+            onboarding_center = onboarding.centerYAnchor() \
+                .constraintEqualToAnchor_(page.centerYAnchor())
+            onboarding_center.setPriority_(725)
+            onboarding_bottom = onboarding.bottomAnchor() \
+                .constraintLessThanOrEqualToAnchor_(page.bottomAnchor())
+            onboarding_bottom.setPriority_(999)
             NSLayoutConstraint.activateConstraints_([
-                onboarding.topAnchor().constraintEqualToAnchor_(
-                    page.topAnchor()),
+                onboarding.topAnchor()
+                .constraintGreaterThanOrEqualToAnchor_(page.topAnchor()),
                 onboarding.leadingAnchor().constraintEqualToAnchor_(
                     page.leadingAnchor()),
                 onboarding.trailingAnchor().constraintEqualToAnchor_(
                     page.trailingAnchor()),
                 onboarding_height,
+                onboarding_center,
+                onboarding_bottom,
             ])
             self.dynamic.update(
                 home_header=header,
@@ -6581,7 +6725,10 @@ if APPKIT_AVAILABLE:
                 panes[name] = pane
 
             personalize = panes["Personalize"]
-            face_rows = -(-len(FACES) // 7) if len(FACES) > 10 else 1
+            # The card budgets exactly the rows the picker will wrap to at
+            # this width; a stale per-row guess left a dead band under the
+            # chips when the picker packed them tighter than the estimate.
+            _, face_rows = _face_grid_columns(len(FACES), width - 16.0)
             face_card_height = 64.0 + (face_rows - 1) * 52.0
             face_card = _card(NSMakeRect(0, 0, width, face_card_height))
             self._register("card", face_card)
@@ -7345,7 +7492,15 @@ if APPKIT_AVAILABLE:
             self._onboarding_presentation = presentation
             self.dynamic["onboarding_card"].setHidden_(
                 not presentation.visible)
+            # Every live-overview block hides while the poster is up. The
+            # old layout merely covered them with the opaque card, which
+            # left the face peeking past the poster on tall windows and
+            # kept covered controls in the Tab order.
+            self.dynamic["home_header"].setHidden_(presentation.visible)
             self.dynamic["overview_hero"].setHidden_(presentation.visible)
+            self.dynamic["overview_actions"].setHidden_(presentation.visible)
+            self.dynamic["overview_outbox_row"].setHidden_(
+                presentation.visible)
             self.dynamic["home_result_card"].setHidden_(presentation.visible)
             for card in self.dynamic["overview_metric_cards"]:
                 card.setHidden_(presentation.visible)
@@ -7471,23 +7626,33 @@ if APPKIT_AVAILABLE:
             # count only earns the line once there is something to count.
             setting_summaries = {
                 "tones": self._l(
-                    "settings.personalize.tones.detail",
+                    plural_key("settings.personalize.tones.detail",
+                               len(settings.app_tones)),
                     count=len(settings.app_tones))
                 if settings.app_tones else self._l(
                     "settings.personalize.tones.empty"),
                 "snippets": self._l(
-                    "settings.personalize.snippets.detail",
+                    plural_key("settings.personalize.snippets.detail",
+                               len(settings.snippets)),
                     count=len(settings.snippets))
                 if settings.snippets else self._l(
                     "settings.personalize.snippets.empty"),
                 "vocabulary": self._l(
                     "settings.personalize.vocabulary.detail",
-                    terms=len(settings.manual_vocabulary),
-                    bans=len(settings.banned_vocabulary))
+                    terms=self._l(
+                        plural_key("settings.personalize.vocabulary.terms",
+                                   len(settings.manual_vocabulary)),
+                        count=len(settings.manual_vocabulary)),
+                    bans=self._l(
+                        plural_key(
+                            "settings.personalize.vocabulary.exclusions",
+                            len(settings.banned_vocabulary)),
+                        count=len(settings.banned_vocabulary)))
                 if (settings.manual_vocabulary or settings.banned_vocabulary)
                 else self._l("settings.personalize.vocabulary.empty"),
                 "corrections": self._l(
-                    "settings.personalize.corrections.detail",
+                    plural_key("settings.personalize.corrections.detail",
+                               len(settings.corrections)),
                     count=len(settings.corrections))
                 if settings.corrections else self._l(
                     "settings.personalize.corrections.empty"),
@@ -7596,7 +7761,8 @@ if APPKIT_AVAILABLE:
                 NSControlStateValueOn if state.voice_object_commands
                 else NSControlStateValueOff)
             voice_object_status = self._l(
-                "settings.privacy.voice_objects.status",
+                plural_key("settings.privacy.voice_objects.status",
+                           state.voice_object_inbox_count),
                 status=state.voice_object_inbox_status,
                 count=state.voice_object_inbox_count,
             )
@@ -7698,7 +7864,9 @@ if APPKIT_AVAILABLE:
             self.dynamic["open_system_settings_button"].setHidden_(
                 not self.view_model.permission_recovery_needed())
             regression = self._l(
-                "diagnostics.regression.cases", count=state.regression_cases)
+                plural_key("diagnostics.regression.cases",
+                           state.regression_cases),
+                count=state.regression_cases)
             if state.regression_quarantined:
                 regression += self._l(
                     "diagnostics.regression.quarantined",
@@ -8035,8 +8203,16 @@ if APPKIT_AVAILABLE:
                     self._l(
                         "settings.dialog.keywords.row",
                         keyword=item.keyword,
-                        observations=item.observations,
-                        confirmations=item.confirmations,
+                        observations=self._l(
+                            plural_key(
+                                "settings.dialog.keywords.observations",
+                                item.observations),
+                            count=item.observations),
+                        confirmations=self._l(
+                            plural_key(
+                                "settings.dialog.keywords.confirmations",
+                                item.confirmations),
+                            count=item.confirmations),
                         status=self._l(
                             "settings.dialog.keywords.status.eligible"
                             if item.eligible else
@@ -9108,7 +9284,7 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         controller.render()
         require(
             str(controller.dynamic["result_summary"].stringValue()) ==
-            localized_string("results.summary.words", words=4),
+            localized_string("results.summary.words.many", words=4),
             "results empty state clears after dictation")
         require(
             bool(controller.dynamic["result_inspect_button"].isEnabled()),
@@ -9646,6 +9822,7 @@ __all__ = [
     "localized_string",
     "native_appkit_smoke_contract",
     "onboarding_presentation",
+    "plural_key",
     "normalize_snapshot",
     "normalize_acoustic_keyword_inspection",
     "normalize_point_and_speak_preview",
