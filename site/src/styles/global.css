@@ -1,33 +1,54 @@
 @import 'tailwindcss';
 
 /* ============================================================= TOKENS */
+/* Pastel clay, mirrored from whisper_face_theme.py: warm cream field,
+   porcelain surfaces, warm green-gray ink. Work surfaces stay quiet (hairline
+   border + one soft ambient shadow); the hard sticker offset is reserved for
+   playful objects, exactly as SURFACE_SPECS reserves it in the app. */
 :root {
-  --bg: #e8fbf0;
-  --surface: #ffffff;
-  --ink: #0e2a24;
-  --ink-soft: #3c5c51;
-  --line: #0c221d;
-  --brand: #10b981;
-  --accent: #fbbf24;
-  --teal: #5eead4;
-  --face: #0b0f0d;
+  --bg: #f5f1e8;
+  --surface: #fffdf8;
+  --ink: #33403a;
+  --ink-soft: #5e6c64;
+  --line: #38332a;
+  --brand: #4cc9a2;
+  /* The raw emerald and butter amber fail AA as text on light surfaces, so
+     text-bearing uses take these inks (BRAND_TEXT_ON_LIGHT in the app). */
+  --brand-ink: #0b7a57;
+  --accent: #f7c873;
+  --teal: #a2efdf;
+  --blush: #f0907e;
+  /* Dark warm ink for copy sitting on pastel fills; the pastels stay light in
+     both themes, so this one does not flip. */
+  --chip-ink: #33281f;
   --spark: rgba(255, 255, 255, 0.85);
-  --sticker: 6px 6px 0 var(--line);
-  --sticker-lg: 10px 10px 0 var(--line);
+  --sticker: 5px 5px 0 color-mix(in srgb, var(--line) 94%, transparent);
+  --sticker-lg: 9px 9px 0 color-mix(in srgb, var(--line) 94%, transparent);
+  --card-line: color-mix(in srgb, var(--line) 16%, transparent);
+  --card-shadow: 0 5px 16px color-mix(in srgb, var(--line) 9%, transparent);
+  --card-shadow-hover: 0 12px 24px color-mix(in srgb, var(--line) 14%, transparent);
+  --blob-1: color-mix(in srgb, var(--teal) 16%, transparent);
+  --blob-2: color-mix(in srgb, var(--accent) 16%, transparent);
+  --blob-3: color-mix(in srgb, var(--blush) 13%, transparent);
   /* Squash amounts and durations are no longer hand-written here: they are
      generated from src/data/motion.ts, which mirrors the Mac app's
      MOTION_SPECS. See the MOTION section at the end of this file. */
 
-  --fox: #ff8a5b;
-  --bear: #fbbf24;
-  --owl: #5eead4;
-  --parrot: #34d399;
-  --cat: #c4b5fd;
-  --dog: #daa560;
-  --wolf: #9aa7b8;
-  --pig: #f6a9bd;
-  --panda: #dce0e8;
-  --tiger: #fba13f;
+  /* FACE_CHIP_COLORS: every chip is the old hue relaxed toward cream. */
+  --fox: #ffb899;
+  --bear: #fdd779;
+  --owl: #a2efdf;
+  --parrot: #89e2bd;
+  --cat: #ddd1f7;
+  --dog: #eac79c;
+  --wolf: #c4c9cf;
+  --pig: #facad2;
+  --panda: #ebeaeb;
+  --tiger: #fdc589;
+  --frog: #bce283;
+  --rabbit: #f6a2bc;
+  --hedgehog: #be9e7f;
+  --penguin: #86cdf0;
 
   --disp: ui-rounded, 'SF Pro Rounded', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --body: ui-sans-serif, -apple-system, system-ui, 'Segoe UI', sans-serif;
@@ -35,29 +56,50 @@
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0a231d;
-    --surface: #123029;
-    --ink: #e8fbf0;
-    --ink-soft: #9fc9bb;
-    --line: #05130f;
+    --bg: #1e2420;
+    --surface: #2a322c;
+    --ink: #f2eee4;
+    --ink-soft: #a8b5ac;
+    --line: #141814;
+    --brand-ink: #4cc9a2;
     --spark: rgba(255, 255, 255, 0.9);
+    --card-line: color-mix(in srgb, var(--line) 46%, transparent);
+    --card-shadow: 0 5px 16px color-mix(in srgb, var(--line) 26%, transparent);
+    --card-shadow-hover: 0 12px 24px color-mix(in srgb, var(--line) 38%, transparent);
+    --blob-1: color-mix(in srgb, var(--teal) 10%, transparent);
+    --blob-2: color-mix(in srgb, var(--accent) 10%, transparent);
+    --blob-3: color-mix(in srgb, var(--blush) 8%, transparent);
   }
 }
 :root[data-theme='light'] {
-  --bg: #e8fbf0;
-  --surface: #ffffff;
-  --ink: #0e2a24;
-  --ink-soft: #3c5c51;
-  --line: #0c221d;
+  --bg: #f5f1e8;
+  --surface: #fffdf8;
+  --ink: #33403a;
+  --ink-soft: #5e6c64;
+  --line: #38332a;
+  --brand-ink: #0b7a57;
   --spark: rgba(255, 255, 255, 0.85);
+  --card-line: color-mix(in srgb, var(--line) 16%, transparent);
+  --card-shadow: 0 5px 16px color-mix(in srgb, var(--line) 9%, transparent);
+  --card-shadow-hover: 0 12px 24px color-mix(in srgb, var(--line) 14%, transparent);
+  --blob-1: color-mix(in srgb, var(--teal) 16%, transparent);
+  --blob-2: color-mix(in srgb, var(--accent) 16%, transparent);
+  --blob-3: color-mix(in srgb, var(--blush) 13%, transparent);
 }
 :root[data-theme='dark'] {
-  --bg: #0a231d;
-  --surface: #123029;
-  --ink: #e8fbf0;
-  --ink-soft: #9fc9bb;
-  --line: #05130f;
+  --bg: #1e2420;
+  --surface: #2a322c;
+  --ink: #f2eee4;
+  --ink-soft: #a8b5ac;
+  --line: #141814;
+  --brand-ink: #4cc9a2;
   --spark: rgba(255, 255, 255, 0.9);
+  --card-line: color-mix(in srgb, var(--line) 46%, transparent);
+  --card-shadow: 0 5px 16px color-mix(in srgb, var(--line) 26%, transparent);
+  --card-shadow-hover: 0 12px 24px color-mix(in srgb, var(--line) 38%, transparent);
+  --blob-1: color-mix(in srgb, var(--teal) 10%, transparent);
+  --blob-2: color-mix(in srgb, var(--accent) 10%, transparent);
+  --blob-3: color-mix(in srgb, var(--blush) 8%, transparent);
 }
 
 /* ============================================================= BASE */
@@ -79,19 +121,31 @@ body {
 jelly-theme.site-theme {
   display: contents;
 }
-.dotgrid {
+/* Backdrop: three huge soft pastel blobs, the same teal/amber/blush trio the
+   app floats behind its Home page, so the site reads as a playground instead
+   of a report. Fixed, so the field holds still while content scrolls by. */
+.clay {
   position: relative;
-  background-image: radial-gradient(var(--teal) 1.4px, transparent 1.6px);
-  background-size: 26px 26px;
 }
-.dotgrid::before {
+.clay::before {
   content: '';
   position: fixed;
   inset: 0;
-  background: var(--bg);
-  opacity: 0.86;
   z-index: 0;
   pointer-events: none;
+  background-image:
+    radial-gradient(closest-side, var(--blob-1) 97%, transparent),
+    radial-gradient(closest-side, var(--blob-2) 97%, transparent),
+    radial-gradient(closest-side, var(--blob-3) 97%, transparent);
+  background-repeat: no-repeat;
+  background-position:
+    left -170px top -70px,
+    right -190px top 26%,
+    left 34% bottom -230px;
+  background-size:
+    480px 480px,
+    560px 560px,
+    460px 460px;
 }
 .wrap {
   max-width: 1160px;
@@ -144,7 +198,8 @@ a {
   z-index: 20;
   backdrop-filter: blur(8px);
   background: color-mix(in srgb, var(--bg) 78%, transparent);
-  border-bottom: 3px solid var(--line);
+  /* Chrome is a work surface now: a whisper of an edge, not a sticker rim. */
+  border-bottom: 1.5px solid var(--card-line);
 }
 .nav .wrap {
   display: flex;
@@ -164,12 +219,12 @@ a {
 .brand .mark {
   width: 34px;
   height: 34px;
-  border-radius: 9px;
+  border-radius: 11px;
   background: var(--parrot);
-  border: 2.5px solid var(--line);
+  border: 2px solid var(--line);
   display: grid;
   place-items: center;
-  box-shadow: 2px 2px 0 var(--line);
+  box-shadow: 2px 2px 0 color-mix(in srgb, var(--line) 94%, transparent);
   flex: none;
 }
 .brand .mark .face-frames {
@@ -214,12 +269,14 @@ a {
   }
 }
 
+/* Buttons are playful objects, so they keep the sticker offset — with the
+   thinner outline and softer clay corners the app's SURFACE_SPECS use. */
 .btn {
   font-family: var(--disp);
   font-weight: 800;
   font-size: 15px;
-  border: 3px solid var(--line);
-  border-radius: 14px;
+  border: 2px solid var(--line);
+  border-radius: 16px;
   padding: 11px 18px;
   cursor: pointer;
   display: inline-flex;
@@ -232,28 +289,28 @@ a {
 .btn-primary {
   background: var(--accent);
   box-shadow: var(--sticker);
-  color: #0c221d;
+  color: var(--chip-ink);
 }
 .btn-primary:hover {
   transform: translate(-2px, -2px);
-  box-shadow: 8px 8px 0 var(--line);
+  box-shadow: 7px 7px 0 color-mix(in srgb, var(--line) 94%, transparent);
 }
 .btn-primary:active {
   transform: translate(3px, 3px);
-  box-shadow: 2px 2px 0 var(--line);
+  box-shadow: 2px 2px 0 color-mix(in srgb, var(--line) 94%, transparent);
 }
 .btn-ghost {
-  background: transparent;
-  box-shadow: 3px 3px 0 var(--line);
+  background: var(--surface);
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--line) 94%, transparent);
 }
 .btn-ghost:hover {
   transform: translate(-1px, -1px);
-  box-shadow: 5px 5px 0 var(--line);
+  box-shadow: 5px 5px 0 color-mix(in srgb, var(--line) 94%, transparent);
 }
 .btn-sm {
   padding: 8px 13px;
   font-size: 14px;
-  border-radius: 12px;
+  border-radius: 14px;
 }
 /* The site's one real Jelly UI element. Its soft body is painted into a canvas,
    so the sticker treatment goes around the body rather than replacing it: black
@@ -262,25 +319,25 @@ a {
 .theme-toggle {
   width: 44px;
   height: 44px;
-  border: 3px solid var(--line);
-  border-radius: 14px;
+  border: 2px solid var(--line);
+  border-radius: 16px;
   background: var(--surface);
-  box-shadow: 3px 3px 0 var(--line);
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--line) 94%, transparent);
   transition: transform 0.12s ease, box-shadow 0.12s ease;
   --jelly-button-height: 44px;
   --jelly-button-min-width: 44px;
   --jelly-button-padding-inline: 0;
-  --jelly-button-radius: 10px;
+  --jelly-button-radius: 12px;
   --jelly-fill: var(--teal);
-  --jelly-label: var(--line);
+  --jelly-label: var(--chip-ink);
 }
 .theme-toggle:hover {
   transform: translate(-1px, -1px);
-  box-shadow: 5px 5px 0 var(--line);
+  box-shadow: 5px 5px 0 color-mix(in srgb, var(--line) 94%, transparent);
 }
 .theme-toggle:active {
   transform: translate(2px, 2px);
-  box-shadow: 1px 1px 0 var(--line);
+  box-shadow: 1px 1px 0 color-mix(in srgb, var(--line) 94%, transparent);
 }
 /* Until jelly.js upgrades the element — or if the CDN ever fails — the toggle
    still has to be a usable, on-brand button. */
@@ -405,15 +462,16 @@ h1.title {
   font-size: 12.5px;
   font-weight: 600;
   padding: 7px 12px;
-  border: 2.5px solid var(--line);
+  border: 1.5px solid var(--card-line);
   border-radius: 999px;
   background: var(--surface);
+  box-shadow: var(--card-shadow);
   display: flex;
   align-items: center;
   gap: 7px;
 }
 .pills li b {
-  color: var(--brand);
+  color: var(--brand-ink);
 }
 
 /* stage */
@@ -432,13 +490,13 @@ h1.title {
 .chip {
   position: absolute;
   inset: 0;
-  border-radius: 40px;
-  border: 4px solid var(--line);
+  border-radius: 44px;
+  border: 3px solid var(--line);
   /* The character's own head is this exact hue, so a solid tile swallows it
      and a translucent tint goes muddy against the dark surface. The tile
      stays neutral and the hue moves to a ring. */
   background: var(--surface);
-  box-shadow: inset 0 0 0 5px color-mix(in oklab, var(--chip, var(--parrot)) 60%, transparent);
+  box-shadow: inset 0 0 0 6px color-mix(in oklab, var(--chip, var(--parrot)) 85%, transparent);
   display: grid;
   place-items: center;
   overflow: hidden;
@@ -481,15 +539,15 @@ h1.title {
   position: relative;
   width: 56px;
   height: 56px;
-  border-radius: 16px;
-  border: 3px solid var(--line);
+  border-radius: 18px;
+  border: 2px solid var(--line);
   background: var(--surface);
   display: grid;
   place-items: center;
   cursor: pointer;
   box-shadow:
-    inset 0 0 0 3px color-mix(in oklab, var(--sc) 60%, transparent),
-    3px 3px 0 var(--line);
+    inset 0 0 0 3px color-mix(in oklab, var(--sc) 85%, transparent),
+    3px 3px 0 color-mix(in srgb, var(--line) 94%, transparent);
   transition: transform 0.12s ease, box-shadow 0.12s ease;
   padding: 0;
 }
@@ -499,11 +557,15 @@ h1.title {
 }
 .swatch:hover {
   transform: translate(-2px, -2px) rotate(-3deg);
-  box-shadow: 6px 6px 0 var(--line);
+  box-shadow:
+    inset 0 0 0 3px color-mix(in oklab, var(--sc) 85%, transparent),
+    6px 6px 0 color-mix(in srgb, var(--line) 94%, transparent);
 }
 .swatch[aria-pressed='true'] {
   transform: translateY(-4px);
-  box-shadow: 3px 8px 0 var(--line);
+  box-shadow:
+    inset 0 0 0 3px color-mix(in oklab, var(--sc) 85%, transparent),
+    3px 8px 0 color-mix(in srgb, var(--line) 94%, transparent);
 }
 
 .ticker {
@@ -522,7 +584,7 @@ h1.title {
   font-size: 12px;
   font-weight: 700;
   padding: 5px 9px;
-  border-radius: 8px;
+  border-radius: 10px;
   border: 2px solid var(--line);
   border-bottom-width: 4px;
   background: var(--surface);
@@ -550,10 +612,10 @@ h1.title {
 
 /* ============================================================= MARQUEE */
 .marquee {
-  border-top: 3px solid var(--line);
-  border-bottom: 3px solid var(--line);
+  border-top: 2px solid var(--line);
+  border-bottom: 2px solid var(--line);
   background: var(--brand);
-  color: #0c221d;
+  color: var(--chip-ink);
   overflow: hidden;
   padding: 14px 0;
   position: relative;
@@ -580,7 +642,7 @@ h1.title {
   white-space: nowrap;
 }
 .marquee-track .star {
-  color: #0c221d;
+  color: var(--chip-ink);
   opacity: 0.55;
 }
 @keyframes scroll {
@@ -611,7 +673,7 @@ section.band {
   font-weight: 600;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--brand);
+  color: var(--brand-ink);
 }
 .sec-head h2 {
   font-family: var(--disp);
@@ -646,27 +708,29 @@ section.band {
     grid-template-columns: 1fr;
   }
 }
+/* Work surfaces go quiet: hairline edge, one soft ambient shadow. The
+   sticker offset stays on the small playful badge inside. */
 .feature {
   background: var(--surface);
-  border: 3px solid var(--line);
-  border-radius: 22px;
+  border: 1.5px solid var(--card-line);
+  border-radius: 24px;
   padding: 24px 22px;
-  box-shadow: var(--sticker);
+  box-shadow: var(--card-shadow);
   transition: transform 0.14s ease, box-shadow 0.14s ease;
 }
 .feature:hover {
-  transform: translate(-3px, -3px);
-  box-shadow: 9px 9px 0 var(--line);
+  transform: translateY(-3px);
+  box-shadow: var(--card-shadow-hover);
 }
 .feature .badge {
   width: 46px;
   height: 46px;
-  border-radius: 13px;
-  border: 3px solid var(--line);
+  border-radius: 15px;
+  border: 2px solid var(--line);
   display: grid;
   place-items: center;
   margin-bottom: 16px;
-  box-shadow: 2px 2px 0 var(--line);
+  box-shadow: 2px 2px 0 color-mix(in srgb, var(--line) 94%, transparent);
   font-size: 22px;
 }
 .feature h3 {
@@ -705,10 +769,10 @@ section.band {
 .step {
   position: relative;
   background: var(--surface);
-  border: 3px solid var(--line);
-  border-radius: 20px;
+  border: 1.5px solid var(--card-line);
+  border-radius: 22px;
   padding: 22px 18px 20px;
-  box-shadow: var(--sticker);
+  box-shadow: var(--card-shadow);
 }
 .step .num {
   counter-increment: step;
@@ -717,13 +781,14 @@ section.band {
   font-size: 13px;
   width: 30px;
   height: 30px;
-  border-radius: 9px;
-  border: 2.5px solid var(--line);
+  border-radius: 11px;
+  border: 2px solid var(--line);
   background: var(--accent);
-  color: #0c221d;
+  color: var(--chip-ink);
   display: grid;
   place-items: center;
   margin-bottom: 14px;
+  box-shadow: 2px 2px 0 color-mix(in srgb, var(--line) 94%, transparent);
 }
 .step .num::before {
   content: counter(step);
@@ -754,10 +819,12 @@ section.band {
     grid-template-columns: repeat(2, 1fr);
   }
 }
+/* The face cards are the playful objects of the page — tilted like stickers
+   on a notebook, so they keep the hard offset the app gives its stat badges. */
 .card {
   background: var(--surface);
-  border: 3px solid var(--line);
-  border-radius: 22px;
+  border: 2px solid var(--line);
+  border-radius: 24px;
   padding: 18px 14px 16px;
   box-shadow: var(--sticker);
   display: flex;
@@ -775,15 +842,15 @@ section.band {
 }
 .card:hover {
   transform: translate(-3px, -3px) rotate(0);
-  box-shadow: 9px 9px 0 var(--line);
+  box-shadow: 8px 8px 0 color-mix(in srgb, var(--line) 94%, transparent);
 }
 .card .tile {
   width: 100%;
   aspect-ratio: 1;
-  border-radius: 16px;
-  border: 3px solid var(--line);
+  border-radius: 18px;
+  border: 2px solid var(--line);
   background: var(--surface);
-  box-shadow: inset 0 0 0 4px color-mix(in oklab, var(--sc) 60%, transparent);
+  box-shadow: inset 0 0 0 4px color-mix(in oklab, var(--sc) 85%, transparent);
   display: grid;
   place-items: center;
   overflow: hidden;
@@ -807,14 +874,15 @@ section.band {
 
 /* ============================================================= PRIVACY */
 .privacy {
-  /* Deliberately one look in both themes: a deep-pine "vault" band that always
-     reads as the calm, trustworthy moment, and sits above the dot-grid overlay. */
-  background: #0b201b;
-  color: #e8fbf0;
+  /* Deliberately one look in both themes: the app's dark clay appearance as a
+     "vault" band that always reads as the calm, trustworthy moment, and sits
+     above the blob backdrop. */
+  background: #232b26;
+  color: #f2eee4;
   position: relative;
   z-index: 1;
-  border-top: 4px solid var(--line);
-  border-bottom: 4px solid var(--line);
+  border-top: 2px solid var(--line);
+  border-bottom: 2px solid var(--line);
 }
 .privacy .wrap {
   padding: 68px 24px;
@@ -855,7 +923,7 @@ section.band {
   font-size: 13px;
   font-weight: 600;
   padding: 9px 13px;
-  border-radius: 12px;
+  border-radius: 14px;
   border: 2px solid var(--teal);
   color: var(--teal);
 }
@@ -887,15 +955,15 @@ section.band {
   flex: none;
   width: 32px;
   height: 32px;
-  border-radius: 10px;
-  border: 2.5px solid var(--line);
+  border-radius: 12px;
+  border: 2px solid var(--line);
   background: var(--parrot);
   display: grid;
   place-items: center;
   font-family: var(--mono);
   font-weight: 700;
-  box-shadow: 2px 2px 0 var(--line);
-  color: #0c221d;
+  box-shadow: 2px 2px 0 color-mix(in srgb, var(--line) 94%, transparent);
+  color: var(--chip-ink);
 }
 .istep h4 {
   font-family: var(--disp);
@@ -911,12 +979,12 @@ section.band {
   font-weight: 500;
 }
 .terminal {
-  border: 3px solid var(--line);
-  border-radius: 18px;
+  border: 2px solid var(--line);
+  border-radius: 20px;
   overflow: hidden;
   box-shadow: var(--sticker-lg);
-  background: #0c1512;
-  color: #e8fbf0;
+  background: #20261f;
+  color: #f2eee4;
 }
 .terminal .bar {
   display: flex;
@@ -932,13 +1000,13 @@ section.band {
   display: block;
 }
 .terminal .bar i:nth-child(1) {
-  background: #ff8a5b;
+  background: #ffb899;
 }
 .terminal .bar i:nth-child(2) {
-  background: #fbbf24;
+  background: #fdd779;
 }
 .terminal .bar i:nth-child(3) {
-  background: #34d399;
+  background: #89e2bd;
 }
 .terminal pre {
   margin: 0;
@@ -949,13 +1017,13 @@ section.band {
   overflow-x: auto;
 }
 .terminal .c {
-  color: #5eead4;
+  color: #a2efdf;
 }
 .terminal .p {
-  color: #8fe3c6;
+  color: #89e2bd;
 }
 .terminal .muted {
-  color: #6f8d84;
+  color: #93a297;
 }
 .install-note {
   margin: 14px 0 0;
@@ -982,9 +1050,9 @@ section.band {
 .install-warn {
   margin: 12px 0 0;
   padding: 11px 14px;
-  border: 2px solid var(--line);
-  border-radius: 12px;
-  background: color-mix(in oklab, var(--accent) 18%, var(--surface));
+  border: 1.5px solid color-mix(in srgb, var(--line) 30%, transparent);
+  border-radius: 14px;
+  background: color-mix(in oklab, var(--accent) 26%, var(--surface));
   color: var(--ink);
   font-size: 13px;
   line-height: 1.55;
@@ -1015,10 +1083,10 @@ section.band {
   max-width: 760px;
 }
 .faq details {
-  border: 3px solid var(--line);
-  border-radius: 16px;
+  border: 1.5px solid var(--card-line);
+  border-radius: 18px;
   background: var(--surface);
-  box-shadow: var(--sticker);
+  box-shadow: var(--card-shadow);
   overflow: hidden;
 }
 .faq summary {
@@ -1039,7 +1107,7 @@ section.band {
 .faq summary::after {
   content: '+';
   font-size: 24px;
-  color: var(--brand);
+  color: var(--brand-ink);
   transition: transform 0.2s ease;
 }
 .faq details[open] summary::after {
@@ -1072,12 +1140,12 @@ footer.foot .wrap {
 .foot-faces .mini {
   width: 34px;
   height: 34px;
-  border-radius: 9px;
-  border: 2.5px solid var(--line);
+  border-radius: 11px;
+  border: 2px solid var(--line);
   background: var(--sc);
   display: grid;
   place-items: center;
-  box-shadow: 2px 2px 0 var(--line);
+  box-shadow: 2px 2px 0 color-mix(in srgb, var(--line) 94%, transparent);
 }
 .foot-faces .mini .face-frames {
   width: 26px;
@@ -1116,10 +1184,10 @@ footer.foot .wrap {
   position: sticky;
   top: 92px;
   align-self: start;
-  border: 3px solid var(--line);
-  border-radius: 18px;
+  border: 1.5px solid var(--card-line);
+  border-radius: 20px;
   background: var(--surface);
-  box-shadow: var(--sticker);
+  box-shadow: var(--card-shadow);
   padding: 18px;
   height: fit-content;
 }
@@ -1134,7 +1202,7 @@ footer.foot .wrap {
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--brand);
+  color: var(--brand-ink);
   margin: 4px 0 10px;
 }
 .doc-side ul {
@@ -1159,8 +1227,8 @@ footer.foot .wrap {
 }
 .doc-side a[aria-current='page'] {
   background: var(--accent);
-  color: #0c221d;
-  box-shadow: 2px 2px 0 var(--line);
+  color: var(--chip-ink);
+  box-shadow: 2px 2px 0 color-mix(in srgb, var(--line) 94%, transparent);
 }
 
 /* prose */
@@ -1213,7 +1281,7 @@ footer.foot .wrap {
   margin: 6px 0;
 }
 .prose a {
-  color: var(--brand);
+  color: var(--brand-ink);
   font-weight: 600;
   text-decoration: underline;
   text-underline-offset: 3px;
@@ -1229,14 +1297,14 @@ footer.foot .wrap {
   border-radius: 6px;
 }
 .prose pre {
-  background: #0c1512;
-  color: #e8fbf0;
-  border: 3px solid var(--line);
-  border-radius: 14px;
+  background: #20261f;
+  color: #f2eee4;
+  border: 1.5px solid var(--card-line);
+  border-radius: 16px;
   padding: 16px 18px;
   overflow-x: auto;
   margin: 0 0 18px;
-  box-shadow: var(--sticker);
+  box-shadow: var(--card-shadow);
 }
 .prose pre code {
   background: none;
@@ -1247,7 +1315,7 @@ footer.foot .wrap {
 .prose blockquote {
   margin: 0 0 18px;
   padding: 4px 18px;
-  border-left: 4px solid var(--brand);
+  border-left: 3px solid color-mix(in srgb, var(--brand) 55%, transparent);
   color: var(--ink-soft);
   font-style: italic;
 }
@@ -1265,22 +1333,22 @@ footer.foot .wrap {
   max-width: 760px;
 }
 .post-card {
-  border: 3px solid var(--line);
-  border-radius: 18px;
+  border: 1.5px solid var(--card-line);
+  border-radius: 20px;
   background: var(--surface);
-  box-shadow: var(--sticker);
+  box-shadow: var(--card-shadow);
   padding: 22px 24px;
   transition: transform 0.14s ease, box-shadow 0.14s ease;
   display: block;
 }
 .post-card:hover {
-  transform: translate(-3px, -3px);
-  box-shadow: 9px 9px 0 var(--line);
+  transform: translateY(-3px);
+  box-shadow: var(--card-shadow-hover);
 }
 .post-card .date {
   font-family: var(--mono);
   font-size: 12.5px;
-  color: var(--brand);
+  color: var(--brand-ink);
   font-weight: 600;
 }
 .post-card h3 {

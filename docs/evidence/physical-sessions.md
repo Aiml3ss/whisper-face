@@ -13,6 +13,13 @@ guided by a tool. Four are checklists, because nothing here should pretend to
 automate a fresh Mac, a Windows box, someone else's laptop, or a competitor's
 product.
 
+Before booking a sitting, run
+[`passive-observation.md`](passive-observation.md): part of the app matrix and
+part of the lifecycle suite can be harvested from dictation you have already
+done, for free, in a second. It also states plainly which corpora ordinary use
+can never supply, so you only spend a sitting on evidence that actually needs
+one.
+
 Every session obeys the same rules:
 
 - **Nothing is defaulted.** A value is recorded only when the runtime printed

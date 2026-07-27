@@ -16,7 +16,8 @@ appearances so layout and contrast can be reviewed as images.
 Usage:
     uv run scripts/window_render_probe.py [output-dir]
 
-Writes window-{home,settings-personalize,settings-privacy,advanced}-
+Writes window-{home,settings-personalize,settings-controls,settings-privacy,
+advanced}-
 {light,dark}.png plus window-onboarding-{stage}-{light,dark}.png for every
 first-run stage, into ``.probe-renders/`` by default.
 
@@ -183,6 +184,24 @@ for appearance_name, suffix in (
             STATE, section="Settings", settings_pane=pane)
         controller.render()
         snapshot(f"window-settings-{pane.lower()}-{suffix}")
+
+    # The worst case for the Controls pane is a capture key that shares a
+    # modifier with two voice modes and an undo key that is bound: both
+    # detail lines are at their longest, which is where truncation shows up.
+    model.state = replace(
+        STATE, section="Settings", settings_pane="Controls",
+        hotkey="ctrl_r", hotkey_label="Right Control",
+        hotkey_shared_modes=("reply", "command", "code"),
+        undo_hotkey="f14", undo_hotkey_label="F14",
+        undo_available=True, sound_theme="whisper")
+    controller.render()
+    snapshot(f"window-settings-controls-shared-{suffix}")
+
+    model.state = replace(
+        STATE, section="Settings", settings_pane="Privacy",
+        recent_dictations=True)
+    controller.render()
+    snapshot(f"window-settings-privacy-recent-{suffix}")
 
     model.state = replace(STATE, section="Advanced")
     controller.render()

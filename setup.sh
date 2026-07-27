@@ -52,20 +52,45 @@ VERIFY_ONLY=0
 # cleanup model are quality upgrades and are opt-in.
 WITH_ALL_MODELS=0
 MODELS_ONLY=0
+UNINSTALL=0
+ASSUME_YES=0
+REMOVE_MODELS=0
+REMOVE_PERSONAL=0
 for arg in "$@"; do
     case "$arg" in
         --server-only) MODE="server-only" ;;
         --verify) VERIFY_ONLY=1 ;;
         --with-all-models) WITH_ALL_MODELS=1 ;;
         --models) MODELS_ONLY=1; WITH_ALL_MODELS=1 ;;
+        --uninstall) UNINSTALL=1 ;;
+        --yes) ASSUME_YES=1 ;;
+        --remove-models) REMOVE_MODELS=1 ;;
+        --remove-personal-data) REMOVE_PERSONAL=1 ;;
         -h|--help)
             echo "Usage: ./setup.sh [--server-only] [--verify]" \
                 "[--with-all-models] [--models]"
+            echo "       ./setup.sh --uninstall [--yes] [--remove-models]" \
+                "[--remove-personal-data]"
             echo "  --server-only  install the headless endpoint without UI/mic"
             echo "  --verify       check an existing installation without changing it"
             echo "  --with-all-models  also download the optional quality models"
             echo "  --models       download only the optional models into an"
             echo "                 existing installation, then exit"
+            echo
+            echo "Uninstall (prints a plan and changes nothing unless --yes):"
+            echo "  --uninstall    list every file and service this installer"
+            echo "                 created, then stop. Nothing is removed."
+            echo "  --yes          actually perform the listed removal"
+            echo "  --remove-models          also remove the downloaded models"
+            echo "                           (~650 MB-5 GB, re-downloadable)"
+            echo "  --remove-personal-data   also remove your dictionary,"
+            echo "                           snippets, tones, preferences,"
+            echo "                           transcripts, corrections, drafts,"
+            echo "                           and logs. Kept by default; these"
+            echo "                           are your words and cannot be"
+            echo "                           downloaded again."
+            echo "  Homebrew, uv, ffmpeg, Ollama itself, and the Swift"
+            echo "  toolchain are shared tools and are never removed."
             echo
             echo "Required (always installed, ~650 MB):"
             echo "  Parakeet Unified 0.6B  primary recognition"
@@ -79,6 +104,18 @@ for arg in "$@"; do
         *) echo "Unknown option: $arg" >&2; exit 2 ;;
     esac
 done
+if [ "$UNINSTALL" -eq 1 ]; then
+    if [ "$MODELS_ONLY" -eq 1 ] || [ "$VERIFY_ONLY" -eq 1 ] \
+            || [ "$WITH_ALL_MODELS" -eq 1 ] || [ "$MODE" != "full" ]; then
+        echo "!! --uninstall cannot be combined with an install option" >&2
+        exit 2
+    fi
+elif [ "$ASSUME_YES" -eq 1 ] || [ "$REMOVE_MODELS" -eq 1 ] \
+        || [ "$REMOVE_PERSONAL" -eq 1 ]; then
+    echo "!! --yes, --remove-models, and --remove-personal-data only apply" \
+        "to --uninstall" >&2
+    exit 2
+fi
 
 fail() {
     echo "!! $*" >&2
@@ -252,6 +289,281 @@ render_plist() {
     mv -f "$temporary" "$destination"
 }
 
+launch_dir="$HOME/Library/LaunchAgents"
+dictate_plist="$launch_dir/com.berg.dictate.plist"
+ollama_plist="$launch_dir/com.berg.ollama.plist"
+launcher_app="$HOME/Applications/Whisper Face.app"
+launcher_receipt="$HOME/Library/Application Support/Whisper Face/launcher-install.json"
+service_receipt_dir="$HOME/Library/Application Support/Whisper Face"
+ollama_service_receipt="$service_receipt_dir/ollama-service.sha256"
+parakeet_helper="$DIR/.models/bin/parrot-asr-helper"
+dictate_log="$DIR/dictate.log"
+ollama_log="$DIR/ollama.log"
+
+# --- Uninstall --------------------------------------------------------------
+# Removal works from the explicit inventory below and never from a glob or a
+# wildcard. Every path named here is one this installer created. Homebrew, uv,
+# ffmpeg, Ollama itself, the Swift toolchain, and every model in the shared
+# Hugging Face cache that Whisper Face did not download are shared tools; they
+# are listed as untouched and are never removed.
+parakeet_model_dir="$HOME/Library/Application Support/FluidAudio/Models/parakeet-unified-en-0.6b"
+hf_hub_cache="${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}"
+whisper_fast_cache="$hf_hub_cache/models--mlx-community--whisper-tiny"
+whisper_large_cache="$hf_hub_cache/models--mlx-community--whisper-large-v3-turbo"
+whisper_fast_lock="$hf_hub_cache/.locks/models--mlx-community--whisper-tiny"
+whisper_large_lock="$hf_hub_cache/.locks/models--mlx-community--whisper-large-v3-turbo"
+
+uninstall_removed=0
+uninstall_absent=0
+uninstall_pending=0
+uninstall_failed=0
+
+keep_installed_path() {
+    # $1 = path, $2 = description. Reports without touching anything.
+    if [ -e "$1" ] || [ -L "$1" ]; then
+        printf '   %-13s %s  (%s)\n' "keeping" "$1" "$2"
+    else
+        printf '   %-13s %s\n' "not present" "$1"
+        uninstall_absent=$((uninstall_absent + 1))
+    fi
+}
+
+remove_installed_path() {
+    # $1 = 1 when this tier was requested, $2 = path, $3 = description.
+    # An unrequested tier is reported, never removed; a requested tier is
+    # removed only once --yes turned the dry run into a real one.
+    local requested="$1" target="$2" description="$3"
+    case "$target" in
+        ""|/|"$HOME"|"$HOME"/|"$DIR"|"$DIR"/)
+            fail "refusing to remove an unsafe path: '$target'" ;;
+    esac
+    if [ "$requested" -ne 1 ]; then
+        keep_installed_path "$target" "$description"
+        return 0
+    fi
+    if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+        printf '   %-13s %s\n' "not present" "$target"
+        uninstall_absent=$((uninstall_absent + 1))
+        return 0
+    fi
+    if [ "$ASSUME_YES" -ne 1 ]; then
+        printf '   %-13s %s  (%s)\n' "would remove" "$target" "$description"
+        uninstall_pending=$((uninstall_pending + 1))
+        return 0
+    fi
+    if rm -rf -- "$target"; then
+        printf '   %-13s %s\n' "removed" "$target"
+        uninstall_removed=$((uninstall_removed + 1))
+    else
+        printf '   %-13s %s  (could not remove)\n' "FAILED" "$target"
+        uninstall_failed=$((uninstall_failed + 1))
+    fi
+}
+
+prune_empty_directory() {
+    # Only ever removes a directory that is already empty, so a shared parent
+    # still holding someone else's files always survives.
+    local target="$1"
+    [ -d "$target" ] || return 0
+    if [ "$ASSUME_YES" -ne 1 ]; then
+        printf '   %-13s %s  (only if empty by then)\n' "would remove" "$target"
+        return 0
+    fi
+    if rmdir -- "$target" 2>/dev/null; then
+        printf '   %-13s %s  (was empty)\n' "removed" "$target"
+        uninstall_removed=$((uninstall_removed + 1))
+    else
+        printf '   %-13s %s  (still holds other files)\n' "keeping" "$target"
+    fi
+}
+
+unload_installed_agent() {
+    # $1 = launchd label, $2 = description.
+    local label="$1" description="$2" target
+    target="gui/$(id -u)/$label"
+    if ! launchctl print "$target" >/dev/null 2>&1; then
+        printf '   %-13s %s  (%s)\n' "not loaded" "$target" "$description"
+        uninstall_absent=$((uninstall_absent + 1))
+        return 0
+    fi
+    if [ "$ASSUME_YES" -ne 1 ]; then
+        printf '   %-13s %s  (%s)\n' "would unload" "$target" "$description"
+        uninstall_pending=$((uninstall_pending + 1))
+        return 0
+    fi
+    launchctl bootout "$target" 2>/dev/null || true
+    for _ in $(seq 1 15); do
+        launchctl print "$target" >/dev/null 2>&1 || break
+        sleep 1
+    done
+    if launchctl print "$target" >/dev/null 2>&1; then
+        printf '   %-13s %s  (still loaded; log out to clear it)\n' \
+            "FAILED" "$target"
+        uninstall_failed=$((uninstall_failed + 1))
+    else
+        printf '   %-13s %s\n' "unloaded" "$target"
+        uninstall_removed=$((uninstall_removed + 1))
+    fi
+}
+
+remove_ollama_cleanup_model() {
+    # qwen3.5:4b lives in Ollama's own store. Ask Ollama to drop that one
+    # model; never delete anything under its data directory by hand. This runs
+    # before the services are unloaded because the CLI needs the local server.
+    local ollama_bin="" candidate
+    if [ "$REMOVE_MODELS" -ne 1 ]; then
+        printf '   %-13s %s\n' "keeping" \
+            "ollama model qwen3.5:4b (if installed), in Ollama's own store"
+        return 0
+    fi
+    ollama_bin="$(command -v ollama 2>/dev/null || true)"
+    if [ -z "$ollama_bin" ]; then
+        for candidate in /opt/homebrew/bin/ollama /usr/local/bin/ollama; do
+            if [ -x "$candidate" ]; then
+                ollama_bin="$candidate"
+                break
+            fi
+        done
+    fi
+    if [ -z "$ollama_bin" ]; then
+        printf '   %-13s %s\n' "unknown" \
+            "ollama command not found; if qwen3.5:4b is installed, remove it with: ollama rm qwen3.5:4b"
+        return 0
+    fi
+    if ! "$ollama_bin" show qwen3.5:4b >/dev/null 2>&1; then
+        printf '   %-13s %s\n' "not present" "ollama model qwen3.5:4b"
+        uninstall_absent=$((uninstall_absent + 1))
+        return 0
+    fi
+    if [ "$ASSUME_YES" -ne 1 ]; then
+        printf '   %-13s %s  (%s)\n' "would remove" \
+            "ollama model qwen3.5:4b" "semantic cleanup model, ~3.4 GB"
+        uninstall_pending=$((uninstall_pending + 1))
+        return 0
+    fi
+    if "$ollama_bin" rm qwen3.5:4b >/dev/null 2>&1; then
+        printf '   %-13s %s\n' "removed" "ollama model qwen3.5:4b"
+        uninstall_removed=$((uninstall_removed + 1))
+    else
+        printf '   %-13s %s\n' "FAILED" \
+            "ollama model qwen3.5:4b (Ollama did not answer; run: ollama rm qwen3.5:4b)"
+        uninstall_failed=$((uninstall_failed + 1))
+    fi
+}
+
+uninstall_whisper_face() {
+    local personal_file
+    echo
+    if [ "$ASSUME_YES" -eq 1 ]; then
+        echo "== Whisper Face uninstall from $DIR"
+    else
+        echo "== Whisper Face uninstall from $DIR (dry run)"
+        echo "== Nothing below is changed. This is exactly what --yes would do."
+    fi
+
+    step "models (removed only with --remove-models)"
+    remove_ollama_cleanup_model
+    remove_installed_path "$REMOVE_MODELS" "$parakeet_model_dir" \
+        "Parakeet Unified Core ML model, ~565 MB"
+    remove_installed_path "$REMOVE_MODELS" "$whisper_fast_cache" \
+        "Whisper Tiny snapshot, ~75 MB"
+    remove_installed_path "$REMOVE_MODELS" "$whisper_large_cache" \
+        "Whisper large-v3-turbo snapshot, ~1.6 GB"
+    remove_installed_path "$REMOVE_MODELS" "$whisper_fast_lock" \
+        "Hugging Face lock for Whisper Tiny"
+    remove_installed_path "$REMOVE_MODELS" "$whisper_large_lock" \
+        "Hugging Face lock for Whisper large-v3-turbo"
+    if [ "$REMOVE_MODELS" -eq 1 ]; then
+        prune_empty_directory "$HOME/Library/Application Support/FluidAudio/Models"
+        prune_empty_directory "$HOME/Library/Application Support/FluidAudio"
+    fi
+
+    step "login services this installer loaded"
+    unload_installed_agent com.berg.dictate "dictation login agent"
+    unload_installed_agent com.berg.ollama "tuned local Ollama service"
+
+    step "service definitions, launcher app, and install receipts"
+    remove_installed_path 1 "$dictate_plist" "dictation LaunchAgent"
+    remove_installed_path 1 "$ollama_plist" "Ollama LaunchAgent"
+    remove_installed_path 1 "$launcher_app" "Whisper Face launcher app"
+    remove_installed_path 1 "$launcher_receipt" "launcher install receipt"
+    remove_installed_path 1 "$ollama_service_receipt" \
+        "Ollama service load receipt"
+    prune_empty_directory "$service_receipt_dir"
+
+    step "build products and runtime state inside the checkout"
+    remove_installed_path 1 "$parakeet_helper" "native Parakeet ASR helper"
+    remove_installed_path 1 "$DIR/.models/bin" "helper install directory"
+    remove_installed_path 1 "$DIR/.models/swift-build" "Swift build scratch"
+    prune_empty_directory "$DIR/.models"
+    remove_installed_path 1 "$DIR/.dictate.lock" "single-instance lock"
+
+    step "personal files (removed only with --remove-personal-data)"
+    echo "   These are your words and your corrections. No download restores"
+    echo "   them. They are kept unless you ask for them to go."
+    for personal_file in \
+            "$DIR/dictionary.txt" \
+            "$DIR/snippets.json" \
+            "$DIR/tones.json" \
+            "$DIR/preferences.json" \
+            "$DIR/learned.json" \
+            "$DIR/transcripts.jsonl" \
+            "$DIR/voice_inbox.json" \
+            "$DIR/demonstrations.json" \
+            "$DIR/acoustic_keyword_memory.json" \
+            "$DIR/delayed_cleanup_activation.json" \
+            "$DIR/acoustic_keyword_activation.json" \
+            "$DIR/acoustic_calibration_activation.json" \
+            "$DIR/relisten_activation.json" \
+            "$DIR/dictate.log" \
+            "$DIR/ollama.log"; do
+        remove_installed_path "$REMOVE_PERSONAL" "$personal_file" \
+            "personal file"
+    done
+
+    step "never touched by this uninstaller"
+    echo "   Homebrew, and the shared packages uv, ffmpeg, and ollama"
+    echo "   Ollama's own store ($HOME/.ollama) and every other model in it"
+    echo "   the Swift toolchain and the Xcode Command Line Tools"
+    echo "   the uv cache, and every Hugging Face model listed nowhere above"
+    echo "   $DIR itself -- delete this folder by hand when you are done"
+    echo "   macOS privacy grants. Remove \"Whisper Face\" yourself under System"
+    echo "     Settings -> Privacy & Security -> Input Monitoring, Accessibility,"
+    echo "     and Microphone. An installer must not edit that database."
+
+    echo
+    if [ "$ASSUME_YES" -eq 1 ]; then
+        echo "== removed $uninstall_removed item(s);" \
+            "$uninstall_absent were already gone"
+    else
+        echo "== dry run: $uninstall_pending item(s) would be removed;" \
+            "$uninstall_absent are already gone"
+        echo "== nothing was changed. To carry it out:"
+        echo "==   ./setup.sh --uninstall --yes"
+        echo "==   ./setup.sh --uninstall --yes --remove-models"
+        echo "==   ./setup.sh --uninstall --yes --remove-personal-data"
+    fi
+    if [ "$REMOVE_MODELS" -ne 1 ]; then
+        echo "== models were kept; rerun with --remove-models to free that space"
+    fi
+    if [ "$REMOVE_PERSONAL" -ne 1 ]; then
+        echo "== your dictionary, snippets, tones, preferences, corrections,"
+        echo "== transcripts, drafts, and logs were kept in $DIR"
+    fi
+    if [ "$uninstall_failed" -gt 0 ]; then
+        echo "!! $uninstall_failed item(s) could not be removed; see FAILED above"
+        return 1
+    fi
+    return 0
+}
+
+if [ "$UNINSTALL" -eq 1 ]; then
+    if uninstall_whisper_face; then
+        exit 0
+    fi
+    exit 1
+fi
+
 required=(
     dictate.py dictate.py.lock parrot_core.py voice_compiler.py
     phonetic_keys.py
@@ -287,6 +599,7 @@ required=(
     com.berg.dictate.plist.template com.berg.ollama.plist.template
     snippets.template.json tones.template.json preferences.template.json
     acoustic_keyword_memory.template.json dictionary.template.txt
+    sounds/start.wav sounds/finish.wav sounds/review.wav sounds/error.wav
     icons/faces/parrot-idle.svg icons/faces/parrot-blink.svg icons/faces/parrot-talk.svg
     icons/faces/fox-idle.svg icons/faces/fox-blink.svg icons/faces/fox-talk.svg
     icons/faces/owl-idle.svg icons/faces/owl-blink.svg icons/faces/owl-talk.svg
@@ -297,6 +610,10 @@ required=(
     icons/faces/pig-idle.svg icons/faces/pig-blink.svg icons/faces/pig-talk.svg
     icons/faces/panda-idle.svg icons/faces/panda-blink.svg icons/faces/panda-talk.svg
     icons/faces/tiger-idle.svg icons/faces/tiger-blink.svg icons/faces/tiger-talk.svg
+    icons/faces/frog-idle.svg icons/faces/frog-blink.svg icons/faces/frog-talk.svg
+    icons/faces/rabbit-idle.svg icons/faces/rabbit-blink.svg icons/faces/rabbit-talk.svg
+    icons/faces/hedgehog-idle.svg icons/faces/hedgehog-blink.svg icons/faces/hedgehog-talk.svg
+    icons/faces/penguin-idle.svg icons/faces/penguin-blink.svg icons/faces/penguin-talk.svg
     icons/faces/color/parrot-idle.svg icons/faces/color/parrot-half.svg icons/faces/color/parrot-talk.svg
     icons/faces/color/fox-idle.svg icons/faces/color/fox-half.svg icons/faces/color/fox-talk.svg
     icons/faces/color/owl-idle.svg icons/faces/color/owl-half.svg icons/faces/color/owl-talk.svg
@@ -307,6 +624,10 @@ required=(
     icons/faces/color/pig-idle.svg icons/faces/color/pig-half.svg icons/faces/color/pig-talk.svg
     icons/faces/color/panda-idle.svg icons/faces/color/panda-half.svg icons/faces/color/panda-talk.svg
     icons/faces/color/tiger-idle.svg icons/faces/color/tiger-half.svg icons/faces/color/tiger-talk.svg
+    icons/faces/color/frog-idle.svg icons/faces/color/frog-half.svg icons/faces/color/frog-talk.svg
+    icons/faces/color/rabbit-idle.svg icons/faces/color/rabbit-half.svg icons/faces/color/rabbit-talk.svg
+    icons/faces/color/hedgehog-idle.svg icons/faces/color/hedgehog-half.svg icons/faces/color/hedgehog-talk.svg
+    icons/faces/color/penguin-idle.svg icons/faces/color/penguin-half.svg icons/faces/color/penguin-talk.svg
 )
 for file in "${required[@]}"; do
     [ -f "$DIR/$file" ] || fail "repository is incomplete: missing $file"
@@ -326,17 +647,6 @@ macos_major="$(sw_vers -productVersion | cut -d. -f1)"
 if [ "$macos_major" -lt 14 ]; then
     echo "!! macOS 14 or newer is recommended and supported by Homebrew."
 fi
-
-launch_dir="$HOME/Library/LaunchAgents"
-dictate_plist="$launch_dir/com.berg.dictate.plist"
-ollama_plist="$launch_dir/com.berg.ollama.plist"
-launcher_app="$HOME/Applications/Whisper Face.app"
-launcher_receipt="$HOME/Library/Application Support/Whisper Face/launcher-install.json"
-service_receipt_dir="$HOME/Library/Application Support/Whisper Face"
-ollama_service_receipt="$service_receipt_dir/ollama-service.sha256"
-parakeet_helper="$DIR/.models/bin/parrot-asr-helper"
-dictate_log="$DIR/dictate.log"
-ollama_log="$DIR/ollama.log"
 
 verify_install() {
     step "verifying installation"

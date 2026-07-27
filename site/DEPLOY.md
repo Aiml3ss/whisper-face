@@ -49,6 +49,7 @@ Cloudflare Web Analytics is wired but off. To enable: dashboard → **Web Analyt
 
 ## Before going live
 
-- Point the **Download** / **Get it on GitHub** buttons at the real signed, notarized release once it exists (they currently go to the repo, and the install section says "building from source today").
+- The download buttons already point at a real release: `src/data/release.ts` holds the version, tag, DMG, size, release-notes and SHA256SUMS URLs, and every link on the site reads from there. Update those values when cutting a release.
+- That build is ad-hoc signed but **not** notarized, which is what `RELEASE.unsigned` records; the install section shows the Gatekeeper note because of it. Once a Developer ID build ships, set `unsigned: false` so the note disappears.
 - Swap placeholder copy in `src/content/` and the components as needed.
 - Re-render `public/og.png` if the tagline changes.
