@@ -257,6 +257,7 @@ required=(
     process_verifier.py prewarmed_verifier.py whisper_verifier_adapter.py
     relisten_activation.py
     insertion_integrity.py personal_regression.py shadow_candidate_gate.py
+    measurement_mode.py
     cleanup_circuit_breaker.py delayed_cleanup_activation.py
     delayed_cleanup_merge.py macos_delayed_cleanup_destination.py
     model_wallet.py model_wallet_shadow.py model_readiness_evidence.py

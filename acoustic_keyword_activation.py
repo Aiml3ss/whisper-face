@@ -4,6 +4,13 @@ Keyword memory alone never changes recognition.  This module grants a bounded
 prompt-ordering effect only when one eligible memory candidate has a balanced
 caller-attested physical evaluation, no observed regression, and explicit
 manual approval.
+
+The biased half of that evaluation can only be recorded while the term is
+actually in the Whisper prompt, which before measurement mode required the very
+activation the evaluation was meant to justify.  A biased pass recorded under
+measurement mode exercises the real prompt, so it is acceptable evidence; each
+entry records that it did, so an override-derived activation stays visibly
+distinct from an ordinary-path one.
 """
 
 from __future__ import annotations
@@ -22,6 +29,13 @@ from acoustic_keyword_bias_evaluation import (
     MIN_SELECTION_IMPROVEMENTS,
 )
 from acoustic_keyword_memory import AcousticKeywordMemory, KeywordCandidate
+from measurement_mode import (
+    EVIDENCE_KEY,
+    KEYWORD_LABEL,
+    ORDINARY_PATH,
+    MeasurementModeError,
+    evidence_label,
+)
 
 
 SCHEMA_VERSION = 1
@@ -34,7 +48,7 @@ _ROOT_KEYS = frozenset({
 })
 _ENTRY_KEYS = frozenset({
     "keyword", "app_scope", "evidence", "source_report_sha256",
-    "manual_review",
+    "manual_review", "measurement_mode",
 })
 _EVIDENCE_KEYS = frozenset({
     "physical_cases", "positive_reference_cases",
@@ -134,6 +148,11 @@ def build_activation_entry(
             or regressions != 0 or losses != 0 or introductions != 0
             or evidence.get("synthetic_cases") != 0):
         raise ActivationError("evaluation evidence is insufficient")
+    try:
+        measurement = evidence_label(
+            evaluation.get(EVIDENCE_KEY), arm=KEYWORD_LABEL)
+    except MeasurementModeError as exc:
+        raise ActivationError("keyword measurement label is invalid") from exc
     return {
         "keyword": keyword,
         "app_scope": candidate.app_scope,
@@ -149,6 +168,9 @@ def build_activation_entry(
         "source_report_sha256": sha256(
             _canonical_bytes(evaluation)).hexdigest(),
         "manual_review": True,
+        # Disclosure, not a threshold: a biased pass recorded under
+        # measurement mode exercised the real Whisper prompt.
+        "measurement_mode": measurement,
     }
 
 
@@ -175,6 +197,8 @@ def validate_state(value: Any) -> dict[str, Any]:
                 or not isinstance(evidence, Mapping)
                 or set(evidence) != _EVIDENCE_KEYS
                 or entry["manual_review"] is not True
+                or entry["measurement_mode"] not in (
+                    ORDINARY_PATH, KEYWORD_LABEL)
                 or not isinstance(digest, str) or len(digest) != 64
                 or any(char not in "0123456789abcdef" for char in digest)):
             raise ActivationError("keyword activation entry is invalid")

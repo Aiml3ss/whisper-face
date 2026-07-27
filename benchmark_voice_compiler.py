@@ -356,7 +356,12 @@ def evaluate_transcripts(path: Path | None) -> dict[str, Any]:
 
     metric_values: dict[str, list[float]] = {
         field: [] for field in PERFORMANCE_FIELDS}
-    verified: list[bool] = []
+    # `asr_verified` is second-pass ASR agreement. It says nothing about
+    # whether the text reached its destination; that is `insertion_verified`,
+    # and conflating the two produced a rate that read as a delivery number.
+    # Records written before the key was disambiguated carry a bare `verified`
+    # and are skipped rather than reinterpreted.
+    asr_verified: list[bool] = []
     for entry in entries:
         metrics = entry.get("metrics")
         if not isinstance(metrics, dict):
@@ -365,16 +370,16 @@ def evaluate_transcripts(path: Path | None) -> dict[str, Any]:
             value = _number(metrics.get(field))
             if value is not None:
                 metric_values[field].append(value)
-        if isinstance(metrics.get("verified"), bool):
-            verified.append(metrics["verified"])
+        if isinstance(metrics.get("asr_verified"), bool):
+            asr_verified.append(metrics["asr_verified"])
     performance = {
         field: _distribution(values)
         for field, values in metric_values.items() if values
     }
-    if verified:
-        performance["verified_rate"] = {
-            "samples": len(verified),
-            "rate": round(sum(verified) / len(verified), 4),
+    if asr_verified:
+        performance["asr_verified_rate"] = {
+            "samples": len(asr_verified),
+            "rate": round(sum(asr_verified) / len(asr_verified), 4),
         }
 
     zero_observations: list[bool] = []
@@ -482,9 +487,9 @@ def render_table(report: dict[str, Any]) -> str:
             f"records: {transcripts['records']} "
             f"(malformed skipped: {transcripts['malformed_records']})")
         for metric, result in transcripts["performance"].items():
-            if metric == "verified_rate":
+            if metric == "asr_verified_rate":
                 lines.append(
-                    f"verified: {_rate(result['rate'])} "
+                    f"asr second pass agreed: {_rate(result['rate'])} "
                     f"({result['samples']} samples)")
             else:
                 suffix = "" if metric == "confidence" else "s"

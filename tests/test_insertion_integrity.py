@@ -328,5 +328,28 @@ class ReadbackConflictShapeTests(unittest.TestCase):
                 self.assertEqual(ReadbackResult.conflict(shape).detail, shape)
 
 
+class EdgeWhitespaceVerificationTests(unittest.TestCase):
+    """Edge whitespace proves delivery; nothing weaker may reach VERIFIED."""
+
+    def test_edge_whitespace_is_verified_with_its_own_reason(self):
+        result = ReadbackResult.verified_edge_whitespace()
+        self.assertEqual(result.state, ReceiptState.VERIFIED)
+        self.assertEqual(result.reason,
+                         ReceiptReason.COMMIT_VERIFIED_EDGE_WHITESPACE)
+        self.assertEqual(result.detail, "trailing-whitespace")
+
+    def test_it_is_distinguishable_from_a_byte_exact_match(self):
+        self.assertNotEqual(ReadbackResult.verified().reason,
+                            ReadbackResult.verified_edge_whitespace().reason)
+        self.assertEqual(ReadbackResult.verified().detail, "")
+
+    def test_correction_learning_still_sees_a_verified_state(self):
+        # Learning is gated on state, not reason: an app that only trims a
+        # newline must not silently disable the Personal Prior.
+        self.assertEqual(ReadbackResult.verified_edge_whitespace().state,
+                         ReadbackResult.verified().state)
+
+
+
 if __name__ == "__main__":
     unittest.main()

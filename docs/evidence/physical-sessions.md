@@ -28,6 +28,12 @@ Every session obeys the same rules:
   silently rewritten.
 - **No tool writes a receipt.** `delayed_cleanup_activation.py` is the only
   thing that may install an activation receipt, and only you may run it.
+- **Measurement mode is not authority.** Where a session needs the runtime to
+  do something only a receipt normally enables, start the runtime with an
+  explicit `--measure` argument. It applies the real code path for one process
+  session, writes nothing, ends when the process does, and is recorded in the
+  evidence it produced. It never becomes a receipt and never relaxes a
+  threshold.
 
 Session state and artifacts land in `.evidence/`, which is gitignored and
 written owner-only (`0600`).
@@ -37,7 +43,7 @@ written owner-only (`0600`).
 | Session | Ledger rows | Tool | Realistic operator time |
 |---|---|---|---|
 | 50-app insertion matrix | 26, 27, 28 | `scripts/capture_app_matrix.py` | 2.5–3.5 h, best split into two sittings |
-| Delayed-cleanup 50-case suite | 25 | `scripts/capture_delayed_cleanup_cases.py` | 3–3.5 h **once the blockers below are fixed** |
+| Delayed-cleanup 50-case suite | 25 | `scripts/capture_delayed_cleanup_cases.py` | 3–3.5 h, runtime started in measurement mode |
 | Lifecycle and stress | 16 | `scripts/capture_lifecycle_evidence.py` | 80–100 min |
 | Fresh-Mac onboarding | 2 | checklist | 45–75 min plus a clean machine or account |
 | Hardware matrix | 11 | checklist | 40–60 min per machine |
@@ -114,45 +120,54 @@ switch, focus, dictate, wait, judge, answer. Fifty apps is 2.5 hours of
 answering plus roughly half an hour of setup and app-launching. Two sittings of
 25 apps is more accurate than one of 50, because judgement quality drops.
 
-**Known gap.** `compatibility_fingerprint.CompatibilityObservation` wants a
-capability triple — `target`, `paste`, `readback`. `dictate.py` computes it
-inside `commit_insertion` and never writes it anywhere an external tool can
-read. So the artifact carries the *outcome* half of every observation, fully
-sourced and translated into the closed compatibility buckets, and reports
-`capability_buckets_available: false` with the exact metric keys the runtime
-would have to emit (`insertion_target`, `insertion_paste`,
-`insertion_readback`). Adding those three keys to the `append_transcript`
-metrics dict is the whole fix; until then the fingerprint aggregator cannot be
-fed from a physical session.
+**Capability buckets are now exported.** `commit_insertion` computes the
+capability triple `compatibility_fingerprint.CompatibilityObservation` wants —
+`target` (`readable`/`opaque`/`unavailable`), `paste`, `readback` — and writes
+it to `transcripts.jsonl` as `metrics.insertion_target`,
+`metrics.insertion_paste`, and `metrics.insertion_readback`. A session recorded
+against a current runtime therefore carries both halves of every observation
+and reports `capability_buckets_available: true`, so the artifact can feed the
+fingerprint aggregator directly.
+
+Utterances the runtime had no lease for (the legacy paste path) still report
+the outcome half only, and say so, rather than guessing a bucket. Sessions
+recorded against an older runtime behave the same way.
 
 ---
 
 ## Session 2 — the delayed-cleanup 50-case suite (row 25)
 
-**Read this before booking three hours.** As shipped, this session cannot be
-completed. Three separate blockers stop it, and the tool will tell you the same
-thing:
+**Start the runtime in measurement mode.** Delayed cleanup schedules a pass
+only when a valid activation receipt is installed — the receipt this session
+exists to earn. So run the whole session with the runtime started like this:
 
-1. **Bootstrap deadlock.** `schedule_delayed_cleanup` returns immediately
-   unless `DELAYED_CLEANUP_STATE["active"]` is true, and that is only true when
-   a valid activation receipt is already installed. The receipt requires 50
-   physical cases; producing those cases requires the feature to run. With no
-   receipt the runtime never schedules a delayed pass, prints no
-   `[delayed-cleanup]` line, and every case blocks on `no-runtime-line`.
-2. **No timing source.** The gate requires `apply_ms` per case with a p95 of
-   150 ms. Nothing in the runtime measures or prints a delayed-apply duration.
-   `[delayed-cleanup] <outcome>; <n> applied, <m> held` carries no time, and a
-   stopwatch is not evidence at 150 ms. Every case blocks on
-   `no-runtime-timing`.
-3. **An unreachable scenario.** The gate requires at least eight
-   `duplicate-callback` cases. `dictate.py` passes the per-utterance
-   `event_id` as the proposal id, so two delayed passes never share one id and
-   the adapter's in-flight and completed-duplicate paths cannot be reached by
-   any operator action.
+```sh
+launchctl bootout gui/$UID/com.berg.dictate      # stop the installed service
+uv run --locked --script dictate.py --measure delayed-cleanup
+```
 
-The session still runs, and running it is useful: it records precisely which
-blocker fired for each case, which is the evidence that these are gate defects
-rather than operator error.
+Stop the LaunchAgent first. Whisper Face holds a single-instance lock, so a
+second copy started with `--measure` exits immediately and silently while the
+ordinary one keeps running — you would record a whole session of blocked cases
+without an obvious reason. Bring the service back with
+`launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.berg.dictate.plist`
+when the session is over.
+
+Measurement mode schedules the same real transaction through the same
+`DelayedCleanupTransactionAdapter` against the same destination. It is not a
+receipt: it writes nothing, `measurement_mode.py` cannot produce one, and it
+ends when you quit the runtime. It announces itself with a `[measurement]`
+banner at startup and a menu-bar row while it is on, and it marks every
+delayed-cleanup line it produces. The capture tool reads that mark from the
+runtime's own line — it never asks you and never assumes — and carries it into
+each record as `measurement_mode`, so the receipt reports how many of its 50
+cases were measured.
+
+The gate **accepts** a measured corpus. It measures the shipping path, which is
+the point; the label is what keeps it distinguishable, not disqualifying.
+
+Without either a receipt or `--measure delayed-cleanup`, the runtime prints no
+`[delayed-cleanup]` line and every case blocks on `no-runtime-line`.
 
 **Run it.**
 
@@ -164,16 +179,32 @@ uv run scripts/capture_delayed_cleanup_cases.py emit \
   --out delayed_cleanup_physical_cases.json
 ```
 
-**The plan.** Fifty cases on a four-surface by five-scenario grid, two per cell
-plus ten spread so every scenario reaches ten and the surfaces land on
-13/13/12/12. That clears every floor in `delayed_cleanup_activation.py`: 50
-cases, 10 per surface, 8 per scenario.
+**The plan.** Fifty cases on a four-surface by four-scenario grid: three per
+cell, plus two extra so the total reaches fifty, leaving surfaces on 13/13/12/12
+and scenarios on 13/13/12/12. That clears every floor in
+`delayed_cleanup_activation.py`: 50 cases, 10 per surface, 8 per scenario.
+
+**Where the fifth scenario went.** `duplicate-callback` used to be required and
+was reachable by no operator action: `dictate.py` derives the proposal id from
+the per-utterance `event_id`, so two delayed passes never share one and the
+adapter's in-flight and completed-duplicate paths cannot be entered from the
+shipped runtime. It is dropped from the gate rather than made reachable by
+injecting a duplicate id, which would have been a synthetic condition wearing a
+physical label. `tests/test_delayed_cleanup_merge.py` covers the single-use-id
+contract deterministically instead.
+
+**Where `apply_ms` comes from.** The runtime times the transactional apply — the
+destination read, merge, and conditional write — and appends it to its own line
+as `; <float> ms`. The proposal build is deliberately excluded: it is cleanup,
+not apply, and the 150 ms budget is an apply budget. A pass that never reached
+an apply (`proposal_failed`, or an adapter exception) prints no duration and the
+case blocks on `no-runtime-timing`. Nothing is defaulted or stopwatched.
 
 **What "balanced" means here.** The gate needs at least 15 cases whose observed
 outcome is `applied` and at least 15 whose outcome is anything else. The plan
-predicts 20 applied (`unchanged` and `edit-elsewhere`) and 30 rejected
-(`edit-overlap`, `focus-drift`, `duplicate-callback`). Those predictions come
-from `DelayedCleanupTransactionAdapter._apply_once`: an operator edit lands
+predicts 25 applied (`unchanged` and `edit-elsewhere`) and 25 rejected
+(`edit-overlap`, `focus-drift`). Those predictions come from
+`DelayedCleanupTransactionAdapter._apply_once`: an operator edit lands
 before the first snapshot, so an edit *inside* the dictated span rejects every
 proposal edit and yields `no_safe_changes`, while an edit *away* from it still
 merges. Predicting is the point — a mismatch between prediction and observation
@@ -194,6 +225,9 @@ uv run delayed_cleanup_activation.py delayed_cleanup_physical_cases.json \
 
 The capture tool never runs this, never writes the receipt, and never sets
 `--manual-reviewed`. That flag is your personal attestation.
+
+Then restart Whisper Face **without** `--measure`, so what runs afterwards is
+the approved receipt rather than the session override.
 
 **Time.** About 3.5 minutes per case: set up the surface, dictate, perform the
 drift action inside the window, wait for the pass, answer four safety
@@ -421,8 +455,8 @@ on it.
 
 | Artifact | Unblocks | Still blocked afterwards |
 |---|---|---|
-| `.evidence/app-matrix.json` | rows 26, 27 — real apps exercised, adversarial cases observed on real destinations | row 28: a four-nines rate needs repeated trials per app, not one pass; and the compatibility capability buckets need the three runtime metric keys |
-| `delayed_cleanup_physical_cases.json` | nothing yet — see the three blockers in session 2 | row 25 entirely, until the runtime can schedule a delayed pass without a receipt, report `apply_ms`, and expose a reachable duplicate-callback path |
+| `.evidence/app-matrix.json` | rows 26, 27 — real apps exercised, adversarial cases observed on real destinations, and both halves of every compatibility observation | row 28: a four-nines rate needs repeated trials per app, not one pass |
+| `delayed_cleanup_physical_cases.json` | row 25, once 50 cases are recorded and you have reviewed every one | nothing in row 25 |
 | `.evidence/lifecycle.json` | row 16's physical device-switch, sleep/wake, thermal, memory, and long-audio evidence | nothing in row 16, once all five scenarios are recorded |
 | onboarding checklist notes | row 2's fresh-Mac walkthrough | nothing in row 2 |
 | hardware matrix notes | row 11 | nothing, provided two runs per machine agree |

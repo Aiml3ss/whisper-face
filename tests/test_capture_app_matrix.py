@@ -311,7 +311,7 @@ class ArtifactTests(unittest.TestCase):
         self.session_path = self.dir / "session.json"
         self.apps = matrix.load_apps(None)
 
-    def record_two(self):
+    def record_two(self, first_metrics=None, second_metrics=None):
         session = support.Session.load(
             self.session_path, matrix.TOOL,
             plan_digest=matrix.plan_digest(self.apps))
@@ -320,12 +320,14 @@ class ArtifactTests(unittest.TestCase):
             self.apps, session, transcripts=self.transcripts,
             reader=ScriptedReader([
                 "1\n",
-                appender(self.transcripts, transcript_line("evt-1")),
+                appender(self.transcripts, transcript_line(
+                    "evt-1", extra_metrics=first_metrics)),
                 "1\n", "1\n",
                 "1\n",
                 appender(self.transcripts, transcript_line(
                     "evt-2", state="conflict", reason="focus_drift",
-                    paste_attempted=False, bundle="com.apple.Notes")),
+                    paste_attempted=False, bundle="com.apple.Notes",
+                    extra_metrics=second_metrics)),
                 "5\n", "5\n",
                 "2\n",
                 "q\n",
@@ -414,6 +416,45 @@ class ArtifactTests(unittest.TestCase):
         observation = CompatibilityObservation.from_buckets(
             receipt.capabilities, receipt.compatibility_outcome())
         self.assertRegex(observation.fingerprint(), r"^[0-9a-f]{16}$")
+
+    def test_a_physical_session_now_yields_full_compatibility_pairs(self):
+        # The runtime writes the capability triple into `transcripts.jsonl`,
+        # so a recorded session carries both halves of every observation and
+        # can feed the fingerprint aggregator directly.
+        artifact = matrix.build_artifact(self.apps, self.record_two(
+            first_metrics={
+                "insertion_target": "readable",
+                "insertion_paste": "available",
+                "insertion_readback": "available"},
+            second_metrics={
+                "insertion_target": "opaque",
+                "insertion_paste": "available",
+                "insertion_readback": "unavailable"}))
+        compatibility = artifact["compatibility"]
+
+        self.assertIs(compatibility["capability_buckets_available"], True)
+        self.assertIsNone(compatibility["capability_blocked_reason"])
+        self.assertEqual(len(compatibility["observations"]), 2)
+
+        aggregator = CompatibilityFingerprintAggregator(minimum_count=2)
+        for pair in compatibility["observations"]:
+            observation = CompatibilityObservation.from_buckets(
+                pair["capabilities"], pair["outcome"])
+            self.assertRegex(observation.fingerprint(), r"^[0-9a-f]{16}$")
+            aggregator.record(pair["capabilities"], pair["outcome"])
+        self.assertIsNone(aggregator.export_payload())
+
+    def test_the_runtime_emits_exactly_the_metric_keys_this_tool_reads(self):
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        for key in support.CAPABILITY_METRIC_KEYS:
+            self.assertIn(f'"{key}"', source, key)
+
+    def test_a_record_without_buckets_still_reports_the_outcome_half(self):
+        artifact = matrix.build_artifact(self.apps, self.record_two())
+        compatibility = artifact["compatibility"]
+        self.assertEqual(len(compatibility["outcomes"]), 2)
+        self.assertEqual(compatibility["observations"], [])
+        self.assertIs(compatibility["capability_buckets_available"], False)
 
     def test_summary_states_the_measured_counts(self):
         artifact = matrix.build_artifact(self.apps, self.record_two())

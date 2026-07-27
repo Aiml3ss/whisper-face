@@ -68,6 +68,10 @@ RECEIPT_REASONS = frozenset(reason.value for reason in ReceiptReason)
 # utterance whose insertion never resolved, which has no outcome bucket.
 COMPATIBILITY_REASON_BY_RECEIPT_REASON = {
     ReceiptReason.COMMIT_VERIFIED.value: "success",
+    # Delivery proven where only leading/trailing whitespace differed. For
+    # compatibility purposes that is a success -- every character arrived in
+    # order -- while the receipt keeps its own distinct reason.
+    ReceiptReason.COMMIT_VERIFIED_EDGE_WHITESPACE.value: "success",
     ReceiptReason.FOCUS_DRIFT.value: "destination-drift",
     ReceiptReason.SELECTION_DRIFT.value: "destination-drift",
     ReceiptReason.SURROUNDING_TEXT_DRIFT.value: "destination-drift",
@@ -455,16 +459,16 @@ def transcript_baseline(path: Path) -> tuple[list[str], int]:
 # --------------------------- capability buckets ---------------------------
 
 # `compatibility_fingerprint.CompatibilityObservation` needs a capability
-# triple that the running process does not publish anywhere an external tool
-# can read: `target`, `paste`, and `readback` are computed inside
-# `dictate.commit_insertion` and never reach `transcripts.jsonl`. These are the
-# metric keys a future runtime would have to emit for the capability half of a
-# compatibility observation to become sourceable. Until then the capture tools
-# record the outcome half only and say so.
+# triple: `target`, `paste`, and `readback`. `dictate.commit_insertion`
+# computes it per utterance and writes it into these three `transcripts.jsonl`
+# metric keys, so the capability half of a compatibility observation is
+# sourceable from an ordinary physical session. A record without them (an
+# older log, or an utterance the runtime had no lease for) still yields the
+# outcome half only, and says so rather than guessing a bucket.
 CAPABILITY_METRIC_KEYS = (
     "insertion_target", "insertion_paste", "insertion_readback")
 CAPABILITY_UNAVAILABLE_REASON = (
-    "runtime-does-not-report-target-paste-readback-buckets")
+    "runtime-reported-no-target-paste-readback-buckets-for-these-utterances")
 
 
 def project_capability_buckets(metrics: Mapping[str, Any] | None
