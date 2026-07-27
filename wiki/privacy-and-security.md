@@ -3,7 +3,7 @@ title: "Privacy and Security"
 type: concept
 language: en
 created: 2026-07-26
-modified: 2026-07-26
+modified: 2026-07-27
 tags: [privacy, security, threat-model, receipts]
 aliases: [privacy-promise, threat-model, support-bundle]
 summary: "No account, no upload, no sale, no shared-model training; RAM-only audio; content-free receipts everywhere; seven security invariants; and a support bundle that is a double allowlist."
@@ -42,11 +42,32 @@ anonymous.
   public release identifies one full Git commit with corresponding
   source; production artifacts are signed+notarized+stapled+checksummed
   with rollback metadata; new outbound flows require explicit consent.
+- **Speech-stays-local is tested, not asserted** (#133): two independent
+  layers in `tests/test_network_egress.py`. Structurally, exactly one of
+  the 43 first-party modules reachable from `dictate.py` may import a
+  network client — calls are classified by their *resolved* names, so an
+  aliased import cannot hide one — and the only outbound HTTP target
+  must remain the `OLLAMA_URL` module constant. Dynamically, a tripwire
+  over `socket`/`urllib`/`requests` drives a synthetic utterance through
+  the real compile path and fails on any target outside local Ollama and
+  the loopback endpoint. The capture harnesses and measurement mode are
+  held to the structural bar alone — no module in their import closure
+  may hold a network client; the dynamic tripwire does not execute them,
+  and the test says so rather than implying more.
+- **Supply chain** (#133): every workflow (both `.yml` and `.yaml`) pins
+  actions to full commits and declares its token permissions; every
+  module that pins a model repository or revision — the runtime, the
+  wallet, the scorecard, the notices, and the independent relisten and
+  verifier pins — is asserted to agree with what the runtime actually
+  loads; the lock is verified on every PR; CI-published releases carry
+  Sigstore build-provenance attestations with no project key to rotate
+  (`gh attestation verify <artifact> --repo Aiml3ss/whisper-face` — the
+  attested subjects are the files listed in SHA256SUMS, not the listing
+  itself).
 - **Port 8787** is disclosed as unauthenticated, loopback by default,
   LAN only under explicit `--server-only`; binding/authenticating it is
   named open security work, alongside capture sandboxing, independent
-  manifest signing, provenance attestations, egress regression tests,
-  and external review.
+  manifest signing, and external review.
 - **Evidence sessions** ([[evidence-capture]]): everything the capture
   harnesses write — WAVs, resumable session state, manifests, artifacts —
   lands in the single gitignored `.evidence/` tree with 0700 directories
