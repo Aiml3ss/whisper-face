@@ -1013,6 +1013,9 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn('"face": "parrot"', template)
         self.assertIn('"acoustic_time_machine": false', template)
         self.assertIn('"voice_object_commands": false', template)
+        self.assertIn('"hotkey": "alt_r"', template)
+        self.assertIn('"sounds": "system"', template)
+        self.assertIn('"recent_dictations": false', template)
         self.assertIn("whisper_face_theme.py", self.shell)
         self.assertIn("whisper_face_theme.py", self.powershell)
         self.assertIn("whisper_face_characters.py", self.shell)
@@ -1036,6 +1039,14 @@ class InstallerContractTests(unittest.TestCase):
             with self.subTest(runtime_module=runtime_module):
                 self.assertIn(runtime_module, self.shell)
                 self.assertIn(runtime_module, self.powershell)
+        # The first-party feedback cues are committed assets, so both
+        # installers have to notice when a checkout is missing one.
+        for cue in ("start", "finish", "review", "error"):
+            relative = f"sounds/{cue}.wav"
+            with self.subTest(relative=relative):
+                self.assertTrue((ROOT / relative).is_file())
+                self.assertIn(relative, self.shell)
+                self.assertIn(relative.replace("/", "\\"), self.powershell)
         self.assertIn("voice_inbox.json", self.shell)
         self.assertIn("voice_inbox.json", self.powershell)
         self.assertIn("demonstrations.json", self.shell)

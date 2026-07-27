@@ -447,6 +447,8 @@ $Required = @(
     "snippets.template.json", "tones.template.json",
     "preferences.template.json", "acoustic_keyword_memory.template.json",
     "dictionary.template.txt",
+    "sounds\start.wav", "sounds\finish.wav",
+    "sounds\review.wav", "sounds\error.wav",
     "icons\faces\parrot-idle.svg", "icons\faces\parrot-blink.svg", "icons\faces\parrot-talk.svg",
     "icons\faces\fox-idle.svg", "icons\faces\fox-blink.svg", "icons\faces\fox-talk.svg",
     "icons\faces\owl-idle.svg", "icons\faces\owl-blink.svg", "icons\faces\owl-talk.svg",
