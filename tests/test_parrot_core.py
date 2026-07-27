@@ -27,6 +27,7 @@ from parrot_core import (  # noqa: E402
     hypothesis_agreement,
     parakeet_confidence_from_agreement,
     should_escalate_uncertain,
+    normalize_spacing,
     confidence_from_segments,
     recognition_words_from_segments,
     correction_similarity,
@@ -412,6 +413,52 @@ class AgreementConfidenceTests(unittest.TestCase):
         self.assertFalse(should_escalate_uncertain(0.5, 5.0))
         self.assertFalse(should_escalate_uncertain(0.2, 30.0))
         self.assertFalse(should_escalate_uncertain(0.2, 0.0))
+class NonEnglishCleanupTests(unittest.TestCase):
+    """Every rule in compile_cleanup is English by construction."""
+
+    def test_english_rules_still_apply_to_english(self):
+        plan = compile_cleanup("um, ship it Tuesday actually Wednesday")
+        self.assertEqual(plan.text, "ship it Wednesday")
+        self.assertIn("remove_filler", [edit.kind for edit in plan.edits])
+
+    def test_the_same_rules_never_run_on_another_language(self):
+        # "um" is a real word in several languages, "actually" only marks a
+        # self-correction in English, and the scratch-that offset arithmetic
+        # is the literal length of an English phrase. Applied elsewhere these
+        # rules cannot help and can silently delete real words.
+        for language, text in (
+            ("de", "um acht Uhr, actually um neun Uhr"),
+            ("es", "el informe   estara listo"),
+            ("nl", "um dat is prima"),
+        ):
+            with self.subTest(language=language):
+                plan = compile_cleanup(text, language)
+                self.assertEqual(plan.edits, [])
+                self.assertFalse(plan.needs_semantic_cleanup)
+                # Whitespace normalization is the one rule that holds
+                # everywhere, so it is all that runs.
+                self.assertEqual(plan.text, " ".join(text.split()))
+
+    def test_spaceless_scripts_keep_their_own_punctuation_spacing(self):
+        japanese = "\u56db\u534a\u671f\u5831\u544a\u66f8\u3002"
+        self.assertEqual(compile_cleanup(japanese, "ja").text, japanese)
+        self.assertEqual(compile_cleanup(japanese, "zh").text, japanese)
+
+    def test_spoken_code_punctuation_is_english_only(self):
+        english = compile_code_dictation("open paren close paren")
+        self.assertEqual(english.text, "()")
+        # The same words are ordinary prose in another language, and the
+        # glyphs they would insert are ASCII regardless of the script.
+        other = compile_code_dictation("open paren close paren", "nl")
+        self.assertEqual(other.text, "open paren close paren")
+
+    def test_normalize_spacing_is_the_shared_language_safe_rule(self):
+        self.assertEqual(
+            normalize_spacing("a  b \n  c", spaced=True), "a b\nc")
+        # A script that does not write ASCII sentence punctuation keeps its
+        # own spacing around it.
+        self.assertEqual(
+            normalize_spacing("a  b", spaced=False), "a b")
 
 
 if __name__ == "__main__":

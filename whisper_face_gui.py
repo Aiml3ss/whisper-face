@@ -31,13 +31,24 @@ APP_NAME = "Whisper Face"
 DEFAULTS_SUITE = "com.whisperface.app"
 SECTIONS = ("Home", "Settings", "Advanced")
 # Keys and sounds get their own pane rather than crowding Personalize: at the
-# 880x600 minimum the Personalize pane has room for roughly one more 44pt row,
-# and shrinking the row rhythm or the character card to fit four controls
-# would cost more than the extra segment does.
+# 880x600 minimum the character card plus six 44pt rows fills the pane
+# exactly, and shrinking the row rhythm or the character card to fit more
+# would cost more than the extra segment does. A seventh row overflows into
+# the notice band, so anything new here has to displace something.
 SETTINGS_PANES = ("Personalize", "Controls", "Privacy")
 MODE_GUIDE = ("capture", "compose", "edit", "reply", "command", "code")
 TONE_CHOICES = ("auto", "casual", "formal", "code", "verbatim", "default")
 SOUND_THEMES = ("system", "whisper", "silent")
+# Dictation languages, in the runtime's order. Deliberately a short measured
+# list, not Whisper's full set: every one of these was round-tripped through
+# large-v3-turbo before it was offered. Adding one is a data change here plus
+# a row in the runtime's LANGUAGES table.
+LANGUAGES = ("en", "es", "fr", "de", "it", "pt", "nl", "ru", "ja", "ko", "zh")
+LANGUAGE_DEFAULT = "en"
+# Parakeet Unified, the fast native recognizer, is English-only. Everything
+# else routes to Whisper, which the picker says plainly in one quiet line
+# rather than behind a warning.
+NATIVE_RECOGNIZER_LANGUAGES = ("en",)
 # macOS virtual key codes for every key that may be bound. Modifier-class and
 # function keys only: binding a letter or digit would swallow ordinary typing
 # in every application, which is worse than the problem the setting solves.
@@ -585,6 +596,24 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.mode.code.name": "Code",
         "settings.mode.code.shortcut": "Shift + Control + {hotkey}",
         "settings.mode.code.detail": "Technical dictation",
+        "settings.personalize.language": "Language",
+        "settings.personalize.language.native":
+            "English gets the fast on-device recognizer",
+        "settings.personalize.language.whisper":
+            "{language} runs on Whisper — accurate, a little slower",
+        # Endonyms: someone looking for their own language scans for the name
+        # they call it, in the script they read.
+        "settings.language.en": "English",
+        "settings.language.es": "Español",
+        "settings.language.fr": "Français",
+        "settings.language.de": "Deutsch",
+        "settings.language.it": "Italiano",
+        "settings.language.pt": "Português",
+        "settings.language.nl": "Nederlands",
+        "settings.language.ru": "Русский",
+        "settings.language.ja": "日本語",
+        "settings.language.ko": "한국어",
+        "settings.language.zh": "中文",
         "settings.personalize.tones": "App tones",
         "settings.personalize.tones.detail": "{count} recent or configured apps",
         "settings.personalize.tones.empty": "Dictate somewhere and that app shows up here",
@@ -717,6 +746,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.accessibility.category.help": "Choose personalization, control, or privacy settings.",
         "settings.accessibility.edit.help": "Edit {setting}.",
         "settings.accessibility.forget.help": "Inspect or forget {setting}.",
+        "settings.accessibility.language.label": "Dictation language",
+        "settings.accessibility.language.help": "Choose the language you dictate in. English uses the fast on-device recognizer; every other language is recognized by Whisper, which is accurate but slower.",
+        "settings.accessibility.language_summary.label": "Dictation language summary",
         "settings.accessibility.face.label": "Whisper Face companion",
         "settings.accessibility.face.help": "Choose the animal shown in the menu bar and listening HUD.",
         "settings.accessibility.flight.label": "Flight Recorder",
@@ -778,6 +810,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "validation.correction.stale_snippet": "That learned snippet edit no longer exists, so nothing was forgotten. Reopen Learned corrections for the current list.",
         "validation.keyword.unknown": "Whisper Face holds no evidence for that pronunciation keyword. Open Pronunciation keywords and pick one from the list.",
         "validation.face.unsupported": "There is no companion called {face}. Pick one of the ten faces.",
+        "validation.language.unsupported": "Whisper Face does not dictate {language} yet. Pick one of the listed languages.",
         # Failure copy names what did not happen, what is still true, and the
         # one move that gets the person unstuck.
         "operation.settings.load_failed": "Could not load your settings: {error}. Nothing was changed — reopen this window to try again.",
@@ -935,6 +968,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "forget_acoustic_keyword",
             "forget_all_acoustic_keywords",
             "choose_face",
+            "choose_language",
             "set_flight_recorder",
             "set_acoustic_time_machine",
             "set_selective_relisten",
@@ -988,6 +1022,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "settings.accessibility.sections.label",
             "settings.accessibility.category.label",
             "settings.accessibility.face.label",
+            "settings.accessibility.language.label",
             "settings.accessibility.flight.label",
             "settings.accessibility.acoustic.label",
             "settings.accessibility.voice_objects.label",
@@ -1051,6 +1086,7 @@ class GUIActions:
         lambda _name: {"accepted": False, "reason": "unsupported_key",
                        "name": "", "label": "", "shared_modes": ()})
     set_sound_theme: Callable[[str], str] = lambda _name: "system"
+    set_language: Callable[[str], str] = lambda _code: LANGUAGE_DEFAULT
     preview_sound: Callable[[str], bool] = lambda _cue: False
     set_recent_dictations: Callable[[bool], bool] = lambda _enabled: False
     recent_dictations: Callable[[], Sequence[Mapping[str, Any]]] = lambda: ()
@@ -1578,6 +1614,7 @@ class GUIState:
     undo_hotkey_label: str = ""
     undo_available: bool = False
     sound_theme: str = "system"
+    language: str = LANGUAGE_DEFAULT
     recent_dictations: bool = False
     prefers_reduced_motion: bool = False
     onboarding_steps: tuple[OnboardingStep, ...] = field(default_factory=tuple)
@@ -3209,6 +3246,9 @@ def normalize_snapshot(
         sound_theme=(_clean_text(source.get("sounds"), "system")
                      if _clean_text(source.get("sounds"), "system")
                      in SOUND_THEMES else "system"),
+        language=(_clean_text(source.get("language"), LANGUAGE_DEFAULT)
+                  if _clean_text(source.get("language"), LANGUAGE_DEFAULT)
+                  in LANGUAGES else LANGUAGE_DEFAULT),
         recent_dictations=source.get("recent_dictations") is True,
         prefers_reduced_motion=(
             source.get("prefers_reduced_motion") is True),
@@ -3684,6 +3724,26 @@ class WhisperFaceViewModel:
             self.state = replace(
                 self.state,
                 sound_theme=(applied if applied in SOUND_THEMES else desired),
+                notice="", notice_level="info")
+            return self.refresh()
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.face.change_failed", error=error),
+                notice_level="error")
+        return self.state
+
+    def choose_language(self, code: str) -> GUIState:
+        """Persist the dictation language and re-read the runtime's answer."""
+        desired = str(code).strip().casefold()
+        if desired not in LANGUAGES:
+            raise ValueError(self.localized(
+                "validation.language.unsupported", language=code))
+        try:
+            applied = self.actions.set_language(desired)
+            self.state = replace(
+                self.state,
+                language=(applied if applied in LANGUAGES else desired),
                 notice="", notice_level="info")
             return self.refresh()
         except Exception as error:
@@ -6544,30 +6604,54 @@ if APPKIT_AVAILABLE:
                         height=face_card_height)
 
             personalize_key_views: list[Any] = list(picker.chips)
+            # Language leads the list: it decides which recognizer runs, so
+            # it outranks every personalization below it. It shares the same
+            # grouped card and 44pt rhythm as the rest — at the 880x600
+            # minimum this pane has room for exactly six rows, which is why
+            # "Voice modes" (a reference table about the capture key) now
+            # sits in Controls beside the key it describes.
             rows = (
+                ("language", "settings.personalize.language", None),
                 ("tones", "settings.personalize.tones", "editTone:"),
                 ("snippets", "settings.personalize.snippets", "editSnippets:"),
                 ("vocabulary", "settings.personalize.vocabulary", "editVocabulary:"),
                 ("corrections", "settings.personalize.corrections", "reviewCorrections:"),
                 ("keywords", "settings.personalize.keywords", "inspectKeywords:"),
-                ("modes", "settings.personalize.modes", "viewModes:"),
             )
             group = _card(NSMakeRect(0, 0, width, 44.0 * len(rows)))
             self._register("card", group)
             for index, (key, title_key, selector) in enumerate(rows):
                 title_label, detail, y = self._group_row(
                     group, index=index, count=len(rows), row_height=44,
-                    title=self._l(title_key))
+                    title=self._l(title_key),
+                    detail_width=430 if key == "language" else 470)
+                if key == "language":
+                    # A popup, not a segmented control: eleven choices will
+                    # never fit a segment strip at the 880pt minimum.
+                    popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                        NSMakeRect(width - 16 - 190, y + 8, 190, 28), False)
+                    popup.addItemsWithTitles_([
+                        self._l(f"settings.language.{code}")
+                        for code in LANGUAGES])
+                    popup.setTarget_(self)
+                    popup.setAction_("languageChanged:")
+                    popup.setAutoresizingMask_(NSViewMinXMargin)
+                    _accessible(
+                        popup,
+                        self._l("settings.accessibility.language.label"),
+                        self._l("settings.accessibility.language.help"))
+                    group.addSubview_(popup)
+                    personalize_key_views.append(popup)
+                    self.dynamic["settings_language_detail"] = detail
+                    self.dynamic["settings_language_popup"] = popup
+                    continue
                 action_key = (
                     "settings.action.review" if key == "corrections" else
                     "settings.action.inspect" if key == "keywords" else
-                    "settings.action.view" if key == "modes" else
                     "settings.action.edit")
                 help_key = (
                     "settings.accessibility.forget.help"
                     if key in {"corrections", "keywords"}
-                    else "settings.accessibility.modes.help"
-                    if key == "modes"
                     else "settings.accessibility.edit.help")
                 button = _button(
                     self._l(action_key),
@@ -6604,6 +6688,13 @@ if APPKIT_AVAILABLE:
                  "settings.controls.action.undo",
                  "settings.accessibility.undo.label",
                  "settings.accessibility.undo.help"),
+                # Voice modes are six modifier combinations of the capture
+                # key, so they belong beside the key rather than under
+                # Personalize, where they were only ever a reference table.
+                ("modes", "settings.personalize.modes", "viewModes:",
+                 "settings.action.view",
+                 "settings.accessibility.modes.label",
+                 "settings.accessibility.modes.help"),
             )
             controls_group = _card(
                 NSMakeRect(0, 0, width, 44.0 * (len(control_rows) + 1)))
@@ -7418,6 +7509,22 @@ if APPKIT_AVAILABLE:
                     self.dynamic[f"settings_{key}_detail"], value,
                     label=self._l(
                         f"settings.accessibility.{key}_summary.label"))
+            # One quiet line, stated the same way every time: English gets
+            # the fast native recognizer, everything else gets Whisper.
+            language_name = self._l(f"settings.language.{state.language}")
+            set_accessible_text(
+                self.dynamic["settings_language_detail"],
+                self._l("settings.personalize.language.native")
+                if state.language in NATIVE_RECOGNIZER_LANGUAGES
+                else self._l("settings.personalize.language.whisper",
+                             language=language_name),
+                label=self._l(
+                    "settings.accessibility.language_summary.label"))
+            self.dynamic["settings_language_popup"].selectItemAtIndex_(
+                LANGUAGES.index(state.language))
+            sync_accessibility(
+                self.dynamic["settings_language_popup"], language_name,
+                label=self._l("settings.accessibility.language.label"))
             set_accessible_text(
                 self.dynamic["sound_theme_detail"],
                 self._l(f"settings.controls.sound.detail.{state.sound_theme}"),
@@ -8179,6 +8286,11 @@ if APPKIT_AVAILABLE:
             self.view_model.choose_face(FACES[sender.selectedSegment()])
             self.render()
 
+        def languageChanged_(self, sender: Any) -> None:
+            self.view_model.choose_language(
+                LANGUAGES[int(sender.indexOfSelectedItem())])
+            self.render()
+
         def flightChanged_(self, sender: Any) -> None:
             enabled = sender.state() == NSControlStateValueOn
             self.view_model.set_flight_recorder(enabled)
@@ -8589,6 +8701,7 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         "undo_hotkey_label": "",
         "undo_available": False,
         "sounds": "system",
+        "language": LANGUAGE_DEFAULT,
         "recent_dictations": False,
         "models": [{
             "name": "Smoke ASR",
@@ -8658,6 +8771,11 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
     def set_face(face: str) -> None:
         calls.append(("face", face))
         runtime["face"] = face
+
+    def set_language(code: str) -> str:
+        calls.append(("language", code))
+        runtime["language"] = code
+        return code
 
     def set_flight(enabled: bool) -> None:
         calls.append(("flight", enabled))
@@ -8756,6 +8874,7 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         status_snapshot=lambda: dict(runtime),
         settings_snapshot=lambda: dict(private_settings),
         set_face=set_face,
+        set_language=set_language,
         describe_hotkey=describe_hotkey,
         set_hotkey=set_hotkey,
         set_undo_hotkey=set_undo_hotkey,
@@ -9362,6 +9481,15 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         model.forget_acoustic_keyword(keyword_inspection.candidates[0])
         model.forget_all_acoustic_keywords()
         model.choose_face("owl")
+        model.choose_language("ja")
+        controller.render()
+        require(
+            int(controller.dynamic[
+                "settings_language_popup"].indexOfSelectedItem()) ==
+            LANGUAGES.index("ja"),
+            "language synchronization")
+        model.choose_language(LANGUAGE_DEFAULT)
+        controller.render()
         model.set_flight_recorder(True)
         expected_calls = {
             ("tone", "com.example.mail", "casual"),
@@ -9374,6 +9502,7 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             ("forget_acoustic_keyword", "Qwen", None),
             ("forget_all_acoustic_keywords",),
             ("face", "owl"),
+            ("language", "ja"),
             ("flight", True),
         }
         require(expected_calls.issubset(set(calls)), "model actions")

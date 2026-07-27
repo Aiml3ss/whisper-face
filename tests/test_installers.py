@@ -1020,6 +1020,9 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn('"hotkey": "alt_r"', template)
         self.assertIn('"sounds": "system"', template)
         self.assertIn('"recent_dictations": false', template)
+        # The dictation language ships defaulted to English, so an existing
+        # install keeps the fast native recognizer without touching anything.
+        self.assertIn('"language": "en"', template)
         self.assertIn("whisper_face_theme.py", self.shell)
         self.assertIn("whisper_face_theme.py", self.powershell)
         self.assertIn("whisper_face_characters.py", self.shell)

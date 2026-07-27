@@ -198,10 +198,12 @@ Run with:  uv run dictate.py   (or via the com.berg.dictate LaunchAgent)
 """
 
 import atexit
+import contextlib
 import ctypes
 import difflib
 import email
 import email.policy
+import functools
 import hashlib
 import json
 import math
@@ -721,6 +723,49 @@ SOUND_CUES = {
     "Ping": "review",
     "Funk": "error",
 }
+# --- Dictation language ----------------------------------------------------
+# Deliberately a short, measured list rather than Whisper's full set. Every
+# entry below was round-tripped through Whisper large-v3-turbo with the
+# language forced, and every one came back faithful; languages we have not
+# actually checked are not offered. Adding one is a data change: append a row
+# here, add the display name to the GUI catalog, and the whole pipeline —
+# decode, cascade routing, prompt budget, cleanup gating — follows.
+#
+# ``spaced`` records whether the script separates words with spaces. It drives
+# real behavior (join spacing, glossary budget), not presentation.
+LANGUAGE_DEFAULT = "en"
+LANGUAGES = (
+    # (ISO 639-1 code, written with inter-word spaces). Display names live in
+    # whisper_face_gui's string catalog; this table is what the pipeline runs on.
+    ("en", True),    # English
+    ("es", True),    # Espanol
+    ("fr", True),    # Francais
+    ("de", True),    # Deutsch
+    ("it", True),    # Italiano
+    ("pt", True),    # Portugues
+    ("nl", True),    # Nederlands
+    ("ru", True),    # Russkiy
+    ("ja", False),   # Nihongo
+    ("ko", True),    # Hangugeo
+    ("zh", False),   # Zhongwen
+)
+LANGUAGE_CODES = tuple(code for code, _spaced in LANGUAGES)
+SPACELESS_LANGUAGES = frozenset(
+    code for code, spaced in LANGUAGES if not spaced)
+# Parakeet Unified is the English-only `parakeet-unified-en-0.6b` checkpoint.
+# Fed other languages it does not fail: it emits an English-alphabet phonetic
+# transliteration (Dutch -> "At Kartala Portis Marchen Ochten Klai for
+# Bordaling") or an empty string, always with ok=true. Since the cascade
+# stamps a fixed PARAKEET_ROUTE_CONFIDENCE on whatever comes back, that
+# garbage would be accepted as a confident final transcript. Routing is
+# therefore explicit rather than trusting the helper to decline.
+PARAKEET_LANGUAGES = frozenset({"en"})
+# Whisper honors ~224 prompt tokens. GLOSSARY_MAX_CHARS spends that budget in
+# characters, which only works because Latin BPE averages ~3 characters per
+# token. Chinese and Japanese run closer to one token per character, so the
+# same 700 characters would be a 3x overrun that pushes the decoder into
+# prompt echo. Dense scripts get a proportionally smaller character budget.
+SPACELESS_GLOSSARY_CHAR_DIVISOR = 3
 PARAKEET_MODEL_DIR = (
     Path.home() / "Library" / "Application Support" / "FluidAudio" /
     "Models" / "parakeet-unified-en-0.6b"
@@ -1396,6 +1441,7 @@ PREFERENCES = {
     "undo_hotkey": "",
     "sounds": SOUND_THEME_DEFAULT,
     "recent_dictations": False,
+    "language": LANGUAGE_DEFAULT,
 }
 ACOUSTIC_TIME_MACHINE = AcousticTimeMachine()
 ACOUSTIC_TIME_MACHINE_STATE = {
@@ -1445,15 +1491,72 @@ def atomic_write_text(path: Path, text: str, mode: int = 0o600):
             pass
 
 
-def is_hallucination(text: str) -> bool:
+def cocoa_pool():
+    """Bound the lifetime of autoreleased Objective-C objects off the main thread.
+
+    AppKit's main thread drains an autorelease pool every pass of the run
+    loop. A plain Python worker thread has no pool at all, so every
+    autoreleased object it creates — an Accessibility attribute value, a
+    pasteboard string, an NSRunningApplication — is retained until the
+    process exits. Under memory pressure that stops being a leak and becomes
+    a crash.
+
+    Applied only to the workers that genuinely create Objective-C objects.
+    Threads that merely hand work to ``AppHelper.callAfter`` do not need it:
+    callAfter makes its own pool, and the callback runs on the main thread
+    inside the run loop's.
+    """
+    if not IS_MACOS:
+        return contextlib.nullcontext()
+    return objc.autorelease_pool()
+
+
+def with_cocoa_pool(func):
+    """Run one worker function inside a single autorelease pool."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with cocoa_pool():
+            return func(*args, **kwargs)
+    return wrapper
+
+
+def exception_origin(error: BaseException) -> str:
+    """Name an exception's type and where it was raised, with no content.
+
+    Exception *messages* routinely quote the value that failed, which on this
+    path can be transcript or destination text, so the message is deliberately
+    never logged. The type plus the innermost file:line and function is enough
+    to find the bug and cannot leak what the user said.
+    """
+    frame = None
+    traceback = error.__traceback__
+    while traceback is not None:
+        frame = traceback
+        traceback = traceback.tb_next
+    if frame is None:
+        return type(error).__name__
+    code = frame.tb_frame.f_code
+    return (f"{type(error).__name__} in {code.co_qualname} "
+            f"({os.path.basename(code.co_filename)}:{frame.tb_lineno})")
+
+
+def is_hallucination(text: str, language: str = LANGUAGE_DEFAULT) -> bool:
     """Reject punctuation-only output and known silent-audio phrases.
 
     Normalize punctuation rather than enumerating every possible terminal
     mark ("Thank you.", "Thank you!", and "THANK YOU..." are equivalent).
+
+    The token class is Unicode: the old ``[a-z0-9]`` matched nothing at all in
+    Japanese, Chinese, Russian, or Korean, so every correct transcript in
+    those languages was classified as a hallucination and thrown away. The
+    phrase list itself is English (Whisper's idle artifacts differ per
+    language), so it only applies to English.
     """
-    words = re.findall(r"[a-z0-9]+", text.casefold())
+    words = re.findall(r"\w+", text.casefold(), flags=re.UNICODE)
     if not words:
         return True
+    if str(language or "").strip().casefold() != "en":
+        return False
     return " ".join(words) in HALLUCINATIONS
 
 
@@ -1490,6 +1593,47 @@ def normalize_face(value) -> str:
 
 def current_face() -> str:
     return normalize_face(PREFERENCES.get("face"))
+
+
+def normalize_language(value: object) -> str:
+    """Return a supported dictation language; anything else stays English.
+
+    Regional tags are folded to their base language ("pt-BR" -> "pt") because
+    the decoders take a bare ISO 639-1 code, and a stored preference from a
+    future build with a longer list must degrade to English rather than
+    reaching the decoder as an unknown token.
+    """
+    code = str(value or "").strip().casefold().replace("_", "-").split("-")[0]
+    return code if code in LANGUAGE_CODES else LANGUAGE_DEFAULT
+
+
+def current_language() -> str:
+    return normalize_language(PREFERENCES.get("language"))
+
+
+def language_uses_spaces(language: str = LANGUAGE_DEFAULT) -> bool:
+    """False for scripts written without inter-word spaces (ja, zh)."""
+    return str(language or "").strip().casefold() not in SPACELESS_LANGUAGES
+
+
+def glossary_char_budget(language: str = LANGUAGE_DEFAULT,
+                         max_chars: int = GLOSSARY_MAX_CHARS) -> int:
+    """Scale the character stand-in for Whisper's ~224-token prompt budget."""
+    if language_uses_spaces(language):
+        return int(max_chars)
+    return max(1, int(max_chars) // SPACELESS_GLOSSARY_CHAR_DIVISOR)
+
+
+def join_recognized_parts(parts, language: str = LANGUAGE_DEFAULT) -> str:
+    """Join decoded pieces the way the language writes them.
+
+    Japanese and Chinese have no inter-word space, so the space this used to
+    insert unconditionally appeared as a visible defect at every rolling-chunk
+    boundary.
+    """
+    pieces = [str(part) for part in parts if str(part).strip()]
+    separator = " " if language_uses_spaces(language) else ""
+    return separator.join(pieces).strip()
 
 
 def refresh_acoustic_calibration() -> bool:
@@ -1720,6 +1864,9 @@ def load_preferences():
     PREFERENCES["sounds"] = normalize_sound_theme(loaded.get("sounds"))
     PREFERENCES["recent_dictations"] = bool(
         loaded.get("recent_dictations") is True)
+    # Cross-platform: both mlx-whisper and faster-whisper take the same bare
+    # ISO 639-1 code, so one preference drives Mac and Windows alike.
+    PREFERENCES["language"] = normalize_language(loaded.get("language"))
     apply_hotkey_bindings()
     if PREFERENCES["acoustic_time_machine"]:
         ACOUSTIC_TIME_MACHINE.enable()
@@ -1795,6 +1942,7 @@ def save_preferences():
             PREFERENCES["undo_hotkey"], default=""),
         "sounds": normalize_sound_theme(PREFERENCES["sounds"]),
         "recent_dictations": bool(PREFERENCES["recent_dictations"]),
+        "language": normalize_language(PREFERENCES["language"]),
     }
     atomic_write_text(
         PREFERENCES_FILE, json.dumps(snapshot, indent=2) + "\n")
@@ -1872,6 +2020,23 @@ def preview_sound_cue(name: str) -> bool:
         return False
     play(name)
     return True
+
+
+def set_dictation_language(code: str) -> str:
+    """Persist the dictation language and rebuild the biasing prompt.
+
+    The glossary prompt carries a language-scaled character budget, so a
+    switch to or from a dense script has to rebuild it rather than leave the
+    previous language's budget in place.
+    """
+    PREFERENCES["language"] = normalize_language(code)
+    save_preferences()
+    try:
+        refresh_glossary()
+    except Exception:
+        pass
+    print(f"[language] dictation language: {PREFERENCES['language']}")
+    return PREFERENCES["language"]
 
 
 def set_recent_dictations_enabled(enabled: bool) -> bool:
@@ -2572,7 +2737,8 @@ def hud_level_step(raw: float, current: float, mode: str,
     return current + (target - current) * LEVEL_SMOOTH
 
 
-def _caption_add(fut, context_terms=(), bundle="", context_pack=None):
+def _caption_add(fut, context_terms=(), bundle="", context_pack=None,
+                 language=LANGUAGE_DEFAULT):
     try:
         result = fut.result()
         if isinstance(result, Recognition):
@@ -2586,11 +2752,11 @@ def _caption_add(fut, context_terms=(), bundle="", context_pack=None):
             t = str(result or "").strip()
     except Exception:
         return
-    if t and not is_hallucination(t):
+    if t and not is_hallucination(t, language):
         current = CAPTION["text"]
         if current == "Listening" or current.endswith(" mode"):
             current = ""
-        CAPTION["text"] = (current + " " + t).strip()
+        CAPTION["text"] = join_recognized_parts((current, t), language)
         CAPTION["stable_prefix"] = True
 
 
@@ -4559,18 +4725,23 @@ AUDIO_RECOVERY = (
     if IS_MACOS else None)
 
 
-def _transcribe_frames(frames, prompt=None) -> Recognition:
+def _transcribe_frames(frames, prompt=None, language=None) -> Recognition:
     """Prepare a rolling chunk off the real-time audio thread."""
     if not frames:
         return Recognition("")
     segment = np.concatenate(frames).flatten()
-    return ASR_POOL.submit(transcribe_detailed, segment, prompt).result()
+    return ASR_POOL.submit(
+        transcribe_detailed, segment, prompt,
+        language=language).result()
 
 
-def _speculative_frames(frames, prompt=None, still_valid=None) -> Recognition:
+def _speculative_frames(frames, prompt=None, still_valid=None,
+                        language=None) -> Recognition:
     """Tiny-first cascade; pay for large Whisper only when confidence demands."""
     if not frames:
         return Recognition("")
+    language = normalize_language(
+        current_language() if language is None else language)
     segment = np.concatenate(frames).flatten()
     fast = ASR_POOL.submit(
         transcribe_detailed,
@@ -4578,6 +4749,10 @@ def _speculative_frames(frames, prompt=None, still_valid=None) -> Recognition:
         prompt,
         False,
         FAST_WHISPER_REPO,
+        # By keyword: the fifth positional is the cross-check hint, and a
+        # language silently landing there would be neither an error nor a
+        # working cross-check.
+        language=language,
     ).result()
     if still_valid is not None and not still_valid():
         return fast
@@ -4585,15 +4760,20 @@ def _speculative_frames(frames, prompt=None, still_valid=None) -> Recognition:
     # than accepting Tiny as final text in the measured bakeoff. Tiny remains
     # valuable for early HUD feedback; every reusable final speculation is
     # verified while the user is still speaking or releasing the key.
+    #
+    # That reasoning only holds for English. In another language Parakeet is
+    # not in the cascade at all, so the ordinary confidence rule decides
+    # whether Tiny's answer is good enough or large-v3-turbo has to run.
     final_parakeet_route = (
         IS_MACOS and PARAKEET_ENABLED and PARAKEET_HELPER.is_file()
+        and language in PARAKEET_LANGUAGES
     )
     if (not final_parakeet_route and fast.text
             and fast.confidence >= FAST_ACCEPT_CONFIDENCE):
         return fast
     accurate = ASR_POOL.submit(
         transcribe_detailed, segment, prompt, True, WHISPER_REPO,
-        crosscheck_text=fast.text or None).result()
+        crosscheck_text=fast.text or None, language=language).result()
     accurate.verified = True
     if fast.text and fast.text != accurate.text:
         accurate.alternative = fast.text
@@ -4692,6 +4872,9 @@ class Recorder:
         self.context_terms = []
         self.context_pack = ContextPack()
         self.prompt = None
+        # Pinned at press so changing the language mid-utterance cannot decode
+        # the first half of one take as English and the second half as Greek.
+        self.language = LANGUAGE_DEFAULT
         self.bundle_at_press = ""
         self.mode = "capture"
         self.uncertain = False
@@ -4804,6 +4987,7 @@ class Recorder:
                 frames_for_speculation,
                 self.prompt,
                 lambda: not self.speculative_invalid,
+                self.language,
             )
         if (self.voiced_since_cut
                 and segment_samples >= CHUNK_MIN_SECONDS * SAMPLE_RATE
@@ -4819,15 +5003,17 @@ class Recorder:
             else:
                 frames_for_chunk = self.frames.frames_from(self.cut_samples)
                 decode_future = CHUNK_PREP_POOL.submit(
-                    _transcribe_frames, frames_for_chunk, self.prompt)
+                    _transcribe_frames, frames_for_chunk, self.prompt,
+                    self.language)
                 decode_start = self.cut_samples
                 decode_end = self.total_samples
             # Only compiler-approved stable text reaches the HUD. Provisional
             # text is never typed into the focused application.
             decode_future.add_done_callback(
                 lambda done, terms=tuple(self.context_terms),
-                bundle=self.bundle_at_press, pack=self.context_pack:
-                    _caption_add(done, terms, bundle, pack))
+                bundle=self.bundle_at_press, pack=self.context_pack,
+                language=self.language:
+                    _caption_add(done, terms, bundle, pack, language))
             self.chunks.append(BoundedRecognitionFuture(
                 decode_future, decode_start, decode_end))
             self.speculative_future = None
@@ -5411,6 +5597,7 @@ def runtime_status_snapshot() -> dict:
         "undo_hotkey_label": hotkey_label_for(UNDO_HOTKEY_NAME),
         "sounds": normalize_sound_theme(PREFERENCES["sounds"]),
         "recent_dictations": bool(PREFERENCES["recent_dictations"]),
+        "language": current_language(),
         "undo_available": undoable_insertion_status()["available"],
         "flight_recorder": flight_active,
         "flight_state": flight_state,
@@ -6086,8 +6273,9 @@ def refresh_glossary():
             seen.add(term.casefold())
 
     terms, chars = [], 0
+    prompt_chars = glossary_char_budget(current_language())
     for t in manual + promoted:
-        if len(terms) >= GLOSSARY_MAX_TERMS or chars + len(t) > GLOSSARY_MAX_CHARS:
+        if len(terms) >= GLOSSARY_MAX_TERMS or chars + len(t) > prompt_chars:
             break
         terms.append(t)
         chars += len(t) + 2
@@ -6150,9 +6338,11 @@ def transcript_app_identity(bundle: str) -> str:
 
 def append_transcript(raw: str, cleaned: str, bundle: str, path: str,
                       metrics: dict | None = None,
-                      event_id: str | None = None):
+                      event_id: str | None = None,
+                      language: str = LANGUAGE_DEFAULT):
     entry = {"ts": time.time(), "app": transcript_app_identity(bundle),
-             "raw": raw, "clean": cleaned, "path": path}
+             "raw": raw, "clean": cleaned, "path": path,
+             "language": str(language or LANGUAGE_DEFAULT)}
     if event_id:
         entry["id"] = event_id
     if metrics:
@@ -6317,6 +6507,9 @@ class _RepasteRequest:
         self.utterance_id = utterance_id
         self.focus_at_press = snapshot
         self.bundle_at_press = bundle
+        # Join spacing depends on the script, so a re-paste carries the same
+        # language field an ordinary take does.
+        self.language = current_language()
         self.insertion_lease = capture_insertion_lease(
             snapshot, bundle, utterance_id)
         self.insertion_capabilities = None
@@ -6325,8 +6518,13 @@ class _RepasteRequest:
         self.mode = "capture"
 
 
+@with_cocoa_pool
 def insert_recent_dictation(entry_id: str) -> dict:
-    """Re-insert one recent dictation through the ordinary transaction."""
+    """Re-insert one recent dictation through the ordinary transaction.
+
+    Runs on its own thread and reads focus, writes through the pasteboard,
+    and reads back, so it owns an autorelease pool.
+    """
     if not PREFERENCES["recent_dictations"]:
         return {"inserted": False, "reason": "disabled"}
     text = _recent_dictation_text(entry_id)
@@ -6414,6 +6612,15 @@ def ollama_chat(system: str | None, user: str, num_predict: int = 512,
 
 
 def parse_texts(lines: list[str]) -> list[str]:
+    """Recent transcript text for the vocabulary miner.
+
+    The miner prompt instructs the model to exclude ordinary *English* words,
+    so feeding it another language would promote that language's everyday
+    vocabulary into the glossary and bias every later decode. Entries carry
+    the language they were dictated in; only English ones are mined. Entries
+    written before this field existed are treated as English, which is what
+    they were.
+    """
     texts = []
     for line in lines:
         try:
@@ -6421,7 +6628,9 @@ def parse_texts(lines: list[str]) -> list[str]:
             metrics = e.get("metrics")
             if (str(e.get("path", "")).startswith("outbox/")
                     or (isinstance(metrics, dict)
-                        and metrics.get("insertion_verified") is False)):
+                        and metrics.get("insertion_verified") is False)
+                    or str(e.get("language", LANGUAGE_DEFAULT)
+                           or LANGUAGE_DEFAULT).strip().casefold() != "en"):
                 continue
             t = e.get("clean") or e.get("raw") or ""
             if t:
@@ -6660,7 +6869,12 @@ def frontmost_bundle() -> str:
         title = windows_foreground_title()
         return f"windows:{title}" if title else "windows:unknown"
     app = NSWorkspace.sharedWorkspace().frontmostApplication()
-    return app.bundleIdentifier() if app else ""
+    # bundleIdentifier is nil for any process that is not inside an app
+    # bundle — including Whisper Face itself, which runs as a bare script.
+    # Returning that nil broke the promised str contract and reached the
+    # context adapters as None, so pressing the hotkey while the app's own
+    # window was frontmost failed the whole take with an AttributeError.
+    return str(app.bundleIdentifier() or "") if app else ""
 
 
 def windows_foreground_title() -> str:
@@ -6706,10 +6920,19 @@ def is_verbatim_app(bundle: str) -> bool:
     return bundle in VERBATIM_APPS or app_tone_override(bundle) == "verbatim"
 
 
-def strip_casual_period(text: str) -> str:
+def strip_casual_period(text: str,
+                        language: str = LANGUAGE_DEFAULT) -> str:
     """Texting convention: no trailing period on a chat message. Internal
-    sentence periods stay; ?, !, and deliberate ellipses stay."""
+    sentence periods stay; ?, !, and deliberate ellipses stay.
+
+    This is an anglophone chat convention about the ASCII full stop, and it
+    is not shared by every language that uses one. Gated to English rather
+    than generalized, because the only honest generalization would be to
+    invent a convention for languages nobody here has checked.
+    """
     t = text.rstrip()
+    if str(language or "").strip().casefold() != "en":
+        return t
     if t.endswith(".") and not t.endswith(("..", "…")):
         return t[:-1]
     return t
@@ -7230,9 +7453,13 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
             and duration <= PARAKEET_CROSSCHECK_MAX_SECONDS
             and asr_model_is_cached(FAST_WHISPER_REPO)):
         try:
+            # English explicitly, rather than whatever the preference says:
+            # this decode exists only to cross-check Parakeet, which is
+            # reached for English alone, and the comparison means nothing if
+            # the two engines decode different languages.
             tiny_text = transcribe_detailed(
                 audio, prompt, verify=False,
-                model_repo=FAST_WHISPER_REPO).text
+                model_repo=FAST_WHISPER_REPO, language="en").text
         except Exception as error:
             print(f"! Tiny cross-check unavailable: {error}")
             tiny_text = None
@@ -7267,7 +7494,7 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
         try:
             fallback = transcribe_detailed(
                 audio, prompt, verify=False, model_repo=WHISPER_REPO,
-                _skip_parakeet=True)
+                _skip_parakeet=True, language="en")
         except Exception as error:
             print(f"! Turbo escalation unavailable: {error}")
             recognition.verified = True
@@ -7287,7 +7514,8 @@ def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
                         verify: bool = True,
                         model_repo: str = WHISPER_REPO,
                         crosscheck_text: str | None = None,
-                        _skip_parakeet: bool = False) -> Recognition:
+                        _skip_parakeet: bool = False,
+                        language: str | None = None) -> Recognition:
     # Whispered/quiet speech: lift the level into the range Whisper decodes
     # confidently. Gain is capped so the noise floor of true near-silence
     # (which the energy gate already rejects) isn't blown up to fake speech.
@@ -7296,8 +7524,15 @@ def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
         with GLOSS["lock"]:
             prompt = GLOSS["prompt"]
 
+    language = normalize_language(
+        current_language() if language is None else language)
+
+    # Parakeet Unified is an English-only checkpoint that answers ok=true for
+    # any audio, so a non-English utterance must never reach it: it would
+    # return a phonetic English transliteration, and the fixed route
+    # confidence would let that stand as the final transcript.
     if (IS_MACOS and model_repo == WHISPER_REPO and PARAKEET_ENABLED
-            and not _skip_parakeet):
+            and not _skip_parakeet and language in PARAKEET_LANGUAGES):
         recognition = _parakeet_crosschecked(
             audio, prompt, verify=verify, crosscheck_text=crosscheck_text)
         if recognition is not None:
@@ -7312,7 +7547,7 @@ def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
             result = mlx_whisper.transcribe(
                 audio,
                 path_or_hf_repo=resolved_model,
-                language="en",
+                language=language,
                 initial_prompt=prompt,
                 temperature=temperature,
                 condition_on_previous_text=False,
@@ -7323,7 +7558,7 @@ def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
                 if isinstance(temperature, tuple) else temperature
             segments, _info = model.transcribe(
                 audio,
-                language="en",
+                language=language,
                 initial_prompt=prompt,
                 temperature=windows_temperature,
                 condition_on_previous_text=False,
@@ -7380,9 +7615,10 @@ def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
     return primary
 
 
-def transcribe(audio: np.ndarray, prompt: str | None = None) -> str:
+def transcribe(audio: np.ndarray, prompt: str | None = None,
+               language: str | None = None) -> str:
     """Compatibility wrapper for warmup, phone, and diagnostics."""
-    return transcribe_detailed(audio, prompt).text
+    return transcribe_detailed(audio, prompt, language=language).text
 
 
 def apply_learned_fixes(text: str, bundle: str = "") -> str:
@@ -8736,7 +8972,8 @@ def insertion_capability_buckets(rec, lease, current: FocusSnapshot | None, *,
     }
 
 
-def insertion_join_prefix(snapshot: FocusSnapshot | None, text: str) -> str:
+def insertion_join_prefix(snapshot: FocusSnapshot | None, text: str,
+                          language: str = LANGUAGE_DEFAULT) -> str:
     """Return the separator to place before ``text`` at the insertion point.
 
     Dictating a second time into a chat box used to jam the new sentence
@@ -8751,9 +8988,13 @@ def insertion_join_prefix(snapshot: FocusSnapshot | None, text: str) -> str:
     # quote, a dash or slash being continued through) and characters that
     # attach to the word before them. Kept local so every caller that
     # extracts this function gets them too.
-    no_join_after = "([{“‘\"'/-–—@#$¡¿"
-    no_join_before = ".,;:!?…)]}”’\"'%"
+    no_join_after = "([{“‘\"'/-–—@#$¡¿「『（"
+    no_join_before = ".,;:!?…)]}”’\"'%。、！？」』）"
     if not text or text[0].isspace() or text[0] in no_join_before:
+        return ""
+    # Japanese and Chinese are written without inter-word spaces, so the
+    # separator that keeps two English sentences apart is simply wrong there.
+    if not language_uses_spaces(language):
         return ""
     # Defensive reads: callers hand this whatever the focus adapter returned,
     # including objects that expose neither attribute.
@@ -8778,7 +9019,9 @@ def commit_insertion(rec, text: str, bundle: str,
     # Join to whatever is already there before anything downstream sees the
     # text, so the staged string, the paste, the readback expectation, and
     # the observed range all agree on exactly one string.
-    text = insertion_join_prefix(current, text) + text
+    text = insertion_join_prefix(
+        current, text,
+        getattr(rec, "language", None) or LANGUAGE_DEFAULT) + text
     # Undo has to restore the exact string that reached the field, joining
     # separator included, so it is published here rather than reconstructed
     # from the pre-join text a caller happens to still be holding.
@@ -9033,6 +9276,7 @@ def undo_refusal(reason: str) -> dict:
     return {"undone": False, "reason": reason}
 
 
+@with_cocoa_pool
 def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
                         coordinator=None, presser=None, paster=None,
                         readback=None) -> dict:
@@ -9211,8 +9455,13 @@ def observe_paste_outcome(receipt: PasteReceipt, timeout=None,
         sleeper(min(poll_interval, remaining))
 
 
+@with_cocoa_pool
 def learn_snippet_edit(name: str, receipt: PasteReceipt):
-    """Turn a user's in-place edit of a pasted snippet into its saved value."""
+    """Turn a user's in-place edit of a pasted snippet into its saved value.
+
+    Same Accessibility polling loop as ``learn_from_corrections``, on its own
+    thread, so it owns a pool too.
+    """
     revised = observe_paste_outcome(receipt)
     if revised is None or revised == receipt.pasted:
         return
@@ -9245,8 +9494,14 @@ def paste_snippet_and_watch(name: str, snippet: str, bundle: str, mode: str,
     return receipt
 
 
+@with_cocoa_pool
 def learn_from_corrections(receipt: PasteReceipt | None):
-    """Learn only edits made inside the exact range that received our paste."""
+    """Learn only edits made inside the exact range that received our paste.
+
+    Polls the pasted Accessibility range for the whole correction window, so
+    it creates an autoreleased attribute value on every tick and needs a pool
+    of its own.
+    """
     if receipt is None:
         return
     event_id = getattr(receipt, "event_id", "")
@@ -9506,11 +9761,17 @@ def collapse_repeats(text: str) -> tuple[str, bool]:
     """Collapse runs of one token repeated 3+ times — the signature of an ASR
     decode loop, never of real speech ("no no" survives, "Unraid" x40 does
     not). Returns (text, looped) where looped means a substantial run was
-    removed."""
+    removed.
+
+    Whitespace tokenization means this cannot see inside a Japanese or
+    Chinese transcript, which arrives as a single token. It fails closed
+    there — the text is returned untouched and ``looped`` is False — rather
+    than guessing at character-level repetition and eating real speech.
+    """
     words = text.split()
     out, prev, run = [], None, 0
     for w in words:
-        key = w.strip(",.;:!?…\"'").casefold()
+        key = w.strip(",.;:!?…\"'。、！？「」").casefold()
         run = run + 1 if key == prev else 1
         prev = key
         if run <= 2:
@@ -9534,13 +9795,22 @@ def looks_like_prompt_echo(text: str) -> bool:
 
 
 def quick_clean(text: str, verbatim: bool = False,
-                continuing: bool = False) -> str:
+                continuing: bool = False,
+                language: str = LANGUAGE_DEFAULT) -> str:
     t = text.strip()
     if verbatim or not t:
         return t
-    t = compile_cleanup(t).text
+    language = str(language or "").strip().casefold() or LANGUAGE_DEFAULT
+    t = compile_cleanup(t, language).text
     if not t:
         return ""
+    if language != "en":
+        # Sentence casing and the ASCII terminator set are English rules.
+        # Capitalization does not exist in Japanese, Chinese, or Korean;
+        # German capitalizes nouns anywhere; and appending "." to a sentence
+        # that already ends in "。" or "？" is a visible defect. The
+        # deterministic pass therefore stops at whitespace normalization.
+        return t
     if t[0].islower() and not continuing:   # mid-sentence joins stay lower
         t = t[0].upper() + t[1:]
     if t[-1] in ",;":
@@ -9552,9 +9822,20 @@ def quick_clean(text: str, verbatim: bool = False,
 
 def needs_llm_cleanup(raw: str, tone_override: str | None,
                       verbatim: bool, mode: str = "capture",
-                      plan=None) -> bool:
-    """Route only transformations that are unsafe for deterministic cleanup."""
-    plan = plan or compile_cleanup(raw)
+                      plan=None,
+                      language: str = LANGUAGE_DEFAULT) -> bool:
+    """Route only transformations that are unsafe for deterministic cleanup.
+
+    The model side of cleanup is English end to end: BASE_PROMPT, the tone
+    styles, the worked examples, and the guard that catches the model
+    answering instead of cleaning all assume English text. Pointing that at
+    another language invites translation and silent rewrites with no guard
+    able to notice, so non-English dictation stays on the deterministic path.
+    """
+    language = str(language or "").strip().casefold() or LANGUAGE_DEFAULT
+    if language != "en":
+        return False
+    plan = plan or compile_cleanup(raw, language)
     return bool(not verbatim and (
         mode in {"compose", "reply", "edit"}
         or
@@ -9563,7 +9844,10 @@ def needs_llm_cleanup(raw: str, tone_override: str | None,
     ))
 
 
-CONT_END = ".!?…:\n"                        # context ending = sentence done
+# Context ending = sentence done. Includes the terminators of every supported
+# script, so continuation detection does not treat a finished Japanese or
+# Chinese sentence as something to continue mid-clause.
+CONT_END = ".!?…:\n。！？；：」』"
 
 
 def cursor_context() -> str | None:
@@ -9711,6 +9995,7 @@ def build_delayed_cleanup_proposal(
     return text
 
 
+@with_cocoa_pool
 def _run_delayed_cleanup(
         generation: int,
         proposal_id: str,
@@ -9724,7 +10009,11 @@ def _run_delayed_cleanup(
         tone_key: str,
         snippet_restore: dict[str, str],
 ) -> None:
-    """Finish cleanup and conditionally replace only an unchanged destination."""
+    """Finish cleanup and conditionally replace only an unchanged destination.
+
+    Runs on its own thread and reads and rewrites the destination through
+    Accessibility, so it owns an autorelease pool.
+    """
     outcome = "proposal_failed"
     applied_count = rejected_count = 0
     # The activation gate budgets p95 apply latency at 150 ms, so the number
@@ -9863,8 +10152,9 @@ def lan_ip() -> str:
 def phone_clean(raw: str) -> str:
     """The local pipeline, minus app context: snippets, tone override,
     quick/LLM routing, transcript logging."""
+    language = current_language()
     raw, looped = collapse_repeats(raw)
-    if not raw or is_hallucination(raw) \
+    if not raw or is_hallucination(raw, language) \
             or (looks_like_prompt_echo(raw) and looped):
         return ""
     raw = apply_learned_fixes(raw)
@@ -9881,17 +10171,19 @@ def phone_clean(raw: str) -> str:
         raw = masked
     raw, tone_override = extract_tone_override(raw)
     verbatim = tone_override == "verbatim"
-    needs_llm = needs_llm_cleanup(raw, tone_override, verbatim) \
+    needs_llm = needs_llm_cleanup(
+        raw, tone_override, verbatim, language=language) \
         and not snippet_restore
     tone_key = tone_override if tone_override in TONE else "default"
     text = llm_clean(raw, TONE[tone_key]) if needs_llm \
-        else quick_clean(raw, verbatim=verbatim)
+        else quick_clean(raw, verbatim=verbatim, language=language)
     text = apply_vocabulary_casing(text)   # user's canonical term casing
     if snippet_restore:
         text = _restore_snippet_sentinels(text, snippet_restore)
         raw = _restore_snippet_sentinels(raw, snippet_restore)
     if text:
-        append_transcript(raw, text, "ios.diction", "phone")
+        append_transcript(raw, text, "ios.diction", "phone",
+                          language=language)
     return text
 
 
@@ -10534,7 +10826,8 @@ class BoundedRecognitionFuture:
 
 
 def assemble_raw(chunk_futs: list, pre_future,
-                 rem_full: np.ndarray, prompt=None) -> Recognition:
+                 rem_full: np.ndarray, prompt=None,
+                 language=None) -> Recognition:
     """Join rolling chunks and exactly one remainder decode."""
     def harvest(scheduled, parts, confidences, alternatives):
         nonlocal elapsed, timing_reliable, last_bound_end_sample
@@ -10613,7 +10906,7 @@ def assemble_raw(chunk_futs: list, pre_future,
             words_valid = False if has_bounds else timing_reliable
             elapsed += duration
         t = result.text.strip()
-        if t and not is_hallucination(t):
+        if t and not is_hallucination(t, language):
             parts.append(t)
             confidences.append(result.confidence)
             for word, start, end in normalized_words:
@@ -10648,7 +10941,8 @@ def assemble_raw(chunk_futs: list, pre_future,
           and peak_rms(rem_full) >= GATE_PEAK_RMS):
         # Speech was active at release, so no pre-tail decode was queued.
         harvest(
-            ASR_POOL.submit(transcribe_detailed, rem_full, prompt),
+            ASR_POOL.submit(
+                transcribe_detailed, rem_full, prompt, language=language),
             parts,
             confidences,
             alternatives,
@@ -10660,7 +10954,7 @@ def assemble_raw(chunk_futs: list, pre_future,
             for word, has_bounds in zip(words, word_has_bounds)
         ]
     return Recognition(
-        text=" ".join(parts).strip(),
+        text=join_recognized_parts(parts, language),
         confidence=min(confidences) if confidences else 0.0,
         alternative=" ".join(alternatives).strip() or None,
         verified=any(verifications),
@@ -10707,7 +11001,8 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                         and peak_rms(rem) >= GATE_PEAK_RMS):
                     pre_future = BoundedRecognitionFuture(
                         ASR_POOL.submit(
-                            transcribe_detailed, rem, rec.prompt),
+                            transcribe_detailed, rem, rec.prompt,
+                            language=rec.language),
                         cut,
                         cut + len(rem),
                     )
@@ -10735,7 +11030,8 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                         and peak_rms(rem) >= GATE_PEAK_RMS):
                     pre_future = BoundedRecognitionFuture(
                         ASR_POOL.submit(
-                            transcribe_detailed, rem, rec.prompt),
+                            transcribe_detailed, rem, rec.prompt,
+                            language=rec.language),
                         cut,
                         cut + len(rem),
                     )
@@ -10764,7 +11060,8 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         phase = "recognition"
         asr_started_at = time.perf_counter()
         recognition = assemble_raw(
-            chunk_futs, pre_future, full_audio[cut:], rec.prompt)
+            chunk_futs, pre_future, full_audio[cut:], rec.prompt,
+            rec.language)
         t_asr = time.perf_counter() - asr_started_at
         # A later take may finish ASR first, but user-visible cleanup, commands,
         # and insertion must follow release order. Capture is already stopped,
@@ -10772,7 +11069,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         phase = "release-order"
         DICTATION_PROCESS_ORDER.wait(rec.process_ticket)
         raw = recognition.text
-        if not raw or is_hallucination(raw):
+        if not raw or is_hallucination(raw, rec.language):
             report_dictation_problem(
                 rec,
                 hud,
@@ -10972,13 +11269,13 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             # Verbatim is a hard contract: retain acoustic text rather than a
             # context/personal compiler substitution.
             raw, tone_override = extract_tone_override(recognized_raw)
-        plan = compile_code_dictation(raw) \
-            if rec.mode == "code" else compile_cleanup(raw)
+        plan = compile_code_dictation(raw, rec.language) \
+            if rec.mode == "code" else compile_cleanup(raw, rec.language)
         compiled = plan.text
         verbatim = ((is_verbatim_app(bundle) or tone_override == "verbatim")
                     and rec.mode in {"capture", "code"})
         needs_llm = needs_llm_cleanup(
-            compiled, tone_override, verbatim, rec.mode, plan)
+            compiled, tone_override, verbatim, rec.mode, plan, rec.language)
         delayed_cleanup_requested = bool(
             needs_llm
             and rec.mode == "capture"
@@ -11049,13 +11346,15 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                         f"proof:{edit.kind}", edit.before, edit.after)
                         for edit in proof_edits if edit.accepted]
                     text = proof.text if rec.mode == "code" else quick_clean(
-                        proof.text, verbatim=verbatim, continuing=continuing)
+                        proof.text, verbatim=verbatim, continuing=continuing,
+                        language=rec.language)
                 else:
                     print("! LLM proof edits did not reconstruct its output; "
                           "pasting deterministic cleanup")
                     semantic_edits = []
                     text = compiled if rec.mode == "code" else quick_clean(
-                        compiled, verbatim=verbatim, continuing=continuing)
+                        compiled, verbatim=verbatim, continuing=continuing,
+                        language=rec.language)
             else:
                 # Compose/reply/edit retain their explicit broad-rewrite
                 # contracts; proof edits constrain ordinary capture only.
@@ -11064,7 +11363,8 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             text = compiled
         else:
             text = quick_clean(
-                compiled, verbatim=verbatim, continuing=continuing)
+                compiled, verbatim=verbatim, continuing=continuing,
+                language=rec.language)
         cleanup_edits = plan.edits + semantic_edits
         PIPELINE_STATE["last_cleanup_edits"] = [
             edit.kind for edit in cleanup_edits]
@@ -11074,15 +11374,17 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             not bool(edit.accepted) for edit in proof_edits)
         t_clean = time.perf_counter() - clean_started_at
         if tone_key == "casual" and not verbatim:
-            text = strip_casual_period(text)   # belt for both paths
+            # belt for both paths
+            text = strip_casual_period(text, rec.language)
         text = apply_vocabulary_casing(text)   # user's canonical term casing
         if PIPELINE_STATE["last_alternatives"]:
             cleaned_alternatives = []
             for alternative in PIPELINE_STATE["last_alternatives"]:
                 candidate = apply_learned_fixes(alternative, bundle)
-                candidate = quick_clean(candidate, verbatim=verbatim)
+                candidate = quick_clean(
+                    candidate, verbatim=verbatim, language=rec.language)
                 if tone_key == "casual" and not verbatim:
-                    candidate = strip_casual_period(candidate)
+                    candidate = strip_casual_period(candidate, rec.language)
                 if candidate and candidate != text:
                     cleaned_alternatives.append(candidate)
             PIPELINE_STATE["last_alternatives"] = list(
@@ -11091,7 +11393,8 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             tail40 = stripped_ctx[-40:].lower()
             if tail40 and text.lower().startswith(tail40):
                 text = text[len(tail40):].lstrip()      # model echoed context
-            if not ctx[-1].isspace() and text[:1] not in ",.;:!?…":
+            if (not ctx[-1].isspace() and text[:1] not in ",.;:!?…。、！？"
+                    and language_uses_spaces(rec.language)):
                 text = " " + text                       # joining needs a space
 
         # Restore the shielded inline expansions on the finalized text, just
@@ -11368,7 +11671,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "insertion_paste": insertion_capabilities.get("paste"),
             "insertion_readback": insertion_capabilities.get("readback"),
             "delayed_cleanup_scheduled": delayed_cleanup_scheduled,
-        }, event_id=event_id)
+        }, event_id=event_id, language=rec.language)
     except Exception as error:
         if delivery_reported:
             print(
@@ -11391,11 +11694,17 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
 
 
 def finish_in_release_order(rec: Recorder, hud: HUD, active: dict):
-    """Finish one ticket and always unblock later releases."""
-    try:
-        finish_and_process(rec, hud, active)
-    finally:
-        DICTATION_PROCESS_ORDER.complete(rec.process_ticket)
+    """Finish one ticket and always unblock later releases.
+
+    Owns the autorelease pool for the whole insertion pipeline: focus
+    snapshots, the pasteboard round-trip, the AX write, and the readback all
+    create Objective-C objects on this thread.
+    """
+    with cocoa_pool():
+        try:
+            finish_and_process(rec, hud, active)
+        finally:
+            DICTATION_PROCESS_ORDER.complete(rec.process_ticket)
 
 
 # ------------------------- warmup & main -------------------------
@@ -11688,6 +11997,7 @@ def main():
             set_hotkey=set_hotkey,
             set_undo_hotkey=set_undo_hotkey,
             set_sound_theme=set_sound_theme,
+            set_language=set_dictation_language,
             preview_sound=preview_sound_cue,
             set_recent_dictations=set_recent_dictations_enabled,
             recent_dictations=recent_dictation_metadata,
@@ -11827,98 +12137,106 @@ def main():
         while True:
             ev, event_at, modifiers = events.get()
             rec = None
-            try:
-                if ev == "listener_recovery":
+            # The press path reads the frontmost application, the
+            # focused Accessibility element and the pasteboard. One pool
+            # per event drains those between takes instead of holding
+            # every one of them for the life of the process.
+            with cocoa_pool():
+                try:
+                    if ev == "listener_recovery":
+                        abandon_active_recording(
+                            caption="Hotkey reset — try again",
+                            log_message=(
+                                "! active dictation cancelled during hotkey "
+                                "recovery"),
+                        )
+                        continue
+                    if (ev == "press" and active["rec"] is None
+                            and not PAUSED["on"]):
+                        LAST_USE["t"] = time.time()
+                        CAPTION["text"] = ""
+                        CAPTION["confidence"] = None
+                        CAPTION["stable_prefix"] = False
+                        rec = Recorder()
+                        rec.language = current_language()
+                        active["rec"] = rec
+                        rec.start(event_at)
+                        rec.bundle_at_press = frontmost_bundle()
+                        if IS_MACOS:
+                            rec.input_signature_at_press = user_input_signature()
+                        rec.mode = mode_from_modifiers(
+                            shift="shift" in modifiers,
+                            command="command" in modifiers,
+                            control="control" in modifiers,
+                        )
+                        CAPTION["text"] = (
+                            "Listening" if rec.mode == "capture"
+                            else f"{rec.mode.title()} mode")
+                        set_status("rec")
+                        AppHelper.callAfter(hud.showMode_, "recording")
+                        play("Tink")              # the cue now means capture-ready
+                        (rec.focus_at_press, rec.context_terms,
+                         rec.context_pack) = capture_recognition_context(
+                             rec.bundle_at_press)
+                        rec.insertion_lease = (
+                            capture_insertion_lease(
+                                rec.focus_at_press,
+                                rec.bundle_at_press,
+                                rec.utterance_id,
+                            ) if IS_MACOS else None
+                        )
+                        with GLOSS["lock"]:
+                            stable_terms = [
+                                *GLOSS["active_keyword_hints"],
+                                *GLOSS["terms"],
+                            ]
+                        rec.prompt = recognition_prompt(
+                            stable_terms, rec.context_terms,
+                            GLOSSARY_MAX_TERMS,
+                            glossary_char_budget(rec.language))
+                        if rec.mode != "capture" or rec.context_terms:
+                            print(f"[context] mode={rec.mode} | "
+                                  f"{len(rec.context_terms)} ephemeral terms")
+                        ready = rec.capture_ready_at - event_at
+                        if ready >= 0.1:
+                            print(f"[audio] capture ready in {ready:.2f}s")
+                    elif ev == "release" and active["rec"] is not None:
+                        rec = active["rec"]
+                        rec.released_at = event_at
+                        if IS_MACOS:
+                            seal_opaque_window_lease(rec)
+                        active["rec"] = None
+                        held = event_at - rec.press_at
+                        if (held <= FLIGHT_TAP_MAX
+                                and rec.captured_via_flight):
+                            # Preserve the rolling buffer while detaching the tap's
+                            # tiny live take, then select speech ending before the
+                            # key went down so the cue itself cannot be captured.
+                            buffered = _capture_retrospective_flight_tap(rec)
+                            if len(buffered) < MIN_SECONDS * SAMPLE_RATE:
+                                print("[flight] no recent utterance found")
+                                play("Funk")
+                                set_status("idle")
+                                AppHelper.callAfter(hud.dismiss)
+                                continue
+                            rec.replace_with_buffered_audio(buffered)
+                            print(f"[flight] captured "
+                                  f"{len(buffered) / SAMPLE_RATE:.1f}s from RAM")
+                        rec.process_ticket = DICTATION_PROCESS_ORDER.issue()
+                        set_status("proc")
+                        AppHelper.callAfter(hud.showMode_, "processing")
+                        threading.Thread(
+                            target=finish_in_release_order, args=(rec, hud, active),
+                            daemon=True,
+                        ).start()
+                except Exception as e:
                     abandon_active_recording(
-                        caption="Hotkey reset — try again",
+                        rec,
+                        caption="Listening failed — try again",
                         log_message=(
-                            "! active dictation cancelled during hotkey "
-                            "recovery"),
+                            f"! hotkey worker failed ({ev}): "
+                            f"{exception_origin(e)}"),
                     )
-                    continue
-                if (ev == "press" and active["rec"] is None
-                        and not PAUSED["on"]):
-                    LAST_USE["t"] = time.time()
-                    CAPTION["text"] = ""
-                    CAPTION["confidence"] = None
-                    CAPTION["stable_prefix"] = False
-                    rec = Recorder()
-                    active["rec"] = rec
-                    rec.start(event_at)
-                    rec.bundle_at_press = frontmost_bundle()
-                    if IS_MACOS:
-                        rec.input_signature_at_press = user_input_signature()
-                    rec.mode = mode_from_modifiers(
-                        shift="shift" in modifiers,
-                        command="command" in modifiers,
-                        control="control" in modifiers,
-                    )
-                    CAPTION["text"] = (
-                        "Listening" if rec.mode == "capture"
-                        else f"{rec.mode.title()} mode")
-                    set_status("rec")
-                    AppHelper.callAfter(hud.showMode_, "recording")
-                    play("Tink")              # the cue now means capture-ready
-                    (rec.focus_at_press, rec.context_terms,
-                     rec.context_pack) = capture_recognition_context(
-                         rec.bundle_at_press)
-                    rec.insertion_lease = (
-                        capture_insertion_lease(
-                            rec.focus_at_press,
-                            rec.bundle_at_press,
-                            rec.utterance_id,
-                        ) if IS_MACOS else None
-                    )
-                    with GLOSS["lock"]:
-                        stable_terms = [
-                            *GLOSS["active_keyword_hints"],
-                            *GLOSS["terms"],
-                        ]
-                    rec.prompt = recognition_prompt(
-                        stable_terms, rec.context_terms,
-                        GLOSSARY_MAX_TERMS, GLOSSARY_MAX_CHARS)
-                    if rec.mode != "capture" or rec.context_terms:
-                        print(f"[context] mode={rec.mode} | "
-                              f"{len(rec.context_terms)} ephemeral terms")
-                    ready = rec.capture_ready_at - event_at
-                    if ready >= 0.1:
-                        print(f"[audio] capture ready in {ready:.2f}s")
-                elif ev == "release" and active["rec"] is not None:
-                    rec = active["rec"]
-                    rec.released_at = event_at
-                    if IS_MACOS:
-                        seal_opaque_window_lease(rec)
-                    active["rec"] = None
-                    held = event_at - rec.press_at
-                    if (held <= FLIGHT_TAP_MAX
-                            and rec.captured_via_flight):
-                        # Preserve the rolling buffer while detaching the tap's
-                        # tiny live take, then select speech ending before the
-                        # key went down so the cue itself cannot be captured.
-                        buffered = _capture_retrospective_flight_tap(rec)
-                        if len(buffered) < MIN_SECONDS * SAMPLE_RATE:
-                            print("[flight] no recent utterance found")
-                            play("Funk")
-                            set_status("idle")
-                            AppHelper.callAfter(hud.dismiss)
-                            continue
-                        rec.replace_with_buffered_audio(buffered)
-                        print(f"[flight] captured "
-                              f"{len(buffered) / SAMPLE_RATE:.1f}s from RAM")
-                    rec.process_ticket = DICTATION_PROCESS_ORDER.issue()
-                    set_status("proc")
-                    AppHelper.callAfter(hud.showMode_, "processing")
-                    threading.Thread(
-                        target=finish_in_release_order, args=(rec, hud, active),
-                        daemon=True,
-                    ).start()
-            except Exception as e:
-                abandon_active_recording(
-                    rec,
-                    caption="Listening failed — try again",
-                    log_message=(
-                        f"! hotkey worker failed: {type(e).__name__}"),
-                )
 
     threading.Thread(target=hotkey_worker, daemon=True).start()
 
