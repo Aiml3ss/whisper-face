@@ -3,6 +3,7 @@
 # dependencies = []
 # ///
 
+import ast
 import hashlib
 import json
 import subprocess
@@ -155,6 +156,53 @@ class RepositoryGovernanceTests(unittest.TestCase):
         self.assertIn("uv run tests/test_voice_input_protocol.py", contributing)
         self.assertIn(
             "Both installers must execute the current checkout", contributing)
+
+    def test_documented_face_roster_matches_the_shipped_one(self):
+        """Prose that counts the companions has to count the real ones.
+
+        Both the README and the capability inventory name the roster in
+        English, which quietly goes stale every time a face is added. Deriving
+        the expectation from ``FACE_CHOICES`` means the drift fails here
+        instead of in front of a reader.
+        """
+        faces = self.face_choices()
+        readme = self.read("README.md")
+        capabilities = self.read("docs/capabilities.md")
+
+        self.assertGreater(len(faces), 1, "expected a roster to check")
+        counted = self.number_word(len(faces))
+
+        for face in faces:
+            self.assertIn(
+                face.capitalize(), readme,
+                f"README does not name the shipped {face} face")
+
+        self.assertIn(f"{counted} characters", readme)
+        self.assertIn(f"{counted} animated companion characters", capabilities)
+
+    def face_choices(self) -> tuple[str, ...]:
+        """Read ``FACE_CHOICES`` out of ``dictate.py`` without importing it."""
+        module = ast.parse(self.read("dictate.py"))
+        for node in module.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            if "FACE_CHOICES" in names:
+                return tuple(ast.literal_eval(node.value))
+        self.fail("FACE_CHOICES is no longer a module-level assignment")
+
+    @staticmethod
+    def number_word(value: int) -> str:
+        words = (
+            "zero", "one", "two", "three", "four", "five", "six", "seven",
+            "eight", "nine", "ten", "eleven", "twelve", "thirteen",
+            "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
+            "nineteen", "twenty",
+        )
+        if value >= len(words):
+            raise AssertionError(
+                f"extend number_word() past {len(words) - 1} for {value} faces")
+        return words[value]
 
 
 if __name__ == "__main__":

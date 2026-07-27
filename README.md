@@ -276,9 +276,10 @@ are never Supporter-only features.
   value is saved for next time and listed under Settings → Personalize →
   **Learned corrections**.
 - **Whispering works** — quiet speech is gain-normalized before recognition.
-- **Choose your Whisper Face** — ten characters (Parrot, Fox, Owl, Cat, Bear,
-  Dog, Wolf, Pig, Panda, and Tiger) share one pastel chibi-clay style. Pick one
-  from the menu bar and it persists locally. On Mac, both the floating
+- **Choose your Whisper Face** — fourteen characters (Parrot, Fox, Owl, Cat,
+  Bear, Dog, Wolf, Pig, Panda, Tiger, Frog, Rabbit, Hedgehog, and Penguin)
+  share one pastel chibi-clay style. Pick one from the menu bar and it
+  persists locally. On Mac, both the floating
   character and tiny menu-bar face open and close their mouths with your live
   speech; Windows mirrors the selected face and recording state in its tray
   icon.
