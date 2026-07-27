@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <mask id="cut"><rect width="64" height="64" fill="#fff"/><circle cx="23" cy="30" r="2.5"/><circle cx="41" cy="30" r="2.5"/><ellipse cx="32" cy="47" rx="5" ry="6"/></mask>
   <g fill="#000" mask="url(#cut)"><circle cx="14" cy="14" r="11"/><circle cx="50" cy="14" r="11"/><circle cx="32" cy="36" r="26"/></g>
-  <path fill="#000" d="M48 7h11v5H48zM52 16h10v5H52z"/>
+  <rect fill="#000" x="48" y="8" width="11" height="5" rx="2.5"/><rect fill="#000" x="52" y="17" width="10" height="5" rx="2.5"/>
 </svg>

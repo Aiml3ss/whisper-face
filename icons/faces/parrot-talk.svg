@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <mask id="cut"><rect width="64" height="64" fill="#fff"/><circle cx="24" cy="30" r="2.8"/><circle cx="40" cy="30" r="2.8"/><path d="M25 39 39 39 32 52z"/></mask>
-  <g fill="#000" mask="url(#cut)"><path d="M32 2 37 17 27 17z"/><path d="M21 4 29 16 18 14z"/><path d="M43 4 46 14 35 16z"/><circle cx="32" cy="37" r="24"/></g>
-  <path fill="#000" d="M48 8h11v5H48zM52 17h10v5H52z"/>
+  <mask id="cut"><rect width="64" height="64" fill="#fff"/><circle cx="24" cy="30" r="2.8"/><circle cx="40" cy="30" r="2.8"/><path d="M25 39 H39 C38.2 45 35.8 50 32 52 C28.2 50 25.8 45 25 39 Z"/></mask>
+  <g fill="#000" mask="url(#cut)"><path d="M32 2.5 C35 4 36.8 10 36.2 16.5 C33.5 18 30.5 18 27.8 16.5 C27.2 10 29 4 32 2.5 Z"/><path d="M20.5 4.5 C24.5 5.5 28 10.5 29 15.8 C26 17 21.5 16.2 18.3 14.4 C18.2 10.5 19 6.5 20.5 4.5 Z"/><path d="M43.5 4.5 C39.5 5.5 36 10.5 35 15.8 C38 17 42.5 16.2 45.7 14.4 C45.8 10.5 45 6.5 43.5 4.5 Z"/><circle cx="32" cy="37" r="24"/></g>
+  <rect fill="#000" x="48" y="8" width="11" height="5" rx="2.5"/><rect fill="#000" x="52" y="17" width="10" height="5" rx="2.5"/>
 </svg>

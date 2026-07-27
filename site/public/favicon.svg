@@ -1,8 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="15" fill="#10b981"/>
-  <mask id="c"><rect width="64" height="64" fill="#fff"/><circle cx="38" cy="23" r="3"/></mask>
-  <g fill="#0b0f0d" mask="url(#c)">
-    <path d="M10 47 3 61l16-10zM28 7A24 24 0 1 0 28 55c15 0 25-9 25-23C53 18 43 7 28 7Z"/>
-    <path d="m44 21 17 9-17 6zM47 10l8-5 3 5-9 4z"/>
+  <rect width="64" height="64" rx="16" fill="#89e2bd"/>
+  <mask id="c"><rect width="64" height="64" fill="#fff"/><circle cx="24" cy="31" r="2.8"/><circle cx="40" cy="31" r="2.8"/><path d="M27 40 H37 C36.4 44.6 34.6 47.8 32 49 C29.4 47.8 27.6 44.6 27 40 Z"/></mask>
+  <g fill="#33281f" mask="url(#c)">
+    <path d="M32 2.5 C35 4 36.8 10 36.2 16.5 C33.5 18 30.5 18 27.8 16.5 C27.2 10 29 4 32 2.5 Z"/>
+    <path d="M20.5 4.5 C24.5 5.5 28 10.5 29 15.8 C26 17 21.5 16.2 18.3 14.4 C18.2 10.5 19 6.5 20.5 4.5 Z"/>
+    <path d="M43.5 4.5 C39.5 5.5 36 10.5 35 15.8 C38 17 42.5 16.2 45.7 14.4 C45.8 10.5 45 6.5 43.5 4.5 Z"/>
+    <circle cx="32" cy="37" r="24"/>
   </g>
 </svg>
