@@ -2138,6 +2138,69 @@ class WhisperFaceThemeTests(unittest.TestCase):
         self.assertEqual(set(FACE_CHIP_COLORS), set(FACE_ORDER))
         self.assertEqual(set(FACE_CHIP_COLORS), set(face_choices))
 
+    # The chip map argues for itself in CIELAB, and that argument went false
+    # in silence when the goldens landed: the comment still claimed a dE 12.5
+    # floor while olive sat 11.0 from panda. A comment cannot check its own
+    # arithmetic, so the two claims it rests on are pinned here instead.
+    CHIP_TWINS = frozenset({"pickles", "olive"})
+    CHIP_HUE_FLOOR = 12.5
+
+    @staticmethod
+    def _cielab(color):
+        """CIE L*a*b* under D65 for a linear-decoded sRGB triple."""
+        linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+                  for c in color]
+        r, g, b = linear
+        xyz = (
+            (r * 0.4124564 + g * 0.3575761 + b * 0.1804375) / 0.95047,
+            (r * 0.2126729 + g * 0.7151522 + b * 0.0721750),
+            (r * 0.0193339 + g * 0.1191920 + b * 0.9503041) / 1.08883,
+        )
+        fx, fy, fz = (
+            t ** (1 / 3) if t > 216 / 24389 else (841 / 108) * t + 4 / 29
+            for t in xyz
+        )
+        return (116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz))
+
+    def test_chip_colors_stay_nameable_apart_except_for_the_twins(self):
+        """Hue names the chip, and exactly one pair is allowed to opt out.
+
+        Two properties keep the picker legible. Chips that carry a hue of
+        their own stay at least as far apart as wolf/panda, the pair that set
+        the floor. The English cream goldens are litter-mates on purpose, so
+        they are permitted to sit closer -- but nothing else may be closer
+        than they are, or the picker has an accidental twin nobody designed.
+        """
+        labs = {face: self._cielab(color)
+                for face, color in FACE_CHIP_COLORS.items()}
+        self.assertEqual(
+            self.CHIP_TWINS & set(labs), self.CHIP_TWINS,
+            "the sanctioned near-twins are no longer in the chip map")
+
+        def distance(one, two):
+            return sum((a - b) ** 2
+                       for a, b in zip(labs[one], labs[two])) ** 0.5
+
+        pairs = [(distance(a, b), a, b)
+                 for index, a in enumerate(sorted(labs))
+                 for b in sorted(labs)[index + 1:]]
+        self.assertTrue(pairs, "expected a chip roster to compare")
+
+        for gap, one, two in pairs:
+            if self.CHIP_TWINS & {one, two}:
+                continue
+            self.assertGreaterEqual(
+                gap, self.CHIP_HUE_FLOOR,
+                f"{one} and {two} are only dE {gap:.1f} apart; hue-named "
+                f"chips owe each other dE {self.CHIP_HUE_FLOOR}")
+
+        closest = min(pairs)
+        self.assertEqual(
+            frozenset(closest[1:]), self.CHIP_TWINS,
+            f"{closest[1]}/{closest[2]} (dE {closest[0]:.1f}) are now the "
+            "closest chips in the map, closer than the goldens meant to be "
+            "the only near-twins")
+
     def test_all_named_jelly_motions_have_bounded_fast_springs(self):
         self.assertEqual(
             set(MOTION_SPECS), {"press", "release", "wobble", "pop"})

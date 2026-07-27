@@ -200,6 +200,42 @@ class RepositoryGovernanceTests(unittest.TestCase):
                 face.capitalize(), roster,
                 f"wiki/whisper-faces.md does not name the shipped {face} face")
 
+    # Comments that do arithmetic on the roster size. The prose pages above
+    # are caught by ROSTER_COUNT; these count in shapes that regex will never
+    # see -- "a sixteen-chip picker", "Sixteen across a 704pt card" -- and so
+    # they sat a release stale after #139 while every documented page was
+    # green. Historical asides are deliberately absent: "the ten-face row" in
+    # the picker is where the 24pt gap cap comes from and must stay ten.
+    FACE_ROSTER_SOURCES = (
+        ("whisper_face_theme.py", r"\b([a-z]+)-chip picker\b"),
+        ("whisper_face_gui.py",
+         r"One row until the chips would crowd\. ([A-Za-z]+)\b"),
+        ("site/src/data/faces.ts", r"^// The ([A-Za-z]+) Whisper Face faces\b"),
+    )
+
+    def test_source_comments_that_count_the_roster_stay_current(self):
+        """Comments that state the roster size have to state the real one.
+
+        Prose is not the only place the count is written down: the chip
+        palette explains itself in terms of picker width, and the picker
+        wraps against a worked example. Deriving both from ``FACE_CHOICES``
+        means the next companion fails here rather than leaving a comment
+        that quietly argues from the wrong number.
+        """
+        counted = self.number_word(len(self.face_choices()))
+        for path, pattern in self.FACE_ROSTER_SOURCES:
+            found = re.findall(pattern, self.read(path), re.MULTILINE)
+            with self.subTest(path=path):
+                self.assertTrue(
+                    found,
+                    f"{path} no longer counts the roster where it used to; "
+                    "update FACE_ROSTER_SOURCES with its new wording")
+                for word in found:
+                    self.assertEqual(
+                        word.lower(), counted,
+                        f"{path} reasons about {word} faces, "
+                        f"but {counted} ship")
+
     def face_choices(self) -> tuple[str, ...]:
         """Read ``FACE_CHOICES`` out of ``dictate.py`` without importing it."""
         module = ast.parse(self.read("dictate.py"))
