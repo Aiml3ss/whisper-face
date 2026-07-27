@@ -3,7 +3,7 @@ title: "Distribution"
 type: concept
 language: en
 created: 2026-07-26
-modified: 2026-07-26
+modified: 2026-07-27
 tags: [updates, packaging, signing, releases, operations]
 aliases: [self-update, side-by-side-update, release-manifest, packaging]
 summary: "Two deliberately separate update paths — a fail-closed local self-update with rollback, and signed-release operator tooling — plus reproducible-tree packaging with notarization and an auditable stdlib-only manifest."
@@ -61,12 +61,21 @@ checkout.
 
 ## The pipeline has now shipped
 
-> 📝 **Updated from [[2026-07-26-evidence-capture-research]]**: three
-> releases exist on the public repository, all published on 2026-07-26 —
-> **v0.1.0**, **v0.2.0**, and **v0.2.1**. Each carries the same four
-> assets the packaging script produces: an Apple-Silicon DMG, a source
-> ZIP, `SHA256SUMS`, and `update-manifest.json`. Every download count is
-> still zero.
+> 📝 **Updated 2026-07-27**: four releases exist on the public
+> repository — **v0.1.0**, **v0.2.0**, **v0.2.1** (2026-07-26), and
+> **v0.3.0** (2026-07-27). Each carries the same four assets the
+> packaging script produces: an Apple-Silicon DMG, a source ZIP,
+> `SHA256SUMS`, and `update-manifest.json`. v0.3.0 is the first release
+> whose manifest and source offer name the renamed repository (#137) and
+> the first whose rollback block links a real previous release (v0.2.1).
+> The self-update path also changed underneath it (#132): the check now
+> compares upstream against the revision the installer last provisioned
+> rather than the checkout's HEAD, refuses to rewind a checkout carrying
+> its own commits, and on installer failure targets the last build that
+> installed cleanly for recovery. That recovery is best-effort — the
+> rollback's own restore and reinstall are not yet verified before
+> `rolled_back` is reported, which is a known honesty gap in
+> `self_update.apply_update`, not a guarantee.
 >
 > The [[marketing-site]] offers exactly one of them through a single
 > constant, `site/src/data/release.ts` — version, tag, DMG URL, size,

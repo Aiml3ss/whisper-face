@@ -328,7 +328,10 @@ class ModelRevisionPinningTests(unittest.TestCase):
 
     def test_the_selective_relisten_verifier_uses_a_pinned_model(self):
         # relisten_activation.py and whisper_verifier_adapter.py name the
-        # verifier repository independently of dictate.py.
+        # verifier repository *and revision* independently of dictate.py.
+        # Checking only the repository name would let either module's
+        # revision drift while this assertion stayed green, so both halves
+        # of each pin are compared against what the runtime loads.
         for module in ("relisten_activation.py", "whisper_verifier_adapter.py"):
             with self.subTest(module=module):
                 source = _read(module)
@@ -338,6 +341,17 @@ class ModelRevisionPinningTests(unittest.TestCase):
                     self.assertIn(
                         repository, self.runtime,
                         f"{module} names a model the runtime does not pin")
+                revisions = re.findall(
+                    r'REVISION\s*=\s*"([0-9a-f]{40})"', source)
+                self.assertTrue(
+                    revisions,
+                    f"{module} no longer pins a literal model revision")
+                for revision in revisions:
+                    self.assertIn(
+                        revision, set(self.runtime.values()),
+                        f"{module} pins revision {revision}, which the "
+                        "runtime does not load; the verifier and the "
+                        "recognizer must ship the same model")
 
 
 class WorkflowSupplyChainTests(unittest.TestCase):

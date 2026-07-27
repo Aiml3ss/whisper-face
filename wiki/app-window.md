@@ -16,16 +16,17 @@ confidence: high
 
 `whisper_face_gui.py` (8,587 lines, AppKit, no browser runtime) is the
 Mac app window opened from [[menu-bar]]'s first row. Since 2026-07-26
-(#104) it has three sections and two Settings panes:
+(#104) it has three sections; a third Settings pane arrived with the
+control features (#128, #135):
 
 ```python
 SECTIONS = ("Home", "Settings", "Advanced")
-SETTINGS_PANES = ("Personalize", "Privacy")
+SETTINGS_PANES = ("Personalize", "Controls", "Privacy")
 ```
 
 The previous five sections (Overview, Results, Settings, Models,
-Diagnostics) and three panes (Modes, Personalize, Privacy) are gone.
-Closing the window does not stop dictation.
+Diagnostics) and the original panes (Modes, Personalize, Privacy) are
+gone. Closing the window does not stop dictation.
 
 ## The three sections
 
@@ -38,11 +39,19 @@ Closing the window does not stop dictation.
   with Play Span, Clear ([[acoustic-personalization]]) and **Inspect
   Evidence**. First run replaces all of it with the onboarding poster.
 - **Settings → Personalize** = the face picker (identity, not privacy)
-  above six rows: App tones, Snippets, Vocabulary, Learned corrections
-  ([[personalization]]), Pronunciation keywords, and **Voice modes**,
-  whose View dialog lists the six Right Option shortcuts
-  ([[voice-modes]]) — the replacement for the deleted zero-interactive
-  Modes tab.
+  above six rows led by the dictation **Language** picker — it decides
+  which recognizer runs, so it outranks everything below it
+  ([[asr-cascade]]) — then App tones, Snippets, Vocabulary, Learned
+  corrections ([[personalization]]), and Pronunciation keywords.
+- **Settings → Controls** (#128, #135) = how you drive it: the
+  **capture key** is configurable (the six mode modifiers stay fixed —
+  the dialog says so itself, "so capture behavior stays predictable and
+  safe"), an optional **Undo key** undoes the last dictation, feedback
+  sounds can be switched between macOS, the first-party set, and
+  silent, and **Voice modes** — whose View dialog lists the six
+  capture-key shortcuts ([[voice-modes]]) — lives here beside the key
+  it describes. Personalize has room for exactly six 44 pt rows at
+  880×600, which is why the modes reference moved rather than squeezed.
 - **Settings → Privacy** = exactly three switches: Voice Object Commands
   (with an Inspect button, [[voice-objects]]), Flight Recorder, and
   Acoustic Time Machine.

@@ -3,7 +3,7 @@ title: "Voice Modes"
 type: concept
 language: en
 created: 2026-07-26
-modified: 2026-07-26
+modified: 2026-07-27
 tags: [modes, tones, snippets, hotkey, ux]
 aliases: [six-modes, tones, snippets, flight-recorder]
 summary: "Modifier keys turn the same Right Option gesture into six explicit modes; per-app tones, self-editing snippets, spoken structure, and the Flight Recorder round out daily use."
@@ -50,10 +50,12 @@ allowlisted **command** mode.
   paste, in capture mode only.
 
 > 📝 **Updated from [[2026-07-26-interface-rebuild-research]]**: the
-> surfaces around these modes moved on 2026-07-26. The six-row mode cheat
-> sheet, the tones submenu and the Flight Recorder toggle left
-> [[menu-bar]]; the mode reference is now Settings → Personalize → **Voice
-> modes**, tones and snippets are rows on the same pane, and Flight
+> surfaces around these modes moved on 2026-07-26, and again on
+> 2026-07-27 (#135). The six-row mode cheat sheet, the tones submenu and
+> the Flight Recorder toggle left [[menu-bar]]; the mode reference now
+> lives at Settings → **Controls** → Voice modes, beside the
+> configurable capture key it describes, tones and snippets are rows on
+> Personalize, and Flight
 > Recorder is a switch under Settings → Privacy ([[app-window]]). The
 > resolution logic is untouched: `tone_for` still resolves override →
 > per-app set → default, and `builtin_tone` was removed as dead code with

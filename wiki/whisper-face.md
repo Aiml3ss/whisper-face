@@ -3,7 +3,7 @@ title: "Whisper Face"
 type: concept
 language: en
 created: 2026-07-26
-modified: 2026-07-26
+modified: 2026-07-27
 tags: [product, overview, dictation, local-first]
 aliases: [whispering-parrot, the-app]
 summary: "Local-first voice input for Mac: hold a key, speak, and trustworthy text appears at the cursor — no account, no cloud, no audio leaving the machine."
@@ -39,6 +39,11 @@ and learning run on-device.
 - **A face, not a dialog** — sixteen animated companion characters live in
   the HUD, the [[menu-bar]] and the [[app-window]]
   ([[whisper-faces]]), all speaking one [[design-language]].
+- **Eleven languages, honestly routed** (#135) — English, Spanish,
+  French, German, Italian, Portuguese, Dutch, Russian, Japanese, Korean,
+  and Chinese. Non-English never touches the English-only Parakeet
+  checkpoint, and every English-assuming cleanup rule stands down when
+  it cannot apply ([[asr-cascade]], [[cleanup-pipeline]]).
 
 ## The pipeline at a glance
 
@@ -65,6 +70,22 @@ The full walk-through lives on [[dictation-pipeline]] and in
 - Operations: [[installers-and-services]], [[distribution]],
   [[benchmarks]], [[evidence-capture]], [[windows-support]]
 - Policy: [[governance]], [[privacy-and-security]]
+
+## What changed on 2026-07-27
+
+> 📝 Eleven-language dictation landed with the Parakeet routing fix
+> behind it (#135), and the update check finally answers about the build
+> you are running instead of the checkout on disk (#132). The
+> speech-stays-local promise became two layers of tests and the supply
+> chain got pinned end to end (#133); publishing a synthetic number as a
+> physical one became structurally impossible (#134). Four new
+> companions, configurable keys, undo, sound toggles and an uninstaller
+> shipped (#127, #128, #125), the Tiny cross-check replaced the fixed
+> Parakeet confidence prior (#126), the rename to whisper-face finished
+> before it could ship again (#137), and **v0.3.0** went out with the
+> site pointing at it ([[distribution]]). After the tag, Pickles and
+> Olive — the English cream goldens — made it sixteen companions
+> (#139); they ride the next release.
 
 ## What changed on 2026-07-26
 
