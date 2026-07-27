@@ -1,4 +1,4 @@
-// The fourteen Whisper Face faces, as inline SVG.
+// The sixteen Whisper Face faces, as inline SVG.
 // Each face has an `idle` and a `talk` frame (mouth open + little sound bars).
 // "MASK" is a placeholder swapped for a unique id per rendered instance so
 // multiple faces on one page never collide on the same <mask> id.

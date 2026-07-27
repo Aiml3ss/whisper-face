@@ -6,7 +6,7 @@ created: 2026-07-26
 modified: 2026-07-27
 tags: [faces, characters, hud, animation, design]
 aliases: [characters, mascots, hud, wave-view, chibi-clay]
-summary: "The fourteen chibi-clay companion characters — one shared draw-op spec renders the live HUD, the app window, and the site, with shared schedules for lip sync, blinks, breath, and gaze, and a three-frame web flap."
+summary: "The sixteen chibi-clay companion characters — one shared draw-op spec renders the live HUD, the app window, and the site, with shared schedules for lip sync, blinks, breath, and gaze, and a three-frame web flap."
 confidence: high
 ---
 
@@ -14,9 +14,9 @@ confidence: high
 
 ## Definition
 
-Fourteen companion characters (Parrot, Fox, Bear, Owl, Cat, Dog, Wolf,
-Pig, Panda, Tiger, Frog, Rabbit, Hedgehog, Penguin) give the dictation
-runtime a face — since the chibi-clay revamp (#120), drawn pastel with
+Sixteen companion characters (Parrot, Fox, Bear, Owl, Cat, Dog, Wolf,
+Pig, Panda, Tiger, Frog, Rabbit, Hedgehog, Penguin, Pickles, Olive) give
+the dictation runtime a face — since the chibi-clay revamp (#120), drawn pastel with
 clay shading, blush and porcelain catchlights. One shared geometry
 spec (`whisper_face_characters.py`)
 defines each character as an ordered list of primitive draw ops in a
