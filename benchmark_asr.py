@@ -23,6 +23,18 @@ Example:
       --engines mlx-tiny mlx-turbo parakeet-unified \
       --macparakeet-cli /path/to/macparakeet-cli \
       --limit 100 --output-dir /tmp/parrot-asr-results
+
+A punctuated, cased reference corpus may replace the LibriSpeech directory:
+pass a JSONL manifest file as --dataset, one object per line, e.g.
+
+    {"id": "note-001", "audio": "audio/note-001.wav", "text": "Hello, world."}
+
+Audio paths resolve relative to the manifest; "id" defaults to the audio file
+stem.  With --formatting-scoring the per-engine summary additionally carries
+cased WER, trailing-punctuation precision/recall/F1, and a capitalization
+match rate.  Against references that carry no formatting (LibriSpeech is
+uppercase and unpunctuated) that block is reported as unavailable instead of
+misleading zeros.  Normalized WER stays the primary metric either way.
 """
 
 from __future__ import annotations
@@ -39,9 +51,10 @@ import struct
 import subprocess
 import tempfile
 import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable, Sequence, TypeVar
 
 
 HERE = Path(__file__).resolve().parent
@@ -64,6 +77,13 @@ PARAKEET_HELPER_STARTUP_TIMEOUT_SECONDS = 5 * 60
 PARAKEET_HELPER_SAMPLE_TIMEOUT_SECONDS = 2 * 60
 PARAKEET_HELPER_CLEANUP_TIMEOUT_SECONDS = 5
 PARAKEET_HELPER_MAX_RESPONSE_BYTES = 64 * 1024
+DEFAULT_DATASET_LABEL = "librispeech-test-clean"
+FORMATTING_PUNCTUATION = ".,?!:;"
+FORMATTING_WRAPPER_CHARACTERS = "\"'“”‘’()[]{}«»"
+FORMATTING_MINIMUM_PUNCTUATED_TOKEN_RATIO = 0.02
+FORMATTING_UNAVAILABLE_UNPUNCTUATED = "unavailable — references unpunctuated"
+FORMATTING_UNAVAILABLE_SINGLE_CASE = "unavailable — references single-case"
+FORMATTING_UNAVAILABLE_EMPTY = "unavailable — no reference text"
 
 
 @dataclass(frozen=True)
@@ -295,7 +315,57 @@ def load_references(dataset: Path) -> dict[str, str]:
     return references
 
 
-def evenly_spaced(items: Sequence[Path], limit: int | None) -> list[Path]:
+def load_manifest_samples(manifest: Path) -> list[Sample]:
+    """Load a JSONL manifest of punctuated, cased references.
+
+    Each line is one object: {"id": ..., "audio": ..., "text": ...}.  The
+    "audio" path resolves relative to the manifest file; "id" defaults to the
+    audio file stem.  Reference text keeps its punctuation and casing so the
+    opt-in formatting scoring has something honest to compare against.
+    """
+    samples: list[Sample] = []
+    seen: set[str] = set()
+    for number, line in enumerate(
+            manifest.read_text(encoding="utf-8").splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"invalid manifest JSON on line {number}") from error
+        if not isinstance(entry, dict):
+            raise ValueError(f"manifest line {number} must be a JSON object")
+        audio = entry.get("audio")
+        text = entry.get("text")
+        if not isinstance(audio, str) or not audio.strip():
+            raise ValueError(f"manifest line {number} needs an audio path")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"manifest line {number} needs reference text")
+        audio_path = Path(audio.strip())
+        if not audio_path.is_absolute():
+            audio_path = manifest.parent / audio_path
+        if not audio_path.is_file():
+            raise ValueError(
+                f"manifest line {number} audio file is missing: {audio_path}")
+        utterance_id = entry.get("id", audio_path.stem)
+        if not isinstance(utterance_id, str) or not utterance_id.strip():
+            raise ValueError(f"manifest line {number} has an invalid id")
+        utterance_id = utterance_id.strip()
+        if utterance_id in seen:
+            raise ValueError(f"duplicate manifest utterance id: {utterance_id}")
+        seen.add(utterance_id)
+        samples.append(Sample(utterance_id, audio_path, text.strip()))
+    if not samples:
+        raise ValueError(f"manifest has no samples: {manifest}")
+    return samples
+
+
+Item = TypeVar("Item")
+
+
+def evenly_spaced(items: Sequence[Item], limit: int | None) -> list[Item]:
     """Select stable coverage across a sorted corpus without random state."""
     if limit is None or limit >= len(items):
         return list(items)
@@ -310,6 +380,8 @@ def evenly_spaced(items: Sequence[Path], limit: int | None) -> list[Path]:
 
 
 def select_samples(dataset: Path, limit: int | None) -> list[Sample]:
+    if dataset.is_file():
+        return evenly_spaced(load_manifest_samples(dataset), limit)
     references = load_references(dataset)
     files = [
         path for path in sorted(dataset.glob("*/*/*.flac"))
@@ -363,6 +435,179 @@ def canonical_tokenizer() -> Callable[[str], list[str]]:
     return tokens
 
 
+def formatting_tokens(text: str) -> list[str]:
+    """Whitespace tokens with curly quotes mapped, formatting preserved."""
+    text = (text.replace("’", "'").replace("‘", "'")
+            .replace("“", '"').replace("”", '"'))
+    return text.split()
+
+
+def split_formatting_token(token: str) -> tuple[str, str]:
+    """Split one token into (case-preserved core, trailing scored marks).
+
+    Wrapper characters (quotes, brackets) never score; trailing marks are the
+    scored punctuation attached after the word, so '"Stop."' yields
+    ("Stop", ".") and 'said,"' yields ("said", ",").
+    """
+    stripped = token.strip(FORMATTING_WRAPPER_CHARACTERS)
+    index = len(stripped)
+    trailing: list[str] = []
+    while index > 0:
+        character = stripped[index - 1]
+        if character in FORMATTING_PUNCTUATION:
+            trailing.append(character)
+        elif character not in FORMATTING_WRAPPER_CHARACTERS:
+            break
+        index -= 1
+    core = stripped[:index].strip(
+        FORMATTING_WRAPPER_CHARACTERS + FORMATTING_PUNCTUATION)
+    return core, "".join(reversed(trailing))
+
+
+def align_tokens(
+        reference: Sequence[str],
+        hypothesis: Sequence[str]) -> list[tuple[int | None, int | None]]:
+    """Return a Levenshtein alignment path as (ref_index, hyp_index) pairs.
+
+    None marks the missing side of an insertion or deletion.  Ties prefer the
+    diagonal so equal tokens stay paired; the backtrace is deterministic.
+    Memory is O(n*m), which is fine at utterance scale.
+    """
+    rows, columns = len(reference), len(hypothesis)
+    cost = [[0] * (columns + 1) for _ in range(rows + 1)]
+    for row in range(1, rows + 1):
+        cost[row][0] = row
+    for column in range(1, columns + 1):
+        cost[0][column] = column
+    for row in range(1, rows + 1):
+        for column in range(1, columns + 1):
+            cost[row][column] = min(
+                cost[row - 1][column - 1]
+                + (reference[row - 1] != hypothesis[column - 1]),
+                cost[row - 1][column] + 1,
+                cost[row][column - 1] + 1,
+            )
+    pairs: list[tuple[int | None, int | None]] = []
+    row, column = rows, columns
+    while row > 0 or column > 0:
+        if (row > 0 and column > 0
+                and cost[row][column] == cost[row - 1][column - 1]
+                + (reference[row - 1] != hypothesis[column - 1])):
+            pairs.append((row - 1, column - 1))
+            row -= 1
+            column -= 1
+        elif row > 0 and cost[row][column] == cost[row - 1][column] + 1:
+            pairs.append((row - 1, None))
+            row -= 1
+        else:
+            pairs.append((None, column - 1))
+            column -= 1
+    pairs.reverse()
+    return pairs
+
+
+def score_formatting_records(records: Iterable[dict]) -> dict | str:
+    """Score punctuation and casing, or say plainly why that is impossible.
+
+    Cased WER compares raw whitespace tokens exactly, punctuation attached.
+    Punctuation precision/recall/F1 and the capitalization match rate are
+    conditioned on aligned equal words (same token after stripping case and
+    punctuation), so recognition errors are not double-counted as formatting
+    errors.  References that carry no formatting produce an explicit
+    unavailable string instead of misleading zeros.
+    """
+    prepared: list[tuple[list[str], list[str]]] = []
+    reference_tokens_total = 0
+    reference_tokens_punctuated = 0
+    has_upper = False
+    has_lower = False
+    for record in records:
+        reference_text = str(record["ref"])
+        reference_tokens = formatting_tokens(reference_text)
+        if not reference_tokens:
+            continue
+        hypothesis_tokens = formatting_tokens(str(record.get("hyp", "")))
+        reference_tokens_total += len(reference_tokens)
+        reference_tokens_punctuated += sum(
+            1 for token in reference_tokens
+            if split_formatting_token(token)[1])
+        has_upper = has_upper or any(
+            character.isupper() for character in reference_text)
+        has_lower = has_lower or any(
+            character.islower() for character in reference_text)
+        prepared.append((reference_tokens, hypothesis_tokens))
+    if not prepared:
+        return FORMATTING_UNAVAILABLE_EMPTY
+    if (reference_tokens_punctuated / reference_tokens_total
+            < FORMATTING_MINIMUM_PUNCTUATED_TOKEN_RATIO):
+        return FORMATTING_UNAVAILABLE_UNPUNCTUATED
+    if not (has_upper and has_lower):
+        return FORMATTING_UNAVAILABLE_SINGLE_CASE
+
+    cased_edits = 0
+    cased_reference_tokens = 0
+    aligned_equal_tokens = 0
+    case_matches = 0
+    reference_marks = 0
+    hypothesis_marks = 0
+    matched_marks = 0
+    for reference_tokens, hypothesis_tokens in prepared:
+        cased_edits += edit_distance(reference_tokens, hypothesis_tokens)
+        cased_reference_tokens += len(reference_tokens)
+        reference_split = [
+            split_formatting_token(token) for token in reference_tokens]
+        hypothesis_split = [
+            split_formatting_token(token) for token in hypothesis_tokens]
+        reference_keys = [core.casefold() for core, _ in reference_split]
+        hypothesis_keys = [core.casefold() for core, _ in hypothesis_split]
+        for ref_index, hyp_index in align_tokens(
+                reference_keys, hypothesis_keys):
+            if ref_index is None or hyp_index is None:
+                continue
+            key = reference_keys[ref_index]
+            if not key or key != hypothesis_keys[hyp_index]:
+                continue
+            reference_core, reference_trailing = reference_split[ref_index]
+            hypothesis_core, hypothesis_trailing = hypothesis_split[hyp_index]
+            aligned_equal_tokens += 1
+            case_matches += int(reference_core == hypothesis_core)
+            reference_counter = Counter(reference_trailing)
+            hypothesis_counter = Counter(hypothesis_trailing)
+            reference_marks += sum(reference_counter.values())
+            hypothesis_marks += sum(hypothesis_counter.values())
+            matched_marks += sum(
+                (reference_counter & hypothesis_counter).values())
+
+    precision = (100 * matched_marks / hypothesis_marks
+                 if hypothesis_marks else None)
+    recall = (100 * matched_marks / reference_marks
+              if reference_marks else None)
+    if precision is not None and recall is not None and precision + recall:
+        f1 = 2 * precision * recall / (precision + recall)
+    elif reference_marks or hypothesis_marks:
+        f1 = 0.0
+    else:
+        f1 = None
+    return {
+        "cased_wer_pct": round(
+            100 * cased_edits / cased_reference_tokens, 4),
+        "punctuation_precision_pct": round(precision, 2)
+        if precision is not None else None,
+        "punctuation_recall_pct": round(recall, 2)
+        if recall is not None else None,
+        "punctuation_f1_pct": round(f1, 2) if f1 is not None else None,
+        "capitalization_match_pct": round(
+            100 * case_matches / aligned_equal_tokens, 2)
+        if aligned_equal_tokens else None,
+        "aligned_equal_tokens": aligned_equal_tokens,
+        "reference_punctuation_marks": reference_marks,
+        "hypothesis_punctuation_marks": hypothesis_marks,
+        "matched_punctuation_marks": matched_marks,
+        "reference_punctuated_token_pct": round(
+            100 * reference_tokens_punctuated / reference_tokens_total, 2),
+    }
+
+
 def score_records(records: Iterable[dict], tokenize=None) -> dict:
     tokenize = tokenize or canonical_tokenizer()
     total_edits = 0
@@ -410,8 +655,12 @@ def score_records(records: Iterable[dict], tokenize=None) -> dict:
 
 def summarize_model_run(
         records: Iterable[dict], spec: ModelSpec, *, executor: str,
-        revision_status: str, preflight_status: str, tokenize=None) -> dict:
+        revision_status: str, preflight_status: str, tokenize=None,
+        formatting: bool = False) -> dict:
+    records = list(records)
     summary = score_records(records, tokenize=tokenize)
+    if formatting:
+        summary["formatting_scoring"] = score_formatting_records(records)
     summary.update(execution_model_provenance(
         spec, executor=executor, revision_status=revision_status,
         preflight_status=preflight_status))
@@ -440,7 +689,8 @@ def load_audio(path: Path):
     return np.asarray(audio, dtype=np.float32)
 
 
-def run_mlx(spec: ModelSpec, samples: Sequence[Sample]) -> list[dict]:
+def run_mlx(spec: ModelSpec, samples: Sequence[Sample], *,
+            dataset_label: str = DEFAULT_DATASET_LABEL) -> list[dict]:
     if platform.system() != "Darwin":
         raise RuntimeError("MLX benchmark engines require macOS")
     import mlx_whisper
@@ -467,7 +717,7 @@ def run_mlx(spec: ModelSpec, samples: Sequence[Sample]) -> list[dict]:
             "id": sample.utterance_id,
             "ref": sample.reference,
             "hyp": str(result.get("text", "")).strip(),
-            "dataset": "librispeech-test-clean",
+            "dataset": dataset_label,
             "engine": engine,
             **provenance,
             "audio_s": round(len(audio) / 16_000, 4),
@@ -478,7 +728,8 @@ def run_mlx(spec: ModelSpec, samples: Sequence[Sample]) -> list[dict]:
 
 
 def run_parakeet(
-        spec: ModelSpec, samples: Sequence[Sample], cli: Path) -> list[dict]:
+        spec: ModelSpec, samples: Sequence[Sample], cli: Path, *,
+        dataset_label: str = DEFAULT_DATASET_LABEL) -> list[dict]:
     engine = spec.engine
     if not cli.exists():
         raise FileNotFoundError(cli)
@@ -522,7 +773,7 @@ def run_parakeet(
                 "id": sample.utterance_id,
                 "ref": sample.reference,
                 "hyp": transcript.read_text(encoding="utf-8").strip(),
-                "dataset": "librispeech-test-clean",
+                "dataset": dataset_label,
                 "engine": engine,
                 **provenance,
                 "audio_s": round(audio_s, 4),
@@ -539,6 +790,7 @@ def run_parrot_helper(
     spec: ModelSpec, samples: Sequence[Sample], helper: Path,
     *, model_dir: Path = DEFAULT_PARAKEET_MODEL_DIR,
     reader_factory=BoundedJSONLineReader,
+    dataset_label: str = DEFAULT_DATASET_LABEL,
 ) -> list[dict]:
     """Drive Whisper Face's shipping RAM-only helper protocol."""
     engine = spec.engine
@@ -570,7 +822,7 @@ def run_parrot_helper(
                 "id": sample.utterance_id,
                 "ref": sample.reference,
                 "hyp": str(response.get("text", "")).strip(),
-                "dataset": "librispeech-test-clean",
+                "dataset": dataset_label,
                 "engine": engine,
                 **provenance,
                 "audio_s": round(len(audio) / 16_000, 4),
@@ -589,6 +841,21 @@ def write_records(path: Path, records: Sequence[dict]) -> None:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _formatting_report_line(value: dict | str) -> str:
+    if isinstance(value, str):
+        return value
+
+    def shown(number) -> str:
+        return "n/a" if number is None else f"{number:.2f}"
+
+    return (
+        f"cased WER {shown(value['cased_wer_pct'])}%  "
+        f"punctuation P/R/F1 {shown(value['punctuation_precision_pct'])}/"
+        f"{shown(value['punctuation_recall_pct'])}/"
+        f"{shown(value['punctuation_f1_pct'])}%  "
+        f"case match {shown(value['capitalization_match_pct'])}%")
+
+
 def print_report(summaries: Sequence[dict]) -> None:
     print("\nASR BAKEOFF")
     print(f"{'engine':20s} {'n':>5s} {'WER%':>8s} {'exact%':>8s} "
@@ -599,6 +866,13 @@ def print_report(summaries: Sequence[dict]) -> None:
             f"{summary['wer_pct']:8.3f} {summary['exact_pct']:8.2f} "
             f"{summary['utterance_p90_wer_pct']:10.2f} "
             f"{summary['rtfx']:8.2f} {summary['proc_p95_s']:10.3f}")
+    formatted = [
+        summary for summary in summaries if "formatting_scoring" in summary]
+    if formatted:
+        print("\nFORMATTING SCORING (opt-in; normalized WER stays primary)")
+        for summary in formatted:
+            print(f"{summary['engine']:20s} "
+                  f"{_formatting_report_line(summary['formatting_scoring'])}")
 
 
 def main() -> int:
@@ -614,6 +888,12 @@ def main() -> int:
     parser.add_argument(
         "--scorecard", type=Path, default=DEFAULT_MODEL_SCORECARD,
         help="reviewed exact model repositories and revisions")
+    parser.add_argument(
+        "--formatting-scoring", action="store_true",
+        help="additionally score punctuation and casing (cased WER, "
+             "punctuation F1, capitalization match) against punctuated, "
+             "cased references; reports unavailable instead of zeros when "
+             "references carry no formatting")
     args = parser.parse_args()
 
     scorecard = args.scorecard.expanduser().resolve()
@@ -623,7 +903,17 @@ def main() -> int:
         raise SystemExit(
             "selected engine is not defined by the reviewed model scorecard: "
             + ", ".join(missing))
-    samples = select_samples(args.dataset.expanduser().resolve(), args.limit)
+    dataset = args.dataset.expanduser().resolve()
+    if dataset.is_file():
+        dataset_label = f"manifest:{dataset.name}"
+        dataset_description = f"JSONL manifest {dataset.name}"
+    else:
+        dataset_label = DEFAULT_DATASET_LABEL
+        dataset_description = "LibriSpeech test-clean"
+    try:
+        samples = select_samples(dataset, args.limit)
+    except ValueError as error:
+        raise SystemExit(f"dataset error: {error}")
     if not samples:
         raise SystemExit(f"no referenced FLAC files under {args.dataset}")
     print(f"dataset={args.dataset} samples={len(samples)}")
@@ -632,21 +922,23 @@ def main() -> int:
     for engine in args.engines:
         spec = model_specs[engine]
         if engine in MLX_ENGINES:
-            records = run_mlx(spec, samples)
+            records = run_mlx(spec, samples, dataset_label=dataset_label)
             executor = "mlx-whisper"
             revision_status = "verified-immutable-snapshot"
             preflight_status = "not-applicable"
         else:
             if args.parrot_helper is not None:
                 records = run_parrot_helper(
-                    spec, samples, args.parrot_helper.expanduser().resolve())
+                    spec, samples, args.parrot_helper.expanduser().resolve(),
+                    dataset_label=dataset_label)
                 executor = "whisper-face-parakeet-helper"
                 revision_status = "unverified-helper-runtime-unattested"
                 preflight_status = "installed-sidecar-revision-matched"
             elif args.macparakeet_cli is not None:
                 records = run_parakeet(
                     spec, samples,
-                    args.macparakeet_cli.expanduser().resolve())
+                    args.macparakeet_cli.expanduser().resolve(),
+                    dataset_label=dataset_label)
                 executor = "macparakeet-cli"
                 revision_status = "unverified-external-executor"
                 preflight_status = "not-supported"
@@ -658,7 +950,8 @@ def main() -> int:
         summaries.append(summarize_model_run(
             records, spec, executor=executor,
             revision_status=revision_status,
-            preflight_status=preflight_status))
+            preflight_status=preflight_status,
+            formatting=args.formatting_scoring))
 
     report = {
         "schema_version": 1,
@@ -666,9 +959,10 @@ def main() -> int:
             "machine": platform.machine(),
             "macos": platform.mac_ver()[0],
         },
-        "dataset": "LibriSpeech test-clean",
+        "dataset": dataset_description,
         "selection": "deterministic-evenly-spaced",
         "samples": len(samples),
+        "formatting_scoring_requested": bool(args.formatting_scoring),
         "harness": harness_provenance(scorecard),
         "engines": summaries,
     }
