@@ -64,6 +64,13 @@ DARK_PALETTE = ThemePalette(
 
 # Chibi-clay pastels: every chip color is the old hue relaxed toward cream so
 # the characters read as soft vinyl toys instead of stickers.
+#
+# The four newest chips claim the hue families the first ten left empty --
+# leaf green, rose, cocoa, and sky -- because a chip has to be nameable at a
+# glance in a fourteen-wide picker. Every pair in the map is at least as far
+# apart in CIELAB as the roster's own closest pair (wolf/panda, dE 12.5), and
+# every chip keeps the dark menu-bar silhouette it carries in the site footer
+# above 4.5:1.
 FACE_CHIP_COLORS: Mapping[str, Color] = {
     "fox": _hex_color("#FFB899"),
     "bear": _hex_color("#FDD779"),
@@ -75,6 +82,10 @@ FACE_CHIP_COLORS: Mapping[str, Color] = {
     "pig": _hex_color("#FACAD2"),
     "panda": _hex_color("#EBEAEB"),
     "tiger": _hex_color("#FDC589"),
+    "frog": _hex_color("#BCE283"),
+    "rabbit": _hex_color("#F6A2BC"),
+    "hedgehog": _hex_color("#BE9E7F"),
+    "penguin": _hex_color("#86CDF0"),
 }
 
 

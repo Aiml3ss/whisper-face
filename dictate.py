@@ -666,6 +666,10 @@ FACE_LABELS = {
     "pig": "Pig",
     "panda": "Panda",
     "tiger": "Tiger",
+    "frog": "Frog",
+    "rabbit": "Rabbit",
+    "hedgehog": "Hedgehog",
+    "penguin": "Penguin",
 }
 FACE_EMOJI = {
     "parrot": "🦜",
@@ -678,6 +682,10 @@ FACE_EMOJI = {
     "pig": "🐷",
     "panda": "🐼",
     "tiger": "🐯",
+    "frog": "🐸",
+    "rabbit": "🐰",
+    "hedgehog": "🦔",
+    "penguin": "🐧",
 }
 DEFAULT_FACE = "parrot"
 
