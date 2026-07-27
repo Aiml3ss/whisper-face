@@ -6369,6 +6369,11 @@ def ollama_chat(system: str | None, user: str, num_predict: int = 512,
     messages += few_shot or []
     messages.append({"role": "user", "content": user})
     streaming = total_deadline is not None
+    # The whole-reply clock starts before the first request so connect time
+    # and compatibility retries spend the same budget as generation; started
+    # after them, three chained (1, 4) s attempts could stack on top of it.
+    deadline = (time.monotonic() + float(total_deadline)
+                if streaming else None)
     payload = {
         "model": OLLAMA_MODEL,
         "messages": messages,
@@ -6399,8 +6404,7 @@ def ollama_chat(system: str | None, user: str, num_predict: int = 512,
         r = post(payload)
     r.raise_for_status()
     if streaming:
-        raw, done_reason = _ollama_stream_reply(
-            r, time.monotonic() + float(total_deadline))
+        raw, done_reason = _ollama_stream_reply(r, deadline)
     else:
         data = r.json()
         raw = data["message"]["content"]
@@ -7256,10 +7260,18 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
             and should_escalate_uncertain(agreement, duration)):
         # The engines heard different utterances: buy one independent Turbo
         # decode and keep whichever transcript is more confident. The loser
-        # is retained as the inspectable alternative.
-        fallback = transcribe_detailed(
-            audio, prompt, verify=False, model_repo=WHISPER_REPO,
-            _skip_parakeet=True)
+        # is retained as the inspectable alternative. Escalation is an
+        # optional upgrade: if the fallback decode itself fails, the primary
+        # transcript must survive rather than turn a working dictation into
+        # a dropped one.
+        try:
+            fallback = transcribe_detailed(
+                audio, prompt, verify=False, model_repo=WHISPER_REPO,
+                _skip_parakeet=True)
+        except Exception as error:
+            print(f"! Turbo escalation unavailable: {error}")
+            recognition.verified = True
+            return recognition
         if fallback.text and fallback.confidence > recognition.confidence:
             fallback.alternative = (
                 text if text != fallback.text else alternative)

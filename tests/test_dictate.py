@@ -7550,6 +7550,22 @@ class OllamaChatTransportTests(unittest.TestCase):
         self.assertEqual(out, "Hello world.")
         self.assertEqual(done, "stop")
 
+    def test_deadline_starts_before_the_first_post(self):
+        # Connect time and compatibility retries spend the same whole-reply
+        # budget as generation; a post that eats the entire budget leaves the
+        # stream reader an already-expired deadline.
+        clock = {"t": 100.0}
+        lines = [json.dumps({"message": {"content": "x"}}).encode()] * 3
+
+        def slow_post(url, json=None, timeout=None, stream=False):
+            clock["t"] += 10.0     # the request itself burns the whole budget
+            return self.response(lines=lines)
+
+        ns = self.namespace(slow_post)
+        ns["time"] = SimpleNamespace(monotonic=lambda: clock["t"])
+        with self.assertRaises(TimeoutError):
+            ns["ollama_chat"]("system", "user", total_deadline=5.0)
+
     def test_streaming_total_deadline_fails_rather_than_hanging(self):
         def endless():
             while True:
@@ -7734,6 +7750,53 @@ class ParakeetCrosscheckTests(unittest.TestCase):
         self.assertEqual(recognition.text, "completely different words")
         self.assertTrue(recognition.verified)
         self.assertEqual(recognition.alternative, "alpha beta gamma delta")
+
+    def test_escalation_failure_keeps_the_primary_transcript(self):
+        # A raising Turbo fallback must not turn a working dictation into a
+        # dropped one: the primary transcript survives escalation failure.
+        from parrot_core import (
+            hypothesis_agreement,
+            parakeet_confidence_from_agreement,
+            should_escalate_uncertain,
+        )
+
+        class ImmediatePool:
+            def submit(self, fn, *args, **kwargs):
+                return SimpleNamespace(result=lambda: fn(*args, **kwargs))
+
+        ns = load_definitions(
+            "_parakeet_crosschecked",
+            "_clean_native_processing_s",
+            extra={
+                "PARAKEET_IO_POOL": ImmediatePool(),
+                "PARAKEET": SimpleNamespace(
+                    transcribe=lambda audio: ("alpha beta gamma delta", 0.05)),
+                "PARAKEET_CROSSCHECK": True,
+                "PARAKEET_CROSSCHECK_MAX_SECONDS": 90.0,
+                "PARAKEET_ROUTE_CONFIDENCE": 0.84,
+                "SAMPLE_RATE": 16_000,
+                "WHISPER_REPO": "turbo-repo",
+                "FAST_WHISPER_REPO": "tiny-repo",
+                "asr_model_is_cached": lambda repo: True,
+                "transcribe_detailed": lambda *args, **kwargs: (
+                    Recognition(text="one two three four", engine="tiny")
+                    if kwargs.get("model_repo") == "tiny-repo"
+                    or (len(args) >= 4 and args[3] == "tiny-repo")
+                    else (_ for _ in ()).throw(
+                        RuntimeError("turbo snapshot missing"))),
+                "hypothesis_agreement": hypothesis_agreement,
+                "parakeet_confidence_from_agreement":
+                    parakeet_confidence_from_agreement,
+                "should_escalate_uncertain": should_escalate_uncertain,
+                "Recognition": Recognition,
+                "print": lambda *args, **kwargs: None,
+            },
+        )
+        audio = np.zeros(16_000 * 4, dtype=np.float32)
+        recognition = ns["_parakeet_crosschecked"](audio, None, verify=True)
+        self.assertEqual(recognition.text, "alpha beta gamma delta")
+        self.assertTrue(recognition.verified)
+        self.assertEqual(recognition.alternative, "one two three four")
 
     def test_low_confidence_escalation_loser_stays_inspectable(self):
         fallback = Recognition(
