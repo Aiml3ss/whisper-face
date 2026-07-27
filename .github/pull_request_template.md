@@ -4,7 +4,7 @@
 
 ## Grant of Copyright and Patent Rights
 
-Read the [Whisper Face Contributor License Agreement](https://github.com/Aiml3ss/whispering-parrot/blob/main/CLA.md)
+Read the [Whisper Face Contributor License Agreement](https://github.com/Aiml3ss/whisper-face/blob/main/CLA.md)
 before submitting outside contributions.
 
 - [ ] I own this contribution or have authority to submit it, and I disclosed

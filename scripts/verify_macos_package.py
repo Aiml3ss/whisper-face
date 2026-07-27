@@ -27,7 +27,7 @@ from pathlib import Path, PurePosixPath
 PRODUCT = "Whisper Face"
 RECEIPT_NAME = "PACKAGE-CONTENTS.json"
 RELEASE_METADATA_NAME = "RELEASE-METADATA.json"
-REPOSITORY = "https://github.com/Aiml3ss/whispering-parrot.git"
+REPOSITORY = "https://github.com/Aiml3ss/whisper-face.git"
 SCHEMA_VERSION = 1
 SEMVER = re.compile(
     r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"

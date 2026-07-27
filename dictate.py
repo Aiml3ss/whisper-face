@@ -704,7 +704,7 @@ OLLAMA_MODEL_MANIFEST_SHA256 = (
     "2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd")
 PROJECT_SOURCE_URL = os.environ.get(
     "WHISPER_FACE_SOURCE_URL",
-    "https://github.com/Aiml3ss/whispering-parrot",
+    "https://github.com/Aiml3ss/whisper-face",
 ).rstrip("/")
 
 HERE = Path(__file__).parent
