@@ -671,6 +671,14 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("whisper_face_characters.py", self.powershell)
         self.assertIn("whisper_face_render.py", self.shell)
         self.assertIn("whisper_face_render.py", self.powershell)
+        for face in ("parrot", "fox", "bear", "owl", "cat", "dog", "wolf",
+                     "pig", "panda", "tiger"):
+            # Every menu-bar frame ships, including the blink frame the
+            # status bar flashes at rest.
+            for frame in ("idle", "talk", "blink"):
+                self.assertIn(f"icons/faces/{face}-{frame}.svg", self.shell)
+                self.assertIn(
+                    f"icons\\faces\\{face}-{frame}.svg", self.powershell)
         for runtime_module in (
                 "voice_objects.py", "voice_object_command_parser.py",
                 "voice_inbox.py", "voice_object_inbox_bridge.py",

@@ -4242,6 +4242,7 @@ try:  # The view-model above remains usable in headless test environments.
         NSAlert,
         NSBackingStoreBuffered,
         NSBezelStyleRounded,
+        NSBezierPath,
         NSBox,
         NSBoxCustom,
         NSButton,
@@ -4517,6 +4518,63 @@ if APPKIT_AVAILABLE:
             add_jelly_motion(self, "press", reduced_motion=_REDUCE_MOTION)
             objc.super(JellySegmentedControl, self).mouseDown_(event)
             add_jelly_motion(self, "release", reduced_motion=_REDUCE_MOTION)
+
+    class SpeechBubbleView(NSView):
+        """Sticker speech bubble whose tail points up at the living face.
+
+        Drawn, not composed: one closed path (rounded rect + tail) so the
+        outline and hard sticker shadow wrap the tail too. The status voice
+        lives inside, which turns state copy into the character speaking.
+        """
+
+        TAIL_H = 14.0
+        TAIL_W = 26.0
+
+        def initWithFrame_(self, frame):
+            self = objc.super(SpeechBubbleView, self).initWithFrame_(frame)
+            if self is None:
+                return None
+            self.fill_color = None
+            self.line_color = None
+            return self
+
+        def isFlipped(self):
+            return False
+
+        @objc.python_method
+        def set_theme(self, fill, line):
+            self.fill_color = fill
+            self.line_color = line
+            self.setNeedsDisplay_(True)
+
+        def drawRect_(self, _rect):
+            bounds = self.bounds().size
+            if self.fill_color is None or self.line_color is None:
+                return
+            width, height = bounds.width, bounds.height
+            radius = 22.0
+            top = height - self.TAIL_H
+            middle = width / 2.0
+            path = NSBezierPath.bezierPath()
+            path.setLineWidth_(2.0)
+            path.setLineJoinStyle_(1)
+            path.moveToPoint_((radius, top))
+            path.lineToPoint_((middle - self.TAIL_W / 2.0, top))
+            path.lineToPoint_((middle, height - 2.0))
+            path.lineToPoint_((middle + self.TAIL_W / 2.0, top))
+            path.appendBezierPathWithArcFromPoint_toPoint_radius_(
+                (width - 3.0, top), (width - 3.0, top - radius), radius)
+            path.appendBezierPathWithArcFromPoint_toPoint_radius_(
+                (width - 3.0, 3.0), (width - 3.0 - radius, 3.0), radius)
+            path.appendBezierPathWithArcFromPoint_toPoint_radius_(
+                (3.0, 3.0), (3.0, radius), radius)
+            path.appendBezierPathWithArcFromPoint_toPoint_radius_(
+                (3.0, top), (radius, top), radius)
+            path.closePath()
+            self.fill_color.set()
+            path.fill()
+            self.line_color.set()
+            path.stroke()
 
     class ArtFacePicker(NSView):
         """Ten colored character chips standing in for a segmented control.
@@ -5159,6 +5217,37 @@ if APPKIT_AVAILABLE:
                             SURFACE_SPECS["control"].shadow_y))
                     except Exception:
                         pass
+            # Playground chrome: bubble, blobs, and stat stickers repaint
+            # with the palette so both appearances stay in the same world.
+            bubble = self.dynamic.get("home_bubble")
+            if bubble is not None:
+                bubble.set_theme(
+                    _theme_color(palette.surface), _theme_color(palette.line))
+                bubble_layer = bubble.layer()
+                if bubble_layer is not None:
+                    try:
+                        bubble_layer.setShadowColor_(
+                            _theme_color(palette.line).CGColor())
+                        bubble_layer.setShadowOpacity_(0.9)
+                        bubble_layer.setShadowRadius_(0.0)
+                        bubble_layer.setShadowOffset_((4.0, -4.0))
+                        bubble_layer.setMasksToBounds_(False)
+                    except Exception:
+                        pass
+            blob_tints = (palette.teal, palette.accent, palette.error)
+            for blob, tint in zip(
+                    self.dynamic.get("home_blobs", ()), blob_tints):
+                blob_layer = blob.layer()
+                if blob_layer is not None:
+                    blob_layer.setBackgroundColor_(_theme_color(
+                        tint, 0.10 if dark else 0.16).CGColor())
+            badge_tints = (palette.teal, palette.accent, palette.error)
+            for badge, tint in zip(
+                    self.dynamic.get("home_stat_badges", ()), badge_tints):
+                badge.setFillColor_(_theme_color(
+                    tint, 0.24 if dark else 0.34))
+                badge.setBorderColor_(_theme_color(palette.line))
+
             # The chip stays a quiet container with a face-tinted ring; the
             # colored character carries the personality.
             chip = self.dynamic["window_face_chip"]
@@ -5563,77 +5652,108 @@ if APPKIT_AVAILABLE:
         def _build_home(self, page: Any) -> None:
             width = CONTENT_WIDTH
 
-            # The living face is the page. Everything else on Home is one
-            # centered status voice and two quiet strips beneath it.
+            # Backdrop: three huge soft pastel blobs so the page reads as a
+            # playground instead of a report. Tinted at theme time.
+            blobs = []
+            for frame, radius in (
+                    (NSMakeRect(-150, 30, 360, 360), 180.0),
+                    (NSMakeRect(width - 190, 140, 340, 340), 170.0),
+                    (NSMakeRect(width / 2.0 - 110, 360, 280, 280), 140.0)):
+                blob = NSView.alloc().initWithFrame_(frame)
+                blob.setWantsLayer_(True)
+                blob_layer = blob.layer()
+                if blob_layer is not None:
+                    blob_layer.setCornerRadius_(radius)
+                page.addSubview_(blob)
+                blobs.append(blob)
+            self.dynamic["home_blobs"] = tuple(blobs)
+
+            # The living face, tilted a touch like a sticker on a notebook.
             face_stage = NSView.alloc().initWithFrame_(
-                NSMakeRect(0, 0, width, 196))
+                NSMakeRect(0, 0, width, 160))
             face_view = LiveFaceView.alloc().initWithFrame_(
-                NSMakeRect((width - 188.0) / 2.0, 4, 188, 188))
+                NSMakeRect((width - 160.0) / 2.0, 0, 160, 160))
             face_view.setAutoresizingMask_(
                 NSViewMinXMargin | NSViewMaxXMargin)
             face_view.setWobbleHook_(lambda: add_jelly_motion(
                 face_view, "wobble", reduced_motion=_REDUCE_MOTION))
+            try:
+                face_view.setFrameCenterRotation_(-2.0)
+            except Exception:
+                pass
             face_stage.addSubview_(face_view)
-            self._stack(page, face_stage, height=196)
+            self._stack(page, face_stage, height=160)
             header = face_stage
 
-            # Centered status group with the single filled CTA under it;
-            # conditional recovery actions flank the CTA only when needed.
-            hero = NSView.alloc().initWithFrame_(
-                NSMakeRect(0, 0, width, 160))
-            center_x = width / 2.0
+            # The face speaks: status copy lives in a sticker speech bubble
+            # whose tail points at the character.
+            hero = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, 96))
+            bubble = SpeechBubbleView.alloc().initWithFrame_(
+                NSMakeRect((width - 480.0) / 2.0, 0, 480, 96))
+            bubble.setAutoresizingMask_(NSViewMinXMargin | NSViewMaxXMargin)
+            bubble.setWantsLayer_(True)
+            hero.addSubview_(bubble)
             phase = self._ink(
                 self._l("overview.phase.ready"),
-                NSMakeRect(0, 144, width, 14),
-                size=11, weight="semibold", rounded=True, alignment=1)
-            phase.setAutoresizingMask_(NSViewWidthSizable)
+                NSMakeRect(16, 62, 448, 13),
+                size=10, weight="semibold", rounded=True, alignment=1)
             status = self._ink(
                 self._l("overview.status.ready.title"),
-                NSMakeRect(0, 116, width, 26),
-                size=20, weight="semibold", rounded=True, truncate=True,
+                NSMakeRect(16, 38, 448, 24),
+                size=18, weight="semibold", rounded=True, truncate=True,
                 alignment=1)
-            status.setAutoresizingMask_(NSViewWidthSizable)
             detail = self._soft(
-                "", NSMakeRect(0, 98, width, 18), size=13, truncate=True,
+                "", NSMakeRect(16, 21, 448, 16), size=12, truncate=True,
                 alignment=1)
-            detail.setAutoresizingMask_(NSViewWidthSizable)
             engine = self._soft(
-                "", NSMakeRect(0, 82, width, 14), size=11, truncate=True,
+                "", NSMakeRect(16, 7, 448, 12), size=10, truncate=True,
                 alignment=1)
-            engine.setAutoresizingMask_(NSViewWidthSizable)
+            for view in (phase, status, detail, engine):
+                bubble.addSubview_(view)
+            self._stack(page, hero, below=face_stage, gap=2, height=96)
+
+            # One chunky CTA, recovery actions only when they earn a spot.
+            actions = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, 42))
+            center_x = width / 2.0
             pause = self._primary_button(
                 self._l("overview.action.pause"),
-                NSMakeRect(center_x - 70, 40, 140, 36), "pauseChanged:",
+                NSMakeRect(center_x - 75, 0, 150, 40), "pauseChanged:",
                 help_text=self._l("overview.action.pause.help"))
             pause.setAutoresizingMask_(NSViewMinXMargin | NSViewMaxXMargin)
             fix = _button(
                 self._l("overview.action.review"),
-                NSMakeRect(center_x - 70 - 8 - 136, 44, 136, 28),
+                NSMakeRect(center_x - 75 - 8 - 136, 6, 136, 28),
                 self, "reviewIssue:",
                 help_text=self._l("overview.action.review.help"))
             fix.setAutoresizingMask_(NSViewMinXMargin | NSViewMaxXMargin)
             copy_outbox = _button(
                 self._l("overview.action.copy_outbox"),
-                NSMakeRect(center_x + 70 + 8, 44, 136, 28),
+                NSMakeRect(center_x + 75 + 8, 6, 136, 28),
                 self, "copyOutbox:",
                 help_text=self._l("overview.action.copy_outbox.help"))
             copy_outbox.setAutoresizingMask_(
                 NSViewMinXMargin | NSViewMaxXMargin)
-            # The recovery warning is the most consequential line on Home,
-            # so it wraps to a second line rather than losing its ending at
-            # the window's minimum width.
+            actions.addSubview_(pause)
+            actions.addSubview_(fix)
+            actions.addSubview_(copy_outbox)
+            self._stack(page, actions, below=hero, gap=4, height=42)
+
             outbox = self._ink(
                 self._l("overview.outbox.empty"),
-                NSMakeRect(40, 2, width - 80, 40), size=13, wrap=True,
+                NSMakeRect(40, 0, width - 80, 28), size=11, wrap=True,
                 lines=2, alignment=1)
             outbox.setAutoresizingMask_(NSViewWidthSizable)
-            for view in (phase, status, detail, engine, outbox, pause,
-                         fix, copy_outbox):
-                hero.addSubview_(view)
-            self._stack(page, hero, below=face_stage, gap=0, height=160)
+            outbox_row = NSView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, width, 28))
+            outbox_row.addSubview_(outbox)
+            self._stack(page, outbox_row, below=actions, gap=2, height=28)
+
             self.dynamic.update(
                 home_face_view=face_view,
+                home_bubble=bubble,
                 overview_hero=hero,
+                overview_actions=actions,
+                overview_outbox_row=outbox_row,
                 overview_phase=phase,
                 overview_status=status,
                 overview_detail=detail,
@@ -5644,70 +5764,77 @@ if APPKIT_AVAILABLE:
                 copy_outbox_button=copy_outbox,
             )
 
-            # One quiet stats strip, no card chrome: three centered columns.
-            metrics = NSView.alloc().initWithFrame_(
-                NSMakeRect(0, 0, width, 44))
+            # Three tilted sticker badges carry the day's numbers.
+            metrics = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, 54))
             metric_specs = (
-                ("overview.metric.last.heading", "overview_last"),
-                ("overview.metric.words.heading", "overview_words"),
-                ("overview.metric.saved.heading", "overview_saved"))
-            block = width / 3.0
-            for index, (heading_key, key) in enumerate(metric_specs):
-                x = index * block
+                ("overview.metric.last.heading", "overview_last", -2.0),
+                ("overview.metric.words.heading", "overview_words", 1.5),
+                ("overview.metric.saved.heading", "overview_saved", 2.5))
+            badge_width = 200.0
+            badges = []
+            for index, (heading_key, key, tilt) in enumerate(metric_specs):
+                x = width / 6.0 * (2 * index + 1) - badge_width / 2.0
+                badge = _card(NSMakeRect(x, 2, badge_width, 50),
+                              treatment="playful")
+                badge.setAutoresizingMask_(
+                    NSViewMinXMargin | NSViewMaxXMargin)
+                try:
+                    badge.setFrameCenterRotation_(tilt)
+                except Exception:
+                    pass
                 caption = self._soft(
                     self._l(heading_key),
-                    NSMakeRect(x, 28, block, 13), size=10, alignment=1)
-                caption.setAutoresizingMask_(
-                    NSViewMinXMargin | NSViewMaxXMargin)
+                    NSMakeRect(0, 30, badge_width, 12), size=9.5,
+                    weight="semibold", rounded=True, alignment=1)
                 value = self._ink(
                     self._l("overview.metric.last.empty"),
-                    NSMakeRect(x, 2, block, 22),
-                    size=17, weight="semibold", rounded=True, truncate=True,
+                    NSMakeRect(0, 6, badge_width, 22),
+                    size=16, weight="semibold", rounded=True, truncate=True,
                     alignment=1)
-                # Monospaced digits: live numbers must not shift layout.
                 value.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(
-                    17.0, 0.3))
-                value.setAutoresizingMask_(
-                    NSViewMinXMargin | NSViewMaxXMargin)
-                metrics.addSubview_(caption)
-                metrics.addSubview_(value)
+                    16.0, 0.3))
+                badge.addSubview_(caption)
+                badge.addSubview_(value)
+                metrics.addSubview_(badge)
+                badges.append(badge)
                 self.dynamic[key] = value
-            self._stack(page, metrics, below=hero, gap=6, height=44)
+            self._stack(page, metrics, below=outbox_row, gap=4, height=54)
             self.dynamic["overview_metric_cards"] = (metrics,)
+            self.dynamic["home_stat_badges"] = tuple(badges)
 
-            # Last dictation: one slim card of evidence lines and actions.
-            result_card = _card(NSMakeRect(0, 0, width, 112))
+            # Last dictation: one slim sticker of evidence and actions.
+            result_card = _card(NSMakeRect(0, 0, width, 88))
             self._register("card", result_card)
             result_summary = self._ink(
                 self._l("results.summary.empty"),
-                NSMakeRect(16, 80, 440, 20),
-                size=15, weight="semibold", rounded=True, truncate=True)
+                NSMakeRect(16, 58, 440, 20),
+                size=14, weight="semibold", rounded=True, truncate=True)
             result_mode = self._pill(
                 self._l("results.mode.capture"),
-                NSMakeRect(width - 16 - 96, 81, 96, 20),
+                NSMakeRect(width - 16 - 96, 59, 96, 20),
                 accessibility_label=self._l("results.accessibility.mode"))
             result_mode.setAutoresizingMask_(NSViewMinXMargin)
             result_engine = self._soft(
                 self._l("results.engine.waiting"),
-                NSMakeRect(16, 60, 660, 16), size=12, truncate=True)
+                NSMakeRect(16, 42, 660, 15), size=11, truncate=True)
             result_engine.setAutoresizingMask_(NSViewWidthSizable)
             result_audio = self._soft(
                 self._l("results.audio.off"),
-                NSMakeRect(16, 44, 660, 14), size=11, truncate=True)
+                NSMakeRect(16, 28, 660, 13), size=10, truncate=True)
             result_audio.setAutoresizingMask_(NSViewWidthSizable)
             play_audio = _button(
                 self._l("results.audio.play"),
-                NSMakeRect(width - 16 - 160 - 8 - 92 - 8 - 116, 10, 116, 26),
+                NSMakeRect(width - 16 - 160 - 8 - 92 - 8 - 116, 3, 116, 24),
                 self, "playRetainedSpan:", symbol="play.fill",
                 help_text=self._l("results.audio.play.help"))
             clear_audio = _button(
                 self._l("results.audio.clear"),
-                NSMakeRect(width - 16 - 160 - 8 - 92, 10, 92, 26),
+                NSMakeRect(width - 16 - 160 - 8 - 92, 3, 92, 24),
                 self, "clearRetainedSpans:", symbol="xmark.bin",
                 help_text=self._l("results.audio.clear.help"))
             inspect_evidence = _button(
                 self._l("results.inspect.action"),
-                NSMakeRect(width - 16 - 160, 10, 160, 26),
+                NSMakeRect(width - 16 - 160, 3, 160, 24),
                 self, "inspectResultEvidence:", symbol="doc.text.magnifyingglass",
                 help_text=self._l("results.inspect.action.help"),
             )
@@ -5717,7 +5844,7 @@ if APPKIT_AVAILABLE:
                          result_audio, play_audio, clear_audio,
                          inspect_evidence):
                 result_card.addSubview_(view)
-            self._stack(page, result_card, below=metrics, gap=10, height=112)
+            self._stack(page, result_card, below=metrics, gap=4, height=88)
             self.dynamic.update(
                 home_result_card=result_card,
                 result_summary=result_summary,
@@ -5963,7 +6090,7 @@ if APPKIT_AVAILABLE:
             face_card.addSubview_(picker)
             self._stack(personalize, face_card, height=64)
 
-            personalize_key_views: list[Any] = [picker]
+            personalize_key_views: list[Any] = list(picker.chips)
             rows = (
                 ("tones", "settings.personalize.tones", "editTone:"),
                 ("snippets", "settings.personalize.snippets", "editSnippets:"),
@@ -6303,9 +6430,34 @@ if APPKIT_AVAILABLE:
             if self.timer is None:
                 self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                     2.0, self, "refreshTimer:", None, True)
-            self.dynamic["home_face_view"].startLiving()
+            self._sync_face_clock()
             if entering:
                 self._entrance_stagger()
+
+        @objc.python_method
+        def _sync_face_clock(self) -> None:
+            """One gate for the 30fps face clock: it runs only while the
+            window is visible and unoccluded, Home is the section, and
+            Reduce Motion is off. Everything else stops it — including
+            navigating to Settings/Advanced and Reduce Motion flips, both
+            reported by review as leaks."""
+            face_view = self.dynamic.get("home_face_view")
+            if face_view is None:
+                return
+            try:
+                occluded = not bool(
+                    self.window.occlusionState()
+                    & NSWindowOcclusionStateVisible)
+            except Exception:
+                occluded = False
+            state = self.view_model.state
+            live = (bool(self.window.isVisible()) and not occluded
+                    and state.section == "Home"
+                    and not state.prefers_reduced_motion)
+            if live:
+                face_view.startLiving()
+            else:
+                face_view.stopLiving()
 
         @objc.python_method
         def _entrance_stagger(self) -> None:
@@ -6871,6 +7023,7 @@ if APPKIT_AVAILABLE:
             self.dynamic["notice"].setTextColor_(notice_color)
             self._animate_notice(state)
             self._restyle_secondary_buttons(dark)
+            self._sync_face_clock()
             self._configure_key_view_loop(state)
 
         @objc.python_method
@@ -7616,18 +7769,7 @@ if APPKIT_AVAILABLE:
             self.dynamic["home_face_view"].stopLiving()
 
         def windowDidChangeOcclusionState_(self, _notification: Any) -> None:
-            """Stop the face clock whenever nobody can see the face."""
-            try:
-                visible = bool(
-                    self.window.occlusionState()
-                    & NSWindowOcclusionStateVisible)
-            except Exception:
-                visible = bool(self.window.isVisible())
-            face_view = self.dynamic["home_face_view"]
-            if visible and bool(self.window.isVisible()):
-                face_view.startLiving()
-            else:
-                face_view.stopLiving()
+            self._sync_face_clock()
 
         @objc.python_method
         def feed_level(self, level: float, mode: str) -> None:
@@ -8157,9 +8299,10 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             localized_string("settings.personalize.modes.detail"),
             "voice modes summary")
         require(
-            controller.dynamic["face_picker"] in
-            controller.dynamic["settings_key_views"]["Personalize"],
-            "face picker lives in Personalize")
+            all(chip in
+                controller.dynamic["settings_key_views"]["Personalize"]
+                for chip in controller.dynamic["face_picker"].chips),
+            "face picker chips are Personalize key views")
 
         def ancestor_views(view: Any) -> tuple[Any, ...]:
             chain = []
