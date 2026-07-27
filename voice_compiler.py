@@ -16,6 +16,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable, Protocol, Sequence
 
+from phonetic_keys import double_metaphone
 from process_verifier import RefusalReason, VerificationReceipt
 
 
@@ -79,26 +80,53 @@ def _norm(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.casefold())
 
 
-def _phonetic_key(value: str) -> str:
-    word = re.sub(r"[^a-z]", "", value.casefold())
-    if not word:
-        return ""
-    for pattern, replacement in (
-        (r"^qw", "gw"), (r"^kn", "n"), (r"^wr", "r"),
-        (r"ph", "f"), (r"ght", "t"),
-        (r"qu", "k"), (r"ck", "k"), (r"[cq]", "k"), (r"x", "ks"),
-        (r"[aeiouy]", ""), (r"(.)\1+", r"\1"),
-    ):
-        word = re.sub(pattern, replacement, word)
-    return word[:16]
+_IDENTIFIER_MARK_RE = re.compile(r"[0-9_./+-]")
+
+
+def _metaphone_codes(value: str) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(
+        code for code in double_metaphone(value) if code))
+
+
+def _best_code_ratio(lefts: tuple[str, ...],
+                     rights: tuple[str, ...]) -> float:
+    return max((difflib.SequenceMatcher(None, left, right).ratio()
+                for left in lefts for right in rights), default=0.0)
+
+
+def _metaphone_ratio(left: str, right: str) -> float:
+    best = _best_code_ratio(_metaphone_codes(left), _metaphone_codes(right))
+    left_marked = bool(_IDENTIFIER_MARK_RE.search(left))
+    right_marked = bool(_IDENTIFIER_MARK_RE.search(right))
+    if left_marked != right_marked:
+        # A speaker drops an identifier's version tail ("Gwen" for the
+        # visible Qwen3_5), so a plain word also competes against the
+        # marked side's letters alone.  Two marked identifiers keep
+        # their marks: Qwen2_5 must never sound identical to Qwen3_5.
+        marked, plain = (left, right) if left_marked else (right, left)
+        stem = _IDENTIFIER_MARK_RE.sub("", marked)
+        if stem:
+            best = max(best, _best_code_ratio(
+                _metaphone_codes(stem), _metaphone_codes(plain)))
+    return best
 
 
 def phonetic_similarity(left: str, right: str) -> float:
+    """Acoustic confusability of two tokens on a 0..1 scale.
+
+    The blend keeps the historical contract behind the span-graph
+    context gate (thresholds 0.84/0.88): identical spelling can reach
+    1.0 while a pure phonetic match tops out at 0.92, so sounding alike
+    never outranks reading alike.  Double Metaphone replaces the old
+    ad-hoc key without lowering any pair that legitimately passed the
+    gate before -- the spelling term is untouched and the golden pairs
+    (Gwen/Qwen, Gwen/Qwen3_5) keep their exact-code 0.92 -- while pairs
+    the crude key confused only by shared consonant skeletons now fall
+    away.
+    """
     spelling = difflib.SequenceMatcher(
         None, left.casefold(), right.casefold()).ratio()
-    phonetic = difflib.SequenceMatcher(
-        None, _phonetic_key(left), _phonetic_key(right)).ratio()
-    return max(spelling, phonetic * 0.92)
+    return max(spelling, _metaphone_ratio(left, right) * 0.92)
 
 
 def _safe_context_replacement(original: str,
