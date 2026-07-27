@@ -189,8 +189,54 @@ partial results are never presented as a completed bakeoff.
 The scorecard normalizes quality, latency, and throughput within the compared
 cohort. Licensing is an independent eligibility gate. Missing memory, energy,
 and startup measurements remain visibly unmeasured and are excluded from the
-score rather than guessed. Update `model_scorecard.json` only from a preserved,
-documented benchmark run.
+score rather than guessed.
+
+### Measured on named hardware, or unmeasured
+
+`model_scorecard.json` is schema version 2 and is the single source of truth
+for the published [ASR bakeoff](ASR_BAKEOFF.md) table; a test parses that
+table and fails if any value drifts from this file.
+
+Every metric binds to one of two states. A `measured` metric names a record in
+the top-level `measurements` list; an `unmeasured` metric is `null` and names
+no run. The loader rejects any disagreement between the two, an unmeasured
+metric that names a run, and a measured metric that names a run that does not
+exist. There is no third state and no implicit default.
+
+A measurement record names the hardware, the operating system, the date, the
+dataset, the sample, and the exact command. Two flags carry the honesty:
+`artifacts_preserved` and `independently_recalculable`. The loader refuses a
+record that claims recalculability without a preserved artifact, refuses a
+preserved artifact without its SHA-256, and refuses a digest published without
+the artifact. Facts that were not recorded — the operating-system version of
+the 2026-07-21 run — stay `null` rather than being guessed.
+
+The scorecard command prints both, per candidate:
+
+```sh
+uv run performance_lab.py scorecard
+```
+
+### Refreshing from a real run
+
+Never hand-edit a metric. Preserve the run's `summary.json` and refresh from
+it:
+
+```sh
+uv run performance_lab.py refresh-model-scorecard \
+  --summary /tmp/parrot-asr-results/summary.json \
+  --measurement-id librispeech-test-clean-100-<machine>-<date> \
+  --hardware "Apple M4 Pro MacBook Pro" \
+  --os-version 26.0.1 \
+  --measured-on 2026-07-21
+```
+
+The command copies only the metrics the summary actually contains, and hashes
+the summary bytes into the new record. It refuses a run whose engine targeted a
+different model or revision than the reviewed pin, refuses a partial run that
+does not cover every reviewed candidate, and refuses a summary missing any
+metric. Memory, energy, and startup stay `unmeasured` because `benchmark_asr.py`
+does not measure them; nothing invents a value for them.
 
 ### Scheduled public-source audit
 

@@ -100,3 +100,13 @@ one-shot network-denial worker are local test foundations, not a stability or
 compatibility promise to external clients. Any such surface needs its own
 versioning, security/privacy model, adapter evidence, and release commitment
 before it can be described as public.
+
+## Building against the seams
+
+[Contributor interfaces](contributor-interfaces.md) is the practical companion
+to this page. It records the exact message kinds, payload fields, capability
+profiles, `GUIActions` callable surface, capture-harness artifact schemas, and
+activation-receipt formats, along with the stability tier of each and the
+inconsistencies a generic reader would trip over. It is written for someone
+changing this repository, not for a third-party client, because — as stated
+above — there is no supported third-party client surface yet.
