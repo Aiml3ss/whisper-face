@@ -88,8 +88,9 @@ AUDITED_NETWORK_IMPORTS = frozenset({"socket", "requests", "http.server"})
 # each one is for. The set is asserted exactly: a sixth entry means someone
 # added a network call that nobody has reviewed.
 AUDITED_CALL_SITES = {
-    # The only outbound HTTP client in the product. Target is OLLAMA_URL.
-    "ollama_chat": frozenset({"requests.post"}),
+    # The only outbound HTTP client in the product. Target is OLLAMA_URL. The
+    # call sits in a closure so the schema-rejection retry can reuse it (#126).
+    "ollama_chat.post": frozenset({"requests.post"}),
     # Route discovery for the printed LAN address. UDP connect assigns a
     # source address; it transmits nothing. Server-only mode reaches it.
     "lan_ip": frozenset({"socket.socket", "s.connect"}),
@@ -98,7 +99,8 @@ AUDITED_CALL_SITES = {
     # A private AF_UNIX activation socket. No IP family is involved.
     "start_gui_activation_server": frozenset(
         {"socket.socket", "listener.bind", "listener.listen"}),
-    "serve": frozenset({"listener.accept", "connection.recv"}),
+    "start_gui_activation_server.serve": frozenset(
+        {"listener.accept", "connection.recv"}),
 }
 
 _CLIENT_CALL_ROOTS = frozenset({
@@ -176,14 +178,21 @@ def _dotted(node: ast.AST) -> str | None:
 
 
 def _call_sites(path: Path) -> dict[str, set[str]]:
-    """Map each enclosing function name to the socket-capable calls it makes."""
+    """Map each enclosing function name to the socket-capable calls it makes.
+
+    Nested helpers are qualified with the function they close over. A bare
+    ``post`` says nothing about who is calling out or where it goes;
+    ``ollama_chat.post`` is reviewable, and lifting a call into a closure no
+    longer silently renames an audited entry into an unaudited one.
+    """
     sites: dict[str, set[str]] = {}
 
     def visit(node: ast.AST, owner: str) -> None:
         for child in ast.iter_child_nodes(node):
             name = owner
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                name = child.name
+                name = (child.name if owner == "<module>"
+                        else f"{owner}.{child.name}")
             if isinstance(child, ast.Call):
                 dotted = _dotted(child.func)
                 if dotted is not None:

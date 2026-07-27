@@ -18,7 +18,7 @@ spctl --assess --type open --context context:primary-signature -vv \
 xcrun stapler validate WhisperFace-<version>-macOS-arm64.dmg
 
 # 3. A specific workflow run in this repository produced these artifacts.
-gh attestation verify SHA256SUMS --repo Aiml3ss/whispering-parrot
+gh attestation verify SHA256SUMS --repo Aiml3ss/whisper-face
 ```
 
 The third command reads a signed [SLSA](https://slsa.dev/) build-provenance
