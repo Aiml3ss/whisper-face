@@ -2126,13 +2126,17 @@ class WhisperFaceThemeTests(unittest.TestCase):
         self.assertNotEqual(LIGHT_PALETTE.bg, DARK_PALETTE.bg)
         self.assertNotEqual(LIGHT_PALETTE.surface, DARK_PALETTE.surface)
         self.assertNotEqual(LIGHT_PALETTE.ink, DARK_PALETTE.ink)
-        # The chip map and the character roster are one roster: every
-        # companion has a chip and no chip is orphaned. Asserted as a
-        # property against FACE_ORDER so the roster can grow without this
-        # test restating it, the same lesson #129 applied to the face
-        # normalization test.
+        # The chip map, the character roster, and the runtime picker roster
+        # are one roster: every companion has a chip, no chip is orphaned,
+        # and everything drawn is actually selectable in the macOS picker
+        # and the Windows tray, which both iterate FACE_CHOICES. Asserted
+        # as a property so the roster can grow without this test restating
+        # it, the same lesson #129 applied to the face normalization test.
         from whisper_face_characters import FACE_ORDER
+        face_choices = load_definitions(
+            "normalize_face", assignments={"FACE_CHOICES"})["FACE_CHOICES"]
         self.assertEqual(set(FACE_CHIP_COLORS), set(FACE_ORDER))
+        self.assertEqual(set(FACE_CHIP_COLORS), set(face_choices))
 
     def test_all_named_jelly_motions_have_bounded_fast_springs(self):
         self.assertEqual(
