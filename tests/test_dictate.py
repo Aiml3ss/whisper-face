@@ -2126,12 +2126,13 @@ class WhisperFaceThemeTests(unittest.TestCase):
         self.assertNotEqual(LIGHT_PALETTE.bg, DARK_PALETTE.bg)
         self.assertNotEqual(LIGHT_PALETTE.surface, DARK_PALETTE.surface)
         self.assertNotEqual(LIGHT_PALETTE.ink, DARK_PALETTE.ink)
-        self.assertEqual(
-            set(FACE_CHIP_COLORS),
-            {"parrot", "fox", "owl", "cat", "bear",
-             "dog", "wolf", "pig", "panda", "tiger",
-             "frog", "rabbit", "hedgehog", "penguin"},
-        )
+        # The chip map and the character roster are one roster: every
+        # companion has a chip and no chip is orphaned. Asserted as a
+        # property against FACE_ORDER so the roster can grow without this
+        # test restating it, the same lesson #129 applied to the face
+        # normalization test.
+        from whisper_face_characters import FACE_ORDER
+        self.assertEqual(set(FACE_CHIP_COLORS), set(FACE_ORDER))
 
     def test_all_named_jelly_motions_have_bounded_fast_springs(self):
         self.assertEqual(
