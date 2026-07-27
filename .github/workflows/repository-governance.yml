@@ -1,0 +1,34 @@
+name: Repository governance
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  repository-governance:
+    # Runs on the self-hosted bergserver runner for the same reason the CLA
+    # check does: the hosted-minutes budget is exhausted, and a required check
+    # that cannot start is a required check that blocks every pull request.
+    #
+    # windows-smoke.yml already runs this suite, but only as one line inside a
+    # long hosted job that is not a required status check. That is how #139
+    # merged with the face-roster prose still claiming fourteen companions.
+    # This job exists to be small enough to require: it needs no models, no
+    # audio, and no platform runtime, and the suite itself takes ~0.1s.
+    runs-on: [self-hosted, bergserver]
+    steps:
+      - name: Check out the merge result
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # The suite reads history directly: it replays the MIT LICENSE out of
+          # its boundary commit, proves that commit is still an ancestor, and
+          # resolves the mit-last tag. A shallow clone fails all three.
+          fetch-depth: 0
+          # Nothing after checkout speaks to GitHub, and this runner's
+          # workspace outlives the job.
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Check the governance invariants
+        run: uv run tests/test_repository_governance.py
