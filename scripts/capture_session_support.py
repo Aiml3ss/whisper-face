@@ -40,13 +40,30 @@ from compatibility_fingerprint import (  # noqa: E402
     STATE_BUCKETS,
     TARGET_BUCKETS,
 )
-from insertion_integrity import ReceiptReason, ReceiptState  # noqa: E402
+from insertion_integrity import (  # noqa: E402
+    READBACK_CONFLICT_SHAPES,
+    ReceiptReason,
+    ReceiptState,
+)
 
 
 SUPPORT_SCHEMA_VERSION = 1
 DEFAULT_EVIDENCE_DIR = ROOT / ".evidence"
 DEFAULT_TRANSCRIPTS = ROOT / "transcripts.jsonl"
 DEFAULT_RUNTIME_LOG = ROOT / "dictate.log"
+
+# How a recorded case came to exist. The distinction is load-bearing: an
+# operator-attested case carries a human answer to "did the right text appear
+# in the right place", and a runtime-observed case carries no human answer at
+# all. A runtime-observed case may never be presented as, aggregated with, or
+# promoted into an attested one.
+ATTESTED_EVIDENCE_SCOPE = "operator-attested"
+OBSERVED_EVIDENCE_SCOPE = "runtime-observed"
+
+# The operator answer a passively observed case does *not* have. It is a
+# distinct third value, never one of the real verdicts, so no summary can
+# mistake a machine reading for something a human confirmed.
+NOT_ASKED_VERDICT = "not-asked-machine-observed"
 
 # `dictate.py` writes these three keys with the user's own words in them. They
 # are named here only so every tool can assert it never touches them.
@@ -209,6 +226,40 @@ class Session:
         }
         self.save()
 
+    def observe(self, case_id: str, payload: Mapping[str, Any]) -> bool:
+        """Merge one machine-observed case, never displacing a human answer.
+
+        Returns ``True`` when the case was written. A case the operator has
+        already answered — recorded with a verdict, or blocked with a closed
+        reason — is left exactly as it is and ``False`` is returned, because
+        passive evidence cannot answer the question an operator answered.
+
+        Unlike :meth:`record` and :meth:`block` this does not save. Passive
+        observation replays a whole log at once, so the caller writes the
+        session once at the end and a crash leaves the previous session file
+        intact rather than a half-merged one.
+        """
+        existing = self.records.get(case_id)
+        if case_id in self.blocked:
+            return False
+        if (existing is not None
+                and existing.get("evidence_scope") != OBSERVED_EVIDENCE_SCOPE):
+            return False
+        self.records[case_id] = {
+            "case_id": case_id,
+            "evidence_scope": OBSERVED_EVIDENCE_SCOPE,
+            **dict(payload),
+        }
+        return True
+
+    def observed(self, case_id: str) -> dict[str, Any] | None:
+        """Return an existing machine-observed record, or None."""
+        existing = self.records.get(case_id)
+        if (existing is not None
+                and existing.get("evidence_scope") == OBSERVED_EVIDENCE_SCOPE):
+            return existing
+        return None
+
     def payload(self) -> dict[str, Any]:
         return {
             "schema_version": SUPPORT_SCHEMA_VERSION,
@@ -315,6 +366,11 @@ class TranscriptReceipt:
     app_bundle: str | None
     app_identity_withheld: bool
     capabilities: dict[str, str] | None = None
+    # How the readback differed, drawn from the runtime's own closed shape
+    # vocabulary. It names a difference, never the differing text.
+    readback_shape: str | None = None
+    # How long the hotkey was held, i.e. the length of one continuous capture.
+    press_ms: float | None = None
 
     @property
     def has_receipt(self) -> bool:
@@ -398,7 +454,27 @@ def project_transcript_record(entry: object) -> TranscriptReceipt | None:
         app_bundle=bundle,
         app_identity_withheld=isinstance(raw_app, str) and bundle is None,
         capabilities=project_capability_buckets(metrics),
+        readback_shape=project_readback_shape(metrics),
+        press_ms=(
+            None if not metrics
+            or _optional_number(metrics.get("press_s")) is None
+            else round(_optional_number(metrics.get("press_s")) * 1000, 4)),
     )
+
+
+def project_readback_shape(metrics: Mapping[str, Any] | None) -> str | None:
+    """Return the runtime's readback shape only if it is a known shape.
+
+    `insertion_integrity.READBACK_CONFLICT_SHAPES` is a closed vocabulary of
+    *differences* — "trailing-whitespace", "observed-is-prefix" — and carries
+    no destination text. The runtime writes an empty string for an utterance
+    that had no conflict shape; that is absence, not a bucket, so it projects
+    to `None` rather than being invented into one.
+    """
+    if not isinstance(metrics, Mapping):
+        return None
+    shape = metrics.get("readback_shape")
+    return shape if shape in READBACK_CONFLICT_SHAPES else None
 
 
 def read_transcript_receipts(path: Path) -> list[TranscriptReceipt]:
@@ -456,6 +532,50 @@ def transcript_baseline(path: Path) -> tuple[list[str], int]:
             len(receipts))
 
 
+# ------------------------- runtime trace reading --------------------------
+
+# `dictate.emit_performance_trace` prints one closed-schema, purely numeric
+# trace per named event behind this prefix. The payloads are already free of
+# transcripts, app identity, paths, and exception text by construction, and
+# only the *event name* is read here — never a payload value.
+PERFORMANCE_TRACE_PREFIX = "[trace] "
+RUNTIME_START_TRACE_EVENT = "warmup_total"
+UTTERANCE_TRACE_EVENT = "warm_path"
+
+
+def read_trace_event_sequence(path: Path,
+                              events: Iterable[str]) -> list[str]:
+    """Return the ordered names of the runtime's own traces, filtered.
+
+    Order is the only thing this recovers, and order is exactly what a
+    restart claim needs: the runtime log carries no timestamps, so "a process
+    start happened between these two utterances" is provable while "it
+    happened at 09:14" is not.
+    """
+    wanted = frozenset(events)
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return []
+    except OSError as error:
+        raise CaptureError(f"cannot read {path}: {error}") from error
+    sequence: list[str] = []
+    for line in text.splitlines():
+        marker = line.find(PERFORMANCE_TRACE_PREFIX)
+        if marker < 0:
+            continue
+        try:
+            payload = json.loads(line[marker + len(PERFORMANCE_TRACE_PREFIX):])
+        except ValueError:
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        event = payload.get("event")
+        if isinstance(event, str) and event in wanted:
+            sequence.append(event)
+    return sequence
+
+
 # --------------------------- capability buckets ---------------------------
 
 # `compatibility_fingerprint.CompatibilityObservation` needs a capability
@@ -503,18 +623,24 @@ assert_compatibility_vocabulary()
 
 
 __all__ = [
+    "ATTESTED_EVIDENCE_SCOPE",
     "CAPABILITY_METRIC_KEYS",
     "CAPABILITY_UNAVAILABLE_REASON",
     "COMPATIBILITY_REASON_BY_RECEIPT_REASON",
     "DEFAULT_EVIDENCE_DIR",
     "DEFAULT_RUNTIME_LOG",
     "DEFAULT_TRANSCRIPTS",
+    "NOT_ASKED_VERDICT",
     "NO_RECEIPT_REASON",
     "NO_RECEIPT_STATE",
+    "OBSERVED_EVIDENCE_SCOPE",
+    "PERFORMANCE_TRACE_PREFIX",
     "RECEIPT_REASONS",
     "RECEIPT_STATES",
     "ROOT",
+    "RUNTIME_START_TRACE_EVENT",
     "TEXT_BEARING_TRANSCRIPT_KEYS",
+    "UTTERANCE_TRACE_EVENT",
     "CaptureError",
     "Choice",
     "Session",
@@ -526,7 +652,9 @@ __all__ = [
     "new_transcript_receipts",
     "progress_line",
     "project_capability_buckets",
+    "project_readback_shape",
     "project_transcript_record",
+    "read_trace_event_sequence",
     "read_transcript_receipts",
     "transcript_baseline",
     "utc_now",

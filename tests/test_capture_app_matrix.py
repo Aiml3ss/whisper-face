@@ -7,6 +7,7 @@
 import ast
 import io
 import json
+import os
 import stat
 import sys
 import tempfile
@@ -463,6 +464,375 @@ class ArtifactTests(unittest.TestCase):
         self.assertIn("real apps exercised: 2", summary)
         self.assertIn("50-app claim: no", summary)
         self.assertIn("four-nines claim: no", summary)
+
+
+class PassiveObservationTests(unittest.TestCase):
+    """Harvesting ordinary use must never impersonate an operator answer."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.transcripts = self.dir / "transcripts.jsonl"
+        self.transcripts.write_text("", encoding="utf-8")
+        self.session_path = self.dir / "session.json"
+        self.apps = matrix.load_apps(None)
+
+    def session(self):
+        return support.Session.load(
+            self.session_path, matrix.TOOL,
+            plan_digest=matrix.plan_digest(self.apps),
+            blocked_reasons=matrix.BLOCKED_REASONS)
+
+    def write(self, *lines, replace=False):
+        """Append, or atomically replace the file the way `dictate.py` does."""
+        if replace:
+            temporary = self.dir / "replacement.jsonl"
+            temporary.write_text(
+                "".join(line + "\n" for line in lines), encoding="utf-8")
+            os.replace(temporary, self.transcripts)
+            return
+        with self.transcripts.open("a", encoding="utf-8") as handle:
+            for line in lines:
+                handle.write(line + "\n")
+
+    def observe(self):
+        session = self.session()
+        outcome = matrix.observe_transcript(
+            self.apps, session, transcripts=self.transcripts)
+        return outcome
+
+    def artifact(self):
+        return matrix.build_artifact(self.apps, self.session().payload())
+
+    def test_a_passive_case_carries_no_dictated_text_at_all(self):
+        self.write(
+            transcript_line("evt-1", bundle="com.apple.TextEdit"),
+            transcript_line("evt-2", bundle="com.apple.TextEdit",
+                            state="conflict", reason="readback_conflict",
+                            extra_metrics={"readback_shape": "divergent"}))
+        self.observe()
+        blob = json.dumps(self.artifact())
+        for poison in (POISON_RAW, POISON_CLEAN, POISON_OBSERVED, POISON_TONE):
+            self.assertNotIn(poison, blob)
+        for key in support.TEXT_BEARING_TRANSCRIPT_KEYS:
+            self.assertNotIn(f'"{key}"', blob)
+        self.assertNotIn('"path"', blob)
+        self.assertIn("com.apple.TextEdit", blob)
+
+    def test_a_windows_window_title_is_never_turned_into_a_case(self):
+        self.write(transcript_line(
+            "evt-w", bundle="windows:Quarterly plan.docx"))
+        outcome = self.observe()
+        self.assertEqual(outcome["cases_merged"], [])
+        self.assertEqual(outcome["skipped"], {"app-identity-withheld": 1})
+        blob = json.dumps(self.artifact())
+        self.assertNotIn("Quarterly", blob)
+        self.assertEqual(self.artifact()["claims"]["real_apps_exercised"], 0)
+
+    def test_an_utterance_without_an_id_or_a_receipt_is_never_counted(self):
+        self.write(
+            transcript_line(None, bundle="com.apple.TextEdit"),
+            transcript_line("evt-legacy", bundle="com.apple.TextEdit",
+                            state=support.NO_RECEIPT_STATE,
+                            reason=support.NO_RECEIPT_REASON))
+        outcome = self.observe()
+        self.assertEqual(outcome["cases_merged"], [])
+        self.assertEqual(outcome["skipped"], {
+            "no-event-id": 1, "runtime-reported-no-receipt": 1})
+
+    def test_re_observing_the_same_log_changes_nothing(self):
+        self.write(
+            transcript_line("evt-1", bundle="com.apple.TextEdit"),
+            transcript_line("evt-2", bundle="com.apple.TextEdit"))
+        first = self.observe()
+        self.assertEqual(first["utterances_observed"], 2)
+        before = self.session_path.read_text(encoding="utf-8")
+
+        second = self.observe()
+        self.assertEqual(second["utterances_observed"], 0)
+        self.assertEqual(second["cases_merged"], [])
+        self.assertEqual(second["skipped"], {"already-observed": 2})
+        self.assertEqual(self.session_path.read_text(encoding="utf-8"), before)
+        runtime = self.session().records["textedit"]["runtime"]
+        self.assertEqual(runtime["utterances_observed"], 2)
+
+    def test_a_file_the_runtime_replaced_under_us_is_de_duplicated(self):
+        # `dictate.py` trims history by atomically replacing the whole file,
+        # so ids disappear from it. De-duplication is by id, and an id already
+        # folded in is never counted twice even though it is still present.
+        self.write(*(transcript_line(f"evt-{index}",
+                                     bundle="com.apple.TextEdit")
+                     for index in range(3)))
+        self.assertEqual(self.observe()["utterances_observed"], 3)
+        self.write(*(transcript_line(f"evt-{index}",
+                                     bundle="com.apple.TextEdit")
+                     for index in range(1, 5)), replace=True)
+        second = self.observe()
+
+        self.assertEqual(second["utterances_observed"], 2)
+        self.assertEqual(second["skipped"], {"already-observed": 2})
+        runtime = self.session().records["textedit"]["runtime"]
+        self.assertEqual(runtime["utterances_observed"], 5)
+        self.assertEqual(
+            runtime["observed_event_ids"],
+            [f"evt-{index}" for index in range(5)])
+
+    def test_every_insertion_into_one_app_is_aggregated_not_replaced(self):
+        self.write(
+            transcript_line("evt-1", bundle="com.apple.TextEdit"),
+            transcript_line("evt-2", bundle="com.apple.TextEdit",
+                            state="conflict", reason="readback_conflict",
+                            paste_attempted=True,
+                            extra_metrics={"readback_shape": "divergent"}),
+            transcript_line("evt-3", bundle="com.apple.TextEdit",
+                            state="conflict", reason="focus_drift",
+                            paste_attempted=False))
+        self.observe()
+        runtime = self.session().records["textedit"]["runtime"]
+
+        self.assertEqual(runtime["utterances_observed"], 3)
+        self.assertEqual(runtime["insertion_states"],
+                         {"conflict": 2, "verified": 1})
+        self.assertEqual(runtime["insertion_reasons"], {
+            "commit_verified": 1, "focus_drift": 1, "readback_conflict": 1})
+        self.assertEqual(runtime["readback_shapes"], {"divergent": 1})
+        self.assertEqual(runtime["paste_attempts"],
+                         {"attempted": 2, "not-attempted": 1})
+        verdict = self.session().records["textedit"]["machine_verdict"]
+        self.assertEqual(verdict["proven_delivery"], 1)
+        self.assertEqual(verdict["proven_not_delivered_as_intended"], 2)
+        self.assertIs(verdict["operator_asked"], False)
+
+    def test_an_operator_answer_is_never_replaced_by_a_passive_one(self):
+        matrix.run_session(
+            self.apps, self.session(), transcripts=self.transcripts,
+            reader=ScriptedReader([
+                "1\n",
+                appender(self.transcripts, transcript_line(
+                    "evt-attested", bundle="com.apple.TextEdit")),
+                "1\n", "1\n", "q\n"]),
+            writer=io.StringIO())
+        self.write(transcript_line("evt-passive",
+                                   bundle="com.apple.TextEdit"))
+        outcome = self.observe()
+
+        self.assertEqual(outcome["cases_protected_by_operator"], ["textedit"])
+        self.assertEqual(outcome["cases_merged"], [])
+        # Both the attested utterance and the later one belong to an app the
+        # operator answered for, so neither is folded in.
+        self.assertEqual(outcome["skipped"], {"operator-already-answered": 2})
+        record = self.session().records["textedit"]
+        self.assertEqual(record["evidence_scope"],
+                         support.ATTESTED_EVIDENCE_SCOPE)
+        self.assertEqual(record["operator"]["text_verdict"],
+                         "correct-text-in-intended-target")
+
+    def test_every_skip_reason_stays_inside_the_closed_set(self):
+        self.write(
+            transcript_line(None, bundle="com.apple.TextEdit"),
+            transcript_line("evt-w", bundle="windows:Quarterly plan.docx"),
+            transcript_line("evt-legacy", bundle="com.apple.TextEdit",
+                            state=support.NO_RECEIPT_STATE,
+                            reason=support.NO_RECEIPT_REASON),
+            transcript_line("evt-1", bundle="com.apple.TextEdit"))
+        self.observe()
+        outcome = self.observe()
+        self.assertLessEqual(
+            set(outcome["skipped"]), matrix.OBSERVE_SKIP_REASONS)
+        self.assertTrue(outcome["skipped"])
+
+    def test_a_blocked_app_is_left_to_the_operator(self):
+        session = self.session()
+        session.block("textedit", "app-not-installed",
+                      {"category": "native-cocoa"})
+        self.write(transcript_line("evt-1", bundle="com.apple.TextEdit"))
+        outcome = self.observe()
+
+        self.assertEqual(outcome["cases_protected_by_operator"], ["textedit"])
+        self.assertNotIn("textedit", self.session().records)
+        self.assertEqual(
+            self.session().blocked["textedit"]["reason"], "app-not-installed")
+
+    def test_the_verdict_is_a_third_value_never_a_human_answer(self):
+        self.write(transcript_line("evt-1", bundle="com.apple.TextEdit"))
+        self.observe()
+        record = self.session().records["textedit"]
+
+        self.assertEqual(record["evidence_scope"],
+                         support.OBSERVED_EVIDENCE_SCOPE)
+        self.assertEqual(record["operator"]["text_verdict"],
+                         support.NOT_ASKED_VERDICT)
+        self.assertEqual(record["operator"]["app_behavior"],
+                         support.NOT_ASKED_VERDICT)
+        for choice in matrix.TEXT_VERDICTS:
+            self.assertNotEqual(choice.value, support.NOT_ASKED_VERDICT)
+        for choice in matrix.APP_BEHAVIORS:
+            self.assertNotEqual(choice.value, support.NOT_ASKED_VERDICT)
+
+    def test_the_artifact_keeps_passive_and_attested_apart(self):
+        matrix.run_session(
+            self.apps, self.session(), transcripts=self.transcripts,
+            reader=ScriptedReader([
+                "1\n",
+                appender(self.transcripts, transcript_line(
+                    "evt-attested", bundle="com.apple.TextEdit")),
+                "1\n", "1\n", "q\n"]),
+            writer=io.StringIO())
+        self.write(transcript_line("evt-passive", bundle="com.apple.Notes"))
+        self.observe()
+        artifact = self.artifact()
+
+        self.assertEqual(artifact["evidence_scope"],
+                         matrix.MIXED_ARTIFACT_SCOPE)
+        self.assertEqual(artifact["operator_observations"]["attested_cases"], 1)
+        self.assertEqual(artifact["machine_observed"]["cases"], 1)
+        self.assertEqual(artifact["machine_observed"]["utterances"], 1)
+        # The attested case is the only one an agreement can be computed for.
+        self.assertEqual(artifact["agreement"]["both"], 1)
+        self.assertEqual(artifact["agreement"]["not_comparable"], 1)
+        self.assertEqual(
+            artifact["operator_observations"]["text_verdicts"], {
+                "correct-text-in-intended-target": 1,
+                support.NOT_ASKED_VERDICT: 1})
+        summary = matrix.render_summary(artifact)
+        self.assertIn("operator-attested cases: 1", summary)
+        self.assertIn("machine-observed cases: 1", summary)
+
+    def test_a_passive_only_artifact_says_so_in_its_scope(self):
+        self.write(transcript_line("evt-1", bundle="com.apple.TextEdit"))
+        self.observe()
+        artifact = self.artifact()
+        self.assertEqual(artifact["evidence_scope"],
+                         matrix.OBSERVED_ARTIFACT_SCOPE)
+        self.assertEqual(artifact["agreement"]["both"], 0)
+        self.assertEqual(artifact["agreement"]["disagreements"], 0)
+
+    def test_coverage_credits_only_the_categories_actually_dictated_into(self):
+        self.write(transcript_line("evt-1", bundle="com.apple.TextEdit"))
+        self.observe()
+        coverage = self.artifact()["coverage"]
+
+        self.assertEqual(coverage["by_category"]["native-cocoa"]["recorded"], 1)
+        for name in matrix.CATEGORIES:
+            if name == "native-cocoa":
+                continue
+            self.assertEqual(coverage["by_category"][name]["recorded"], 0, name)
+        self.assertEqual(
+            coverage["categories_without_evidence"],
+            sorted(set(matrix.CATEGORIES) - {"native-cocoa"}))
+        totals = sum(entry["recorded"]
+                     for entry in coverage["by_category"].values())
+        self.assertEqual(totals, coverage["apps_recorded"])
+
+    def test_an_app_outside_the_plan_fills_no_planned_slot(self):
+        self.write(transcript_line(
+            "evt-1", bundle="com.anthropic.claudefordesktop"))
+        self.observe()
+        artifact = self.artifact()
+        coverage = artifact["coverage"]
+
+        self.assertEqual(coverage["apps_recorded"], 0)
+        self.assertEqual(coverage["apps_observed_off_plan"], 1)
+        self.assertEqual(coverage["apps_not_attempted"], 50)
+        self.assertEqual(
+            coverage["categories_without_evidence"], sorted(matrix.CATEGORIES))
+        # It is still a real app that really received text.
+        self.assertEqual(artifact["claims"]["real_apps_exercised"], 1)
+        self.assertIs(artifact["claims"]["fifty_app_claim"], False)
+
+    def test_the_fifty_app_claim_still_only_flips_at_fifty(self):
+        self.write(*(
+            transcript_line(f"evt-{index}", bundle=f"com.example.app{index}")
+            for index in range(49)))
+        self.observe()
+        self.assertIs(self.artifact()["claims"]["fifty_app_claim"], False)
+        self.assertEqual(self.artifact()["claims"]["real_apps_exercised"], 49)
+
+        self.write(transcript_line("evt-49", bundle="com.example.app49"))
+        self.observe()
+        self.assertEqual(self.artifact()["claims"]["real_apps_exercised"], 50)
+        self.assertIs(self.artifact()["claims"]["fifty_app_claim"], True)
+        self.assertIs(self.artifact()["claims"]["four_nines_claim"], False)
+        self.assertIs(self.artifact()["coverage"]["extrapolated"], False)
+
+    def test_a_bundle_two_curated_cases_share_is_never_guessed(self):
+        # Terminal hosts both a shell prompt and a full-screen TUI editor.
+        self.assertEqual(
+            sum(1 for app in self.apps
+                if app["bundle_id"] == "com.apple.Terminal"), 2)
+        self.assertNotIn("com.apple.Terminal", matrix.bundle_index(self.apps))
+        self.write(transcript_line("evt-1", bundle="com.apple.Terminal"))
+        self.observe()
+
+        self.assertNotIn("terminal-app", self.session().records)
+        self.assertNotIn("terminal-tui-editor", self.session().records)
+        self.assertEqual(
+            self.artifact()["coverage"]["by_category"]["terminal"]["recorded"],
+            0)
+        self.assertEqual(
+            self.artifact()["coverage"]["apps_observed_off_plan"], 1)
+
+    def test_two_different_bundles_never_collapse_into_one_case(self):
+        first = matrix.observed_case_id("com.example.Thing")
+        second = matrix.observed_case_id("com.example/thing")
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.startswith("observed-"))
+        self.assertLessEqual(len(first), 64)
+
+    def test_capability_buckets_survive_into_aggregator_ready_pairs(self):
+        self.write(transcript_line("evt-1", bundle="com.apple.TextEdit",
+                                   extra_metrics={
+                                       "insertion_target": "readable",
+                                       "insertion_paste": "available",
+                                       "insertion_readback": "available"}))
+        self.observe()
+        compatibility = self.artifact()["compatibility"]
+
+        self.assertIs(compatibility["capability_buckets_available"], True)
+        self.assertEqual(len(compatibility["observations"]), 1)
+        aggregator = CompatibilityFingerprintAggregator(minimum_count=2)
+        for pair in compatibility["observations"]:
+            observation = CompatibilityObservation.from_buckets(
+                pair["capabilities"], pair["outcome"])
+            self.assertRegex(observation.fingerprint(), r"^[0-9a-f]{16}$")
+            aggregator.record(pair["capabilities"], pair["outcome"])
+
+    def test_a_readback_shape_outside_the_closed_set_is_dropped(self):
+        self.assertIsNone(support.project_readback_shape(
+            {"readback_shape": "the-user-typed-this-instead"}))
+        self.assertIsNone(support.project_readback_shape(
+            {"readback_shape": ""}))
+        self.assertEqual(
+            support.project_readback_shape(
+                {"readback_shape": "trailing-whitespace"}),
+            "trailing-whitespace")
+
+    def test_observe_writes_an_owner_only_session_and_artifact(self):
+        self.write(transcript_line("evt-1", bundle="com.apple.TextEdit"))
+        target = self.dir / "artifact.json"
+        writer = io.StringIO()
+        code = matrix.main(
+            ["--session", str(self.session_path), "observe",
+             "--transcripts", str(self.transcripts), "--out", str(target)],
+            reader=ScriptedReader([]), writer=writer)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.session_path.stat().st_mode), 0o600)
+        output = writer.getvalue()
+        self.assertIn("PASSIVE OBSERVATION", output)
+        self.assertIn("machine-observed cases: 1", output)
+        self.assertIn("categories with no evidence at all:", output)
+
+    def test_observe_refuses_a_transcript_that_does_not_exist(self):
+        writer = io.StringIO()
+        code = matrix.main(
+            ["--session", str(self.session_path), "observe",
+             "--transcripts", str(self.dir / "missing.jsonl")],
+            reader=ScriptedReader([]), writer=writer)
+        self.assertEqual(code, 2)
+        self.assertIn("does not exist yet", writer.getvalue())
 
 
 class NoReceiptWritingTests(unittest.TestCase):
