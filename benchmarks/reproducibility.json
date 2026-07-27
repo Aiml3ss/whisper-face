@@ -1,124 +1,133 @@
 {
-  "schema_version": 1,
-  "description": "What a third party can actually re-run, per checked-in corpus. This file is the machine-readable source for docs/benchmarks/reproducible-corpora.md; a test asserts every corpus in benchmarks/ appears exactly once, that every declared case count matches the file, and that every named command points at a script that exists.",
-  "privacy": "no recordings, no personal dictation, and no private user state is referenced by any clone-only corpus",
-  "requirement_classes": {
-    "clone-only": "Runs with nothing but a git clone and uv. No network, no downloads, no personal data, no hardware beyond the machine running it.",
-    "needs-download": "Requires a public dataset or model download before it can run.",
-    "needs-local-service": "Requires a locally running service such as Ollama with a pulled model.",
-    "needs-apple-silicon": "Requires an Apple Silicon Mac and installed runtime assets.",
-    "needs-external-observations": "Requires observation files a human must collect outside this repository.",
-    "needs-private-runtime-log": "Requires a log produced by actually dictating on an installed machine.",
-    "reference-data": "Not a case corpus; thresholds, pins, or protocol definitions consumed by another command."
+ "schema_version": 1,
+ "description": "What a third party can actually re-run, per checked-in corpus. This file is the machine-readable source for docs/benchmarks/reproducible-corpora.md; a test asserts every corpus in benchmarks/ appears exactly once, that every declared case count matches the file, and that every named command points at a script that exists.",
+ "privacy": "no recordings, no personal dictation, and no private user state is referenced by any clone-only corpus",
+ "requirement_classes": {
+  "clone-only": "Runs with nothing but a git clone and uv. No network, no downloads, no personal data, no hardware beyond the machine running it.",
+  "needs-download": "Requires a public dataset or model download before it can run.",
+  "needs-local-service": "Requires a locally running service such as Ollama with a pulled model.",
+  "needs-apple-silicon": "Requires an Apple Silicon Mac and installed runtime assets.",
+  "needs-external-observations": "Requires observation files a human must collect outside this repository.",
+  "needs-private-runtime-log": "Requires a log produced by actually dictating on an installed machine.",
+  "reference-data": "Not a case corpus; thresholds, pins, or protocol definitions consumed by another command."
+ },
+ "corpora": [
+  {
+   "path": "benchmarks/voice_compiler_cases.json",
+   "case_key": "cases",
+   "cases": 11,
+   "content": "synthetic-text",
+   "requirement": "clone-only",
+   "command": "uv run benchmark_voice_compiler.py",
+   "notes": "The golden-corpus half is fully reproducible. The optional --transcripts telemetry half reads private local dictation history and degrades to 'unavailable' for anyone else, which is the correct outcome, not a failure."
   },
-  "corpora": [
-    {
-      "path": "benchmarks/voice_compiler_cases.json",
-      "case_key": "cases",
-      "cases": 11,
-      "content": "synthetic-text",
-      "requirement": "clone-only",
-      "command": "uv run benchmark_voice_compiler.py",
-      "notes": "The golden-corpus half is fully reproducible. The optional --transcripts telemetry half reads private local dictation history and degrades to 'unavailable' for anyone else, which is the correct outcome, not a failure."
-    },
-    {
-      "path": "benchmarks/consequence_routing_cases.json",
-      "case_key": "cases",
-      "cases": 16,
-      "content": "synthetic-text",
-      "requirement": "clone-only",
-      "command": "uv run benchmark_consequence_routing.py",
-      "notes": "Synthetic classification and selector policy only. The artifact states that no audio, verifier, runtime ASR backend, or physical device was exercised."
-    },
-    {
-      "path": "benchmarks/insertion_reliability_cases.json",
-      "case_key": "cases",
-      "cases": 11,
-      "content": "synthetic-adapter-fixtures",
-      "requirement": "clone-only",
-      "command": "uv run benchmark_insertion_reliability.py",
-      "notes": "Adapter simulation only. The report prints zero real apps exercised. Its capability profiles are also the reference corpus for the physical app-matrix capture harness."
-    },
-    {
-      "path": "benchmarks/point_and_speak_cases.json",
-      "case_key": "cases",
-      "cases": 17,
-      "content": "synthetic-ui-scenes",
-      "requirement": "clone-only",
-      "command": "uv run public_scorecard.py",
-      "notes": "point_and_speak_resolver.py has no CLI of its own, so the public scorecard is the reproducing command."
-    },
-    {
-      "path": "benchmarks/drop_to_target_cases.json",
-      "case_key": "cases",
-      "cases": 11,
-      "content": "synthetic-ui-scenes",
-      "requirement": "clone-only",
-      "command": "uv run public_scorecard.py",
-      "notes": "drop_to_target.py has no CLI of its own. There is no drag path in the codebase at all; these cases only decide whether a named target could accept one."
-    },
-    {
-      "path": "benchmarks/representative_dictation_cases.json",
-      "case_key": "cases",
-      "cases": 22,
-      "content": "synthetic-text",
-      "requirement": "clone-only",
-      "command": "uv run performance_lab.py corpus",
-      "notes": "Coverage of the accent, noise, and quiet-speech dimensions passes on scenario labels only. Those cases carry explicit unfulfilled recording requirements; a text fixture cannot prove acoustic performance. The lifecycle and stress commands read the same corpus and are also clone-only."
-    },
-    {
-      "path": "benchmarks/competitor_run_template.json",
-      "case_key": null,
-      "cases": null,
-      "content": "zero-measurement-template",
-      "requirement": "clone-only",
-      "command": "uv run competitor_benchmark.py benchmarks/competitor_run_template.json",
-      "notes": "Every observation is 'unavailable' with reason 'not_run'. It exists so a third party can execute the evaluator end to end and see the output shape without collecting anything. It contains no measurement by construction, and a test enforces that."
-    },
-    {
-      "path": "benchmarks/cleanup_latency_cases.json",
-      "case_key": "cases",
-      "cases": 30,
-      "content": "synthetic-text",
-      "requirement": "needs-local-service",
-      "command": "uv run benchmark_cleanup_latency.py --run",
-      "notes": "The latency path needs a local Ollama serving the pinned cleanup model, and refuses to start without --run. The proof-recovery half of the same corpus IS clone-only: uv run benchmark_cleanup_proof_recovery.py."
-    },
-    {
-      "path": "benchmarks/competitor_tasks.json",
-      "case_key": "tasks",
-      "cases": 6,
-      "content": "task-protocol-definitions",
-      "requirement": "needs-external-observations",
-      "command": "uv run competitor_benchmark.py --protocol benchmarks/competitor_tasks.json <run.json> ...",
-      "notes": "The protocol is reproducible; the runs are not. Producing a real observation file needs clean machines, the other products, and a human observer. The corpus itself declares product_results_included: false."
-    },
-    {
-      "path": "benchmarks/model_scorecard.json",
-      "case_key": "candidates",
-      "cases": 3,
-      "content": "model-pins-and-measured-metrics",
-      "requirement": "needs-apple-silicon",
-      "command": "uv run performance_lab.py scorecard",
-      "notes": "Ranking the checked-in evidence is clone-only. Regenerating the metrics needs a LibriSpeech download, an Apple Silicon Mac, the MLX snapshots, and the installed Parakeet helper. uv run performance_lab.py audit-models additionally needs network access to the public Hugging Face API."
-    },
-    {
-      "path": "benchmarks/performance_budgets.json",
-      "case_key": null,
-      "cases": null,
-      "content": "thresholds",
-      "requirement": "reference-data",
-      "command": "uv run performance_lab.py stress --cycles 10 --restart-every 50",
-      "notes": "Only the ci_warm_path profile is reachable from a clone. The product_quality, warm_path_stage, and startup_readiness profiles all need private runtime logs produced by actually dictating on an installed machine."
-    },
-    {
-      "path": "benchmarks/reproducibility.json",
-      "case_key": null,
-      "cases": null,
-      "content": "this-manifest",
-      "requirement": "reference-data",
-      "command": "uv run tests/test_reproducible_corpora.py",
-      "notes": "Self-describing. The test that reads it is the thing that keeps this file honest."
-    }
-  ]
+  {
+   "path": "benchmarks/consequence_routing_cases.json",
+   "case_key": "cases",
+   "cases": 16,
+   "content": "synthetic-text",
+   "requirement": "clone-only",
+   "command": "uv run benchmark_consequence_routing.py",
+   "notes": "Synthetic classification and selector policy only. The artifact states that no audio, verifier, runtime ASR backend, or physical device was exercised."
+  },
+  {
+   "path": "benchmarks/insertion_reliability_cases.json",
+   "case_key": "cases",
+   "cases": 11,
+   "content": "synthetic-adapter-fixtures",
+   "requirement": "clone-only",
+   "command": "uv run benchmark_insertion_reliability.py",
+   "notes": "Adapter simulation only. The report prints zero real apps exercised. Its capability profiles are also the reference corpus for the physical app-matrix capture harness."
+  },
+  {
+   "path": "benchmarks/point_and_speak_cases.json",
+   "case_key": "cases",
+   "cases": 17,
+   "content": "synthetic-ui-scenes",
+   "requirement": "clone-only",
+   "command": "uv run public_scorecard.py",
+   "notes": "point_and_speak_resolver.py has no CLI of its own, so the public scorecard is the reproducing command."
+  },
+  {
+   "path": "benchmarks/drop_to_target_cases.json",
+   "case_key": "cases",
+   "cases": 11,
+   "content": "synthetic-ui-scenes",
+   "requirement": "clone-only",
+   "command": "uv run public_scorecard.py",
+   "notes": "drop_to_target.py has no CLI of its own. There is no drag path in the codebase at all; these cases only decide whether a named target could accept one."
+  },
+  {
+   "path": "benchmarks/representative_dictation_cases.json",
+   "case_key": "cases",
+   "cases": 22,
+   "content": "synthetic-text",
+   "requirement": "clone-only",
+   "command": "uv run performance_lab.py corpus",
+   "notes": "Coverage of the accent, noise, and quiet-speech dimensions passes on scenario labels only. Those cases carry explicit unfulfilled recording requirements; a text fixture cannot prove acoustic performance. The lifecycle and stress commands read the same corpus and are also clone-only."
+  },
+  {
+   "path": "benchmarks/competitor_run_template.json",
+   "case_key": null,
+   "cases": null,
+   "content": "zero-measurement-template",
+   "requirement": "clone-only",
+   "command": "uv run competitor_benchmark.py benchmarks/competitor_run_template.json",
+   "notes": "Every observation is 'unavailable' with reason 'not_run'. It exists so a third party can execute the evaluator end to end and see the output shape without collecting anything. It contains no measurement by construction, and a test enforces that."
+  },
+  {
+   "path": "benchmarks/cleanup_latency_cases.json",
+   "case_key": "cases",
+   "cases": 30,
+   "content": "synthetic-text",
+   "requirement": "needs-local-service",
+   "command": "uv run benchmark_cleanup_latency.py --run",
+   "notes": "The latency path needs a local Ollama serving the pinned cleanup model, and refuses to start without --run. The proof-recovery half of the same corpus IS clone-only: uv run benchmark_cleanup_proof_recovery.py."
+  },
+  {
+   "path": "benchmarks/competitor_tasks.json",
+   "case_key": "tasks",
+   "cases": 6,
+   "content": "task-protocol-definitions",
+   "requirement": "needs-external-observations",
+   "command": "uv run competitor_benchmark.py --protocol benchmarks/competitor_tasks.json <run.json> ...",
+   "notes": "The protocol is reproducible; the runs are not. Producing a real observation file needs clean machines, the other products, and a human observer. The corpus itself declares product_results_included: false."
+  },
+  {
+   "path": "benchmarks/model_scorecard.json",
+   "case_key": "candidates",
+   "cases": 3,
+   "content": "model-pins-and-measured-metrics",
+   "requirement": "needs-apple-silicon",
+   "command": "uv run performance_lab.py scorecard",
+   "notes": "Ranking the checked-in evidence is clone-only. Regenerating the metrics needs a LibriSpeech download, an Apple Silicon Mac, the MLX snapshots, and the installed Parakeet helper. uv run performance_lab.py audit-models additionally needs network access to the public Hugging Face API."
+  },
+  {
+   "path": "benchmarks/performance_budgets.json",
+   "case_key": null,
+   "cases": null,
+   "content": "thresholds",
+   "requirement": "reference-data",
+   "command": "uv run performance_lab.py stress --cycles 10 --restart-every 50",
+   "notes": "Only the ci_warm_path profile is reachable from a clone. The product_quality, warm_path_stage, and startup_readiness profiles all need private runtime logs produced by actually dictating on an installed machine."
+  },
+  {
+   "path": "benchmarks/reproducibility.json",
+   "case_key": null,
+   "cases": null,
+   "content": "this-manifest",
+   "requirement": "reference-data",
+   "command": "uv run tests/test_reproducible_corpora.py",
+   "notes": "Self-describing. The test that reads it is the thing that keeps this file honest."
+  },
+  {
+   "path": "benchmarks/quality_baseline.json",
+   "case_key": null,
+   "cases": null,
+   "content": "aggregate-metrics",
+   "requirement": "reference-data",
+   "command": "uv run quality_gate.py",
+   "notes": "Pinned deterministic quality metrics, not a corpus: the release gate replays the golden, scorecard, proof-recovery and stress collectors and fails on any difference. --rebaseline rewrites it; the diff rides the causing PR."
+  }
+ ]
 }

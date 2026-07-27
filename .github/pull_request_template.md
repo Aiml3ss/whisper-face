@@ -35,6 +35,8 @@ before submitting outside contributions.
 - [ ] `uv run tests/test_benchmark_consequence_routing.py`
 - [ ] `uv run tests/test_benchmark_cleanup_latency.py`
 - [ ] `uv run tests/test_cleanup_proof_recovery.py`
+- [ ] `uv run tests/test_quality_gate.py`
+- [ ] `uv run quality_gate.py`
 - [ ] `uv run tests/test_benchmark_cleanup_proof_recovery.py`
 - [ ] `uv run tests/test_benchmark_asr.py`
 - [ ] `uv run tests/test_benchmark_macos_asr_warm_path.py`
