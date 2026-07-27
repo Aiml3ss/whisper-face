@@ -42,10 +42,18 @@ parity is a hard gate.
   Known drift: the characters test appears only in AGENTS.md; the
   release workflow omits two acoustic tests; a few tests appear in no
   gate list.
-- **CI workflows**: cla-check (the only *required* status check; runs
-  on the self-hosted bergserver runner since commit `8fb7ed5` because
-  GitHub-hosted jobs stop starting when the Actions budget is spent),
-  windows-smoke (hosted, non-required), macos-release (full gates,
+- **CI workflows**: two *required* status checks, both on the
+  self-hosted bergserver runner because GitHub-hosted jobs stop
+  starting when the Actions budget is spent — cla-check
+  (`acceptance-recorded`, there since commit `8fb7ed5`) and
+  repository-governance (`repository-governance`, #143), which runs
+  `tests/test_repository_governance.py` in about 0.1 s. The governance
+  job fails closed on fork pull requests rather than execute their
+  Python on a persistent personal machine.
+  The rest are advisory: windows-smoke (hosted, non-required — it runs
+  the governance suite too, which is exactly why that was not enough:
+  #139 merged with the face roster stale because nothing blocked on
+  it), macos-release (full gates,
   pristine-worktree assertion, credentials confined to the package job,
   SHA-pinned actions, isolated publish), and two weekly evidence jobs
   (model audit, performance lifecycle) that upload artifacts before

@@ -19,6 +19,23 @@ jobs:
     # audio, and no platform runtime, and the suite itself takes ~0.1s.
     runs-on: [self-hosted, bergserver]
     steps:
+      # Everything below executes the merge result's own Python on a persistent
+      # personal machine, so the merge result has to be trusted code. From a
+      # fork it is not, and CODEOWNERS does not help: a contributor never has
+      # to touch a protected file, because adding `tests/ast.py` shadows this
+      # suite's own `import ast` and runs before the first assertion.
+      #
+      # So fail closed rather than run it. Outside contributions already need a
+      # Project Owner entry in the CLA ledger to pass acceptance-recorded, so a
+      # maintainer is in the loop for any fork PR that could merge anyway; they
+      # re-run the suite from a same-repository branch. The principled fix is a
+      # validator that runs from a trusted revision outside the candidate tree,
+      # which the suite is not written for today.
+      - name: Refuse to execute fork code on the self-hosted runner
+        if: github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "::error title=Fork pull request::The governance suite is not run on the self-hosted runner for pull requests from forks, because it would execute this PR's Python there. A maintainer must review the diff and re-run it from a same-repository branch."
+          exit 1
       - name: Check out the merge result
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
