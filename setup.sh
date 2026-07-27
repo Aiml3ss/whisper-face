@@ -566,6 +566,7 @@ fi
 
 required=(
     dictate.py dictate.py.lock parrot_core.py voice_compiler.py
+    phonetic_keys.py
     process_verifier.py prewarmed_verifier.py whisper_verifier_adapter.py
     relisten_activation.py
     insertion_integrity.py personal_regression.py shadow_candidate_gate.py

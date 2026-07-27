@@ -3,7 +3,7 @@ title: "Acoustic Personalization"
 type: concept
 language: en
 created: 2026-07-26
-modified: 2026-07-26
+modified: 2026-07-27
 tags: [acoustics, keywords, calibration, privacy, evidence]
 aliases: [acoustic-keyword-memory, acoustic-calibration, acoustic-time-machine]
 summary: "Three bounded acoustic subsystems: a keyword evidence store with no recognition effect of its own, an offline calibration policy, and a RAM-only microspan replay buffer."
@@ -52,38 +52,40 @@ storage/policy layers whose runtime effects are gated elsewhere
   consequence-selected spans from memory; disabling wipes them; no
   replay file is ever written.
 
-## Neither acoustic gate can be evidenced today
+## The evidence circle, and how it was broken
 
-> ⚠️ **Known blocker (issue #108, open on `main`)**: the two properties
-> above that make these subsystems safe are exactly what makes their
-> evidence circular. Calibrated settings apply *only* from a valid
-> receipt, so a capture session cannot record a calibrated candidate arm;
-> a biased keyword reaches the ASR prompt *only* through the activation
-> file, so the biased arm cannot be measured without the receipt it is
-> meant to justify. The workarounds `docs/evidence/voice-corpora.md`
-> documents — temporarily editing local settings, or approximating the
-> bias with a `dictionary.txt` entry — both require the operator to
-> hand-modify runtime state mid-corpus, which is the unwitnessed step
-> these gates exist to prevent, and neither measures the real shipping
-> path. Three related findings from the same audit: calibration
-> `telemetry` and `cases` are unlinked, so a stale telemetry log plus a
-> fresh corpus passes; the runbook's example case token is sequential and
-> therefore correlatable across manifests; and keyword-memory eligibility
-> (3 observations plus 2 confirmations from real corrections) is
-> separately unreachable and only discovered at approval time.
+> 📝 **Updated 2026-07-27** (#118, closing issue #108): the two
+> properties above that make these subsystems safe made their evidence
+> circular — calibrated settings apply only from a valid receipt, and a
+> biased keyword reaches the ASR prompt only through the activation
+> file, so neither candidate arm could be recorded. A session-scoped
+> `--measure` override (`measurement_mode.py`) now applies the real
+> candidate front end or prompt for one process session, bounded by the
+> same policy limits a receipt is held to, granting no authority and
+> labelling every manifest recorded under it; the receipts carry the
+> label forward. The old workarounds (hand-editing local settings, or
+> approximating the bias with a `dictionary.txt` entry) are withdrawn
+> from the runbook — they measured an approximation off the shipping
+> path via an unwitnessed mid-corpus change of runtime state, exactly
+> what these gates exist to prevent. The same audit's side findings are
+> now stated in the runbook as operator caveats: the unlinked
+> calibration `telemetry`/`cases` pairing, a non-sequential case-token
+> example, and the keyword-memory eligibility (3 observations plus 2
+> confirmations) that must already exist before the session is booked.
+> Neither corpus has been recorded yet; both features still ship off.
 
 ## Related Concepts
 
 - [[activation-receipt]] — how any of this gains runtime effect
 - [[asr-cascade]] — where prompt priority lands
 - [[consequence-receipts]] — selects the retained microspans
-- [[evidence-capture]] — the corpora, and why two of them stall
+- [[evidence-capture]] — the corpora, and the audit that filed #108
 - [[privacy-and-security]] — the storage posture
 
 ## References
 
 - acoustic_keyword_memory.py, acoustic_keyword_activation.py,
   acoustic_keyword_bias_evaluation.py, acoustic_calibration.py,
-  acoustic_calibration_activation.py, acoustic_time_machine.py;
-  docs/acoustic-accuracy-activation.md
+  acoustic_calibration_activation.py, acoustic_time_machine.py,
+  measurement_mode.py; docs/acoustic-accuracy-activation.md
 - [[2026-07-26-trust-personalization-research]]

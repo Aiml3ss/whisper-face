@@ -1773,8 +1773,15 @@ class ParakeetClientTests(unittest.TestCase):
         self.assertEqual(first_process.wait_calls, 2)
 
     def test_parakeet_processing_time_reaches_recognition_evidence(self):
+        class ImmediatePool:
+            def submit(self, function, *args, **kwargs):
+                return SimpleNamespace(
+                    result=lambda: function(*args, **kwargs))
+
         ns = load_definitions(
             "transcribe_detailed",
+            "_parakeet_crosschecked",
+            "_clean_native_processing_s",
             extra={
                 "np": np,
                 "GLOSS": {"lock": threading.Lock(), "prompt": None},
@@ -1785,6 +1792,9 @@ class ParakeetClientTests(unittest.TestCase):
                 "PARAKEET": SimpleNamespace(
                     transcribe=lambda _audio: ("hello", 0.125)),
                 "PARAKEET_ROUTE_CONFIDENCE": 0.9,
+                "PARAKEET_IO_POOL": ImmediatePool(),
+                "PARAKEET_CROSSCHECK": False,
+                "PARAKEET_CROSSCHECK_MAX_SECONDS": 90.0,
                 "SAMPLE_RATE": 16_000,
                 "Recognition": Recognition,
                 "prepare_asr_audio": lambda audio: audio,
@@ -3479,6 +3489,7 @@ class CleanupGuardTests(unittest.TestCase):
             "_guard_cleaned_output", "llm_clean_with_edits",
             assignments={
                 "BASE_PROMPT", "FEW_SHOT", "LLM_CLEANUP_TIMEOUT",
+                "LLM_CLEANUP_TOTAL_DEADLINES", "CLEANUP_RESPONSE_SCHEMA",
                 "MODE_INSTRUCTIONS", "REFUSAL_RE", "STRUCTURED_OUTPUT",
             },
             extra={
@@ -3494,6 +3505,8 @@ class CleanupGuardTests(unittest.TestCase):
         self.assertEqual(cleaned, "Ready.")
         self.assertEqual(edits, [])
         self.assertEqual(seen["timeout"], (1, 4))
+        # Capture stays on the tight whole-reply ceiling.
+        self.assertEqual(seen["total_deadline"], 6.0)
 
     def test_llm_edit_kind_is_canonicalized_before_status_projection(self):
         private_kind = "customer said secret launch phrase"
@@ -3513,6 +3526,7 @@ class CleanupGuardTests(unittest.TestCase):
             "llm_clean_with_edits",
             assignments={
                 "BASE_PROMPT", "FEW_SHOT", "LLM_CLEANUP_TIMEOUT",
+                "LLM_CLEANUP_TOTAL_DEADLINES", "CLEANUP_RESPONSE_SCHEMA",
                 "LLM_EDIT_KINDS", "MODE_INSTRUCTIONS", "REFUSAL_RE",
                 "STRUCTURED_OUTPUT",
             },
@@ -3544,6 +3558,7 @@ class CleanupGuardTests(unittest.TestCase):
             "_guard_cleaned_output", "llm_clean_with_edits",
             assignments={
                 "BASE_PROMPT", "FEW_SHOT", "LLM_CLEANUP_TIMEOUT",
+                "LLM_CLEANUP_TOTAL_DEADLINES", "CLEANUP_RESPONSE_SCHEMA",
                 "MODE_INSTRUCTIONS", "REFUSAL_RE", "STRUCTURED_OUTPUT",
             },
             extra={
@@ -3568,6 +3583,36 @@ class CleanupGuardTests(unittest.TestCase):
         self.assertTrue(any("bypassed (cooldown)" in line for line in lines))
         self.assertFalse(any("second private dictation" in line
                              for line in lines))
+
+    def test_guard_rejection_releases_without_resetting_the_cooldown(self):
+        breaker = CleanupCircuitBreaker(cooldown_seconds=60)
+
+        def refusing(*_args, **_kwargs):
+            return json.dumps({
+                "text": "I cannot help with that.", "edits": [],
+            }), "stop"
+
+        ns = load_definitions(
+            "_guard_cleaned_output", "llm_clean_with_edits",
+            assignments={
+                "BASE_PROMPT", "FEW_SHOT", "LLM_CLEANUP_TIMEOUT",
+                "LLM_CLEANUP_TOTAL_DEADLINES", "CLEANUP_RESPONSE_SCHEMA",
+                "MODE_INSTRUCTIONS", "REFUSAL_RE", "STRUCTURED_OUTPUT",
+            },
+            extra={
+                "CleanupEdit": object,
+                "LLM_CLEANUP_BREAKER": breaker,
+                "ollama_chat": refusing,
+                "quick_clean": lambda text: f"fallback:{text}",
+                "STRUCTURED_FEW_SHOT": [],
+                "print": lambda *_: None,
+            },
+        )
+        cleaned, _ = ns["llm_clean_with_edits"](
+            "please clean this dictation", "neutral")
+        self.assertEqual(cleaned, "fallback:please clean this dictation")
+        # Released, not stuck in flight, and not opened either.
+        self.assertTrue(breaker.acquire().allowed)
 
     def test_structured_output_guard_rejects_destructive_results(self):
         ns = load_definitions(
@@ -6454,13 +6499,16 @@ class ReleasePlanTests(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def submit(self, function, *args):
+            def submit(self, function, *args, **kwargs):
                 self.calls.append(args[-1])
-                return SimpleNamespace(result=lambda: function(*args))
+                return SimpleNamespace(
+                    result=lambda: function(*args, **kwargs))
 
         pool = ImmediatePool()
+        crosscheck_hints = []
 
-        def detailed(audio, prompt, verify, model):
+        def detailed(audio, prompt, verify, model, crosscheck_text=None):
+            crosscheck_hints.append(crosscheck_text)
             confidence = 0.99 if model == "tiny" else 0.84
             return Recognition(model, confidence)
 
@@ -6491,19 +6539,23 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertEqual(result.alternative, "tiny")
         self.assertTrue(result.verified)
         self.assertEqual(pool.calls, ["tiny", "parakeet-or-whisper-fallback"])
+        # The speculative Tiny hypothesis rides along so the Parakeet route
+        # can derive agreement confidence without a second Tiny decode.
+        self.assertEqual(crosscheck_hints, [None, "tiny"])
 
     def test_tiny_first_cascade_escalates_low_confidence(self):
         class ImmediatePool:
             def __init__(self):
                 self.calls = []
 
-            def submit(self, function, *args):
+            def submit(self, function, *args, **kwargs):
                 self.calls.append(args[-1])
-                return SimpleNamespace(result=lambda: function(*args))
+                return SimpleNamespace(
+                    result=lambda: function(*args, **kwargs))
 
         pool = ImmediatePool()
 
-        def detailed(audio, prompt, verify, model):
+        def detailed(audio, prompt, verify, model, crosscheck_text=None):
             return Recognition(model, 0.5 if model == "tiny" else 0.9)
 
         ns = load_definitions(
@@ -7413,6 +7465,399 @@ class InsertionJoinPrefixTests(unittest.TestCase):
         replacing = types.SimpleNamespace(
             text="the cat sat", selection=(4, 3), element=object())
         self.assertEqual(join(replacing, "dog"), "")
+
+
+class OllamaChatTransportTests(unittest.TestCase):
+    """Structured-output schema and streamed generation deadlines."""
+
+    @staticmethod
+    def namespace(post):
+        return load_definitions(
+            "ollama_chat", "_ollama_stream_reply",
+            extra={
+                "OLLAMA_MODEL": "test-model",
+                "OLLAMA_URL": "http://localhost:11434/api/chat",
+                "requests": SimpleNamespace(post=post),
+                "time": time,
+            },
+        )
+
+    @staticmethod
+    def response(status=200, *, body=None, lines=None, text=""):
+        return SimpleNamespace(
+            status_code=status,
+            text=text,
+            json=lambda: body,
+            iter_lines=lambda: iter(lines or []),
+            close=lambda: None,
+            raise_for_status=lambda: None,
+        )
+
+    def test_schema_is_sent_and_non_streaming_path_is_unchanged(self):
+        posted = []
+
+        def post(url, json=None, timeout=None, stream=False):
+            posted.append((json, stream))
+            return self.response(body={
+                "message": {"content": "{\"text\":\"ok\"}"},
+                "done_reason": "stop",
+            })
+
+        ns = self.namespace(post)
+        out, done = ns["ollama_chat"](
+            "system", "user", json_mode=True,
+            json_schema={"type": "object"})
+        self.assertEqual(out, "{\"text\":\"ok\"}")
+        self.assertEqual(done, "stop")
+        payload, stream = posted[0]
+        self.assertEqual(payload["format"], {"type": "object"})
+        self.assertFalse(payload["stream"])
+        self.assertFalse(stream)
+
+    def test_schema_rejection_falls_back_to_plain_json_mode(self):
+        posted = []
+
+        def post(url, json=None, timeout=None, stream=False):
+            posted.append(dict(json))
+            if isinstance(json.get("format"), dict):
+                return self.response(400, text="invalid format")
+            return self.response(body={
+                "message": {"content": "{}"}, "done_reason": "stop"})
+
+        ns = self.namespace(post)
+        out, _ = ns["ollama_chat"](
+            "system", "user", json_mode=True,
+            json_schema={"type": "object"})
+        self.assertEqual(out, "{}")
+        self.assertEqual(posted[1]["format"], "json")
+
+    def test_streaming_assembles_chunks_and_reports_done_reason(self):
+        lines = [
+            json.dumps({"message": {"content": "Hello "}}).encode(),
+            b"",
+            json.dumps({"message": {"content": "world."},
+                        "done": True, "done_reason": "stop"}).encode(),
+        ]
+
+        def post(url, json=None, timeout=None, stream=False):
+            self.assertTrue(json["stream"])
+            self.assertTrue(stream)
+            return self.response(lines=lines)
+
+        ns = self.namespace(post)
+        out, done = ns["ollama_chat"](
+            "system", "user", total_deadline=5.0)
+        self.assertEqual(out, "Hello world.")
+        self.assertEqual(done, "stop")
+
+    def test_deadline_starts_before_the_first_post(self):
+        # Connect time and compatibility retries spend the same whole-reply
+        # budget as generation; a post that eats the entire budget leaves the
+        # stream reader an already-expired deadline.
+        clock = {"t": 100.0}
+        lines = [json.dumps({"message": {"content": "x"}}).encode()] * 3
+
+        def slow_post(url, json=None, timeout=None, stream=False):
+            clock["t"] += 10.0     # the request itself burns the whole budget
+            return self.response(lines=lines)
+
+        ns = self.namespace(slow_post)
+        ns["time"] = SimpleNamespace(monotonic=lambda: clock["t"])
+        with self.assertRaises(TimeoutError):
+            ns["ollama_chat"]("system", "user", total_deadline=5.0)
+
+    def test_streaming_total_deadline_fails_rather_than_hanging(self):
+        def endless():
+            while True:
+                yield json.dumps(
+                    {"message": {"content": "x"}}).encode()
+
+        ns = self.namespace(lambda *args, **kwargs: None)
+        clock = {"t": 0.0}
+
+        def fake_monotonic():
+            clock["t"] += 0.5
+            return clock["t"]
+
+        closed = []
+        with self.assertRaises(TimeoutError):
+            ns["_ollama_stream_reply"](
+                SimpleNamespace(
+                    iter_lines=endless,
+                    close=lambda: closed.append(True)),
+                deadline=1.0, clock=fake_monotonic)
+        self.assertEqual(closed, [True])
+
+    def test_think_flag_rejection_retries_without_think(self):
+        posted = []
+
+        def post(url, json=None, timeout=None, stream=False):
+            posted.append(dict(json))
+            if "think" in json:
+                return self.response(400, text="think is not supported")
+            return self.response(body={
+                "message": {"content": "ok"}, "done_reason": "stop"})
+
+        ns = self.namespace(post)
+        out, _ = ns["ollama_chat"]("system", "user")
+        self.assertEqual(out, "ok")
+        self.assertNotIn("think", posted[-1])
+
+
+class TailSilencePollTests(unittest.TestCase):
+    """The post-release tail ends as soon as the silence run exists."""
+
+    @staticmethod
+    def waited(silent_samples_curve, *, end_silence=0.12, cap=0.30):
+        clock = {"t": 0.0}
+        curve = list(silent_samples_curve)
+        rec = SimpleNamespace(silent_samples=curve.pop(0))
+
+        def now():
+            return clock["t"]
+
+        def sleep(seconds):
+            clock["t"] += seconds
+            if curve:
+                rec.silent_samples = curve.pop(0)
+
+        ns = load_definitions(
+            "wait_for_tail_silence",
+            extra={
+                "TAIL_SECONDS": cap,
+                "SAMPLE_RATE": 16_000,
+                "calibrated_end_silence_seconds": lambda: end_silence,
+                "time": SimpleNamespace(
+                    sleep=sleep, perf_counter=now),
+            },
+        )
+        return ns["wait_for_tail_silence"](
+            rec, sleep=sleep, now=now)
+
+    def test_quiet_tail_exits_at_the_first_silence_run(self):
+        # Silence run completes after two polls: 40 ms, not 300 ms.
+        waited = self.waited([0, 500, 16_000 * 0.13])
+        self.assertLess(waited, 0.05)
+
+    def test_continuing_speech_still_caps_at_the_full_tail(self):
+        waited = self.waited([0] * 100)
+        self.assertAlmostEqual(waited, 0.30, places=2)
+
+    def test_calibrated_end_silence_shortens_the_wait(self):
+        # A 60 ms calibrated run is satisfied by the second sample.
+        waited = self.waited(
+            [0, 16_000 * 0.07, 16_000 * 0.07], end_silence=0.06)
+        self.assertLess(waited, 0.05)
+
+
+class ParakeetCrosscheckTests(unittest.TestCase):
+    """Agreement-derived route confidence on the Parakeet primary path."""
+
+    @staticmethod
+    def crosschecked(*, parakeet_result, tiny_text=None, fallback=None,
+                     crosscheck_enabled=True, tiny_cached=True,
+                     calls=None):
+        from parrot_core import (
+            hypothesis_agreement,
+            parakeet_confidence_from_agreement,
+            should_escalate_uncertain,
+        )
+        calls = calls if calls is not None else []
+
+        class ImmediatePool:
+            def submit(self, fn, *args, **kwargs):
+                return SimpleNamespace(result=lambda: fn(*args, **kwargs))
+
+        def fake_transcribe_detailed(audio, prompt=None, verify=True,
+                                     model_repo="turbo",
+                                     crosscheck_text=None,
+                                     _skip_parakeet=False):
+            calls.append((model_repo, _skip_parakeet))
+            if model_repo == "tiny-repo":
+                return Recognition(text=tiny_text or "", engine="tiny")
+            return fallback or Recognition(text="", confidence=0.0)
+
+        ns = load_definitions(
+            "_parakeet_crosschecked",
+            "_clean_native_processing_s",
+            extra={
+                "PARAKEET_IO_POOL": ImmediatePool(),
+                "PARAKEET": SimpleNamespace(
+                    transcribe=lambda audio: parakeet_result),
+                "PARAKEET_CROSSCHECK": crosscheck_enabled,
+                "PARAKEET_CROSSCHECK_MAX_SECONDS": 90.0,
+                "PARAKEET_ROUTE_CONFIDENCE": 0.84,
+                "SAMPLE_RATE": 16_000,
+                "WHISPER_REPO": "turbo-repo",
+                "FAST_WHISPER_REPO": "tiny-repo",
+                "asr_model_is_cached": lambda repo: tiny_cached,
+                "transcribe_detailed": fake_transcribe_detailed,
+                "hypothesis_agreement": hypothesis_agreement,
+                "parakeet_confidence_from_agreement":
+                    parakeet_confidence_from_agreement,
+                "should_escalate_uncertain": should_escalate_uncertain,
+                "Recognition": Recognition,
+                "print": lambda *args, **kwargs: None,
+            },
+        )
+        audio = np.zeros(16_000 * 4, dtype=np.float32)
+        return ns["_parakeet_crosschecked"](audio, None, verify=True), calls
+
+    def test_full_agreement_yields_high_confidence_and_no_alternative(self):
+        recognition, _ = self.crosschecked(
+            parakeet_result=("ship the installer today", 0.05),
+            tiny_text="ship the installer today")
+        self.assertEqual(recognition.engine, "parakeet-unified")
+        self.assertAlmostEqual(recognition.confidence, 0.93)
+        self.assertIsNone(recognition.alternative)
+        self.assertEqual(recognition.native_processing_s, 0.05)
+
+    def test_disagreement_drops_confidence_below_the_context_gate(self):
+        recognition, _ = self.crosschecked(
+            parakeet_result=("ship the installer to Berg today ok", 0.05),
+            tiny_text="skip the finish line by the bay no")
+        self.assertLess(recognition.confidence, 0.70)
+        self.assertEqual(
+            recognition.alternative, "skip the finish line by the bay no")
+
+    def test_no_crosscheck_keeps_the_fixed_routing_prior(self):
+        recognition, calls = self.crosschecked(
+            parakeet_result=("hello there", 0.05),
+            crosscheck_enabled=False)
+        self.assertAlmostEqual(recognition.confidence, 0.84)
+        self.assertEqual(calls, [])
+
+    def test_missing_tiny_snapshot_keeps_the_fixed_routing_prior(self):
+        recognition, calls = self.crosschecked(
+            parakeet_result=("hello there", 0.05), tiny_cached=False)
+        self.assertAlmostEqual(recognition.confidence, 0.84)
+        self.assertEqual(calls, [])
+
+    def test_helper_failure_returns_none_for_the_whisper_fallback(self):
+        recognition, _ = self.crosschecked(
+            parakeet_result=None, tiny_text="anything")
+        self.assertIsNone(recognition)
+
+    def test_severe_disagreement_escalates_once_and_keeps_the_winner(self):
+        fallback = Recognition(
+            text="completely different words", confidence=0.9,
+            engine="turbo")
+        recognition, calls = self.crosschecked(
+            parakeet_result=("alpha beta gamma delta", 0.05),
+            tiny_text="one two three four",
+            fallback=fallback)
+        self.assertIn(("turbo-repo", True), calls)
+        self.assertEqual(recognition.text, "completely different words")
+        self.assertTrue(recognition.verified)
+        self.assertEqual(recognition.alternative, "alpha beta gamma delta")
+
+    def test_escalation_failure_keeps_the_primary_transcript(self):
+        # A raising Turbo fallback must not turn a working dictation into a
+        # dropped one: the primary transcript survives escalation failure.
+        from parrot_core import (
+            hypothesis_agreement,
+            parakeet_confidence_from_agreement,
+            should_escalate_uncertain,
+        )
+
+        class ImmediatePool:
+            def submit(self, fn, *args, **kwargs):
+                return SimpleNamespace(result=lambda: fn(*args, **kwargs))
+
+        ns = load_definitions(
+            "_parakeet_crosschecked",
+            "_clean_native_processing_s",
+            extra={
+                "PARAKEET_IO_POOL": ImmediatePool(),
+                "PARAKEET": SimpleNamespace(
+                    transcribe=lambda audio: ("alpha beta gamma delta", 0.05)),
+                "PARAKEET_CROSSCHECK": True,
+                "PARAKEET_CROSSCHECK_MAX_SECONDS": 90.0,
+                "PARAKEET_ROUTE_CONFIDENCE": 0.84,
+                "SAMPLE_RATE": 16_000,
+                "WHISPER_REPO": "turbo-repo",
+                "FAST_WHISPER_REPO": "tiny-repo",
+                "asr_model_is_cached": lambda repo: True,
+                "transcribe_detailed": lambda *args, **kwargs: (
+                    Recognition(text="one two three four", engine="tiny")
+                    if kwargs.get("model_repo") == "tiny-repo"
+                    or (len(args) >= 4 and args[3] == "tiny-repo")
+                    else (_ for _ in ()).throw(
+                        RuntimeError("turbo snapshot missing"))),
+                "hypothesis_agreement": hypothesis_agreement,
+                "parakeet_confidence_from_agreement":
+                    parakeet_confidence_from_agreement,
+                "should_escalate_uncertain": should_escalate_uncertain,
+                "Recognition": Recognition,
+                "print": lambda *args, **kwargs: None,
+            },
+        )
+        audio = np.zeros(16_000 * 4, dtype=np.float32)
+        recognition = ns["_parakeet_crosschecked"](audio, None, verify=True)
+        self.assertEqual(recognition.text, "alpha beta gamma delta")
+        self.assertTrue(recognition.verified)
+        self.assertEqual(recognition.alternative, "one two three four")
+
+    def test_low_confidence_escalation_loser_stays_inspectable(self):
+        fallback = Recognition(
+            text="different words", confidence=0.1, engine="turbo")
+        recognition, calls = self.crosschecked(
+            parakeet_result=("alpha beta gamma delta", 0.05),
+            tiny_text="one two three four",
+            fallback=fallback)
+        self.assertIn(("turbo-repo", True), calls)
+        self.assertEqual(recognition.text, "alpha beta gamma delta")
+        self.assertTrue(recognition.verified)
+        self.assertEqual(recognition.alternative, "different words")
+
+    def test_speculative_crosscheck_text_skips_the_extra_tiny_decode(self):
+        recognition, calls = self.crosschecked(
+            parakeet_result=("use the same words", 0.05),
+            tiny_text="never decoded")
+        self.assertTrue(
+            any(repo == "tiny-repo" for repo, _skip in calls))
+
+        calls_with_hint = []
+        from parrot_core import (
+            hypothesis_agreement,
+            parakeet_confidence_from_agreement,
+            should_escalate_uncertain,
+        )
+
+        class ImmediatePool:
+            def submit(self, fn, *args, **kwargs):
+                return SimpleNamespace(result=lambda: fn(*args, **kwargs))
+
+        ns = load_definitions(
+            "_parakeet_crosschecked",
+            "_clean_native_processing_s",
+            extra={
+                "PARAKEET_IO_POOL": ImmediatePool(),
+                "PARAKEET": SimpleNamespace(
+                    transcribe=lambda audio: ("use the same words", 0.05)),
+                "PARAKEET_CROSSCHECK": True,
+                "PARAKEET_CROSSCHECK_MAX_SECONDS": 90.0,
+                "PARAKEET_ROUTE_CONFIDENCE": 0.84,
+                "SAMPLE_RATE": 16_000,
+                "WHISPER_REPO": "turbo-repo",
+                "FAST_WHISPER_REPO": "tiny-repo",
+                "asr_model_is_cached": lambda repo: True,
+                "transcribe_detailed":
+                    lambda *args, **kwargs: calls_with_hint.append(args)
+                    or Recognition(text=""),
+                "hypothesis_agreement": hypothesis_agreement,
+                "parakeet_confidence_from_agreement":
+                    parakeet_confidence_from_agreement,
+                "should_escalate_uncertain": should_escalate_uncertain,
+                "Recognition": Recognition,
+                "print": lambda *args, **kwargs: None,
+            },
+        )
+        audio = np.zeros(16_000 * 4, dtype=np.float32)
+        recognition = ns["_parakeet_crosschecked"](
+            audio, None, verify=True, crosscheck_text="use the same words")
+        self.assertEqual(calls_with_hint, [])
+        self.assertAlmostEqual(recognition.confidence, 0.93)
 
 
 class BuiltInVerbatimToneTests(unittest.TestCase):

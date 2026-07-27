@@ -3,10 +3,10 @@ title: "Menu Bar"
 type: concept
 language: en
 created: 2026-07-26
-modified: 2026-07-26
+modified: 2026-07-27
 tags: [menu-bar, macos, ux, surfaces]
 aliases: [status-bar, statusbar, menu, tray]
-summary: "Six choices by default and four rows that appear only when they have something to offer — the everyday control surface, with everything else moved into the window."
+summary: "Six choices by default and five rows that appear only when they have something to offer — the everyday control surface, with everything else moved into the window."
 confidence: high
 ---
 
@@ -16,15 +16,15 @@ confidence: high
 
 The macOS menu is the fastest everyday control and deliberately not a
 second control panel. Since 2026-07-26 (#101) it holds **six choices**,
-plus four rows that appear only when they have something to offer. The
+plus five rows that appear only when they have something to offer. The
 in-code rationale sits directly above the construction
-(`dictate.py:2727-2733`): someone opening the menu fifty times a day used
+(`dictate.py:2738-2741`): someone opening the menu fifty times a day used
 to meet thirteen visible options, a six-row mode cheat sheet, and a dense
 evidence submenu every time.
 
 ## Always present
 
-In assembly order (`StatusBar.init`, `dictate.py:2759-2772`):
+In assembly order (`StatusBar.init`, `dictate.py:2773-2787`):
 
 1. **Open Whisper Face…** — the route to [[app-window]]
 2. the usage lines — two non-actionable rows refreshed on open:
@@ -40,6 +40,12 @@ disabled group of two.
 
 ## Rows that appear only when useful
 
+- **Measurement mode** (#118) — a non-actionable announcement row
+  directly under Open Whisper Face, present only while a `--measure`
+  session is running ([[activation-receipt]]). It names the active
+  arms, never the keyword text, and is set once at init rather than
+  refreshed per open, because measurement mode is fixed for the
+  process.
 - **Last Recognition** — shown once a first result exists
   (`refresh_recognition_item`); titled `Last Recognition — Review` only
   on the `review` consequence route ([[consequence-receipts]]). Opens the
@@ -93,6 +99,6 @@ window to move them into ([[windows-support]]).
 
 ## References
 
-- dictate.py `StatusBar` (:2684-2990), `usage_stats` (:2566-2595),
-  `recognition_root_title` (:5879-5882), `WindowsStatusBar` (:3311-3323)
+- dictate.py `StatusBar` (:2690), `usage_stats` (:2568),
+  `recognition_root_title` (:5985), `WindowsStatusBar` (:3275)
 - [[2026-07-26-interface-rebuild-research]]

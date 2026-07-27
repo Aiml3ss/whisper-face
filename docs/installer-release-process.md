@@ -141,11 +141,12 @@ rather than quietly landing outside the gate.
 | `tests/test_capture_delayed_cleanup_cases.py` | Covers `scripts/capture_delayed_cleanup_cases.py`. |
 | `tests/test_capture_lifecycle_evidence.py` | Covers `scripts/capture_lifecycle_evidence.py`. |
 | `tests/test_capture_voice_evidence.py` | Covers `scripts/capture_voice_evidence.py`. |
+| `tests/test_benchmark_latency_rig.py` | Covers `benchmark_latency_rig.py`. |
 
-The four guided evidence-capture sessions are maintainer tooling. No installer
-provisions them, no service runs them, and nothing in a user's installation
-changes when they fail; they exist to produce the corpora that the benchmark
-gates then consume. Run them when you change anything under
+The four guided evidence-capture sessions and the latency rig are maintainer
+tooling. No installer provisions them, no service runs them, and nothing in a
+user's installation changes when they fail; they exist to produce the corpora
+and observations that the benchmark gates then consume. Run them when you change anything under
 `scripts/capture_*.py` — in particular the property that a capture session may
 print an approval command but may never run one, import an activation module,
 or write a receipt.

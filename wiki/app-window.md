@@ -3,7 +3,7 @@ title: "App Window"
 type: concept
 language: en
 created: 2026-07-26
-modified: 2026-07-26
+modified: 2026-07-27
 tags: [gui, macos, ux, surfaces, onboarding]
 aliases: [native-window, whisper-face-window, home-settings-advanced, gui]
 summary: "The native Mac window is three sections — Home, Settings (Personalize + Privacy), Advanced — with the whole trust surface behind one explicit evidence inspector."
@@ -14,7 +14,7 @@ confidence: high
 
 ## Definition
 
-`whisper_face_gui.py` (8,255 lines, AppKit, no browser runtime) is the
+`whisper_face_gui.py` (8,587 lines, AppKit, no browser runtime) is the
 Mac app window opened from [[menu-bar]]'s first row. Since 2026-07-26
 (#104) it has three sections and two Settings panes:
 
@@ -73,7 +73,9 @@ evidence reveal "must carry the entire trust surface instead".
 Demonstrations authoring, the risky-action confirmation ceremony, the
 [[point-and-speak]] preview/press dialogs and the Drop-to-Target preview
 dialogs ([[inert-foundations]]) have no selector, button, dialog method
-or catalog row on any page. What remains, verified at `1165335`: their
+or catalog row on any page. What remains, verified at `1165335` (and the
+chibi-clay rebuild #120 left the contract tuples, actions and key
+equivalents unchanged): their
 `GUIActions` fields (still listed in the contract's action names), their
 view-model passthrough methods, their runtime modules, and their tests.
 They are developer-invokable, not deleted.
@@ -121,7 +123,8 @@ and Drop-to-Target view-model layers are covered in
 ## References
 
 - whisper_face_gui.py (`SECTIONS`/`SETTINGS_PANES` :32-33, `_build_home`
-  :5518, `_build_settings` :5837, `_build_advanced` :6021,
-  `result_evidence_text` :2529, key equivalents :915-919);
+  :5652, `_build_settings` :6028, `_build_advanced` :6207,
+  `result_evidence_text` :2515, key equivalents :903-904);
+  whisper_face_render.py (`LiveFaceView`);
   scripts/window_render_probe.py; README "Native Mac window"
 - [[2026-07-26-interface-rebuild-research]]

@@ -16,25 +16,36 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import benchmark_asr
 from benchmark_asr import (
     BoundedJSONLineReader,
     DEFAULT_MODEL_SCORECARD,
+    FORMATTING_PUNCTUATION,
+    FORMATTING_UNAVAILABLE_EMPTY,
+    FORMATTING_UNAVAILABLE_SINGLE_CASE,
+    FORMATTING_UNAVAILABLE_UNPUNCTUATED,
     PARAKEET_CLI_TIMEOUT_SECONDS,
     PARAKEET_HELPER_SAMPLE_TIMEOUT_SECONDS,
     PARAKEET_HELPER_STARTUP_TIMEOUT_SECONDS,
     PARAKEET_ENGINES,
     Sample,
     _cleanup_helper_process,
+    _formatting_report_line,
+    align_tokens,
     edit_distance,
     execution_model_provenance,
     evenly_spaced,
     harness_provenance,
+    load_manifest_samples,
     load_model_specs,
     load_references,
     resolve_mlx_snapshot,
     run_parakeet,
     run_parrot_helper,
+    score_formatting_records,
     score_records,
+    select_samples,
+    split_formatting_token,
     summarize_model_run,
     verify_installed_parakeet_revision,
 )
@@ -399,6 +410,243 @@ class BenchmarkASRTests(unittest.TestCase):
         self.assertTrue(process.terminated)
         self.assertTrue(process.killed)
         self.assertEqual(process.waits, 3)
+
+
+class FormattingScoringTests(unittest.TestCase):
+    def test_split_formatting_token_extracts_core_and_trailing_marks(self):
+        self.assertEqual(set(FORMATTING_PUNCTUATION), set(".,?!:;"))
+        self.assertEqual(split_formatting_token("world."), ("world", "."))
+        self.assertEqual(split_formatting_token('"Stop."'), ("Stop", "."))
+        self.assertEqual(split_formatting_token('said,"'), ("said", ","))
+        self.assertEqual(split_formatting_token("wait..."), ("wait", "..."))
+        self.assertEqual(split_formatting_token("(yes),"), ("yes", ","))
+        self.assertEqual(split_formatting_token("don't"), ("don't", ""))
+        self.assertEqual(split_formatting_token("plain"), ("plain", ""))
+
+    def test_align_tokens_returns_match_delete_and_insert_positions(self):
+        self.assertEqual(
+            align_tokens("a b c".split(), "a x c".split()),
+            [(0, 0), (1, 1), (2, 2)])
+        self.assertEqual(
+            align_tokens("a b c".split(), "a c".split()),
+            [(0, 0), (1, None), (2, 1)])
+        self.assertEqual(
+            align_tokens("a c".split(), "a b c".split()),
+            [(0, 0), (None, 1), (1, 2)])
+        self.assertEqual(align_tokens([], ["a"]), [(None, 0)])
+        self.assertEqual(align_tokens(["a"], []), [(0, None)])
+
+    def test_punctuation_f1_matches_hand_computed_counts(self):
+        result = score_formatting_records([{
+            "engine": "candidate",
+            "ref": "Hello, world. This is fine.",
+            "hyp": "Hello world. This is fine.",
+        }])
+        self.assertEqual(result["reference_punctuation_marks"], 3)
+        self.assertEqual(result["hypothesis_punctuation_marks"], 2)
+        self.assertEqual(result["matched_punctuation_marks"], 2)
+        self.assertEqual(result["punctuation_precision_pct"], 100.0)
+        self.assertEqual(result["punctuation_recall_pct"], 66.67)
+        self.assertEqual(result["punctuation_f1_pct"], 80.0)
+        self.assertEqual(result["aligned_equal_tokens"], 5)
+        self.assertEqual(result["capitalization_match_pct"], 100.0)
+        self.assertEqual(result["cased_wer_pct"], 20.0)
+        self.assertEqual(result["reference_punctuated_token_pct"], 60.0)
+
+    def test_punctuation_scoring_ignores_marks_on_misrecognized_words(self):
+        result = score_formatting_records([{
+            "engine": "candidate",
+            "ref": "Good morning, Sam",
+            "hyp": "Good evening, Sam.",
+        }])
+        self.assertEqual(result["aligned_equal_tokens"], 2)
+        self.assertEqual(result["reference_punctuation_marks"], 0)
+        self.assertEqual(result["hypothesis_punctuation_marks"], 1)
+        self.assertEqual(result["punctuation_precision_pct"], 0.0)
+        self.assertIsNone(result["punctuation_recall_pct"])
+        self.assertEqual(result["punctuation_f1_pct"], 0.0)
+        self.assertEqual(result["capitalization_match_pct"], 100.0)
+        self.assertEqual(result["cased_wer_pct"], 66.6667)
+
+    def test_capitalization_match_rate_over_aligned_equal_tokens(self):
+        result = score_formatting_records([{
+            "engine": "candidate",
+            "ref": "Hello world. Sam left.",
+            "hyp": "hello world. sam left.",
+        }])
+        self.assertEqual(result["capitalization_match_pct"], 50.0)
+        self.assertEqual(result["punctuation_f1_pct"], 100.0)
+        self.assertEqual(result["cased_wer_pct"], 50.0)
+
+    def test_librispeech_style_references_report_unavailable_not_zeros(self):
+        result = score_formatting_records([
+            {"engine": "candidate", "ref": "HELLO WORLD",
+             "hyp": "Hello, world."},
+            {"engine": "candidate", "ref": "SECOND TEST",
+             "hyp": "Second test."},
+        ])
+        self.assertEqual(result, FORMATTING_UNAVAILABLE_UNPUNCTUATED)
+        self.assertEqual(result, "unavailable — references unpunctuated")
+
+    def test_single_case_punctuated_references_are_unavailable(self):
+        for reference in ("hello, world.", "HELLO, WORLD."):
+            result = score_formatting_records([{
+                "engine": "candidate", "ref": reference, "hyp": reference}])
+            self.assertEqual(result, FORMATTING_UNAVAILABLE_SINGLE_CASE)
+        self.assertEqual(
+            score_formatting_records([]), FORMATTING_UNAVAILABLE_EMPTY)
+
+    def test_detection_uses_two_percent_punctuated_token_floor(self):
+        sparse = " ".join(["word"] * 99 + ["End."])
+        self.assertEqual(
+            score_formatting_records([
+                {"engine": "candidate", "ref": sparse, "hyp": sparse}]),
+            FORMATTING_UNAVAILABLE_UNPUNCTUATED)
+        boundary = " ".join(["word"] * 49 + ["End."])
+        result = score_formatting_records([
+            {"engine": "candidate", "ref": boundary, "hyp": boundary}])
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["reference_punctuated_token_pct"], 2.0)
+        self.assertEqual(result["cased_wer_pct"], 0.0)
+        self.assertEqual(result["punctuation_f1_pct"], 100.0)
+
+    def test_summary_carries_formatting_only_when_requested(self):
+        spec = load_model_specs(DEFAULT_MODEL_SCORECARD)["mlx-tiny"]
+        records = [{
+            "engine": spec.engine,
+            "ref": "Hello, world.",
+            "hyp": "Hello world.",
+            "audio_s": 1.0,
+            "proc_s": 0.1,
+        }]
+        keywords = dict(
+            executor="mlx-whisper",
+            revision_status="verified-immutable-snapshot",
+            preflight_status="not-applicable",
+            tokenize=str.split)
+        plain = summarize_model_run(records, spec, **keywords)
+        self.assertNotIn("formatting_scoring", plain)
+        scored = summarize_model_run(
+            records, spec, formatting=True, **keywords)
+        self.assertEqual(scored["wer_pct"], 50.0)
+        self.assertEqual(set(scored["formatting_scoring"]), {
+            "cased_wer_pct",
+            "punctuation_precision_pct",
+            "punctuation_recall_pct",
+            "punctuation_f1_pct",
+            "capitalization_match_pct",
+            "aligned_equal_tokens",
+            "reference_punctuation_marks",
+            "hypothesis_punctuation_marks",
+            "matched_punctuation_marks",
+            "reference_punctuated_token_pct",
+        })
+        librispeech = summarize_model_run([{
+            "engine": spec.engine,
+            "ref": "HELLO WORLD",
+            "hyp": "hello world",
+            "audio_s": 1.0,
+            "proc_s": 0.1,
+        }], spec, formatting=True, **keywords)
+        self.assertEqual(
+            librispeech["formatting_scoring"],
+            FORMATTING_UNAVAILABLE_UNPUNCTUATED)
+
+    def test_formatting_report_line_shows_unavailable_and_metrics(self):
+        self.assertEqual(
+            _formatting_report_line(FORMATTING_UNAVAILABLE_UNPUNCTUATED),
+            "unavailable — references unpunctuated")
+        line = _formatting_report_line({
+            "cased_wer_pct": 20.0,
+            "punctuation_precision_pct": 100.0,
+            "punctuation_recall_pct": 66.67,
+            "punctuation_f1_pct": 80.0,
+            "capitalization_match_pct": None,
+        })
+        self.assertIn("cased WER 20.00%", line)
+        self.assertIn("100.00/66.67/80.00%", line)
+        self.assertIn("case match n/a%", line)
+
+    def test_main_accepts_formatting_scoring_flag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            argv = [
+                "benchmark_asr.py", "--dataset", directory,
+                "--engines", "mlx-tiny",
+                "--output-dir", str(Path(directory) / "out"),
+                "--formatting-scoring",
+            ]
+            with mock.patch.object(sys, "argv", argv):
+                with self.assertRaisesRegex(SystemExit, "no referenced"):
+                    benchmark_asr.main()
+
+
+class ManifestCorpusTests(unittest.TestCase):
+    def test_manifest_dataset_keeps_punctuated_cased_references(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "audio").mkdir()
+            for name in ("one.wav", "two.wav"):
+                (root / "audio" / name).write_bytes(b"fixture")
+            manifest = root / "manifest.jsonl"
+            manifest.write_text(
+                '{"id": "one", "audio": "audio/one.wav",'
+                ' "text": "Hello, world."}\n'
+                "\n"
+                '{"audio": "audio/two.wav", "text": "Second test?"}\n',
+                encoding="utf-8")
+            samples = select_samples(manifest, None)
+            self.assertEqual(
+                [sample.utterance_id for sample in samples], ["one", "two"])
+            self.assertEqual(samples[0].reference, "Hello, world.")
+            self.assertEqual(samples[1].reference, "Second test?")
+            self.assertEqual(samples[0].audio_path, root / "audio" / "one.wav")
+            limited = select_samples(manifest, 1)
+            self.assertEqual(
+                [sample.utterance_id for sample in limited], ["one"])
+
+    def test_manifest_rejects_bad_lines_duplicates_and_missing_audio(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "one.wav").write_bytes(b"fixture")
+            manifest = root / "manifest.jsonl"
+
+            manifest.write_text("not json\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "invalid manifest JSON"):
+                load_manifest_samples(manifest)
+
+            manifest.write_text(
+                '{"audio": "one.wav", "text": "First."}\n'
+                '{"id": "one", "audio": "one.wav", "text": "Again."}\n',
+                encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                load_manifest_samples(manifest)
+
+            manifest.write_text(
+                '{"audio": "gone.wav", "text": "Missing."}\n',
+                encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "audio file is missing"):
+                load_manifest_samples(manifest)
+
+            manifest.write_text(
+                '{"audio": "one.wav", "text": "  "}\n', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "reference text"):
+                load_manifest_samples(manifest)
+
+            manifest.write_text("", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "no samples"):
+                load_manifest_samples(manifest)
+
+    def test_directory_dataset_still_uses_librispeech_layout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            chapter = Path(directory) / "1" / "2"
+            chapter.mkdir(parents=True)
+            (chapter / "1-2.trans.txt").write_text(
+                "1-2-0000 HELLO WORLD\n", encoding="utf-8")
+            (chapter / "1-2-0000.flac").write_bytes(b"fixture")
+            samples = select_samples(Path(directory), None)
+            self.assertEqual(
+                [sample.utterance_id for sample in samples], ["1-2-0000"])
+            self.assertEqual(samples[0].reference, "HELLO WORLD")
 
 
 if __name__ == "__main__":

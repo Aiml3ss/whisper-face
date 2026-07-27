@@ -74,6 +74,52 @@ helper startup, and per-sample operations have bounded deadlines; helper JSON
 responses are size-limited and timeout cleanup escalates from close to
 terminate to kill.
 
+## Formatting scoring (opt-in)
+
+Normalized WER strips punctuation and casing before comparison, so it says
+nothing about the formatting a user reads in every dictation. Parakeet emits
+its own punctuation; that part of its output is not covered by the table
+above.
+
+`--formatting-scoring` adds a `formatting_scoring` block to each engine
+summary next to, never replacing, the primary normalized WER:
+
+- **Cased WER** (`cased_wer_pct`): word error rate over raw whitespace
+  tokens compared exactly, case-sensitive and with punctuation still
+  attached.
+- **Punctuation precision/recall/F1**: reference and hypothesis words are
+  aligned after stripping case and punctuation; on aligned equal words the
+  trailing marks from `. , ? ! : ;` are compared. Marks on misrecognized
+  words are excluded so a recognition error is not also counted as a
+  punctuation error.
+- **Capitalization match** (`capitalization_match_pct`): the share of
+  aligned equal words whose exact casing matches the reference. There is no
+  proper-noun modelling; sentence-initial and proper-noun capitalization
+  count the same way.
+
+The mode refuses to score references that carry no formatting. LibriSpeech
+transcripts are uppercase without punctuation, so a LibriSpeech run reports
+`"formatting_scoring": "unavailable — references unpunctuated"` instead of
+misleading zeros. References with under 2% punctuated tokens, or with only
+one letter case, are both treated as unavailable.
+
+To score formatting, point `--dataset` at a JSONL manifest file instead of a
+LibriSpeech directory. One object per line:
+
+```json
+{"id": "note-001", "audio": "audio/note-001.wav", "text": "Punctuated, cased reference."}
+```
+
+`audio` resolves relative to the manifest, `id` defaults to the audio file
+stem, and the audio requirements are unchanged (16 kHz for the MLX and
+helper engines). Keep manifests and their audio outside the repository like
+every other corpus here.
+
+No punctuated-corpus run has been recorded yet. Parakeet's formatting
+quality remains unmeasured until one is.
+
+## Output hygiene
+
 Generated JSONL may contain public corpus text. Keep it outside the repository
 so benchmark results cannot be mistaken for application assets or personal
 dictation history.
