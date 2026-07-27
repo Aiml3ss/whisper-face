@@ -4749,7 +4749,10 @@ def _speculative_frames(frames, prompt=None, still_valid=None,
         prompt,
         False,
         FAST_WHISPER_REPO,
-        language,
+        # By keyword: the fifth positional is the cross-check hint, and a
+        # language silently landing there would be neither an error nor a
+        # working cross-check.
+        language=language,
     ).result()
     if still_valid is not None and not still_valid():
         return fast
@@ -7491,7 +7494,7 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
         try:
             fallback = transcribe_detailed(
                 audio, prompt, verify=False, model_repo=WHISPER_REPO,
-                _skip_parakeet=True)
+                _skip_parakeet=True, language="en")
         except Exception as error:
             print(f"! Turbo escalation unavailable: {error}")
             recognition.verified = True

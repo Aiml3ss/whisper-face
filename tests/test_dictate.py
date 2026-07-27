@@ -7766,8 +7766,13 @@ class ParakeetCrosscheckTests(unittest.TestCase):
         def fake_transcribe_detailed(audio, prompt=None, verify=True,
                                      model_repo="turbo",
                                      crosscheck_text=None,
-                                     _skip_parakeet=False):
-            calls.append((model_repo, _skip_parakeet))
+                                     _skip_parakeet=False,
+                                     language="en"):
+            # Record the language rather than merely tolerating it. The
+            # cross-check is only meaningful against Parakeet's English, and
+            # the caller's `except Exception` would otherwise swallow a
+            # signature mismatch into a silent drop back to the fixed prior.
+            calls.append((model_repo, _skip_parakeet, language))
             if model_repo == "tiny-repo":
                 return Recognition(text=tiny_text or "", engine="tiny")
             return fallback or Recognition(text="", confidence=0.0)
@@ -7841,7 +7846,7 @@ class ParakeetCrosscheckTests(unittest.TestCase):
             parakeet_result=("alpha beta gamma delta", 0.05),
             tiny_text="one two three four",
             fallback=fallback)
-        self.assertIn(("turbo-repo", True), calls)
+        self.assertIn(("turbo-repo", True, "en"), calls)
         self.assertEqual(recognition.text, "completely different words")
         self.assertTrue(recognition.verified)
         self.assertEqual(recognition.alternative, "alpha beta gamma delta")
@@ -7900,7 +7905,7 @@ class ParakeetCrosscheckTests(unittest.TestCase):
             parakeet_result=("alpha beta gamma delta", 0.05),
             tiny_text="one two three four",
             fallback=fallback)
-        self.assertIn(("turbo-repo", True), calls)
+        self.assertIn(("turbo-repo", True, "en"), calls)
         self.assertEqual(recognition.text, "alpha beta gamma delta")
         self.assertTrue(recognition.verified)
         self.assertEqual(recognition.alternative, "different words")
@@ -7910,7 +7915,7 @@ class ParakeetCrosscheckTests(unittest.TestCase):
             parakeet_result=("use the same words", 0.05),
             tiny_text="never decoded")
         self.assertTrue(
-            any(repo == "tiny-repo" for repo, _skip in calls))
+            any(repo == "tiny-repo" for repo, _skip, _lang in calls))
 
         calls_with_hint = []
         from parrot_core import (
@@ -8609,6 +8614,17 @@ class DictationLanguageTests(unittest.TestCase):
             "PARAKEET_ENABLED": True,
             "PARAKEET": SimpleNamespace(transcribe=parakeet_transcribe),
             "PARAKEET_ROUTE_CONFIDENCE": 0.84,
+            # The English route runs the helper and the Tiny cross-check
+            # concurrently; resolve both inline so ordering is deterministic.
+            "PARAKEET_IO_POOL": SimpleNamespace(
+                submit=lambda fn, *a, **k: SimpleNamespace(
+                    result=lambda: fn(*a, **k))),
+            "PARAKEET_CROSSCHECK": False,
+            "PARAKEET_CROSSCHECK_MAX_SECONDS": 90.0,
+            "asr_model_is_cached": lambda _repo: False,
+            "hypothesis_agreement": lambda _a, _b: 1.0,
+            "parakeet_confidence_from_agreement": lambda _a: 0.93,
+            "should_escalate_uncertain": lambda *a, **k: False,
             "WHISPER_REPO": "large",
             "FAST_WHISPER_REPO": "tiny",
             "SAMPLE_RATE": 16_000,
@@ -8627,7 +8643,9 @@ class DictationLanguageTests(unittest.TestCase):
             "PREFERENCES": {"language": "en"},
         }
         extra.update(overrides)
-        return load_definitions("transcribe_detailed", extra=extra), calls
+        return load_definitions(
+            "transcribe_detailed", "_parakeet_crosschecked",
+            "_clean_native_processing_s", extra=extra), calls
 
     def test_english_still_takes_the_native_parakeet_route(self):
         ns, calls = self._decode_namespace()
@@ -8666,7 +8684,8 @@ class DictationLanguageTests(unittest.TestCase):
                 return SimpleNamespace(
                     result=lambda: function(*args, **kwargs))
 
-        def detailed(_audio, _prompt, _verify, model, language="en"):
+        def detailed(_audio, _prompt, _verify, model,
+                     crosscheck_text=None, language="en"):
             return Recognition(model, 0.99 if model == "tiny" else 0.84)
 
         with tempfile.TemporaryDirectory() as directory:
