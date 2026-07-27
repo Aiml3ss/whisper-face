@@ -180,7 +180,13 @@ def rank_context_terms(
 
 def recognition_prompt(global_terms: Iterable[str], context_terms: Iterable[str],
                        max_terms: int = 60, max_chars: int = 700) -> str | None:
-    """Merge stable and ephemeral vocabulary into one closed Whisper prompt."""
+    """Merge stable and ephemeral vocabulary into one closed Whisper prompt.
+
+    ``max_chars`` is a character stand-in for Whisper's ~224-token prompt
+    ceiling and is only a fair proxy at Latin's ~3 characters per token.
+    Callers dictating a dense script pass a proportionally smaller budget;
+    see ``glossary_char_budget`` in dictate.py.
+    """
     stable = [str(term).strip() for term in global_terms if str(term).strip()]
     stable_casing = {term.casefold(): term for term in stable}
     ephemeral = [stable_casing.get(str(term).strip().casefold(), str(term).strip())
@@ -309,8 +315,44 @@ def _has_ambiguous_filler(text: str) -> bool:
     return bool(AMBIGUOUS_FILLER_RE.search(literal_free))
 
 
-def compile_cleanup(raw: str) -> CleanupPlan:
-    """Compile safe spoken transformations into explicit, reversible edits."""
+# Scripts written without inter-word spaces. Whitespace is the one cleanup
+# rule that survives translation, and even it changes shape here.
+SPACELESS_SCRIPTS = frozenset({"ja", "zh"})
+
+
+def normalize_spacing(text: str, spaced: bool = True) -> str:
+    """The only whitespace rule that holds in every supported language.
+
+    Collapsing runs of horizontal space and tidying line breaks is safe
+    everywhere. Closing the gap before ASCII sentence punctuation is applied
+    only where that punctuation is what the language actually writes; a script
+    that ends sentences with a different mark keeps its own spacing.
+    """
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    if spaced:
+        text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    return text.strip()
+
+
+def compile_cleanup(raw: str, language: str = "en") -> CleanupPlan:
+    """Compile safe spoken transformations into explicit, reversible edits.
+
+    Every rule below is English by construction: the filler and
+    self-correction patterns are English words, "scratch that" is an English
+    phrase whose length is baked into the offset arithmetic, and the list
+    formatter reads English cardinals and ordinals. Applied to another
+    language they cannot help and can silently delete real words, so a
+    non-English utterance gets whitespace normalization and nothing else.
+    """
+    code = str(language or "en").strip().casefold()
+    if code != "en":
+        return CleanupPlan(
+            text=normalize_spacing(
+                raw.strip(), spaced=code not in SPACELESS_SCRIPTS),
+            edits=[],
+            needs_semantic_cleanup=False,
+        )
     text = raw.strip()
     edits: list[CleanupEdit] = []
 
@@ -370,9 +412,7 @@ def compile_cleanup(raw: str) -> CleanupPlan:
             else:
                 scratch_needs_semantic = True
 
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r" *\n *", "\n", text)
-    text = re.sub(r"\s+([,.;:!?])", r"\1", text).strip()
+    text = normalize_spacing(text)
     deterministic_list = (
         _format_numbered_list_markers(text)
         or _format_counted_inline_list(text))
@@ -493,9 +533,16 @@ CODE_PHRASES = (
 )
 
 
-def compile_code_dictation(raw: str) -> CleanupPlan:
-    """Compile spoken code punctuation while preserving ordinary identifiers."""
-    plan = compile_cleanup(raw)
+def compile_code_dictation(raw: str, language: str = "en") -> CleanupPlan:
+    """Compile spoken code punctuation while preserving ordinary identifiers.
+
+    CODE_PHRASES are English names for ASCII glyphs, and the spacing rules
+    below are Latin code conventions, so a non-English utterance keeps
+    ``compile_cleanup``'s language-safe result untouched.
+    """
+    plan = compile_cleanup(raw, language)
+    if str(language or "en").strip().casefold() != "en":
+        return plan
     text = plan.text
     edits = list(plan.edits)
     for pattern, token in CODE_PHRASES:

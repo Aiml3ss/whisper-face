@@ -51,6 +51,7 @@ from whisper_face_gui import (
     HOTKEY_KEYCODES,
     MODE_GUIDE,
     SOUND_THEMES,
+    LANGUAGES,
     result_evidence_text,
     run_native_appkit_smoke,
     resolve_locale,
@@ -502,6 +503,7 @@ class SnapshotTests(unittest.TestCase):
                 "validation.correction.stale_snippet",
                 "validation.keyword.unknown",
                 "validation.face.unsupported",
+                "validation.language.unsupported",
             },
             "operation.": {
                 "operation.settings.load_failed",
@@ -2759,6 +2761,52 @@ class ControlSettingsViewModelTests(unittest.TestCase):
         self.assertEqual(self.calls, list(SOUND_THEMES))
         with self.assertRaises(ValueError):
             model.choose_sound_theme("airhorn")
+
+    def test_the_language_list_matches_the_runtime_exactly(self):
+        # Two tables, one contract: the picker offers what dictate.py can
+        # actually decode, in the same order, so a code can never reach the
+        # runtime that the runtime would silently fold back to English.
+        tree = ast.parse((ROOT / "dictate.py").read_text(encoding="utf-8"))
+        runtime = None
+        for node in tree.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            if {t.id for t in node.targets
+                    if isinstance(t, ast.Name)} == {"LANGUAGES"}:
+                runtime = tuple(
+                    row.elts[0].value for row in node.value.elts)
+        self.assertIsNotNone(runtime, "dictate.py LANGUAGES not found")
+        self.assertEqual(tuple(LANGUAGES), runtime)
+        self.assertEqual(LANGUAGES[0], "en")
+        for code in LANGUAGES:
+            self.assertIn(f"settings.language.{code}", STRING_CATALOGS["en"])
+
+    def test_languages_are_validated_before_they_reach_the_runtime(self):
+        def set_language(code):
+            self.calls.append(code)
+            self.runtime["language"] = code
+            return code
+
+        model = self.model(set_language=set_language)
+        for code in LANGUAGES:
+            model.choose_language(code)
+        self.assertEqual(self.calls, list(LANGUAGES))
+        self.assertEqual(model.state.language, LANGUAGES[-1])
+        with self.assertRaises(ValueError):
+            model.choose_language("klingon")
+
+    def test_the_runtimes_answer_wins_over_the_requested_language(self):
+        # The runtime normalizes and is authoritative; a rejected code must
+        # not leave the picker showing something that is not in force.
+        model = self.model(set_language=lambda _code: "en")
+        model.choose_language("ja")
+        self.assertEqual(model.state.language, "en")
+
+    def test_an_unsupported_stored_language_falls_back_to_english(self):
+        self.runtime["language"] = "klingon"
+        self.assertEqual(normalize_snapshot(self.runtime).language, "en")
+        self.runtime["language"] = "ja"
+        self.assertEqual(normalize_snapshot(self.runtime).language, "ja")
 
     def test_recent_dictations_stay_empty_while_the_setting_is_off(self):
         model = self.model(
