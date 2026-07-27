@@ -10,7 +10,10 @@ logic can run in under a second without loading either model.
 """
 
 import ast
+import contextlib
+import copy
 import ctypes
+import functools
 import hashlib
 import io
 import json
@@ -111,27 +114,102 @@ from whisper_face_theme import (  # noqa: E402
 
 TREE = ast.parse((ROOT / "dictate.py").read_text(encoding="utf-8"))
 
+# Cross-cutting primitives nearly every selection needs. They are pulled from
+# the real source like everything else — never stubbed — so a test still fails
+# if production changes them, but no test has to name them to get a language
+# code or an autorelease pool.
+BASELINE_DEFINITIONS = (
+    "normalize_language",
+    "join_recognized_parts",
+    "current_language",
+    "language_uses_spaces",
+    "glossary_char_budget",
+    "cocoa_pool",
+    "with_cocoa_pool",
+)
+BASELINE_ASSIGNMENTS = (
+    "IS_MACOS",
+    "IS_WINDOWS",
+    "PREFERENCES",
+    "DEFAULT_FACE",
+    "HOTKEY_DEFAULT",
+    "SOUND_THEME_DEFAULT",
+    "LANGUAGE_DEFAULT",
+    "LANGUAGES",
+    "LANGUAGE_CODES",
+    "SPACELESS_LANGUAGES",
+    "PARAKEET_LANGUAGES",
+    "SPACELESS_GLOSSARY_CHAR_DIVISOR",
+    "GLOSSARY_MAX_CHARS",
+    "GLOSSARY_MAX_TERMS",
+)
+
+try:  # pragma: no cover - depends on the runner
+    import objc as _objc
+except ImportError:  # pragma: no cover - depends on the runner
+    # This harness does not depend on pyobjc. An autorelease pool bounds
+    # object lifetime and has no behavior to assert, so a null pool stands in
+    # rather than skipping every macOS worker under test.
+    _objc = types.SimpleNamespace(
+        autorelease_pool=contextlib.nullcontext)
+
+
+def _evaluate(nodes, namespace):
+    module = ast.fix_missing_locations(ast.Module(
+        body=[ast.ImportFrom(
+            module="__future__",
+            names=[ast.alias(name="annotations")], level=0), *nodes],
+        type_ignores=[],
+    ))
+    exec(compile(module, "dictate-selected", "exec"), namespace)
+    return namespace
+
+
+def _baseline_values():
+    """Evaluate the shared constants once, from the real source."""
+    nodes = [
+        node for node in TREE.body
+        if isinstance(node, ast.Assign)
+        and {t.id for t in node.targets if isinstance(t, ast.Name)}
+        & set(BASELINE_ASSIGNMENTS)
+    ]
+    namespace = _evaluate(nodes, {"sys": sys, "__builtins__": __builtins__})
+    return {name: namespace[name] for name in BASELINE_ASSIGNMENTS
+            if name in namespace}
+
+
+BASELINE_VALUES = _baseline_values()
+
 
 def load_definitions(*names, assignments=(), extra=None):
     selected = []
     found = set()
+    wanted = set(names) | set(BASELINE_DEFINITIONS)
     for node in TREE.body:
         if isinstance(node, (ast.FunctionDef, ast.ClassDef)) \
-                and node.name in names:
+                and node.name in wanted:
             selected.append(node)
             found.add(node.name)
         elif isinstance(node, ast.Assign):
             targets = {t.id for t in node.targets if isinstance(t, ast.Name)}
             if targets & set(assignments):
                 selected.append(node)
-    missing = set(names) - found
+    missing = wanted - found
     if missing:
         raise AssertionError(f"production definitions missing: {sorted(missing)}")
     namespace = {
         "json": json,
         "re": re,
         "threading": threading,
+        "contextlib": contextlib,
+        "functools": functools,
+        "objc": _objc,
+        "sys": sys,
     }
+    # Shared constants come first so an explicit `extra` still overrides them
+    # (tests pin IS_MACOS both ways), and a per-call copy keeps one test's
+    # preference mutation out of the next test.
+    namespace.update(copy.deepcopy(BASELINE_VALUES))
     namespace.update(extra or {})
     # Production uses modern annotations throughout. Execute the selected AST
     # with postponed annotation evaluation so this harness behaves consistently
@@ -1872,6 +1950,7 @@ class FacePreferenceTests(unittest.TestCase):
                 "undo_hotkey": "",
                 "sounds": "system",
                 "recent_dictations": False,
+                "language": "en",
             })
 
     def test_control_preferences_round_trip_and_reject_bad_values(self):
@@ -3643,7 +3722,7 @@ class CleanupGuardTests(unittest.TestCase):
                 "CAPTION": caption,
                 "compile_voice_evidence": lambda *_args, **_kwargs: (
                     None, SimpleNamespace(stable_prefix="stable words")),
-                "is_hallucination": lambda _text: False,
+                "is_hallucination": lambda _text, _language="en": False,
             },
         )
         future = SimpleNamespace(result=lambda: Recognition(
@@ -6121,9 +6200,9 @@ class ReleasePlanTests(unittest.TestCase):
             def __init__(self):
                 self.submissions = 0
 
-            def submit(self, function, audio, *args):
+            def submit(self, function, audio, *args, **kwargs):
                 self.submissions += 1
-                return Future(function(audio, *args))
+                return Future(function(audio, *args, **kwargs))
 
         pool = Pool()
         ns = load_definitions(
@@ -6133,10 +6212,12 @@ class ReleasePlanTests(unittest.TestCase):
                 "SAMPLE_RATE": 16_000,
                 "GATE_PEAK_RMS": 0.002,
                 "ASR_POOL": pool,
-                "transcribe_detailed": lambda audio, prompt=None:
-                    Recognition("remainder", verified=True, engine="tiny"),
+                "transcribe_detailed":
+                    lambda audio, prompt=None, language="en":
+                        Recognition(
+                            "remainder", verified=True, engine="tiny"),
                 "peak_rms": lambda audio: 0.1,
-                "is_hallucination": lambda text: False,
+                "is_hallucination": lambda text, language="en": False,
                 "Recognition": Recognition,
             },
         )
@@ -6171,7 +6252,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "ASR_POOL": SimpleNamespace(),
                 "transcribe_detailed": None,
                 "peak_rms": lambda _audio: 0.0,
-                "is_hallucination": lambda _text: False,
+                "is_hallucination": lambda _text, _language="en": False,
                 "Recognition": Recognition,
                 "RecognitionWord": RecognitionWord,
             },
@@ -6210,7 +6291,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "ASR_POOL": SimpleNamespace(),
                 "transcribe_detailed": None,
                 "peak_rms": lambda _audio: 0.0,
-                "is_hallucination": lambda _text: False,
+                "is_hallucination": lambda _text, _language="en": False,
                 "Recognition": Recognition,
                 "RecognitionWord": RecognitionWord,
             },
@@ -6263,7 +6344,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "ASR_POOL": SimpleNamespace(),
                 "transcribe_detailed": None,
                 "peak_rms": lambda _audio: 0.0,
-                "is_hallucination": lambda _text: False,
+                "is_hallucination": lambda _text, _language="en": False,
                 "Recognition": Recognition,
                 "RecognitionWord": RecognitionWord,
             },
@@ -6328,14 +6409,15 @@ class ReleasePlanTests(unittest.TestCase):
             def __init__(self):
                 self.future = SimpleNamespace()
 
-            def submit(self, *_args):
+            def submit(self, *_args, **_kwargs):
                 return self.future
 
         pool = Pool()
         assembled = []
         problems = []
 
-        def assemble(chunk_futures, pre_future, remainder, prompt):
+        def assemble(chunk_futures, pre_future, remainder, prompt,
+                     language="en"):
             assembled.append((chunk_futures, pre_future, remainder, prompt))
             return Recognition("")
 
@@ -6358,7 +6440,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "audio_gate_measurements": lambda _audio: (1.0, 0.1),
                 "assemble_raw": assemble,
                 "Recognition": Recognition,
-                "is_hallucination": lambda _text: False,
+                "is_hallucination": lambda _text, _language="en": False,
                 "report_dictation_problem": (
                     lambda _rec, _hud, caption, log, **_kwargs:
                     problems.append((caption, log))),
@@ -6380,6 +6462,7 @@ class ReleasePlanTests(unittest.TestCase):
             speculative_start = 0
             speculative_end = 0
             prompt = None
+            language = "en"
             process_ticket = None
             recording = False
             uncertain = False
@@ -6440,7 +6523,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "ASR_POOL": SimpleNamespace(),
                 "transcribe_detailed": None,
                 "peak_rms": lambda _audio: 0.0,
-                "is_hallucination": lambda _text: False,
+                "is_hallucination": lambda _text, _language="en": False,
                 "Recognition": Recognition,
                 "RecognitionWord": RecognitionWord,
             },
@@ -6464,13 +6547,17 @@ class ReleasePlanTests(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def submit(self, function, *args):
-                self.calls.append(args[-1])
-                return SimpleNamespace(result=lambda: function(*args))
+            def submit(self, function, *args, **kwargs):
+                # The cascade now passes the decode language after the model
+                # repository, so the recorded call is the model, not the last
+                # positional argument.
+                self.calls.append(args[3] if len(args) > 3 else None)
+                return SimpleNamespace(
+                    result=lambda: function(*args, **kwargs))
 
         pool = ImmediatePool()
 
-        def detailed(audio, prompt, verify, model):
+        def detailed(audio, prompt, verify, model, language="en"):
             confidence = 0.9 if model == "tiny" else 1.0
             return Recognition(model, confidence)
 
@@ -6500,14 +6587,18 @@ class ReleasePlanTests(unittest.TestCase):
                 self.calls = []
 
             def submit(self, function, *args, **kwargs):
-                self.calls.append(args[-1])
+                # The model repository is the fourth positional argument;
+                # the cross-check hint and the decode language ride as
+                # keywords, so index rather than take the last one.
+                self.calls.append(args[3] if len(args) > 3 else None)
                 return SimpleNamespace(
                     result=lambda: function(*args, **kwargs))
 
         pool = ImmediatePool()
         crosscheck_hints = []
 
-        def detailed(audio, prompt, verify, model, crosscheck_text=None):
+        def detailed(audio, prompt, verify, model,
+                     crosscheck_text=None, language="en"):
             crosscheck_hints.append(crosscheck_text)
             confidence = 0.99 if model == "tiny" else 0.84
             return Recognition(model, confidence)
@@ -6549,13 +6640,17 @@ class ReleasePlanTests(unittest.TestCase):
                 self.calls = []
 
             def submit(self, function, *args, **kwargs):
-                self.calls.append(args[-1])
+                # The model repository is the fourth positional argument;
+                # the cross-check hint and the decode language ride as
+                # keywords, so index rather than take the last one.
+                self.calls.append(args[3] if len(args) > 3 else None)
                 return SimpleNamespace(
                     result=lambda: function(*args, **kwargs))
 
         pool = ImmediatePool()
 
-        def detailed(audio, prompt, verify, model, crosscheck_text=None):
+        def detailed(audio, prompt, verify, model,
+                     crosscheck_text=None, language="en"):
             return Recognition(model, 0.5 if model == "tiny" else 0.9)
 
         ns = load_definitions(
@@ -8446,6 +8541,345 @@ class CorrectionLearningUndoSuppressionTests(unittest.TestCase):
         ns["learn_from_corrections"](receipt)
 
         self.assertEqual(len(recorded), 1)
+
+
+class DictationLanguageTests(unittest.TestCase):
+    """B1: a non-English language must route around the English-only parts."""
+
+    def test_language_preference_round_trips_and_rejects_unknown_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            preferences = Path(directory) / "preferences.json"
+            ns = load_definitions(
+                "normalize_face", "current_face", "load_preferences",
+                "save_preferences", "normalize_hotkey",
+                "normalize_sound_theme", "set_dictation_language",
+                assignments={"FACE_CHOICES", "HOTKEY_CHOICES",
+                             "SOUND_THEMES"},
+                extra={
+                    "PREFERENCES_FILE": preferences,
+                    "IS_MACOS": True,
+                    "ACOUSTIC_TIME_MACHINE": AcousticTimeMachine(),
+                    "json": json,
+                    "print": lambda *_args: None,
+                    "refresh_glossary": lambda: None,
+                    "apply_hotkey_bindings": lambda: None,
+                    "atomic_write_text": lambda path, value:
+                        path.write_text(value, encoding="utf-8"),
+                },
+            )
+            # A preferences file written before this setting existed keeps
+            # the English behavior it already had.
+            preferences.write_text(json.dumps({"face": "fox"}),
+                                   encoding="utf-8")
+            ns["load_preferences"]()
+            self.assertEqual(ns["current_language"](), "en")
+
+            preferences.write_text(json.dumps({"language": "pt-BR"}),
+                                   encoding="utf-8")
+            ns["load_preferences"]()
+            self.assertEqual(ns["current_language"](), "pt")
+
+            for unsupported in ("klingon", "", None, 7):
+                preferences.write_text(json.dumps({"language": unsupported}),
+                                       encoding="utf-8")
+                ns["load_preferences"]()
+                self.assertEqual(ns["current_language"](), "en")
+
+            self.assertEqual(ns["set_dictation_language"]("ja"), "ja")
+            saved = json.loads(preferences.read_text(encoding="utf-8"))
+            self.assertEqual(saved["language"], "ja")
+            self.assertEqual(ns["set_dictation_language"]("nonsense"), "en")
+
+    def _decode_namespace(self, **overrides):
+        calls = []
+
+        def parakeet_transcribe(_audio):
+            calls.append("parakeet")
+            return ("native text", 0.05)
+
+        def mlx_transcribe(_audio, **kwargs):
+            calls.append(kwargs.get("language"))
+            return {"text": " decoded ", "segments": []}
+
+        extra = {
+            "np": np,
+            "Recognition": Recognition,
+            "GLOSS": {"lock": threading.Lock(), "prompt": None},
+            "IS_MACOS": True,
+            "PARAKEET_ENABLED": True,
+            "PARAKEET": SimpleNamespace(transcribe=parakeet_transcribe),
+            "PARAKEET_ROUTE_CONFIDENCE": 0.84,
+            "WHISPER_REPO": "large",
+            "FAST_WHISPER_REPO": "tiny",
+            "SAMPLE_RATE": 16_000,
+            "MIN_SECONDS": 0.25,
+            "LOW_CONFIDENCE": 0.5,
+            "prepare_asr_audio": lambda audio: audio,
+            "asr_decode_target": lambda repo: repo,
+            "resolve_asr_model": lambda repo: repo,
+            "mlx_whisper": SimpleNamespace(transcribe=mlx_transcribe),
+            "confidence_from_segments": lambda _segments: 0.9,
+            "recognition_words_from_segments": lambda _segments: [],
+            "mark_model_warm_path_observed": lambda _provider: None,
+            "WHISPER_TINY_PROFILE": SimpleNamespace(provider_id="tiny"),
+            "WHISPER_LARGE_TURBO_PROFILE": SimpleNamespace(
+                provider_id="turbo"),
+            "PREFERENCES": {"language": "en"},
+        }
+        extra.update(overrides)
+        return load_definitions("transcribe_detailed", extra=extra), calls
+
+    def test_english_still_takes_the_native_parakeet_route(self):
+        ns, calls = self._decode_namespace()
+        result = ns["transcribe_detailed"](
+            np.ones(16_000, dtype=np.float32), language="en")
+        self.assertEqual(result.engine, "parakeet-unified")
+        self.assertEqual(calls, ["parakeet"])
+
+    def test_a_non_english_language_never_reaches_parakeet(self):
+        # Parakeet Unified is the English-only checkpoint. Fed other
+        # languages it answers ok=true with an English-alphabet
+        # transliteration, and the fixed route confidence would let that
+        # stand as the final transcript, so the routing has to be explicit.
+        for language in ("es", "ja", "ru"):
+            with self.subTest(language=language):
+                ns, calls = self._decode_namespace()
+                result = ns["transcribe_detailed"](
+                    np.ones(16_000, dtype=np.float32), language=language)
+                self.assertNotIn("parakeet", calls)
+                self.assertEqual(calls, [language])
+                self.assertEqual(result.engine, "turbo")
+                self.assertEqual(result.text, "decoded")
+
+    def test_the_decode_language_defaults_to_the_stored_preference(self):
+        ns, calls = self._decode_namespace(PREFERENCES={"language": "de"})
+        ns["transcribe_detailed"](np.ones(16_000, dtype=np.float32))
+        self.assertEqual(calls, ["de"])
+
+    def test_the_cascade_drops_the_parakeet_route_off_english(self):
+        class ImmediatePool:
+            def __init__(self):
+                self.models = []
+
+            def submit(self, function, *args, **kwargs):
+                self.models.append(args[3])
+                return SimpleNamespace(
+                    result=lambda: function(*args, **kwargs))
+
+        def detailed(_audio, _prompt, _verify, model, language="en"):
+            return Recognition(model, 0.99 if model == "tiny" else 0.84)
+
+        with tempfile.TemporaryDirectory() as directory:
+            helper = Path(directory) / "parrot-asr-helper"
+            helper.write_bytes(b"helper")
+            for language, expected in (("en", ["tiny", "large"]),
+                                       ("ja", ["tiny"])):
+                with self.subTest(language=language):
+                    pool = ImmediatePool()
+                    ns = load_definitions(
+                        "_speculative_frames",
+                        extra={
+                            "np": np,
+                            "Recognition": Recognition,
+                            "ASR_POOL": pool,
+                            "transcribe_detailed": detailed,
+                            "FAST_WHISPER_REPO": "tiny",
+                            "WHISPER_REPO": "large",
+                            "FAST_ACCEPT_CONFIDENCE": 0.70,
+                            "IS_MACOS": True,
+                            "PARAKEET_ENABLED": True,
+                            "PARAKEET_HELPER": helper,
+                            "PREFERENCES": {"language": language},
+                        },
+                    )
+                    ns["_speculative_frames"](
+                        [np.ones((100, 1), dtype=np.float32)],
+                        language=language)
+                    self.assertEqual(pool.models, expected)
+
+    def test_non_latin_transcripts_survive_the_hallucination_guard(self):
+        ns = load_definitions(
+            "is_hallucination", assignments={"HALLUCINATIONS"})
+        guard = ns["is_hallucination"]
+        # The old ASCII-only token class matched nothing here, so every
+        # correct transcript in these scripts was dropped as a hallucination.
+        for text, language in (
+            ("\u5b63\u5ea6\u62a5\u544a", "zh"),
+            ("\u56db\u534a\u671f\u5831\u544a\u66f8", "ja"),
+            ("\u041a\u0432\u0430\u0440\u0442\u0430\u043b\u044c\u043d"
+             "\u044b\u0439 \u043e\u0442\u0447\u0451\u0442", "ru"),
+            ("\ubd84\uae30 \ubcf4\uace0\uc11c", "ko"),
+        ):
+            with self.subTest(language=language):
+                self.assertFalse(guard(text, language))
+        # Punctuation-only output is still nothing, in any language.
+        self.assertTrue(guard("\u3002\u3002\u3002", "ja"))
+        self.assertTrue(guard("  ...  ", "en"))
+        # The phrase list is English, so it only fires for English.
+        self.assertTrue(guard("Thank you for watching.", "en"))
+        self.assertFalse(guard("Thank you for watching.", "de"))
+
+    def test_english_only_text_rules_leave_other_languages_alone(self):
+        ns = load_definitions(
+            "quick_clean", "strip_casual_period", "needs_llm_cleanup",
+            extra={"compile_cleanup": compile_cleanup})
+        # English: sentence casing and a closing period.
+        self.assertEqual(ns["quick_clean"]("hello there", language="en"),
+                         "Hello there.")
+        # Japanese already ends its sentence; nothing is appended, nothing
+        # is capitalized, and no ASCII period is invented.
+        japanese = "\u56db\u534a\u671f\u5831\u544a\u66f8\u3002"
+        self.assertEqual(ns["quick_clean"](japanese, language="ja"), japanese)
+        spanish = "el informe estara listo manana"
+        self.assertEqual(ns["quick_clean"](spanish, language="es"), spanish)
+        # The casual trailing-period convention is anglophone.
+        self.assertEqual(ns["strip_casual_period"]("See you.", "en"),
+                         "See you")
+        self.assertEqual(ns["strip_casual_period"]("Hasta luego.", "es"),
+                         "Hasta luego.")
+        # The cleanup model's prompts, examples and refusal guard are all
+        # English, so non-English dictation stays deterministic.
+        self.assertTrue(ns["needs_llm_cleanup"](
+            "make this sound right", "formal", False, language="en"))
+        self.assertFalse(ns["needs_llm_cleanup"](
+            "make this sound right", "formal", False, language="ja"))
+
+    def test_spaceless_scripts_are_never_joined_with_a_space(self):
+        ns = load_definitions(
+            "join_recognized_parts", "insertion_join_prefix",
+            extra={"FocusSnapshot": SimpleNamespace})
+        self.assertEqual(
+            ns["join_recognized_parts"](("hello", "there"), "en"),
+            "hello there")
+        self.assertEqual(
+            ns["join_recognized_parts"](
+                ("\u56db\u534a\u671f", "\u5831\u544a\u66f8"), "ja"),
+            "\u56db\u534a\u671f\u5831\u544a\u66f8")
+        field = SimpleNamespace(text="\u65e2\u5b58\u306e", selection=(3, 0))
+        self.assertEqual(
+            ns["insertion_join_prefix"](field, "\u6587\u7ae0", "ja"), "")
+        latin = SimpleNamespace(text="Hello", selection=(5, 0))
+        self.assertEqual(ns["insertion_join_prefix"](latin, "world", "en"),
+                         " ")
+
+    def test_dense_scripts_get_a_smaller_glossary_character_budget(self):
+        ns = load_definitions("glossary_char_budget")
+        english = ns["glossary_char_budget"]("en")
+        # Whisper honors ~224 prompt tokens. Latin BPE averages about three
+        # characters per token; CJK runs closer to one, so the same character
+        # budget would be a threefold token overrun.
+        self.assertEqual(english, 700)
+        for dense in ("ja", "zh"):
+            with self.subTest(language=dense):
+                self.assertLess(ns["glossary_char_budget"](dense), english)
+                self.assertGreater(ns["glossary_char_budget"](dense), 0)
+
+    def test_the_vocabulary_miner_only_reads_english_dictations(self):
+        # MINER_PROMPT instructs the model to exclude ordinary *English*
+        # words, so another language would promote its everyday vocabulary
+        # into the glossary and bias every later decode.
+        ns = load_definitions("parse_texts")
+        lines = [
+            json.dumps({"clean": "english phrase", "language": "en"}),
+            json.dumps({"clean": "legacy phrase without a language"}),
+            json.dumps({"clean": "frase espanola", "language": "es"}),
+            json.dumps({"clean": "japanese", "language": "ja"}),
+        ]
+        self.assertEqual(ns["parse_texts"](lines), [
+            "english phrase", "legacy phrase without a language"])
+
+
+class HotkeyWorkerDiagnosticsTests(unittest.TestCase):
+    """E2: the unexplained `hotkey worker failed: AttributeError`."""
+
+    @staticmethod
+    def _namespace(bundle_identifier, *, application=True):
+        front = SimpleNamespace(
+            bundleIdentifier=lambda: bundle_identifier) if application else None
+        return load_definitions(
+            "frontmost_bundle",
+            extra={
+                "IS_WINDOWS": False,
+                "NSWorkspace": SimpleNamespace(
+                    sharedWorkspace=lambda: SimpleNamespace(
+                        frontmostApplication=lambda: front)),
+            },
+        )
+
+    def test_a_bundleless_frontmost_app_reports_an_empty_bundle(self):
+        # Root cause: bundleIdentifier() is nil for any process outside an
+        # app bundle, including Whisper Face itself, which runs as a bare
+        # script. That nil reached the context adapters as None, where
+        # `observation.bundle.casefold()` raised, so pressing the hotkey
+        # while the app's own window was frontmost lost the whole take.
+        bundle = self._namespace(None)["frontmost_bundle"]()
+        self.assertEqual(bundle, "")
+        self.assertIsInstance(bundle, str)
+        self.assertEqual(bundle.casefold(), "")   # the call that used to raise
+
+    def test_a_named_bundle_is_still_returned_verbatim(self):
+        self.assertEqual(
+            self._namespace("com.apple.mail")["frontmost_bundle"](),
+            "com.apple.mail")
+
+    def test_no_frontmost_application_is_also_an_empty_bundle(self):
+        self.assertEqual(
+            self._namespace(None, application=False)["frontmost_bundle"](),
+            "")
+
+    def test_a_swallowed_failure_names_its_origin_without_any_content(self):
+        ns = load_definitions("exception_origin", extra={"os": os})
+
+        def inner():
+            raise AttributeError(
+                "'NoneType' object has no attribute 'casefold'")
+
+        try:
+            inner()
+        except AttributeError as error:
+            origin = ns["exception_origin"](error)
+
+        self.assertIn("AttributeError", origin)
+        self.assertIn("inner", origin)
+        self.assertIn("test_dictate.py:", origin)
+        # The message can quote a transcript or a destination field, so it is
+        # never logged.
+        self.assertNotIn("casefold", origin)
+        self.assertNotIn("NoneType", origin)
+
+    def test_an_exception_with_no_traceback_still_names_its_type(self):
+        ns = load_definitions("exception_origin", extra={"os": os})
+        self.assertEqual(
+            ns["exception_origin"](RuntimeError("boom")), "RuntimeError")
+
+
+class AutoreleasePoolTests(unittest.TestCase):
+    """E4: workers that create Objective-C objects own a pool."""
+
+    def test_cocoa_pool_is_inert_off_mac(self):
+        ns = load_definitions("cocoa_pool", extra={"IS_MACOS": False})
+        with ns["cocoa_pool"]():
+            pass
+
+    def test_every_objective_c_worker_is_wrapped(self):
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        # These run on their own threads and create Objective-C objects:
+        # Accessibility attribute values, pasteboard strings, running
+        # applications. Without a pool every one of them lives until exit.
+        for worker in (
+            "def insert_recent_dictation",
+            "def undo_last_dictation",
+            "def learn_from_corrections",
+            "def learn_snippet_edit",
+            "def _run_delayed_cleanup",
+        ):
+            with self.subTest(worker=worker):
+                self.assertIn("@with_cocoa_pool\n" + worker, source)
+        # The two that scope a block rather than a whole function.
+        self.assertIn(
+            "with cocoa_pool():\n        try:\n"
+            "            finish_and_process", source)
+        self.assertIn("with cocoa_pool():\n                try:", source)
 
 
 if __name__ == "__main__":
