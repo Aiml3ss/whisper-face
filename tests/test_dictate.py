@@ -3336,6 +3336,7 @@ class CleanupGuardTests(unittest.TestCase):
             "_guard_cleaned_output", "llm_clean_with_edits",
             assignments={
                 "BASE_PROMPT", "FEW_SHOT", "LLM_CLEANUP_TIMEOUT",
+                "LLM_CLEANUP_TOTAL_DEADLINES", "CLEANUP_RESPONSE_SCHEMA",
                 "MODE_INSTRUCTIONS", "REFUSAL_RE", "STRUCTURED_OUTPUT",
             },
             extra={
@@ -3351,6 +3352,8 @@ class CleanupGuardTests(unittest.TestCase):
         self.assertEqual(cleaned, "Ready.")
         self.assertEqual(edits, [])
         self.assertEqual(seen["timeout"], (1, 4))
+        # Capture stays on the tight whole-reply ceiling.
+        self.assertEqual(seen["total_deadline"], 6.0)
 
     def test_llm_edit_kind_is_canonicalized_before_status_projection(self):
         private_kind = "customer said secret launch phrase"
@@ -3370,6 +3373,7 @@ class CleanupGuardTests(unittest.TestCase):
             "llm_clean_with_edits",
             assignments={
                 "BASE_PROMPT", "FEW_SHOT", "LLM_CLEANUP_TIMEOUT",
+                "LLM_CLEANUP_TOTAL_DEADLINES", "CLEANUP_RESPONSE_SCHEMA",
                 "LLM_EDIT_KINDS", "MODE_INSTRUCTIONS", "REFUSAL_RE",
                 "STRUCTURED_OUTPUT",
             },
@@ -3401,6 +3405,7 @@ class CleanupGuardTests(unittest.TestCase):
             "_guard_cleaned_output", "llm_clean_with_edits",
             assignments={
                 "BASE_PROMPT", "FEW_SHOT", "LLM_CLEANUP_TIMEOUT",
+                "LLM_CLEANUP_TOTAL_DEADLINES", "CLEANUP_RESPONSE_SCHEMA",
                 "MODE_INSTRUCTIONS", "REFUSAL_RE", "STRUCTURED_OUTPUT",
             },
             extra={
@@ -7276,6 +7281,127 @@ class InsertionJoinPrefixTests(unittest.TestCase):
         replacing = types.SimpleNamespace(
             text="the cat sat", selection=(4, 3), element=object())
         self.assertEqual(join(replacing, "dog"), "")
+
+
+class OllamaChatTransportTests(unittest.TestCase):
+    """Structured-output schema and streamed generation deadlines."""
+
+    @staticmethod
+    def namespace(post):
+        return load_definitions(
+            "ollama_chat", "_ollama_stream_reply",
+            extra={
+                "OLLAMA_MODEL": "test-model",
+                "OLLAMA_URL": "http://localhost:11434/api/chat",
+                "requests": SimpleNamespace(post=post),
+                "time": time,
+            },
+        )
+
+    @staticmethod
+    def response(status=200, *, body=None, lines=None, text=""):
+        return SimpleNamespace(
+            status_code=status,
+            text=text,
+            json=lambda: body,
+            iter_lines=lambda: iter(lines or []),
+            close=lambda: None,
+            raise_for_status=lambda: None,
+        )
+
+    def test_schema_is_sent_and_non_streaming_path_is_unchanged(self):
+        posted = []
+
+        def post(url, json=None, timeout=None, stream=False):
+            posted.append((json, stream))
+            return self.response(body={
+                "message": {"content": "{\"text\":\"ok\"}"},
+                "done_reason": "stop",
+            })
+
+        ns = self.namespace(post)
+        out, done = ns["ollama_chat"](
+            "system", "user", json_mode=True,
+            json_schema={"type": "object"})
+        self.assertEqual(out, "{\"text\":\"ok\"}")
+        self.assertEqual(done, "stop")
+        payload, stream = posted[0]
+        self.assertEqual(payload["format"], {"type": "object"})
+        self.assertFalse(payload["stream"])
+        self.assertFalse(stream)
+
+    def test_schema_rejection_falls_back_to_plain_json_mode(self):
+        posted = []
+
+        def post(url, json=None, timeout=None, stream=False):
+            posted.append(dict(json))
+            if isinstance(json.get("format"), dict):
+                return self.response(400, text="invalid format")
+            return self.response(body={
+                "message": {"content": "{}"}, "done_reason": "stop"})
+
+        ns = self.namespace(post)
+        out, _ = ns["ollama_chat"](
+            "system", "user", json_mode=True,
+            json_schema={"type": "object"})
+        self.assertEqual(out, "{}")
+        self.assertEqual(posted[1]["format"], "json")
+
+    def test_streaming_assembles_chunks_and_reports_done_reason(self):
+        lines = [
+            json.dumps({"message": {"content": "Hello "}}).encode(),
+            b"",
+            json.dumps({"message": {"content": "world."},
+                        "done": True, "done_reason": "stop"}).encode(),
+        ]
+
+        def post(url, json=None, timeout=None, stream=False):
+            self.assertTrue(json["stream"])
+            self.assertTrue(stream)
+            return self.response(lines=lines)
+
+        ns = self.namespace(post)
+        out, done = ns["ollama_chat"](
+            "system", "user", total_deadline=5.0)
+        self.assertEqual(out, "Hello world.")
+        self.assertEqual(done, "stop")
+
+    def test_streaming_total_deadline_fails_rather_than_hanging(self):
+        def endless():
+            while True:
+                yield json.dumps(
+                    {"message": {"content": "x"}}).encode()
+
+        ns = self.namespace(lambda *args, **kwargs: None)
+        clock = {"t": 0.0}
+
+        def fake_monotonic():
+            clock["t"] += 0.5
+            return clock["t"]
+
+        closed = []
+        with self.assertRaises(TimeoutError):
+            ns["_ollama_stream_reply"](
+                SimpleNamespace(
+                    iter_lines=endless,
+                    close=lambda: closed.append(True)),
+                deadline=1.0, clock=fake_monotonic)
+        self.assertEqual(closed, [True])
+
+    def test_think_flag_rejection_retries_without_think(self):
+        posted = []
+
+        def post(url, json=None, timeout=None, stream=False):
+            posted.append(dict(json))
+            if "think" in json:
+                return self.response(400, text="think is not supported")
+            return self.response(body={
+                "message": {"content": "ok"}, "done_reason": "stop"})
+
+        ns = self.namespace(post)
+        out, _ = ns["ollama_chat"]("system", "user")
+        self.assertEqual(out, "ok")
+        self.assertNotIn("think", posted[-1])
 
 
 class TailSilencePollTests(unittest.TestCase):
