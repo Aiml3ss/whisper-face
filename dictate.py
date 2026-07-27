@@ -2490,6 +2490,11 @@ class HUD(NSObject):
         bar = STATUS.get("bar")
         if bar is not None and hasattr(bar, "setMouthLevel_"):
             bar.setMouthLevel_(self.wave.raw)
+        # Same seam, third consumer: the window face flaps along when the
+        # app window is open. The facade no-ops when it is closed.
+        gui = getattr(bar, "gui", None)
+        if gui is not None and hasattr(gui, "feed_level"):
+            gui.feed_level(self.wave.raw, self.wave.mode)
         self.wave.setNeedsDisplay_(True)
 
 

@@ -288,8 +288,13 @@ if RENDER_APPKIT_AVAILABLE:
 
         def setLevel_mode_(self, level, mode):
             self.raw = max(0.0, min(1.0, float(level)))
+            self.setMode_(mode)
+
+        def setMode_(self, mode):
             if mode != self.mode:
                 self.mode = mode
+                if mode != "recording":
+                    self.raw = 0.0
                 self.setNeedsDisplay_(True)
 
         def setReduceMotion_(self, flag):

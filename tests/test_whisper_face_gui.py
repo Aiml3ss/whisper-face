@@ -2378,6 +2378,23 @@ class ViewModelTests(unittest.TestCase):
         self.assertIs(gui.view_model.actions, self.actions)
         self.assertIsNone(gui._controller)
 
+    def test_feed_level_is_a_noop_before_any_window_exists(self):
+        # The HUD tick calls this at 30fps; with no window it must stay a
+        # cheap guard, never allocate a controller, and never raise.
+        gui = create_gui(self.actions)
+        gui.feed_level(0.5, "recording")
+        self.assertIsNone(gui._controller)
+
+    def test_feed_level_swallows_controller_errors(self):
+        gui = create_gui(self.actions)
+
+        class ExplodingController:
+            def feed_level(self, level, mode):
+                raise RuntimeError("boom")
+
+        gui._controller = ExplodingController()
+        gui.feed_level(0.2, "processing")  # must not raise
+
     def test_voice_inbox_facade_delegates_to_the_native_metadata_entry(self):
         calls = []
 

@@ -4304,6 +4304,7 @@ try:  # The view-model above remains usable in headless test environments.
         NSVisualEffectMaterialSidebar,
         NSVisualEffectView,
         NSWindow,
+        NSWindowOcclusionStateVisible,
         NSWorkspace,
         NSWindowStyleMaskClosable,
         NSWindowStyleMaskMiniaturizable,
@@ -5606,6 +5607,8 @@ if APPKIT_AVAILABLE:
                 NSMakeRect((width - 188.0) / 2.0, 4, 188, 188))
             face_view.setAutoresizingMask_(
                 NSViewMinXMargin | NSViewMaxXMargin)
+            face_view.setWobbleHook_(lambda: add_jelly_motion(
+                face_view, "wobble", reduced_motion=_REDUCE_MOTION))
             face_stage.addSubview_(face_view)
             self._stack(page, face_stage, height=196)
             header = face_stage
@@ -6332,6 +6335,7 @@ if APPKIT_AVAILABLE:
             if self.timer is None:
                 self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                     2.0, self, "refreshTimer:", None, True)
+            self.dynamic["home_face_view"].startLiving()
 
         @objc.python_method
         def show_voice_inbox(self) -> None:
@@ -6404,7 +6408,9 @@ if APPKIT_AVAILABLE:
             face_view = self.dynamic["home_face_view"]
             face_view.setFace_(state.face)
             face_view.setReduceMotion_(bool(state.prefers_reduced_motion))
-            face_view.setLevel_mode_(0.0, {
+            # Mode only: the live level arrives through feed_level so the
+            # 2s refresh can never stomp a mid-sentence mouth.
+            face_view.setMode_({
                 "recording": "recording",
                 "processing": "processing",
                 "degraded": "error",
@@ -7572,6 +7578,30 @@ if APPKIT_AVAILABLE:
             if self.timer is not None:
                 self.timer.invalidate()
                 self.timer = None
+            self.dynamic["home_face_view"].stopLiving()
+
+        def windowDidChangeOcclusionState_(self, _notification: Any) -> None:
+            """Stop the face clock whenever nobody can see the face."""
+            try:
+                visible = bool(
+                    self.window.occlusionState()
+                    & NSWindowOcclusionStateVisible)
+            except Exception:
+                visible = bool(self.window.isVisible())
+            face_view = self.dynamic["home_face_view"]
+            if visible and bool(self.window.isVisible()):
+                face_view.startLiving()
+            else:
+                face_view.stopLiving()
+
+        @objc.python_method
+        def feed_level(self, level: float, mode: str) -> None:
+            """Live audio seam from the runtime; main-thread, cheap no-op
+            when the window is closed or the clock is off."""
+            face_view = self.dynamic.get("home_face_view")
+            if face_view is None or not face_view.isLiving():
+                return
+            face_view.setLevel_mode_(level, mode)
 
 
 def run_native_appkit_smoke() -> Mapping[str, int]:
@@ -8257,6 +8287,20 @@ class WhisperFaceGUI:
     @property
     def available(self) -> bool:
         return APPKIT_AVAILABLE
+
+    def feed_level(self, level: float, mode: str) -> None:
+        """Forward a live mic level to the window face, if one is alive.
+
+        Called from the HUD's main-thread tick; must stay a cheap no-op
+        when the window has never been opened, is closed, or is occluded.
+        """
+        controller = self._controller
+        if controller is None:
+            return
+        try:
+            controller.feed_level(float(level), str(mode))
+        except Exception:
+            pass
 
     def show(self) -> None:
         if not APPKIT_AVAILABLE:
