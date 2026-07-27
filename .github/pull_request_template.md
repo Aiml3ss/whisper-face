@@ -48,6 +48,7 @@ before submitting outside contributions.
 - [ ] `uv run tests/test_acoustic_keyword_memory.py`
 - [ ] `uv run tests/test_acoustic_keyword_bias_evaluation.py`
 - [ ] `uv run tests/test_acoustic_calibration.py`
+- [ ] `uv run tests/test_measurement_mode.py`
 - [ ] `uv run tests/test_benchmark_acoustic_calibration.py`
 - [ ] `uv run tests/test_delayed_cleanup_merge.py`
 - [ ] `uv run tests/test_macos_delayed_cleanup_destination.py`

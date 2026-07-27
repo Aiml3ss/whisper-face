@@ -397,6 +397,7 @@ from macos_delayed_cleanup_destination import (  # noqa: E402
     MacDestinationStateAdapter,
     SystemMacDestinationStateReader,
 )
+from measurement_mode import parse_measurement_mode  # noqa: E402
 from macos_email_compose import MacEmailComposeAdapter  # noqa: E402
 from macos_voice_draft_clipboard import (  # noqa: E402
     MacVoiceDraftClipboardAdapter,
@@ -637,6 +638,13 @@ CORRECTION_MAX_LEARN = 3     # per dictation
 
 PHONE_PORT = 8787            # /v1/audio/transcriptions for the Diction app
 SERVER_ONLY = "--server-only" in sys.argv   # headless: endpoint only
+
+# Session-scoped evidence-collection override, read exactly once from the
+# process arguments and never persisted. It applies a candidate code path so a
+# corpus can be recorded before the receipt that path would otherwise need; it
+# is not a receipt and grants no authority. Any malformed argument leaves every
+# arm off, so ordinary behavior is the fail-closed default.
+MEASUREMENT_MODE = parse_measurement_mode(sys.argv)
 
 # Per-app tone overrides chosen from the menu bar (App Tones); wins over the
 # built-in *_APPS sets. bundle id -> "casual"|"formal"|"code"|"verbatim"|"default"
@@ -1091,6 +1099,11 @@ PIPELINE_STATE = {
     "last_delayed_cleanup_outcome": "not_scheduled",
     "last_delayed_cleanup_applied": 0,
     "last_delayed_cleanup_rejected": 0,
+    # Duration of the most recent delayed *apply*, in milliseconds. Deliberately
+    # not written into a transcript record: an utterance's transcript is
+    # appended before that utterance's delayed pass finishes, so any apply_ms
+    # placed there would belong to a different utterance.
+    "last_delayed_cleanup_apply_ms": None,
 }
 DELAYED_CLEANUP_TRANSACTIONS = DelayedCleanupTransactionAdapter()
 DELAYED_CLEANUP_STATE = {
@@ -1283,40 +1296,69 @@ def refresh_acoustic_calibration() -> bool:
     return activation.ready
 
 
-def acoustic_calibration_status_snapshot() -> dict:
+def active_calibration_settings() -> CalibrationSettings | None:
+    """Return the front-end settings this session should actually apply.
+
+    A measurement session applies its own candidate settings so the candidate
+    arm of the A/B can be recorded at all; it never becomes, replaces, or
+    writes a receipt, and the status snapshot reports which source is in force.
+    """
+    measured = MEASUREMENT_MODE.calibration
+    if measured is not None:
+        return CalibrationSettings(*measured.as_tuple())
     settings = ACOUSTIC_CALIBRATION_STATE["settings"]
+    return settings if isinstance(settings, CalibrationSettings) else None
+
+
+def acoustic_calibration_source() -> str:
+    if MEASUREMENT_MODE.calibration is not None:
+        return "measurement-mode"
+    return ("receipt"
+            if isinstance(ACOUSTIC_CALIBRATION_STATE["settings"],
+                          CalibrationSettings)
+            else "defaults")
+
+
+def acoustic_calibration_status_snapshot() -> dict:
+    receipted = isinstance(
+        ACOUSTIC_CALIBRATION_STATE["settings"], CalibrationSettings)
+    settings = active_calibration_settings()
     return {
-        "enabled": isinstance(settings, CalibrationSettings),
+        # `enabled` stays receipt-only: measurement mode never reads as
+        # authorization anywhere a reviewer might mistake it for one.
+        "enabled": receipted,
         "status": ACOUSTIC_CALIBRATION_STATE["status"],
+        "applied": settings is not None,
+        "source": acoustic_calibration_source(),
         "controls": (
             ("gain", "noise", "vad", "end-silence")
-            if isinstance(settings, CalibrationSettings) else ()
+            if settings is not None else ()
         ),
         "reverb": "unavailable",
     }
 
 
 def calibrated_vad_threshold() -> float:
-    settings = ACOUSTIC_CALIBRATION_STATE["settings"]
+    settings = active_calibration_settings()
     return (
         settings.vad_threshold
-        if isinstance(settings, CalibrationSettings)
+        if settings is not None
         else SILENCE_RMS
     )
 
 
 def calibrated_end_silence_seconds() -> float:
-    settings = ACOUSTIC_CALIBRATION_STATE["settings"]
+    settings = active_calibration_settings()
     return (
         settings.end_silence_ms / 1000.0
-        if isinstance(settings, CalibrationSettings)
+        if settings is not None
         else TAIL_SKIP_SILENCE
     )
 
 
 def prepare_asr_audio(audio: np.ndarray) -> np.ndarray:
-    """Apply only receipt-authorized front-end controls; defaults are stable."""
-    settings = ACOUSTIC_CALIBRATION_STATE["settings"]
+    """Apply only authorized or measured front-end controls; defaults stay."""
+    settings = active_calibration_settings()
     prepared = audio
     gain_ceiling = 25.0
     if isinstance(settings, CalibrationSettings):
@@ -1499,10 +1541,27 @@ def load_delayed_cleanup_activation(
 
 def delayed_cleanup_activation_status() -> dict:
     with DELAYED_CLEANUP_STATE["lock"]:
-        return {
-            "active": bool(DELAYED_CLEANUP_STATE["active"]),
-            "status": str(DELAYED_CLEANUP_STATE["status"]),
-        }
+        active = bool(DELAYED_CLEANUP_STATE["active"])
+        status = str(DELAYED_CLEANUP_STATE["status"])
+    measured = bool(IS_MACOS and MEASUREMENT_MODE.delayed_cleanup)
+    return {
+        # `active` stays receipt-only. Measurement mode is reported beside it,
+        # never folded into it, so nothing can read an override as authority.
+        "active": active,
+        "status": status,
+        "measurement_mode": measured,
+        "scheduling": active or measured,
+    }
+
+
+def delayed_cleanup_scheduling_enabled() -> bool:
+    """True when a delayed pass may run: a valid receipt, or measurement mode.
+
+    Measurement mode exists because the receipt needs 50 physical cases the
+    feature itself has to produce. It schedules the same real transaction; it
+    installs nothing and expires with the process.
+    """
+    return bool(delayed_cleanup_activation_status()["scheduling"])
 
 
 def save_preferences():
@@ -1620,6 +1679,14 @@ def voice_outbox_menu_title(count) -> str:
     count = min(max(count, 0), VOICE_OUTBOX_MAX_ITEMS)
     return ("Voice Outbox" if count == 0 else
             f"Voice Outbox — {count} recoverable")
+
+
+def measurement_menu_title() -> str:
+    """Name the measured arms without ever naming a measured keyword."""
+    if not MEASUREMENT_MODE.active:
+        return "Measurement mode off"
+    return ("Measurement mode: " + ", ".join(MEASUREMENT_MODE.arms)
+            + " — evidence only")
 
 
 def inspect_voice_object_drafts() -> tuple[dict, ...]:
@@ -2758,7 +2825,14 @@ class StatusBar(NSObject):
         # window's toggle still drive its title/state helpers.
         self.flight_item = mk("Flight Recorder", "toggleFlight:")
         self.pause_item = mk("Pause Dictation", "togglePause:")
+        # Measurement mode changes what the runtime does for one session, so
+        # it announces itself at the top of the menu whenever it is on and
+        # takes no space at all when it is off. Fixed for the process, so it
+        # is set here rather than refreshed on every menu open.
+        self.measurement_item = mk(measurement_menu_title(), None)
+        self.measurement_item.setHidden_(not MEASUREMENT_MODE.active)
         menu.addItem_(mk("Open Whisper Face…", "openGUI:"))
+        menu.addItem_(self.measurement_item)
         menu.addItem_(NSMenuItem.separatorItem())
         menu.addItem_(self.stat1)
         menu.addItem_(self.stat2)
@@ -4455,6 +4529,23 @@ def _load_acoustic_keyword_memory() \
         return AcousticKeywordMemory(), "invalid"
 
 
+def measured_keyword_hints(active: tuple) -> tuple:
+    """Prepend this session's measured term to the receipt-backed hints.
+
+    The biased arm of the keyword A/B needs the term in the real Whisper
+    prompt, which the receipt is what normally grants. Measurement mode adds it
+    for this process only; it writes no activation state and cannot make the
+    term eligible in keyword memory.
+    """
+    measured = MEASUREMENT_MODE.keyword
+    if not measured:
+        return tuple(active)
+    folded = {str(term).casefold() for term in active}
+    if measured.casefold() in folded:
+        return tuple(active)
+    return (measured, *active)
+
+
 def acoustic_keyword_memory_status_snapshot() -> dict:
     """Return bounded aggregates only; keyword text stays out of status."""
     with ACOUSTIC_KEYWORD_MEMORY_LOCK:
@@ -4462,15 +4553,19 @@ def acoustic_keyword_memory_status_snapshot() -> dict:
         active, activation_status = active_acoustic_keywords(
             ACOUSTIC_KEYWORD_ACTIVATION_FILE, memory)
     candidates = memory.candidates
+    measured = measured_keyword_hints(active)
     return {
         "storage_status": storage_status,
         "activation_status": activation_status,
         "candidate_count": len(candidates),
         "eligible_count": sum(
             1 for candidate in candidates if candidate.eligible),
+        # `active_count` stays receipt-backed only; the measured term is
+        # reported separately so it can never be read as an activation.
         "active_count": len(active),
+        "measurement_mode_terms": len(measured) - len(active),
         "recognition_effect": (
-            "prompt-priority" if active else "none"),
+            "prompt-priority" if measured else "none"),
         "candidate_summaries": [
             {
                 "scope_hash": candidate.app_scope,
@@ -4933,7 +5028,11 @@ def runtime_status_snapshot() -> dict:
                 "last_delayed_cleanup_applied"],
             "last_rejected": PIPELINE_STATE[
                 "last_delayed_cleanup_rejected"],
+            "last_apply_ms": PIPELINE_STATE[
+                "last_delayed_cleanup_apply_ms"],
         },
+        # An operator must never be unknowingly running a measured session.
+        "measurement_mode": MEASUREMENT_MODE.status_snapshot(),
         "prefers_reduced_motion": mac_prefers_reduced_motion(),
         "words_today": words,
         "minutes_saved": saved,
@@ -5584,6 +5683,7 @@ def refresh_glossary():
             ACOUSTIC_KEYWORD_ACTIVATION_FILE, keyword_memory)
     if keyword_storage_status == "invalid":
         keyword_hints = ()
+    keyword_hints = measured_keyword_hints(keyword_hints)
 
     with GLOSS["lock"]:
         GLOSS["terms"] = terms
@@ -5606,11 +5706,28 @@ def refresh_glossary():
     return terms
 
 
+def transcript_app_identity(bundle: str) -> str:
+    """Return an app identity safe to keep in history.
+
+    On macOS `bundle` is a bundle identifier and is kept as is. On Windows the
+    runtime has no bundle identifier and uses the foreground window title,
+    which routinely carries a document name — so history stores a stable local
+    digest of it instead. The `windows:` prefix is preserved because every
+    reader already uses it to tell "not a macOS bundle id" from one.
+    """
+    if not isinstance(bundle, str) or not bundle.startswith("windows:"):
+        return bundle
+    digest = hashlib.sha256(
+        b"whisper-face/transcript-app-identity/v1\0"
+        + bundle[len("windows:"):].encode("utf-8")).hexdigest()[:16]
+    return f"windows:{digest}"
+
+
 def append_transcript(raw: str, cleaned: str, bundle: str, path: str,
                       metrics: dict | None = None,
                       event_id: str | None = None):
-    entry = {"ts": time.time(), "app": bundle, "raw": raw,
-             "clean": cleaned, "path": path}
+    entry = {"ts": time.time(), "app": transcript_app_identity(bundle),
+             "raw": raw, "clean": cleaned, "path": path}
     if event_id:
         entry["id"] = event_id
     if metrics:
@@ -7627,6 +7744,15 @@ def opaque_focus_context(snapshot: FocusSnapshot | None) -> str:
     return snapshot.window_title or ""
 
 
+def unresolved_destination_id(bundle: str, utterance_id: str) -> str:
+    """The sentinel destination for a target the runtime could not identify.
+
+    Named rather than inlined so the capability bucketing can recognize this
+    exact branch by construction instead of by pattern-matching a string.
+    """
+    return f"{bundle or 'unknown'}:unavailable:{utterance_id}"
+
+
 def capture_insertion_lease(snapshot: FocusSnapshot | None, bundle: str,
                             utterance_id: str) -> InsertionLease | None:
     """Lease readable Mac fields; hidden/terminal fields keep legacy paste."""
@@ -7637,7 +7763,7 @@ def capture_insertion_lease(snapshot: FocusSnapshot | None, bundle: str,
         # Unknown applications never get a window-only compatibility lease.
         return InsertionLease.capture_opaque(
             utterance_id,
-            f"{bundle or 'unknown'}:unavailable:{utterance_id}",
+            unresolved_destination_id(bundle, utterance_id),
             "unavailable",
         )
     if snapshot is None:
@@ -7830,10 +7956,39 @@ def insertion_readback(snapshot: FocusSnapshot, inserted: str,
         sleeper(min(0.02, remaining))
 
 
+def insertion_capability_buckets(rec, lease, current: FocusSnapshot | None, *,
+                                 paste_available: bool) -> dict | None:
+    """Bucket what this destination let the runtime do, for compatibility.
+
+    `compatibility_fingerprint.CompatibilityObservation` needs a capability
+    triple alongside the outcome the receipt already reports. Every branch here
+    is decided by state the commit already holds, so the triple costs nothing
+    beyond three comparisons and never re-queries Accessibility.
+    """
+    if lease is None:
+        return None
+    if not lease.opaque:
+        target = "readable"
+    elif lease.destination_id == unresolved_destination_id(
+            getattr(rec, "bundle_at_press", ""), lease.utterance_id):
+        target = "unavailable"
+    else:
+        target = "opaque"
+    return {
+        "target": target,
+        "paste": "available" if paste_available else "unavailable",
+        # Exactly the condition below that decides whether a real readback runs
+        # or an unverifiable result is substituted for one.
+        "readback": ("available" if current is not None and not lease.opaque
+                     else "unavailable"),
+    }
+
+
 def commit_insertion(rec, text: str, bundle: str,
                      current: FocusSnapshot | None):
     """Commit through a lease when possible, otherwise preserve old behavior."""
     lease = getattr(rec, "insertion_lease", None)
+    rec.insertion_capabilities = None
     if lease is None:
         paste(text)
         PIPELINE_STATE["last_insertion_state"] = "legacy"
@@ -7842,9 +7997,16 @@ def commit_insertion(rec, text: str, bundle: str,
     try:
         INSERTION_COORDINATOR.stage(lease, text)
     except ValueError:
+        # A second stage of the same utterance never reaches a paste, so this
+        # destination had no paste path in this attempt.
+        rec.insertion_capabilities = insertion_capability_buckets(
+            rec, lease, current, paste_available=False)
         rec.insertion_receipt = INSERTION_COORDINATOR.receipt(
             lease.utterance_id)
         return rec.insertion_receipt
+    rec.insertion_capabilities = insertion_capability_buckets(
+        rec, lease, current, paste_available=True)
+
     def readback():
         """Read back, and file the conflict shape so a repeat is diagnosable.
 
@@ -8529,6 +8691,12 @@ def _run_delayed_cleanup(
     """Finish cleanup and conditionally replace only an unchanged destination."""
     outcome = "proposal_failed"
     applied_count = rejected_count = 0
+    # The activation gate budgets p95 apply latency at 150 ms, so the number
+    # has to be the transactional apply itself — read the destination, merge,
+    # write only if unchanged — and not the cleanup that produced the
+    # proposal. It stays None unless that apply returned, because a pass that
+    # never applied has no apply duration and must block rather than guess.
+    apply_ms: float | None = None
     try:
         proposal = build_delayed_cleanup_proposal(
             compiled,
@@ -8543,6 +8711,7 @@ def _run_delayed_cleanup(
         if proposal is not None:
             destination = MacDestinationStateAdapter(
                 SystemMacDestinationStateReader())
+            apply_started_at = time.perf_counter()
             receipt = DELAYED_CLEANUP_TRANSACTIONS.apply(
                 proposal_id,
                 original,
@@ -8550,19 +8719,26 @@ def _run_delayed_cleanup(
                 lambda: destination.capture().snapshot,
                 destination.apply_if_unchanged,
             )
+            apply_ms = (time.perf_counter() - apply_started_at) * 1000.0
             outcome = receipt.outcome.value
             applied_count = receipt.merge_applied_count
             rejected_count = receipt.merge_rejected_count
     except Exception:
         outcome = "adapter_exception"
+        apply_ms = None
     with DELAYED_CLEANUP_STATE["lock"]:
         if generation != DELAYED_CLEANUP_STATE["generation"]:
             return
         PIPELINE_STATE["last_delayed_cleanup_outcome"] = outcome
         PIPELINE_STATE["last_delayed_cleanup_applied"] = applied_count
         PIPELINE_STATE["last_delayed_cleanup_rejected"] = rejected_count
+        PIPELINE_STATE["last_delayed_cleanup_apply_ms"] = (
+            round(apply_ms, 4) if apply_ms is not None else None)
     print("[delayed-cleanup] "
-          f"{outcome}; {applied_count} applied, {rejected_count} held")
+          f"{outcome}; {applied_count} applied, {rejected_count} held"
+          + (f"; {apply_ms:.3f} ms" if apply_ms is not None else "")
+          + ("; measurement-mode" if MEASUREMENT_MODE.delayed_cleanup
+             else ""))
 
 
 def schedule_delayed_cleanup(
@@ -8580,14 +8756,15 @@ def schedule_delayed_cleanup(
         starter=None,
 ) -> bool:
     """Start one daemon proposal only after a verified initial insertion."""
+    if not delayed_cleanup_scheduling_enabled():
+        return False
     with DELAYED_CLEANUP_STATE["lock"]:
-        if not DELAYED_CLEANUP_STATE["active"]:
-            return False
         DELAYED_CLEANUP_STATE["generation"] += 1
         generation = DELAYED_CLEANUP_STATE["generation"]
         PIPELINE_STATE["last_delayed_cleanup_outcome"] = "scheduled"
         PIPELINE_STATE["last_delayed_cleanup_applied"] = 0
         PIPELINE_STATE["last_delayed_cleanup_rejected"] = 0
+        PIPELINE_STATE["last_delayed_cleanup_apply_ms"] = None
     args = (
         generation, proposal_id, original, compiled, tone_txt, voice_ir,
         continuing, context_tail, context_text, tone_key,
@@ -9744,7 +9921,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         delayed_cleanup_requested = bool(
             needs_llm
             and rec.mode == "capture"
-            and delayed_cleanup_activation_status()["active"]
+            and delayed_cleanup_scheduling_enabled()
         )
 
         mode_context = None
@@ -9957,6 +10134,10 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             path = f"flight/{path}"
         if not verified:
             path = f"outbox/{path}"
+        # Held per-utterance rather than in PIPELINE_STATE so two overlapping
+        # dictations can never publish each other's destination capabilities.
+        insertion_capabilities = getattr(
+            rec, "insertion_capabilities", None) or {}
         now = time.perf_counter()
         release_total = now - released_at
         press_total = now - rec.press_at if rec.press_at else release_total
@@ -10047,7 +10228,10 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "insertion_s": round(t_insert, 4),
             "asr_engine": recognition.engine or "unknown",
             "confidence": round(compiler_result.confidence, 4),
-            "verified": recognition.verified,
+            # Second-pass ASR agreement, never insertion. Insertion truth is
+            # `insertion_verified` below; the old bare `verified` key invited
+            # exactly that confusion and is gone.
+            "asr_verified": recognition.verified,
             "alternatives": len(PIPELINE_STATE["last_alternatives"]),
             "word_evidence": len(recognition.words),
             "prosody_events": len(voice_ir.prosody),
@@ -10106,6 +10290,12 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "readback_shape": PIPELINE_STATE["last_readback_shape"],
             "paste_attempted": attempted,
             "insertion_verified": verified,
+            # The capability half of a compatibility observation. Absent
+            # (None) whenever the runtime had no lease to describe, which the
+            # readers treat exactly as "not reported".
+            "insertion_target": insertion_capabilities.get("target"),
+            "insertion_paste": insertion_capabilities.get("paste"),
+            "insertion_readback": insertion_capabilities.get("readback"),
             "delayed_cleanup_scheduled": delayed_cleanup_scheduled,
         }, event_id=event_id)
     except Exception as error:
@@ -10385,6 +10575,8 @@ def platform_smoke_test():
 
 def main():
     lock_fd = ensure_single_instance()      # noqa: F841 — held for lifetime
+    for line in MEASUREMENT_MODE.banner():
+        print(line)
     load_app_tones()
     load_preferences()
     load_delayed_cleanup_activation()

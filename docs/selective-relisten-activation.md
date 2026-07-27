@@ -41,6 +41,27 @@ Use at least 40 real cases: at least 20 confirmed and 20 contradicted. Keep WAV,
 expected text, and manifest private. The emitted report contains only aggregate
 counts, decisions, refusals, and monotonic latency.
 
+### Every take is capped at 2.4 seconds
+
+The verifier only ever sees a microspan. `whisper_verifier_adapter` pins
+`MAX_AUDIO_SAMPLES` to 2.4 s at 16 kHz, and
+`benchmark_relisten_activation.read_microspan_wav` **rejects any longer WAV at
+load**. A hand-recorded corpus of natural-length phrases therefore fails after
+the recording time is already spent.
+
+Record short, consequence-bearing spans — "invoice 2042", "transfer fifteen
+hundred", "due March third" — not sentences. Expected text is separately capped
+at 160 characters and 640 UTF-8 bytes.
+
+`scripts/capture_voice_evidence.py relisten` hard-caps recording at the same
+constant and stops the take when it is reached, which is the simplest way to
+stay inside it.
+
+Selective Re-listen needs no measurement mode: its benchmark drives the
+verifier directly instead of asking the runtime to behave as if a receipt
+existed, so nothing here is circular. That is the shape the other three gates
+were made to match.
+
 ## Measure, review, approve
 
 From the MacBook Pro checkout:

@@ -74,6 +74,7 @@ uv run tests/test_acoustic_keyword_bias_evaluation.py
 uv run tests/test_acoustic_keyword_activation.py
 uv run tests/test_acoustic_time_machine.py
 uv run tests/test_acoustic_calibration.py
+uv run tests/test_measurement_mode.py
 uv run tests/test_benchmark_acoustic_calibration.py
 uv run tests/test_acoustic_calibration_activation.py
 uv run tests/test_delayed_cleanup_merge.py

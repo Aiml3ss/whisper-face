@@ -29,6 +29,12 @@ from acoustic_calibration_activation import (
     build_activation_receipt,
     write_activation_receipt,
 )
+from measurement_mode import (
+    CALIBRATION_LABEL,
+    EVIDENCE_KEY,
+    MeasurementModeError,
+    evidence_label,
+)
 
 
 SCHEMA_VERSION = 1
@@ -73,13 +79,22 @@ def load_manifest(path: Path) -> dict[str, Any]:
         root = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
         raise BenchmarkError("manifest is unavailable or invalid") from exc
-    if (not isinstance(root, Mapping) or set(root) != _ROOT_KEYS
+    # `measurement_mode` is the only optional root key: absent means the
+    # candidate pass ran on the ordinary path, the same fail-closed default a
+    # missing receipt gets.
+    if (not isinstance(root, Mapping)
+            or set(root) - {EVIDENCE_KEY} != _ROOT_KEYS
             or root["schema_version"] != SCHEMA_VERSION
             or root["kind"] != MANIFEST_KIND
             or not isinstance(root["telemetry"], list)
             or not isinstance(root["cases"], list)
             or len(root["cases"]) > MAX_CASES):
         raise BenchmarkError("manifest is invalid")
+    try:
+        measurement = evidence_label(
+            root.get(EVIDENCE_KEY), arm=CALIBRATION_LABEL)
+    except MeasurementModeError as exc:
+        raise BenchmarkError("manifest is invalid") from exc
     cases = []
     seen = set()
     for supplied in root["cases"]:
@@ -99,7 +114,11 @@ def load_manifest(path: Path) -> dict[str, Any]:
             "baseline": baseline,
             "candidate": candidate,
         })
-    return {"telemetry": root["telemetry"], "cases": cases}
+    return {
+        "telemetry": root["telemetry"],
+        "cases": cases,
+        EVIDENCE_KEY: measurement,
+    }
 
 
 def evaluate(manifest: Mapping[str, Any]) -> dict[str, Any]:
@@ -163,6 +182,9 @@ def evaluate(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "privacy": "aggregate-categorical-and-numeric-only",
         "settings": settings,
         "evidence": evidence,
+        # Carried through to the receipt so a reviewer can see whether the
+        # candidate pass ran under measurement mode. It changes no threshold.
+        EVIDENCE_KEY: manifest.get(EVIDENCE_KEY),
         "telemetry_policy_verdict": recommendation["verdict"],
         "activation_candidate": candidate,
         "verdict": (

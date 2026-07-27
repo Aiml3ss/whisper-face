@@ -120,7 +120,12 @@ _LIFECYCLE_IDS = {
     "cold-start",
     "warm-path",
     "back-to-back",
+    # `run_compiler_stress` reports `compiler-restart` (a re-instantiated
+    # compiler); `run_lifecycle_simulation` and the physical capture session
+    # both report `process-restart` (a restarted process). Both are real
+    # scenario names an observation log can carry, so both are accepted.
     "compiler-restart",
+    "process-restart",
     "long-form",
     "sleep-wake",
     "audio-device-switch",
@@ -1047,7 +1052,8 @@ def run_lifecycle_simulation(
     faults_observed = 0
     recoveries = 0
 
-    def compile_and_compare(name: str, case: dict[str, Any]) -> None:
+    def compile_and_compare(name: str, case: dict[str, Any]) -> bool:
+        """Compile one case; return whether it produced the baseline output."""
         nonlocal failures, nondeterministic
         scenarios[name]["operations"] += 1
         try:
@@ -1055,10 +1061,12 @@ def run_lifecycle_simulation(
         except Exception:
             failures += 1
             scenarios[name]["failures"] += 1
-            return
+            return False
         if actual != baseline[case["id"]]:
             nondeterministic += 1
             scenarios[name]["failures"] += 1
+            return False
+        return True
 
     def expect_blocked(name: str, case: dict[str, Any]) -> None:
         nonlocal failures, faults_observed
@@ -1085,19 +1093,20 @@ def run_lifecycle_simulation(
         adapter.restart()
         compile_and_compare("process-restart", case)
 
+        # A recovery is counted only when the operation that follows the
+        # recovery call actually succeeds and reproduces the baseline. Calling
+        # wake() or restore_audio_device() proves nothing on its own.
         faults_injected += 1
         adapter.inject_sleep()
         expect_blocked("sleep-wake", case)
         adapter.wake()
-        recoveries += 1
-        compile_and_compare("sleep-wake", case)
+        recoveries += compile_and_compare("sleep-wake", case)
 
         faults_injected += 1
         adapter.inject_audio_device_loss()
         expect_blocked("audio-device-switch", case)
         adapter.restore_audio_device()
-        recoveries += 1
-        compile_and_compare("audio-device-switch", case)
+        recoveries += compile_and_compare("audio-device-switch", case)
 
     return {
         "schema_version": 1,
@@ -1112,6 +1121,8 @@ def run_lifecycle_simulation(
             for scenario in scenarios.values()),
         "faults_injected": faults_injected,
         "faults_observed": faults_observed,
+        # Proven recoveries: the post-fault operation ran and matched the
+        # baseline, not merely that a recovery call was made.
         "recoveries": recoveries,
         "failures": failures,
         "nondeterministic_outputs": nondeterministic,
@@ -1332,7 +1343,8 @@ def render_lifecycle_simulation(report: dict[str, Any]) -> str:
         f"blocked operations: {report['blocked_operations']}",
         f"faults observed: {report['faults_observed']}/"
         f"{report['faults_injected']}",
-        f"recoveries: {report['recoveries']}",
+        f"proven recoveries: {report['recoveries']}/"
+        f"{report['faults_injected']}",
         f"failures: {report['failures']}",
         f"nondeterministic outputs: {report['nondeterministic_outputs']}",
         "physical evidence: no",

@@ -3,16 +3,25 @@
 
 Ledger row 25 is fail-closed: `delayed_cleanup_activation.py` will not install
 an activation receipt without at least 50 manually reviewed caller-attested
-physical cases, ten per editor surface, eight per drift/duplicate scenario, at
-least fifteen applied and fifteen rejected, zero safety failures, and p95 apply
+physical cases, ten per editor surface, eight per drift scenario, at least
+fifteen applied and fifteen rejected, zero safety failures, and p95 apply
 latency within 150 ms. No such suite has been run, so the feature is off.
 
-This tool walks that grid case by case. It reads what the runtime itself
+Producing that suite needs the feature running, which the receipt is what
+normally grants. Start the runtime in measurement mode for the session:
+
+    uv run --locked --script dictate.py --measure delayed-cleanup
+
+Measurement mode schedules the same real transaction against the same real
+destination. It is not a receipt, is never persisted, ends with the process,
+and the runtime marks every pass it produced so each recorded case says so.
+
+This tool walks the grid case by case. It reads what the runtime itself
 printed — `dictate.py` logs one text-free `[delayed-cleanup] <outcome>; <n>
-applied, <m> held` line per delayed pass to `dictate.log` — and asks the
-operator only for the closed safety observations a human has to make: did a
-write land somewhere it should not have, did it overwrite an edit the operator
-had just made, did the selection jump.
+applied, <m> held; <apply> ms` line per delayed pass to `dictate.log` — and
+asks the operator only for the closed safety observations a human has to make:
+did a write land somewhere it should not have, did it overwrite an edit the
+operator had just made, did the selection jump.
 
 Three things this tool deliberately does not do:
 
@@ -21,11 +30,8 @@ Three things this tool deliberately does not do:
 * It never decides an outcome. A case with no runtime line, an ambiguous set of
   lines, or no runtime-reported apply latency is recorded as blocked with a
   closed reason.
-* It never invents `apply_ms`. The runtime does not currently report a
-  delayed-apply duration anywhere an external tool can read (see
-  `--timing-source`), so today every case blocks on `no-runtime-timing` and the
-  session prints exactly what the runtime has to emit for the gate to be
-  satisfiable at all.
+* It never invents `apply_ms`. The duration comes from the runtime's own line
+  or the case blocks; an operator stopwatch is not evidence at 150 ms.
 
     uv run scripts/capture_delayed_cleanup_cases.py plan
     uv run scripts/capture_delayed_cleanup_cases.py run
@@ -72,26 +78,36 @@ from delayed_cleanup_activation import (  # noqa: E402
     SCENARIOS,
     SURFACES,
 )
+from measurement_mode import (  # noqa: E402
+    DELAYED_CLEANUP_LABEL,
+    EVIDENCE_KEY,
+    ORDINARY_PATH,
+)
 
 
 TOOL = "capture_delayed_cleanup_cases"
 ARTIFACT_SCHEMA_VERSION = 1
 DEFAULT_SESSION = DEFAULT_EVIDENCE_DIR / "delayed-cleanup-session.json"
 DEFAULT_RECORDS_OUT = "delayed_cleanup_physical_cases.json"
+MEASUREMENT_COMMAND = (
+    "uv run --locked --script dictate.py --measure delayed-cleanup")
 ACTIVATION_COMMAND = (
     "uv run delayed_cleanup_activation.py {records} "
     "--manual-reviewed --write-receipt delayed_cleanup_activation.json")
 
-# `dictate.py` prints exactly this, text-free, once per delayed pass.
+# `dictate.py` prints exactly this, text-free, once per delayed pass. The apply
+# duration and the measurement-mode marker are both optional trailing clauses,
+# so a pass that never reached an apply, or one produced on the ordinary path,
+# is still parsed and still distinguishable.
 RUNTIME_LINE = re.compile(
     r"\[delayed-cleanup\]\s+(?P<outcome>[a-z_]+);\s+"
     r"(?P<applied>\d+)\s+applied,\s+(?P<held>\d+)\s+held"
-    r"(?:;\s*(?P<apply_ms>\d+(?:\.\d+)?)\s*ms)?")
+    r"(?:;\s*(?P<apply_ms>\d+(?:\.\d+)?)\s*ms)?"
+    r"(?:;\s*(?P<measured>measurement-mode))?")
 
 SURFACE_ORDER = ("native-text", "web-text", "electron-editor",
                  "terminal-editor")
-SCENARIO_ORDER = ("unchanged", "edit-elsewhere", "edit-overlap", "focus-drift",
-                  "duplicate-callback")
+SCENARIO_ORDER = ("unchanged", "edit-elsewhere", "edit-overlap", "focus-drift")
 
 SURFACE_SETUP = {
     "native-text": "a stock Cocoa text view (TextEdit, Notes, or Stickies)",
@@ -119,12 +135,6 @@ SCENARIO_ACTION = {
     "focus-drift": (
         "As soon as the first text lands, click into a different field, "
         "window, or application and stay there."),
-    "duplicate-callback": (
-        "There is no operator action that forces this. `dictate.py` derives "
-        "the proposal id from the per-utterance event id, so two delayed "
-        "passes never share one id and the adapter's duplicate paths are "
-        "unreachable from the shipped runtime. Attempt the case, record what "
-        "the runtime actually does, and expect it to block."),
 }
 
 # What the suite predicts, derived from
@@ -137,14 +147,16 @@ SCENARIO_EXPECTATION = {
     "edit-elsewhere": "applied",
     "edit-overlap": "no_safe_changes",
     "focus-drift": "focus_drift",
-    "duplicate-callback": "proposal_in_flight",
 }
 
-UNREACHABLE_SCENARIOS = {
-    "duplicate-callback": (
-        "proposal ids are unique per utterance, so no physical action reaches "
-        "the adapter's in-flight or completed-duplicate paths"),
-}
+# `duplicate-callback` used to sit here and could never be recorded: the
+# runtime derives a proposal id from the per-utterance event id, so two delayed
+# passes never share one and the adapter's in-flight and completed-duplicate
+# paths are unreachable by any operator action. The gate dropped the scenario
+# rather than inviting an injected duplicate id, which would have been a
+# synthetic case wearing a physical label. `test_delayed_cleanup_merge` covers
+# the single-use-id contract deterministically.
+UNREACHABLE_SCENARIOS: dict[str, str] = {}
 
 SAFETY_QUESTIONS = (
     ("wrong_target_write",
@@ -179,20 +191,26 @@ TIMING_SOURCES = ("runtime-log", "none")
 # ------------------------------- the plan ---------------------------------
 
 
+# Four surfaces by four scenarios is sixteen cells; three cases per cell is
+# forty-eight, so two cells run four. One extra sits on an applied scenario and
+# one on a rejected scenario, which keeps the split even at 25/25.
+EXTRA_CASE_CELLS = frozenset({("unchanged", "native-text"),
+                              ("edit-overlap", "web-text")})
+
+
 def build_plan() -> tuple[dict[str, Any], ...]:
     """Build a 50-case grid that satisfies every coverage floor in the gate.
 
-    Four surfaces by five scenarios is twenty cells. Two cases per cell covers
-    the per-surface floor of ten and the per-scenario floor of eight; ten extra
-    cases are spread so each scenario reaches ten and the surfaces land on
-    13/12/13/12. Expected outcomes make the applied/rejected split 20/30, above
-    the fifteen-each balance the gate requires in both directions.
+    Three cases per cell already clears the per-surface floor of ten and the
+    per-scenario floor of eight; the two extras bring the total to the fifty
+    the gate requires, leaving surfaces on 13/13/12/12 and scenarios on
+    13/13/12/12. Expected outcomes make the applied/rejected split 25/25,
+    above the fifteen-each balance the gate requires in both directions.
     """
     cases: list[dict[str, Any]] = []
-    for scenario_index, scenario in enumerate(SCENARIO_ORDER):
-        for surface_index, surface in enumerate(SURFACE_ORDER):
-            repeats = 2 + int(
-                (surface_index + scenario_index) % len(SURFACE_ORDER) < 2)
+    for scenario in SCENARIO_ORDER:
+        for surface in SURFACE_ORDER:
+            repeats = 3 + int((scenario, surface) in EXTRA_CASE_CELLS)
             for repeat in range(repeats):
                 cases.append({
                     "id": f"{surface}-{scenario}-{repeat + 1}",
@@ -268,6 +286,8 @@ def read_runtime_lines(path: Path) -> list[dict[str, Any]]:
             "held": int(match.group("held")),
             "apply_ms": (float(match.group("apply_ms"))
                          if match.group("apply_ms") is not None else None),
+            EVIDENCE_KEY: (DELAYED_CLEANUP_LABEL
+                           if match.group("measured") else ORDINARY_PATH),
         })
     return found
 
@@ -293,7 +313,10 @@ def run_session(cases: Sequence[Mapping[str, Any]], session: Session, *,
         f"timing source: {timing_source}\n"
         f"dictate this phrase every time: \"{DICTATION_PHRASE}\"\n"
         "Every recorded value comes from the runtime's own report or from a\n"
-        "closed answer you type. Nothing is defaulted.\n")
+        "closed answer you type. Nothing is defaulted.\n"
+        "\nWithout an activation receipt the runtime must be started with:\n"
+        f"  {MEASUREMENT_COMMAND}\n"
+        "otherwise it schedules no delayed pass and every case blocks.\n")
 
     if timing_source == "none":
         writer.write(
@@ -380,7 +403,7 @@ def run_session(cases: Sequence[Mapping[str, Any]], session: Session, *,
             writer.write(
                 f"  Runtime reported: {observed['outcome']}; "
                 f"{observed['applied']} applied, {observed['held']} held, "
-                f"{apply_ms} ms\n")
+                f"{apply_ms} ms, {observed[EVIDENCE_KEY]}\n")
             safety: dict[str, bool] = {}
             for field, question in SAFETY_QUESTIONS:
                 safety[field] = ask_choice(
@@ -394,6 +417,9 @@ def run_session(cases: Sequence[Mapping[str, Any]], session: Session, *,
                     "merge_applied": observed["applied"],
                     "merge_held": observed["held"],
                     "apply_ms": apply_ms,
+                    # Read from the runtime's own line, never asked and never
+                    # assumed, so the corpus cannot understate how it was made.
+                    EVIDENCE_KEY: observed[EVIDENCE_KEY],
                 },
                 "operator": safety,
             })
@@ -447,6 +473,7 @@ def build_records(session_payload: Mapping[str, Any]) -> dict[str, Any]:
             "selection_disrupted": bool(operator["selection_disrupted"]),
             "duplicate_write": bool(operator["duplicate_write"]),
             "apply_ms": float(runtime["apply_ms"]),
+            EVIDENCE_KEY: str(runtime.get(EVIDENCE_KEY) or ORDINARY_PATH),
         })
     return {"records": records}
 
@@ -459,6 +486,9 @@ def coverage_report(cases: Sequence[Mapping[str, Any]],
     scenarios = Counter(str(item["scenario"]) for item in records)
     applied = sum(
         1 for item in records if item["runtime"]["outcome"] == "applied")
+    measured = sum(
+        1 for item in records
+        if item["runtime"].get(EVIDENCE_KEY) == DELAYED_CLEANUP_LABEL)
     latencies = sorted(float(item["runtime"]["apply_ms"]) for item in records)
     shortfalls = []
     if len(records) < MIN_CASES:
@@ -490,6 +520,7 @@ def coverage_report(cases: Sequence[Mapping[str, Any]],
         "scenario_counts": {key: scenarios[key] for key in sorted(SCENARIOS)},
         "applied_count": applied,
         "rejected_count": len(records) - applied,
+        "measurement_mode_count": measured,
         "observed_apply_ms_max": latencies[-1] if latencies else None,
         "max_p95_apply_ms_allowed": MAX_P95_APPLY_MS,
         "blocked_reasons": dict(sorted(Counter(
@@ -516,6 +547,8 @@ def render_summary(coverage: Mapping[str, Any], records_path: str) -> str:
         f"applied {coverage['applied_count']} · "
         f"rejected {coverage['rejected_count']} · "
         f"p95 budget {coverage['max_p95_apply_ms_allowed']} ms",
+        f"recorded in measurement mode: "
+        f"{coverage['measurement_mode_count']}/{coverage['cases_recorded']}",
     ]
     if coverage["blocked_reasons"]:
         lines.append("blocked: " + ", ".join(
@@ -556,6 +589,9 @@ def render_plan(cases: Sequence[Mapping[str, Any]]) -> str:
         f"{MIN_SCENARIO_CASES} per scenario, 15 applied and 15 rejected, "
         f"p95 apply <= {MAX_P95_APPLY_MS} ms",
         "",
+        f"run the runtime like this for the whole session:\n  "
+        f"{MEASUREMENT_COMMAND}",
+        "",
         "surfaces:  " + ", ".join(
             f"{key} {surfaces[key]}" for key in SURFACE_ORDER),
         "scenarios: " + ", ".join(
@@ -571,14 +607,25 @@ def render_plan(cases: Sequence[Mapping[str, Any]]) -> str:
     lines.append("")
     lines.append("preconditions the operator must check first:")
     lines.append(
-        "  * delayed cleanup only schedules when the activation receipt is "
-        "already valid,")
+        "  * delayed cleanup schedules only with a valid activation receipt "
+        "or in measurement")
     lines.append(
-        "    so an unreceipted runtime prints no line and every case blocks.")
+        "    mode. Nobody has a receipt yet, so start the runtime with:")
+    lines.append("")
+    lines.append(f"      {MEASUREMENT_COMMAND}")
+    lines.append("")
     lines.append(
-        "  * the runtime prints no apply duration, so --timing-source "
-        "runtime-log finds")
-    lines.append("    no apply_ms and every case blocks on no-runtime-timing.")
+        "    Measurement mode runs the real transaction, grants no authority, "
+        "and ends with")
+    lines.append(
+        "    the process. The runtime marks every pass it produced and each "
+        "recorded case")
+    lines.append(
+        "    carries that mark into the records file and the receipt.")
+    lines.append(
+        "  * without either, the runtime prints no line and every case blocks "
+        "on")
+    lines.append("    no-runtime-line.")
     for scenario, why in sorted(UNREACHABLE_SCENARIOS.items()):
         lines.append(f"  * scenario {scenario} is unreachable: {why}.")
     return "\n".join(lines)

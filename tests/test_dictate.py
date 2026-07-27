@@ -11,6 +11,7 @@ logic can run in under a second without loading either model.
 
 import ast
 import ctypes
+import hashlib
 import io
 import json
 import os
@@ -69,6 +70,11 @@ from acoustic_calibration_activation import (  # noqa: E402
 )
 from acoustic_time_machine import AcousticTimeMachine  # noqa: E402
 from cleanup_circuit_breaker import CleanupCircuitBreaker  # noqa: E402
+from compatibility_fingerprint import (  # noqa: E402
+    AVAILABILITY_BUCKETS,
+    TARGET_BUCKETS,
+)
+from measurement_mode import MeasurementMode  # noqa: E402
 from insertion_integrity import (  # noqa: E402
     DestinationObservation,
     InsertionCoordinator,
@@ -1952,6 +1958,7 @@ class AcousticKeywordMemoryRuntimeTests(unittest.TestCase):
             "atomic_write_text",
             "_load_acoustic_keyword_memory",
             "acoustic_keyword_memory_status_snapshot",
+            "measured_keyword_hints",
             "export_acoustic_keyword_memory",
             "remember_explicit_acoustic_keyword_correction",
             "forget_acoustic_keyword",
@@ -1967,6 +1974,7 @@ class AcousticKeywordMemoryRuntimeTests(unittest.TestCase):
                 "remove_acoustic_keyword_activation":
                     remove_acoustic_keyword_activation,
                 "refresh_glossary": lambda: None,
+                "MEASUREMENT_MODE": MeasurementMode.inert(),
                 "os": os,
                 "tempfile": tempfile,
                 "Path": Path,
@@ -2789,6 +2797,8 @@ class AcousticCalibrationRuntimeTests(unittest.TestCase):
     def namespace(loader):
         return load_definitions(
             "refresh_acoustic_calibration",
+            "active_calibration_settings",
+            "acoustic_calibration_source",
             "acoustic_calibration_status_snapshot",
             "calibrated_vad_threshold",
             "calibrated_end_silence_seconds",
@@ -2796,6 +2806,7 @@ class AcousticCalibrationRuntimeTests(unittest.TestCase):
             assignments={"SILENCE_RMS", "TAIL_SKIP_SILENCE"},
             extra={
                 "np": np,
+                "MEASUREMENT_MODE": MeasurementMode.inert(),
                 "CalibrationSettings": CalibrationSettings,
                 "load_acoustic_calibration_activation": loader,
                 "ACOUSTIC_CALIBRATION_ACTIVATION_FILE":
@@ -3884,8 +3895,8 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_transcript_log_keeps_performance_metrics(self):
         ns = load_definitions(
-            "append_transcript",
-            extra={"os": os, "time": time},
+            "append_transcript", "transcript_app_identity",
+            extra={"hashlib": hashlib, "os": os, "time": time},
         )
         with tempfile.TemporaryDirectory() as td:
             transcript = Path(td) / "transcripts.jsonl"
@@ -3903,6 +3914,52 @@ class ConfigurationTests(unittest.TestCase):
             entry = json.loads(transcript.read_text())
             self.assertEqual(entry["metrics"]["release_s"], 0.12)
             self.assertEqual(entry["metrics"]["asr_engine"], "tiny")
+
+    def test_a_windows_window_title_never_reaches_transcript_history(self):
+        ns = load_definitions(
+            "append_transcript", "transcript_app_identity",
+            extra={"hashlib": hashlib, "os": os, "time": time},
+        )
+        with tempfile.TemporaryDirectory() as td:
+            transcript = Path(td) / "transcripts.jsonl"
+            ns.update({
+                "TRANSCRIPTS_FILE": transcript,
+                "TRANSCRIPTS_LOCK": threading.Lock(),
+                "USAGE_CACHE": {
+                    "at": 0.0, "value": (0, 0.0),
+                    "lock": threading.Lock()},
+            })
+            ns["append_transcript"](
+                "raw", "clean", "windows:Q3 layoffs plan.docx - Word", "fast")
+            entry = json.loads(transcript.read_text())
+
+        self.assertNotIn("layoffs", json.dumps(entry))
+        self.assertRegex(entry["app"], r"^windows:[0-9a-f]{16}$")
+        # Stable per window title, so per-app grouping survives redaction,
+        # and a macOS bundle identifier is still stored verbatim.
+        self.assertEqual(
+            ns["transcript_app_identity"](
+                "windows:Q3 layoffs plan.docx - Word"),
+            entry["app"])
+        self.assertNotEqual(
+            ns["transcript_app_identity"]("windows:Other - Word"),
+            entry["app"])
+        self.assertEqual(
+            ns["transcript_app_identity"]("com.apple.TextEdit"),
+            "com.apple.TextEdit")
+
+    def test_transcript_metrics_name_asr_and_insertion_verification_apart(self):
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        # `verified` alone read as delivery truth and was aggregated as one.
+        self.assertNotIn('"verified": recognition.verified', source)
+        self.assertIn('"asr_verified": recognition.verified', source)
+        self.assertIn('"insertion_verified": verified', source)
+
+    def test_transcript_metrics_export_the_capability_triple(self):
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        for key in ("insertion_target", "insertion_paste",
+                    "insertion_readback"):
+            self.assertIn(f'"{key}": insertion_capabilities.get(', source)
 
     def test_transcript_log_closes_descriptor_without_fchmod(self):
         class OsWithoutFchmod:
@@ -3927,8 +3984,8 @@ class ConfigurationTests(unittest.TestCase):
 
         portable_os = OsWithoutFchmod()
         ns = load_definitions(
-            "append_transcript",
-            extra={"os": portable_os, "time": time},
+            "append_transcript", "transcript_app_identity",
+            extra={"hashlib": hashlib, "os": portable_os, "time": time},
         )
         with tempfile.TemporaryDirectory() as td:
             transcript = Path(td) / "transcripts.jsonl"
@@ -3946,8 +4003,10 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_paste_outcome_updates_only_its_receipted_record(self):
         ns = load_definitions(
-            "append_transcript", "record_paste_outcome",
+            "append_transcript", "transcript_app_identity",
+            "record_paste_outcome",
             extra={
+                "hashlib": hashlib,
                 "os": os,
                 "time": time,
                 "PasteReceipt": object,
@@ -4469,8 +4528,10 @@ class InsertionAdapterTests(unittest.TestCase):
         pipeline = {}
         ns = load_definitions(
             "focus_destination_id", "opaque_focus_context",
-            "capture_insertion_lease", "destination_observation",
-            "commit_insertion",
+            "capture_insertion_lease", "unresolved_destination_id",
+            "destination_observation",
+            "commit_insertion", "insertion_capability_buckets",
+            "unresolved_destination_id",
             extra={
                 "FocusSnapshot": object,
                 "InsertionLease": InsertionLease,
@@ -4512,7 +4573,8 @@ class InsertionAdapterTests(unittest.TestCase):
         ns = load_definitions(
             "focus_destination_id", "opaque_focus_context",
             "capture_insertion_lease", "seal_opaque_window_lease",
-            "destination_observation", "commit_insertion",
+            "destination_observation", "commit_insertion", "insertion_capability_buckets",
+            "unresolved_destination_id",
             extra={
                 "FocusSnapshot": object,
                 "InsertionLease": InsertionLease,
@@ -4552,7 +4614,8 @@ class InsertionAdapterTests(unittest.TestCase):
         ns = load_definitions(
             "focus_destination_id", "opaque_focus_context",
             "capture_insertion_lease", "seal_opaque_window_lease",
-            "destination_observation", "commit_insertion",
+            "destination_observation", "commit_insertion", "insertion_capability_buckets",
+            "unresolved_destination_id",
             extra={
                 "FocusSnapshot": object,
                 "InsertionLease": InsertionLease,
@@ -4596,7 +4659,8 @@ class InsertionAdapterTests(unittest.TestCase):
         ns = load_definitions(
             "focus_destination_id", "opaque_focus_context",
             "capture_insertion_lease", "seal_opaque_window_lease",
-            "destination_observation", "commit_insertion",
+            "destination_observation", "commit_insertion", "insertion_capability_buckets",
+            "unresolved_destination_id",
             extra={
                 "FocusSnapshot": object,
                 "InsertionLease": InsertionLease,
@@ -4637,7 +4701,8 @@ class InsertionAdapterTests(unittest.TestCase):
         ns = load_definitions(
             "focus_destination_id", "opaque_focus_context",
             "capture_insertion_lease", "seal_opaque_window_lease",
-            "destination_observation", "commit_insertion",
+            "destination_observation", "commit_insertion", "insertion_capability_buckets",
+            "unresolved_destination_id",
             extra={
                 "FocusSnapshot": object,
                 "InsertionLease": InsertionLease,
@@ -4840,7 +4905,8 @@ class InsertionAdapterTests(unittest.TestCase):
         ns = load_definitions(
             "bounded_focus_text", "focus_destination_id",
             "focus_destination_matches", "opaque_focus_context",
-            "destination_observation", "commit_insertion",
+            "destination_observation", "commit_insertion", "insertion_capability_buckets",
+            "unresolved_destination_id",
             extra={
                 "FocusSnapshot": object,
                 "DestinationObservation": DestinationObservation,
@@ -4908,7 +4974,8 @@ class InsertionAdapterTests(unittest.TestCase):
     def test_hidden_field_lease_still_binds_to_original_application(self):
         ns = load_definitions(
             "focus_destination_id", "opaque_focus_context",
-            "capture_insertion_lease", "destination_observation",
+            "capture_insertion_lease", "unresolved_destination_id",
+            "destination_observation",
             extra={
                 "FocusSnapshot": object,
                 "InsertionLease": InsertionLease,
@@ -4935,7 +5002,8 @@ class InsertionAdapterTests(unittest.TestCase):
         pasted = []
         pipeline = {}
         ns = load_definitions(
-            "commit_insertion",
+            "commit_insertion", "insertion_capability_buckets",
+            "unresolved_destination_id",
             extra={
                 "INSERTION_COORDINATOR": coordinator,
                 "destination_observation": lambda _snapshot, _bundle, _lease,
@@ -4956,6 +5024,105 @@ class InsertionAdapterTests(unittest.TestCase):
         self.assertEqual(receipt.state, ReceiptState.CONFLICT)
         self.assertFalse(receipt.paste_attempted)
         self.assertEqual(pipeline["last_insertion_state"], "conflict")
+
+    def capability_namespace(self, coordinator, **extra):
+        return load_definitions(
+            "commit_insertion", "insertion_capability_buckets",
+            "unresolved_destination_id",
+            extra={
+                "INSERTION_COORDINATOR": coordinator,
+                "destination_observation": lambda *_args:
+                    DestinationObservation.capture(
+                        "field-a", (0, 0), "nearby"),
+                "insertion_readback": lambda *_args, **_kwargs:
+                    ReadbackResult.verified(),
+                "readback_timeout_for_frontmost": lambda: 0.02,
+                "paste": lambda _text: None,
+                "PIPELINE_STATE": {},
+                "frontmost_bundle": lambda: "com.openai.codex",
+                **extra,
+            },
+        )
+
+    def test_a_readable_field_reports_the_full_capability_triple(self):
+        lease = InsertionLease.capture(
+            "utterance-1", "field-a", (0, 0), "nearby")
+        rec = SimpleNamespace(
+            insertion_lease=lease, insertion_receipt=None,
+            bundle_at_press="com.openai.codex")
+        ns = self.capability_namespace(InsertionCoordinator())
+
+        ns["commit_insertion"](rec, "Ship it", "com.openai.codex", object())
+
+        self.assertEqual(rec.insertion_capabilities, {
+            "target": "readable", "paste": "available",
+            "readback": "available"})
+
+    def test_an_opaque_lease_reports_opaque_target_and_no_readback(self):
+        lease = InsertionLease.capture_opaque(
+            "utterance-2", "com.apple.Terminal:window-7", "context")
+        rec = SimpleNamespace(
+            insertion_lease=lease, insertion_receipt=None,
+            bundle_at_press="com.apple.Terminal")
+        ns = self.capability_namespace(InsertionCoordinator())
+
+        ns["commit_insertion"](rec, "Ship it", "com.apple.Terminal", None)
+
+        self.assertEqual(rec.insertion_capabilities, {
+            "target": "opaque", "paste": "available",
+            "readback": "unavailable"})
+
+    def test_an_unresolved_destination_reports_an_unavailable_target(self):
+        ns = self.capability_namespace(InsertionCoordinator())
+        lease = InsertionLease.capture_opaque(
+            "utterance-3",
+            ns["unresolved_destination_id"]("com.unknown.app", "utterance-3"),
+            "unavailable")
+        rec = SimpleNamespace(
+            insertion_lease=lease, insertion_receipt=None,
+            bundle_at_press="com.unknown.app")
+
+        ns["commit_insertion"](rec, "Ship it", "com.unknown.app", None)
+
+        self.assertEqual(rec.insertion_capabilities["target"], "unavailable")
+
+    def test_a_second_stage_reports_that_no_paste_path_existed(self):
+        coordinator = InsertionCoordinator()
+        lease = InsertionLease.capture(
+            "utterance-4", "field-a", (0, 0), "nearby")
+        coordinator.stage(lease, "already staged")
+        rec = SimpleNamespace(
+            insertion_lease=lease, insertion_receipt=None,
+            bundle_at_press="com.openai.codex")
+        ns = self.capability_namespace(coordinator)
+
+        ns["commit_insertion"](rec, "Ship it", "com.openai.codex", object())
+
+        self.assertEqual(rec.insertion_capabilities["paste"], "unavailable")
+
+    def test_the_legacy_path_reports_no_capabilities_at_all(self):
+        rec = SimpleNamespace(insertion_lease=None, insertion_receipt=None)
+        ns = self.capability_namespace(InsertionCoordinator())
+
+        self.assertIsNone(
+            ns["commit_insertion"](rec, "Ship it", "com.openai.codex", None))
+        self.assertIsNone(rec.insertion_capabilities)
+
+    def test_every_reported_bucket_is_in_the_aggregator_vocabulary(self):
+        ns = self.capability_namespace(InsertionCoordinator())
+        for lease, snapshot, expected_target in (
+            (InsertionLease.capture("u1", "field", (0, 0), "near"),
+             object(), "readable"),
+            (InsertionLease.capture_opaque("u2", "bundle:window", "ctx"),
+             None, "opaque"),
+        ):
+            rec = SimpleNamespace(bundle_at_press="com.openai.codex")
+            buckets = ns["insertion_capability_buckets"](
+                rec, lease, snapshot, paste_available=True)
+            self.assertIn(buckets["target"], TARGET_BUCKETS)
+            self.assertIn(buckets["paste"], AVAILABILITY_BUCKETS)
+            self.assertIn(buckets["readback"], AVAILABILITY_BUCKETS)
+            self.assertEqual(buckets["target"], expected_target)
 
     def test_outbox_clipboard_failure_does_not_acknowledge_payload(self):
         acknowledgements = []
@@ -6526,6 +6693,7 @@ class CustomVocabularyTests(unittest.TestCase):
                     lambda: (AcousticKeywordMemory(), "missing"),
                 "active_acoustic_keywords":
                     lambda _path, _memory: ((), "missing"),
+                "measured_keyword_hints": tuple,
                 "ACOUSTIC_KEYWORD_ACTIVATION_FILE":
                     Path("acoustic_keyword_activation.json"),
             },
@@ -6578,7 +6746,9 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
         namespace = load_definitions(
             "load_delayed_cleanup_activation",
             "delayed_cleanup_activation_status",
+            "delayed_cleanup_scheduling_enabled",
             extra={
+                "MEASUREMENT_MODE": MeasurementMode.inert(),
                 "Path": Path,
                 "os": os,
                 "stat": stat,
@@ -6603,7 +6773,8 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
                 namespace["load_delayed_cleanup_activation"](path))
             self.assertEqual(
                 namespace["delayed_cleanup_activation_status"](),
-                {"active": True, "status": "active"},
+                {"active": True, "status": "active",
+                 "measurement_mode": False, "scheduling": True},
             )
 
             path.write_text('{"valid": false}', encoding="utf-8")
@@ -6638,7 +6809,11 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
         worker = object()
         namespace = load_definitions(
             "schedule_delayed_cleanup",
+            "delayed_cleanup_activation_status",
+            "delayed_cleanup_scheduling_enabled",
             extra={
+                "MEASUREMENT_MODE": MeasurementMode.inert(),
+                "IS_MACOS": True,
                 "DELAYED_CLEANUP_STATE": state,
                 "PIPELINE_STATE": pipeline,
                 "_run_delayed_cleanup": worker,
@@ -6674,6 +6849,90 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
             starts[0][1][-1], {"sentinel": "private expansion"})
         self.assertEqual(
             pipeline["last_delayed_cleanup_outcome"], "scheduled")
+
+    @staticmethod
+    def runner_namespace(*, proposal, outcome="applied", measured=False,
+                         raises=False, printed=None):
+        state = {"active": True, "status": "active", "generation": 1,
+                 "lock": threading.Lock()}
+        pipeline = {}
+
+        class Transactions:
+            def apply(self, *_args):
+                if raises:
+                    raise RuntimeError("adapter blew up")
+                return SimpleNamespace(
+                    outcome=SimpleNamespace(value=outcome),
+                    merge_applied_count=2,
+                    merge_rejected_count=1)
+
+        namespace = load_definitions(
+            "_run_delayed_cleanup",
+            extra={
+                "build_delayed_cleanup_proposal":
+                    lambda *_args, **_kwargs: proposal,
+                "MacDestinationStateAdapter": lambda reader: SimpleNamespace(
+                    capture=lambda: SimpleNamespace(snapshot=object()),
+                    apply_if_unchanged=lambda *_args: True),
+                "SystemMacDestinationStateReader": object,
+                "DELAYED_CLEANUP_TRANSACTIONS": Transactions(),
+                "DELAYED_CLEANUP_STATE": state,
+                "PIPELINE_STATE": pipeline,
+                "MEASUREMENT_MODE": MeasurementMode(
+                    delayed_cleanup=measured),
+                "time": time,
+                "print": (printed.append if printed is not None else print),
+            },
+        )
+        return namespace, pipeline
+
+    def test_a_delayed_apply_is_timed_and_printed_in_the_parsed_shape(self):
+        printed = []
+        namespace, pipeline = self.runner_namespace(
+            proposal=object(), printed=printed)
+
+        namespace["_run_delayed_cleanup"](
+            1, "proposal-1", "original", "compiled", "tone",
+            SimpleNamespace(), False, "", None, "formal", {})
+
+        self.assertEqual(len(printed), 1)
+        self.assertRegex(
+            printed[0],
+            r"^\[delayed-cleanup\] applied; 2 applied, 1 held; "
+            r"\d+\.\d{3} ms$")
+        self.assertIsNotNone(pipeline["last_delayed_cleanup_apply_ms"])
+        self.assertGreaterEqual(
+            pipeline["last_delayed_cleanup_apply_ms"], 0.0)
+
+    def test_a_measured_pass_marks_itself_after_the_duration(self):
+        printed = []
+        namespace, _ = self.runner_namespace(
+            proposal=object(), measured=True, printed=printed)
+
+        namespace["_run_delayed_cleanup"](
+            1, "proposal-1", "original", "compiled", "tone",
+            SimpleNamespace(), False, "", None, "formal", {})
+
+        self.assertRegex(
+            printed[0],
+            r"^\[delayed-cleanup\] applied; 2 applied, 1 held; "
+            r"\d+\.\d{3} ms; measurement-mode$")
+
+    def test_a_pass_that_never_applied_reports_no_duration_at_all(self):
+        for kwargs in ({"proposal": None}, {"proposal": object(),
+                                            "raises": True}):
+            with self.subTest(**kwargs):
+                printed = []
+                namespace, pipeline = self.runner_namespace(
+                    printed=printed, **kwargs)
+
+                namespace["_run_delayed_cleanup"](
+                    1, "proposal-1", "original", "compiled", "tone",
+                    SimpleNamespace(), False, "", None, "formal", {})
+
+                self.assertNotIn(" ms", printed[0])
+                self.assertIsNone(
+                    pipeline["last_delayed_cleanup_apply_ms"])
 
     def test_proposal_requires_exact_voice_compiler_reconstruction(self):
         verified = []
