@@ -4,14 +4,23 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   windows-runtime:
     runs-on: windows-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      # Every pull request, not just every release: the lock is what stands
+      # between a contributor and an unreviewed package.
+      - name: Verify the lock matches the declared dependencies
+        run: uv lock --check --script dictate.py
       - name: Validate locked Windows environment
         run: uv sync --locked --script dictate.py
       - name: Import Windows runtime
@@ -64,6 +73,8 @@ jobs:
           uv run tests/test_support_bundle.py
           uv run tests/test_whisper_face_gui.py
           uv run tests/test_whisper_face_characters.py
+          uv run tests/test_network_egress.py
+          uv run tests/test_supply_chain_integrity.py
           uv run tests/test_installers.py
           uv run tests/test_repository_governance.py
           uv run tests/test_macos_distribution.py

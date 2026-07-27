@@ -54,5 +54,7 @@ Project Owner can make that commitment.
 - local private files created with permissions broader than the current user.
 
 The public trust boundaries and current mitigations are documented in the
-[threat model](docs/security/threat-model.md). The user-facing data contract is
-the [privacy promise](PRIVACY.md).
+[threat model](docs/security/threat-model.md). What a downloaded release does
+and does not prove about its own origin is documented in
+[release provenance](docs/security/release-provenance.md). The user-facing data
+contract is the [privacy promise](PRIVACY.md).
