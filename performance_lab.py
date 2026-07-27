@@ -14,8 +14,10 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import hashlib
 import math
 import os
+import re
 import statistics
 import sys
 import tempfile
@@ -673,11 +675,112 @@ def evaluate_budgets(
     }
 
 
+MODEL_SCORECARD_SCHEMA_VERSION = 2
+_MEASUREMENT_KEYS = frozenset({
+    "measurement_id", "measured_on", "hardware", "os_name", "os_version",
+    "dataset", "sample", "command", "artifacts_preserved", "summary_sha256",
+    "independently_recalculable", "notes",
+})
+_MEASUREMENT_ID = re.compile(r"\A[a-z0-9][a-z0-9._-]{0,95}\Z")
+_MEASUREMENT_DATE = re.compile(r"\A[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
+_SHA256 = re.compile(r"\A[0-9a-f]{64}\Z")
+_METRIC_STATES = frozenset({"measured", "unmeasured"})
+
+
+def _load_measurements(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Validate the named runs that every measured metric must point at.
+
+    A measurement record is a claim about a physical machine. It must name the
+    hardware and date concretely, and it may not claim to be independently
+    recalculable unless a preserved artifact digest backs that claim.
+    """
+    measurements = payload.get("measurements")
+    if not isinstance(measurements, list):
+        raise ValueError("model scorecard needs a measurements list")
+    known: dict[str, dict[str, Any]] = {}
+    for record in measurements:
+        if not isinstance(record, dict) or set(record) != _MEASUREMENT_KEYS:
+            raise ValueError(
+                "measurement records must declare exactly "
+                + ", ".join(sorted(_MEASUREMENT_KEYS)))
+        identifier = record["measurement_id"]
+        if (not isinstance(identifier, str)
+                or not _MEASUREMENT_ID.match(identifier)
+                or identifier in known):
+            raise ValueError("invalid or duplicate measurement identifier")
+        if (not isinstance(record["measured_on"], str)
+                or not _MEASUREMENT_DATE.match(record["measured_on"])):
+            raise ValueError(f"{identifier}: measured_on must be an ISO date")
+        for field in ("hardware", "os_name", "dataset", "sample", "command"):
+            value = record[field]
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{identifier}: {field} must be named")
+        for field in ("os_version", "notes"):
+            value = record[field]
+            if value is not None and (
+                    not isinstance(value, str) or not value.strip()):
+                raise ValueError(
+                    f"{identifier}: {field} must be a string or null")
+        preserved = record["artifacts_preserved"]
+        recalculable = record["independently_recalculable"]
+        if not isinstance(preserved, bool) or not isinstance(
+                recalculable, bool):
+            raise ValueError(f"{identifier}: artifact flags must be booleans")
+        digest = record["summary_sha256"]
+        if digest is not None and (
+                not isinstance(digest, str) or not _SHA256.match(digest)):
+            raise ValueError(f"{identifier}: summary_sha256 must be a SHA-256")
+        if preserved != (digest is not None):
+            raise ValueError(
+                f"{identifier}: a preserved artifact needs its digest, and a "
+                "digest cannot be published without the artifact")
+        if recalculable and not preserved:
+            raise ValueError(
+                f"{identifier}: a run with no preserved artifact cannot be "
+                "called independently recalculable")
+        known[identifier] = record
+    return known
+
+
+def _validate_metric_provenance(
+        candidate: dict[str, Any], metrics: set[str],
+        measurements: dict[str, dict[str, Any]]) -> None:
+    """Bind every metric to a named run or to the explicit unmeasured state."""
+    identifier = candidate["model_id"]
+    provenance = candidate.get("metric_provenance")
+    if not isinstance(provenance, dict) or set(provenance) != metrics:
+        raise ValueError(
+            f"{identifier}: metric_provenance must cover every criterion")
+    for metric, entry in provenance.items():
+        if (not isinstance(entry, dict)
+                or set(entry) != {"state", "measurement_id"}
+                or entry["state"] not in _METRIC_STATES):
+            raise ValueError(f"{identifier}: invalid provenance for {metric}")
+        measured = entry["state"] == "measured"
+        value_present = _number(candidate["metrics"].get(metric)) is not None
+        if measured != value_present:
+            raise ValueError(
+                f"{identifier}: {metric} provenance disagrees with its value; "
+                "a measured metric needs a number and an unmeasured metric "
+                "must stay null")
+        reference = entry["measurement_id"]
+        if measured:
+            if reference not in measurements:
+                raise ValueError(
+                    f"{identifier}: {metric} names an unknown measurement")
+        elif reference is not None:
+            raise ValueError(
+                f"{identifier}: an unmeasured metric cannot name a run")
+
+
 def load_model_scorecard(
         path: Path = DEFAULT_MODEL_SCORECARD) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+    if (not isinstance(payload, dict)
+            or payload.get("schema_version")
+            != MODEL_SCORECARD_SCHEMA_VERSION):
         raise ValueError("unsupported model scorecard schema")
+    measurements = _load_measurements(payload)
     criteria = payload.get("criteria")
     candidates = payload.get("candidates")
     if not isinstance(criteria, list) or not criteria:
@@ -735,6 +838,7 @@ def load_model_scorecard(
         for metric, value in candidate["metrics"].items():
             if metric not in metrics or (value is not None and _number(value) is None):
                 raise ValueError(f"{identifier}: invalid metric {metric}")
+        _validate_metric_provenance(candidate, metrics, measurements)
     return payload
 
 
@@ -742,6 +846,10 @@ def generate_model_scorecard(source: dict[str, Any]) -> dict[str, Any]:
     """Normalize heterogeneous model evidence into an explainable ranking."""
     criteria = source["criteria"]
     candidates = source["candidates"]
+    known_measurements = {
+        record["measurement_id"]: record
+        for record in source.get("measurements", ())
+    }
     ranges: dict[str, tuple[float, float]] = {}
     for criterion in criteria:
         values = [
@@ -781,6 +889,15 @@ def generate_model_scorecard(source: dict[str, Any]) -> dict[str, Any]:
         reasons = [f"missing-required:{metric}" for metric in missing_required]
         if candidate["license_status"] != "approved":
             reasons.append(f"license-{candidate['license_status']}")
+        provenance = candidate.get("metric_provenance", {})
+        measured_metrics = sorted(
+            metric for metric, entry in provenance.items()
+            if entry.get("state") == "measured")
+        backing_ids = sorted({
+            entry["measurement_id"] for entry in provenance.values()
+            if entry.get("state") == "measured"
+        })
+        backing = [known_measurements[identifier] for identifier in backing_ids]
         ranked.append({
             "model_id": candidate["model_id"],
             "benchmark_engine": candidate["benchmark_engine"],
@@ -804,6 +921,15 @@ def generate_model_scorecard(source: dict[str, Any]) -> dict[str, Any]:
             if available_weight else None,
             "available_weight": round(available_weight, 4),
             "normalized_metrics": contributions,
+            "measured_metrics": measured_metrics,
+            "unmeasured_metrics": sorted(
+                metric for metric, entry in provenance.items()
+                if entry.get("state") != "measured"),
+            "measured_on_hardware": sorted({
+                record["hardware"] for record in backing}),
+            "measurement_ids": backing_ids,
+            "independently_recalculable": bool(backing) and all(
+                record["independently_recalculable"] for record in backing),
         })
     ranked.sort(key=lambda item: (
         not item["eligible"],
@@ -819,8 +945,12 @@ def generate_model_scorecard(source: dict[str, Any]) -> dict[str, Any]:
     )
     total_cells = len(criteria) * len(candidates)
     return {
-        "schema_version": 1,
+        "schema_version": MODEL_SCORECARD_SCHEMA_VERSION,
         "evidence": source.get("evidence", {}),
+        "measurements": [
+            dict(record) for record in source.get("measurements", ())],
+        "measured_on_hardware": sorted({
+            record["hardware"] for record in known_measurements.values()}),
         "ranked": ranked,
         "measurement_coverage": round(present_cells / total_cells, 4),
         "missing_measurements": missing_measurements,
@@ -832,6 +962,108 @@ def generate_model_scorecard(source: dict[str, Any]) -> dict[str, Any]:
             "never treated as zero; license eligibility is a separate gate."
         ),
     }
+
+
+_REFRESHABLE_METRICS = (
+    "wer_pct", "exact_pct", "utterance_p90_wer_pct", "proc_p95_s", "rtfx",
+)
+
+
+def refresh_model_scorecard(
+        source: dict[str, Any], summary: dict[str, Any], *,
+        measurement_id: str, hardware: str, measured_on: str, command: str,
+        summary_sha256: str, os_name: str = "macOS",
+        os_version: str | None = None,
+        notes: str | None = None) -> dict[str, Any]:
+    """Rewrite measured metrics from a real, preserved benchmark_asr run.
+
+    Nothing is invented. Only the metrics the summary actually contains are
+    written; memory, energy, and startup stay unmeasured because the harness
+    does not measure them. A summary whose engine ran a different model than
+    the reviewed pin is refused rather than silently attributed.
+    """
+    if not isinstance(summary, dict) or summary.get("schema_version") != 1:
+        raise ValueError("unsupported benchmark_asr summary schema")
+    engines = summary.get("engines")
+    if not isinstance(engines, list) or not engines:
+        raise ValueError("benchmark_asr summary contains no engine results")
+    if not _MEASUREMENT_ID.match(measurement_id):
+        raise ValueError("invalid measurement identifier")
+    if not _MEASUREMENT_DATE.match(measured_on):
+        raise ValueError("measured_on must be an ISO date")
+    if not _SHA256.match(summary_sha256):
+        raise ValueError("summary_sha256 must be a SHA-256 digest")
+    for label, value in (("hardware", hardware), ("command", command),
+                         ("os_name", os_name)):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{label} must be named for a physical run")
+
+    refreshed = json.loads(json.dumps(source))
+    by_engine = {
+        candidate["benchmark_engine"]: candidate
+        for candidate in refreshed["candidates"]
+    }
+    updated: list[str] = []
+    for result in engines:
+        if not isinstance(result, dict):
+            raise ValueError("invalid engine summary")
+        engine = result.get("engine")
+        candidate = by_engine.get(engine)
+        if candidate is None:
+            raise ValueError(
+                f"summary engine {engine!r} is not a reviewed candidate")
+        if (result.get("requested_model_id") != candidate["model_id"]
+                or result.get("requested_model_revision")
+                != candidate["revision"]):
+            raise ValueError(
+                f"{engine}: the run targeted a different model or revision "
+                "than the reviewed pin")
+        for metric in _REFRESHABLE_METRICS:
+            value = _number(result.get(metric))
+            if value is None:
+                raise ValueError(
+                    f"{engine}: the summary has no usable {metric}")
+            candidate["metrics"][metric] = value
+            candidate["metric_provenance"][metric] = {
+                "state": "measured",
+                "measurement_id": measurement_id,
+            }
+        updated.append(engine)
+
+    stale = sorted(set(by_engine) - set(updated))
+    if stale:
+        raise ValueError(
+            "refusing a partial refresh; the run must cover every reviewed "
+            "candidate, missing: " + ", ".join(stale))
+
+    record = {
+        "measurement_id": measurement_id,
+        "measured_on": measured_on,
+        "hardware": hardware,
+        "os_name": os_name,
+        "os_version": os_version,
+        "dataset": str(summary.get("dataset") or "unrecorded dataset"),
+        "sample": f"{summary.get('samples')} "
+                  f"{summary.get('selection', 'unrecorded selection')} "
+                  "utterances",
+        "command": command,
+        "artifacts_preserved": True,
+        "summary_sha256": summary_sha256,
+        "independently_recalculable": True,
+        "notes": notes,
+    }
+    refreshed["measurements"] = [
+        item for item in refreshed.get("measurements", ())
+        if item.get("measurement_id") != measurement_id
+    ] + [record]
+    evidence = refreshed.setdefault("evidence", {})
+    evidence["measured_on"] = measured_on
+    evidence["hardware"] = hardware
+    evidence["metric_verification"] = (
+        "Refreshed from a preserved benchmark_asr summary artifact "
+        f"(sha256 {summary_sha256}); every published metric can be "
+        "recalculated from that artifact.")
+    return refreshed
 
 
 def _hub_base_models(card_data: Any) -> list[str]:
@@ -1384,6 +1616,27 @@ def render_scorecard(report: dict[str, Any]) -> str:
             f"{candidate['rank']:>4} {candidate['model_id']:<54} "
             f"{score:>8} {str(candidate['eligible']):>10} "
             f"{candidate['license_status']}")
+    lines.append("MEASURED ON NAMED HARDWARE")
+    for record in report.get("measurements", ()):
+        recalculable = (
+            "recalculable from a preserved artifact"
+            if record["independently_recalculable"]
+            else "artifact not preserved; documented-run evidence only")
+        os_version = record["os_version"] or "version unrecorded"
+        lines.append(
+            f"  {record['measurement_id']}: {record['hardware']}, "
+            f"{record['os_name']} {os_version}, {record['measured_on']} "
+            f"- {recalculable}")
+    if not report.get("measurements"):
+        lines.append("  none; every metric below is unmeasured")
+    lines.append("PER CANDIDATE")
+    for candidate in report["ranked"]:
+        hardware = ", ".join(candidate["measured_on_hardware"]) or "nothing"
+        lines.append(
+            f"  {candidate['model_id']}: "
+            f"{len(candidate['measured_metrics'])} measured on {hardware}; "
+            f"{len(candidate['unmeasured_metrics'])} unmeasured "
+            f"({', '.join(candidate['unmeasured_metrics']) or 'none'})")
     lines.extend((
         f"recommendation: {report['recommendation'] or 'none'}",
         f"measurement coverage: {report['measurement_coverage'] * 100:.1f}%",
@@ -1496,6 +1749,31 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     scorecard.add_argument(
         "--format", choices=("table", "json"), default="table")
 
+    refresh = commands.add_parser(
+        "refresh-model-scorecard",
+        help="rewrite measured metrics from a preserved benchmark_asr run")
+    refresh.add_argument(
+        "--scorecard", type=Path, default=DEFAULT_MODEL_SCORECARD)
+    refresh.add_argument(
+        "--summary", type=Path, required=True,
+        help="summary.json written by benchmark_asr.py --output-dir")
+    refresh.add_argument(
+        "--measurement-id", required=True,
+        help="stable identifier for this physical run")
+    refresh.add_argument(
+        "--hardware", required=True,
+        help="the machine the run happened on, named concretely")
+    refresh.add_argument(
+        "--measured-on", required=True, help="ISO date of the run")
+    refresh.add_argument("--os-name", default="macOS")
+    refresh.add_argument("--os-version")
+    refresh.add_argument("--notes")
+    refresh.add_argument(
+        "--output", type=Path,
+        help="defaults to rewriting --scorecard in place")
+    refresh.add_argument(
+        "--format", choices=("table", "json"), default="table")
+
     audit = commands.add_parser(
         "audit-models", help="check reviewed public model metadata for drift")
     audit.add_argument(
@@ -1575,6 +1853,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 load_model_scorecard(args.scorecard))
             rendered = render_scorecard(payload)
             status = int(payload["recommendation"] is None)
+        elif args.command == "refresh-model-scorecard":
+            summary_path = args.summary.expanduser().resolve()
+            summary_bytes = summary_path.read_bytes()
+            refreshed = refresh_model_scorecard(
+                load_model_scorecard(args.scorecard),
+                json.loads(summary_bytes.decode("utf-8")),
+                measurement_id=args.measurement_id,
+                hardware=args.hardware,
+                measured_on=args.measured_on,
+                command=(
+                    "uv run benchmark_asr.py ... "
+                    "--output-dir <preserved artifact directory>"),
+                summary_sha256=hashlib.sha256(summary_bytes).hexdigest(),
+                os_name=args.os_name,
+                os_version=args.os_version,
+                notes=args.notes,
+            )
+            destination = args.output or args.scorecard
+            write_json_artifact(destination, refreshed)
+            payload = generate_model_scorecard(
+                load_model_scorecard(destination))
+            rendered = render_scorecard(payload)
+            status = 0
         else:
             payload = audit_model_sources(load_model_scorecard(args.scorecard))
             rendered = render_model_audit(payload)

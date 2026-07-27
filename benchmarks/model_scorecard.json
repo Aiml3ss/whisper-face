@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "description": "Versioned model-selection evidence. Values come from the documented 100-utterance Mac ASR bakeoff; absent resource measurements remain null until measured.",
+  "schema_version": 2,
+  "description": "Versioned model-selection evidence, and the single source of truth for the published ASR bakeoff table. Every metric is bound either to a named measurement record or to the explicit state 'unmeasured'; absent resource measurements stay null and are never guessed.",
   "evidence": {
     "scope": "Mac ASR runtime candidates only",
     "benchmark": "benchmarks/ASR_BAKEOFF.md",
@@ -14,6 +14,22 @@
     "local_cache_check": "Both MLX Hugging Face cache refs matched their runtime pins; dictate.py --verify-parakeet-model verified every required installed Parakeet asset against its pinned revision metadata.",
     "metric_verification": "Scorecard values exactly match benchmarks/ASR_BAKEOFF.md. Raw JSONL and summary artifacts were not present in the repository or /tmp/parrot-asr-results during this audit, so the run could not be independently recalculated."
   },
+  "measurements": [
+    {
+      "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21",
+      "measured_on": "2026-07-21",
+      "hardware": "Apple M4 Pro MacBook Pro",
+      "os_name": "macOS",
+      "os_version": null,
+      "dataset": "LibriSpeech test-clean",
+      "sample": "100 deterministic evenly spaced utterances",
+      "command": "uv run benchmark_asr.py --dataset /tmp/LibriSpeech/test-clean --engines mlx-tiny mlx-turbo parakeet-unified --parrot-helper .models/bin/parrot-asr-helper --limit 100 --output-dir /tmp/parrot-asr-results",
+      "artifacts_preserved": false,
+      "summary_sha256": null,
+      "independently_recalculable": false,
+      "notes": "Documented-run evidence. The raw JSONL and summary.json were not preserved, so the numbers cannot be recomputed from a stored artifact; the operating-system version of that run was not recorded and is left null rather than guessed. Re-run the command above and refresh with performance_lab.py refresh-model-scorecard to replace this record with a recalculable one."
+    }
+  ],
   "criteria": [
     {"metric": "wer_pct", "dimension": "quality", "direction": "min", "weight": 0.25, "required": true},
     {"metric": "exact_pct", "dimension": "quality", "direction": "max", "weight": 0.1, "required": true},
@@ -50,6 +66,16 @@
         "peak_memory_mb": null,
         "energy_j_per_audio_minute": null,
         "startup_ms": null
+      },
+      "metric_provenance": {
+        "wer_pct": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
+        "exact_pct": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
+        "utterance_p90_wer_pct": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
+        "proc_p95_s": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
+        "rtfx": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
+        "peak_memory_mb": {"state": "unmeasured", "measurement_id": null},
+        "energy_j_per_audio_minute": {"state": "unmeasured", "measurement_id": null},
+        "startup_ms": {"state": "unmeasured", "measurement_id": null}
       }
     },
     {
@@ -77,6 +103,16 @@
         "peak_memory_mb": null,
         "energy_j_per_audio_minute": null,
         "startup_ms": null
+      },
+      "metric_provenance": {
+        "wer_pct": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
+        "exact_pct": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
+        "utterance_p90_wer_pct": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
+        "proc_p95_s": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
+        "rtfx": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
+        "peak_memory_mb": {"state": "unmeasured", "measurement_id": null},
+        "energy_j_per_audio_minute": {"state": "unmeasured", "measurement_id": null},
+        "startup_ms": {"state": "unmeasured", "measurement_id": null}
       }
     },
     {
@@ -111,6 +147,16 @@
         "peak_memory_mb": null,
         "energy_j_per_audio_minute": null,
         "startup_ms": null
+      },
+      "metric_provenance": {
+        "wer_pct": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
+        "exact_pct": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
+        "utterance_p90_wer_pct": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
+        "proc_p95_s": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
+        "rtfx": {"state": "measured", "measurement_id": "librispeech-test-clean-100-m4-pro-2026-07-21"},
+        "peak_memory_mb": {"state": "unmeasured", "measurement_id": null},
+        "energy_j_per_audio_minute": {"state": "unmeasured", "measurement_id": null},
+        "startup_ms": {"state": "unmeasured", "measurement_id": null}
       }
     }
   ]

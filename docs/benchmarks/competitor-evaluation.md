@@ -99,6 +99,20 @@ session, so every report says `source: operator-supplied-trace-log`, and
 personal statement, never the tool's inference. `physical_conditions_verified`
 stays false either way.
 
+Collecting a real observation file needs clean machines, the other products,
+and a human observer, so the evaluator used to be unreachable from a bare
+clone. `benchmarks/competitor_run_template.json` closes that gap without
+inventing anything — every one of its six observations is `unavailable` with
+reason `not_run`, so the pipeline runs end to end while reporting exactly zero
+measurements:
+
+```sh
+uv run competitor_benchmark.py benchmarks/competitor_run_template.json
+```
+
+The template is a schema demonstration, not evidence, and a test asserts it can
+never carry a measured value.
+
 ## Current public synthetic scorecard
 
 The repository also has deterministic internal evidence, which is not a
@@ -113,3 +127,27 @@ simulation, Point-and-Speak, and Drop-to-Target corpora. The report is
 transcript-free and explicitly reports zero physical apps, audio runs, or model
 runs. Passing synthetic cases must not be presented as physical product
 accuracy.
+
+## Publishing a dated report
+
+The same tool publishes a dated public report that keeps the two kinds of
+evidence in separate sections which are never summed:
+
+```sh
+uv run public_scorecard.py publish \
+  --revision <40-character commit> \
+  --published-on 2026-07-27 \
+  --format markdown
+```
+
+With no `--physical-artifact`, the physical section states plainly that every
+number in the report is synthetic — which is the current, accurate state.
+Physical sources may only be added from artifacts a capture harness or
+activation benchmark actually produced, and only alongside a concretely named
+machine. The publisher refuses an artifact the harness did not stamp physical,
+an artifact reporting zero physical work, a re-listen report that counted even
+one synthetic sample, and any physical claim whose hardware, operating-system
+version, or repository revision is a placeholder.
+
+[Reproducible corpora](reproducible-corpora.md) records exactly which of these
+commands a third party can run from a bare clone.

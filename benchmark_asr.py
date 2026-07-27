@@ -106,7 +106,8 @@ def load_model_specs(
     """Load exact benchmark targets from the reviewed model scorecard."""
     payload = json.loads(path.read_text(encoding="utf-8"))
     candidates = payload.get("candidates") if isinstance(payload, dict) else None
-    if (not isinstance(payload, dict) or payload.get("schema_version") != 1
+    if (not isinstance(payload, dict)
+            or payload.get("schema_version") not in (1, 2)
             or not isinstance(candidates, list)):
         raise ValueError("unsupported model scorecard")
     specs: dict[str, ModelSpec] = {}
