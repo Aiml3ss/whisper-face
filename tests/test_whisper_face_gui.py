@@ -411,13 +411,17 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(resolve_locale("en-US"), "en")
         self.assertEqual(resolve_locale("fr-CA"), "en")
         self.assertEqual(
-            localized_string("settings.personalize.snippets.detail",
+            localized_string("settings.personalize.snippets.detail.many",
                              locale="fr", count=2),
             "2 saved phrases")
+        self.assertEqual(
+            localized_string("settings.personalize.snippets.detail.one",
+                             count=1),
+            "1 saved phrase")
         with self.assertRaises(KeyError):
             localized_string("missing.key")
         with self.assertRaises(ValueError):
-            localized_string("settings.personalize.snippets.detail")
+            localized_string("settings.personalize.snippets.detail.many")
         for key in (
             "nav.home",
             "nav.settings",
