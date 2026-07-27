@@ -46,7 +46,7 @@ class FakeRunner:
 
     def __init__(self, *, head="", upstream=None, upstream_ref="@{u}",
                  status="", fetch_rc=0, count=0,
-                 checkout_rc=0, installer_rcs=None,
+                 checkout_rc=0, checkout_rcs=None, installer_rcs=None,
                  branch="", branch_sha=None, resolvable=(), ancestry=None,
                  installer_stdout="", installer_stderr=""):
         # Default ancestry: HEAD is simply behind upstream, which is the shape
@@ -60,6 +60,9 @@ class FakeRunner:
         self.fetch_rc = fetch_rc
         self.count = count
         self.checkout_rc = checkout_rc
+        # Per-call checkout results, popped like installer_rcs; a failing
+        # rollback checkout is a different event than a failing forward one.
+        self.checkout_rcs = list(checkout_rcs or [])
         self.installer_rcs = list(installer_rcs or [])
         # "" models a detached HEAD, which is what `symbolic-ref` reports by
         # refusing. `branch_sha` defaults to HEAD: an update moves HEAD alone,
@@ -126,7 +129,17 @@ class FakeRunner:
             return self._cp(cmd, 0, f"{self.count}\n")
         if git[:2] == ["checkout", "--quiet"]:
             self.checkouts.append(git[2])
-            return self._cp(cmd, self.checkout_rc)
+            rc = self.checkout_rcs.pop(0) if self.checkout_rcs \
+                else self.checkout_rc
+            if rc == 0:
+                # Track HEAD through the checkout, as git would: a branch
+                # name lands on the commit the branch points at, anything
+                # else is taken as a revision. Without this, _restore's
+                # verification would compare against a stale HEAD.
+                target = git[2]
+                self.head = self.branch_sha if target == self.branch \
+                    else target
+            return self._cp(cmd, rc)
         raise AssertionError(f"unexpected command: {cmd}")
 
 
@@ -381,6 +394,49 @@ class ApplyRecoversTheWorkingBuildTests(unittest.TestCase):
         self.assertEqual(outcome["from"], CURRENT)
         self.assertEqual(runner.checkouts, [LATEST, CURRENT])
 
+
+class RollbackIsVerifiedTests(unittest.TestCase):
+    """"Rolled back" must mean the previous build is verifiably present.
+
+    The old path ignored both the restore result and the rollback
+    installer's exit code, then reported rolled_back unconditionally -- so
+    a user whose recovery had actually failed was told their previous
+    version was restored while the app may not have been running at all.
+    """
+
+    def test_a_failed_restore_is_reported_not_dressed_up(self):
+        # Forward checkout succeeds, forward install fails, and every
+        # rollback checkout fails too: HEAD is stuck on the broken revision.
+        runner = FakeRunner(head=CURRENT, checkout_rcs=[0, 1, 1],
+                            installer_rcs=[1, 0])
+        outcome = self_update.apply_update(
+            CHECKOUT, LATEST, runner=runner, install_receipt=NO_RECEIPT)
+        self.assertEqual(outcome["status"], "rollback_failed")
+        self.assertIn("could not restore revision", outcome["error"])
+        self.assertIn(CURRENT[:7], outcome["error"])
+        # The forward failure is still named alongside the recovery failure.
+        self.assertIn("Install.command failed", outcome["error"])
+
+    def test_a_failed_rollback_reinstall_is_reported(self):
+        # Restore succeeds but reinstalling the previous build fails: the
+        # files are right and the services are not, which is not recovery.
+        runner = FakeRunner(head=CURRENT, checkout_rc=0,
+                            installer_rcs=[1, 1],
+                            installer_stderr="pip exploded")
+        outcome = self_update.apply_update(
+            CHECKOUT, LATEST, runner=runner, install_receipt=NO_RECEIPT)
+        self.assertEqual(outcome["status"], "rollback_failed")
+        self.assertIn("recovery also failed", outcome["error"])
+        self.assertIn("pip exploded", outcome["error"])
+
+    def test_a_verified_rollback_still_reports_rolled_back(self):
+        runner = FakeRunner(head=CURRENT, checkout_rc=0,
+                            installer_rcs=[1, 0])
+        outcome = self_update.apply_update(
+            CHECKOUT, LATEST, runner=runner, install_receipt=NO_RECEIPT)
+        self.assertEqual(outcome["status"], "rolled_back")
+        # HEAD demonstrably came back to the previous revision.
+        self.assertEqual(runner.head, CURRENT)
 
 class ApplyUpdateTests(unittest.TestCase):
     def test_happy_path_checks_out_then_installs_in_order(self):
