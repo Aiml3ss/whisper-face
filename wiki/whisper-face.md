@@ -36,7 +36,7 @@ and learning run on-device.
   inspectable local rules and regression cases ([[personalization]]),
   and risky capabilities unlock only through physical-evidence receipts
   ([[activation-receipt]]).
-- **A face, not a dialog** — ten animated companion characters live in
+- **A face, not a dialog** — fourteen animated companion characters live in
   the HUD, the [[menu-bar]] and the [[app-window]]
   ([[whisper-faces]]), all speaking one [[design-language]].
 

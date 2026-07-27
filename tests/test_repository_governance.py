@@ -6,6 +6,7 @@
 import ast
 import hashlib
 import json
+import re
 import subprocess
 import unittest
 from pathlib import Path
@@ -157,28 +158,47 @@ class RepositoryGovernanceTests(unittest.TestCase):
         self.assertIn(
             "Both installers must execute the current checkout", contributing)
 
+    # Every page that states the roster in English. Checking only the ones we
+    # happened to remember is how the wiki ended up three revisions behind the
+    # README while CI stayed green.
+    FACE_ROSTER_PAGES = (
+        "README.md",
+        "docs/capabilities.md",
+        "wiki/whisper-face.md",
+        "wiki/whisper-faces.md",
+        "wiki/marketing-site.md",
+    )
+
     def test_documented_face_roster_matches_the_shipped_one(self):
         """Prose that counts the companions has to count the real ones.
 
-        Both the README and the capability inventory name the roster in
-        English, which quietly goes stale every time a face is added. Deriving
-        the expectation from ``FACE_CHOICES`` means the drift fails here
-        instead of in front of a reader.
+        These pages name the roster in English, which quietly goes stale every
+        time a face is added. Deriving the expectation from ``FACE_CHOICES``
+        means the drift fails here instead of in front of a reader.
         """
         faces = self.face_choices()
-        readme = self.read("README.md")
-        capabilities = self.read("docs/capabilities.md")
-
         self.assertGreater(len(faces), 1, "expected a roster to check")
         counted = self.number_word(len(faces))
 
+        for page in self.FACE_ROSTER_PAGES:
+            found = self.ROSTER_COUNT.findall(self.read(page))
+            with self.subTest(page=page):
+                self.assertTrue(
+                    found, f"{page} no longer states the roster size at all")
+                for word in found:
+                    self.assertEqual(
+                        word.lower(), counted,
+                        f"{page} claims {word} characters, but {counted} ship")
+
+        readme = self.read("README.md")
+        roster = self.read("wiki/whisper-faces.md")
         for face in faces:
             self.assertIn(
                 face.capitalize(), readme,
                 f"README does not name the shipped {face} face")
-
-        self.assertIn(f"{counted} characters", readme)
-        self.assertIn(f"{counted} animated companion characters", capabilities)
+            self.assertIn(
+                face.capitalize(), roster,
+                f"wiki/whisper-faces.md does not name the shipped {face} face")
 
     def face_choices(self) -> tuple[str, ...]:
         """Read ``FACE_CHOICES`` out of ``dictate.py`` without importing it."""
@@ -191,18 +211,30 @@ class RepositoryGovernanceTests(unittest.TestCase):
                 return tuple(ast.literal_eval(node.value))
         self.fail("FACE_CHOICES is no longer a module-level assignment")
 
-    @staticmethod
-    def number_word(value: int) -> str:
-        words = (
-            "zero", "one", "two", "three", "four", "five", "six", "seven",
-            "eight", "nine", "ten", "eleven", "twelve", "thirteen",
-            "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
-            "nineteen", "twenty",
-        )
-        if value >= len(words):
+    NUMBER_WORDS = (
+        "zero", "one", "two", "three", "four", "five", "six", "seven",
+        "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen",
+        "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty",
+    )
+
+    @classmethod
+    def number_word(cls, value: int) -> str:
+        if value >= len(cls.NUMBER_WORDS):
             raise AssertionError(
-                f"extend number_word() past {len(words) - 1} for {value} faces")
-        return words[value]
+                f"extend NUMBER_WORDS past {len(cls.NUMBER_WORDS) - 1} "
+                f"for {value} faces")
+        return cls.NUMBER_WORDS[value]
+
+    # A spelled-out number in front of "characters" is a claim about the
+    # roster however it is dressed up -- "ten characters", "the ten chibi-clay
+    # companion characters". Catch the count wherever it sits so a page cannot
+    # keep a stale one simply by rewording around a fixed phrase. "one" is left
+    # out: it reads as ordinary prose about a single character, not a total.
+    ROSTER_COUNT = re.compile(
+        r"\b(" + "|".join(w for w in NUMBER_WORDS if w != "one") + r")\b"
+        r"(?:\s+[\w-]+){0,3}?\s+characters\b",
+        re.IGNORECASE,
+    )
 
 
 if __name__ == "__main__":
