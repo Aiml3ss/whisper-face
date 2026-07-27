@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <mask id="cut"><rect width="64" height="64" fill="#fff"/><ellipse cx="32" cy="46" rx="14" ry="19"/><circle cx="25" cy="33" r="2.8" fill="#fff"/><circle cx="39" cy="33" r="2.8" fill="#fff"/><path d="M25 40 Q32 38.4 39 40 Q36 48.5 32 50.5 Q28 48.5 25 40 Z" fill="#fff"/></mask>
+  <g fill="#000" mask="url(#cut)"><ellipse cx="32" cy="34" rx="22" ry="27"/></g>
+</svg>

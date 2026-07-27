@@ -1888,7 +1888,8 @@ class WhisperFaceThemeTests(unittest.TestCase):
         self.assertEqual(
             set(FACE_CHIP_COLORS),
             {"parrot", "fox", "owl", "cat", "bear",
-             "dog", "wolf", "pig", "panda", "tiger"},
+             "dog", "wolf", "pig", "panda", "tiger",
+             "frog", "rabbit", "hedgehog", "penguin"},
         )
 
     def test_all_named_jelly_motions_have_bounded_fast_springs(self):

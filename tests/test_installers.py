@@ -1020,7 +1020,8 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("whisper_face_render.py", self.shell)
         self.assertIn("whisper_face_render.py", self.powershell)
         for face in ("parrot", "fox", "bear", "owl", "cat", "dog", "wolf",
-                     "pig", "panda", "tiger"):
+                     "pig", "panda", "tiger", "frog", "rabbit", "hedgehog",
+                     "penguin"):
             # Every menu-bar frame ships, including the blink frame the
             # status bar flashes at rest.
             for frame in ("idle", "talk", "blink"):
@@ -1049,7 +1050,8 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("delayed_cleanup_activation.json", gitignore)
         self.assertIn(".delayed_cleanup_activation.json.*.tmp", gitignore)
         for face in ("parrot", "fox", "owl", "cat", "bear",
-                     "dog", "wolf", "pig", "panda", "tiger"):
+                     "dog", "wolf", "pig", "panda", "tiger",
+                     "frog", "rabbit", "hedgehog", "penguin"):
             # The flat silhouette drives the menu bar with two frames; the
             # colored character adds the mid-syllable half frame the site's
             # flap animation passes through.

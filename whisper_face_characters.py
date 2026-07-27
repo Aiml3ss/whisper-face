@@ -1,6 +1,6 @@
 """Shared Whisper Face character geometry for every colored surface.
 
-The ten faces used to be drawn twice: once as AppKit Bezier calls inside the
+The faces used to be drawn twice: once as AppKit Bezier calls inside the
 recording HUD, and once as flat silhouettes hand-authored under ``icons/faces``.
 Only the HUD ever showed the colored character, so the app window and the
 onboarding hero rendered a menu-bar glyph blown up past the size it was drawn
@@ -119,10 +119,17 @@ class CharacterStyle:
 
     ``ears`` picks the silhouette: ``pointed`` for the feline and vulpine
     faces, ``round`` for the bear family, ``floppy`` for the dog, whose flat
-    silhouette has always had hanging ears.  ``snout`` gives the pig the
-    feature that separates it from a pink bear.  The remaining flags are the
-    species accents that keep ten similar toys from reading as one animal in
-    ten colorways.
+    silhouette has always had hanging ears, ``long`` for the rabbit, and
+    ``none`` for the two faces whose crown carries something else entirely.
+    ``snout`` gives the pig the feature that separates it from a pink bear.
+    The remaining flags are the species accents that keep a dozen similar
+    toys from reading as one animal in a dozen colorways.
+
+    The last four flags each carry one species on their own: ``eye_domes``
+    puts the frog's eyes on top of its head where no mammal's are,
+    ``buck_teeth`` pairs with the rabbit's long ears, ``quills`` fans the
+    hedgehog's spines past the head outline, and ``hood`` swaps the paired
+    cheeks for the penguin's single face bib under a dark cap.
     """
     head: Color
     deep: Color
@@ -140,6 +147,13 @@ class CharacterStyle:
     big_tongue: bool = False
     inner_ears: bool = True
     blush_alpha: float = 0.4
+    eye_domes: bool = False
+    wide_mouth: bool = False
+    buck_teeth: bool = False
+    quills: bool = False
+    snout_point: bool = False
+    hood: bool = False
+    beak: bool = False
 
 
 COMPANIONS: Mapping[str, CharacterStyle] = {
@@ -202,12 +216,47 @@ COMPANIONS: Mapping[str, CharacterStyle] = {
         muzzle=(1.000, 0.945, 0.867),
         stripes=True,
     ),
+    "frog": CharacterStyle(
+        head=FACE_CHIP_COLORS["frog"],
+        deep=(0.427, 0.635, 0.239),
+        muzzle=(0.973, 0.988, 0.859),
+        ears="none",
+        eye_domes=True,
+        wide_mouth=True,
+        blush_alpha=0.55,
+    ),
+    "rabbit": CharacterStyle(
+        head=FACE_CHIP_COLORS["rabbit"],
+        deep=(0.867, 0.494, 0.604),
+        muzzle=(1.000, 0.949, 0.957),
+        ears="long",
+        buck_teeth=True,
+        blush_alpha=0.55,
+    ),
+    "hedgehog": CharacterStyle(
+        head=FACE_CHIP_COLORS["hedgehog"],
+        deep=(0.404, 0.302, 0.216),
+        muzzle=(1.000, 0.953, 0.894),
+        ears="none",
+        quills=True,
+        snout_point=True,
+        blush_alpha=0.42,
+    ),
+    "penguin": CharacterStyle(
+        head=FACE_CHIP_COLORS["penguin"],
+        deep=(0.216, 0.318, 0.443),
+        muzzle=(1.000, 0.996, 0.965),
+        ears="none",
+        hood=True,
+        beak=True,
+        blush_alpha=0.45,
+    ),
 }
 
-# Parrot and owl keep bespoke geometry; the other eight share one template.
+# Parrot and owl keep bespoke geometry; the other twelve share one template.
 FACE_ORDER: tuple[str, ...] = (
     "parrot", "fox", "bear", "owl", "cat", "dog", "wolf", "pig", "panda",
-    "tiger",
+    "tiger", "frog", "rabbit", "hedgehog", "penguin",
 )
 
 
@@ -310,23 +359,109 @@ def _smile_and_jaw(cx: float, top: float, mouth: float, *,
     return ops
 
 
-def _blush_ops(alpha: float) -> list[Op]:
-    """Big soft chibi rouge, tucked right under the eyes."""
-    return [Ellipse(42, 146, 42, 24, BLUSH, alpha),
-            Ellipse(172, 146, 42, 24, BLUSH, alpha)]
+def _wide_grin(cx: float, top: float, mouth: float) -> list[Op]:
+    """The frog's ear-to-ear mouth, on the same three-frame contract.
+
+    A frog's grin is nearly as wide as its head, which no template mouth can
+    stretch to without the closed smile and the open jaw disagreeing about
+    where the corners are.  Closed it is a shallow round-capped line; open it
+    is a broad, shallow cavity rather than the deep chibi jaw.
+    """
+    ops: list[Op] = []
+    if mouth < 0.18:
+        fade = 1.0 - mouth / 0.18
+        ops.append(Stroke(((cx - 56, top - 8), (cx - 30, top + 8),
+                           (cx, top + 12), (cx + 30, top + 8),
+                           (cx + 56, top - 8)), MOUTH, 6.5, fade))
+    if mouth <= 0.04:
+        return ops
+
+    half = (108.0 - 20.0 * mouth) / 2.0
+    drop = 6.0 + 30.0 * mouth
+    lip = top - 6.0
+    ops.append(Curve(
+        (cx - half, lip),
+        (((cx - half + 6, lip + drop * 0.9),
+          (cx - 20, lip + drop), (cx, lip + drop)),
+         ((cx + 20, lip + drop),
+          (cx + half - 6, lip + drop * 0.9), (cx + half, lip)),
+         ((cx + half * 0.5, lip - 6.0),
+          (cx - half * 0.5, lip - 6.0), (cx - half, lip))),
+        MOUTH,
+    ))
+    if mouth > 0.24:
+        rise = _clamp01((mouth - 0.24) / 0.6)
+        tongue_h = 8.0 + 9.0 * rise
+        tongue_w = 40.0 * (0.8 + 0.2 * rise)
+        ops.append(Ellipse(cx - tongue_w / 2.0,
+                           lip + drop - tongue_h * 0.72,
+                           tongue_w, tongue_h, TONGUE))
+    return ops
 
 
-def _nose_ops(color: Color) -> list[Op]:
+def _beak_ops(top: float, mouth: float) -> list[Op]:
+    """Bottom-up beak stack: dark gape, fixed upper, swinging mandible.
+
+    Shared by the owl and the penguin so the two beaked faces cannot drift
+    apart in how they open.
+    """
+    drop = mouth * 11.0
+    return [
+        Polygon(((115, top + 6), (141, top + 6),
+                 (128, top + 20 + mouth * 12)), MOUTH),
+        Polygon(((110, top), (146, top), (128, top + 16)), BEAK_UP),
+        Polygon(((115, top + 17 + drop), (141, top + 17 + drop),
+                 (128, top + 29 + drop)), BEAK_LO),
+    ]
+
+
+def _quill_ops(color: Color) -> list[Op]:
+    """The hedgehog's spines, fanned around the crown behind the head.
+
+    Each spine roots just inside the head ellipse and points straight out of
+    it, so the head swallows the bases and only the tips break the outline.
+    """
+    ops: list[Op] = []
+    count = 9
+    for index in range(count):
+        angle = math.radians(200.0 + index * (140.0 / (count - 1)))
+        edge_x = 128.0 + 98.0 * math.cos(angle)
+        edge_y = 144.0 + 92.0 * math.sin(angle)
+        out_x, out_y = edge_x - 128.0, edge_y - 144.0
+        span = math.hypot(out_x, out_y)
+        out_x, out_y = out_x / span, out_y / span
+        root_x, root_y = edge_x - out_x * 14.0, edge_y - out_y * 14.0
+        ops.append(Polygon((
+            (root_x - out_y * 16.0, root_y + out_x * 16.0),
+            (edge_x + out_x * 34.0, edge_y + out_y * 34.0),
+            (root_x + out_y * 16.0, root_y - out_x * 16.0),
+        ), color))
+    return ops
+
+
+def _blush_ops(alpha: float, *, y: float = 146.0,
+               inset: float = 0.0) -> list[Op]:
+    """Big soft chibi rouge, tucked right under the eyes.
+
+    ``y`` follows the eyes on faces that moved them, and ``inset`` pulls the
+    pads toward the center on faces whose cheeks are not the head color.
+    """
+    return [Ellipse(42 + inset, y, 42, 24, BLUSH, alpha),
+            Ellipse(172 - inset, y, 42, 24, BLUSH, alpha)]
+
+
+def _nose_ops(color: Color, y: float = 142.0) -> list[Op]:
     """Small rounded-triangle nose with a tiny highlight."""
+    drop = y - 142.0
     return [
         Curve(
-            (117, 142),
-            (((121, 138), (135, 138), (139, 142)),
-             ((137, 150), (131, 154), (128, 154)),
-             ((125, 154), (119, 150), (117, 142))),
+            (117, 142 + drop),
+            (((121, 138 + drop), (135, 138 + drop), (139, 142 + drop)),
+             ((137, 150 + drop), (131, 154 + drop), (128, 154 + drop)),
+             ((125, 154 + drop), (119, 150 + drop), (117, 142 + drop))),
             color,
         ),
-        Ellipse(121, 142, 6, 4, CATCH, 0.4),
+        Ellipse(121, 142 + drop, 6, 4, CATCH, 0.4),
     ]
 
 
@@ -361,6 +496,40 @@ def _companion_ops(face: str, mouth: float, level: float, blink: float,
         if style.inner_ears:
             ops += [Ellipse(58, 52, 28, 28, style.muzzle),
                     Ellipse(170, 52, 28, 28, style.muzzle)]
+    elif style.ears == "long":
+        # Leaning teardrops with pink liners.  Two upright capsules read as
+        # antennae; the outward lean and the taper at the root are what make
+        # the pair read as a rabbit.  The head swallows the roots.
+        ops.append(Curve(
+            (96, 104),
+            (((74, 96), (62, 46), (76, 22)),
+             ((86, 6), (108, 14), (110, 44)),
+             ((112, 70), (108, 100), (96, 104))),
+            style.deep,
+        ))
+        ops.append(Curve(
+            (160, 104),
+            (((182, 96), (194, 46), (180, 22)),
+             ((170, 6), (148, 14), (146, 44)),
+             ((144, 70), (148, 100), (160, 104))),
+            style.deep,
+        ))
+        ops.append(Curve(
+            (96, 98),
+            (((84, 92), (76, 52), (86, 34)),
+             ((94, 22), (102, 30), (103, 52)),
+             ((104, 74), (103, 94), (96, 98))),
+            style.muzzle,
+        ))
+        ops.append(Curve(
+            (160, 98),
+            (((172, 92), (180, 52), (170, 34)),
+             ((162, 22), (154, 30), (153, 52)),
+             ((152, 74), (153, 94), (160, 98))),
+            style.muzzle,
+        ))
+    elif style.ears == "none":
+        pass
     elif style.ears == "floppy":
         # Teardrop ears that hug the head instead of hanging past the jaw;
         # closed curves so they still droop rather than stand up stiff.
@@ -393,6 +562,15 @@ def _companion_ops(face: str, mouth: float, level: float, blink: float,
             ops += [Polygon(((61.5, 51.5), (66, 36), (79.5, 47.5)), MOUTH),
                     Polygon(((176.5, 47.5), (190, 36), (194.5, 51.5)), MOUTH)]
 
+    if style.eye_domes:
+        # Head-colored bulges on the crown.  A frog's eyes are not on its
+        # face, they are on top of its skull, and drawing them in the head
+        # color keeps the silhouette one blob with two bumps.
+        ops += [Ellipse(44, 32, 70, 70, style.head),
+                Ellipse(142, 32, 70, 70, style.head)]
+    if style.quills:
+        ops += _quill_ops(style.deep)
+
     ops.append(Ellipse(30, 52, 196, 184, style.head))
 
     if style.cheek_fluff:
@@ -405,10 +583,31 @@ def _companion_ops(face: str, mouth: float, level: float, blink: float,
             Polygon(((184, 172), (216, 184), (182, 192)), style.muzzle),
         ]
 
-    # Cheeks keep the soft, toy-like language and leave a clean lip-sync
-    # cavity between them.
-    ops += [Ellipse(64, 140, 72, 58, style.muzzle),
-            Ellipse(120, 140, 72, 58, style.muzzle)]
+    if style.hood:
+        # A dark cap over the crown and one cream bib instead of the paired
+        # cheeks.  That pairing is what reads as a seabird rather than as a
+        # round-eared mammal, and it survives being 40 points wide.
+        ops += [Ellipse(44, 62, 168, 142, style.deep),
+                Ellipse(64, 104, 128, 122, style.muzzle)]
+    elif style.wide_mouth:
+        # A frog has no cheeks worth drawing: one pale throat spanning the
+        # chin, with the grin riding its top edge the way a real one does.
+        ops.append(Ellipse(66, 184, 124, 48, style.muzzle))
+    elif style.snout_point:
+        # One tapered muzzle in place of the paired cheeks, because a face
+        # that does not actually come to a point reads as a spiky bear.
+        ops.append(Curve(
+            (91, 146),
+            (((89, 178), (102, 200), (128, 200)),
+             ((154, 200), (167, 178), (165, 146)),
+             ((165, 128), (91, 128), (91, 146))),
+            style.muzzle,
+        ))
+    else:
+        # Cheeks keep the soft, toy-like language and leave a clean lip-sync
+        # cavity between them.
+        ops += [Ellipse(64, 140, 72, 58, style.muzzle),
+                Ellipse(120, 140, 72, 58, style.muzzle)]
 
     if style.patches:
         # Tilted teardrop patches, not straight ovals: the tilt is what makes
@@ -429,10 +628,38 @@ def _companion_ops(face: str, mouth: float, level: float, blink: float,
         ))
 
     ops += _clay_ops(style.deep)
-    ops += _blush_ops(style.blush_alpha)
-    ops += _eye_ops(76, 162, 108, 18, 22, blink,
-                    lid=style.muzzle if style.patches else DARK_EYE,
-                    gaze=gaze)
+
+    if style.quills:
+        # A dark spiny mantle over the crown, laid on after the clay sheen so
+        # the sheen does not leave a bald highlight in the middle of it.  The
+        # fan behind the head breaks the outline; this is what it grows from.
+        ops.append(Curve(
+            (48, 100),
+            (((48, 66), (84, 52), (128, 52)),
+             ((172, 52), (208, 66), (208, 100)),
+             ((172, 112), (84, 112), (48, 100))),
+            style.deep,
+        ))
+
+    if style.eye_domes:
+        # Pink over green goes gray, so the rouge sits on small cream pads,
+        # the same trick the parrot and the owl use.  The eyeballs come back
+        # on top of the head so the domes keep a rim of head color.
+        ops += [Ellipse(46, 125, 38, 21, CATCH, 0.5),
+                Ellipse(172, 125, 38, 21, CATCH, 0.5)]
+        ops += _blush_ops(style.blush_alpha, y=126.0, inset=4.0)
+        ops += [Ellipse(55, 43, 48, 48, CATCH),
+                Ellipse(153, 43, 48, 48, CATCH)]
+        ops += _eye_ops(68, 166, 54, 22, 26, blink, gaze=gaze)
+    elif style.hood:
+        # The bib sits low, so the eyes and the rouge follow it down and in.
+        ops += _blush_ops(style.blush_alpha, y=152.0, inset=30.0)
+        ops += _eye_ops(78, 160, 124, 18, 22, blink, gaze=gaze)
+    else:
+        ops += _blush_ops(style.blush_alpha)
+        ops += _eye_ops(76, 162, 108, 18, 22, blink,
+                        lid=style.muzzle if style.patches else DARK_EYE,
+                        gaze=gaze)
 
     if style.brow_patch:
         ops.append(Ellipse(146, 88, 30, 18, style.deep, 0.9))
@@ -456,13 +683,36 @@ def _companion_ops(face: str, mouth: float, level: float, blink: float,
         ops.append(Ellipse(105, 145, 46, 30, style.muzzle))
         ops += [Ellipse(x, 151, 8, 13, style.deep) for x in (113, 135)]
         ops += _smile_and_jaw(128, 192, mouth, max_drop=18.0)
+    elif style.beak:
+        ops += _beak_ops(158, mouth)
+    elif style.wide_mouth:
+        # Two nostril pricks where a mammal wears a nose, then the grin.
+        ops += [Ellipse(115, 138, 9, 7, style.deep, 0.9),
+                Ellipse(132, 138, 9, 7, style.deep, 0.9)]
+        ops += _wide_grin(128, 180, mouth)
+    elif style.snout_point:
+        # A round nose right on the tip of the snout, not the small triangle
+        # a flat-faced companion wears halfway up its muzzle.
+        ops += [Ellipse(114, 170, 28, 21, style.deep),
+                Ellipse(120, 174, 8, 5, CATCH, 0.4)]
+        ops += _smile_and_jaw(128, 195, mouth, max_drop=18.0)
     else:
-        ops += _nose_ops(style.deep)
+        # A face wearing incisors needs its nose out of their way.
+        ops += _nose_ops(style.deep,
+                         y=136.0 if style.buck_teeth else 142.0)
         ops += _smile_and_jaw(
             128, 166, mouth,
             tongue_scale=1.4 if style.big_tongue else 1.0,
             fangs=style.fangs,
         )
+
+    if style.buck_teeth:
+        # Two incisors on their own dark pad: cream teeth on a cream cheek
+        # would disappear the moment the mouth closed.  They stay put as the
+        # jaw opens, so the pair hangs into the cavity the way real ones do.
+        ops += [RoundedRect(110, 150, 36, 25, 8, MOUTH),
+                RoundedRect(111.5, 151.5, 16, 22, 5, CATCH),
+                RoundedRect(128.5, 151.5, 16, 22, 5, CATCH)]
 
     if style.whiskers:
         for y, dy in ((152, -5), (160, 0), (168, 5)):
@@ -587,12 +837,7 @@ def _owl_ops(mouth: float, level: float, blink: float,
                                    132 + gy * 0.8 + outer_h * 0.12,
                                    3, 3.4 * squash, CATCH, 0.85))
 
-    ops.append(Polygon(((115, 158), (141, 158), (128, 172 + mouth * 12)),
-                       MOUTH))
-    ops.append(Polygon(((110, 152), (146, 152), (128, 168)), BEAK_UP))
-    drop = mouth * 11.0
-    ops.append(Polygon(((115, 169 + drop), (141, 169 + drop),
-                        (128, 181 + drop)), BEAK_LO))
+    ops += _beak_ops(152, mouth)
     # Two rows of chest chevrons read as feathers where the parrot wears its
     # single scallop, so the two birds stay distinct below the beak.
     for row_y, spread in ((202.0, 14.0), (216.0, 10.0)):
