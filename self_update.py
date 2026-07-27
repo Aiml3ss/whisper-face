@@ -36,6 +36,14 @@ from typing import Callable
 DEFAULT_REMOTE = "origin"
 DEFAULT_INSTALLER = "Install.command"
 
+# The installer's own receipt. Its ``source_revision`` is the revision that was
+# last actually provisioned -- which is the app the user is running, and is not
+# the same thing as the checkout's HEAD once anything moves the checkout without
+# going through the installer.
+DEFAULT_INSTALL_RECEIPT = (
+    Path.home() / "Library" / "Application Support" / "Whisper Face" /
+    "launcher-install.json")
+
 # One network op (fetch) plus fast local plumbing; keep a menu-driven,
 # background-thread check bounded so it can never hang the app forever.
 _FETCH_TIMEOUT = 60.0
@@ -86,6 +94,21 @@ def _rev_parse(runner: Runner, checkout: Path, ref: str,
     return None
 
 
+def _installed_revision(receipt) -> str:
+    """Read ``source_revision`` from the installer's receipt, or ``""``.
+
+    Absent, unreadable, or malformed all mean the same thing here -- no usable
+    record -- and the caller falls back to HEAD, which is exactly how this
+    module behaved before the receipt existed.
+    """
+    try:
+        payload = json.loads(Path(receipt).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    revision = payload.get("source_revision") if isinstance(payload, dict) else None
+    return revision if isinstance(revision, str) and revision.strip() else ""
+
+
 def _current_branch(runner: Runner, checkout: Path) -> str:
     """Return the checked-out branch name, or ``""`` when HEAD is detached."""
     result = _git(runner, checkout, "symbolic-ref", "--short", "--quiet",
@@ -114,15 +137,26 @@ def _restore(runner: Runner, checkout: Path, previous: str,
 
 
 def check_for_update(checkout, remote: str = DEFAULT_REMOTE, *,
-                     runner: Runner) -> dict:
-    """Report whether the tracked upstream is ahead of this checkout.
+                     runner: Runner, install_receipt=None) -> dict:
+    """Report whether the tracked upstream is ahead of the *installed* revision.
 
     Returns ``{"available", "current", "latest", "behind", "error"}``. Fails
     closed: any git/network failure, a non-repo, or a dirty working tree returns
     ``available=False`` with a human-readable ``error`` and never raises. The
     only network access is the single ``git fetch``.
+
+    ``current`` is the revision the installer last provisioned, not the
+    checkout's HEAD. The two are identical for anyone whose checkout only ever
+    moves through this module, but they diverge the moment something else moves
+    it -- a developer pulling, a script, a rolled-back update. HEAD then
+    describes files on disk while the user is still running the older build, and
+    comparing HEAD to upstream would answer "up to date" to someone who is
+    demonstrably not. Comparing the installed revision answers the question the
+    user actually asked. Applying the update re-runs the installer, which
+    refreshes the receipt, so a stale receipt corrects itself on first use.
     """
     checkout = Path(checkout)
+    receipt = DEFAULT_INSTALL_RECEIPT if install_receipt is None else install_receipt
     result = {"available": False, "current": "", "latest": "",
               "behind": 0, "error": None}
     try:
@@ -130,6 +164,15 @@ def check_for_update(checkout, remote: str = DEFAULT_REMOTE, *,
         if not current:
             result["error"] = "not a git checkout"
             return result
+
+        # Prefer what was installed over what is checked out. Resolve it through
+        # git so an unknown or garbage revision falls back to HEAD rather than
+        # poisoning the comparison.
+        installed = _installed_revision(receipt)
+        if installed and installed != current:
+            resolved = _rev_parse(runner, checkout, f"{installed}^{{commit}}")
+            if resolved:
+                current = resolved
         result["current"] = current
 
         # Refuse when the working tree carries uncommitted changes: applying an
@@ -168,7 +211,7 @@ def check_for_update(checkout, remote: str = DEFAULT_REMOTE, *,
             return result  # up to date: available stays False, behind 0
 
         counted = _git(runner, checkout, "rev-list", "--count",
-                       f"HEAD..{latest}")
+                       f"{current}..{latest}")
         if counted.returncode != 0:
             result["error"] = "could not compare with upstream"
             return result

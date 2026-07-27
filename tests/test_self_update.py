@@ -11,8 +11,10 @@ sentinel: the fake matches on ``git -C <checkout> ...`` argv and never reads
 ``cwd``.
 """
 
+import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -25,6 +27,13 @@ import self_update  # noqa: E402
 CHECKOUT = Path("/whisper-face/checkout")
 CURRENT = "a" * 40
 LATEST = "b" * 40
+INSTALLED = "c" * 40
+
+# Every check here names a receipt explicitly. Left to its default,
+# check_for_update would read the real one out of the running user's home
+# directory, which is exactly the kind of ambient dependency this suite exists
+# to avoid.
+NO_RECEIPT = Path("/whisper-face/nonexistent/launcher-install.json")
 
 
 class FakeRunner:
@@ -38,7 +47,7 @@ class FakeRunner:
     def __init__(self, *, head="", upstream=None, upstream_ref="@{u}",
                  status="", fetch_rc=0, count=0,
                  checkout_rc=0, installer_rcs=None,
-                 branch="", branch_sha=None,
+                 branch="", branch_sha=None, resolvable=(),
                  installer_stdout="", installer_stderr=""):
         self.head = head
         self.upstream = upstream
@@ -53,6 +62,10 @@ class FakeRunner:
         # so the branch it started on still points at the pre-update commit.
         self.branch = branch
         self.branch_sha = head if branch_sha is None else branch_sha
+        # Revisions this repo knows about, for `<sha>^{commit}` lookups. A sha
+        # left out of this set models a receipt naming a commit the checkout has
+        # never fetched.
+        self.resolvable = set(resolvable)
         self.installer_stdout = installer_stdout
         self.installer_stderr = installer_stderr
         self.calls = []
@@ -84,6 +97,11 @@ class FakeRunner:
                 return self._cp(cmd, 0, self.upstream + "\n")
             if self.branch and ref == self.branch:
                 return self._cp(cmd, 0, self.branch_sha + "\n")
+            if ref.endswith("^{commit}"):
+                sha = ref[: -len("^{commit}")]
+                if sha in self.resolvable:
+                    return self._cp(cmd, 0, sha + "\n")
+                return self._cp(cmd, 1)  # unknown object
             return self._cp(cmd, 1)  # upstream ref does not resolve
         if git == ["symbolic-ref", "--short", "--quiet", "HEAD"]:
             return self._cp(cmd, 0, self.branch + "\n") if self.branch \
@@ -103,7 +121,8 @@ class FakeRunner:
 class CheckForUpdateTests(unittest.TestCase):
     def test_up_to_date_reports_not_available(self):
         runner = FakeRunner(head=CURRENT, upstream=CURRENT)
-        report = self_update.check_for_update(CHECKOUT, runner=runner)
+        report = self_update.check_for_update(
+            CHECKOUT, runner=runner, install_receipt=NO_RECEIPT)
         self.assertFalse(report["available"])
         self.assertEqual(report["current"], CURRENT)
         self.assertEqual(report["latest"], CURRENT)
@@ -115,7 +134,8 @@ class CheckForUpdateTests(unittest.TestCase):
 
     def test_behind_reports_available_with_shas_and_count(self):
         runner = FakeRunner(head=CURRENT, upstream=LATEST, count=3)
-        report = self_update.check_for_update(CHECKOUT, runner=runner)
+        report = self_update.check_for_update(
+            CHECKOUT, runner=runner, install_receipt=NO_RECEIPT)
         self.assertTrue(report["available"])
         self.assertEqual(report["current"], CURRENT)
         self.assertEqual(report["latest"], LATEST)
@@ -125,11 +145,12 @@ class CheckForUpdateTests(unittest.TestCase):
         self.assertEqual(
             sum(1 for c in runner.calls if c[3:5] == ("fetch", "--quiet")), 1)
         self.assertIn(("git", "-C", str(CHECKOUT), "rev-list", "--count",
-                       f"HEAD..{LATEST}"), runner.calls)
+                       f"{CURRENT}..{LATEST}"), runner.calls)
 
     def test_fetch_failure_fails_closed(self):
         runner = FakeRunner(head=CURRENT, upstream=LATEST, fetch_rc=1)
-        report = self_update.check_for_update(CHECKOUT, runner=runner)
+        report = self_update.check_for_update(
+            CHECKOUT, runner=runner, install_receipt=NO_RECEIPT)
         self.assertFalse(report["available"])
         self.assertEqual(report["current"], CURRENT)
         self.assertEqual(report["latest"], "")
@@ -141,7 +162,8 @@ class CheckForUpdateTests(unittest.TestCase):
 
     def test_dirty_tree_refuses_without_touching_network(self):
         runner = FakeRunner(head=CURRENT, upstream=LATEST, status=" M dictate.py\n")
-        report = self_update.check_for_update(CHECKOUT, runner=runner)
+        report = self_update.check_for_update(
+            CHECKOUT, runner=runner, install_receipt=NO_RECEIPT)
         self.assertFalse(report["available"])
         self.assertEqual(report["current"], CURRENT)
         self.assertEqual(report["error"], "local changes present")
@@ -150,16 +172,106 @@ class CheckForUpdateTests(unittest.TestCase):
 
     def test_missing_repo_returns_clean_error(self):
         runner = FakeRunner(head="")  # rev-parse HEAD fails -> not a repo
-        report = self_update.check_for_update(CHECKOUT, runner=runner)
+        report = self_update.check_for_update(
+            CHECKOUT, runner=runner, install_receipt=NO_RECEIPT)
         self.assertFalse(report["available"])
         self.assertEqual(report["error"], "not a git checkout")
 
     def test_runner_exception_never_raises(self):
         def boom(*a, **k):
             raise FileNotFoundError("git")
-        report = self_update.check_for_update(CHECKOUT, runner=boom)
+        report = self_update.check_for_update(
+            CHECKOUT, runner=boom, install_receipt=NO_RECEIPT)
         self.assertFalse(report["available"])
         self.assertEqual(report["error"], "git is not installed")
+
+
+class InstalledRevisionTests(unittest.TestCase):
+    """The check must answer about the app that is running, not the files.
+
+    The app runs from a git checkout, so anything that moves that checkout --
+    a developer pulling, a script, a rolled-back update -- leaves HEAD ahead of
+    the build the user actually launched. Comparing HEAD against upstream then
+    reports "up to date" to someone running a demonstrably older app, and the
+    only way out is a manual reinstall they have no reason to suspect.
+    """
+
+    def receipt(self, payload) -> Path:
+        directory = Path(tempfile.mkdtemp())
+        path = directory / "launcher-install.json"
+        path.write_text(
+            payload if isinstance(payload, str) else json.dumps(payload),
+            encoding="utf-8")
+        self.addCleanup(directory.rmdir)
+        self.addCleanup(path.unlink)
+        return path
+
+    def test_a_checkout_moved_behind_the_apps_back_still_offers_it(self):
+        # HEAD already sits at upstream -- someone pulled -- but the installer
+        # last provisioned INSTALLED, so that is the app the user is running.
+        runner = FakeRunner(head=LATEST, upstream=LATEST, count=6,
+                            resolvable={INSTALLED})
+        report = self_update.check_for_update(
+            CHECKOUT, runner=runner,
+            install_receipt=self.receipt({"source_revision": INSTALLED}))
+
+        self.assertTrue(report["available"])
+        self.assertEqual(report["current"], INSTALLED)
+        self.assertEqual(report["latest"], LATEST)
+        self.assertEqual(report["behind"], 6)
+        self.assertIsNone(report["error"])
+        # Counted from what is installed, never from HEAD.
+        self.assertIn(("git", "-C", str(CHECKOUT), "rev-list", "--count",
+                       f"{INSTALLED}..{LATEST}"), runner.calls)
+
+    def test_installed_revision_at_upstream_is_up_to_date(self):
+        runner = FakeRunner(head=LATEST, upstream=LATEST, resolvable={LATEST})
+        report = self_update.check_for_update(
+            CHECKOUT, runner=runner,
+            install_receipt=self.receipt({"source_revision": LATEST}))
+        self.assertFalse(report["available"])
+        self.assertEqual(report["current"], LATEST)
+        self.assertEqual(report["behind"], 0)
+
+    def test_absent_receipt_falls_back_to_head(self):
+        runner = FakeRunner(head=CURRENT, upstream=LATEST, count=3)
+        report = self_update.check_for_update(
+            CHECKOUT, runner=runner, install_receipt=NO_RECEIPT)
+        self.assertTrue(report["available"])
+        self.assertEqual(report["current"], CURRENT)
+
+    def test_unreadable_receipt_falls_back_to_head(self):
+        for payload in ("not json at all", "[]", '{"source_revision": 12}',
+                        '{"source_revision": ""}', "{}"):
+            with self.subTest(payload=payload):
+                runner = FakeRunner(head=CURRENT, upstream=LATEST, count=3)
+                report = self_update.check_for_update(
+                    CHECKOUT, runner=runner,
+                    install_receipt=self.receipt(payload))
+                self.assertEqual(report["current"], CURRENT)
+                self.assertTrue(report["available"])
+
+    def test_receipt_naming_an_unknown_commit_falls_back_to_head(self):
+        # A revision this checkout has never fetched must not poison the
+        # comparison; git refuses to resolve it and HEAD is used instead.
+        runner = FakeRunner(head=CURRENT, upstream=LATEST, count=3,
+                            resolvable=set())
+        report = self_update.check_for_update(
+            CHECKOUT, runner=runner,
+            install_receipt=self.receipt({"source_revision": INSTALLED}))
+        self.assertEqual(report["current"], CURRENT)
+        self.assertIn(("git", "-C", str(CHECKOUT), "rev-list", "--count",
+                       f"{CURRENT}..{LATEST}"), runner.calls)
+
+    def test_a_dirty_tree_still_refuses_before_the_network(self):
+        runner = FakeRunner(head=LATEST, upstream=LATEST,
+                            status=" M dictate.py\n", resolvable={INSTALLED})
+        report = self_update.check_for_update(
+            CHECKOUT, runner=runner,
+            install_receipt=self.receipt({"source_revision": INSTALLED}))
+        self.assertFalse(report["available"])
+        self.assertEqual(report["error"], "local changes present")
+        self.assertFalse(any("fetch" in c for c in runner.calls))
 
 
 class ApplyUpdateTests(unittest.TestCase):
