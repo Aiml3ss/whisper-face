@@ -6226,8 +6226,17 @@ if APPKIT_AVAILABLE:
         def show(self) -> None:
             self.view_model.refresh()
             self.render()
-            self.window.makeKeyAndOrderFront_(None)
+            # Activate BEFORE ordering front. This process runs as an
+            # accessory (no Dock icon), so a window ordered front while the
+            # app is still inactive joins a background window list and stays
+            # behind whatever the user was looking at; activating afterwards
+            # does not re-order it. The symptom is having to click "Open
+            # Whisper Face" twice, because the second click finds the app
+            # already active. orderFrontRegardless then covers the case where
+            # macOS declines the activation.
             NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            self.window.makeKeyAndOrderFront_(None)
+            self.window.orderFrontRegardless()
             if self._onboarding_presentation is not None:
                 self._animate_onboarding_face(
                     self._onboarding_presentation)
