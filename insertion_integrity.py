@@ -105,10 +105,33 @@ class InsertionLease:
         )
 
 
+# How an observed destination differed from the expected one. These are
+# categories, never content: a conflict has to be diagnosable without anyone
+# reading the user's text. "unclassified" covers a caller that did not supply
+# a shape, so an older caller stays valid.
+READBACK_CONFLICT_SHAPES = frozenset({
+    "unclassified",
+    "observed-empty",          # the field read back as nothing at all
+    "trailing-whitespace",     # equal once edge whitespace is ignored
+    "internal-whitespace",     # equal once runs of whitespace collapse
+    "unicode-form",            # equal under NFC normalization
+    "expected-is-substring",   # the app kept text around what we inserted
+    "observed-is-prefix",      # the field was still filling in: a timing loss
+    "divergent",               # genuinely different content
+})
+
+
 @dataclass(frozen=True)
 class ReadbackResult:
+    """A terminal readback outcome, plus a content-free shape for conflicts.
+
+    ``detail`` names *how* the observed field differed, drawn from
+    ``READBACK_CONFLICT_SHAPES``. It never carries destination text, so a
+    conflict can be diagnosed without a transcript. Empty for non-conflicts.
+    """
     state: ReceiptState
     reason: ReceiptReason
+    detail: str = ""
 
     @classmethod
     def verified(cls) -> "ReadbackResult":
@@ -120,8 +143,11 @@ class ReadbackResult:
                    ReceiptReason.READBACK_UNAVAILABLE)
 
     @classmethod
-    def conflict(cls) -> "ReadbackResult":
-        return cls(ReceiptState.CONFLICT, ReceiptReason.READBACK_CONFLICT)
+    def conflict(cls, detail: str = "unclassified") -> "ReadbackResult":
+        if detail not in READBACK_CONFLICT_SHAPES:
+            raise ValueError(f"unknown readback conflict shape: {detail}")
+        return cls(ReceiptState.CONFLICT, ReceiptReason.READBACK_CONFLICT,
+                   detail)
 
 
 @dataclass(frozen=True)

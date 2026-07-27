@@ -193,6 +193,7 @@ import math
 import os
 import queue
 import re
+import unicodedata
 import select
 import socket
 import stat
@@ -1051,6 +1052,7 @@ PIPELINE_STATE = {
     "last_alternatives": [],
     "last_cleanup_edits": [],
     "last_mode": "capture",
+    "last_readback_shape": "",
     "last_compiler_decisions": 0,
     "last_compiler_details": [],
     "last_protected_anchors": 0,
@@ -7763,6 +7765,31 @@ def readback_timeout_for_frontmost() -> float:
             else READBACK_TIMEOUT)
 
 
+def classify_readback_conflict(observed: str | None, expected: str) -> str:
+    """Name how a destination differed, using no destination text.
+
+    A bare "readback_conflict" cannot be acted on: an app that appends a
+    newline, one whose Accessibility value lags the paste, and one that put
+    the text somewhere else entirely all look identical. These categories
+    separate them while keeping every receipt content-free.
+    """
+    if not observed:
+        return "observed-empty"
+    if observed.strip() == expected.strip():
+        return "trailing-whitespace"
+    if (re.sub(r"\s+", " ", observed).strip()
+            == re.sub(r"\s+", " ", expected).strip()):
+        return "internal-whitespace"
+    if (unicodedata.normalize("NFC", observed)
+            == unicodedata.normalize("NFC", expected)):
+        return "unicode-form"
+    if expected and expected in observed:
+        return "expected-is-substring"
+    if expected.startswith(observed):
+        return "observed-is-prefix"
+    return "divergent"
+
+
 def insertion_readback(snapshot: FocusSnapshot, inserted: str,
                        timeout: float = 0.02, reader=None,
                        clock=None, sleeper=None) -> ReadbackResult:
@@ -7779,15 +7806,20 @@ def insertion_readback(snapshot: FocusSnapshot, inserted: str,
     sleeper = sleeper or time.sleep
     deadline = clock() + max(0.0, timeout)
     observed_any = False
+    last_observed = None
     while True:
         current = reader(snapshot.element)
         if current == expected:
             return ReadbackResult.verified()
-        observed_any = observed_any or current is not None
+        if current is not None:
+            observed_any = True
+            last_observed = current
         remaining = deadline - clock()
         if remaining <= 0:
-            return (ReadbackResult.conflict() if observed_any
-                    else ReadbackResult.unverifiable())
+            if not observed_any:
+                return ReadbackResult.unverifiable()
+            return ReadbackResult.conflict(
+                classify_readback_conflict(last_observed, expected))
         sleeper(min(0.02, remaining))
 
 
@@ -7806,6 +7838,20 @@ def commit_insertion(rec, text: str, bundle: str,
         rec.insertion_receipt = INSERTION_COORDINATOR.receipt(
             lease.utterance_id)
         return rec.insertion_receipt
+    def readback():
+        """Read back, and file the conflict shape so a repeat is diagnosable.
+
+        The shape is a category from READBACK_CONFLICT_SHAPES, never text, so
+        one app failing every paste is finally identifiable from the private
+        record alone.
+        """
+        if current is None or lease.opaque:
+            return ReadbackResult.unverifiable()
+        result = insertion_readback(
+            current, text, timeout=readback_timeout_for_frontmost())
+        PIPELINE_STATE["last_readback_shape"] = result.detail or ""
+        return result
+
     current_bundle = frontmost_bundle()
     receipt = INSERTION_COORDINATOR.commit(
         lease.utterance_id,
@@ -7817,10 +7863,7 @@ def commit_insertion(rec, text: str, bundle: str,
             getattr(rec, "bundle_at_press", bundle),
         ),
         paste,
-        (lambda: insertion_readback(
-            current, text, timeout=readback_timeout_for_frontmost())
-         if current is not None and not lease.opaque
-         else ReadbackResult.unverifiable()),
+        readback,
     )
     PIPELINE_STATE["last_insertion_state"] = receipt.state.value
     rec.insertion_receipt = receipt
@@ -10051,6 +10094,9 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "insertion_reason": (
                 integrity_receipt.reason.value
                 if integrity_receipt is not None else "unsupported_field"),
+            # How the destination differed, as a category only. Empty unless
+            # a readback conflict happened.
+            "readback_shape": PIPELINE_STATE["last_readback_shape"],
             "paste_attempted": attempted,
             "insertion_verified": verified,
             "delayed_cleanup_scheduled": delayed_cleanup_scheduled,
