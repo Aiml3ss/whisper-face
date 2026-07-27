@@ -9,19 +9,47 @@ $Repo = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Repo
 $Mode = "full"
 $VerifyOnly = $false
+$Uninstall = $false
+$AssumeYes = $false
+$RemoveModels = $false
+$RemovePersonalData = $false
 
 foreach ($Argument in $Args) {
     switch ($Argument) {
         { $_ -in @("--server-only", "-ServerOnly") } { $Mode = "server-only" }
         { $_ -in @("--verify", "-Verify") } { $VerifyOnly = $true }
+        { $_ -in @("--uninstall", "-Uninstall") } { $Uninstall = $true }
+        { $_ -in @("--yes", "-Yes") } { $AssumeYes = $true }
+        { $_ -in @("--remove-models", "-RemoveModels") } { $RemoveModels = $true }
+        { $_ -in @("--remove-personal-data", "-RemovePersonalData") } {
+            $RemovePersonalData = $true
+        }
         { $_ -in @("-h", "--help", "-Help") } {
             Write-Host "Usage: .\setup.ps1 [--server-only] [--verify]"
+            Write-Host "       .\setup.ps1 --uninstall [--yes] [--remove-models] [--remove-personal-data]"
             Write-Host "  --server-only  install the headless endpoint without UI/mic"
             Write-Host "  --verify       check an existing installation without changing it"
+            Write-Host ""
+            Write-Host "Uninstall (prints a plan and changes nothing unless --yes):"
+            Write-Host "  --uninstall    list every file and task this installer created, then stop"
+            Write-Host "  --yes          actually perform the listed removal"
+            Write-Host "  --remove-models          also remove the downloaded models (re-downloadable)"
+            Write-Host "  --remove-personal-data   also remove your dictionary, snippets, tones,"
+            Write-Host "                           preferences, transcripts, corrections, drafts, and"
+            Write-Host "                           logs. Kept by default; these are your words and"
+            Write-Host "                           cannot be downloaded again."
+            Write-Host "  uv, ffmpeg, and Ollama itself are shared tools and are never removed."
             exit 0
         }
         default { throw "Unknown option: $Argument" }
     }
+}
+if ($Uninstall) {
+    if ($VerifyOnly -or $Mode -ne "full") {
+        throw "--uninstall cannot be combined with an install option"
+    }
+} elseif ($AssumeYes -or $RemoveModels -or $RemovePersonalData) {
+    throw "--yes, --remove-models, and --remove-personal-data only apply to --uninstall"
 }
 
 function Write-Step([string]$Message) {
@@ -152,6 +180,242 @@ function Confirm-WritableCheckout {
     }
 }
 
+$TaskName = "Whisper Face"
+$LegacyTaskName = "Whispering Parrot"
+$LauncherDir = Join-Path $Repo ".windows"
+$Launcher = Join-Path $LauncherDir "launch.ps1"
+$LauncherReceipt = Join-Path $LauncherDir "launch.sha256"
+$Log = Join-Path $Repo "dictate.log"
+$OllamaLog = Join-Path $Repo "ollama.log"
+$OllamaErrorLog = Join-Path $Repo "ollama-error.log"
+
+# --- Uninstall ---------------------------------------------------------------
+# Removal works from the explicit inventory below and never from a wildcard.
+# Every path named here is one this installer created. uv, ffmpeg, Ollama
+# itself, and Ollama's own model store are shared tools; they are reported as
+# untouched and are never removed.
+$script:UninstallRemoved = 0
+$script:UninstallAbsent = 0
+$script:UninstallPending = 0
+$script:UninstallFailed = 0
+
+function Write-UninstallLine([string]$Verb, [string]$Target, [string]$Note) {
+    if ([string]::IsNullOrEmpty($Note)) {
+        Write-Host ("   {0,-13} {1}" -f $Verb, $Target)
+    } else {
+        Write-Host ("   {0,-13} {1}  ({2})" -f $Verb, $Target, $Note)
+    }
+}
+
+function Remove-InstalledPath([bool]$Requested, [string]$Target,
+        [string]$Description) {
+    foreach ($Unsafe in @($Repo, $env:USERPROFILE,
+            [IO.Path]::GetPathRoot($Repo))) {
+        if (-not [string]::IsNullOrWhiteSpace($Unsafe) -and
+                $Target.TrimEnd('\') -ieq $Unsafe.TrimEnd('\')) {
+            throw "refusing to remove an unsafe path: $Target"
+        }
+    }
+    $Present = Test-Path -LiteralPath $Target
+    if (-not $Requested) {
+        if ($Present) {
+            Write-UninstallLine "keeping" $Target $Description
+        } else {
+            Write-UninstallLine "not present" $Target ""
+            $script:UninstallAbsent++
+        }
+        return
+    }
+    if (-not $Present) {
+        Write-UninstallLine "not present" $Target ""
+        $script:UninstallAbsent++
+        return
+    }
+    if (-not $AssumeYes) {
+        Write-UninstallLine "would remove" $Target $Description
+        $script:UninstallPending++
+        return
+    }
+    try {
+        Remove-Item -LiteralPath $Target -Recurse -Force -ErrorAction Stop
+        Write-UninstallLine "removed" $Target ""
+        $script:UninstallRemoved++
+    } catch {
+        Write-UninstallLine "FAILED" $Target "could not remove"
+        $script:UninstallFailed++
+    }
+}
+
+function Remove-EmptyDirectory([string]$Target) {
+    # Only ever removes a directory that is already empty, so a shared parent
+    # still holding someone else's files always survives.
+    if (-not (Test-Path -LiteralPath $Target -PathType Container)) { return }
+    if (-not $AssumeYes) {
+        Write-UninstallLine "would remove" $Target "only if empty by then"
+        return
+    }
+    $Remaining = @(Get-ChildItem -Force -LiteralPath $Target `
+        -ErrorAction SilentlyContinue)
+    if ($Remaining.Count -gt 0) {
+        Write-UninstallLine "keeping" $Target "still holds other files"
+        return
+    }
+    try {
+        Remove-Item -LiteralPath $Target -Force -ErrorAction Stop
+        Write-UninstallLine "removed" $Target "was empty"
+        $script:UninstallRemoved++
+    } catch {
+        Write-UninstallLine "FAILED" $Target "could not remove"
+        $script:UninstallFailed++
+    }
+}
+
+function Remove-InstalledTask([string]$Name, [string]$Description) {
+    $Existing = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+    if ($null -eq $Existing) {
+        Write-UninstallLine "not present" "scheduled task '$Name'" $Description
+        $script:UninstallAbsent++
+        return
+    }
+    if (-not $AssumeYes) {
+        Write-UninstallLine "would remove" "scheduled task '$Name'" $Description
+        $script:UninstallPending++
+        return
+    }
+    try {
+        Stop-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue |
+            Out-Null
+        Unregister-ScheduledTask -TaskName $Name -Confirm:$false `
+            -ErrorAction Stop | Out-Null
+        Write-UninstallLine "removed" "scheduled task '$Name'" ""
+        $script:UninstallRemoved++
+    } catch {
+        Write-UninstallLine "FAILED" "scheduled task '$Name'" `
+            "could not unregister"
+        $script:UninstallFailed++
+    }
+}
+
+function Remove-CleanupModel {
+    # qwen3.5:4b lives in Ollama's own store. Ask Ollama to drop that one
+    # model; never delete anything under its data directory by hand.
+    if (-not $RemoveModels) {
+        Write-UninstallLine "keeping" "ollama model qwen3.5:4b (if installed)" `
+            "in Ollama's own store"
+        return
+    }
+    Refresh-ProcessPath
+    $OllamaExe = Find-Executable "ollama.exe" @(
+        (Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe")
+    )
+    if (-not $OllamaExe) {
+        Write-UninstallLine "unknown" "ollama command not found" `
+            "if qwen3.5:4b is installed, remove it with: ollama rm qwen3.5:4b"
+        return
+    }
+    & $OllamaExe show "qwen3.5:4b" *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-UninstallLine "not present" "ollama model qwen3.5:4b" ""
+        $script:UninstallAbsent++
+        return
+    }
+    if (-not $AssumeYes) {
+        Write-UninstallLine "would remove" "ollama model qwen3.5:4b" `
+            "semantic cleanup model, ~3.4 GB"
+        $script:UninstallPending++
+        return
+    }
+    & $OllamaExe rm "qwen3.5:4b" *> $null
+    if ($LASTEXITCODE -eq 0) {
+        Write-UninstallLine "removed" "ollama model qwen3.5:4b" ""
+        $script:UninstallRemoved++
+    } else {
+        Write-UninstallLine "FAILED" "ollama model qwen3.5:4b" `
+            "Ollama did not answer; run: ollama rm qwen3.5:4b"
+        $script:UninstallFailed++
+    }
+}
+
+function Invoke-Uninstall {
+    Write-Host ""
+    if ($AssumeYes) {
+        Write-Host "== Whisper Face uninstall from $Repo"
+    } else {
+        Write-Host "== Whisper Face uninstall from $Repo (dry run)"
+        Write-Host "== Nothing below is changed. This is exactly what --yes would do."
+    }
+
+    Write-Step "models (removed only with --remove-models)"
+    Remove-CleanupModel
+    Remove-InstalledPath $RemoveModels (Join-Path $Repo ".models") `
+        "cached faster-Whisper Tiny and large-v3-turbo models"
+
+    Write-Step "login task this installer registered"
+    Remove-InstalledTask $TaskName "Whisper Face login task"
+    Remove-InstalledTask $LegacyTaskName "legacy login task name"
+
+    Write-Step "generated launcher and its receipt"
+    Remove-InstalledPath $true $Launcher "generated login launcher"
+    Remove-InstalledPath $true $LauncherReceipt "launcher digest receipt"
+    Remove-EmptyDirectory $LauncherDir
+
+    Write-Step "runtime state inside the checkout"
+    Remove-InstalledPath $true (Join-Path $Repo ".dictate.lock") `
+        "single-instance lock"
+
+    Write-Step "personal files (removed only with --remove-personal-data)"
+    Write-Host "   These are your words and your corrections. No download restores"
+    Write-Host "   them. They are kept unless you ask for them to go."
+    foreach ($PersonalName in @(
+        "dictionary.txt", "snippets.json", "tones.json", "preferences.json",
+        "learned.json", "transcripts.jsonl", "voice_inbox.json",
+        "demonstrations.json", "acoustic_keyword_memory.json",
+        "delayed_cleanup_activation.json", "acoustic_keyword_activation.json",
+        "acoustic_calibration_activation.json", "relisten_activation.json",
+        "dictate.log", "ollama.log", "ollama-error.log"
+    )) {
+        Remove-InstalledPath $RemovePersonalData `
+            (Join-Path $Repo $PersonalName) "personal file"
+    }
+
+    Write-Step "never touched by this uninstaller"
+    Write-Host "   the winget packages astral-sh.uv, Gyan.FFmpeg, and Ollama.Ollama"
+    Write-Host "   Ollama's own store and every other model in it"
+    Write-Host "   the uv cache"
+    Write-Host "   $Repo itself -- delete this folder by hand when you are done"
+
+    Write-Host ""
+    if ($AssumeYes) {
+        Write-Host ("== removed {0} item(s); {1} were already gone" -f
+            $script:UninstallRemoved, $script:UninstallAbsent)
+    } else {
+        Write-Host ("== dry run: {0} item(s) would be removed; {1} are already gone" -f
+            $script:UninstallPending, $script:UninstallAbsent)
+        Write-Host "== nothing was changed. To carry it out:"
+        Write-Host "==   .\setup.ps1 --uninstall --yes"
+        Write-Host "==   .\setup.ps1 --uninstall --yes --remove-models"
+        Write-Host "==   .\setup.ps1 --uninstall --yes --remove-personal-data"
+    }
+    if (-not $RemoveModels) {
+        Write-Host "== models were kept; rerun with --remove-models to free that space"
+    }
+    if (-not $RemovePersonalData) {
+        Write-Host "== your dictionary, snippets, tones, preferences, corrections,"
+        Write-Host "== transcripts, drafts, and logs were kept in $Repo"
+    }
+    if ($script:UninstallFailed -gt 0) {
+        Write-Host ("!! {0} item(s) could not be removed; see FAILED above" -f
+            $script:UninstallFailed)
+        return 1
+    }
+    return 0
+}
+
+if ($Uninstall) {
+    $UninstallStatus = Invoke-Uninstall
+    exit ([int]($UninstallStatus | Select-Object -Last 1))
+}
+
 $Required = @(
     "dictate.py", "dictate.py.lock", "parrot_core.py", "voice_compiler.py",
     "process_verifier.py", "prewarmed_verifier.py",
@@ -221,15 +485,6 @@ $Architecture = if ($env:PROCESSOR_ARCHITEW6432) {
 if ($Architecture -notin @("AMD64", "x86_64")) {
     throw "Windows x64 is currently required by the faster-Whisper runtime (detected $Architecture)."
 }
-
-$TaskName = "Whisper Face"
-$LegacyTaskName = "Whispering Parrot"
-$LauncherDir = Join-Path $Repo ".windows"
-$Launcher = Join-Path $LauncherDir "launch.ps1"
-$LauncherReceipt = Join-Path $LauncherDir "launch.sha256"
-$Log = Join-Path $Repo "dictate.log"
-$OllamaLog = Join-Path $Repo "ollama.log"
-$OllamaErrorLog = Join-Path $Repo "ollama-error.log"
 
 function Get-InstalledTools {
     Refresh-ProcessPath

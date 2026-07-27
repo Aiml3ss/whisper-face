@@ -47,7 +47,9 @@ before submitting outside contributions.
 - [ ] `uv run tests/test_voice_input_protocol.py`
 - [ ] `uv run tests/test_acoustic_keyword_memory.py`
 - [ ] `uv run tests/test_acoustic_keyword_bias_evaluation.py`
+- [ ] `uv run tests/test_acoustic_keyword_activation.py`
 - [ ] `uv run tests/test_acoustic_calibration.py`
+- [ ] `uv run tests/test_acoustic_calibration_activation.py`
 - [ ] `uv run tests/test_measurement_mode.py`
 - [ ] `uv run tests/test_benchmark_acoustic_calibration.py`
 - [ ] `uv run tests/test_delayed_cleanup_merge.py`
@@ -59,6 +61,7 @@ before submitting outside contributions.
 - [ ] `uv run tests/test_drop_to_target.py`
 - [ ] `uv run tests/test_macos_drop_to_target_snapshot.py`
 - [ ] `uv run tests/test_voice_objects.py`
+- [ ] `uv run tests/test_spoken_edit_commands_runtime.py`
 - [ ] `uv run tests/test_voice_inbox.py`
 - [ ] `uv run tests/test_demonstration_drafts.py`
 - [ ] `uv run tests/test_competitor_benchmark.py`
@@ -66,11 +69,13 @@ before submitting outside contributions.
 - [ ] `uv run tests/test_personal_regression.py`
 - [ ] `uv run tests/test_support_bundle.py`
 - [ ] `uv run tests/test_whisper_face_gui.py`
+- [ ] `uv run tests/test_whisper_face_characters.py`
 - [ ] `uv run --locked --script dictate.py --native-gui-smoke-test`
 - [ ] `uv run tests/test_installers.py`
 - [ ] `uv run tests/test_repository_governance.py`
 - [ ] `uv run tests/test_macos_distribution.py`
 - [ ] `uv run tests/test_safe_update_advisor.py`
 - [ ] `uv run tests/test_side_by_side_update.py`
+- [ ] `uv run tests/test_self_update.py`
 - [ ] Live Mac or Windows installer verification was run, or the unavailable
       platform is explicitly disclosed.
