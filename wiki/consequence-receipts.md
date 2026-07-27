@@ -3,7 +3,7 @@ title: "Consequence Receipts"
 type: concept
 language: en
 created: 2026-07-26
-modified: 2026-07-26
+modified: 2026-07-27
 tags: [risk, verification, relisten, safety, evidence]
 aliases: [selective-relisten, microspan-verifier, consequence-routing]
 summary: "Names, numbers, dates, recipients, commands and other consequence-sensitive spans get transcript-free risk receipts, optionally verified by a process-isolated microspan re-listen — evidence that never changes the text."
@@ -58,8 +58,8 @@ never change recognition, cleanup, insertion, or model routing.
   straightforwardly recordable today, because its benchmark drives the
   verifier directly rather than through a receipt-gated runtime path
   ([[evidence-capture]]). Recording is capped at the adapter's 2.4 s
-  microspan bound — enforced in code and pinned by a test, though the
-  re-listen runbook still does not state it (issue #108).
+  microspan bound — enforced in code, pinned by a test, and since #118
+  stated in the re-listen runbook as well.
 
 ## Related Concepts
 
