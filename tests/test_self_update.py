@@ -416,6 +416,10 @@ class RollbackIsVerifiedTests(unittest.TestCase):
         self.assertIn(CURRENT[:7], outcome["error"])
         # The forward failure is still named alongside the recovery failure.
         self.assertIn("Install.command failed", outcome["error"])
+        # And crucially, the installer never ran from the unrestored broken
+        # revision: it can restart services and rewrite the install receipt
+        # against exactly the build being rolled away from.
+        self.assertEqual(runner.installer_runs, 1)
 
     def test_a_failed_rollback_reinstall_is_reported(self):
         # Restore succeeds but reinstalling the previous build fails: the
@@ -426,6 +430,28 @@ class RollbackIsVerifiedTests(unittest.TestCase):
         outcome = self_update.apply_update(
             CHECKOUT, LATEST, runner=runner, install_receipt=NO_RECEIPT)
         self.assertEqual(outcome["status"], "rollback_failed")
+        self.assertIn("recovery also failed", outcome["error"])
+        self.assertIn("pip exploded", outcome["error"])
+
+    def test_an_exception_path_keeps_the_recovery_reason(self):
+        # A git timeout mid-apply, then a rollback whose reinstall fails:
+        # the result must name both, not just the original exception --
+        # recovery is the failure that now needs manual repair.
+        inner = FakeRunner(head=CURRENT, installer_rcs=[1],
+                           installer_stderr="pip exploded")
+        state = {"raised": False}
+
+        def flaky(cmd, **kwargs):
+            git = list(cmd[3:]) if list(cmd[:2]) == ["git", "-C"] else []
+            if git[:2] == ["checkout", "--quiet"] and not state["raised"]:
+                state["raised"] = True
+                raise subprocess.TimeoutExpired(cmd, 1)
+            return inner(cmd, **kwargs)
+
+        outcome = self_update.apply_update(
+            CHECKOUT, LATEST, runner=flaky, install_receipt=NO_RECEIPT)
+        self.assertEqual(outcome["status"], "rollback_failed")
+        self.assertIn("timed out", outcome["error"])
         self.assertIn("recovery also failed", outcome["error"])
         self.assertIn("pip exploded", outcome["error"])
 

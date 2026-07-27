@@ -367,34 +367,51 @@ def apply_update(checkout, target_rev: str, *, runner: Runner,
         # verifiably present and reinstalled, not that recovery was attempted.
         forward_error = _installer_error(installed, installer)
         restored = _restore(runner, checkout, previous, previous_branch)
+        if not restored:
+            # Do not run the installer here: HEAD is still on the failed
+            # revision, and an installer run can restart services and rewrite
+            # the install receipt against exactly the build being rolled away
+            # from -- or quietly succeed on retry while the outcome says the
+            # opposite.
+            result["status"] = "rollback_failed"
+            result["error"] = (
+                f"{forward_error}; recovery also failed: could not restore "
+                f"revision {previous[:7]}")
+            return result
         reinstalled = _run_installer(runner, checkout, installer)
-        if restored and reinstalled.returncode == 0:
+        if reinstalled.returncode == 0:
             result["status"] = "rolled_back"
             result["error"] = forward_error
             return result
         result["status"] = "rollback_failed"
-        rollback_error = (
-            f"could not restore revision {previous[:7]}" if not restored
-            else _installer_error(reinstalled, installer))
         result["error"] = (
-            f"{forward_error}; recovery also failed: {rollback_error}")
+            f"{forward_error}; recovery also failed: "
+            f"{_installer_error(reinstalled, installer)}")
         return result
     except (OSError, subprocess.SubprocessError) as exc:
         # Unexpected failure mid-apply (e.g. a git timeout). Best-effort restore
         # to the recorded previous revision so we do not strand a broken tree.
         previous = result.get("from")
+        recovery_error = None
         if previous:
             try:
-                restored = _restore(runner, checkout, previous,
-                                    previous_branch)
-                reinstalled = _run_installer(runner, checkout, installer)
-                result["status"] = (
-                    "rolled_back"
-                    if restored and reinstalled.returncode == 0
-                    else "rollback_failed")
-            except (OSError, subprocess.SubprocessError):
+                if _restore(runner, checkout, previous, previous_branch):
+                    reinstalled = _run_installer(runner, checkout, installer)
+                    if reinstalled.returncode == 0:
+                        result["status"] = "rolled_back"
+                    else:
+                        result["status"] = "rollback_failed"
+                        recovery_error = _installer_error(
+                            reinstalled, installer)
+                else:
+                    result["status"] = "rollback_failed"
+                    recovery_error = (
+                        f"could not restore revision {previous[:7]}")
+            except (OSError, subprocess.SubprocessError) as recovery_exc:
                 result["status"] = "rollback_failed"
-        result["error"] = _describe(exc)
+                recovery_error = _describe(recovery_exc)
+        result["error"] = _describe(exc) if recovery_error is None else (
+            f"{_describe(exc)}; recovery also failed: {recovery_error}")
         return result
 
 
