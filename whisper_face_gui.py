@@ -4680,20 +4680,31 @@ if APPKIT_AVAILABLE:
             label.setAlignment_(alignment)
         return _accessible(label, accessibility_label or text)
 
+# Secondary buttons drop the stock Aqua bezel for the clay language:
+# porcelain fill, soft hairline, concentric radius. They repaint on every
+# appearance flip through this registry (the window is a singleton, and the
+# registry is rebuilt with it).
+    _SECONDARY_BUTTONS: list[Any] = []
+
     def _button(title: str, frame: Any, target: Any, action: str,
                 *, help_text: str = "", symbol: str = "") -> Any:
         button = JellyButton.alloc().initWithFrame_(frame)
         button.setTitle_(title)
-        button.setBezelStyle_(NSBezelStyleRounded)
-        button.setFont_(_font(13.0, "medium"))
+        button.setBordered_(False)
+        button.setFont_(_font(12.5, "medium", rounded=True))
         if symbol:
             image = _symbol_image(symbol, size=12.0)
             if image is not None:
                 button.setImage_(image)
                 button.setImagePosition_(NSImageLeading)
         button.setWantsLayer_(True)
+        layer = button.layer()
+        if layer is not None:
+            layer.setCornerRadius_(min(13.0, frame.size.height / 2.0))
+            layer.setBorderWidth_(1.0)
         button.setTarget_(target)
         button.setAction_(action)
+        _SECONDARY_BUTTONS.append(button)
         return _accessible(button, title, help_text)
 
     def _hairline(frame: Any) -> Any:
@@ -5107,8 +5118,22 @@ if APPKIT_AVAILABLE:
                     _theme_color(palette.bg).CGColor())
             for box in self.themed.get("card", ()):
                 box.setFillColor_(_theme_color(palette.surface))
-                box.setBorderColor_(
-                    _theme_color(palette.line, CARD_BORDER_ALPHA))
+                # Depth comes from one soft ambient shadow; the hairline
+                # drops to a whisper so the edge reads, not the border.
+                box.setBorderColor_(_theme_color(
+                    palette.line, 0.20 if dark else 0.10))
+                box.setWantsLayer_(True)
+                layer = box.layer()
+                if layer is not None:
+                    try:
+                        layer.setShadowColor_(
+                            _theme_color(palette.line).CGColor())
+                        layer.setShadowOpacity_(0.16 if dark else 0.07)
+                        layer.setShadowRadius_(16.0)
+                        layer.setShadowOffset_((0.0, -5.0))
+                        layer.setMasksToBounds_(False)
+                    except Exception:
+                        pass
             for line in self.themed.get("hairline", ()):
                 line.setFillColor_(_theme_color(palette.line, 0.14))
             for label in self.themed.get("ink", ()):
@@ -5342,6 +5367,10 @@ if APPKIT_AVAILABLE:
             header.addSubview_(title)
             header.addSubview_(badge)
             topbar.addSubview_(header)
+            topbar_edge = _hairline(NSMakeRect(0, 0, 1000, 1))
+            topbar_edge.setAutoresizingMask_(NSViewWidthSizable)
+            self._register("hairline", topbar_edge)
+            topbar.addSubview_(topbar_edge)
 
             # Home and Settings are pills; Advanced hides behind the tool
             # button at the far right (and ⌘D, window-wide, as always).
@@ -5560,8 +5589,8 @@ if APPKIT_AVAILABLE:
             phase.setAutoresizingMask_(NSViewWidthSizable)
             status = self._ink(
                 self._l("overview.status.ready.title"),
-                NSMakeRect(0, 118, width, 24),
-                size=17, weight="semibold", rounded=True, truncate=True,
+                NSMakeRect(0, 116, width, 26),
+                size=20, weight="semibold", rounded=True, truncate=True,
                 alignment=1)
             status.setAutoresizingMask_(NSViewWidthSizable)
             detail = self._soft(
@@ -5635,6 +5664,9 @@ if APPKIT_AVAILABLE:
                     NSMakeRect(x, 2, block, 22),
                     size=17, weight="semibold", rounded=True, truncate=True,
                     alignment=1)
+                # Monospaced digits: live numbers must not shift layout.
+                value.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(
+                    17.0, 0.3))
                 value.setAutoresizingMask_(
                     NSViewMinXMargin | NSViewMaxXMargin)
                 metrics.addSubview_(caption)
@@ -6251,6 +6283,7 @@ if APPKIT_AVAILABLE:
             )
 
         def show(self) -> None:
+            entering = not bool(self.window.isVisible())
             self.view_model.refresh()
             self.render()
             # Activate BEFORE ordering front. This process runs as an
@@ -6271,6 +6304,44 @@ if APPKIT_AVAILABLE:
                 self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                     2.0, self, "refreshTimer:", None, True)
             self.dynamic["home_face_view"].startLiving()
+            if entering:
+                self._entrance_stagger()
+
+        @objc.python_method
+        def _entrance_stagger(self) -> None:
+            """Reveal Home in semantic chunks, ~90ms apart, on open only.
+
+            The face pops with the first chunk; a second open while the
+            window is already visible never replays the entrance.  Reduce
+            Motion shows everything immediately.
+            """
+            state = self.view_model.state
+            if state.prefers_reduced_motion or state.section != "Home":
+                return
+            blocks = [
+                self.dynamic["home_header"],
+                self.dynamic["overview_hero"],
+                self.dynamic["overview_metric_cards"][0],
+                self.dynamic["home_result_card"],
+                self.dynamic["onboarding_card"],
+            ]
+            delay = 0.0
+            for view in blocks:
+                if view is None or bool(view.isHidden()):
+                    continue
+                view.setAlphaValue_(0.0)
+                NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                    delay, self, "staggerReveal:", view, False)
+                delay += 0.09
+            add_jelly_motion(
+                self.dynamic["home_face_view"], "pop",
+                reduced_motion=state.prefers_reduced_motion)
+
+        def staggerReveal_(self, timer: Any) -> None:
+            view = timer.userInfo()
+            if view is not None:
+                fade_in(view, reduced_motion=bool(
+                    self.view_model.state.prefers_reduced_motion))
 
         @objc.python_method
         def show_voice_inbox(self) -> None:
@@ -6799,7 +6870,36 @@ if APPKIT_AVAILABLE:
                 else _theme_color(notice_palette.ink_soft))
             self.dynamic["notice"].setTextColor_(notice_color)
             self._animate_notice(state)
+            self._restyle_secondary_buttons(dark)
             self._configure_key_view_loop(state)
+
+        @objc.python_method
+        def _restyle_secondary_buttons(self, dark: bool) -> None:
+            """Clay treatment for every non-CTA button, last so any title
+            written earlier in this render keeps its ink."""
+            palette = palette_for_appearance(dark)
+            fill = (0.259, 0.318, 0.286) if dark else (1.0, 1.0, 1.0)
+            for button in _SECONDARY_BUTTONS:
+                layer = button.layer()
+                if layer is None:
+                    continue
+                layer.setBackgroundColor_(_theme_color(fill).CGColor())
+                layer.setBorderColor_(_theme_color(
+                    palette.line, 0.26 if dark else 0.16).CGColor())
+                try:
+                    tint = _theme_color(
+                        palette.ink if bool(button.isEnabled())
+                        else palette.ink_soft)
+                    button.setContentTintColor_(tint)
+                    button.setAttributedTitle_(
+                        NSAttributedString.alloc()
+                        .initWithString_attributes_(str(button.title()), {
+                            NSFontAttributeName: _font(
+                                12.5, "medium", rounded=True),
+                            NSForegroundColorAttributeName: tint,
+                        }))
+                except Exception:
+                    pass
 
         @objc.python_method
         def _text_editor(self, frame: Any, value: str, *,
