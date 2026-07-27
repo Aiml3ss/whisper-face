@@ -7,6 +7,7 @@
 
 import json
 import sys
+import ast
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -2516,6 +2517,38 @@ class ViewModelTests(unittest.TestCase):
         self.assertFalse(self.model.state.onboarding_acknowledged)
         self.model.acknowledge_onboarding()
         self.assertTrue(self.model.refresh().onboarding_acknowledged)
+
+
+class AccessoryActivationOrderTests(unittest.TestCase):
+    """An accessory app must activate before it orders a window front.
+
+    Ordering front while the process is still inactive puts the window in a
+    background list, so the user has to click "Open Whisper Face" twice. The
+    order is invisible to a headless render, so it is pinned as source.
+    """
+
+    def _show_source(self):
+        source = Path(__file__).resolve().parents[1] / "whisper_face_gui.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "show":
+                text = ast.unparse(node)
+                if "makeKeyAndOrderFront_" in text:
+                    return text
+        self.fail("window show() not found")
+
+    def test_activation_precedes_ordering_the_window_front(self):
+        text = self._show_source()
+        activate = text.index("activateIgnoringOtherApps_")
+        order = text.index("makeKeyAndOrderFront_")
+        self.assertLess(
+            activate, order,
+            "activateIgnoringOtherApps_ must run before "
+            "makeKeyAndOrderFront_ or the first click is swallowed")
+
+    def test_show_orders_front_regardless_as_a_fallback(self):
+        self.assertIn("orderFrontRegardless", self._show_source())
+
 
 
 if __name__ == "__main__":
