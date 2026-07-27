@@ -24,6 +24,9 @@ from parrot_core import (  # noqa: E402
     classify_edit_command,
     compile_cleanup,
     compile_code_dictation,
+    hypothesis_agreement,
+    parakeet_confidence_from_agreement,
+    should_escalate_uncertain,
     confidence_from_segments,
     recognition_words_from_segments,
     correction_similarity,
@@ -369,6 +372,46 @@ class RecognitionTests(unittest.TestCase):
         self.assertTrue(can_reuse_speculation(True, False, 8_000, 8_000))
         self.assertFalse(can_reuse_speculation(True, True, 8_000, 8_000))
         self.assertFalse(can_reuse_speculation(True, False, 8_000, 9_000))
+
+
+class AgreementConfidenceTests(unittest.TestCase):
+    def test_agreement_counts_every_token_case_insensitively(self):
+        self.assertEqual(hypothesis_agreement(
+            "Ship it to Berg", "ship it to berg"), 1.0)
+        self.assertEqual(hypothesis_agreement("", ""), 1.0)
+        self.assertEqual(hypothesis_agreement("something", ""), 0.0)
+        self.assertEqual(hypothesis_agreement(
+            "alpha beta gamma delta", "epsilon zeta eta theta"), 0.0)
+
+    def test_agreement_penalizes_insertions_not_just_substitutions(self):
+        # Same matched words, but the longer hypothesis added two tokens.
+        partial = hypothesis_agreement(
+            "send the deposit", "send the full deposit today")
+        self.assertAlmostEqual(partial, 3 / 5)
+
+    def test_short_words_and_numbers_count_toward_disagreement(self):
+        heard_two = hypothesis_agreement(
+            "pay 2 dollars now", "pay 10 dollars now")
+        self.assertLess(heard_two, 1.0)
+
+    def test_confidence_map_crosses_the_runtime_gates_where_documented(self):
+        self.assertAlmostEqual(parakeet_confidence_from_agreement(1.0), 0.93)
+        self.assertAlmostEqual(parakeet_confidence_from_agreement(0.0), 0.45)
+        # Context-candidate repair unlocks below 0.70.
+        self.assertGreater(parakeet_confidence_from_agreement(0.6), 0.70)
+        self.assertLess(parakeet_confidence_from_agreement(0.4), 0.70)
+        # The low-confidence region below 0.52 needs severe disagreement.
+        self.assertLess(parakeet_confidence_from_agreement(0.1), 0.52)
+        self.assertGreater(parakeet_confidence_from_agreement(0.2), 0.52)
+        # Out-of-range inputs stay bounded.
+        self.assertAlmostEqual(parakeet_confidence_from_agreement(1.7), 0.93)
+        self.assertAlmostEqual(parakeet_confidence_from_agreement(-0.5), 0.45)
+
+    def test_escalation_needs_bad_agreement_and_bounded_audio(self):
+        self.assertTrue(should_escalate_uncertain(0.2, 5.0))
+        self.assertFalse(should_escalate_uncertain(0.5, 5.0))
+        self.assertFalse(should_escalate_uncertain(0.2, 30.0))
+        self.assertFalse(should_escalate_uncertain(0.2, 0.0))
 
 
 if __name__ == "__main__":

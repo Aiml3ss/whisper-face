@@ -1697,8 +1697,15 @@ class ParakeetClientTests(unittest.TestCase):
         self.assertEqual(first_process.wait_calls, 2)
 
     def test_parakeet_processing_time_reaches_recognition_evidence(self):
+        class ImmediatePool:
+            def submit(self, function, *args, **kwargs):
+                return SimpleNamespace(
+                    result=lambda: function(*args, **kwargs))
+
         ns = load_definitions(
             "transcribe_detailed",
+            "_parakeet_crosschecked",
+            "_clean_native_processing_s",
             extra={
                 "np": np,
                 "GLOSS": {"lock": threading.Lock(), "prompt": None},
@@ -1709,6 +1716,9 @@ class ParakeetClientTests(unittest.TestCase):
                 "PARAKEET": SimpleNamespace(
                     transcribe=lambda _audio: ("hello", 0.125)),
                 "PARAKEET_ROUTE_CONFIDENCE": 0.9,
+                "PARAKEET_IO_POOL": ImmediatePool(),
+                "PARAKEET_CROSSCHECK": False,
+                "PARAKEET_CROSSCHECK_MAX_SECONDS": 90.0,
                 "SAMPLE_RATE": 16_000,
                 "Recognition": Recognition,
                 "prepare_asr_audio": lambda audio: audio,
@@ -6300,13 +6310,16 @@ class ReleasePlanTests(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def submit(self, function, *args):
+            def submit(self, function, *args, **kwargs):
                 self.calls.append(args[-1])
-                return SimpleNamespace(result=lambda: function(*args))
+                return SimpleNamespace(
+                    result=lambda: function(*args, **kwargs))
 
         pool = ImmediatePool()
+        crosscheck_hints = []
 
-        def detailed(audio, prompt, verify, model):
+        def detailed(audio, prompt, verify, model, crosscheck_text=None):
+            crosscheck_hints.append(crosscheck_text)
             confidence = 0.99 if model == "tiny" else 0.84
             return Recognition(model, confidence)
 
@@ -6337,19 +6350,23 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertEqual(result.alternative, "tiny")
         self.assertTrue(result.verified)
         self.assertEqual(pool.calls, ["tiny", "parakeet-or-whisper-fallback"])
+        # The speculative Tiny hypothesis rides along so the Parakeet route
+        # can derive agreement confidence without a second Tiny decode.
+        self.assertEqual(crosscheck_hints, [None, "tiny"])
 
     def test_tiny_first_cascade_escalates_low_confidence(self):
         class ImmediatePool:
             def __init__(self):
                 self.calls = []
 
-            def submit(self, function, *args):
+            def submit(self, function, *args, **kwargs):
                 self.calls.append(args[-1])
-                return SimpleNamespace(result=lambda: function(*args))
+                return SimpleNamespace(
+                    result=lambda: function(*args, **kwargs))
 
         pool = ImmediatePool()
 
-        def detailed(audio, prompt, verify, model):
+        def detailed(audio, prompt, verify, model, crosscheck_text=None):
             return Recognition(model, 0.5 if model == "tiny" else 0.9)
 
         ns = load_definitions(
@@ -7259,6 +7276,169 @@ class InsertionJoinPrefixTests(unittest.TestCase):
         replacing = types.SimpleNamespace(
             text="the cat sat", selection=(4, 3), element=object())
         self.assertEqual(join(replacing, "dog"), "")
+
+
+class ParakeetCrosscheckTests(unittest.TestCase):
+    """Agreement-derived route confidence on the Parakeet primary path."""
+
+    @staticmethod
+    def crosschecked(*, parakeet_result, tiny_text=None, fallback=None,
+                     crosscheck_enabled=True, tiny_cached=True,
+                     calls=None):
+        from parrot_core import (
+            hypothesis_agreement,
+            parakeet_confidence_from_agreement,
+            should_escalate_uncertain,
+        )
+        calls = calls if calls is not None else []
+
+        class ImmediatePool:
+            def submit(self, fn, *args, **kwargs):
+                return SimpleNamespace(result=lambda: fn(*args, **kwargs))
+
+        def fake_transcribe_detailed(audio, prompt=None, verify=True,
+                                     model_repo="turbo",
+                                     crosscheck_text=None,
+                                     _skip_parakeet=False):
+            calls.append((model_repo, _skip_parakeet))
+            if model_repo == "tiny-repo":
+                return Recognition(text=tiny_text or "", engine="tiny")
+            return fallback or Recognition(text="", confidence=0.0)
+
+        ns = load_definitions(
+            "_parakeet_crosschecked",
+            "_clean_native_processing_s",
+            extra={
+                "PARAKEET_IO_POOL": ImmediatePool(),
+                "PARAKEET": SimpleNamespace(
+                    transcribe=lambda audio: parakeet_result),
+                "PARAKEET_CROSSCHECK": crosscheck_enabled,
+                "PARAKEET_CROSSCHECK_MAX_SECONDS": 90.0,
+                "PARAKEET_ROUTE_CONFIDENCE": 0.84,
+                "SAMPLE_RATE": 16_000,
+                "WHISPER_REPO": "turbo-repo",
+                "FAST_WHISPER_REPO": "tiny-repo",
+                "asr_model_is_cached": lambda repo: tiny_cached,
+                "transcribe_detailed": fake_transcribe_detailed,
+                "hypothesis_agreement": hypothesis_agreement,
+                "parakeet_confidence_from_agreement":
+                    parakeet_confidence_from_agreement,
+                "should_escalate_uncertain": should_escalate_uncertain,
+                "Recognition": Recognition,
+                "print": lambda *args, **kwargs: None,
+            },
+        )
+        audio = np.zeros(16_000 * 4, dtype=np.float32)
+        return ns["_parakeet_crosschecked"](audio, None, verify=True), calls
+
+    def test_full_agreement_yields_high_confidence_and_no_alternative(self):
+        recognition, _ = self.crosschecked(
+            parakeet_result=("ship the installer today", 0.05),
+            tiny_text="ship the installer today")
+        self.assertEqual(recognition.engine, "parakeet-unified")
+        self.assertAlmostEqual(recognition.confidence, 0.93)
+        self.assertIsNone(recognition.alternative)
+        self.assertEqual(recognition.native_processing_s, 0.05)
+
+    def test_disagreement_drops_confidence_below_the_context_gate(self):
+        recognition, _ = self.crosschecked(
+            parakeet_result=("ship the installer to Berg today ok", 0.05),
+            tiny_text="skip the finish line by the bay no")
+        self.assertLess(recognition.confidence, 0.70)
+        self.assertEqual(
+            recognition.alternative, "skip the finish line by the bay no")
+
+    def test_no_crosscheck_keeps_the_fixed_routing_prior(self):
+        recognition, calls = self.crosschecked(
+            parakeet_result=("hello there", 0.05),
+            crosscheck_enabled=False)
+        self.assertAlmostEqual(recognition.confidence, 0.84)
+        self.assertEqual(calls, [])
+
+    def test_missing_tiny_snapshot_keeps_the_fixed_routing_prior(self):
+        recognition, calls = self.crosschecked(
+            parakeet_result=("hello there", 0.05), tiny_cached=False)
+        self.assertAlmostEqual(recognition.confidence, 0.84)
+        self.assertEqual(calls, [])
+
+    def test_helper_failure_returns_none_for_the_whisper_fallback(self):
+        recognition, _ = self.crosschecked(
+            parakeet_result=None, tiny_text="anything")
+        self.assertIsNone(recognition)
+
+    def test_severe_disagreement_escalates_once_and_keeps_the_winner(self):
+        fallback = Recognition(
+            text="completely different words", confidence=0.9,
+            engine="turbo")
+        recognition, calls = self.crosschecked(
+            parakeet_result=("alpha beta gamma delta", 0.05),
+            tiny_text="one two three four",
+            fallback=fallback)
+        self.assertIn(("turbo-repo", True), calls)
+        self.assertEqual(recognition.text, "completely different words")
+        self.assertTrue(recognition.verified)
+        self.assertEqual(recognition.alternative, "alpha beta gamma delta")
+
+    def test_low_confidence_escalation_loser_stays_inspectable(self):
+        fallback = Recognition(
+            text="different words", confidence=0.1, engine="turbo")
+        recognition, calls = self.crosschecked(
+            parakeet_result=("alpha beta gamma delta", 0.05),
+            tiny_text="one two three four",
+            fallback=fallback)
+        self.assertIn(("turbo-repo", True), calls)
+        self.assertEqual(recognition.text, "alpha beta gamma delta")
+        self.assertTrue(recognition.verified)
+        self.assertEqual(recognition.alternative, "different words")
+
+    def test_speculative_crosscheck_text_skips_the_extra_tiny_decode(self):
+        recognition, calls = self.crosschecked(
+            parakeet_result=("use the same words", 0.05),
+            tiny_text="never decoded")
+        self.assertTrue(
+            any(repo == "tiny-repo" for repo, _skip in calls))
+
+        calls_with_hint = []
+        from parrot_core import (
+            hypothesis_agreement,
+            parakeet_confidence_from_agreement,
+            should_escalate_uncertain,
+        )
+
+        class ImmediatePool:
+            def submit(self, fn, *args, **kwargs):
+                return SimpleNamespace(result=lambda: fn(*args, **kwargs))
+
+        ns = load_definitions(
+            "_parakeet_crosschecked",
+            "_clean_native_processing_s",
+            extra={
+                "PARAKEET_IO_POOL": ImmediatePool(),
+                "PARAKEET": SimpleNamespace(
+                    transcribe=lambda audio: ("use the same words", 0.05)),
+                "PARAKEET_CROSSCHECK": True,
+                "PARAKEET_CROSSCHECK_MAX_SECONDS": 90.0,
+                "PARAKEET_ROUTE_CONFIDENCE": 0.84,
+                "SAMPLE_RATE": 16_000,
+                "WHISPER_REPO": "turbo-repo",
+                "FAST_WHISPER_REPO": "tiny-repo",
+                "asr_model_is_cached": lambda repo: True,
+                "transcribe_detailed":
+                    lambda *args, **kwargs: calls_with_hint.append(args)
+                    or Recognition(text=""),
+                "hypothesis_agreement": hypothesis_agreement,
+                "parakeet_confidence_from_agreement":
+                    parakeet_confidence_from_agreement,
+                "should_escalate_uncertain": should_escalate_uncertain,
+                "Recognition": Recognition,
+                "print": lambda *args, **kwargs: None,
+            },
+        )
+        audio = np.zeros(16_000 * 4, dtype=np.float32)
+        recognition = ns["_parakeet_crosschecked"](
+            audio, None, verify=True, crosscheck_text="use the same words")
+        self.assertEqual(calls_with_hint, [])
+        self.assertAlmostEqual(recognition.confidence, 0.93)
 
 
 if __name__ == "__main__":

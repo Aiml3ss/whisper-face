@@ -342,6 +342,9 @@ from parrot_core import (  # noqa: E402
     compile_code_dictation,
     confidence_from_segments,
     correction_similarity,
+    hypothesis_agreement,
+    parakeet_confidence_from_agreement,
+    should_escalate_uncertain,
     infer_revised_insertion,
     mode_from_modifiers,
     recognition_words_from_segments,
@@ -605,8 +608,11 @@ LOW_CONFIDENCE = 0.52        # verify only uncertain Whisper output
 # while routing uncertain/proper-name-heavy audio through large-v3-turbo.
 FAST_ACCEPT_CONFIDENCE = 0.70
 # Parakeet Unified does not expose a calibrated utterance confidence through
-# its current offline API. This is a routing prior, deliberately below a very
-# confident Whisper hypothesis; actual disagreements remain inspectable.
+# its current offline API. The live route confidence is derived from
+# cross-engine agreement with an independent Tiny decode
+# (parakeet_confidence_from_agreement); this fixed prior remains only for
+# decodes where no cross-check hypothesis exists (cross-check disabled, Tiny
+# snapshot missing, or audio beyond the cross-check bound).
 PARAKEET_ROUTE_CONFIDENCE = 0.84
 PARAKEET_STARTUP_TIMEOUT = 10.0
 PARAKEET_MIN_REQUEST_TIMEOUT = 3.0
@@ -4163,7 +4169,8 @@ def _speculative_frames(frames, prompt=None, still_valid=None) -> Recognition:
             and fast.confidence >= FAST_ACCEPT_CONFIDENCE):
         return fast
     accurate = ASR_POOL.submit(
-        transcribe_detailed, segment, prompt, True, WHISPER_REPO).result()
+        transcribe_detailed, segment, prompt, True, WHISPER_REPO,
+        crosscheck_text=fast.text or None).result()
     accurate.verified = True
     if fast.text and fast.text != accurate.text:
         accurate.alternative = fast.text
@@ -6510,9 +6517,99 @@ def windows_whisper_model(model_repo: str):
     raise RuntimeError(f"could not load Windows Whisper model: {error}")
 
 
+# The helper request is pure subprocess I/O, so it can overlap the Tiny
+# cross-check decode that must stay on the calling ASR pool thread (Metal is
+# one-thread-only for this process). One worker: requests stay serialized.
+PARAKEET_IO_POOL = ThreadPoolExecutor(max_workers=1)
+PARAKEET_CROSSCHECK = os.environ.get("PARROT_ASR_CROSSCHECK", "tiny") != "off"
+PARAKEET_CROSSCHECK_MAX_SECONDS = 90.0
+
+
+def _clean_native_processing_s(value) -> float | None:
+    try:
+        native_processing_s = float(value)
+    except (TypeError, ValueError):
+        return None
+    if (native_processing_s < 0.0
+            or native_processing_s != native_processing_s
+            or native_processing_s == float("inf")):
+        return None
+    return native_processing_s
+
+
+def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
+                           verify: bool,
+                           crosscheck_text: str | None = None) \
+        -> Recognition | None:
+    """Parakeet primary decode with an agreement-derived route confidence.
+
+    Parakeet exposes no calibrated confidence, and a fixed routing prior sat
+    above every downstream gate: context repair (0.70), the low-confidence
+    region (0.52), and fallback escalation could never engage on the primary
+    path. An independent Whisper Tiny decode of the same audio now runs on
+    the calling ASR thread while the helper request waits on the I/O pool,
+    so the agreement signal costs almost no wall time. Tiny is never
+    accepted as final text here; it only calibrates confidence and survives
+    as an inspectable alternative. Returns None when the helper fails so the
+    caller falls through to the faithful Whisper path.
+    """
+    duration = len(audio) / SAMPLE_RATE
+    helper_future = PARAKEET_IO_POOL.submit(PARAKEET.transcribe, audio)
+    tiny_text = crosscheck_text
+    if (tiny_text is None and verify and PARAKEET_CROSSCHECK
+            and duration <= PARAKEET_CROSSCHECK_MAX_SECONDS
+            and asr_model_is_cached(FAST_WHISPER_REPO)):
+        try:
+            tiny_text = transcribe_detailed(
+                audio, prompt, verify=False,
+                model_repo=FAST_WHISPER_REPO).text
+        except Exception as error:
+            print(f"! Tiny cross-check unavailable: {error}")
+            tiny_text = None
+    parakeet = helper_future.result()
+    if parakeet is None or not parakeet[0]:
+        return None
+    text = parakeet[0]
+    agreement = None
+    confidence = PARAKEET_ROUTE_CONFIDENCE
+    alternative = None
+    if tiny_text is not None and tiny_text.strip():
+        agreement = hypothesis_agreement(text, tiny_text)
+        confidence = parakeet_confidence_from_agreement(agreement)
+        if tiny_text != text:
+            alternative = tiny_text
+    recognition = Recognition(
+        text=text,
+        confidence=confidence,
+        engine="parakeet-unified",
+        alternative=alternative,
+        audio_duration=duration,
+        native_processing_s=_clean_native_processing_s(parakeet[1]),
+    )
+    if (agreement is not None and verify
+            and should_escalate_uncertain(agreement, duration)):
+        # The engines heard different utterances: buy one independent Turbo
+        # decode and keep whichever transcript is more confident. The loser
+        # is retained as the inspectable alternative.
+        fallback = transcribe_detailed(
+            audio, prompt, verify=False, model_repo=WHISPER_REPO,
+            _skip_parakeet=True)
+        if fallback.text and fallback.confidence > recognition.confidence:
+            fallback.alternative = (
+                text if text != fallback.text else alternative)
+            fallback.verified = True
+            return fallback
+        if fallback.text and fallback.text != recognition.text:
+            recognition.alternative = fallback.text
+        recognition.verified = True
+    return recognition
+
+
 def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
                         verify: bool = True,
-                        model_repo: str = WHISPER_REPO) -> Recognition:
+                        model_repo: str = WHISPER_REPO,
+                        crosscheck_text: str | None = None,
+                        _skip_parakeet: bool = False) -> Recognition:
     # Whispered/quiet speech: lift the level into the range Whisper decodes
     # confidently. Gain is capped so the noise floor of true near-silence
     # (which the energy gate already rejects) isn't blown up to fake speech.
@@ -6520,23 +6617,13 @@ def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
     if prompt is None:
         with GLOSS["lock"]:
             prompt = GLOSS["prompt"]
-    engine = "tiny" if model_repo == FAST_WHISPER_REPO else "turbo"
 
-    if IS_MACOS and model_repo == WHISPER_REPO and PARAKEET_ENABLED:
-        parakeet = PARAKEET.transcribe(audio)
-        if parakeet is not None and parakeet[0]:
-            native_processing_s = float(parakeet[1])
-            if (native_processing_s < 0.0
-                    or native_processing_s != native_processing_s
-                    or native_processing_s == float("inf")):
-                native_processing_s = None
-            return Recognition(
-                text=parakeet[0],
-                confidence=PARAKEET_ROUTE_CONFIDENCE,
-                engine="parakeet-unified",
-                audio_duration=len(audio) / SAMPLE_RATE,
-                native_processing_s=native_processing_s,
-            )
+    if (IS_MACOS and model_repo == WHISPER_REPO and PARAKEET_ENABLED
+            and not _skip_parakeet):
+        recognition = _parakeet_crosschecked(
+            audio, prompt, verify=verify, crosscheck_text=crosscheck_text)
+        if recognition is not None:
+            return recognition
 
     model_repo = asr_decode_target(model_repo)
     engine = "tiny" if model_repo == FAST_WHISPER_REPO else "turbo"

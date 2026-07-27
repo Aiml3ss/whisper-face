@@ -559,6 +559,61 @@ def infer_revised_insertion(before: str, selection: tuple[int, int],
     return revised if revised != pasted else None
 
 
+AGREEMENT_TOKEN_RE = re.compile(r"[\w']+")
+
+# Parakeet exposes no calibrated confidence, so the route confidence is
+# derived from cross-engine agreement with an independent Whisper Tiny decode
+# of the same audio.  The linear map is anchored to the two runtime gates it
+# must drive:
+#   * context-candidate rewrites unlock below 0.70
+#     (CONTEXT_REWRITE_MAX_CONFIDENCE), which this map crosses when
+#     agreement drops under ~0.52 — engines that mostly agree keep the
+#     conservative no-rewrite behavior;
+#   * the low-confidence region below 0.52 (LOW_CONFIDENCE) is reached only
+#     under ~0.15 agreement, i.e. the engines heard different utterances.
+# Full agreement lands near the previous fixed routing prior so downstream
+# thresholds keep their measured behavior.
+PARAKEET_AGREEMENT_FLOOR = 0.45
+PARAKEET_AGREEMENT_CEILING = 0.93
+# Escalate to the independent fallback recognizer only when the engines
+# disagree badly and the audio is short enough that a Turbo decode cannot
+# stall the paste path (Turbo measured ~4.4x realtime).
+ESCALATION_MAX_AGREEMENT = 0.35
+ESCALATION_MAX_SECONDS = 12.0
+
+
+def hypothesis_agreement(primary: str, secondary: str) -> float:
+    """Token-level agreement between two hypotheses of the same audio, 0..1.
+
+    Case-insensitive over every word-shaped token (short words and numbers
+    included — dropping them would hide real disagreement).  Matched-token
+    count is normalized by the longer hypothesis so insertions and deletions
+    count against agreement, not just substitutions.
+    """
+    a = [t.casefold() for t in AGREEMENT_TOKEN_RE.findall(primary or "")]
+    b = [t.casefold() for t in AGREEMENT_TOKEN_RE.findall(secondary or "")]
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    matched = sum(block.size for block in matcher.get_matching_blocks())
+    return matched / max(len(a), len(b))
+
+
+def parakeet_confidence_from_agreement(agreement: float) -> float:
+    """Map cross-engine agreement to a route confidence for Parakeet."""
+    agreement = min(1.0, max(0.0, float(agreement)))
+    return PARAKEET_AGREEMENT_FLOOR + (
+        PARAKEET_AGREEMENT_CEILING - PARAKEET_AGREEMENT_FLOOR) * agreement
+
+
+def should_escalate_uncertain(agreement: float, duration_s: float) -> bool:
+    """Whether disagreement warrants one independent fallback decode."""
+    return (float(agreement) < ESCALATION_MAX_AGREEMENT
+            and 0.0 < float(duration_s) <= ESCALATION_MAX_SECONDS)
+
+
 def confidence_from_segments(segments: Iterable[dict]) -> float:
     """Convert Whisper log probabilities into a stable 0..1 confidence."""
     weighted = []
