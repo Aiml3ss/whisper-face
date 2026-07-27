@@ -7984,11 +7984,49 @@ def insertion_capability_buckets(rec, lease, current: FocusSnapshot | None, *,
     }
 
 
+def insertion_join_prefix(snapshot: FocusSnapshot | None, text: str) -> str:
+    """Return the separator to place before ``text`` at the insertion point.
+
+    Dictating a second time into a chat box used to jam the new sentence
+    against the previous one, because nothing in the paste path looked at the
+    character to its left. The continuation hint that existed only told the
+    language model not to capitalize, and only ran when the model ran at all.
+    This decides from the destination itself, using the character immediately
+    before the insertion point rather than the end of the field, so a cursor
+    placed mid-text behaves the same way.
+    """
+    # Characters that already provide separation (an opening bracket or
+    # quote, a dash or slash being continued through) and characters that
+    # attach to the word before them. Kept local so every caller that
+    # extracts this function gets them too.
+    no_join_after = "([{“‘\"'/-–—@#$¡¿"
+    no_join_before = ".,;:!?…)]}”’\"'%"
+    if not text or text[0].isspace() or text[0] in no_join_before:
+        return ""
+    # Defensive reads: callers hand this whatever the focus adapter returned,
+    # including objects that expose neither attribute.
+    field = getattr(snapshot, "text", None)
+    selection = getattr(snapshot, "selection", None)
+    if not isinstance(field, str) or not isinstance(selection, tuple):
+        return ""
+    start = selection[0] if selection else 0
+    if not isinstance(start, int) or start <= 0 or start > len(field):
+        return ""
+    preceding = field[start - 1]
+    if preceding.isspace() or preceding in no_join_after:
+        return ""
+    return " "
+
+
 def commit_insertion(rec, text: str, bundle: str,
                      current: FocusSnapshot | None):
     """Commit through a lease when possible, otherwise preserve old behavior."""
     lease = getattr(rec, "insertion_lease", None)
     rec.insertion_capabilities = None
+    # Join to whatever is already there before anything downstream sees the
+    # text, so the staged string, the paste, the readback expectation, and
+    # the observed range all agree on exactly one string.
+    text = insertion_join_prefix(current, text) + text
     if lease is None:
         paste(text)
         PIPELINE_STATE["last_insertion_state"] = "legacy"

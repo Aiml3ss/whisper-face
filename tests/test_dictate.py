@@ -4531,6 +4531,7 @@ class InsertionAdapterTests(unittest.TestCase):
             "capture_insertion_lease", "unresolved_destination_id",
             "destination_observation",
             "commit_insertion", "insertion_capability_buckets",
+            "insertion_join_prefix",
             "unresolved_destination_id",
             extra={
                 "FocusSnapshot": object,
@@ -4574,6 +4575,7 @@ class InsertionAdapterTests(unittest.TestCase):
             "focus_destination_id", "opaque_focus_context",
             "capture_insertion_lease", "seal_opaque_window_lease",
             "destination_observation", "commit_insertion", "insertion_capability_buckets",
+            "insertion_join_prefix",
             "unresolved_destination_id",
             extra={
                 "FocusSnapshot": object,
@@ -4615,6 +4617,7 @@ class InsertionAdapterTests(unittest.TestCase):
             "focus_destination_id", "opaque_focus_context",
             "capture_insertion_lease", "seal_opaque_window_lease",
             "destination_observation", "commit_insertion", "insertion_capability_buckets",
+            "insertion_join_prefix",
             "unresolved_destination_id",
             extra={
                 "FocusSnapshot": object,
@@ -4660,6 +4663,7 @@ class InsertionAdapterTests(unittest.TestCase):
             "focus_destination_id", "opaque_focus_context",
             "capture_insertion_lease", "seal_opaque_window_lease",
             "destination_observation", "commit_insertion", "insertion_capability_buckets",
+            "insertion_join_prefix",
             "unresolved_destination_id",
             extra={
                 "FocusSnapshot": object,
@@ -4702,6 +4706,7 @@ class InsertionAdapterTests(unittest.TestCase):
             "focus_destination_id", "opaque_focus_context",
             "capture_insertion_lease", "seal_opaque_window_lease",
             "destination_observation", "commit_insertion", "insertion_capability_buckets",
+            "insertion_join_prefix",
             "unresolved_destination_id",
             extra={
                 "FocusSnapshot": object,
@@ -4906,6 +4911,7 @@ class InsertionAdapterTests(unittest.TestCase):
             "bounded_focus_text", "focus_destination_id",
             "focus_destination_matches", "opaque_focus_context",
             "destination_observation", "commit_insertion", "insertion_capability_buckets",
+            "insertion_join_prefix",
             "unresolved_destination_id",
             extra={
                 "FocusSnapshot": object,
@@ -5003,6 +5009,7 @@ class InsertionAdapterTests(unittest.TestCase):
         pipeline = {}
         ns = load_definitions(
             "commit_insertion", "insertion_capability_buckets",
+            "insertion_join_prefix",
             "unresolved_destination_id",
             extra={
                 "INSERTION_COORDINATOR": coordinator,
@@ -5028,6 +5035,7 @@ class InsertionAdapterTests(unittest.TestCase):
     def capability_namespace(self, coordinator, **extra):
         return load_definitions(
             "commit_insertion", "insertion_capability_buckets",
+            "insertion_join_prefix",
             "unresolved_destination_id",
             extra={
                 "INSERTION_COORDINATOR": coordinator,
@@ -7078,6 +7086,77 @@ class ReadbackEdgeWhitespaceTests(unittest.TestCase):
         self.assertEqual(classify("totally other", "abc"), "divergent")
         self.assertEqual(classify(None, "abc"), "observed-empty")
         self.assertEqual(classify("", "abc"), "observed-empty")
+
+
+class InsertionJoinPrefixTests(unittest.TestCase):
+    """Dictating twice in a row must not weld the sentences together."""
+
+    def _join(self):
+        return load_definitions(
+            "insertion_join_prefix",
+            assignments={"NO_JOIN_AFTER", "NO_JOIN_BEFORE", "NO_JOIN_AFTER", "NO_JOIN_BEFORE"},
+        )["insertion_join_prefix"]
+
+    @staticmethod
+    def _snapshot(text, start=None):
+        start = len(text) if start is None else start
+        return types.SimpleNamespace(
+            text=text, selection=(start, 0), element=object())
+
+    def test_appending_after_a_finished_sentence_adds_one_space(self):
+        join = self._join()
+        self.assertEqual(
+            join(self._snapshot("Hello there."), "Second sentence"), " ")
+
+    def test_continuing_mid_sentence_also_needs_the_space(self):
+        join = self._join()
+        self.assertEqual(join(self._snapshot("I went to the"), "store"), " ")
+
+    def test_empty_field_gets_no_leading_space(self):
+        join = self._join()
+        self.assertEqual(join(self._snapshot(""), "First words"), "")
+
+    def test_existing_trailing_space_is_not_doubled(self):
+        join = self._join()
+        self.assertEqual(join(self._snapshot("Hello there. "), "Next"), "")
+        self.assertEqual(join(self._snapshot("Hello\n"), "Next"), "")
+
+    def test_opening_bracket_or_quote_stays_tight(self):
+        join = self._join()
+        for opener in ("(", "[", "{", "“", "'"):
+            with self.subTest(opener=opener):
+                self.assertEqual(
+                    join(self._snapshot(f"see {opener}"), "inside"), "")
+
+    def test_text_starting_with_attached_punctuation_stays_tight(self):
+        join = self._join()
+        for lead in (",", ".", "!", "?", ")", ":"):
+            with self.subTest(lead=lead):
+                self.assertEqual(
+                    join(self._snapshot("word"), f"{lead} more"), "")
+
+    def test_cursor_in_the_middle_uses_the_character_to_its_left(self):
+        join = self._join()
+        # Cursor after "the ", not at the end of the field.
+        self.assertEqual(join(self._snapshot("the  end", start=4), "quick"), "")
+        self.assertEqual(join(self._snapshot("the end", start=3), "quick"), " ")
+
+    def test_unreadable_or_missing_destination_changes_nothing(self):
+        join = self._join()
+        self.assertEqual(join(None, "words"), "")
+        blind = types.SimpleNamespace(
+            text=None, selection=None, element=object())
+        self.assertEqual(join(blind, "words"), "")
+
+    def test_selection_start_beyond_the_text_is_ignored(self):
+        join = self._join()
+        self.assertEqual(join(self._snapshot("short", start=99), "words"), "")
+
+    def test_replacing_a_selection_looks_before_the_selection(self):
+        join = self._join()
+        replacing = types.SimpleNamespace(
+            text="the cat sat", selection=(4, 3), element=object())
+        self.assertEqual(join(replacing, "dog"), "")
 
 
 if __name__ == "__main__":
