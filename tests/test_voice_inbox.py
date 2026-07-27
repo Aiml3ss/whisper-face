@@ -51,7 +51,9 @@ class VoiceInboxTests(unittest.TestCase):
             ["request:001", "request:002"],
         )
         if os.name != "nt":
-            self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+            if os.name == "posix":
+                self.assertEqual(
+                    self.path.stat().st_mode & 0o777, 0o600)
 
     def test_receipts_are_fixed_shape_and_content_free(self):
         secret = "Please send the unreleased launch plan to Casey"

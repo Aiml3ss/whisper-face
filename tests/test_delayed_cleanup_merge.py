@@ -1,3 +1,4 @@
+import os
 import json
 import sys
 import tempfile
@@ -459,7 +460,9 @@ class DelayedCleanupActivationTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "activation.json"
                 write_activation_receipt(path, receipt)
-                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                if os.name == "posix":
+                    self.assertEqual(
+                        path.stat().st_mode & 0o777, 0o600)
                 self.assertEqual(
                     json.loads(path.read_text(encoding="utf-8")),
                     receipt,

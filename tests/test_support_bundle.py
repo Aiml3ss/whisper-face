@@ -100,7 +100,9 @@ class SupportBundleTests(unittest.TestCase):
             saved = write_support_bundle(destination, snapshot())
 
             self.assertEqual(saved, destination)
-            self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o600)
+            if os.name == "posix":
+                self.assertEqual(
+                    stat.S_IMODE(destination.stat().st_mode), 0o600)
             self.assertEqual(json.loads(destination.read_text())["kind"],
                              BUNDLE_KIND)
 
