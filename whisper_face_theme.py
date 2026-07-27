@@ -35,28 +35,31 @@ class ThemePalette:
     error: Color
 
 
+# Pastel clay: warm cream field, porcelain surfaces, warm green-gray ink.
+# The brand emerald and butter amber stay in the family as soft accents;
+# text-bearing uses swap in the AA inks the window derives from these.
 LIGHT_PALETTE = ThemePalette(
-    bg=_hex_color("#E8FBF0"),
-    surface=_hex_color("#FFFFFF"),
-    ink=_hex_color("#0E2A24"),
-    ink_soft=_hex_color("#3C5C51"),
-    line=_hex_color("#0C221D"),
-    brand=_hex_color("#10B981"),
-    accent=_hex_color("#FBBF24"),
-    teal=_hex_color("#5EEAD4"),
-    error=_hex_color("#FF6C5A"),
+    bg=_hex_color("#F5F1E8"),
+    surface=_hex_color("#FFFDF8"),
+    ink=_hex_color("#33403A"),
+    ink_soft=_hex_color("#5E6C64"),
+    line=_hex_color("#38332A"),
+    brand=_hex_color("#4CC9A2"),
+    accent=_hex_color("#F7C873"),
+    teal=_hex_color("#A2EFDF"),
+    error=_hex_color("#F0907E"),
 )
 
 DARK_PALETTE = ThemePalette(
-    bg=_hex_color("#0A231D"),
-    surface=_hex_color("#123029"),
-    ink=_hex_color("#E8FBF0"),
-    ink_soft=_hex_color("#9FC9BB"),
-    line=_hex_color("#05130F"),
-    brand=_hex_color("#10B981"),
-    accent=_hex_color("#FBBF24"),
-    teal=_hex_color("#5EEAD4"),
-    error=_hex_color("#FF6C5A"),
+    bg=_hex_color("#1E2420"),
+    surface=_hex_color("#2A322C"),
+    ink=_hex_color("#F2EEE4"),
+    ink_soft=_hex_color("#A8B5AC"),
+    line=_hex_color("#141814"),
+    brand=_hex_color("#4CC9A2"),
+    accent=_hex_color("#F7C873"),
+    teal=_hex_color("#A2EFDF"),
+    error=_hex_color("#F0907E"),
 )
 
 # Chibi-clay pastels: every chip color is the old hue relaxed toward cream so
@@ -122,12 +125,13 @@ class SurfaceSpec:
 
 # AppKit and the site translate these geometry tokens into native layers and
 # CSS. Work surfaces remain quiet; only playful objects carry the full sticker
-# offset.
+# offset. Radii sit a step larger than classic macOS so surfaces read as soft
+# clay next to the chibi characters.
 SURFACE_SPECS: Mapping[str, SurfaceSpec] = {
-    "work": SurfaceSpec(14.0, 1.0, 0.0, 0.0),
-    "card": SurfaceSpec(16.0, 1.5, 0.0, 0.0),
-    "playful": SurfaceSpec(18.0, 2.0, 5.0, -5.0),
-    "control": SurfaceSpec(12.0, 1.5, 2.0, -2.0),
+    "work": SurfaceSpec(16.0, 1.0, 0.0, 0.0),
+    "card": SurfaceSpec(18.0, 1.5, 0.0, 0.0),
+    "playful": SurfaceSpec(20.0, 2.0, 5.0, -5.0),
+    "control": SurfaceSpec(14.0, 1.5, 2.0, -2.0),
 }
 
 
@@ -137,6 +141,35 @@ class HudPresentation:
     confidence: str
     accessibility_value: str
     accent: str
+
+
+# The palette's raw emerald and amber fail WCAG AA as text on light
+# surfaces, so text-bearing uses swap in these darkened inks while fills
+# and dark-appearance text keep the shared palette hues. Contrast is
+# enforced by tests against LIGHT_PALETTE.bg and .surface.
+BRAND_TEXT_ON_LIGHT: Color = (0.043, 0.478, 0.341)   # ≈ #0B7A57
+AMBER_TEXT_ON_LIGHT: Color = (0.478, 0.310, 0.0)     # ≈ #7A4F00
+
+
+def relative_luminance(color: Color) -> float:
+    """WCAG 2.x relative luminance of a linear-intent sRGB color."""
+    channels = []
+    for value in color:
+        if value <= 0.03928:
+            channels.append(value / 12.92)
+        else:
+            channels.append(((value + 0.055) / 1.055) ** 2.4)
+    r, g, b = channels
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast_ratio(foreground: Color, background: Color) -> float:
+    """WCAG contrast ratio between two theme colors."""
+    lighter = max(relative_luminance(foreground),
+                  relative_luminance(background))
+    darker = min(relative_luminance(foreground),
+                 relative_luminance(background))
+    return (lighter + 0.05) / (darker + 0.05)
 
 
 def palette_for_appearance(dark: bool) -> ThemePalette:

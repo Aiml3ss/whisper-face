@@ -1943,6 +1943,25 @@ class WhisperFaceThemeTests(unittest.TestCase):
         self.assertGreater(active[0], 1.0)
         self.assertLess(active[1], 1.0)
 
+    def test_every_text_ink_meets_aa_on_its_surfaces(self):
+        from whisper_face_theme import (
+            AMBER_TEXT_ON_LIGHT,
+            BRAND_TEXT_ON_LIGHT,
+            contrast_ratio,
+        )
+
+        for palette in (LIGHT_PALETTE, DARK_PALETTE):
+            for surface in (palette.bg, palette.surface):
+                for ink in (palette.ink, palette.ink_soft):
+                    self.assertGreaterEqual(
+                        contrast_ratio(ink, surface), 4.5,
+                        f"{ink} on {surface}")
+        # The darkened accent inks carry colored text on light surfaces.
+        for ink in (BRAND_TEXT_ON_LIGHT, AMBER_TEXT_ON_LIGHT):
+            for surface in (LIGHT_PALETTE.bg, LIGHT_PALETTE.surface):
+                self.assertGreaterEqual(
+                    contrast_ratio(ink, surface), 4.5, f"{ink} on {surface}")
+
 
 class AcousticKeywordMemoryRuntimeTests(unittest.TestCase):
     @staticmethod

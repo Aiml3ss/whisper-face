@@ -4329,11 +4329,12 @@ if APPKIT_AVAILABLE:
     _TEXT = NSColor.labelColor()
     _SECONDARY = NSColor.secondaryLabelColor()
 
-    # The palette's raw emerald and amber fail WCAG AA as text on light
-    # surfaces, so text-bearing uses swap in these darkened inks while fills
-    # and dark-appearance text keep the shared palette hues.
-    BRAND_TEXT_ON_LIGHT = (0.043, 0.478, 0.341)   # ≈ #0B7A57, 5.3:1 on white
-    AMBER_TEXT_ON_LIGHT = (0.478, 0.310, 0.0)     # ≈ #7A4F00, 6.1:1 on white
+    # AA text inks live beside the palettes so their contrast can be tested
+    # headlessly; see whisper_face_theme.BRAND_TEXT_ON_LIGHT.
+    from whisper_face_theme import (
+        AMBER_TEXT_ON_LIGHT,
+        BRAND_TEXT_ON_LIGHT,
+    )
 
     # Quiet work surfaces per the design language: hairline border, radius 12,
     # no offset shadow. Sticker offsets stay reserved for the playful objects.
