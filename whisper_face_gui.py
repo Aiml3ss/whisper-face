@@ -30,9 +30,36 @@ from whisper_face_theme import (
 APP_NAME = "Whisper Face"
 DEFAULTS_SUITE = "com.whisperface.app"
 SECTIONS = ("Home", "Settings", "Advanced")
-SETTINGS_PANES = ("Personalize", "Privacy")
+# Keys and sounds get their own pane rather than crowding Personalize: at the
+# 880x600 minimum the Personalize pane has room for roughly one more 44pt row,
+# and shrinking the row rhythm or the character card to fit four controls
+# would cost more than the extra segment does.
+SETTINGS_PANES = ("Personalize", "Controls", "Privacy")
 MODE_GUIDE = ("capture", "compose", "edit", "reply", "command", "code")
 TONE_CHOICES = ("auto", "casual", "formal", "code", "verbatim", "default")
+SOUND_THEMES = ("system", "whisper", "silent")
+# macOS virtual key codes for every key that may be bound. Modifier-class and
+# function keys only: binding a letter or digit would swallow ordinary typing
+# in every application, which is worse than the problem the setting solves.
+HOTKEY_KEYCODES = {
+    61: "alt_r", 58: "alt_l",
+    54: "cmd_r", 55: "cmd_l",
+    62: "ctrl_r", 59: "ctrl_l",
+    60: "shift_r", 56: "shift_l",
+    122: "f1", 120: "f2", 99: "f3", 118: "f4", 96: "f5", 97: "f6",
+    98: "f7", 100: "f8", 101: "f9", 109: "f10", 103: "f11", 111: "f12",
+    105: "f13", 107: "f14", 113: "f15", 106: "f16", 64: "f17", 79: "f18",
+    80: "f19", 90: "f20",
+}
+# Which voice-mode modifier a bindable key belongs to, for the picker's
+# warning copy. Kept beside the keycodes because both describe the same
+# vocabulary the runtime owns.
+HOTKEY_MODIFIER_FAMILIES = {
+    "shift_l": "shift", "shift_r": "shift",
+    "cmd_l": "command", "cmd_r": "command",
+    "ctrl_l": "control", "ctrl_r": "control",
+}
+RECENT_DICTATION_LIMIT = 10
 CONSEQUENCE_CATEGORIES = frozenset({
     "name", "number", "currency", "date", "time", "recipient", "contact",
     "url", "path", "command", "action",
@@ -456,26 +483,107 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "issue.fallback.title": "A fallback model needs attention",
         "issue.fallback.detail": "Dictation can continue with a ready engine. Check: {models}.",
         "settings.title": "Settings",
-        "settings.subtitle": "Personal language, appearance, and privacy in one place.",
+        "settings.subtitle": "Personal language, appearance, keys, sound, and privacy in one place.",
         "settings.pane.personalize": "Personalize",
+        "settings.pane.controls": "Controls",
         "settings.pane.privacy": "Privacy",
+        "settings.controls.hotkey": "Capture key",
+        "settings.controls.hotkey.detail": "Hold {hotkey} to dictate",
+        "settings.controls.hotkey.shared": "Hold {hotkey} to dictate · {modes} need the other {family} key",
+        "settings.controls.undo": "Undo key",
+        "settings.controls.undo.detail": "Press {hotkey} to undo the last dictation",
+        "settings.controls.undo.unset": "Not set — undo stays in the menu bar",
+        "settings.controls.sound": "Feedback sounds",
+        "settings.controls.sound.system": "macOS",
+        "settings.controls.sound.whisper": "Whisper Face",
+        "settings.controls.sound.silent": "Silent",
+        "settings.controls.sound.detail.system": "Borrowed macOS system sounds",
+        "settings.controls.sound.detail.whisper": "Short first-party cues for start, finish, and trouble",
+        "settings.controls.sound.detail.silent": "No sound at all",
+        "settings.controls.undo_now": "Undo last dictation",
+        "settings.controls.undo_now.ready": "Restores the destination's exact prior text",
+        "settings.controls.undo_now.none": "Nothing to undo yet",
+        "settings.controls.action.change": "Change…",
+        "settings.controls.action.undo": "Undo",
+        "settings.accessibility.undo.label": "Undo last dictation",
+        "settings.accessibility.undo.help": "Put the destination back the way it was before the last insertion.",
+        "settings.controls.action.preview": "Preview",
+        "settings.dialog.hotkey.title": "Choose your capture key",
+        "settings.dialog.hotkey.message": "Press the key you want to hold while dictating. Modifier keys and function keys only — an ordinary key would swallow your typing everywhere.",
+        "settings.dialog.undo.title": "Choose your undo key",
+        "settings.dialog.undo.message": "Press the key you want to press to undo the last dictation. Modifier keys and function keys only.",
+        "settings.dialog.hotkey.waiting": "Waiting for a key…",
+        "settings.dialog.hotkey.current": "Now bound to {hotkey}",
+        "settings.dialog.hotkey.none": "Nothing bound yet",
+        "settings.dialog.hotkey.captured": "{hotkey}",
+        "settings.dialog.hotkey.rejected": "That key would swallow ordinary typing. Try a modifier key or a function key.",
+        "settings.dialog.hotkey.conflict": "That is already your capture key. Pick a different one.",
+        "settings.dialog.hotkey.shared": "{modes} will need the other {family} key.",
+        "settings.dialog.hotkey.use": "Use This Key",
+        "settings.dialog.hotkey.clear": "Clear",
+        "settings.modifier.shift": "Shift",
+        "settings.modifier.command": "Command",
+        "settings.modifier.control": "Control",
+        "settings.accessibility.hotkey.label": "Capture key",
+        "settings.accessibility.hotkey.help": "Choose which key you hold to dictate.",
+        "settings.accessibility.undo_hotkey.label": "Undo key",
+        "settings.accessibility.undo_hotkey.help": "Choose a key that undoes the last dictation.",
+        "settings.accessibility.sound.label": "Feedback sounds",
+        "settings.accessibility.sound.help": "Choose macOS sounds, the first-party set, or silence.",
+        "settings.accessibility.sound_preview.label": "Preview feedback sound",
+        "settings.accessibility.sound_preview.help": "Play the finish cue for the selected sound setting.",
+        "settings.accessibility.capture_field.label": "Key capture",
+        "settings.accessibility.capture_field.help": "Press a modifier key or a function key to bind it.",
+        "settings.privacy.recent": "Recent dictations",
+        "settings.privacy.recent.detail": "Off. Nothing is listed until you turn this on.",
+        "settings.privacy.recent.on": "On · last {count} kept locally, text hidden until you reveal it",
+        "settings.privacy.recent.browse": "Browse…",
+        "settings.privacy.recent.browse.help": "List recent dictations by time, length, and app.",
+        "settings.accessibility.recent.label": "Recent dictations",
+        "settings.accessibility.recent.help": "Show recent dictations so they can be revealed or inserted again.",
+        "settings.dialog.recent.title": "Recent dictations",
+        "settings.dialog.recent.message": "Metadata only. Reveal a dictation to see its words, or insert it again through the usual safe insertion.",
+        "settings.dialog.recent.empty": "Nothing recorded yet.",
+        "settings.dialog.recent.row": "{when} · {words} · {app}",
+        "settings.dialog.recent.words": "{count} words",
+        "settings.dialog.recent.word": "1 word",
+        "recent.age.now": "just now",
+        "recent.age.minutes": "{count} min ago",
+        "recent.age.hours": "{count} hr ago",
+        "recent.age.days": "{count}d ago",
+        "recent.app.unknown": "unknown app",
+        "settings.dialog.recent.reveal": "Reveal Text…",
+        "settings.dialog.recent.insert": "Insert Again",
+        "settings.dialog.recent.revealed.title": "Recent dictation",
+        "settings.dialog.recent.revealed.gone": "That dictation is no longer in the local log.",
+        "settings.accessibility.recent_list.label": "Recent dictations list",
+        "settings.accessibility.recent_list.help": "Choose one recent dictation to reveal or insert.",
+        "settings.notice.hotkey": "Capture key is now {hotkey}.",
+        "settings.notice.undo_hotkey": "Undo key is now {hotkey}.",
+        "settings.notice.undo_hotkey.cleared": "Undo key cleared.",
+        "settings.notice.hotkey.rejected": "That key cannot be a shortcut.",
+        "settings.notice.undo.done": "Last dictation undone.",
+        "settings.notice.undo.refused": "Undo declined: {reason}.",
+        "settings.notice.recent.inserted": "Inserted again.",
+        "settings.notice.recent.refused": "Insertion declined: {reason}.",
         "settings.mode.capture.name": "Capture",
-        "settings.mode.capture.shortcut": "Right Option",
+        "settings.hotkey.default": "Right Option",
+        "settings.mode.capture.shortcut": "{hotkey}",
         "settings.mode.capture.detail": "Faithful dictation",
         "settings.mode.compose.name": "Compose",
-        "settings.mode.compose.shortcut": "Shift + Right Option",
+        "settings.mode.compose.shortcut": "Shift + {hotkey}",
         "settings.mode.compose.detail": "Compose and tighten",
         "settings.mode.edit.name": "Edit",
-        "settings.mode.edit.shortcut": "Command + Right Option",
+        "settings.mode.edit.shortcut": "Command + {hotkey}",
         "settings.mode.edit.detail": "Edit selected text",
         "settings.mode.reply.name": "Reply",
-        "settings.mode.reply.shortcut": "Control + Right Option",
+        "settings.mode.reply.shortcut": "Control + {hotkey}",
         "settings.mode.reply.detail": "Draft a direct reply",
         "settings.mode.command.name": "Command",
-        "settings.mode.command.shortcut": "Command + Control + Right Option",
+        "settings.mode.command.shortcut": "Command + Control + {hotkey}",
         "settings.mode.command.detail": "Editing commands",
         "settings.mode.code.name": "Code",
-        "settings.mode.code.shortcut": "Shift + Control + Right Option",
+        "settings.mode.code.shortcut": "Shift + Control + {hotkey}",
         "settings.mode.code.detail": "Technical dictation",
         "settings.personalize.tones": "App tones",
         "settings.personalize.tones.detail": "{count} recent or configured apps",
@@ -492,12 +600,12 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.personalize.keywords": "Pronunciation keywords",
         "settings.personalize.keywords.detail": "Open to inspect correction-backed evidence",
         "settings.personalize.modes": "Voice modes",
-        "settings.personalize.modes.detail": "Six fixed Right Option shortcuts choose capture behavior",
+        "settings.personalize.modes.detail": "Six {hotkey} shortcuts choose capture behavior",
         "settings.dialog.modes.title": "Voice modes",
-        "settings.dialog.modes.message": "Hold Right Option with a modifier to choose a mode. Shortcuts are fixed so capture behavior stays predictable and safe.",
+        "settings.dialog.modes.message": "Hold {hotkey} with a modifier to choose a mode. The modifier for each mode is fixed so capture behavior stays predictable and safe.",
         "settings.dialog.modes.row": "{name} · {shortcut}\n    {detail}",
         "settings.accessibility.modes.label": "Voice mode shortcuts",
-        "settings.accessibility.modes.help": "View the six fixed voice mode shortcuts.",
+        "settings.accessibility.modes.help": "View the six voice mode shortcuts.",
         "settings.accessibility.modes_summary.label": "Voice modes summary",
         "settings.action.view": "View",
         "settings.action.edit": "Edit",
@@ -596,12 +704,17 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.face.pig": "Pig",
         "settings.face.panda": "Panda",
         "settings.face.tiger": "Tiger",
+        "settings.face.frog": "Frog",
+        "settings.face.rabbit": "Rabbit",
+        "settings.face.hedgehog": "Hedgehog",
+        "settings.face.penguin": "Penguin",
         "settings.state.enabled": "Enabled",
+        "settings.state.disabled": "Off",
         "settings.state.local_processing": "Local processing",
         "settings.accessibility.sections.label": "Settings sections",
         "settings.accessibility.sections.help": "Use arrow keys to move between Whisper Face settings sections.",
         "settings.accessibility.category.label": "Settings category",
-        "settings.accessibility.category.help": "Choose personalization or privacy settings.",
+        "settings.accessibility.category.help": "Choose personalization, control, or privacy settings.",
         "settings.accessibility.edit.help": "Edit {setting}.",
         "settings.accessibility.forget.help": "Inspect or forget {setting}.",
         "settings.accessibility.face.label": "Whisper Face companion",
@@ -622,6 +735,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.accessibility.vocabulary_summary.label": "Vocabulary summary",
         "settings.accessibility.corrections_summary.label": "Learned corrections summary",
         "settings.accessibility.keywords_summary.label": "Pronunciation keyword evidence",
+        "settings.accessibility.hotkey_summary.label": "Capture key summary",
+        "settings.accessibility.undo_hotkey_summary.label": "Undo key summary",
+        "settings.accessibility.undo_summary.label": "Undo availability",
         "settings.notice.loaded": "Settings loaded",
         "settings.notice.tone_saved": "App tone saved",
         "settings.notice.snippet_saved": "Snippet saved",
@@ -783,6 +899,7 @@ def localized_string(key: str, *, locale: str = "en", **values: Any) -> str:
 FACES = (
     "parrot", "fox", "owl", "cat", "bear",
     "dog", "wolf", "pig", "panda", "tiger",
+    "frog", "rabbit", "hedgehog", "penguin",
 )
 @dataclass(frozen=True)
 class NativeAppKitSmokeContract:
@@ -919,6 +1036,30 @@ class GUIActions:
     inspect_result_evidence: Callable[[], Mapping[str, Any]] = lambda: {}
     settings_snapshot: Callable[[], Mapping[str, Any]] = lambda: {}
     set_face: Callable[[str], None] = _noop
+    # Key binding lives in the runtime: it owns the preference file and the
+    # listener. The window captures a key, asks the runtime to describe it,
+    # and shows whatever verdict comes back — there is no second copy of the
+    # guard rules here.
+    describe_hotkey: Callable[..., Mapping[str, Any]] = (
+        lambda _name, **_kwargs: {
+            "accepted": False, "reason": "unsupported_key",
+            "name": "", "label": "", "shared_modes": ()})
+    set_hotkey: Callable[[str], Mapping[str, Any]] = (
+        lambda _name: {"accepted": False, "reason": "unsupported_key",
+                       "name": "", "label": "", "shared_modes": ()})
+    set_undo_hotkey: Callable[[str], Mapping[str, Any]] = (
+        lambda _name: {"accepted": False, "reason": "unsupported_key",
+                       "name": "", "label": "", "shared_modes": ()})
+    set_sound_theme: Callable[[str], str] = lambda _name: "system"
+    preview_sound: Callable[[str], bool] = lambda _cue: False
+    set_recent_dictations: Callable[[bool], bool] = lambda _enabled: False
+    recent_dictations: Callable[[], Sequence[Mapping[str, Any]]] = lambda: ()
+    reveal_recent_dictation: Callable[[str], str | None] = (
+        lambda _entry_id: None)
+    insert_recent_dictation: Callable[[str], Mapping[str, Any]] = (
+        lambda _entry_id: {"inserted": False, "reason": "unavailable"})
+    undo_last_dictation: Callable[[], Mapping[str, Any]] = (
+        lambda: {"undone": False, "reason": "nothing_to_undo"})
     set_flight_recorder: Callable[[bool], None] = _noop
     set_acoustic_time_machine: Callable[[bool], None] = _noop
     set_selective_relisten: Callable[[bool], None] = _noop
@@ -1430,7 +1571,14 @@ class GUIState:
     models: tuple[ModelStatus, ...] = field(default_factory=tuple)
     model_wallet_advisory: str = localized_string(
         "models.wallet.unavailable")
-    hotkey_label: str = localized_string("settings.mode.capture.shortcut")
+    hotkey_label: str = localized_string("settings.hotkey.default")
+    hotkey: str = "alt_r"
+    hotkey_shared_modes: tuple[str, ...] = field(default_factory=tuple)
+    undo_hotkey: str = ""
+    undo_hotkey_label: str = ""
+    undo_available: bool = False
+    sound_theme: str = "system"
+    recent_dictations: bool = False
     prefers_reduced_motion: bool = False
     onboarding_steps: tuple[OnboardingStep, ...] = field(default_factory=tuple)
     onboarding_complete: bool = False
@@ -1439,7 +1587,7 @@ class GUIState:
     status_title: str = localized_string("overview.status.ready.title")
     status_detail: str = localized_string(
         "overview.status.ready.detail", hotkey=localized_string(
-            "settings.mode.capture.shortcut"))
+            "settings.hotkey.default"))
     degraded_issues: tuple[DegradedIssue, ...] = field(default_factory=tuple)
     last_result: ResultInspection = field(default_factory=ResultInspection)
     verification: str = localized_string("diagnostics.verification.not_run")
@@ -1482,6 +1630,94 @@ def _support_mode(value: object) -> str:
     return normalized if normalized in {
         "capture", "compose", "edit", "reply", "command", "code",
     } else "unknown"
+
+
+def hotkey_name_for_keycode(keycode: object) -> str:
+    """Canonical name for a captured macOS key, or "" when it is unbindable.
+
+    Returning "" is the guard: an ordinary letter, digit, space, or return
+    never becomes a shortcut, because holding one of those to dictate would
+    swallow typing in every application.
+    """
+    try:
+        code = int(keycode)
+    except (TypeError, ValueError):
+        return ""
+    return HOTKEY_KEYCODES.get(code, "")
+
+
+def hotkey_row_detail(state: GUIState, *, locale: str = "en") -> str:
+    """One line describing the capture key, including any mode it shares.
+
+    The six voice modes are modifier + capture key. Binding a Shift, Command,
+    or Control key means the modes that need that modifier now need the key on
+    the other side of the keyboard. That is a real consequence, so the picker
+    states it rather than letting a mode quietly stop working.
+    """
+    shared = tuple(
+        mode for mode in state.hotkey_shared_modes if mode in MODE_GUIDE)
+    if not shared:
+        return localized_string(
+            "settings.controls.hotkey.detail", locale=locale,
+            hotkey=state.hotkey_label)
+    family = HOTKEY_MODIFIER_FAMILIES.get(state.hotkey, "")
+    return localized_string(
+        "settings.controls.hotkey.shared", locale=locale,
+        hotkey=state.hotkey_label,
+        modes=", ".join(
+            localized_string(f"settings.mode.{mode}.name", locale=locale)
+            for mode in shared),
+        family=localized_string(
+            f"settings.modifier.{family}", locale=locale) if family else "")
+
+
+def hotkey_shared_mode_note(shared: Sequence[str], name: str, *,
+                            locale: str = "en") -> str:
+    """The same warning, phrased for inside the picker dialog."""
+    modes = tuple(mode for mode in shared if mode in MODE_GUIDE)
+    family = HOTKEY_MODIFIER_FAMILIES.get(name, "")
+    if not modes or not family:
+        return ""
+    return localized_string(
+        "settings.dialog.hotkey.shared", locale=locale,
+        modes=", ".join(
+            localized_string(f"settings.mode.{mode}.name", locale=locale)
+            for mode in modes),
+        family=localized_string(f"settings.modifier.{family}", locale=locale))
+
+
+def recent_dictation_row(entry: Mapping[str, Any], *,
+                         locale: str = "en") -> str:
+    """Render one browser row from metadata alone — never from its text."""
+    words = entry.get("words")
+    words = words if isinstance(words, int) and not isinstance(words, bool) \
+        else 0
+    words = max(0, words)
+    seconds = entry.get("age_seconds")
+    try:
+        seconds = float(seconds)
+    except (TypeError, ValueError):
+        seconds = 0.0
+    if not math.isfinite(seconds) or seconds < 60:
+        when = localized_string("recent.age.now", locale=locale)
+    elif seconds < 3600:
+        when = localized_string(
+            "recent.age.minutes", locale=locale, count=int(seconds // 60))
+    elif seconds < 86400:
+        when = localized_string(
+            "recent.age.hours", locale=locale, count=int(seconds // 3600))
+    else:
+        when = localized_string(
+            "recent.age.days", locale=locale, count=int(seconds // 86400))
+    app = entry.get("app")
+    return localized_string(
+        "settings.dialog.recent.row", locale=locale, when=when,
+        words=(localized_string("settings.dialog.recent.word", locale=locale)
+               if words == 1 else localized_string(
+                   "settings.dialog.recent.words", locale=locale,
+                   count=words)),
+        app=str(app) if isinstance(app, str) and app else localized_string(
+            "recent.app.unknown", locale=locale))
 
 
 def support_snapshot_text(state: GUIState) -> str:
@@ -2884,7 +3120,7 @@ def normalize_snapshot(
         source.get("model_wallet_shadow"), locale=locale)
     hotkey_label = _clean_text(
         source.get("hotkey_label"), localized_string(
-            "settings.mode.capture.shortcut", locale=locale))
+            "settings.hotkey.default", locale=locale))
     successful_dictation = (
         source.get("first_dictation_complete") is True
         or (last_word_count is not None and last_word_count > 0))
@@ -2961,6 +3197,19 @@ def normalize_snapshot(
         models=models,
         model_wallet_advisory=model_wallet_advisory,
         hotkey_label=hotkey_label,
+        hotkey=_clean_text(source.get("hotkey"), "alt_r"),
+        # Modes whose modifier the bound capture key also presses. Surfaced
+        # so the picker can say so instead of a mode quietly not working.
+        hotkey_shared_modes=tuple(
+            str(mode) for mode in (source.get("hotkey_shared_modes") or ())
+            if str(mode) in MODE_GUIDE),
+        undo_hotkey=_clean_text(source.get("undo_hotkey"), ""),
+        undo_hotkey_label=_clean_text(source.get("undo_hotkey_label"), ""),
+        undo_available=source.get("undo_available") is True,
+        sound_theme=(_clean_text(source.get("sounds"), "system")
+                     if _clean_text(source.get("sounds"), "system")
+                     in SOUND_THEMES else "system"),
+        recent_dictations=source.get("recent_dictations") is True,
         prefers_reduced_motion=(
             source.get("prefers_reduced_motion") is True),
         onboarding_steps=onboarding_steps,
@@ -3352,6 +3601,179 @@ class WhisperFaceViewModel:
                 self.state, notice=self.localized(
                     "operation.face.change_failed", error=error),
                 notice_level="error")
+        return self.state
+
+    def describe_hotkey(self, name: str, *,
+                        allow_unbound: bool = False) -> Mapping[str, Any]:
+        """Ask the runtime what a captured key means. Never decides itself."""
+        try:
+            verdict = self.actions.describe_hotkey(
+                name, allow_unbound=allow_unbound)
+        except Exception:
+            verdict = None
+        if not isinstance(verdict, Mapping):
+            return {"accepted": False, "reason": "unsupported_key",
+                    "name": "", "label": "", "shared_modes": ()}
+        return verdict
+
+    def choose_hotkey(self, name: str) -> GUIState:
+        """Bind the capture key, or report exactly why the key was refused."""
+        try:
+            verdict = self.actions.set_hotkey(str(name))
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.face.change_failed", error=error),
+                notice_level="error")
+            return self.state
+        if not isinstance(verdict, Mapping) or not verdict.get("accepted"):
+            self.state = replace(
+                self.state,
+                notice=self.localized("settings.notice.hotkey.rejected"),
+                notice_level="error")
+            return self.state
+        label = str(verdict.get("label") or "")
+        # Re-read the runtime first, then state the outcome: refresh rebuilds
+        # state from the snapshot and would otherwise drop the notice.
+        self.refresh()
+        self.state = replace(
+            self.state,
+            hotkey=str(verdict.get("name") or self.state.hotkey),
+            hotkey_label=label or self.state.hotkey_label,
+            hotkey_shared_modes=tuple(
+                str(mode) for mode in (verdict.get("shared_modes") or ())),
+            notice=self.localized("settings.notice.hotkey", hotkey=label),
+            notice_level="success")
+        return self.state
+
+    def choose_undo_hotkey(self, name: str) -> GUIState:
+        """Bind (or clear) the undo key through the same guard rules."""
+        try:
+            verdict = self.actions.set_undo_hotkey(str(name))
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.face.change_failed", error=error),
+                notice_level="error")
+            return self.state
+        if not isinstance(verdict, Mapping) or not verdict.get("accepted"):
+            self.state = replace(
+                self.state,
+                notice=self.localized("settings.notice.hotkey.rejected"),
+                notice_level="error")
+            return self.state
+        label = str(verdict.get("label") or "")
+        self.refresh()
+        self.state = replace(
+            self.state,
+            undo_hotkey=str(verdict.get("name") or ""),
+            undo_hotkey_label=label,
+            notice=(self.localized("settings.notice.undo_hotkey",
+                                   hotkey=label) if label
+                    else self.localized("settings.notice.undo_hotkey.cleared")),
+            notice_level="success")
+        return self.state
+
+    def choose_sound_theme(self, theme: str) -> GUIState:
+        desired = str(theme).strip().casefold()
+        if desired not in SOUND_THEMES:
+            raise ValueError(self.localized(
+                "validation.face.unsupported", face=theme))
+        try:
+            applied = self.actions.set_sound_theme(desired)
+            self.state = replace(
+                self.state,
+                sound_theme=(applied if applied in SOUND_THEMES else desired),
+                notice="", notice_level="info")
+            return self.refresh()
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.face.change_failed", error=error),
+                notice_level="error")
+        return self.state
+
+    def preview_sound(self) -> bool:
+        """Play the finish cue so a theme can be heard before it is kept."""
+        try:
+            return bool(self.actions.preview_sound("Pop"))
+        except Exception:
+            return False
+
+    def set_recent_dictations(self, enabled: bool) -> GUIState:
+        desired = bool(enabled)
+        try:
+            self.actions.set_recent_dictations(desired)
+            self.state = replace(
+                self.state, recent_dictations=desired, notice="",
+                notice_level="info")
+            return self.refresh()
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.flight.update_failed", error=error),
+                notice_level="error")
+        return self.state
+
+    def recent_dictations(self) -> tuple[Mapping[str, Any], ...]:
+        """Bounded metadata for the browser; never carries transcript text."""
+        if not self.state.recent_dictations:
+            return ()
+        try:
+            entries = self.actions.recent_dictations()
+        except Exception:
+            return ()
+        return tuple(
+            entry for entry in (entries or ()) if isinstance(entry, Mapping))
+
+    def reveal_recent_dictation(self, entry_id: str) -> str:
+        """Return one entry's words, only because the user asked for them."""
+        try:
+            revealed = self.actions.reveal_recent_dictation(str(entry_id))
+        except Exception:
+            revealed = None
+        return revealed if isinstance(revealed, str) else ""
+
+    def insert_recent_dictation(self, entry_id: str) -> GUIState:
+        try:
+            result = self.actions.insert_recent_dictation(str(entry_id))
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.face.change_failed", error=error),
+                notice_level="error")
+            return self.state
+        inserted = isinstance(result, Mapping) and result.get("inserted")
+        reason = str((result or {}).get("reason") or "unavailable")
+        self.refresh()
+        self.state = replace(
+            self.state,
+            notice=(self.localized("settings.notice.recent.inserted")
+                    if inserted else
+                    self.localized("settings.notice.recent.refused",
+                                   reason=reason)),
+            notice_level="success" if inserted else "error")
+        return self.state
+
+    def undo_last_dictation(self) -> GUIState:
+        """Ask the runtime to restore the destination's prior text."""
+        try:
+            result = self.actions.undo_last_dictation()
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.face.change_failed", error=error),
+                notice_level="error")
+            return self.state
+        undone = isinstance(result, Mapping) and result.get("undone")
+        reason = str((result or {}).get("reason") or "nothing_to_undo")
+        self.refresh()
+        self.state = replace(
+            self.state,
+            notice=(self.localized("settings.notice.undo.done") if undone
+                    else self.localized("settings.notice.undo.refused",
+                                        reason=reason)),
+            notice_level="success" if undone else "error")
         return self.state
 
     def set_flight_recorder(self, enabled: bool) -> GUIState:
@@ -4251,6 +4673,9 @@ try:  # The view-model above remains usable in headless test environments.
         NSControlStateValueOn,
         NSAppearanceNameAqua,
         NSAppearanceNameDarkAqua,
+        NSEvent,
+        NSEventMaskFlagsChanged,
+        NSEventMaskKeyDown,
         NSEventModifierFlagCommand,
         NSFont,
         NSFontAttributeName,
@@ -4602,11 +5027,31 @@ if APPKIT_AVAILABLE:
             self.target = target
             self.pick_action = action
             chip_side = 44.0
-            gap = (self.frame().size.width -
-                   chip_side * len(faces)) / (len(faces) + 1)
+            # One row until the chips would crowd. Fourteen across a 704pt
+            # card leaves 5.9pt between them; the roster is meant to grow, so
+            # wrap instead of letting the breathing room collapse.
+            width = self.frame().size.width
+            per_row = len(faces)
+            while per_row > 1 and (
+                    width - chip_side * per_row) / (per_row + 1) < 14.0:
+                per_row = -(-len(faces) // (-(-len(faces) // per_row) + 1))
+            rows = -(-len(faces) // per_row)
+            # Cap the gap so a wrapped row keeps the same rhythm the
+            # ten-face row had, rather than scattering across the card.
+            gap = min((width - chip_side * per_row) / (per_row + 1),
+                      24.0)
+            row_gap = 8.0
+            top = self.frame().size.height - chip_side - 4.0
             for index, face in enumerate(faces):
+                row, column = divmod(index, per_row)
+                # A short last row centers rather than hanging left.
+                in_row = min(per_row, len(faces) - row * per_row)
+                inset = (width - (in_row * chip_side
+                                  + (in_row - 1) * gap)) / 2.0
                 frame = NSMakeRect(
-                    gap + index * (chip_side + gap), 4, chip_side, chip_side)
+                    inset + column * (chip_side + gap),
+                    top - row * (chip_side + row_gap),
+                    chip_side, chip_side)
                 chip = JellyButton.alloc().initWithFrame_(frame)
                 chip.setTitle_("")
                 chip.setBordered_(False)
@@ -4618,7 +5063,8 @@ if APPKIT_AVAILABLE:
                 # A view, not a button image: NSImageView keeps the vector
                 # art crisp where the button cell would rasterize it small.
                 art = NSImageView.alloc().initWithFrame_(NSMakeRect(
-                    frame.origin.x + 4, 8, chip_side - 8, chip_side - 8))
+                    frame.origin.x + 4, frame.origin.y + 4,
+                    chip_side - 8, chip_side - 8))
                 art.setImageScaling_(NSImageScaleProportionallyUpOrDown)
                 art.setEditable_(False)
                 image = images[index]
@@ -6030,8 +6476,11 @@ if APPKIT_AVAILABLE:
             header = self._page_header(
                 page, self._l("settings.title"),
                 subtitle=self._l("settings.subtitle"))
+            # Three panes need more room than two did: at 200pt the widest
+            # label truncated to "Personal…", which is not a word.
+            pane_width = 96.0 * len(SETTINGS_PANES)
             pane_control = JellySegmentedControl.alloc().initWithFrame_(
-                NSMakeRect(width - 200, 28, 200, 24))
+                NSMakeRect(width - pane_width, 28, pane_width, 24))
             pane_control.setSegmentCount_(len(SETTINGS_PANES))
             pane_control.setSegmentStyle_(NSSegmentStyleRounded)
             pane_control.setControlSize_(1)
@@ -6039,7 +6488,7 @@ if APPKIT_AVAILABLE:
                 pane_control.setLabel_forSegment_(self._l(
                     f"settings.pane.{pane.casefold()}"), index)
                 pane_control.setWidth_forSegment_(
-                    200.0 / len(SETTINGS_PANES), index)
+                    pane_width / len(SETTINGS_PANES), index)
             pane_control.setTarget_(self)
             pane_control.setAction_("settingsPaneChanged:")
             pane_control.setAutoresizingMask_(NSViewMinXMargin)
@@ -6068,14 +6517,17 @@ if APPKIT_AVAILABLE:
                 panes[name] = pane
 
             personalize = panes["Personalize"]
-            face_card = _card(NSMakeRect(0, 0, width, 64))
+            face_rows = -(-len(FACES) // 7) if len(FACES) > 10 else 1
+            face_card_height = 64.0 + (face_rows - 1) * 52.0
+            face_card = _card(NSMakeRect(0, 0, width, face_card_height))
             self._register("card", face_card)
             # Ten colored chibi chips instead of emoji segments; each chip
             # shows the real character art, and the selected chip wears a
             # ring in its own face color. Animal names stay available
             # through tooltips and the menu-bar "Choose Face" submenu.
             picker = ArtFacePicker.alloc().initWithFrame_(
-                NSMakeRect(8.0, 6, width - 16.0, 52))
+                NSMakeRect(8.0, 6, width - 16.0,
+                           face_card_height - 12.0))
             picker.populate(
                 FACES,
                 [self._face_image(face, talk=False) for face in FACES],
@@ -6088,7 +6540,8 @@ if APPKIT_AVAILABLE:
                 self._l("settings.accessibility.face.label"),
                 self._l("settings.accessibility.face.help"))
             face_card.addSubview_(picker)
-            self._stack(personalize, face_card, height=64)
+            self._stack(personalize, face_card,
+                        height=face_card_height)
 
             personalize_key_views: list[Any] = list(picker.chips)
             rows = (
@@ -6131,6 +6584,88 @@ if APPKIT_AVAILABLE:
             self._stack(personalize, group, below=face_card, gap=16,
                         height=44.0 * len(rows))
 
+            # ---- Controls: which keys drive dictation, and what it sounds
+            # like. Both were fixed constants until now; Option is the macOS
+            # accent key, and there was no way at all to mute the app.
+            controls = panes["Controls"]
+            control_rows = (
+                ("hotkey", "settings.controls.hotkey", "changeHotkey:",
+                 "settings.controls.action.change",
+                 "settings.accessibility.hotkey.label",
+                 "settings.accessibility.hotkey.help"),
+                ("undo_hotkey", "settings.controls.undo",
+                 "changeUndoHotkey:", "settings.controls.action.change",
+                 "settings.accessibility.undo_hotkey.label",
+                 "settings.accessibility.undo_hotkey.help"),
+                # The same action the menu bar and the bound key run. It is
+                # here as well so undo is discoverable before anyone knows a
+                # key exists for it.
+                ("undo", "settings.controls.undo_now", "undoLastDictation:",
+                 "settings.controls.action.undo",
+                 "settings.accessibility.undo.label",
+                 "settings.accessibility.undo.help"),
+            )
+            controls_group = _card(
+                NSMakeRect(0, 0, width, 44.0 * (len(control_rows) + 1)))
+            self._register("card", controls_group)
+            control_key_views: list[Any] = []
+            row_count = len(control_rows) + 1
+            for index, (key, title_key, selector, action_key, label_key,
+                        help_key) in enumerate(control_rows):
+                _title, detail, y = self._group_row(
+                    controls_group, index=index, count=row_count,
+                    row_height=44, title=self._l(title_key))
+                button = _button(
+                    self._l(action_key),
+                    NSMakeRect(width - 16 - 94, y + 8, 94, 28),
+                    self, selector,
+                    help_text=self._l(help_key))
+                button.setAutoresizingMask_(NSViewMinXMargin)
+                _accessible(button, self._l(label_key), self._l(help_key))
+                controls_group.addSubview_(button)
+                control_key_views.append(button)
+                self.dynamic[f"settings_{key}_detail"] = detail
+                self.dynamic[f"settings_{key}_button"] = button
+
+            # Sound is a three-way choice, so it earns a segmented control
+            # rather than a switch: "off" is one of three answers, not the
+            # absence of an answer.
+            _sound_title, sound_detail, sound_y = self._group_row(
+                controls_group, index=len(control_rows), count=row_count,
+                row_height=44, title=self._l("settings.controls.sound"),
+                detail_width=330)
+            sound_control = JellySegmentedControl.alloc().initWithFrame_(
+                NSMakeRect(width - 16 - 260, sound_y + 10, 260, 24))
+            sound_control.setSegmentCount_(len(SOUND_THEMES))
+            sound_control.setSegmentStyle_(NSSegmentStyleRounded)
+            sound_control.setControlSize_(1)
+            for index, theme in enumerate(SOUND_THEMES):
+                sound_control.setLabel_forSegment_(
+                    self._l(f"settings.controls.sound.{theme}"), index)
+                sound_control.setWidth_forSegment_(260.0 / len(SOUND_THEMES),
+                                                   index)
+            sound_control.setTarget_(self)
+            sound_control.setAction_("soundThemeChanged:")
+            sound_control.setAutoresizingMask_(NSViewMinXMargin)
+            _accessible(
+                sound_control,
+                self._l("settings.accessibility.sound.label"),
+                self._l("settings.accessibility.sound.help"))
+            controls_group.addSubview_(sound_control)
+            sound_preview = _button(
+                self._l("settings.controls.action.preview"),
+                NSMakeRect(width - 16 - 260 - 8 - 84, sound_y + 8, 84, 28),
+                self, "previewSound:",
+                help_text=self._l("settings.accessibility.sound_preview.help"))
+            sound_preview.setAutoresizingMask_(NSViewMinXMargin)
+            _accessible(
+                sound_preview,
+                self._l("settings.accessibility.sound_preview.label"),
+                self._l("settings.accessibility.sound_preview.help"))
+            controls_group.addSubview_(sound_preview)
+            control_key_views.extend([sound_preview, sound_control])
+            self._stack(controls, controls_group, height=44.0 * row_count)
+
             privacy = panes["Privacy"]
             privacy_rows = (
                 ("voice_objects", "settings.privacy.voice_objects",
@@ -6144,6 +6679,12 @@ if APPKIT_AVAILABLE:
                  "acousticTimeMachineChanged:",
                  "settings.accessibility.acoustic.label",
                  "settings.accessibility.acoustic.help"),
+                # Off by default, and privacy-consistent with the Voice
+                # Inbox: the list is metadata until an explicit reveal.
+                ("recent", "settings.privacy.recent",
+                 "recentDictationsChanged:",
+                 "settings.accessibility.recent.label",
+                 "settings.accessibility.recent.help"),
             )
             privacy_group = _card(
                 NSMakeRect(0, 0, width, 44.0 * len(privacy_rows)))
@@ -6176,6 +6717,19 @@ if APPKIT_AVAILABLE:
                         self._l(
                             "settings.privacy.voice_objects.inspect.help"))
                     privacy_group.addSubview_(inspect_voice_objects)
+                if key == "recent":
+                    browse_recent = _button(
+                        self._l("settings.privacy.recent.browse"),
+                        NSMakeRect(width - 16 - 40 - 16 - 92, y + 8, 92, 28),
+                        self, "browseRecentDictations:",
+                        help_text=self._l(
+                            "settings.privacy.recent.browse.help"))
+                    browse_recent.setAutoresizingMask_(NSViewMinXMargin)
+                    _accessible(
+                        browse_recent,
+                        self._l("settings.accessibility.recent_list.label"),
+                        self._l("settings.privacy.recent.browse.help"))
+                    privacy_group.addSubview_(browse_recent)
             voice_objects, voice_object_status = privacy_controls[
                 "voice_objects"]
             flight, flight_detail = privacy_controls["flight"]
@@ -6184,6 +6738,9 @@ if APPKIT_AVAILABLE:
             acoustic, acoustic_detail = privacy_controls["acoustic"]
             acoustic_detail.setStringValue_(
                 self._l("settings.privacy.acoustic.detail"))
+            recent, recent_detail = privacy_controls["recent"]
+            recent_detail.setStringValue_(
+                self._l("settings.privacy.recent.detail"))
             self._stack(privacy, privacy_group,
                         height=44.0 * len(privacy_rows))
 
@@ -6192,10 +6749,17 @@ if APPKIT_AVAILABLE:
                 settings_panes=panes,
                 settings_key_views={
                     "Personalize": tuple(personalize_key_views),
+                    "Controls": tuple(control_key_views),
                     "Privacy": (
                         voice_objects, inspect_voice_objects, flight,
-                        acoustic),
+                        acoustic, browse_recent, recent),
                 },
+                sound_theme_control=sound_control,
+                sound_preview_button=sound_preview,
+                sound_theme_detail=sound_detail,
+                recent_dictations_toggle=recent,
+                recent_dictations_detail=recent_detail,
+                recent_dictations_browse=browse_recent,
                 face_picker=picker,
                 flight_toggle=flight,
                 acoustic_time_machine_toggle=acoustic,
@@ -6834,14 +7398,59 @@ if APPKIT_AVAILABLE:
                     "settings.personalize.corrections.empty"),
                 "keywords": self._l(
                     "settings.personalize.keywords.detail"),
+                # Every reference to the shortcut reads the key that is
+                # actually bound, not the key that used to be hardcoded.
                 "modes": self._l(
-                    "settings.personalize.modes.detail"),
+                    "settings.personalize.modes.detail",
+                    hotkey=state.hotkey_label),
+                "hotkey": hotkey_row_detail(state, locale=self.view_model.locale),
+                "undo_hotkey": (
+                    self._l("settings.controls.undo.detail",
+                            hotkey=state.undo_hotkey_label)
+                    if state.undo_hotkey_label
+                    else self._l("settings.controls.undo.unset")),
+                "undo": (self._l("settings.controls.undo_now.ready")
+                         if state.undo_available
+                         else self._l("settings.controls.undo_now.none")),
             }
             for key, value in setting_summaries.items():
                 set_accessible_text(
                     self.dynamic[f"settings_{key}_detail"], value,
                     label=self._l(
                         f"settings.accessibility.{key}_summary.label"))
+            set_accessible_text(
+                self.dynamic["sound_theme_detail"],
+                self._l(f"settings.controls.sound.detail.{state.sound_theme}"),
+                label=self._l("settings.accessibility.sound.label"))
+            self.dynamic["sound_theme_control"].setSelectedSegment_(
+                SOUND_THEMES.index(state.sound_theme))
+            sync_accessibility(
+                self.dynamic["sound_theme_control"],
+                self._l(f"settings.controls.sound.{state.sound_theme}"),
+                label=self._l("settings.accessibility.sound.label"))
+            # Nothing to preview when the answer is silence.
+            self.dynamic["sound_preview_button"].setEnabled_(
+                state.sound_theme != "silent")
+            self.dynamic["recent_dictations_toggle"].setState_(
+                NSControlStateValueOn if state.recent_dictations
+                else NSControlStateValueOff)
+            set_accessible_text(
+                self.dynamic["recent_dictations_detail"],
+                self._l("settings.privacy.recent.on",
+                        count=RECENT_DICTATION_LIMIT)
+                if state.recent_dictations
+                else self._l("settings.privacy.recent.detail"),
+                label=self._l("settings.accessibility.recent.label"))
+            sync_accessibility(
+                self.dynamic["recent_dictations_toggle"],
+                self._l("settings.state.enabled") if state.recent_dictations
+                else self._l("settings.state.disabled"),
+                label=self._l("settings.accessibility.recent.label"))
+            self.dynamic["recent_dictations_browse"].setEnabled_(
+                state.recent_dictations)
+            # Undo offers itself only while there is something to restore.
+            self.dynamic["settings_undo_button"].setEnabled_(
+                state.undo_available)
             self.dynamic["settings_tones_button"].setEnabled_(
                 bool(settings.app_tones))
             self.dynamic["settings_snippets_button"].setEnabled_(True)
@@ -7590,16 +8199,188 @@ if APPKIT_AVAILABLE:
             self.view_model.set_voice_object_commands(enabled)
             self.render()
 
+        def soundThemeChanged_(self, sender: Any) -> None:
+            self.view_model.choose_sound_theme(
+                SOUND_THEMES[int(sender.selectedSegment())])
+            self.render()
+
+        def previewSound_(self, _sender: Any) -> None:
+            self.view_model.preview_sound()
+
+        def recentDictationsChanged_(self, sender: Any) -> None:
+            enabled = sender.state() == NSControlStateValueOn
+            self.view_model.set_recent_dictations(enabled)
+            self.render()
+
+        def undoLastDictation_(self, _sender: Any) -> None:
+            self.view_model.undo_last_dictation()
+            self.render()
+
+        @objc.python_method
+        def _capture_hotkey(self, *, title_key: str, message_key: str,
+                            current_label: str,
+                            allow_unbound: bool) -> None:
+            """Run one live key-capture dialog and apply what it captured.
+
+            Live capture beats a list of key names: the honest set of usable
+            keys is large, and "press the key you want" needs no translation
+            from a name to a physical key. A local event monitor does the
+            capturing so the dialog does not depend on which view happens to
+            hold first responder.
+            """
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(self._l(title_key))
+            alert.setInformativeText_(self._l(message_key))
+            field = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 420, 62))
+            preview = self._ink(
+                current_label or self._l("settings.dialog.hotkey.none"),
+                NSMakeRect(0, 30, 420, 26), size=22, weight="semibold",
+                rounded=True)
+            note = self._soft(
+                self._l("settings.dialog.hotkey.waiting"),
+                NSMakeRect(0, 8, 420, 18), size=11, wrap=True, lines=2)
+            field.addSubview_(preview)
+            field.addSubview_(note)
+            _accessible(
+                field,
+                self._l("settings.accessibility.capture_field.label"),
+                self._l("settings.accessibility.capture_field.help"))
+            alert.setAccessoryView_(field)
+            alert.addButtonWithTitle_(self._l("settings.dialog.hotkey.use"))
+            if allow_unbound:
+                alert.addButtonWithTitle_(
+                    self._l("settings.dialog.hotkey.clear"))
+            alert.addButtonWithTitle_(self._l("settings.action.cancel"))
+
+            captured: dict[str, str] = {"name": ""}
+
+            def observe(event: Any) -> Any:
+                name = hotkey_name_for_keycode(
+                    getattr(event, "keyCode", lambda: -1)())
+                if not name:
+                    set_accessible_text(
+                        note, self._l("settings.dialog.hotkey.rejected"),
+                        label=self._l(
+                            "settings.accessibility.capture_field.label"))
+                    return None          # never let it reach the dialog
+                verdict = self.view_model.describe_hotkey(name)
+                captured["name"] = name
+                set_accessible_text(
+                    preview, str(verdict.get("label") or name),
+                    label=self._l(
+                        "settings.accessibility.capture_field.label"))
+                set_accessible_text(
+                    note,
+                    hotkey_shared_mode_note(
+                        verdict.get("shared_modes") or (), name,
+                        locale=self.view_model.locale)
+                    or self._l("settings.dialog.hotkey.current",
+                               hotkey=str(verdict.get("label") or name)),
+                    label=self._l(
+                        "settings.accessibility.capture_field.label"))
+                return None
+
+            monitor = None
+            try:
+                monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+                    NSEventMaskKeyDown | NSEventMaskFlagsChanged, observe)
+            except Exception:
+                # Without a monitor the dialog still opens and can be
+                # cancelled; it simply cannot capture. Fail visible, not
+                # silent, and never crash the settings window.
+                set_accessible_text(
+                    note, self._l("settings.dialog.hotkey.rejected"),
+                    label=self._l(
+                        "settings.accessibility.capture_field.label"))
+            try:
+                response = alert.runModal()
+            finally:
+                if monitor is not None:
+                    try:
+                        NSEvent.removeMonitor_(monitor)
+                    except Exception:
+                        pass
+            use, clear = 1000, 1001 if allow_unbound else None
+            if response == use and captured["name"]:
+                if allow_unbound:
+                    self.view_model.choose_undo_hotkey(captured["name"])
+                else:
+                    self.view_model.choose_hotkey(captured["name"])
+            elif clear is not None and response == clear:
+                self.view_model.choose_undo_hotkey("")
+            self.render()
+
+        def changeHotkey_(self, _sender: Any) -> None:
+            self._capture_hotkey(
+                title_key="settings.dialog.hotkey.title",
+                message_key="settings.dialog.hotkey.message",
+                current_label=self.view_model.state.hotkey_label,
+                allow_unbound=False)
+
+        def changeUndoHotkey_(self, _sender: Any) -> None:
+            self._capture_hotkey(
+                title_key="settings.dialog.undo.title",
+                message_key="settings.dialog.undo.message",
+                current_label=self.view_model.state.undo_hotkey_label,
+                allow_unbound=True)
+
+        def browseRecentDictations_(self, _sender: Any) -> None:
+            """List recent dictations as metadata; text needs a second step."""
+            entries = self.view_model.recent_dictations()
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(self._l("settings.dialog.recent.title"))
+            alert.setInformativeText_(
+                self._l("settings.dialog.recent.message") if entries
+                else self._l("settings.dialog.recent.empty"))
+            chooser = None
+            if entries:
+                chooser = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                    NSMakeRect(0, 0, 460, 26), False)
+                for entry in entries:
+                    chooser.addItemWithTitle_(recent_dictation_row(
+                        entry, locale=self.view_model.locale))
+                _accessible(
+                    chooser,
+                    self._l("settings.accessibility.recent_list.label"),
+                    self._l("settings.accessibility.recent_list.help"))
+                alert.setAccessoryView_(chooser)
+                alert.addButtonWithTitle_(
+                    self._l("settings.dialog.recent.reveal"))
+                alert.addButtonWithTitle_(
+                    self._l("settings.dialog.recent.insert"))
+            alert.addButtonWithTitle_(self._l("settings.action.done"))
+            response = alert.runModal()
+            if chooser is None:
+                return
+            selected = entries[chooser.indexOfSelectedItem()]
+            entry_id = str(selected.get("id") or "")
+            if response == 1000:
+                revealed = self.view_model.reveal_recent_dictation(entry_id)
+                detail = NSAlert.alloc().init()
+                detail.setMessageText_(
+                    self._l("settings.dialog.recent.revealed.title"))
+                detail.setInformativeText_(
+                    revealed or self._l(
+                        "settings.dialog.recent.revealed.gone"))
+                detail.addButtonWithTitle_(self._l("settings.action.done"))
+                detail.runModal()
+            elif response == 1001:
+                self.view_model.insert_recent_dictation(entry_id)
+            self.render()
+
         def viewModes_(self, _sender: Any) -> None:
-            """Show the six fixed voice-mode shortcuts in a small dialog."""
+            """Show the six voice-mode shortcuts, using the key that is bound."""
             alert = NSAlert.alloc().init()
             alert.setMessageText_(self._l("settings.dialog.modes.title"))
-            alert.setInformativeText_(self._l("settings.dialog.modes.message"))
+            hotkey = self.view_model.state.hotkey_label
+            alert.setInformativeText_(
+                self._l("settings.dialog.modes.message", hotkey=hotkey))
             listing = "\n".join(
                 self._l(
                     "settings.dialog.modes.row",
                     name=self._l(f"settings.mode.{mode}.name"),
-                    shortcut=self._l(f"settings.mode.{mode}.shortcut"),
+                    shortcut=self._l(
+                        f"settings.mode.{mode}.shortcut", hotkey=hotkey),
                     detail=self._l(f"settings.mode.{mode}.detail"),
                 )
                 for mode in MODE_GUIDE
@@ -7607,7 +8388,8 @@ if APPKIT_AVAILABLE:
             scroll, editor = self._text_editor(
                 NSMakeRect(0, 0, 460, 190), listing,
                 label=self._l("settings.accessibility.modes.label"),
-                help_text=self._l("settings.dialog.modes.message"),
+                help_text=self._l(
+                    "settings.dialog.modes.message", hotkey=hotkey),
             )
             editor.setEditable_(False)
             alert.setAccessoryView_(scroll)
@@ -7800,7 +8582,14 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         "service_status": "Not started",
         "microphone_status": "Not requested",
         "accessibility_status": "Not requested",
+        "hotkey": "alt_r",
         "hotkey_label": "Right Option",
+        "hotkey_shared_modes": [],
+        "undo_hotkey": "",
+        "undo_hotkey_label": "",
+        "undo_available": False,
+        "sounds": "system",
+        "recent_dictations": False,
         "models": [{
             "name": "Smoke ASR",
             "role": "Construction fixture",
@@ -7914,10 +8703,73 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
     def open_system_settings() -> None:
         calls.append(("open_system_settings",))
 
+    # The runtime owns the guard rules; the smoke fixture mirrors the shape it
+    # returns so the window is exercised against a real verdict, not a stub.
+    _hotkey_labels = {
+        "alt_r": "Right Option", "alt_l": "Left Option",
+        "cmd_r": "Right Command", "cmd_l": "Left Command",
+        "ctrl_r": "Right Control", "ctrl_l": "Left Control",
+        "shift_r": "Right Shift", "shift_l": "Left Shift",
+    }
+
+    def describe_hotkey(name: str, *, allow_unbound: bool = False
+                        ) -> Mapping[str, Any]:
+        label = _hotkey_labels.get(name) or (
+            name.upper() if name.startswith("f") and name[1:].isdigit()
+            else "")
+        if not label:
+            if allow_unbound and not name:
+                return {"accepted": True, "reason": "unbound", "name": "",
+                        "label": "", "shared_modes": ()}
+            return {"accepted": False, "reason": "unsupported_key",
+                    "name": "", "label": "", "shared_modes": ()}
+        return {"accepted": True, "reason": "ok", "name": name,
+                "label": label, "shared_modes": ()}
+
+    def set_hotkey(name: str) -> Mapping[str, Any]:
+        verdict = describe_hotkey(name)
+        if verdict["accepted"]:
+            calls.append(("hotkey", name))
+            runtime["hotkey"] = name
+            runtime["hotkey_label"] = verdict["label"]
+        return verdict
+
+    def set_undo_hotkey(name: str) -> Mapping[str, Any]:
+        verdict = describe_hotkey(name, allow_unbound=True)
+        if verdict["accepted"]:
+            calls.append(("undo_hotkey", name))
+            runtime["undo_hotkey"] = verdict["name"]
+            runtime["undo_hotkey_label"] = verdict["label"]
+        return verdict
+
+    def set_sound_theme(name: str) -> str:
+        calls.append(("sound_theme", name))
+        runtime["sounds"] = name
+        return name
+
+    def set_recent_dictations(enabled: bool) -> bool:
+        calls.append(("recent_dictations", enabled))
+        runtime["recent_dictations"] = bool(enabled)
+        return bool(enabled)
+
     actions = GUIActions(
         status_snapshot=lambda: dict(runtime),
         settings_snapshot=lambda: dict(private_settings),
         set_face=set_face,
+        describe_hotkey=describe_hotkey,
+        set_hotkey=set_hotkey,
+        set_undo_hotkey=set_undo_hotkey,
+        set_sound_theme=set_sound_theme,
+        preview_sound=lambda cue: calls.append(("preview_sound", cue)) or True,
+        set_recent_dictations=set_recent_dictations,
+        recent_dictations=lambda: (
+            {"id": "smoke-1", "at": 0.0, "age_seconds": 90.0,
+             "words": 4, "app": "Mail"},),
+        reveal_recent_dictation=lambda entry_id: None,
+        insert_recent_dictation=lambda entry_id: {
+            "inserted": False, "reason": "unavailable"},
+        undo_last_dictation=lambda: {
+            "undone": False, "reason": "nothing_to_undo"},
         set_flight_recorder=set_flight,
         set_app_tone=set_tone,
         save_snippet=save_snippet,
@@ -8296,13 +9148,104 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             "voice modes action title")
         require(
             str(controller.dynamic["settings_modes_detail"].stringValue()) ==
-            localized_string("settings.personalize.modes.detail"),
+            localized_string("settings.personalize.modes.detail",
+                             hotkey=runtime["hotkey_label"]),
             "voice modes summary")
         require(
             all(chip in
                 controller.dynamic["settings_key_views"]["Personalize"]
                 for chip in controller.dynamic["face_picker"].chips),
             "face picker chips are Personalize key views")
+        # Controls: the capture key, the undo key, and the sound setting are
+        # all reachable, all labelled, and all in the key-view loop.
+        require(
+            str(controller.dynamic["settings_hotkey_button"].action()) ==
+            "changeHotkey:", "capture key picker surface")
+        require(
+            str(controller.dynamic["settings_undo_hotkey_button"].action()) ==
+            "changeUndoHotkey:", "undo key picker surface")
+        require(
+            str(controller.dynamic["settings_hotkey_detail"].stringValue()) ==
+            localized_string("settings.controls.hotkey.detail",
+                             hotkey=runtime["hotkey_label"]),
+            "capture key summary names the bound key")
+        require(
+            str(controller.dynamic[
+                "settings_undo_hotkey_detail"].stringValue()) ==
+            localized_string("settings.controls.undo.unset"),
+            "undo key summary reports an unbound key")
+        require(
+            int(controller.dynamic["sound_theme_control"].segmentCount()) ==
+            len(SOUND_THEMES), "sound theme segments")
+        require(
+            bool(controller.dynamic["sound_preview_button"].isEnabled()),
+            "sound preview available while a sound is chosen")
+        require(
+            not bool(controller.dynamic[
+                "recent_dictations_browse"].isEnabled()),
+            "recent dictations stay unbrowsable while off")
+        require(
+            not bool(controller.dynamic["settings_undo_button"].isEnabled()),
+            "undo offers nothing while there is nothing to undo")
+        require(
+            str(controller.dynamic["settings_undo_detail"].stringValue()) ==
+            localized_string("settings.controls.undo_now.none"),
+            "undo summary reports an empty slot")
+        for pane_name in SETTINGS_PANES:
+            require(
+                len(controller.dynamic["settings_key_views"][pane_name]) >= 2,
+                f"{pane_name} key views")
+        require(
+            accessible_value(
+                controller.dynamic["sound_theme_control"],
+                "accessibilityLabel") == localized_string(
+                    "settings.accessibility.sound.label"),
+            "sound control accessibility label")
+        require(
+            accessible_value(
+                controller.dynamic["recent_dictations_toggle"],
+                "accessibilityLabel") == localized_string(
+                    "settings.accessibility.recent.label"),
+            "recent dictations accessibility label")
+        require(
+            hotkey_name_for_keycode(61) == "alt_r"
+            and hotkey_name_for_keycode(0) == ""
+            and hotkey_name_for_keycode(None) == "",
+            "key capture guard")
+        # Drive the seams the pickers use, without opening a modal dialog.
+        model.choose_hotkey("f13")
+        require(model.state.hotkey_label == "F13", "capture key rebinds")
+        require(("hotkey", "f13") in calls, "capture key reaches the runtime")
+        model.choose_hotkey("a")
+        require(model.state.hotkey_label == "F13",
+                "a typing key never becomes the capture key")
+        require(model.state.notice_level == "error", "refusal is reported")
+        model.choose_undo_hotkey("f14")
+        require(model.state.undo_hotkey_label == "F14", "undo key binds")
+        model.choose_undo_hotkey("")
+        require(not model.state.undo_hotkey_label, "undo key clears")
+        model.choose_sound_theme("silent")
+        controller.render()
+        require(
+            not bool(controller.dynamic["sound_preview_button"].isEnabled()),
+            "silence has nothing to preview")
+        model.choose_sound_theme("whisper")
+        model.set_recent_dictations(True)
+        controller.render()
+        require(
+            bool(controller.dynamic["recent_dictations_browse"].isEnabled()),
+            "recent dictations become browsable once enabled")
+        require(
+            len(model.recent_dictations()) == 1, "recent metadata reaches UI")
+        require(
+            recent_dictation_row(model.recent_dictations()[0])
+            == "1 min ago · 4 words · Mail", "recent row is metadata only")
+        model.set_recent_dictations(False)
+        require(model.recent_dictations() == (),
+                "nothing is listed while the setting is off")
+        model.choose_sound_theme("system")
+        model.choose_hotkey("alt_r")
+        controller.render()
 
         def ancestor_views(view: Any) -> tuple[Any, ...]:
             chain = []

@@ -3,7 +3,7 @@ title: "Delayed Cleanup"
 type: concept
 language: en
 created: 2026-07-26
-modified: 2026-07-26
+modified: 2026-07-27
 tags: [cleanup, insertion, merge, activation, macos]
 aliases: [insert-now-clean-later, three-way-merge]
 summary: "Insert the deterministic result immediately, finish LLM cleanup in the background, and apply only safe merged edits after exact destination rechecks — gated by a physical-evidence activation receipt."
@@ -42,39 +42,43 @@ a manually reviewed physical suite.
   and documents the residual race: macOS Accessibility has no native
   compare-and-swap primitive.
 - **Activation bar**: ≥50 caller-attested physical cases across native,
-  web, Electron, and terminal editors, balanced applied/rejected
+  web, Electron, and terminal editors and the four scenarios (unchanged,
+  edit-elsewhere, edit-overlap, focus-drift), balanced applied/rejected
   outcomes, zero wrong-target/user-overwrite/duplicate failures, p95
   final-apply ≤150 ms, manual review. The suite has not been run in the
   repository, so the feature ships off and no live safety claim is made.
 
-## The activation bar is currently unearnable
+## The activation bar became earnable on 2026-07-27
 
-> ⚠️ **Known blocker (issue #110, open on `main`)**: building the capture
-> harness ([[evidence-capture]]) established that the 50-case corpus
-> cannot be produced at all today. Three defects, all still present:
+> 📝 **Updated**: issue #110 recorded three defects that made the 50-case
+> corpus unproducible. #118 fixed all three, closing the issue:
 >
-> 1. **Bootstrap deadlock.** `schedule_delayed_cleanup` returns `False`
->    unless `DELAYED_CLEANUP_STATE["active"]`, which is only true once a
->    valid receipt exists — and that receipt requires 50 manually
->    reviewed cases produced *by the feature running*. With no receipt
->    the runtime schedules nothing, prints no `[delayed-cleanup]` line,
->    and every case blocks.
-> 2. **`apply_ms` has no source.** The gate wants per-case apply timing
->    at p95 ≤150 ms, but nothing measures it: the log line carries only
->    `{outcome}; N applied, M held`. A stopwatch is not evidence at a
->    150 ms threshold, so cases block on `no-runtime-timing` rather than
->    defaulting to a guess.
-> 3. **`duplicate-callback` is physically unreachable.** The gate demands
->    ≥8 cases of it, but the runtime passes the per-utterance `event_id`
->    as the proposal id, so two passes never share one and the adapter's
->    in-flight and completed-duplicate paths cannot be reached by any
->    operator action. (Deterministic single-use-id tests do cover them.)
+> 1. **Measurement mode breaks the bootstrap deadlock.** Starting the
+>    runtime with `--measure delayed-cleanup` (`measurement_mode.py`)
+>    lets `schedule_delayed_cleanup` run the same real transaction with
+>    no receipt. The override is session-scoped and argument-only,
+>    prints a startup banner, shows a menu-bar row, and grants no
+>    authority: `DELAYED_CLEANUP_STATE["active"]` stays receipt-only,
+>    every case recorded under it carries the
+>    `measured-delayed-cleanup` label, and the receipt reports the count
+>    as `measurement_mode_cases`.
+> 2. **`apply_ms` has a source.** `_run_delayed_cleanup` now times the
+>    transactional apply itself (read, merge, compare-and-swap) and
+>    appends `; <float> ms` to the `[delayed-cleanup]` line the capture
+>    tool parses. The proposal build is excluded because the 150 ms
+>    budget is an apply budget; a pass that never reached an apply
+>    prints no duration, so that case still blocks on
+>    `no-runtime-timing` rather than guessing.
+> 3. **`duplicate-callback` was dropped, not made reachable.** The
+>    runtime derives the proposal id from the per-utterance event id,
+>    so the adapter's duplicate paths cannot be entered by any operator
+>    action; earning eight "physical" cases would have required a
+>    synthetic injection wearing a physical label. `SCENARIOS` is now
+>    the four listed above, and `test_delayed_cleanup_merge` covers the
+>    single-use-id contract deterministically.
 >
-> This is the same circular-gate family as #108
-> ([[activation-receipt]]). `docs/evidence/physical-sessions.md` records
-> all three for the operator, noting that running the session anyway
-> records which blocker fired — "the evidence that these are gate defects
-> rather than operator error".
+> Earnable is not earned: the physical 50-case session has still not
+> been run, no receipt exists, and the feature still ships off.
 
 ## Related Concepts
 
@@ -87,6 +91,6 @@ a manually reviewed physical suite.
 ## References
 
 - delayed_cleanup_merge.py; macos_delayed_cleanup_destination.py;
-  delayed_cleanup_activation.py; README "Tuning"
+  delayed_cleanup_activation.py; measurement_mode.py; README "Tuning"
 - [[2026-07-26-runtime-pipeline-research]],
   [[2026-07-26-voice-actions-research]]

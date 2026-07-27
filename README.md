@@ -75,7 +75,11 @@ are never Supporter-only features.
   as unverified instead of training from an assumption; if macOS cannot identify any focused
   element at all, the insertion fails closed into the outbox. The count-only
   **Voice Outbox** menu entry routes directly to Home; only the existing
-  explicit **Copy & Dismiss** control can recover content.
+  explicit **Copy & Dismiss** control can recover content. When the field can
+  be read and the character before the caret is neither whitespace nor opening
+  punctuation, a single space is added so a new dictation does not jam against
+  the text before it; text that starts with its own space, or with closing
+  punctuation, is left exactly as recognized.
 - **Flight Recorder (experimental)** — enable it under Settings →
   Privacy, speak
   naturally, then tap Right Option afterward. Whisper Face finds and pastes the
@@ -272,18 +276,21 @@ are never Supporter-only features.
   value is saved for next time and listed under Settings → Personalize →
   **Learned corrections**.
 - **Whispering works** — quiet speech is gain-normalized before recognition.
-- **Choose your Whisper Face** — Parrot, Fox, Owl, Cat, and Bear share the
-  original friendly vector style. Pick one from the menu bar and it persists
-  locally. On Mac, both the floating character and tiny menu-bar face open and
-  close their mouths with your live speech; Windows mirrors the selected face
-  and recording state in its tray icon.
+- **Choose your Whisper Face** — fourteen characters (Parrot, Fox, Owl, Cat,
+  Bear, Dog, Wolf, Pig, Panda, Tiger, Frog, Rabbit, Hedgehog, and Penguin)
+  share one pastel chibi-clay style. Pick one from the menu bar and it
+  persists locally. On Mac, both the floating
+  character and tiny menu-bar face open and close their mouths with your live
+  speech; Windows mirrors the selected face and recording state in its tray
+  icon.
 - **Menu-bar/tray presence** — the selected face remains visible in the menu
   bar or Windows notification area, with processing and paused states. The Mac
-  menu stays a quick-glance surface: usage, pause, character choice, and a
-  Last Recognition shortcut, with Voice Outbox/Inbox recovery rows appearing
-  only while they hold something. Tones, learned corrections, mode reference,
-  and logs live in the app window; Windows adds character, pause, Flight
-  Recorder, logs, and quit to its tray.
+  menu stays a quick-glance surface: **Open Whisper Face…**, usage, pause,
+  character choice, **Check for Updates…**, and quit are always there, and the
+  Last Recognition, Voice Outbox, Voice Inbox, and Selective Re-listen rows
+  each appear only once they have something to show. Tones, learned
+  corrections, mode reference, and logs live in the app window; Windows adds
+  character, pause, Flight Recorder, logs, and quit to its tray.
 - **Experimental phone compatibility endpoint** — an OpenAI-compatible
   `/v1/audio/transcriptions` endpoint (port 8787) can support self-hosted
   clients such as [Diction](https://diction.one). Ordinary desktop mode binds
@@ -437,8 +444,8 @@ and Voice Outbox recovery. Home leads with your character, drawn live: it
 breathes and blinks while idle and mouths along with the mic while you
 dictate (System Settings Reduce Motion keeps it still). Closing the window
 does not stop dictation.
-The **Last Recognition** submenu ends with **Open Last Result…** for a direct
-route to the existing transcript-free evidence inspector.
+A single **Last Recognition…** menu row appears once there is a result to look
+at, and is a direct route to the transcript-free evidence inspector.
 Advanced can copy a fixed support snapshot containing only categorized
 health/model state and numeric result aggregates; it excludes dictation text,
 context, paths, logs, personal language data, and machine identifiers.
@@ -469,6 +476,56 @@ Verify that headless installation later with `./setup.sh --server-only --verify`
 the runtime/model/service checks still run while the AppKit construction gate
 is correctly skipped.
 
+## Uninstall
+
+You can leave, and see exactly what leaving costs before it happens. Both
+installers take `--uninstall`, which by default only prints a plan:
+
+```sh
+./setup.sh --uninstall              # macOS: list everything, change nothing
+.\setup.ps1 --uninstall             # Windows: the same
+```
+
+The listing names every service, file, and directory the installer created,
+with its full path, and separates them into three tiers. Nothing is removed
+until you add `--yes`:
+
+```sh
+./setup.sh --uninstall --yes                          # the software
+./setup.sh --uninstall --yes --remove-models          # and the models
+./setup.sh --uninstall --yes --remove-personal-data   # and your words
+```
+
+- **The software** goes without ceremony: both login services, the Ollama and
+  dictation LaunchAgents (or the Windows scheduled task, under its current and
+  legacy names), `~/Applications/Whisper Face.app`, the Application Support
+  receipts, the built native helper, and the Swift build scratch.
+- **The models** are a separate choice because they are large (650 MB to 5 GB)
+  and can be downloaded again: the Parakeet Unified Core ML model, the two
+  pinned Whisper snapshots in the Hugging Face cache, and `qwen3.5:4b`, which
+  Ollama itself is asked to drop.
+- **Your personal files are kept unless you ask for them to go.** Your
+  dictionary, snippets, tones, preferences, learned corrections, transcripts,
+  Voice Inbox drafts, demonstrations, activation receipts, and logs are your
+  words. No download restores them, so `--remove-personal-data` is the only
+  thing that removes them, and the run tells you where they were left.
+
+The uninstaller works from an explicit inventory, never a wildcard. It never
+touches Homebrew, `uv`, `ffmpeg`, Ollama itself, the Swift toolchain, or any
+other model in the shared Hugging Face cache — those are shared tools that
+something else on your machine may need, and the output says so. It is safe to
+run on a partial or already-clean installation: a missing service or app
+bundle is reported and the run still succeeds.
+
+Two things it deliberately leaves to you. The checkout itself stays where it
+is — delete that folder by hand when you are done with it. And macOS privacy
+grants live in a system database that no installer should edit, so remove
+**Whisper Face** yourself under System Settings → Privacy & Security →
+**Input Monitoring**, **Accessibility**, and **Microphone**.
+
+Full detail, including a per-platform table of exactly what each tier removes,
+is in the [update and rollback guide](docs/distribution/update-and-rollback.md).
+
 ## Daily use
 
 | Say | Get |
@@ -497,8 +554,9 @@ opened in another app; all other speech follows the normal paste path.
 Turning the setting off stops new diversion but leaves already queued local
 drafts intact.
 
-Choose the always-available **Voice Inbox** menu-bar entry for the shortest
-route to the local inspector; its title adds only the bounded queued count.
+A **Voice Inbox** menu-bar entry appears whenever the queue holds a draft, and
+is the shortest route to the local inspector; its title adds only the bounded
+queued count. An empty queue earns no menu row.
 You can also choose **Inspect** beside Voice Object Commands in Privacy. The
 first view lists only bounded draft number, type, and state. Draft text is read
 only after you explicitly choose **Reveal**. A revealed queued task or

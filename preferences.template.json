@@ -3,5 +3,9 @@
   "acoustic_time_machine": false,
   "voice_object_commands": false,
   "selective_relisten": false,
-  "face": "parrot"
+  "face": "parrot",
+  "hotkey": "alt_r",
+  "undo_hotkey": "",
+  "sounds": "system",
+  "recent_dictations": false
 }

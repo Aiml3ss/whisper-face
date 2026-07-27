@@ -44,6 +44,13 @@ from whisper_face_gui import (
     normalize_result_evidence,
     normalize_snapshot,
     normalize_settings,
+    hotkey_name_for_keycode,
+    hotkey_row_detail,
+    hotkey_shared_mode_note,
+    recent_dictation_row,
+    HOTKEY_KEYCODES,
+    MODE_GUIDE,
+    SOUND_THEMES,
     result_evidence_text,
     run_native_appkit_smoke,
     resolve_locale,
@@ -2566,6 +2573,239 @@ class AccessoryActivationOrderTests(unittest.TestCase):
     def test_show_orders_front_regardless_as_a_fallback(self):
         self.assertIn("orderFrontRegardless", self._show_source())
 
+
+class BoundKeyCopyTests(unittest.TestCase):
+    """A1: no surface may claim a key that is not the one bound."""
+
+    def test_no_catalog_string_hardcodes_a_key_name(self):
+        for locale, catalog in STRING_CATALOGS.items():
+            for key, value in catalog.items():
+                if key == "settings.hotkey.default":
+                    continue        # the one honest default, used as a value
+                with self.subTest(locale=locale, key=key):
+                    self.assertNotIn("Right Option", value)
+                    self.assertNotIn("Right Alt", value)
+
+    def test_every_mode_shortcut_is_written_from_the_bound_key(self):
+        for mode in MODE_GUIDE:
+            with self.subTest(mode=mode):
+                rendered = localized_string(
+                    f"settings.mode.{mode}.shortcut", hotkey="F13")
+                self.assertIn("F13", rendered)
+                self.assertNotIn("{hotkey}", rendered)
+
+    def test_snapshot_carries_the_runtime_key_into_every_surface(self):
+        state = normalize_snapshot({
+            "hotkey": "f13",
+            "hotkey_label": "F13",
+            "hotkey_shared_modes": [],
+            "capture_state": "Ready",
+            "service_status": "Running",
+            "microphone_status": "Ready",
+            "accessibility_status": "Granted",
+            "models": [{"name": "Parakeet", "role": "primary",
+                        "status": "Ready"}],
+        })
+        self.assertEqual(state.hotkey_label, "F13")
+        self.assertIn("F13", state.status_detail)
+        self.assertIn(
+            "F13",
+            localized_string("settings.personalize.modes.detail",
+                             hotkey=state.hotkey_label))
+        practice = next(
+            step for step in state.onboarding_steps if step.key == "hotkey")
+        self.assertIn("F13", practice.detail)
+
+    def test_a_missing_runtime_label_falls_back_to_the_shipped_default(self):
+        state = normalize_snapshot({})
+        self.assertEqual(state.hotkey_label, "Right Option")
+
+
+class HotkeyPickerCopyTests(unittest.TestCase):
+    """A1: the picker states its guard and its mode consequences."""
+
+    def test_only_modifier_and_function_keys_are_capturable(self):
+        self.assertEqual(hotkey_name_for_keycode(61), "alt_r")
+        self.assertEqual(hotkey_name_for_keycode(105), "f13")
+        # A, 1, space, return: ordinary typing keys are never a shortcut.
+        for keycode in (0, 18, 49, 36, -1, None, "alt_r", 4.5):
+            with self.subTest(keycode=keycode):
+                self.assertEqual(hotkey_name_for_keycode(keycode), "")
+
+    def test_every_capturable_keycode_is_a_modifier_or_function_key(self):
+        for name in HOTKEY_KEYCODES.values():
+            with self.subTest(name=name):
+                self.assertTrue(
+                    name.startswith(("alt_", "cmd_", "ctrl_", "shift_"))
+                    or (name.startswith("f") and name[1:].isdigit()))
+
+    def test_row_detail_names_the_bound_key(self):
+        state = normalize_snapshot(
+            {"hotkey": "f13", "hotkey_label": "F13"})
+        self.assertEqual(hotkey_row_detail(state), "Hold F13 to dictate")
+
+    def test_row_detail_says_which_modes_now_need_the_other_key(self):
+        state = normalize_snapshot({
+            "hotkey": "ctrl_r",
+            "hotkey_label": "Right Control",
+            "hotkey_shared_modes": ["reply", "command", "code"],
+        })
+        detail = hotkey_row_detail(state)
+        self.assertIn("Right Control", detail)
+        self.assertIn("Reply, Command, Code", detail)
+        self.assertIn("Control key", detail)
+
+    def test_unknown_modes_from_the_runtime_are_dropped(self):
+        state = normalize_snapshot({
+            "hotkey": "ctrl_r",
+            "hotkey_label": "Right Control",
+            "hotkey_shared_modes": ["reply", "nonsense", 7],
+        })
+        self.assertEqual(state.hotkey_shared_modes, ("reply",))
+
+    def test_dialog_note_is_empty_for_a_key_that_shares_nothing(self):
+        self.assertEqual(hotkey_shared_mode_note(("compose",), "alt_r"), "")
+        self.assertEqual(hotkey_shared_mode_note((), "shift_r"), "")
+        self.assertIn(
+            "Shift", hotkey_shared_mode_note(("compose", "code"), "shift_r"))
+
+
+class RecentDictationRowTests(unittest.TestCase):
+    """A3: a browser row is metadata, and survives a malformed entry."""
+
+    def test_rows_render_from_metadata_only(self):
+        self.assertEqual(
+            recent_dictation_row({
+                "age_seconds": 90.0, "words": 4, "app": "Mail"}),
+            "1 min ago · 4 words · Mail")
+        self.assertEqual(
+            recent_dictation_row({
+                "age_seconds": 5.0, "words": 1, "app": "Terminal"}),
+            "just now · 1 word · Terminal")
+        self.assertEqual(
+            recent_dictation_row({
+                "age_seconds": 7200.0, "words": 12, "app": ""}),
+            "2 hr ago · 12 words · unknown app")
+        self.assertEqual(
+            recent_dictation_row({
+                "age_seconds": 172800.0, "words": 3, "app": "Notes"}),
+            "2d ago · 3 words · Notes")
+
+    def test_a_malformed_entry_never_raises(self):
+        for entry in ({}, {"words": "many", "age_seconds": "ages"},
+                      {"words": -4, "age_seconds": float("nan")},
+                      {"words": True, "app": 7}):
+            with self.subTest(entry=entry):
+                self.assertTrue(recent_dictation_row(entry))
+
+
+class ControlSettingsViewModelTests(unittest.TestCase):
+    """A1/A2/A3/D1: the window drives the runtime and reports its verdicts."""
+
+    def setUp(self):
+        self.calls = []
+        self.runtime = {
+            "hotkey": "alt_r", "hotkey_label": "Right Option",
+            "hotkey_shared_modes": [], "undo_hotkey": "",
+            "undo_hotkey_label": "", "sounds": "system",
+            "recent_dictations": False, "undo_available": False,
+        }
+
+    def model(self, **overrides):
+        actions = GUIActions(
+            status_snapshot=lambda: dict(self.runtime),
+            **overrides)
+        return WhisperFaceViewModel(actions)
+
+    def test_a_refused_key_changes_nothing_and_says_so(self):
+        model = self.model(set_hotkey=lambda name: {
+            "accepted": False, "reason": "unsupported_key",
+            "name": "", "label": "", "shared_modes": ()})
+        model.choose_hotkey("a")
+        self.assertEqual(model.state.hotkey, "alt_r")
+        self.assertEqual(model.state.hotkey_label, "Right Option")
+        self.assertEqual(model.state.notice_level, "error")
+
+    def test_an_accepted_key_is_applied_with_its_shared_modes(self):
+        def set_hotkey(name):
+            self.calls.append(name)
+            self.runtime.update(
+                hotkey=name, hotkey_label="Right Shift",
+                hotkey_shared_modes=["compose", "code"])
+            return {"accepted": True, "reason": "ok", "name": name,
+                    "label": "Right Shift",
+                    "shared_modes": ("compose", "code")}
+
+        model = self.model(set_hotkey=set_hotkey)
+        model.choose_hotkey("shift_r")
+        self.assertEqual(self.calls, ["shift_r"])
+        self.assertEqual(model.state.hotkey_label, "Right Shift")
+        self.assertEqual(
+            model.state.hotkey_shared_modes, ("compose", "code"))
+
+    def test_clearing_the_undo_key_is_reported_as_cleared(self):
+        model = self.model(set_undo_hotkey=lambda name: {
+            "accepted": True, "reason": "unbound", "name": "",
+            "label": "", "shared_modes": ()})
+        model.choose_undo_hotkey("")
+        self.assertEqual(model.state.undo_hotkey_label, "")
+        self.assertIn("cleared", model.state.notice)
+
+    def test_sound_themes_are_validated_before_they_reach_the_runtime(self):
+        model = self.model(
+            set_sound_theme=lambda name: self.calls.append(name) or name)
+        for theme in SOUND_THEMES:
+            model.choose_sound_theme(theme)
+        self.assertEqual(self.calls, list(SOUND_THEMES))
+        with self.assertRaises(ValueError):
+            model.choose_sound_theme("airhorn")
+
+    def test_recent_dictations_stay_empty_while_the_setting_is_off(self):
+        model = self.model(
+            recent_dictations=lambda: ({"id": "a", "words": 3},))
+        self.assertEqual(model.recent_dictations(), ())
+        self.runtime["recent_dictations"] = True
+        model.refresh()
+        self.assertEqual(len(model.recent_dictations()), 1)
+
+    def test_a_runtime_that_raises_never_takes_the_window_down(self):
+        def explode(*_args, **_kwargs):
+            raise RuntimeError("private detail")
+
+        model = self.model(
+            set_hotkey=explode, set_undo_hotkey=explode,
+            set_sound_theme=explode, set_recent_dictations=explode,
+            recent_dictations=explode, reveal_recent_dictation=explode,
+            insert_recent_dictation=explode, undo_last_dictation=explode,
+            preview_sound=explode, describe_hotkey=explode)
+        model.choose_hotkey("f13")
+        model.choose_undo_hotkey("f14")
+        model.choose_sound_theme("silent")
+        model.set_recent_dictations(True)
+        self.assertEqual(model.recent_dictations(), ())
+        self.assertEqual(model.reveal_recent_dictation("a"), "")
+        model.insert_recent_dictation("a")
+        model.undo_last_dictation()
+        self.assertFalse(model.preview_sound())
+        self.assertFalse(model.describe_hotkey("f13")["accepted"])
+
+    def test_undo_reports_state_and_reason_and_never_any_text(self):
+        model = self.model(undo_last_dictation=lambda: {
+            "undone": False, "reason": "focus_drift"})
+        model.undo_last_dictation()
+        self.assertEqual(model.state.notice_level, "error")
+        self.assertIn("focus_drift", model.state.notice)
+
+        model = self.model(undo_last_dictation=lambda: {
+            "undone": True, "reason": "commit_verified"})
+        model.undo_last_dictation()
+        self.assertEqual(model.state.notice_level, "success")
+        self.assertEqual(model.state.notice, "Last dictation undone.")
+
+    def test_revealing_a_recent_dictation_requires_the_runtime_to_supply_it(
+            self):
+        model = self.model(reveal_recent_dictation=lambda _entry: None)
+        self.assertEqual(model.reveal_recent_dictation("a"), "")
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@ title: "Activation Receipt"
 type: concept
 language: en
 created: 2026-07-26
-modified: 2026-07-26
+modified: 2026-07-27
 tags: [evidence, safety, pattern, activation]
 aliases: [evidence-gating, physical-evidence-receipt]
 summary: "The house pattern for risky capabilities: features ship off and unlock only via a 0600 receipt this machine produced from manually reviewed physical evidence — with policy, model, and evidence pinning."
@@ -62,27 +62,32 @@ benchmark invocation and stops. Manual review stays where it was: a
 non-defaultable flag the operator passes to the benchmark, after
 listening.
 
-## Three of the four gates cannot currently be earned
+## How the three circular gates became earnable
 
-> ⚠️ **Known blocker (issues #108 and #110, open on `main`)**: three of
-> the four receipts require evidence whose *candidate* arm the runtime
-> only produces after the receipt that evidence would authorize.
+> 📝 **Updated 2026-07-27** (#118, closing issues #108 and #110): three
+> of the four receipts required evidence whose *candidate* arm the
+> runtime only produced after the receipt that evidence would authorize
+> — calibration settings applied only from a receipt, the biased keyword
+> reached the ASR prompt only through the activation file, and delayed
+> cleanup scheduled nothing without one. Selective re-listen never had
+> the loop (its benchmark drives the verifier directly), and its shape
+> is what the fix copies.
 >
-> - **Calibration** applies its settings only from a valid receipt, so
->   the candidate recordings cannot exercise the calibrated front end.
-> - **Keyword priority** reaches the ASR prompt only through the
->   activation file, so the biased arm cannot be measured without it.
-> - **Delayed cleanup** adds two more: the gate wants p95 apply timing
->   the runtime never measures, and ≥8 cases of a `duplicate-callback`
->   scenario that no operator action can reach.
+> `measurement_mode.py` closes the circle with a session-scoped
+> `--measure` argument that applies the real candidate path — the same
+> front end, the same Whisper prompt, the same transaction — while
+> granting no authority. The module imports no activation module, opens
+> no file, and cannot produce the settings type the runtime treats as
+> proof; a startup banner, a menu-bar row, and the status snapshot all
+> announce an active session, and it ends with the process. One
+> malformed argument disables every arm. Every artifact recorded under
+> an arm carries that arm's label and the validators carry the label
+> into the receipt, so a measured corpus is disclosed, never laundered.
+> No threshold moved, and manual review remains the only thing that
+> installs anything.
 >
-> Selective re-listen has no such circularity — its benchmark drives the
-> verifier directly. The proposed fix in #108 is an explicitly labelled
-> measurement-only override that is recorded in the manifest and grants
-> no runtime authority of its own. Until then, three of the four
-> capabilities on this page are unearnable in practice, not merely
-> un-activated — a stronger and less comfortable statement than "the
-> suite has not been run".
+> Earnable is not earned: none of the physical suites has been run, no
+> receipt exists, and all four capabilities still ship off.
 
 ## Examples
 
@@ -105,5 +110,6 @@ listening.
 ## References
 
 - acoustic_calibration_activation.py, acoustic_keyword_activation.py,
-  relisten_activation.py, delayed_cleanup_activation.py
+  relisten_activation.py, delayed_cleanup_activation.py,
+  measurement_mode.py
 - [[2026-07-26-trust-personalization-research]]

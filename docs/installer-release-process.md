@@ -74,9 +74,9 @@ uv run tests/test_acoustic_keyword_bias_evaluation.py
 uv run tests/test_acoustic_keyword_activation.py
 uv run tests/test_acoustic_time_machine.py
 uv run tests/test_acoustic_calibration.py
+uv run tests/test_acoustic_calibration_activation.py
 uv run tests/test_measurement_mode.py
 uv run tests/test_benchmark_acoustic_calibration.py
-uv run tests/test_acoustic_calibration_activation.py
 uv run tests/test_delayed_cleanup_merge.py
 uv run tests/test_macos_delayed_cleanup_destination.py
 uv run tests/test_model_wallet.py
@@ -89,6 +89,7 @@ uv run tests/test_drop_to_target.py
 uv run tests/test_voice_objects.py
 uv run tests/test_voice_object_command_parser.py
 uv run tests/test_voice_object_commands_runtime.py
+uv run tests/test_spoken_edit_commands_runtime.py
 uv run tests/test_voice_inbox.py
 uv run tests/test_voice_object_inbox_bridge.py
 uv run tests/test_risky_action_confirmation.py
@@ -98,13 +99,59 @@ uv run tests/test_public_scorecard.py
 uv run tests/test_personal_regression.py
 uv run tests/test_support_bundle.py
 uv run tests/test_whisper_face_gui.py
+uv run tests/test_whisper_face_characters.py
 uv run --locked --script dictate.py --native-gui-smoke-test
 uv run tests/test_installers.py
 uv run tests/test_repository_governance.py
 uv run tests/test_macos_distribution.py
 uv run tests/test_safe_update_advisor.py
 uv run tests/test_side_by_side_update.py
+uv run tests/test_self_update.py
 ```
+
+## Where the gate list lives, and why it is duplicated
+
+The same list appears in three places, and `tests/test_installers.py` asserts
+that the three hold exactly the same set of tests:
+
+| Copy | Purpose |
+|---|---|
+| `AGENTS.md` | what an agent or contributor runs locally |
+| this document | the canonical list and the reasoning around it |
+| `.github/workflows/macos-release.yml` | what a release must pass before it is packaged |
+
+`.github/workflows/windows-smoke.yml` and `.github/pull_request_template.md`
+carry the same *subset* of that list as each other: the tests that hold on a
+Windows host. They deliberately omit gates that assert a macOS-only runtime
+path — the AppKit smoke command, the Whisper/Parakeet verifier adapters, the
+networkless worker, the point-and-speak snapshot, the voice-object and
+relisten seams — because a Windows runner cannot execute what they describe.
+Do not add a gate to the Windows workflow without first confirming it passes
+with no macOS runtime present.
+
+## Deliberate gate exclusions
+
+Every `tests/test_*.py` file is either in the gate list above or named here.
+`tests/test_installers.py` enforces that, so a new test file forces a decision
+rather than quietly landing outside the gate.
+
+| Excluded test | Why it is not a release gate |
+|---|---|
+| `tests/test_capture_app_matrix.py` | Covers `scripts/capture_app_matrix.py`. |
+| `tests/test_capture_delayed_cleanup_cases.py` | Covers `scripts/capture_delayed_cleanup_cases.py`. |
+| `tests/test_capture_lifecycle_evidence.py` | Covers `scripts/capture_lifecycle_evidence.py`. |
+| `tests/test_capture_voice_evidence.py` | Covers `scripts/capture_voice_evidence.py`. |
+| `tests/test_benchmark_latency_rig.py` | Covers `benchmark_latency_rig.py`. |
+
+The four guided evidence-capture sessions and the latency rig are maintainer
+tooling. No installer provisions them, no service runs them, and nothing in a
+user's installation changes when they fail; they exist to produce the corpora
+and observations that the benchmark gates then consume. Run them when you change anything under
+`scripts/capture_*.py` — in particular the property that a capture session may
+print an approval command but may never run one, import an activation module,
+or write a receipt.
+
+## Live platform verification
 
 Run the live verification available on the current platform:
 

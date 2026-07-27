@@ -44,6 +44,7 @@ from parrot_core import (  # noqa: E402
     RecognitionWord,
     compile_cleanup,
     infer_revised_insertion,
+    mode_from_modifiers,
 )
 from voice_compiler import (  # noqa: E402
     ContextCandidate,
@@ -399,9 +400,12 @@ class DictationSuccessSoundTests(unittest.TestCase):
             raise OSError("missing afplay")
 
         namespace = load_definitions(
-            "play",
+            "play", "sound_cue_path", "normalize_sound_theme",
+            assignments={"SOUND_THEMES", "SOUND_THEME_DEFAULT", "SOUND_CUES"},
             extra={
                 "IS_WINDOWS": False,
+                "PREFERENCES": {"sounds": "system"},
+                "SOUNDS_DIR": Path("/nonexistent-sounds"),
                 "print": logs.append,
                 "subprocess": SimpleNamespace(
                     DEVNULL=None,
@@ -412,7 +416,7 @@ class DictationSuccessSoundTests(unittest.TestCase):
 
         namespace["play"]("Pop")
 
-        self.assertEqual(logs, ["! system feedback sound unavailable"])
+        self.assertEqual(logs, ["! feedback sound unavailable"])
 
     def test_mac_review_route_uses_advisory_ping(self):
         select = load_definitions(
@@ -426,6 +430,78 @@ class DictationSuccessSoundTests(unittest.TestCase):
 
         self.assertEqual(select("standard", is_macos=True), "Pop")
         self.assertEqual(select("review", is_macos=False), "Pop")
+
+
+class SoundThemeTests(unittest.TestCase):
+    """D1: the app can sound like itself, or say nothing at all."""
+
+    def namespace(self, theme, directory, *, played=None, windows=False):
+        played = [] if played is None else played
+        return load_definitions(
+            "play", "sound_cue_path", "normalize_sound_theme",
+            assignments={"SOUND_THEMES", "SOUND_THEME_DEFAULT", "SOUND_CUES"},
+            extra={
+                "IS_WINDOWS": windows,
+                "PREFERENCES": {"sounds": theme},
+                "SOUNDS_DIR": Path(directory),
+                "print": lambda *_a, **_k: None,
+                "subprocess": SimpleNamespace(
+                    DEVNULL=None,
+                    Popen=lambda argv, **_k: played.append(argv),
+                ),
+            },
+        )
+
+    def test_silent_theme_plays_nothing_at_all(self):
+        played = []
+        ns = self.namespace("silent", ROOT / "sounds", played=played)
+        for cue in ("Tink", "Pop", "Ping", "Funk"):
+            ns["play"](cue)
+        self.assertEqual(played, [])
+
+    def test_system_theme_keeps_the_existing_macos_sounds(self):
+        played = []
+        ns = self.namespace("system", ROOT / "sounds", played=played)
+        ns["play"]("Pop")
+        self.assertEqual(
+            played, [["afplay", "/System/Library/Sounds/Pop.aiff"]])
+
+    def test_first_party_theme_plays_the_committed_assets(self):
+        played = []
+        ns = self.namespace("whisper", ROOT / "sounds", played=played)
+        for cue, asset in (
+                ("Tink", "start"), ("Pop", "finish"),
+                ("Ping", "review"), ("Funk", "error")):
+            ns["play"](cue)
+            self.assertEqual(
+                played[-1], ["afplay", str(ROOT / "sounds" / f"{asset}.wav")])
+
+    def test_missing_first_party_asset_falls_back_to_system_sound(self):
+        played = []
+        ns = self.namespace("whisper", "/nonexistent-sounds", played=played)
+        ns["play"]("Pop")
+        self.assertEqual(
+            played, [["afplay", "/System/Library/Sounds/Pop.aiff"]])
+
+    def test_unknown_theme_names_keep_system_sounds(self):
+        ns = self.namespace("system", ROOT / "sounds")
+        for candidate in ("", "  ", "loud", None, 3, True):
+            with self.subTest(candidate=candidate):
+                self.assertEqual(
+                    ns["normalize_sound_theme"](candidate), "system")
+        self.assertEqual(ns["normalize_sound_theme"]("SILENT"), "silent")
+
+    def test_every_committed_cue_is_short_quiet_mono_audio(self):
+        import wave
+
+        for cue in ("start", "finish", "review", "error"):
+            with self.subTest(cue=cue):
+                with wave.open(str(ROOT / "sounds" / f"{cue}.wav")) as handle:
+                    self.assertEqual(handle.getnchannels(), 1)
+                    self.assertEqual(handle.getsampwidth(), 2)
+                    seconds = handle.getnframes() / handle.getframerate()
+                    self.assertLess(seconds, 0.150)
+                    self.assertGreater(seconds, 0.050)
 
 
 class ModelWalletShadowRuntimeStatusTests(unittest.TestCase):
@@ -1697,8 +1773,15 @@ class ParakeetClientTests(unittest.TestCase):
         self.assertEqual(first_process.wait_calls, 2)
 
     def test_parakeet_processing_time_reaches_recognition_evidence(self):
+        class ImmediatePool:
+            def submit(self, function, *args, **kwargs):
+                return SimpleNamespace(
+                    result=lambda: function(*args, **kwargs))
+
         ns = load_definitions(
             "transcribe_detailed",
+            "_parakeet_crosschecked",
+            "_clean_native_processing_s",
             extra={
                 "np": np,
                 "GLOSS": {"lock": threading.Lock(), "prompt": None},
@@ -1709,6 +1792,9 @@ class ParakeetClientTests(unittest.TestCase):
                 "PARAKEET": SimpleNamespace(
                     transcribe=lambda _audio: ("hello", 0.125)),
                 "PARAKEET_ROUTE_CONFIDENCE": 0.9,
+                "PARAKEET_IO_POOL": ImmediatePool(),
+                "PARAKEET_CROSSCHECK": False,
+                "PARAKEET_CROSSCHECK_MAX_SECONDS": 90.0,
                 "SAMPLE_RATE": 16_000,
                 "Recognition": Recognition,
                 "prepare_asr_audio": lambda audio: audio,
@@ -1735,13 +1821,19 @@ class FacePreferenceTests(unittest.TestCase):
             preferences = Path(directory) / "preferences.json"
             ns = load_definitions(
                 "normalize_face", "current_face", "load_preferences",
-                "save_preferences",
-                assignments={"FACE_CHOICES", "DEFAULT_FACE", "PREFERENCES"},
+                "save_preferences", "normalize_hotkey",
+                "normalize_sound_theme",
+                assignments={
+                    "FACE_CHOICES", "DEFAULT_FACE", "PREFERENCES",
+                    "HOTKEY_CHOICES", "HOTKEY_DEFAULT",
+                    "SOUND_THEMES", "SOUND_THEME_DEFAULT",
+                },
                 extra={
                     "PREFERENCES_FILE": preferences,
                     "IS_MACOS": True,
                     "ACOUSTIC_TIME_MACHINE": AcousticTimeMachine(),
                     "json": json,
+                    "apply_hotkey_bindings": lambda: None,
                     "atomic_write_text": lambda path, value:
                         path.write_text(value, encoding="utf-8"),
                 },
@@ -1759,6 +1851,12 @@ class FacePreferenceTests(unittest.TestCase):
             self.assertTrue(ns["PREFERENCES"]["acoustic_time_machine"])
             self.assertFalse(ns["PREFERENCES"]["voice_object_commands"])
             self.assertFalse(ns["PREFERENCES"]["spoken_edit_commands"])
+            # A1 migration: this file predates the hotkey setting entirely and
+            # keeps Right Option without saying anything about it.
+            self.assertEqual(ns["PREFERENCES"]["hotkey"], "alt_r")
+            self.assertEqual(ns["PREFERENCES"]["undo_hotkey"], "")
+            self.assertEqual(ns["PREFERENCES"]["sounds"], "system")
+            self.assertFalse(ns["PREFERENCES"]["recent_dictations"])
 
             ns["PREFERENCES"]["face"] = "FOX"
             ns["save_preferences"]()
@@ -1770,7 +1868,59 @@ class FacePreferenceTests(unittest.TestCase):
                 "spoken_edit_commands": False,
                 "selective_relisten": False,
                 "face": "fox",
+                "hotkey": "alt_r",
+                "undo_hotkey": "",
+                "sounds": "system",
+                "recent_dictations": False,
             })
+
+    def test_control_preferences_round_trip_and_reject_bad_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            preferences = Path(directory) / "preferences.json"
+            ns = load_definitions(
+                "normalize_face", "current_face", "load_preferences",
+                "save_preferences", "normalize_hotkey",
+                "normalize_sound_theme",
+                assignments={
+                    "FACE_CHOICES", "DEFAULT_FACE", "PREFERENCES",
+                    "HOTKEY_CHOICES", "HOTKEY_DEFAULT",
+                    "SOUND_THEMES", "SOUND_THEME_DEFAULT",
+                },
+                extra={
+                    "PREFERENCES_FILE": preferences,
+                    "IS_MACOS": True,
+                    "ACOUSTIC_TIME_MACHINE": AcousticTimeMachine(),
+                    "json": json,
+                    "apply_hotkey_bindings": lambda: None,
+                    "atomic_write_text": lambda path, value:
+                        path.write_text(value, encoding="utf-8"),
+                },
+            )
+            preferences.write_text(json.dumps({
+                "hotkey": "f13",
+                "undo_hotkey": "f14",
+                "sounds": "whisper",
+                "recent_dictations": True,
+            }), encoding="utf-8")
+            ns["load_preferences"]()
+            self.assertEqual(ns["PREFERENCES"]["hotkey"], "f13")
+            self.assertEqual(ns["PREFERENCES"]["undo_hotkey"], "f14")
+            self.assertEqual(ns["PREFERENCES"]["sounds"], "whisper")
+            self.assertTrue(ns["PREFERENCES"]["recent_dictations"])
+
+            # A stored value that is not bindable never reaches the listener:
+            # an ordinary letter would swallow typing everywhere.
+            preferences.write_text(json.dumps({
+                "hotkey": "a",
+                "undo_hotkey": "space",
+                "sounds": "airhorn",
+                "recent_dictations": "yes",
+            }), encoding="utf-8")
+            ns["load_preferences"]()
+            self.assertEqual(ns["PREFERENCES"]["hotkey"], "alt_r")
+            self.assertEqual(ns["PREFERENCES"]["undo_hotkey"], "")
+            self.assertEqual(ns["PREFERENCES"]["sounds"], "system")
+            self.assertFalse(ns["PREFERENCES"]["recent_dictations"])
 
     def test_privacy_preferences_are_mac_only_and_default_off(self):
         for is_macos, acoustic, voice_objects, expected in (
@@ -1789,12 +1939,18 @@ class FacePreferenceTests(unittest.TestCase):
                     buffer = AcousticTimeMachine()
                     ns = load_definitions(
                         "normalize_face", "load_preferences",
-                        assignments={"FACE_CHOICES", "DEFAULT_FACE", "PREFERENCES"},
+                        "normalize_hotkey", "normalize_sound_theme",
+                        assignments={
+                            "FACE_CHOICES", "DEFAULT_FACE", "PREFERENCES",
+                            "HOTKEY_CHOICES", "HOTKEY_DEFAULT",
+                            "SOUND_THEMES", "SOUND_THEME_DEFAULT",
+                        },
                         extra={
                             "PREFERENCES_FILE": path,
                             "IS_MACOS": is_macos,
                             "ACOUSTIC_TIME_MACHINE": buffer,
                             "json": json,
+                            "apply_hotkey_bindings": lambda: None,
                         },
                     )
                     ns["load_preferences"]()
@@ -1813,11 +1969,15 @@ class FacePreferenceTests(unittest.TestCase):
             "normalize_face",
             assignments={"FACE_CHOICES", "DEFAULT_FACE"},
         )
+        # The property, not the roster: every supported face normalizes to
+        # itself, so adding a companion does not fail this test.
         self.assertEqual(
             tuple(ns["normalize_face"](face) for face in ns["FACE_CHOICES"]),
-            ("parrot", "fox", "owl", "cat", "bear",
-             "dog", "wolf", "pig", "panda", "tiger"),
+            tuple(ns["FACE_CHOICES"]),
         )
+        self.assertIn(ns["DEFAULT_FACE"], ns["FACE_CHOICES"])
+        self.assertEqual(
+            ns["normalize_face"]("not-an-animal"), ns["DEFAULT_FACE"])
 
     def test_reduce_motion_freezes_hud_audio_animation(self):
         ns = load_definitions(
@@ -1839,6 +1999,8 @@ class SelectiveRelistenPreferenceTests(unittest.TestCase):
             assignments={"PREFERENCES"},
             extra={
                 "DEFAULT_FACE": "parrot",
+                "HOTKEY_DEFAULT": "alt_r",
+                "SOUND_THEME_DEFAULT": "system",
                 "IS_MACOS": is_macos,
                 "RELISTEN_ACTIVATION_FILE": Path("private-receipt.json"),
                 "load_activation_receipt": lambda _path: status,
@@ -1888,7 +2050,8 @@ class WhisperFaceThemeTests(unittest.TestCase):
         self.assertEqual(
             set(FACE_CHIP_COLORS),
             {"parrot", "fox", "owl", "cat", "bear",
-             "dog", "wolf", "pig", "panda", "tiger"},
+             "dog", "wolf", "pig", "panda", "tiger",
+             "frog", "rabbit", "hedgehog", "penguin"},
         )
 
     def test_all_named_jelly_motions_have_bounded_fast_springs(self):
@@ -3326,6 +3489,7 @@ class CleanupGuardTests(unittest.TestCase):
             "_guard_cleaned_output", "llm_clean_with_edits",
             assignments={
                 "BASE_PROMPT", "FEW_SHOT", "LLM_CLEANUP_TIMEOUT",
+                "LLM_CLEANUP_TOTAL_DEADLINES", "CLEANUP_RESPONSE_SCHEMA",
                 "MODE_INSTRUCTIONS", "REFUSAL_RE", "STRUCTURED_OUTPUT",
             },
             extra={
@@ -3341,6 +3505,8 @@ class CleanupGuardTests(unittest.TestCase):
         self.assertEqual(cleaned, "Ready.")
         self.assertEqual(edits, [])
         self.assertEqual(seen["timeout"], (1, 4))
+        # Capture stays on the tight whole-reply ceiling.
+        self.assertEqual(seen["total_deadline"], 6.0)
 
     def test_llm_edit_kind_is_canonicalized_before_status_projection(self):
         private_kind = "customer said secret launch phrase"
@@ -3360,6 +3526,7 @@ class CleanupGuardTests(unittest.TestCase):
             "llm_clean_with_edits",
             assignments={
                 "BASE_PROMPT", "FEW_SHOT", "LLM_CLEANUP_TIMEOUT",
+                "LLM_CLEANUP_TOTAL_DEADLINES", "CLEANUP_RESPONSE_SCHEMA",
                 "LLM_EDIT_KINDS", "MODE_INSTRUCTIONS", "REFUSAL_RE",
                 "STRUCTURED_OUTPUT",
             },
@@ -3391,6 +3558,7 @@ class CleanupGuardTests(unittest.TestCase):
             "_guard_cleaned_output", "llm_clean_with_edits",
             assignments={
                 "BASE_PROMPT", "FEW_SHOT", "LLM_CLEANUP_TIMEOUT",
+                "LLM_CLEANUP_TOTAL_DEADLINES", "CLEANUP_RESPONSE_SCHEMA",
                 "MODE_INSTRUCTIONS", "REFUSAL_RE", "STRUCTURED_OUTPUT",
             },
             extra={
@@ -3415,6 +3583,36 @@ class CleanupGuardTests(unittest.TestCase):
         self.assertTrue(any("bypassed (cooldown)" in line for line in lines))
         self.assertFalse(any("second private dictation" in line
                              for line in lines))
+
+    def test_guard_rejection_releases_without_resetting_the_cooldown(self):
+        breaker = CleanupCircuitBreaker(cooldown_seconds=60)
+
+        def refusing(*_args, **_kwargs):
+            return json.dumps({
+                "text": "I cannot help with that.", "edits": [],
+            }), "stop"
+
+        ns = load_definitions(
+            "_guard_cleaned_output", "llm_clean_with_edits",
+            assignments={
+                "BASE_PROMPT", "FEW_SHOT", "LLM_CLEANUP_TIMEOUT",
+                "LLM_CLEANUP_TOTAL_DEADLINES", "CLEANUP_RESPONSE_SCHEMA",
+                "MODE_INSTRUCTIONS", "REFUSAL_RE", "STRUCTURED_OUTPUT",
+            },
+            extra={
+                "CleanupEdit": object,
+                "LLM_CLEANUP_BREAKER": breaker,
+                "ollama_chat": refusing,
+                "quick_clean": lambda text: f"fallback:{text}",
+                "STRUCTURED_FEW_SHOT": [],
+                "print": lambda *_: None,
+            },
+        )
+        cleaned, _ = ns["llm_clean_with_edits"](
+            "please clean this dictation", "neutral")
+        self.assertEqual(cleaned, "fallback:please clean this dictation")
+        # Released, not stuck in flight, and not opened either.
+        self.assertTrue(breaker.acquire().allowed)
 
     def test_structured_output_guard_rejects_destructive_results(self):
         ns = load_definitions(
@@ -4436,6 +4634,7 @@ class LearningTests(unittest.TestCase):
                 "correction_similarity": lambda _old, _new: 0.8,
                 "infer_revised_insertion": infer_revised_insertion,
                 "parse_dictionary": lambda: ([], set()),
+                "utterance_was_undone": lambda _event_id: False,
                 "record_paste_outcome": lambda _receipt, value:
                     observed.append(value),
                 "remember_explicit_acoustic_keyword_correction":
@@ -6300,13 +6499,16 @@ class ReleasePlanTests(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def submit(self, function, *args):
+            def submit(self, function, *args, **kwargs):
                 self.calls.append(args[-1])
-                return SimpleNamespace(result=lambda: function(*args))
+                return SimpleNamespace(
+                    result=lambda: function(*args, **kwargs))
 
         pool = ImmediatePool()
+        crosscheck_hints = []
 
-        def detailed(audio, prompt, verify, model):
+        def detailed(audio, prompt, verify, model, crosscheck_text=None):
+            crosscheck_hints.append(crosscheck_text)
             confidence = 0.99 if model == "tiny" else 0.84
             return Recognition(model, confidence)
 
@@ -6337,19 +6539,23 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertEqual(result.alternative, "tiny")
         self.assertTrue(result.verified)
         self.assertEqual(pool.calls, ["tiny", "parakeet-or-whisper-fallback"])
+        # The speculative Tiny hypothesis rides along so the Parakeet route
+        # can derive agreement confidence without a second Tiny decode.
+        self.assertEqual(crosscheck_hints, [None, "tiny"])
 
     def test_tiny_first_cascade_escalates_low_confidence(self):
         class ImmediatePool:
             def __init__(self):
                 self.calls = []
 
-            def submit(self, function, *args):
+            def submit(self, function, *args, **kwargs):
                 self.calls.append(args[-1])
-                return SimpleNamespace(result=lambda: function(*args))
+                return SimpleNamespace(
+                    result=lambda: function(*args, **kwargs))
 
         pool = ImmediatePool()
 
-        def detailed(audio, prompt, verify, model):
+        def detailed(audio, prompt, verify, model, crosscheck_text=None):
             return Recognition(model, 0.5 if model == "tiny" else 0.9)
 
         ns = load_definitions(
@@ -7259,6 +7465,987 @@ class InsertionJoinPrefixTests(unittest.TestCase):
         replacing = types.SimpleNamespace(
             text="the cat sat", selection=(4, 3), element=object())
         self.assertEqual(join(replacing, "dog"), "")
+
+
+class OllamaChatTransportTests(unittest.TestCase):
+    """Structured-output schema and streamed generation deadlines."""
+
+    @staticmethod
+    def namespace(post):
+        return load_definitions(
+            "ollama_chat", "_ollama_stream_reply",
+            extra={
+                "OLLAMA_MODEL": "test-model",
+                "OLLAMA_URL": "http://localhost:11434/api/chat",
+                "requests": SimpleNamespace(post=post),
+                "time": time,
+            },
+        )
+
+    @staticmethod
+    def response(status=200, *, body=None, lines=None, text=""):
+        return SimpleNamespace(
+            status_code=status,
+            text=text,
+            json=lambda: body,
+            iter_lines=lambda: iter(lines or []),
+            close=lambda: None,
+            raise_for_status=lambda: None,
+        )
+
+    def test_schema_is_sent_and_non_streaming_path_is_unchanged(self):
+        posted = []
+
+        def post(url, json=None, timeout=None, stream=False):
+            posted.append((json, stream))
+            return self.response(body={
+                "message": {"content": "{\"text\":\"ok\"}"},
+                "done_reason": "stop",
+            })
+
+        ns = self.namespace(post)
+        out, done = ns["ollama_chat"](
+            "system", "user", json_mode=True,
+            json_schema={"type": "object"})
+        self.assertEqual(out, "{\"text\":\"ok\"}")
+        self.assertEqual(done, "stop")
+        payload, stream = posted[0]
+        self.assertEqual(payload["format"], {"type": "object"})
+        self.assertFalse(payload["stream"])
+        self.assertFalse(stream)
+
+    def test_schema_rejection_falls_back_to_plain_json_mode(self):
+        posted = []
+
+        def post(url, json=None, timeout=None, stream=False):
+            posted.append(dict(json))
+            if isinstance(json.get("format"), dict):
+                return self.response(400, text="invalid format")
+            return self.response(body={
+                "message": {"content": "{}"}, "done_reason": "stop"})
+
+        ns = self.namespace(post)
+        out, _ = ns["ollama_chat"](
+            "system", "user", json_mode=True,
+            json_schema={"type": "object"})
+        self.assertEqual(out, "{}")
+        self.assertEqual(posted[1]["format"], "json")
+
+    def test_streaming_assembles_chunks_and_reports_done_reason(self):
+        lines = [
+            json.dumps({"message": {"content": "Hello "}}).encode(),
+            b"",
+            json.dumps({"message": {"content": "world."},
+                        "done": True, "done_reason": "stop"}).encode(),
+        ]
+
+        def post(url, json=None, timeout=None, stream=False):
+            self.assertTrue(json["stream"])
+            self.assertTrue(stream)
+            return self.response(lines=lines)
+
+        ns = self.namespace(post)
+        out, done = ns["ollama_chat"](
+            "system", "user", total_deadline=5.0)
+        self.assertEqual(out, "Hello world.")
+        self.assertEqual(done, "stop")
+
+    def test_deadline_starts_before_the_first_post(self):
+        # Connect time and compatibility retries spend the same whole-reply
+        # budget as generation; a post that eats the entire budget leaves the
+        # stream reader an already-expired deadline.
+        clock = {"t": 100.0}
+        lines = [json.dumps({"message": {"content": "x"}}).encode()] * 3
+
+        def slow_post(url, json=None, timeout=None, stream=False):
+            clock["t"] += 10.0     # the request itself burns the whole budget
+            return self.response(lines=lines)
+
+        ns = self.namespace(slow_post)
+        ns["time"] = SimpleNamespace(monotonic=lambda: clock["t"])
+        with self.assertRaises(TimeoutError):
+            ns["ollama_chat"]("system", "user", total_deadline=5.0)
+
+    def test_streaming_total_deadline_fails_rather_than_hanging(self):
+        def endless():
+            while True:
+                yield json.dumps(
+                    {"message": {"content": "x"}}).encode()
+
+        ns = self.namespace(lambda *args, **kwargs: None)
+        clock = {"t": 0.0}
+
+        def fake_monotonic():
+            clock["t"] += 0.5
+            return clock["t"]
+
+        closed = []
+        with self.assertRaises(TimeoutError):
+            ns["_ollama_stream_reply"](
+                SimpleNamespace(
+                    iter_lines=endless,
+                    close=lambda: closed.append(True)),
+                deadline=1.0, clock=fake_monotonic)
+        self.assertEqual(closed, [True])
+
+    def test_think_flag_rejection_retries_without_think(self):
+        posted = []
+
+        def post(url, json=None, timeout=None, stream=False):
+            posted.append(dict(json))
+            if "think" in json:
+                return self.response(400, text="think is not supported")
+            return self.response(body={
+                "message": {"content": "ok"}, "done_reason": "stop"})
+
+        ns = self.namespace(post)
+        out, _ = ns["ollama_chat"]("system", "user")
+        self.assertEqual(out, "ok")
+        self.assertNotIn("think", posted[-1])
+
+
+class TailSilencePollTests(unittest.TestCase):
+    """The post-release tail ends as soon as the silence run exists."""
+
+    @staticmethod
+    def waited(silent_samples_curve, *, end_silence=0.12, cap=0.30):
+        clock = {"t": 0.0}
+        curve = list(silent_samples_curve)
+        rec = SimpleNamespace(silent_samples=curve.pop(0))
+
+        def now():
+            return clock["t"]
+
+        def sleep(seconds):
+            clock["t"] += seconds
+            if curve:
+                rec.silent_samples = curve.pop(0)
+
+        ns = load_definitions(
+            "wait_for_tail_silence",
+            extra={
+                "TAIL_SECONDS": cap,
+                "SAMPLE_RATE": 16_000,
+                "calibrated_end_silence_seconds": lambda: end_silence,
+                "time": SimpleNamespace(
+                    sleep=sleep, perf_counter=now),
+            },
+        )
+        return ns["wait_for_tail_silence"](
+            rec, sleep=sleep, now=now)
+
+    def test_quiet_tail_exits_at_the_first_silence_run(self):
+        # Silence run completes after two polls: 40 ms, not 300 ms.
+        waited = self.waited([0, 500, 16_000 * 0.13])
+        self.assertLess(waited, 0.05)
+
+    def test_continuing_speech_still_caps_at_the_full_tail(self):
+        waited = self.waited([0] * 100)
+        self.assertAlmostEqual(waited, 0.30, places=2)
+
+    def test_calibrated_end_silence_shortens_the_wait(self):
+        # A 60 ms calibrated run is satisfied by the second sample.
+        waited = self.waited(
+            [0, 16_000 * 0.07, 16_000 * 0.07], end_silence=0.06)
+        self.assertLess(waited, 0.05)
+
+
+class ParakeetCrosscheckTests(unittest.TestCase):
+    """Agreement-derived route confidence on the Parakeet primary path."""
+
+    @staticmethod
+    def crosschecked(*, parakeet_result, tiny_text=None, fallback=None,
+                     crosscheck_enabled=True, tiny_cached=True,
+                     calls=None):
+        from parrot_core import (
+            hypothesis_agreement,
+            parakeet_confidence_from_agreement,
+            should_escalate_uncertain,
+        )
+        calls = calls if calls is not None else []
+
+        class ImmediatePool:
+            def submit(self, fn, *args, **kwargs):
+                return SimpleNamespace(result=lambda: fn(*args, **kwargs))
+
+        def fake_transcribe_detailed(audio, prompt=None, verify=True,
+                                     model_repo="turbo",
+                                     crosscheck_text=None,
+                                     _skip_parakeet=False):
+            calls.append((model_repo, _skip_parakeet))
+            if model_repo == "tiny-repo":
+                return Recognition(text=tiny_text or "", engine="tiny")
+            return fallback or Recognition(text="", confidence=0.0)
+
+        ns = load_definitions(
+            "_parakeet_crosschecked",
+            "_clean_native_processing_s",
+            extra={
+                "PARAKEET_IO_POOL": ImmediatePool(),
+                "PARAKEET": SimpleNamespace(
+                    transcribe=lambda audio: parakeet_result),
+                "PARAKEET_CROSSCHECK": crosscheck_enabled,
+                "PARAKEET_CROSSCHECK_MAX_SECONDS": 90.0,
+                "PARAKEET_ROUTE_CONFIDENCE": 0.84,
+                "SAMPLE_RATE": 16_000,
+                "WHISPER_REPO": "turbo-repo",
+                "FAST_WHISPER_REPO": "tiny-repo",
+                "asr_model_is_cached": lambda repo: tiny_cached,
+                "transcribe_detailed": fake_transcribe_detailed,
+                "hypothesis_agreement": hypothesis_agreement,
+                "parakeet_confidence_from_agreement":
+                    parakeet_confidence_from_agreement,
+                "should_escalate_uncertain": should_escalate_uncertain,
+                "Recognition": Recognition,
+                "print": lambda *args, **kwargs: None,
+            },
+        )
+        audio = np.zeros(16_000 * 4, dtype=np.float32)
+        return ns["_parakeet_crosschecked"](audio, None, verify=True), calls
+
+    def test_full_agreement_yields_high_confidence_and_no_alternative(self):
+        recognition, _ = self.crosschecked(
+            parakeet_result=("ship the installer today", 0.05),
+            tiny_text="ship the installer today")
+        self.assertEqual(recognition.engine, "parakeet-unified")
+        self.assertAlmostEqual(recognition.confidence, 0.93)
+        self.assertIsNone(recognition.alternative)
+        self.assertEqual(recognition.native_processing_s, 0.05)
+
+    def test_disagreement_drops_confidence_below_the_context_gate(self):
+        recognition, _ = self.crosschecked(
+            parakeet_result=("ship the installer to Berg today ok", 0.05),
+            tiny_text="skip the finish line by the bay no")
+        self.assertLess(recognition.confidence, 0.70)
+        self.assertEqual(
+            recognition.alternative, "skip the finish line by the bay no")
+
+    def test_no_crosscheck_keeps_the_fixed_routing_prior(self):
+        recognition, calls = self.crosschecked(
+            parakeet_result=("hello there", 0.05),
+            crosscheck_enabled=False)
+        self.assertAlmostEqual(recognition.confidence, 0.84)
+        self.assertEqual(calls, [])
+
+    def test_missing_tiny_snapshot_keeps_the_fixed_routing_prior(self):
+        recognition, calls = self.crosschecked(
+            parakeet_result=("hello there", 0.05), tiny_cached=False)
+        self.assertAlmostEqual(recognition.confidence, 0.84)
+        self.assertEqual(calls, [])
+
+    def test_helper_failure_returns_none_for_the_whisper_fallback(self):
+        recognition, _ = self.crosschecked(
+            parakeet_result=None, tiny_text="anything")
+        self.assertIsNone(recognition)
+
+    def test_severe_disagreement_escalates_once_and_keeps_the_winner(self):
+        fallback = Recognition(
+            text="completely different words", confidence=0.9,
+            engine="turbo")
+        recognition, calls = self.crosschecked(
+            parakeet_result=("alpha beta gamma delta", 0.05),
+            tiny_text="one two three four",
+            fallback=fallback)
+        self.assertIn(("turbo-repo", True), calls)
+        self.assertEqual(recognition.text, "completely different words")
+        self.assertTrue(recognition.verified)
+        self.assertEqual(recognition.alternative, "alpha beta gamma delta")
+
+    def test_escalation_failure_keeps_the_primary_transcript(self):
+        # A raising Turbo fallback must not turn a working dictation into a
+        # dropped one: the primary transcript survives escalation failure.
+        from parrot_core import (
+            hypothesis_agreement,
+            parakeet_confidence_from_agreement,
+            should_escalate_uncertain,
+        )
+
+        class ImmediatePool:
+            def submit(self, fn, *args, **kwargs):
+                return SimpleNamespace(result=lambda: fn(*args, **kwargs))
+
+        ns = load_definitions(
+            "_parakeet_crosschecked",
+            "_clean_native_processing_s",
+            extra={
+                "PARAKEET_IO_POOL": ImmediatePool(),
+                "PARAKEET": SimpleNamespace(
+                    transcribe=lambda audio: ("alpha beta gamma delta", 0.05)),
+                "PARAKEET_CROSSCHECK": True,
+                "PARAKEET_CROSSCHECK_MAX_SECONDS": 90.0,
+                "PARAKEET_ROUTE_CONFIDENCE": 0.84,
+                "SAMPLE_RATE": 16_000,
+                "WHISPER_REPO": "turbo-repo",
+                "FAST_WHISPER_REPO": "tiny-repo",
+                "asr_model_is_cached": lambda repo: True,
+                "transcribe_detailed": lambda *args, **kwargs: (
+                    Recognition(text="one two three four", engine="tiny")
+                    if kwargs.get("model_repo") == "tiny-repo"
+                    or (len(args) >= 4 and args[3] == "tiny-repo")
+                    else (_ for _ in ()).throw(
+                        RuntimeError("turbo snapshot missing"))),
+                "hypothesis_agreement": hypothesis_agreement,
+                "parakeet_confidence_from_agreement":
+                    parakeet_confidence_from_agreement,
+                "should_escalate_uncertain": should_escalate_uncertain,
+                "Recognition": Recognition,
+                "print": lambda *args, **kwargs: None,
+            },
+        )
+        audio = np.zeros(16_000 * 4, dtype=np.float32)
+        recognition = ns["_parakeet_crosschecked"](audio, None, verify=True)
+        self.assertEqual(recognition.text, "alpha beta gamma delta")
+        self.assertTrue(recognition.verified)
+        self.assertEqual(recognition.alternative, "one two three four")
+
+    def test_low_confidence_escalation_loser_stays_inspectable(self):
+        fallback = Recognition(
+            text="different words", confidence=0.1, engine="turbo")
+        recognition, calls = self.crosschecked(
+            parakeet_result=("alpha beta gamma delta", 0.05),
+            tiny_text="one two three four",
+            fallback=fallback)
+        self.assertIn(("turbo-repo", True), calls)
+        self.assertEqual(recognition.text, "alpha beta gamma delta")
+        self.assertTrue(recognition.verified)
+        self.assertEqual(recognition.alternative, "different words")
+
+    def test_speculative_crosscheck_text_skips_the_extra_tiny_decode(self):
+        recognition, calls = self.crosschecked(
+            parakeet_result=("use the same words", 0.05),
+            tiny_text="never decoded")
+        self.assertTrue(
+            any(repo == "tiny-repo" for repo, _skip in calls))
+
+        calls_with_hint = []
+        from parrot_core import (
+            hypothesis_agreement,
+            parakeet_confidence_from_agreement,
+            should_escalate_uncertain,
+        )
+
+        class ImmediatePool:
+            def submit(self, fn, *args, **kwargs):
+                return SimpleNamespace(result=lambda: fn(*args, **kwargs))
+
+        ns = load_definitions(
+            "_parakeet_crosschecked",
+            "_clean_native_processing_s",
+            extra={
+                "PARAKEET_IO_POOL": ImmediatePool(),
+                "PARAKEET": SimpleNamespace(
+                    transcribe=lambda audio: ("use the same words", 0.05)),
+                "PARAKEET_CROSSCHECK": True,
+                "PARAKEET_CROSSCHECK_MAX_SECONDS": 90.0,
+                "PARAKEET_ROUTE_CONFIDENCE": 0.84,
+                "SAMPLE_RATE": 16_000,
+                "WHISPER_REPO": "turbo-repo",
+                "FAST_WHISPER_REPO": "tiny-repo",
+                "asr_model_is_cached": lambda repo: True,
+                "transcribe_detailed":
+                    lambda *args, **kwargs: calls_with_hint.append(args)
+                    or Recognition(text=""),
+                "hypothesis_agreement": hypothesis_agreement,
+                "parakeet_confidence_from_agreement":
+                    parakeet_confidence_from_agreement,
+                "should_escalate_uncertain": should_escalate_uncertain,
+                "Recognition": Recognition,
+                "print": lambda *args, **kwargs: None,
+            },
+        )
+        audio = np.zeros(16_000 * 4, dtype=np.float32)
+        recognition = ns["_parakeet_crosschecked"](
+            audio, None, verify=True, crosscheck_text="use the same words")
+        self.assertEqual(calls_with_hint, [])
+        self.assertAlmostEqual(recognition.confidence, 0.93)
+
+
+class BuiltInVerbatimToneTests(unittest.TestCase):
+    """E1: terminals must resolve to verbatim through the built-in path."""
+
+    def _tone_for(self, override=None):
+        return load_definitions(
+            "tone_for",
+            assignments={"TONE", "CASUAL_APPS", "FORMAL_APPS",
+                         "VERBATIM_APPS", "CODE_APPS"},
+            extra={"app_tone_override": lambda _bundle: override},
+        )["tone_for"]
+
+    def test_verbatim_apps_resolve_to_verbatim_without_a_manual_override(self):
+        tone_for = self._tone_for()
+        for bundle in ("com.apple.Terminal", "com.googlecode.iterm2",
+                       "net.kovidgoyal.kitty", "com.github.wez.wezterm"):
+            with self.subTest(bundle=bundle):
+                self.assertEqual(tone_for(bundle), "verbatim")
+
+    def test_other_built_in_sets_are_unchanged(self):
+        tone_for = self._tone_for()
+        self.assertEqual(tone_for("com.tinyspeck.slackmacgap"), "casual")
+        self.assertEqual(tone_for("com.apple.mail"), "formal")
+        self.assertEqual(tone_for("com.microsoft.VSCode"), "code")
+        self.assertEqual(tone_for("com.example.unknown"), "default")
+
+    def test_a_manual_tone_override_still_wins_over_the_built_in_set(self):
+        self.assertEqual(
+            self._tone_for(override="casual")("com.apple.Terminal"), "casual")
+
+    def test_verbatim_is_a_contract_and_carries_no_prompt_text(self):
+        # The call site reads TONE with a fallback precisely because of this.
+        namespace = load_definitions(
+            "tone_for", assignments={"TONE"},
+            extra={"app_tone_override": lambda _bundle: None})
+        self.assertNotIn("verbatim", namespace["TONE"])
+
+
+class HotkeyBindingTests(unittest.TestCase):
+    """A1: the capture key is chosen, and the guard refuses typing keys."""
+
+    def namespace(self):
+        return load_definitions(
+            "normalize_hotkey", "hotkey_label_for", "hotkey_shared_modes",
+            "hotkey_binding_decision", "modifier_pressed_by",
+            assignments={"HOTKEY_CHOICES", "HOTKEY_DEFAULT",
+                         "HOTKEY_MODIFIER_FAMILY",
+                         "HOTKEY_MODES_BY_MODIFIER"},
+            extra={"IS_MACOS": True},
+        )
+
+    def test_ordinary_typing_keys_are_refused(self):
+        decide = self.namespace()["hotkey_binding_decision"]
+        for candidate in ("a", "Z", "7", "space", "enter", "tab", ".",
+                          "backspace", "", "   ", None, 5, True):
+            with self.subTest(candidate=candidate):
+                verdict = decide(candidate)
+                self.assertFalse(verdict["accepted"])
+                self.assertEqual(verdict["reason"], "unsupported_key")
+
+    def test_modifier_and_function_keys_are_accepted(self):
+        decide = self.namespace()["hotkey_binding_decision"]
+        for candidate in ("alt_r", "alt_l", "cmd_l", "ctrl_r", "shift_l",
+                          "f1", "f13", "f20"):
+            with self.subTest(candidate=candidate):
+                verdict = decide(candidate)
+                self.assertTrue(verdict["accepted"])
+                self.assertEqual(verdict["name"], candidate)
+                self.assertTrue(verdict["label"])
+
+    def test_an_unbound_undo_key_is_allowed_only_where_it_is_meaningful(self):
+        decide = self.namespace()["hotkey_binding_decision"]
+        self.assertFalse(decide("")["accepted"])
+        unbound = decide("", allow_unbound=True)
+        self.assertTrue(unbound["accepted"])
+        self.assertEqual(unbound["reason"], "unbound")
+        self.assertEqual(unbound["name"], "")
+
+    def test_labels_follow_the_platform(self):
+        label = self.namespace()["hotkey_label_for"]
+        self.assertEqual(label("alt_r", is_macos=True), "Right Option")
+        self.assertEqual(label("alt_r", is_macos=False), "Right Alt")
+        self.assertEqual(label("cmd_l", is_macos=True), "Left Command")
+        self.assertEqual(label("cmd_l", is_macos=False), "Left Windows")
+        self.assertEqual(label("f13", is_macos=True), "F13")
+        self.assertEqual(label("", is_macos=True), "")
+
+    def test_migration_keeps_right_option_when_no_preference_is_stored(self):
+        normalize = self.namespace()["normalize_hotkey"]
+        for stored in (None, "", "nonsense", 12, {}):
+            with self.subTest(stored=stored):
+                self.assertEqual(normalize(stored), "alt_r")
+        self.assertEqual(normalize(None, default=""), "")
+
+    def test_option_and_function_keys_leave_every_mode_reachable(self):
+        shared = self.namespace()["hotkey_shared_modes"]
+        for candidate in ("alt_r", "alt_l", "f1", "f13", "f20"):
+            with self.subTest(candidate=candidate):
+                self.assertEqual(shared(candidate), ())
+
+    def test_mode_modifier_keys_declare_exactly_which_modes_they_share(self):
+        shared = self.namespace()["hotkey_shared_modes"]
+        # mode_from_modifiers reads shift/command/control, so a bound key from
+        # one of those families is named here rather than silently colliding.
+        self.assertEqual(shared("shift_r"), ("compose", "code"))
+        self.assertEqual(shared("shift_l"), ("compose", "code"))
+        self.assertEqual(shared("cmd_r"), ("edit", "command"))
+        self.assertEqual(shared("ctrl_l"), ("reply", "command", "code"))
+
+    def test_shared_modes_match_the_real_mode_table(self):
+        """Derive the answer from parrot_core rather than restating it here.
+
+        A mode "needs" a modifier when every combination that selects it holds
+        that modifier down. Those are exactly the modes that, once the same
+        key is the capture trigger, require the opposite-side key instead.
+        """
+        shared = self.namespace()["hotkey_shared_modes"]
+        combinations = [
+            frozenset(names) for names in (
+                (), ("shift",), ("command",), ("control",),
+                ("shift", "command"), ("shift", "control"),
+                ("command", "control"),
+                ("shift", "command", "control"))
+        ]
+        for candidate, modifier in (
+                ("shift_r", "shift"), ("shift_l", "shift"),
+                ("cmd_r", "command"), ("cmd_l", "command"),
+                ("ctrl_r", "control"), ("ctrl_l", "control")):
+            selections: dict[str, list] = {}
+            for combination in combinations:
+                mode = mode_from_modifiers(
+                    "shift" in combination, "command" in combination,
+                    "control" in combination)
+                selections.setdefault(mode, []).append(combination)
+            expected = {
+                mode for mode, holding in selections.items()
+                if all(modifier in combination for combination in holding)
+            }
+            with self.subTest(candidate=candidate):
+                self.assertEqual(set(shared(candidate)), expected)
+                # Capture is never listed: the trigger is not a modifier.
+                self.assertNotIn("capture", shared(candidate))
+
+    def test_the_bound_key_never_counts_as_its_own_modifier(self):
+        contributes = self.namespace()["modifier_pressed_by"]
+        families = (
+            ("shift", {"shift_l", "shift_r"}),
+            ("command", {"cmd_l", "cmd_r"}),
+            ("control", {"ctrl_l", "ctrl_r"}),
+        )
+        # Binding Right Shift must leave plain Capture reachable: the trigger
+        # is not also a modifier.
+        self.assertIsNone(contributes("shift_r", "shift_r", families))
+        self.assertEqual(contributes("shift_l", "shift_r", families), "shift")
+        self.assertEqual(contributes("cmd_r", "shift_r", families), "command")
+        self.assertIsNone(contributes("alt_r", "alt_r", families))
+        self.assertIsNone(contributes("f13", "alt_r", families))
+
+
+class RecentDictationTests(unittest.TestCase):
+    """A3: metadata in the menu, text only after an explicit reveal."""
+
+    LOG = [
+        json.dumps({"ts": 1000.0, "app": "com.apple.mail",
+                    "clean": "alpha bravo charlie", "id": "a"}),
+        json.dumps({"ts": 2000.0, "app": "com.apple.Terminal",
+                    "clean": "delta", "id": "b"}),
+        "{ not json at all",
+        json.dumps({"ts": 3000.0, "app": "", "clean": "   "}),
+        json.dumps({"ts": 3600.0, "app": "com.apple.mail",
+                    "clean": "echo foxtrot golf hotel", "id": "c"}),
+    ]
+
+    def namespace(self):
+        return load_definitions(
+            "recent_dictation_metadata", "recent_dictation_menu_title",
+            "describe_dictation_age", "undo_menu_title",
+            assignments={"RECENT_DICTATION_LIMIT"},
+            extra={"time": SimpleNamespace(time=lambda: 3700.0),
+                   "math": __import__("math"),
+                   "TRANSCRIPTS_LOCK": threading.Lock(),
+                   "app_display_name":
+                       lambda bundle: bundle.rsplit(".", 1)[-1]},
+        )
+
+    def test_metadata_never_contains_the_dictated_text(self):
+        ns = self.namespace()
+        entries = ns["recent_dictation_metadata"](lines=self.LOG, now=3700.0)
+        self.assertEqual([entry["id"] for entry in entries], ["c", "b", "a"])
+        serialized = json.dumps(entries)
+        for text in ("alpha", "bravo", "charlie", "delta", "echo",
+                     "foxtrot", "golf", "hotel"):
+            self.assertNotIn(text, serialized)
+        self.assertEqual(entries[0]["words"], 4)
+        self.assertEqual(entries[0]["app"], "mail")
+
+    def test_the_list_is_bounded_and_skips_unusable_entries(self):
+        ns = self.namespace()
+        entries = ns["recent_dictation_metadata"](
+            limit=2, lines=self.LOG, now=3700.0)
+        self.assertEqual(len(entries), 2)
+        # A blank transcript and a corrupt line are simply not offered.
+        self.assertEqual(len(ns["recent_dictation_metadata"](
+            lines=self.LOG, now=3700.0)), 3)
+
+    def test_older_entries_without_an_id_stay_addressable_by_position(self):
+        ns = self.namespace()
+        log = [json.dumps({"ts": 1.0, "app": "x", "clean": "no id here"})]
+        entries = ns["recent_dictation_metadata"](lines=log, now=2.0)
+        self.assertEqual(entries[0]["id"], "line:1")
+
+    def test_menu_titles_carry_no_text(self):
+        ns = self.namespace()
+        entries = ns["recent_dictation_metadata"](lines=self.LOG, now=3700.0)
+        titles = [ns["recent_dictation_menu_title"](e) for e in entries]
+        self.assertEqual(titles[0], "1 min ago · 4 words · mail")
+        self.assertEqual(titles[1], "28 min ago · 1 word · Terminal")
+        for title in titles:
+            for text in ("alpha", "bravo", "charlie", "delta", "echo",
+                         "foxtrot", "golf", "hotel"):
+                self.assertNotIn(text, title)
+
+    def test_age_is_coarse_and_survives_nonsense(self):
+        describe = self.namespace()["describe_dictation_age"]
+        self.assertEqual(describe(0), "just now")
+        self.assertEqual(describe(59), "just now")
+        self.assertEqual(describe(120), "2 min ago")
+        self.assertEqual(describe(7200), "2 hr ago")
+        self.assertEqual(describe(172800), "2d ago")
+        self.assertEqual(describe(float("nan")), "just now")
+        self.assertEqual(describe("later"), "just now")
+
+    def test_undo_menu_title_names_state_never_content(self):
+        title = self.namespace()["undo_menu_title"]
+        self.assertEqual(title({"available": False}), "Undo Last Dictation")
+        self.assertEqual(
+            title({"available": True, "app": "Mail"}, "F14"),
+            "Undo Last Dictation in Mail (F14)")
+        self.assertEqual(
+            title({"available": True, "app": ""}, ""),
+            "Undo Last Dictation")
+
+
+class UndoLastDictationTests(unittest.TestCase):
+    """A2: undo is an insertion in reverse, held to the same standard."""
+
+    BEFORE = "Dear Ada, "
+    INSERTED = "thanks for the note."
+
+    def namespace(self, *, field=None, destination="mail:field-1"):
+        from insertion_integrity import (
+            DestinationObservation,
+            InsertionCoordinator,
+            InsertionLease,
+            ReadbackResult,
+            ReceiptState,
+        )
+
+        element = object()
+        state = {
+            "text": (field if field is not None
+                     else self.BEFORE + self.INSERTED),
+            "keys": [],
+            "pasted": [],
+        }
+
+        def press(*keys):
+            state["keys"].append(tuple(getattr(k, "name", k) for k in keys))
+            # Selecting then deleting is what the real chord does; the fake
+            # field applies the same substitution so readback is meaningful.
+            if len(keys) == 1 and getattr(keys[0], "name", "") == "backspace":
+                state["text"] = self.BEFORE
+
+        def paste(text):
+            state["pasted"].append(text)
+            state["text"] = self.BEFORE + text
+
+        namespace = load_definitions(
+            "undo_last_dictation", "undo_utterance_id", "undo_refusal",
+            "UndoableInsertion", "record_undoable_insertion",
+            "undoable_insertion_status", "note_undone_utterance",
+            "utterance_was_undone", "build_undoable_insertion",
+            "bounded_focus_text", "destination_observation",
+            "insertion_readback", "classify_readback_conflict",
+            "FocusSnapshot",
+            extra={
+                "dataclass": dataclass,
+                "time": time,
+                "math": __import__("math"),
+                "unicodedata": __import__("unicodedata"),
+                "DestinationObservation": DestinationObservation,
+                "InsertionLease": InsertionLease,
+                "ReadbackResult": ReadbackResult,
+                "ReceiptState": ReceiptState,
+                "INSERTION_COORDINATOR": InsertionCoordinator(),
+                "UNDOABLE_INSERTION": {"record": None,
+                                       "lock": threading.RLock()},
+                "UNDONE_UTTERANCES": __import__("collections").deque(
+                    maxlen=64),
+                "UNDONE_UTTERANCES_LOCK": threading.Lock(),
+                "UNDO_MAX_CHARACTERS": 2000,
+                "LAST_INSERTION": None,
+                "app_display_name": lambda bundle: bundle,
+                "keyboard": SimpleNamespace(Key=SimpleNamespace(
+                    shift=SimpleNamespace(name="shift"),
+                    left=SimpleNamespace(name="left"),
+                    backspace=SimpleNamespace(name="backspace"))),
+                # The real helper folds the frontmost bundle into the id, so
+                # the fake must too: that is what makes focus drift visible.
+                "focus_destination_id": lambda snapshot, bundle: (
+                    f"{bundle}:{destination}" if snapshot is not None
+                    else None),
+                "focus_destination_matches": lambda *_a: True,
+                "opaque_focus_context": lambda _snapshot: "",
+                "readback_timeout_for_frontmost": lambda: 0.0,
+                "_ax_text": lambda _element: state["text"],
+                "print": lambda *_a, **_k: None,
+                "paste": paste,
+                "_press_edit_chord": press,
+                "focused_snapshot": lambda: None,
+                "frontmost_bundle": lambda: "com.apple.mail",
+            },
+        )
+        namespace["_state"] = state
+        namespace["_element"] = element
+        return namespace
+
+    def _record(self, ns):
+        return ns["UndoableInsertion"](
+            element=ns["_element"],
+            bundle="com.apple.mail",
+            destination_id="com.apple.mail:mail:field-1",
+            utterance_id="utterance-1",
+            inserted=self.INSERTED,
+            before=self.BEFORE,
+            selection=(len(self.BEFORE), 0),
+        )
+
+    def _snapshot(self, ns, *, text=None, caret=None):
+        return ns["FocusSnapshot"](
+            element=ns["_element"],
+            text=ns["_state"]["text"] if text is None else text,
+            selection=(len(self.BEFORE + self.INSERTED), 0)
+            if caret is None else caret,
+        )
+
+    def test_undo_restores_the_exact_prior_text(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._record(ns))
+        result = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns))
+
+        self.assertTrue(result["undone"])
+        self.assertEqual(ns["_state"]["text"], self.BEFORE)
+        # Exactly one shift+left per inserted character, then one delete.
+        self.assertEqual(
+            ns["_state"]["keys"].count(("shift", "left")),
+            len(self.INSERTED))
+        self.assertEqual(ns["_state"]["keys"][-1], ("backspace",))
+
+    def test_undo_restores_replaced_text_rather_than_deleting_it(self):
+        ns = self.namespace()
+        record = ns["UndoableInsertion"](
+            element=ns["_element"],
+            bundle="com.apple.mail",
+            destination_id="com.apple.mail:mail:field-1",
+            utterance_id="utterance-2",
+            inserted=self.INSERTED,
+            before="Dear Ada, hello",
+            selection=(10, 5),
+        )
+        ns["record_undoable_insertion"](record)
+        ns["_state"]["text"] = record.expected
+        result = ns["undo_last_dictation"](
+            snapshot_reader=lambda: ns["FocusSnapshot"](
+                element=ns["_element"], text=record.expected,
+                selection=(10 + len(self.INSERTED), 0)))
+
+        self.assertTrue(result["undone"])
+        self.assertEqual(ns["_state"]["pasted"], ["hello"])
+
+    def test_undo_refuses_when_focus_moved(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._record(ns))
+        result = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns),
+            bundle_reader=lambda: "com.tinyspeck.slackmacgap")
+
+        self.assertFalse(result["undone"])
+        self.assertEqual(result["reason"], "focus_drift")
+        self.assertEqual(ns["_state"]["text"], self.BEFORE + self.INSERTED)
+        self.assertEqual(ns["_state"]["keys"], [])
+
+    def test_undo_refuses_when_the_caret_moved(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._record(ns))
+        result = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns, caret=(3, 0)))
+
+        self.assertFalse(result["undone"])
+        self.assertEqual(result["reason"], "selection_drift")
+        self.assertEqual(ns["_state"]["keys"], [])
+
+    def test_undo_refuses_when_the_surrounding_text_changed(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._record(ns))
+        # Same length, so the caret still matches: this must be caught by
+        # the surrounding-text fingerprint and nothing else.
+        edited = "Dear Zed, " + self.INSERTED
+        result = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(
+                ns, text=edited, caret=(len(edited), 0)))
+
+        self.assertFalse(result["undone"])
+        self.assertEqual(result["reason"], "surrounding_text_drift")
+        self.assertEqual(ns["_state"]["keys"], [])
+
+    def test_undo_refuses_when_the_destination_cannot_be_read(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._record(ns))
+        result = ns["undo_last_dictation"](snapshot_reader=lambda: None)
+
+        self.assertFalse(result["undone"])
+        self.assertEqual(result["reason"], "target_unreadable")
+        self.assertEqual(ns["_state"]["keys"], [])
+
+    def test_undo_is_single_use(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._record(ns))
+        first = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns))
+        self.assertTrue(first["undone"])
+
+        # Re-arming the same utterance cannot produce a second undo: the
+        # coordinator already holds a terminal entry for that id.
+        ns["record_undoable_insertion"](self._record(ns))
+        second = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns, text=self.BEFORE))
+        self.assertFalse(second["undone"])
+        self.assertEqual(second["reason"], "already_undone")
+
+    def test_nothing_to_undo_is_a_refusal_not_a_crash(self):
+        ns = self.namespace()
+        self.assertEqual(
+            ns["undo_last_dictation"](),
+            {"undone": False, "reason": "nothing_to_undo"})
+
+    def test_a_new_dictation_replaces_what_is_undoable(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._record(ns))
+        self.assertTrue(ns["undoable_insertion_status"]()["available"])
+        ns["record_undoable_insertion"](None)
+        self.assertFalse(ns["undoable_insertion_status"]()["available"])
+        self.assertEqual(
+            ns["undo_last_dictation"]()["reason"], "nothing_to_undo")
+
+    def test_an_over_long_insertion_is_declined_rather_than_typed_back(self):
+        ns = self.namespace()
+        ns["UNDO_MAX_CHARACTERS"] = 4
+        record = ns["UndoableInsertion"](
+            element=ns["_element"], bundle="com.apple.mail",
+            destination_id="com.apple.mail:mail:field-1",
+            utterance_id="utterance-long",
+            inserted="x" * 5, before="", selection=(0, 0))
+        ns["record_undoable_insertion"](record)
+        result = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns))
+        self.assertEqual(result["reason"], "too_long_to_undo")
+        self.assertEqual(ns["_state"]["keys"], [])
+
+    def test_a_verified_undo_is_suppressed_from_correction_learning(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._record(ns))
+        self.assertFalse(ns["utterance_was_undone"]("utterance-1"))
+        ns["undo_last_dictation"](snapshot_reader=lambda: self._snapshot(ns))
+        self.assertTrue(ns["utterance_was_undone"]("utterance-1"))
+
+    def test_a_refusal_that_never_touched_the_field_still_allows_learning(
+            self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._record(ns))
+        ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns, caret=(3, 0)))
+        # The destination is untouched, so a real correction made there is
+        # still the user's and still deserves to be learned.
+        self.assertFalse(ns["utterance_was_undone"]("utterance-1"))
+
+    def test_an_unreadable_destination_is_never_recorded_as_undoable(self):
+        ns = self.namespace()
+        request = SimpleNamespace(committed_text=self.INSERTED)
+        opaque = ns["FocusSnapshot"](
+            element=ns["_element"], text=None, selection=None)
+        self.assertIsNone(ns["build_undoable_insertion"](
+            request, opaque, "com.apple.mail", "u"))
+        self.assertIsNone(ns["build_undoable_insertion"](
+            request, None, "com.apple.mail", "u"))
+        self.assertIsNone(ns["build_undoable_insertion"](
+            SimpleNamespace(committed_text=""), self._snapshot(ns),
+            "com.apple.mail", "u"))
+
+    def test_the_recorded_insertion_is_the_string_that_reached_the_field(self):
+        ns = self.namespace()
+        request = SimpleNamespace(committed_text=" " + self.INSERTED)
+        snapshot = ns["FocusSnapshot"](
+            element=ns["_element"], text=self.BEFORE.rstrip(),
+            selection=(len(self.BEFORE.rstrip()), 0))
+        record = ns["build_undoable_insertion"](
+            request, snapshot, "com.apple.mail", "u")
+        # The joining space is part of what was inserted, so undo removes it.
+        self.assertEqual(record.inserted, " " + self.INSERTED)
+        self.assertEqual(record.restored, self.BEFORE.rstrip())
+
+
+class CorrectionLearningUndoSuppressionTests(unittest.TestCase):
+    """A2: an undo must never be mistaken for the user correcting text."""
+
+    def namespace(self, undone, *, revised="Hello Qwen world"):
+        recorded = []
+        return load_definitions(
+            "learn_from_corrections",
+            extra={
+                "observe_paste_outcome": lambda _receipt: revised,
+                "record_paste_outcome":
+                    lambda *args: recorded.append(args),
+                "utterance_was_undone": lambda event_id: event_id in undone,
+                "print": lambda *_a, **_k: None,
+                "difflib": __import__("difflib"),
+                "time": SimpleNamespace(time=lambda: 1.0),
+                "correction_similarity": lambda _old, _new: 0.8,
+                "parse_dictionary": lambda: ([], set()),
+                "CORRECTION_MAX_LEARN": 3,
+                "PROMOTE_MIN_COUNT": 2,
+                "LEARN_LOCK": threading.Lock(),
+                "load_learned": lambda: {
+                    "counts": {}, "fixes": {}, "confusions": {},
+                    "history": [], "regression_lab": {}},
+                "save_learned": lambda _state: None,
+                "personal_regression_lab": lambda _state: SimpleNamespace(
+                    record_correction=lambda *_a, **_k: None,
+                    propose=lambda *_a, **_k: SimpleNamespace(passed=True),
+                    to_dict=lambda: {}),
+                "refresh_glossary": lambda: None,
+                "remember_explicit_acoustic_keyword_correction":
+                    lambda *_a, **_k: True,
+                "PERSONAL_APP_MIN_COUNT": 2,
+                "PERSONAL_GLOBAL_MIN_COUNT": 3,
+            },
+        ), recorded
+
+    def test_an_undone_utterance_never_reaches_the_personal_prior(self):
+        ns, recorded = self.namespace({"undone-event"})
+        receipt = SimpleNamespace(
+            pasted="Hello Gwen world", bundle="com.apple.mail",
+            mode="capture", event_id="undone-event")
+
+        ns["learn_from_corrections"](receipt)
+
+        self.assertEqual(recorded, [])
+
+    def test_an_undo_during_the_watch_window_is_still_suppressed(self):
+        # The watcher is already sleeping when the undo arrives, so the check
+        # after observe_paste_outcome is the one that has to catch it.
+        undone = set()
+        ns, recorded = self.namespace(undone)
+
+        def observe(_receipt):
+            undone.add("late-event")
+            return "Hello Qwen world"
+
+        ns["observe_paste_outcome"] = observe
+        receipt = SimpleNamespace(
+            pasted="Hello Gwen world", bundle="com.apple.mail",
+            mode="capture", event_id="late-event")
+
+        ns["learn_from_corrections"](receipt)
+
+        self.assertEqual(recorded, [])
+
+    def test_an_ordinary_correction_is_unaffected(self):
+        ns, recorded = self.namespace(set())
+        receipt = SimpleNamespace(
+            pasted="Hello Gwen world", bundle="com.apple.mail",
+            mode="capture", event_id="normal-event")
+
+        ns["learn_from_corrections"](receipt)
+
+        self.assertEqual(len(recorded), 1)
 
 
 if __name__ == "__main__":

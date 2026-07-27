@@ -54,6 +54,51 @@ uv run competitor_benchmark.py --protocol benchmarks/competitor_tasks.json \
 The evaluator emits descriptive per-product aggregates in stable identifier
 order. It deliberately emits no rank, winner, or inferred value.
 
+## Collecting observations
+
+`benchmark_latency_rig.py` turns the protocol into something one sitting can
+execute. It observes and records only: it runs no product, injects no key
+events, automates no UI, and generates no audio.
+
+List the six tasks, then stopwatch one task for one product:
+
+```sh
+uv run benchmark_latency_rig.py tasks
+uv run benchmark_latency_rig.py observe --product wispr-flow \
+  --task short-message --environment mac-m2-quiet-room
+```
+
+The rig prints the task's written procedure plus the protocol's exact latency
+and interaction definitions, then records monotonic wall-clock milliseconds
+between two Enter presses: one at your first user action, one when the
+completion rule is met or the attempt ends. There is no flag that accepts a
+typed-in latency. It then prompts for the closed `completed`, `error_count`,
+and `interaction_count` values and for an artifact reference (a
+screen-recording file name or note id, never dictated text). Tasks you have
+not run yet are written as `unavailable`/`not_run`, so the file passes the
+evaluator at every point in the sitting. Record a vendor claim with
+`--state claimed-only --source-reference ...` and a task you cannot run with
+`--state unavailable --reason ...`. A recorded task is never silently
+overwritten; replacing one requires `--redo`. Every write is validated through
+`competitor_benchmark.py` first, and the default output location is the
+gitignored `.evidence/competitor-runs/`.
+
+For Whisper Face's own stage latency, the rig aggregates the runtime's
+content-free `warm_path` traces from a log you supply:
+
+```sh
+uv run benchmark_latency_rig.py trace --trace-log dictate.log
+```
+
+It reports p50/p95/max milliseconds per stage. `release` is the whole
+hotkey-release-to-inserted wall clock; the other five stages are component
+timings inside it. Fewer than 20 dictations reports `insufficient-samples`
+and no percentiles. The tool cannot know whether a log came from a live
+session, so every report says `source: operator-supplied-trace-log`, and
+`physical_evidence` becomes true only with `--operator-attestation` — your
+personal statement, never the tool's inference. `physical_conditions_verified`
+stays false either way.
+
 ## Current public synthetic scorecard
 
 The repository also has deterministic internal evidence, which is not a

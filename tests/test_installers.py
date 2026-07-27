@@ -11,6 +11,34 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+GATE_TEST = re.compile(r"uv run tests/(test_[a-z0-9_]+)\.py")
+TEST_PATH = re.compile(r"tests/(test_[a-z0-9_]+)\.py")
+
+# Files that hold the user's own words and corrections. Nothing here can be
+# downloaded again, so an uninstall must keep every one of them unless the
+# person running it asks, in as many words, for them to go.
+PERSONAL_FILES = (
+    "dictionary.txt",
+    "snippets.json",
+    "tones.json",
+    "preferences.json",
+    "learned.json",
+    "transcripts.jsonl",
+    "voice_inbox.json",
+    "demonstrations.json",
+    "acoustic_keyword_memory.json",
+    "delayed_cleanup_activation.json",
+    "acoustic_keyword_activation.json",
+    "acoustic_calibration_activation.json",
+    "relisten_activation.json",
+    "dictate.log",
+    "ollama.log",
+)
+
+# Tools Whisper Face installs alongside itself but does not own. Someone else
+# on this machine may depend on any of them.
+SHARED_TOOLS = ("brew", "uv", "ffmpeg", "ollama")
+
 
 class InstallerContractTests(unittest.TestCase):
     @classmethod
@@ -19,6 +47,17 @@ class InstallerContractTests(unittest.TestCase):
         cls.powershell = (ROOT / "setup.ps1").read_text(encoding="utf-8")
         cls.script = (ROOT / "dictate.py").read_text(encoding="utf-8")
         cls.lock = (ROOT / "dictate.py.lock").read_text(encoding="utf-8")
+
+    def shell_uninstall(self):
+        """The uninstall block of setup.sh, up to the install path proper."""
+        start = self.shell.index("# --- Uninstall ---")
+        return self.shell[start:self.shell.index("\nrequired=(", start)]
+
+    def powershell_uninstall(self):
+        """The uninstall block of setup.ps1, up to the install path proper."""
+        start = self.powershell.index("# --- Uninstall ---")
+        return self.powershell[
+            start:self.powershell.index("\n$Required = @(", start)]
 
     def test_repository_makes_installer_parity_a_release_gate(self):
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
@@ -63,8 +102,10 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_macos_networkless_worker.py",
             "uv run tests/test_acoustic_keyword_memory.py",
             "uv run tests/test_acoustic_keyword_bias_evaluation.py",
+            "uv run tests/test_acoustic_keyword_activation.py",
             "uv run tests/test_acoustic_time_machine.py",
             "uv run tests/test_acoustic_calibration.py",
+            "uv run tests/test_acoustic_calibration_activation.py",
             "uv run tests/test_benchmark_acoustic_calibration.py",
             "uv run tests/test_delayed_cleanup_merge.py",
             "uv run tests/test_macos_delayed_cleanup_destination.py",
@@ -78,6 +119,7 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_voice_objects.py",
             "uv run tests/test_voice_object_command_parser.py",
             "uv run tests/test_voice_object_commands_runtime.py",
+            "uv run tests/test_spoken_edit_commands_runtime.py",
             "uv run tests/test_voice_inbox.py",
             "uv run tests/test_voice_object_inbox_bridge.py",
             "uv run tests/test_risky_action_confirmation.py",
@@ -87,11 +129,13 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_personal_regression.py",
             "uv run tests/test_support_bundle.py",
             "uv run tests/test_whisper_face_gui.py",
+            "uv run tests/test_whisper_face_characters.py",
             "uv run --locked --script dictate.py --native-gui-smoke-test",
             "uv run tests/test_installers.py",
             "uv run tests/test_macos_distribution.py",
             "uv run tests/test_safe_update_advisor.py",
             "uv run tests/test_side_by_side_update.py",
+            "uv run tests/test_self_update.py",
             "setup.sh --verify",
             "setup.ps1 --verify",
         ):
@@ -117,11 +161,315 @@ class InstallerContractTests(unittest.TestCase):
             "uv run tests/test_support_bundle.py",
             "uv run tests/test_safe_update_advisor.py",
             "uv run tests/test_side_by_side_update.py",
+            "uv run tests/test_self_update.py",
+            "uv run tests/test_spoken_edit_commands_runtime.py",
+            "uv run tests/test_whisper_face_characters.py",
+            "uv run tests/test_acoustic_keyword_activation.py",
+            "uv run tests/test_acoustic_calibration_activation.py",
         ):
             with self.subTest(batch_gate=batch_gate):
                 self.assertIn(batch_gate, pull_request)
                 self.assertIn(batch_gate, macos_workflow)
                 self.assertIn(batch_gate, windows_workflow)
+
+    def test_the_three_full_gate_lists_hold_exactly_the_same_tests(self):
+        # The list is duplicated so a contributor, the process document, and
+        # release CI cannot disagree about what "the gates" means. Compare the
+        # sets rather than the text so grouping stays a local decision.
+        process = (ROOT / "docs" / "installer-release-process.md").read_text(
+            encoding="utf-8")
+        gate_section = process[:process.index("## Deliberate gate exclusions")]
+        lists = {
+            "AGENTS.md": set(GATE_TEST.findall(
+                (ROOT / "AGENTS.md").read_text(encoding="utf-8"))),
+            "docs/installer-release-process.md": set(
+                GATE_TEST.findall(gate_section)),
+            "macos-release.yml": set(GATE_TEST.findall((
+                ROOT / ".github" / "workflows" / "macos-release.yml"
+            ).read_text(encoding="utf-8"))),
+        }
+        canonical = lists["AGENTS.md"]
+        self.assertGreater(len(canonical), 50)
+        for name, gated in lists.items():
+            with self.subTest(gate_list=name):
+                self.assertEqual(
+                    gated, canonical,
+                    f"{name} has drifted from the other gate lists: "
+                    f"only here {sorted(gated - canonical)}, "
+                    f"missing here {sorted(canonical - gated)}")
+
+        # Windows CI and the pull-request checklist carry the same
+        # platform-independent subset as each other, never something extra.
+        windows = set(GATE_TEST.findall((
+            ROOT / ".github" / "workflows" / "windows-smoke.yml"
+        ).read_text(encoding="utf-8")))
+        pull_request = set(GATE_TEST.findall((
+            ROOT / ".github" / "pull_request_template.md"
+        ).read_text(encoding="utf-8")))
+        self.assertEqual(windows, pull_request)
+        self.assertTrue(
+            windows <= canonical,
+            f"Windows CI gates something absent from the full list: "
+            f"{sorted(windows - canonical)}")
+
+    def test_every_test_file_is_gated_or_documented_as_an_exclusion(self):
+        # A new test file must force a decision. Either it protects a shipping
+        # contract and joins the gate list, or the reason it does not is
+        # written down where the next person will read it.
+        process = (ROOT / "docs" / "installer-release-process.md").read_text(
+            encoding="utf-8")
+        boundary = process.index("## Deliberate gate exclusions")
+        gated = set(GATE_TEST.findall(process[:boundary]))
+        section = process[boundary:process.index("\n## ", boundary + 1)]
+        excluded = set(TEST_PATH.findall("\n".join(
+            row for row in section.splitlines()
+            if row.startswith("| `tests/"))))
+        self.assertFalse(
+            gated & excluded,
+            f"listed as both gated and excluded: {sorted(gated & excluded)}")
+        for path in sorted((ROOT / "tests").glob("test_*.py")):
+            with self.subTest(test=path.name):
+                self.assertIn(
+                    path.stem, gated | excluded,
+                    f"{path.name} is in no gate list and is not documented "
+                    f"under 'Deliberate gate exclusions'")
+        for name in sorted(gated | excluded):
+            with self.subTest(named=name):
+                self.assertTrue(
+                    (ROOT / "tests" / f"{name}.py").is_file(),
+                    f"{name}.py is named in the release process but does "
+                    f"not exist")
+
+    def test_both_installers_offer_a_way_out(self):
+        # Leaving cleanly is a trust property. Both platforms expose the same
+        # four-word vocabulary, and neither removes anything until asked.
+        for name, installer in (
+            ("shell", self.shell), ("powershell", self.powershell)
+        ):
+            for flag in ("--uninstall", "--yes", "--remove-models",
+                         "--remove-personal-data"):
+                with self.subTest(installer=name, flag=flag):
+                    self.assertIn(flag, installer)
+        # Mac: dry run is the default, and each destructive tier is off until
+        # its own flag turns it on.
+        for default in ("UNINSTALL=0", "ASSUME_YES=0", "REMOVE_MODELS=0",
+                        "REMOVE_PERSONAL=0"):
+            with self.subTest(default=default):
+                self.assertIn(default, self.shell)
+        self.assertIn('--uninstall) UNINSTALL=1 ;;', self.shell)
+        self.assertIn('if [ "$UNINSTALL" -eq 1 ]; then\n'
+                      '    if uninstall_whisper_face; then', self.shell)
+        self.assertIn("(dry run)", self.shell)
+        # Windows: same defaults, same dry run.
+        for default in ("$Uninstall = $false", "$AssumeYes = $false",
+                        "$RemoveModels = $false",
+                        "$RemovePersonalData = $false"):
+            with self.subTest(default=default):
+                self.assertIn(default, self.powershell)
+        self.assertIn("(dry run)", self.powershell)
+        self.assertIn("if ($Uninstall) {", self.powershell)
+
+        # An uninstall must survive a partial installation. Both dispatch
+        # before the repository-completeness check, so a checkout missing a
+        # runtime file can still be uninstalled instead of erroring.
+        self.assertLess(
+            self.shell.index('if [ "$UNINSTALL" -eq 1 ]; then\n    if '),
+            self.shell.index("\nrequired=("))
+        self.assertLess(
+            self.powershell.index("if ($Uninstall) {\n    $UninstallStatus"),
+            self.powershell.index("\n$Required = @("))
+
+    def test_uninstall_keeps_personal_files_unless_explicitly_asked(self):
+        shell = self.shell_uninstall()
+        powershell = self.powershell_uninstall()
+        # Every personal file is listed, and listed only behind its own flag.
+        for personal in PERSONAL_FILES:
+            with self.subTest(personal=personal):
+                self.assertIn(personal, shell)
+                self.assertIn(personal, powershell)
+        mac_personal = shell[shell.index('step "personal files'):]
+        mac_personal = mac_personal[:mac_personal.index('step "never touched')]
+        windows_personal = powershell[
+            powershell.index('Write-Step "personal files'):]
+        windows_personal = windows_personal[
+            :windows_personal.index('Write-Step "never touched')]
+        for personal in PERSONAL_FILES:
+            with self.subTest(personal=personal, tier="personal"):
+                self.assertIn(personal, mac_personal)
+                self.assertIn(personal, windows_personal)
+        self.assertIn('remove_installed_path "$REMOVE_PERSONAL"', mac_personal)
+        self.assertIn("Remove-InstalledPath $RemovePersonalData",
+                      windows_personal)
+        # No personal file may be reachable from an unconditional removal.
+        unconditional = re.findall(
+            r'remove_installed_path 1 "([^"]+)"', shell)
+        unconditional += re.findall(
+            r'Remove-InstalledPath \$true \(?([^)\n]+)', powershell)
+        for personal in PERSONAL_FILES:
+            for target in unconditional:
+                with self.subTest(personal=personal, target=target):
+                    self.assertNotIn(personal, target)
+        # The prompt has to say plainly what these files are.
+        for installer in (mac_personal, windows_personal):
+            self.assertIn("your words and your corrections", installer)
+            self.assertIn("No download restores", installer)
+
+    def test_uninstall_never_touches_a_shared_tool(self):
+        shell = self.shell_uninstall()
+        powershell = self.powershell_uninstall()
+        for forbidden in (
+            "brew uninstall", "brew remove", "winget uninstall",
+            "rm -rf ~/.ollama", 'rm -rf "$HOME/.ollama"',
+            "uv cache clean", "pip uninstall",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, shell)
+                self.assertNotIn(forbidden, powershell)
+        # Nothing is ever matched by pattern; every target is spelled out.
+        for wildcard in ("rm -rf *", 'rm -rf "$DIR"/*', "-Recurse -Include",
+                         "Get-ChildItem -Filter"):
+            with self.subTest(wildcard=wildcard):
+                self.assertNotIn(wildcard, shell)
+                self.assertNotIn(wildcard, powershell)
+        for line in (shell + powershell).splitlines():
+            statement = line.split("#", 1)[0]
+            if "rm -rf" in statement or "rmdir" in statement \
+                    or "Remove-Item" in statement:
+                with self.subTest(statement=statement.strip()):
+                    self.assertNotIn("*", statement)
+        # Both say so out loud, so the person reading the output knows.
+        for tool in SHARED_TOOLS:
+            with self.subTest(tool=tool):
+                self.assertIn(tool, shell[shell.index('step "never touched'):])
+        self.assertIn(
+            "astral-sh.uv, Gyan.FFmpeg, and Ollama.Ollama",
+            powershell[powershell.index('Write-Step "never touched'):])
+        # macOS privacy grants live in a system database an installer must not
+        # edit; the user is told to revoke them by hand.
+        self.assertIn("Privacy & Security", shell)
+        self.assertIn("An installer must not edit that database", shell)
+        for forbidden in ("tccutil", "sqlite3", "TCC.db"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, self.shell)
+
+    def test_uninstall_inventory_covers_everything_the_installer_creates(self):
+        shell = self.shell_uninstall()
+        powershell = self.powershell_uninstall()
+
+        # Every path the Mac install path writes is named by the uninstall.
+        for variable in (
+            "$dictate_plist", "$ollama_plist", "$launcher_app",
+            "$launcher_receipt", "$ollama_service_receipt",
+            "$service_receipt_dir", "$parakeet_helper",
+        ):
+            with self.subTest(variable=variable):
+                self.assertIn(variable, shell)
+        for built in (".models/bin", ".models/swift-build", ".dictate.lock",
+                      "dictate.log", "ollama.log"):
+            with self.subTest(built=built):
+                self.assertIn(built, shell)
+        # Both launchd jobs are unloaded before their definitions go.
+        self.assertIn("launchctl bootout", shell)
+        for label in ("com.berg.dictate", "com.berg.ollama"):
+            with self.subTest(label=label):
+                self.assertIn(f"unload_installed_agent {label}", shell)
+        self.assertLess(shell.index("unload_installed_agent com.berg.dictate"),
+                        shell.index('remove_installed_path 1 "$dictate_plist"'))
+
+        # The private files the install path creates or protects, read out of
+        # setup.sh itself, must all appear in the uninstall inventory.
+        templates = re.search(
+            r"for name in ([a-z_ ]+); do", self.shell).group(1).split()
+        created = [f"{name}.json" for name in templates
+                   if name != "dictionary"]
+        created.append("dictionary.txt")
+        protected = self.shell[
+            self.shell.index("for private_file in transcripts.jsonl"):]
+        protected = protected[:protected.index("; do")]
+        created += re.findall(
+            r"[A-Za-z0-9_.]+\.(?:jsonl|json|log|txt|lock)", protected)
+        self.assertIn("transcripts.jsonl", created)
+        self.assertIn(".dictate.lock", created)
+        for name in sorted(set(created)):
+            with self.subTest(created=name):
+                self.assertIn(
+                    name, shell,
+                    f"setup.sh creates or protects {name} but the uninstall "
+                    f"inventory never mentions it")
+
+        # Windows: the login task under both names, the generated launcher and
+        # its receipt directory, and the model cache.
+        for expected in (
+            "$TaskName", "$LegacyTaskName", "$Launcher", "$LauncherReceipt",
+            "$LauncherDir", ".models", ".dictate.lock",
+            "Unregister-ScheduledTask",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, powershell)
+        windows_protected = self.powershell[
+            self.powershell.index("foreach ($PrivateStateName in @("):]
+        windows_protected = windows_protected[:windows_protected.index("))")]
+        for name in re.findall(r'"([A-Za-z0-9_.]+\.json)"', windows_protected):
+            with self.subTest(created=name):
+                self.assertIn(name, powershell)
+        for log in ("dictate.log", "ollama.log", "ollama-error.log"):
+            with self.subTest(log=log):
+                self.assertIn(log, powershell)
+
+        # Models are a separate, larger decision on both platforms.
+        for model_path in (
+            "FluidAudio/Models/parakeet-unified-en-0.6b",
+            "models--mlx-community--whisper-tiny",
+            "models--mlx-community--whisper-large-v3-turbo",
+        ):
+            with self.subTest(model_path=model_path):
+                self.assertIn(model_path, shell)
+        self.assertIn('remove_installed_path "$REMOVE_MODELS"', shell)
+        self.assertIn("Remove-InstalledPath $RemoveModels", powershell)
+        self.assertIn("ollama rm qwen3.5:4b", shell)
+        self.assertIn("ollama rm qwen3.5:4b", powershell)
+
+    def test_uninstall_is_idempotent_and_honest_about_what_it_kept(self):
+        shell = self.shell_uninstall()
+        powershell = self.powershell_uninstall()
+        # A missing target is reported, never an error.
+        for required in ('"not present"', '"keeping"'):
+            with self.subTest(required=required):
+                self.assertIn(required, shell)
+                self.assertIn(required, powershell)
+        # Only macOS has launchd jobs to find already unloaded.
+        self.assertIn('"not loaded"', shell)
+        self.assertIn('if [ ! -e "$target" ] && [ ! -L "$target" ]; then',
+                      shell)
+        self.assertIn("if (-not $Present) {", powershell)
+        # A shared parent directory is removed only when already empty.
+        self.assertIn("rmdir -- ", shell)
+        self.assertIn("still holds other files", shell)
+        self.assertIn("still holds other files", powershell)
+        # Refuse an unsafe root outright rather than trusting the caller.
+        self.assertIn('refusing to remove an unsafe path', shell)
+        self.assertIn("refusing to remove an unsafe path", powershell)
+        # The closing summary names what survived and where it lives.
+        for kept in ("models were kept", "were kept in"):
+            with self.subTest(kept=kept):
+                self.assertIn(kept, shell)
+                self.assertIn(kept, powershell)
+
+    def test_uninstall_is_documented_where_install_is(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        guide = (
+            ROOT / "docs" / "distribution" / "update-and-rollback.md"
+        ).read_text(encoding="utf-8")
+        for expected in (
+            "./setup.sh --uninstall",
+            ".\\setup.ps1 --uninstall",
+            "--remove-models",
+            "--remove-personal-data",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, readme)
+                self.assertIn(expected, guide)
+        self.assertIn("## Uninstall", readme)
 
     def test_cleanup_model_stays_in_sync_with_both_installers(self):
         tree = ast.parse(self.script)
@@ -665,6 +1013,9 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn('"face": "parrot"', template)
         self.assertIn('"acoustic_time_machine": false', template)
         self.assertIn('"voice_object_commands": false', template)
+        self.assertIn('"hotkey": "alt_r"', template)
+        self.assertIn('"sounds": "system"', template)
+        self.assertIn('"recent_dictations": false', template)
         self.assertIn("whisper_face_theme.py", self.shell)
         self.assertIn("whisper_face_theme.py", self.powershell)
         self.assertIn("whisper_face_characters.py", self.shell)
@@ -672,7 +1023,8 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("whisper_face_render.py", self.shell)
         self.assertIn("whisper_face_render.py", self.powershell)
         for face in ("parrot", "fox", "bear", "owl", "cat", "dog", "wolf",
-                     "pig", "panda", "tiger"):
+                     "pig", "panda", "tiger", "frog", "rabbit", "hedgehog",
+                     "penguin"):
             # Every menu-bar frame ships, including the blink frame the
             # status bar flashes at rest.
             for frame in ("idle", "talk", "blink"):
@@ -687,6 +1039,14 @@ class InstallerContractTests(unittest.TestCase):
             with self.subTest(runtime_module=runtime_module):
                 self.assertIn(runtime_module, self.shell)
                 self.assertIn(runtime_module, self.powershell)
+        # The first-party feedback cues are committed assets, so both
+        # installers have to notice when a checkout is missing one.
+        for cue in ("start", "finish", "review", "error"):
+            relative = f"sounds/{cue}.wav"
+            with self.subTest(relative=relative):
+                self.assertTrue((ROOT / relative).is_file())
+                self.assertIn(relative, self.shell)
+                self.assertIn(relative.replace("/", "\\"), self.powershell)
         self.assertIn("voice_inbox.json", self.shell)
         self.assertIn("voice_inbox.json", self.powershell)
         self.assertIn("demonstrations.json", self.shell)
@@ -701,7 +1061,8 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("delayed_cleanup_activation.json", gitignore)
         self.assertIn(".delayed_cleanup_activation.json.*.tmp", gitignore)
         for face in ("parrot", "fox", "owl", "cat", "bear",
-                     "dog", "wolf", "pig", "panda", "tiger"):
+                     "dog", "wolf", "pig", "panda", "tiger",
+                     "frog", "rabbit", "hedgehog", "penguin"):
             # The flat silhouette drives the menu bar with two frames; the
             # colored character adds the mid-syllable half frame the site's
             # flap animation passes through.

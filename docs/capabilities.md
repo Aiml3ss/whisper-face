@@ -28,8 +28,8 @@ Last reviewed: **26 July 2026**.
   pre-warmed at login, so the start cue means *capture is ready*, not *key
   went down*.
 - **Rolling recognition.** Long dictation is transcribed while you are still
-  talking, cut at natural pauses, so a sixty-second stretch pastes about as
-  fast as a sentence.
+  talking, cut at natural pauses, so the decode at key release covers only
+  the remainder rather than the whole recording.
 - **Three-engine cascade on Mac.** Whisper Tiny speculates during end pauses,
   a warm native Parakeet Unified helper is the primary recognizer, and Whisper
   large-v3-turbo is the independent fallback. Any helper failure falls back
@@ -91,7 +91,7 @@ Last reviewed: **26 July 2026**.
   files.
 - **Native Mac window** with three sections — Home, Settings, Advanced —
   covering status, personalization, privacy, models, and diagnostics.
-- **Menu-bar presence** with ten animated companion characters whose mouths
+- **Menu-bar presence** with fourteen animated companion characters whose mouths
   move with your speech; recovery rows appear only when they have something.
 - **Guided first run** through permissions, hotkey practice, model readiness,
   and a first real dictation, each confirmed by evidence rather than assumed.

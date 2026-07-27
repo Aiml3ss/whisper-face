@@ -6,7 +6,7 @@ created: 2026-07-26
 modified: 2026-07-26
 tags: [site, astro, web, cloudflare]
 aliases: [whisperface-com, site]
-summary: "A fully static Astro 5 + Tailwind 4 site at whisperface.com — docs, blog, and the ten characters as generated inline SVG with a three-frame flap — deployed by Cloudflare Pages, not Actions."
+summary: "A fully static Astro 5 + Tailwind 4 site at whisperface.com — docs, blog, and the fourteen characters as generated inline SVG with a three-frame flap — deployed by Cloudflare Pages, not Actions."
 confidence: high
 ---
 
@@ -21,7 +21,7 @@ pages, and a small blog.
 
 ## Key Properties
 
-- **Faces on the web**: the ten characters ship as generated inline SVG
+- **Faces on the web**: the fourteen characters ship as generated inline SVG
   (idle / half / talk frames) from the shared spec — the hero syncs the
   mouth to the letters landing in the ticker and the gallery runs a
   babble loop on hover ([[whisper-faces]]). Menu-bar-sized marks keep

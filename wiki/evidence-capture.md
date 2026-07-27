@@ -3,7 +3,7 @@ title: "Evidence Capture"
 type: concept
 language: en
 created: 2026-07-26
-modified: 2026-07-26
+modified: 2026-07-27
 tags: [evidence, activation, harness, operator, safety]
 aliases: [capture-harness, capture-voice-evidence, capture-app-matrix, physical-sessions, voice-corpora]
 summary: "Four guided, resumable terminal sessions that record real physical evidence and hand it to the existing evaluators — structurally incapable of approving anything, and blocking rather than guessing when the runtime stays silent."
@@ -45,12 +45,14 @@ they write lands in the gitignored, owner-only `.evidence/`.
   measured: `extrapolated` is hardcoded false and `four_nines_claim` is
   unconditionally false.
 - **`scripts/capture_delayed_cleanup_cases.py`** walks the four-surface
-  by five-scenario grid the [[delayed-cleanup]] gate demands, importing
-  the gate's own vocabulary and thresholds so it cannot drift, reads the
-  runtime's `[delayed-cleanup]` line, asks four closed safety questions
-  per case, and prints the activation command only when no shortfall
-  remains — "This tool does not run it, does not write the receipt, and
-  does not set --manual-reviewed on your behalf."
+  by four-scenario grid the [[delayed-cleanup]] gate demands (50 cases,
+  13/13/12/12 per surface and per scenario, a 25/25 applied/rejected
+  split), importing the gate's own vocabulary and thresholds so it
+  cannot drift, reads the runtime's `[delayed-cleanup]` line — including
+  its apply duration and measurement-mode marker — asks four closed
+  safety questions per case, and prints the activation command only when
+  no shortfall remains — "This tool does not run it, does not write the
+  receipt, and does not set --manual-reviewed on your behalf."
 - **`scripts/capture_lifecycle_evidence.py`** guides exactly the five
   scenarios `performance_lab.run_lifecycle_simulation` names — long-form,
   back-to-back, process-restart, sleep-wake, audio-device-switch — and
@@ -103,26 +105,29 @@ once.
   commits added, and the voice tool parses the real `.gitignore` and
   refuses any session directory inside a checkout that no entry covers.
 
-## Two issues, three gates that cannot be earned
+## Two issues the build surfaced, and their fix
 
-Building the tools was the audit. Both issues were filed before any
-operator time was spent, and both are open on `main`:
+Building the tools was the audit. Issues #108 and #110 were filed before
+any operator time was spent: three of the four gates demanded evidence
+whose candidate arm the runtime only produced after the receipt that
+evidence would authorize, and delayed cleanup added an unmeasured
+`apply_ms` and a physically unreachable `duplicate-callback` scenario.
+#118 closed both on 2026-07-27:
 
-- **Issue #108** — the calibration and keyword A/Bs cannot produce their
-  candidate arm, because the runtime applies calibrated settings and the
-  biased prompt only from the receipt the A/B is meant to authorize
-  ([[acoustic-personalization]]). Selective re-listen has no such
-  circularity, which is why that corpus is straightforwardly recordable
-  today.
-- **Issue #110** — [[delayed-cleanup]] adds three: a bootstrap deadlock,
-  an `apply_ms` the runtime never measures against a p95 ≤ 150 ms
-  threshold, and a `duplicate-callback` scenario that is physically
-  unreachable.
+- A session-scoped `--measure` override (`measurement_mode.py`) applies
+  the real candidate path — calibrated front end, biased prompt, or the
+  delayed-cleanup transaction — with no receipt and no authority. Every
+  artifact recorded under it is labelled, and the validators carry the
+  label into the receipt ([[activation-receipt]]).
+- The runtime now times the transactional apply and prints it on the
+  `[delayed-cleanup]` line this tool parses.
+- `duplicate-callback` left the gate's scenario set rather than being
+  made reachable by synthetic injection; the plan is now a 4×4 grid
+  ([[delayed-cleanup]]).
 
-`docs/evidence/physical-sessions.md` records all three delayed-cleanup
-defects for the operator, with the honest framing that running the
-session anyway records precisely which blocker fired — "the evidence that
-these are gate defects rather than operator error".
+Selective re-listen never had the circularity, which is why that corpus
+was straightforwardly recordable all along. None of the physical
+sessions has been run yet, so every gated feature still ships off.
 
 ## Documentation
 
@@ -138,7 +143,8 @@ run).
 
 - [[activation-receipt]] — what the evidence is for, and who may write it
 - [[benchmarks]] — the evaluators the harnesses stop in front of
-- [[delayed-cleanup]], [[acoustic-personalization]] — the blocked gates
+- [[delayed-cleanup]], [[acoustic-personalization]] — the gates the
+  sessions feed
 - [[privacy-and-security]] — 0600, gitignored, content-free artifacts
 
 ## References

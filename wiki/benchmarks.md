@@ -3,7 +3,7 @@ title: "Benchmarks"
 type: concept
 language: en
 created: 2026-07-26
-modified: 2026-07-26
+modified: 2026-07-27
 tags: [benchmarks, evidence, performance, labs]
 aliases: [performance-lab, no-runtime-authority, public-scorecard]
 summary: "A family of offline, transcript-free labs whose shared rule is no runtime authority: evidence can reject changes and build activation receipts, but nothing in the runtime moves on a benchmark's say-so."
@@ -66,10 +66,11 @@ assert those properties over its own AST. Two consequences for this page:
   lifecycle scenario keys and reports which of its three
   `requires_physical_validation` ids a session discharges — the honest
   counterpart to a simulation that reports `real_apps_exercised: 0`.
-- Building the harnesses was itself an audit, and it produced two open
-  gate defects (issues #108, #110) rather than evidence — recorded on
-  [[activation-receipt]], [[delayed-cleanup]] and
-  [[acoustic-personalization]].
+- Building the harnesses was itself an audit: it produced two gate
+  defects (issues #108, #110) rather than evidence. Both closed on
+  2026-07-27 when #118 added session-scoped measurement mode — the
+  history and the fix are recorded on [[activation-receipt]],
+  [[delayed-cleanup]] and [[acoustic-personalization]].
 
 ## Related Concepts
 

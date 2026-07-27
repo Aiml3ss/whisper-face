@@ -3,7 +3,7 @@ title: "Design Language"
 type: concept
 language: en
 created: 2026-07-26
-modified: 2026-07-26
+modified: 2026-07-27
 tags: [design, motion, typography, color, accessibility]
 aliases: [motion-specs, jelly-springs, whisper-face-theme, type-scale]
 summary: "One platform-independent theme module names the palettes, surfaces and four springs that the Mac window, the HUD and the website all render — the app through Core Animation, the site through a baked integration of the same ODE."
@@ -14,13 +14,16 @@ confidence: high
 
 ## Definition
 
-`whisper_face_theme.py` (216 lines) is deliberately platform-independent
+`whisper_face_theme.py` (251 lines) is deliberately platform-independent
 so colour, motion, type and accessibility contracts can be tested without
 loading AppKit. It names the light and dark palettes, the ten face chip
 colours, three HUD type tokens, four `SURFACE_SPECS` treatments (work,
 card, playful, control) and four `MOTION_SPECS` springs. Native views
 translate the specs into Core Animation; the [[marketing-site]] bakes the
-same numbers into CSS.
+same numbers into CSS. The chibi-clay rebuild (#120) repainted both
+palettes pastel and stepped the surface radii up so cards read as soft
+clay beside the characters; the four springs and their constants were
+untouched, and contrast stays test-enforced against the light palette.
 
 ## The four springs
 
@@ -122,9 +125,9 @@ it in any case. That finding is recorded in the tree, in
 
 ## References
 
-- whisper_face_theme.py (`MOTION_SPECS` :105-110, `SURFACE_SPECS`
-  :124-129, palettes :38-60); whisper_face_gui.py (`add_jelly_motion`
-  :4446, `center_layer_anchor` :4418, `_set_cta_title` :4823, AA inks
-  :4332-4336); dictate.py `_center_layer_anchor` (:2093-2117);
-  site/src/data/motion.ts
+- whisper_face_theme.py (`MOTION_SPECS` :110-115, `SURFACE_SPECS`
+  :130-135, palettes :41-65, AA inks :150-151); whisper_face_gui.py
+  (`add_jelly_motion` :4430, `center_layer_anchor` :4402,
+  `_set_cta_title` :4920, AA ink resolution :4683-4687); dictate.py
+  `_center_layer_anchor` (:2157); site/src/data/motion.ts
 - [[2026-07-26-interface-rebuild-research]]

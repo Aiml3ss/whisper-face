@@ -500,5 +500,130 @@ class ResultEvidenceRuntimeTests(unittest.TestCase):
         self.assertNotIn("private_stage", snapshot["timings_ms"])
 
 
+class ControlPreferenceRuntimeTests(unittest.TestCase):
+    """A1/A3/D1: the window's control setters persist through preferences."""
+
+    def namespace(self, path, *, applied=None, saved=None):
+        applied = [] if applied is None else applied
+        saved = [] if saved is None else saved
+        return load_definitions(
+            "set_hotkey", "set_undo_hotkey", "set_sound_theme",
+            "set_recent_dictations_enabled", "preview_sound_cue",
+            "normalize_hotkey", "normalize_sound_theme", "save_preferences",
+            "hotkey_binding_decision", "hotkey_label_for",
+            "hotkey_shared_modes",
+            assignments={
+                "PREFERENCES", "HOTKEY_CHOICES", "HOTKEY_DEFAULT",
+                "HOTKEY_MODIFIER_FAMILY", "HOTKEY_MODES_BY_MODIFIER",
+                "SOUND_THEMES", "SOUND_THEME_DEFAULT", "SOUND_CUES",
+            },
+            extra={
+                "IS_MACOS": True,
+                "DEFAULT_FACE": "parrot",
+                "PREFERENCES_FILE": path,
+                "json": json,
+                "print": lambda *_a, **_k: None,
+                "apply_hotkey_bindings": lambda: applied.append(True),
+                "play": saved.append,
+                "current_face": lambda: "parrot",
+                "IS_WINDOWS": False,
+                "atomic_write_text": lambda target, value:
+                    target.write_text(value, encoding="utf-8"),
+            },
+        )
+
+    def test_a_bindable_key_is_applied_and_written_to_disk(self):
+        applied: list = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "preferences.json"
+            ns = self.namespace(path, applied=applied)
+
+            verdict = ns["set_hotkey"]("f13")
+
+            self.assertTrue(verdict["accepted"])
+            self.assertEqual(verdict["label"], "F13")
+            self.assertEqual(applied, [True])
+            self.assertEqual(
+                json.loads(path.read_text())["hotkey"], "f13")
+
+    def test_an_unbindable_key_is_refused_without_touching_the_file(self):
+        applied: list = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "preferences.json"
+            ns = self.namespace(path, applied=applied)
+
+            for candidate in ("a", "space", "", "  ", None):
+                with self.subTest(candidate=candidate):
+                    verdict = ns["set_hotkey"](candidate)
+                    self.assertFalse(verdict["accepted"])
+                    self.assertEqual(verdict["reason"], "unsupported_key")
+            self.assertEqual(applied, [])
+            self.assertFalse(path.exists())
+
+    def test_a_mode_sharing_key_is_accepted_and_declares_its_cost(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "preferences.json"
+            ns = self.namespace(path)
+
+            verdict = ns["set_hotkey"]("shift_r")
+
+            self.assertTrue(verdict["accepted"])
+            self.assertEqual(verdict["shared_modes"], ("compose", "code"))
+
+    def test_the_undo_key_cannot_be_the_capture_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "preferences.json"
+            ns = self.namespace(path)
+            ns["set_hotkey"]("f13")
+
+            verdict = ns["set_undo_hotkey"]("f13")
+
+            self.assertFalse(verdict["accepted"])
+            self.assertEqual(verdict["reason"], "conflicts_with_capture")
+            self.assertEqual(
+                json.loads(path.read_text())["undo_hotkey"], "")
+
+    def test_the_undo_key_can_be_cleared(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "preferences.json"
+            ns = self.namespace(path)
+            ns["set_undo_hotkey"]("f14")
+            self.assertEqual(
+                json.loads(path.read_text())["undo_hotkey"], "f14")
+
+            verdict = ns["set_undo_hotkey"]("")
+
+            self.assertTrue(verdict["accepted"])
+            self.assertEqual(verdict["reason"], "unbound")
+            self.assertEqual(
+                json.loads(path.read_text())["undo_hotkey"], "")
+
+    def test_sound_and_recent_settings_persist_and_reject_nonsense(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "preferences.json"
+            ns = self.namespace(path)
+
+            self.assertEqual(ns["set_sound_theme"]("silent"), "silent")
+            self.assertEqual(json.loads(path.read_text())["sounds"], "silent")
+            self.assertEqual(ns["set_sound_theme"]("airhorn"), "system")
+            self.assertTrue(ns["set_recent_dictations_enabled"](True))
+            self.assertTrue(
+                json.loads(path.read_text())["recent_dictations"])
+            self.assertFalse(ns["set_recent_dictations_enabled"](False))
+
+    def test_only_known_cue_names_reach_the_sound_player(self):
+        played: list = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "preferences.json"
+            ns = self.namespace(path, saved=played)
+
+            self.assertTrue(ns["preview_sound_cue"]("Pop"))
+            # play() interpolates its argument into a filesystem path.
+            for candidate in ("../../etc/passwd", "", "Boom"):
+                with self.subTest(candidate=candidate):
+                    self.assertFalse(ns["preview_sound_cue"](candidate))
+            self.assertEqual(played, ["Pop"])
+
+
 if __name__ == "__main__":
     unittest.main()

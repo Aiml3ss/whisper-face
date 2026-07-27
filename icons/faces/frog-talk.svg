@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <mask id="cut"><rect width="64" height="64" fill="#fff"/><circle cx="18" cy="23" r="6"/><circle cx="46" cy="23" r="6"/><circle cx="18" cy="24" r="2.7" fill="#fff"/><circle cx="46" cy="24" r="2.7" fill="#fff"/><ellipse cx="32" cy="49" rx="14" ry="6"/></mask>
+  <g fill="#000" mask="url(#cut)"><circle cx="18" cy="24" r="10"/><circle cx="46" cy="24" r="10"/><circle cx="32" cy="41" r="22"/></g>
+  <rect fill="#000" x="48" y="8" width="11" height="5" rx="2.5"/><rect fill="#000" x="52" y="17" width="10" height="5" rx="2.5"/>
+</svg>

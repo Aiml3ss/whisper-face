@@ -104,6 +104,10 @@ thresholds in `performance_budgets.json`; each check is gated on
 `latency_ms.<stage>.samples`, so a thin log reports `insufficient-samples`
 instead of a false pass. The trace schema is duplicated between `dictate.py` and
 `performance_lab.py` and held identical by a parity test.
+`benchmark_latency_rig.py trace` reads the same log through this parser and
+produces the operator-facing p50/p95/max report with a 20-dictation minimum
+sample gate and explicit operator-attestation labelling; see
+`docs/benchmarks/competitor-evaluation.md` for both rig modes.
 
 ## Deterministic warm-path gate
 

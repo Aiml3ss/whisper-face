@@ -1,10 +1,14 @@
 """Bounded macOS Whisper Tiny adapters for process-isolated verification.
 
-Neither adapter has runtime wiring.  Each accepted request is decoded without
-a prompt or application context, and only a closed decision crosses the child
-process boundary.  The disposable adapter loads per request; the prewarmed
-adapter resolves and loads the pinned local model once in a reusable killable
-child.  No latency, accuracy, activation, or sandbox claim is made here.
+The prewarmed adapter is wired into the runtime as the selective re-listen
+verifier, but stays gated: dictate.py constructs it only behind the Mac-only
+opt-in plus a validated activation receipt.  The disposable adapter has no
+runtime wiring and is exercised by the activation benchmark only.  Each
+accepted request is decoded without a prompt or application context, and only
+a closed decision crosses the child process boundary.  The disposable adapter
+loads per request; the prewarmed adapter resolves and loads the pinned local
+model once in a reusable killable child.  No latency, accuracy, activation,
+or sandbox claim is made here.
 """
 
 from __future__ import annotations

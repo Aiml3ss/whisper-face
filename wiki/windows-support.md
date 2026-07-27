@@ -3,7 +3,7 @@ title: "Windows Support"
 type: concept
 language: en
 created: 2026-07-26
-modified: 2026-07-26
+modified: 2026-07-27
 tags: [windows, platform, parity]
 aliases: [windows-path, tray-icon]
 summary: "Windows shares the core capture, cascade, cleanup, snippets, tones, and learning pipeline with one-click installer parity — while the Cocoa HUD, Accessibility context, and several macOS-only trust features stay Mac."
@@ -34,10 +34,13 @@ focus; Windows is the shared-pipeline sibling.
   [[menu-bar]] because [[app-window]] could hold what it dropped;
   Windows has no such window, so its five-entry tray still carries
   Choose Face, Flight Recorder (RAM only), Pause Dictation, Open Log and
-  Quit. Windows also writes a window title into the same transcript
-  field that holds a macOS bundle id, which is why the evidence harnesses
-  withhold that field entirely on Windows ([[evidence-capture]], issue
-  #110).
+  Quit. Windows used to write the raw window title — which routinely
+  carries a document name — into the same transcript field that holds a
+  macOS bundle id; since #118 `transcript_app_identity` stores a stable
+  local digest instead, keeping the `windows:` prefix readers use to
+  tell it from a bundle id so per-app grouping survives the redaction.
+  The evidence harnesses still withhold `windows:`-prefixed identities
+  ([[evidence-capture]]).
 - **macOS-only features** (gated by platform checks): the native
   Parakeet helper, [[voice-objects]], spoken edit commands,
   [[acoustic-personalization]] time machine, [[delayed-cleanup]],

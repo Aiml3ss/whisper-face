@@ -164,3 +164,53 @@ rollback shortcut.
 If you installed from a downloaded archive instead of a Git checkout, keep the
 old extracted folder as the rollback copy. A newly extracted folder has its
 own private state; migration between folders is currently manual.
+
+## Uninstall
+
+Leaving is the same shape as rolling back: look first, then decide. Both
+installers take `--uninstall`, which prints a plan and changes nothing:
+
+```sh
+./setup.sh --uninstall              # macOS
+.\setup.ps1 --uninstall             # Windows
+```
+
+The plan lists, with full paths, every service, file, and directory the
+installer created. Removal happens only when you add `--yes`, and each tier
+beyond the software itself needs its own flag:
+
+```sh
+./setup.sh --uninstall --yes                          # services, launcher, receipts
+./setup.sh --uninstall --yes --remove-models          # and the downloaded models
+./setup.sh --uninstall --yes --remove-personal-data   # and your private files
+```
+
+```powershell
+.\setup.ps1 --uninstall --yes
+.\setup.ps1 --uninstall --yes --remove-models
+.\setup.ps1 --uninstall --yes --remove-personal-data
+```
+
+What each tier covers:
+
+| Tier | macOS | Windows |
+|---|---|---|
+| Software (with `--yes`) | `launchctl bootout` of `com.berg.dictate` and `com.berg.ollama`, both LaunchAgent plists, `~/Applications/Whisper Face.app`, the `Application Support/Whisper Face` receipts, `.models/bin`, `.models/swift-build`, `.dictate.lock` | the `Whisper Face` scheduled task and its legacy `Whispering Parrot` name, `.windows/launch.ps1`, `.windows/launch.sha256`, the `.windows` directory, `.dictate.lock` |
+| Models (`--remove-models`) | the Parakeet Unified Core ML model, both pinned `mlx-community/whisper-*` snapshots in the Hugging Face cache, and `ollama rm qwen3.5:4b` | the `.models` faster-Whisper cache and `ollama rm qwen3.5:4b` |
+| Personal (`--remove-personal-data`) | `snippets.json`, `tones.json`, `preferences.json`, `acoustic_keyword_memory.json`, `acoustic_keyword_activation.json`, `acoustic_calibration_activation.json`, `relisten_activation.json`, `delayed_cleanup_activation.json`, `dictionary.txt`, `transcripts.jsonl`, `learned.json`, `voice_inbox.json`, `demonstrations.json`, `dictate.log`, `ollama.log` | the same, plus `ollama-error.log` |
+
+The personal tier is exactly the backup list at the top of this document, and
+for the same reason: no download restores those files. They are kept unless
+you ask for them by name, and the closing summary says where they were left.
+
+The uninstaller removes only paths it can name, never a pattern. Homebrew,
+`uv`, `ffmpeg`, Ollama itself, Ollama's own model store, the `uv` cache, the
+Swift toolchain, and every other model in the shared Hugging Face cache are
+left alone; the run prints that list too. Running it twice is safe — the
+second run reports everything as already gone and still succeeds.
+
+Two steps stay manual on purpose. The checkout is not deleted, so remove that
+folder yourself once you no longer want the source. And macOS privacy grants
+live in a system database an installer must not edit, so remove **Whisper
+Face** by hand under System Settings → Privacy & Security → **Input
+Monitoring**, **Accessibility**, and **Microphone**.
