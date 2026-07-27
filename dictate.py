@@ -5473,6 +5473,20 @@ def set_gui_app_tone(bundle: str, tone: str):
     set_app_tone(app_id, None if normalized == "auto" else normalized)
 
 
+def snippet_name_key(value: str) -> str:
+    """One canonical key for snippet-name comparison, in any script.
+
+    The old rule stripped everything outside [a-z0-9 ], so every name
+    written in Cyrillic, Japanese, Korean, or Chinese collapsed to the
+    empty string: they all collided with each other in the editor, and a
+    spoken non-Latin name matched whichever snippet happened to come
+    first. Word characters are kept across scripts; an empty key means
+    "no comparable name" and callers must never treat two empty keys as
+    equal.
+    """
+    return re.sub(r"[^\w ]", "", value.casefold()).strip()
+
+
 def save_gui_snippet(name: str, expected_original: str | None, text: str):
     snippet_name = str(name).strip()
     value = str(text)
@@ -5484,8 +5498,6 @@ def save_gui_snippet(name: str, expected_original: str | None, text: str):
     if not value.strip() or len(value) > 4000:
         raise ValueError("snippet text must be 1–4000 characters")
 
-    def normalized_key(candidate: str) -> str:
-        return re.sub(r"[^a-z0-9 ]", "", candidate.casefold()).strip()
 
     with SNIPPETS_LOCK:
         snippets = _json_object(SNIPPETS_FILE, label="snippets.json")
@@ -5497,7 +5509,9 @@ def save_gui_snippet(name: str, expected_original: str | None, text: str):
             raise RuntimeError(
                 "snippet changed since the editor was opened")
         collision = next((existing for existing in snippets
-                          if normalized_key(str(existing)) == normalized_key(snippet_name)
+                          if snippet_name_key(str(existing))
+                          and snippet_name_key(str(existing))
+                          == snippet_name_key(snippet_name)
                           and existing != snippet_name), None)
         if collision is not None:
             raise ValueError(f"snippet name conflicts with {collision!r}")
@@ -8241,10 +8255,11 @@ def match_snippet(raw: str) -> tuple[str, str] | None:
     m = SNIPPET_RE.match(raw.strip())
     if not m or not SNIPPETS_FILE.exists():
         return None
-    def norm(value):
-        return re.sub(r"[^a-z0-9 ]", "", value.casefold()).strip()
-
-    key = norm(m.group(1))
+    key = snippet_name_key(m.group(1))
+    if not key:
+        # A name that normalizes to nothing is not a name; matching it
+        # against another empty key would pick an arbitrary snippet.
+        return None
     try:
         snippets = json.loads(SNIPPETS_FILE.read_text())
     except Exception as e:
@@ -8254,7 +8269,7 @@ def match_snippet(raw: str) -> tuple[str, str] | None:
         print("! snippets.json must contain a JSON object; ignoring it")
         return None
     for name, text in snippets.items():
-        if isinstance(text, str) and key == norm(name):
+        if isinstance(text, str) and key == snippet_name_key(name):
             return name, text
     return None
 
