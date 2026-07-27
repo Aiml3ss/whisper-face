@@ -532,14 +532,18 @@ class PrivacyTests(CaptureHarness):
         nested = self.root / "outer" / "inner" / "corpus"
         capture.secure_directory(nested)
         for path in (self.root / "outer", self.root / "outer" / "inner", nested):
-            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
+            if os.name == "posix":
+                self.assertEqual(
+                    stat.S_IMODE(path.stat().st_mode), 0o700)
 
     def test_a_too_permissive_directory_is_tightened(self):
         loose = self.root / "loose"
         loose.mkdir()
         os.chmod(loose, 0o755)
         capture.secure_directory(loose)
-        self.assertEqual(stat.S_IMODE(loose.stat().st_mode), 0o700)
+        if os.name == "posix":
+            self.assertEqual(
+                stat.S_IMODE(loose.stat().st_mode), 0o700)
 
     def test_atomic_write_leaves_no_temporary_behind(self):
         target = self.root / "corpus" / "manifest.json"

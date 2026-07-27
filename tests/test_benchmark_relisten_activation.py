@@ -3,6 +3,7 @@
 # dependencies = []
 # ///
 
+import os
 from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
@@ -361,7 +362,9 @@ class RelistenActivationBenchmarkTests(unittest.TestCase):
 
         self.assertEqual(status, 0)
         self.assertTrue(load_activation_receipt(activation_path).ready)
-        self.assertEqual(activation_path.stat().st_mode & 0o777, 0o600)
+        if os.name == "posix":
+            self.assertEqual(
+                activation_path.stat().st_mode & 0o777, 0o600)
 
     def test_general_llm_audio_is_honestly_unavailable(self):
         manifest = load_manifest(self._manifest([self._case(1)]))

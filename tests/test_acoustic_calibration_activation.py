@@ -161,8 +161,9 @@ class AcousticCalibrationActivationTests(unittest.TestCase):
                 "--confirm-manual-review",
             ])
         self.assertEqual(accepted, 0)
-        self.assertEqual(
-            os.stat(self.activation_path).st_mode & 0o777, 0o600)
+        if os.name == "posix":
+            self.assertEqual(
+                os.stat(self.activation_path).st_mode & 0o777, 0o600)
         self.assertTrue(load_activation_receipt(
             self.activation_path).ready)
         self.assertNotIn("case-", stdout.getvalue())

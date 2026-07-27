@@ -4,6 +4,7 @@
 # ///
 """The lifecycle session must report only what a machine or a human said."""
 
+import os
 import ast
 import io
 import json
@@ -432,7 +433,9 @@ class CommandLineTests(unittest.TestCase):
             code, output = self.run_cli(
                 ["--session", str(session_path), "emit", "--out", str(target)])
             self.assertEqual(code, 0)
-            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+            if os.name == "posix":
+                self.assertEqual(
+                    stat.S_IMODE(target.stat().st_mode), 0o600)
             artifact = json.loads(target.read_text(encoding="utf-8"))
         self.assertEqual(artifact["coverage"]["runs_recorded"], 0)
         self.assertIn("still required:", output)
