@@ -799,6 +799,7 @@ APP_NAME = "Whisper Face"
 FACE_CHOICES = (
     "parrot", "fox", "owl", "cat", "bear",
     "dog", "wolf", "pig", "panda", "tiger",
+    "frog", "rabbit", "hedgehog", "penguin",
 )
 FACE_LABELS = {
     "parrot": "Parrot",

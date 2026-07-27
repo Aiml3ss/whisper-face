@@ -704,6 +704,10 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.face.pig": "Pig",
         "settings.face.panda": "Panda",
         "settings.face.tiger": "Tiger",
+        "settings.face.frog": "Frog",
+        "settings.face.rabbit": "Rabbit",
+        "settings.face.hedgehog": "Hedgehog",
+        "settings.face.penguin": "Penguin",
         "settings.state.enabled": "Enabled",
         "settings.state.disabled": "Off",
         "settings.state.local_processing": "Local processing",
@@ -895,6 +899,7 @@ def localized_string(key: str, *, locale: str = "en", **values: Any) -> str:
 FACES = (
     "parrot", "fox", "owl", "cat", "bear",
     "dog", "wolf", "pig", "panda", "tiger",
+    "frog", "rabbit", "hedgehog", "penguin",
 )
 @dataclass(frozen=True)
 class NativeAppKitSmokeContract:
@@ -5022,11 +5027,31 @@ if APPKIT_AVAILABLE:
             self.target = target
             self.pick_action = action
             chip_side = 44.0
-            gap = (self.frame().size.width -
-                   chip_side * len(faces)) / (len(faces) + 1)
+            # One row until the chips would crowd. Fourteen across a 704pt
+            # card leaves 5.9pt between them; the roster is meant to grow, so
+            # wrap instead of letting the breathing room collapse.
+            width = self.frame().size.width
+            per_row = len(faces)
+            while per_row > 1 and (
+                    width - chip_side * per_row) / (per_row + 1) < 14.0:
+                per_row = -(-len(faces) // (-(-len(faces) // per_row) + 1))
+            rows = -(-len(faces) // per_row)
+            # Cap the gap so a wrapped row keeps the same rhythm the
+            # ten-face row had, rather than scattering across the card.
+            gap = min((width - chip_side * per_row) / (per_row + 1),
+                      24.0)
+            row_gap = 8.0
+            top = self.frame().size.height - chip_side - 4.0
             for index, face in enumerate(faces):
+                row, column = divmod(index, per_row)
+                # A short last row centers rather than hanging left.
+                in_row = min(per_row, len(faces) - row * per_row)
+                inset = (width - (in_row * chip_side
+                                  + (in_row - 1) * gap)) / 2.0
                 frame = NSMakeRect(
-                    gap + index * (chip_side + gap), 4, chip_side, chip_side)
+                    inset + column * (chip_side + gap),
+                    top - row * (chip_side + row_gap),
+                    chip_side, chip_side)
                 chip = JellyButton.alloc().initWithFrame_(frame)
                 chip.setTitle_("")
                 chip.setBordered_(False)
@@ -5038,7 +5063,8 @@ if APPKIT_AVAILABLE:
                 # A view, not a button image: NSImageView keeps the vector
                 # art crisp where the button cell would rasterize it small.
                 art = NSImageView.alloc().initWithFrame_(NSMakeRect(
-                    frame.origin.x + 4, 8, chip_side - 8, chip_side - 8))
+                    frame.origin.x + 4, frame.origin.y + 4,
+                    chip_side - 8, chip_side - 8))
                 art.setImageScaling_(NSImageScaleProportionallyUpOrDown)
                 art.setEditable_(False)
                 image = images[index]
@@ -6491,14 +6517,17 @@ if APPKIT_AVAILABLE:
                 panes[name] = pane
 
             personalize = panes["Personalize"]
-            face_card = _card(NSMakeRect(0, 0, width, 64))
+            face_rows = -(-len(FACES) // 7) if len(FACES) > 10 else 1
+            face_card_height = 64.0 + (face_rows - 1) * 52.0
+            face_card = _card(NSMakeRect(0, 0, width, face_card_height))
             self._register("card", face_card)
             # Ten colored chibi chips instead of emoji segments; each chip
             # shows the real character art, and the selected chip wears a
             # ring in its own face color. Animal names stay available
             # through tooltips and the menu-bar "Choose Face" submenu.
             picker = ArtFacePicker.alloc().initWithFrame_(
-                NSMakeRect(8.0, 6, width - 16.0, 52))
+                NSMakeRect(8.0, 6, width - 16.0,
+                           face_card_height - 12.0))
             picker.populate(
                 FACES,
                 [self._face_image(face, talk=False) for face in FACES],
@@ -6511,7 +6540,8 @@ if APPKIT_AVAILABLE:
                 self._l("settings.accessibility.face.label"),
                 self._l("settings.accessibility.face.help"))
             face_card.addSubview_(picker)
-            self._stack(personalize, face_card, height=64)
+            self._stack(personalize, face_card,
+                        height=face_card_height)
 
             personalize_key_views: list[Any] = list(picker.chips)
             rows = (
