@@ -53,8 +53,10 @@ arguments:
    uv run tests/test_macos_networkless_worker.py
    uv run tests/test_acoustic_keyword_memory.py
    uv run tests/test_acoustic_keyword_bias_evaluation.py
+   uv run tests/test_acoustic_keyword_activation.py
    uv run tests/test_acoustic_time_machine.py
    uv run tests/test_acoustic_calibration.py
+   uv run tests/test_acoustic_calibration_activation.py
    uv run tests/test_measurement_mode.py
    uv run tests/test_benchmark_acoustic_calibration.py
    uv run tests/test_delayed_cleanup_merge.py
@@ -69,6 +71,7 @@ arguments:
    uv run tests/test_voice_objects.py
    uv run tests/test_voice_object_command_parser.py
    uv run tests/test_voice_object_commands_runtime.py
+   uv run tests/test_spoken_edit_commands_runtime.py
    uv run tests/test_voice_inbox.py
    uv run tests/test_voice_object_inbox_bridge.py
    uv run tests/test_risky_action_confirmation.py
@@ -85,7 +88,15 @@ arguments:
    uv run tests/test_macos_distribution.py
    uv run tests/test_safe_update_advisor.py
    uv run tests/test_side_by_side_update.py
+   uv run tests/test_self_update.py
    ```
+
+   This list is duplicated in `docs/installer-release-process.md` and
+   `.github/workflows/macos-release.yml`, and `tests/test_installers.py`
+   asserts the three stay identical. The Windows workflow and the pull-request
+   template carry the platform-independent subset of it. Every
+   `tests/test_*.py` file must appear in this list or be named, with a reason,
+   under "Deliberate gate exclusions" in `docs/installer-release-process.md`.
 
 6. On an installed Mac, also run `./setup.sh --verify`. On Windows, run
    `.\setup.ps1 --verify`. If the current environment cannot run a platform
