@@ -5,3 +5,7 @@
 # The launcher bundles this icon verbatim and the signed bundle has to
 # reproduce byte for byte, so never let Git rewrite it.
 /icons/WhisperFace.icns binary
+# cmd.exe is the one interpreter here that still cares about carriage returns.
+# `git archive` applies this attribute, so the Windows release bundle ships the
+# entry point with the line endings Windows expects.
+/Install.cmd text eol=crlf

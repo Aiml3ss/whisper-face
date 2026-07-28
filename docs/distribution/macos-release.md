@@ -1,5 +1,11 @@
 # macOS release and rollback runbook
 
+Windows has its own bundle, built from macOS by `scripts/package_windows.sh`
+and documented in [the Windows release runbook](windows-release.md). It shares
+this document's exact-source discipline and none of its Apple trust: no
+Authenticode certificate exists, so the Windows artifact is unsigned and says
+so.
+
 The public Mac distribution is an exact-source release, not a second frozen
 copy of the runtime. The source bundle contains one Git archive, minimal shallow
 Git metadata for that exact commit, and the shipped `Install.command`;
