@@ -262,7 +262,7 @@ COMPANIONS: Mapping[str, CharacterStyle] = {
         head=FACE_CHIP_COLORS["pickles"],
         deep=(0.804, 0.647, 0.412),
         muzzle=(1.000, 0.976, 0.925),
-        ears="floppy",
+        ears="retriever",
         big_tongue=True,
         blep=True,
         blush_alpha=0.45,
@@ -271,7 +271,7 @@ COMPANIONS: Mapping[str, CharacterStyle] = {
         head=FACE_CHIP_COLORS["olive"],
         deep=(0.808, 0.686, 0.502),
         muzzle=(1.000, 0.984, 0.949),
-        ears="floppy",
+        ears="retriever",
         bow=True,
         blush_alpha=0.45,
     ),
@@ -554,6 +554,37 @@ def _companion_ops(face: str, mouth: float, level: float, blink: float,
         ))
     elif style.ears == "none":
         pass
+    elif style.ears == "retriever":
+        # A golden's ears are the breed marker: set at eye level, broad,
+        # and hanging past the cheek with a feathered edge. The shared
+        # floppy teardrop tucks inside the head blob and disappears
+        # entirely at chip size, which is why the litter-mates read as
+        # round-eared rodents rather than as dogs. These deliberately
+        # break the silhouette -- the outer edge swings well outside the
+        # head ellipse (x 30..226) so the pair is visible before any
+        # feature is, and the root stays hidden under the crown so the
+        # head still reads as one soft blob.
+        for flip in (False, True):
+            def x(value: float) -> float:
+                return 256.0 - value if flip else value
+
+            ops.append(Curve(
+                (x(96), 70),
+                (((x(24), 64), (x(-8), 134), (x(12), 194)),
+                 ((x(20), 226), (x(76), 234), (x(98), 204)),
+                 ((x(112), 152), (x(118), 92), (x(96), 70))),
+                style.deep,
+            ))
+            # Feathering: one paler wave riding the inner edge, the fringe
+            # a golden carries down the length of the ear. Low alpha so it
+            # reads as fur at 208 points and vanishes politely at 18.
+            ops.append(Curve(
+                (x(44), 128),
+                (((x(28), 156), (x(26), 188), (x(42), 206)),
+                 ((x(58), 222), (x(80), 214), (x(84), 190)),
+                 ((x(78), 162), (x(64), 138), (x(44), 128))),
+                style.muzzle, 0.30,
+            ))
     elif style.ears == "floppy":
         # Teardrop ears that hug the head instead of hanging past the jaw;
         # closed curves so they still droop rather than stand up stiff.
