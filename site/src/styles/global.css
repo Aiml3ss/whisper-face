@@ -955,6 +955,57 @@ section.band {
   flex-direction: column;
   gap: 14px;
 }
+
+/* Platform picker. The steps genuinely differ per platform -- disk image
+   versus zip, Install.command versus Install.bat, accessibility versus
+   SmartScreen -- so each platform gets its own panel rather than one set
+   of steps hedged with parentheses. The panel repeats the column gap the
+   steps used to inherit from .install-steps directly. */
+.platform-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.platform-tab {
+  font: inherit;
+  font-weight: 700;
+  font-size: 14px;
+  padding: 8px 18px;
+  border-radius: 999px;
+  border: 2px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+  transition: background 0.16s ease, box-shadow 0.16s ease;
+}
+.platform-tab[aria-selected='true'] {
+  background: var(--brand);
+  box-shadow: var(--sticker);
+}
+.platform-tab:hover {
+  background: color-mix(in srgb, var(--brand) 35%, var(--surface));
+}
+.platform-tab[aria-selected='true']:hover {
+  background: var(--brand);
+}
+.platform-tab:focus-visible {
+  outline: 3px solid var(--brand-ink);
+  outline-offset: 3px;
+}
+.platform-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.platform-panel[hidden],
+.terminal[hidden] {
+  display: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .platform-tab {
+    transition: none;
+  }
+}
 .istep {
   display: flex;
   gap: 14px;

@@ -1,22 +1,56 @@
 ---
 import { RELEASE } from '../data/release';
 
-const steps = [
+const platforms = [
   {
-    h: 'Download and open',
-    p: 'Grab the disk image and open it. No account, no sign-up wall.',
+    id: 'mac',
+    label: 'Mac',
+    href: RELEASE.dmg,
+    meta: `${RELEASE.version} · ${RELEASE.size}`,
+    requires: 'Apple Silicon, macOS 14 or newer.',
+    steps: [
+      {
+        h: 'Download and open',
+        p: 'Grab the disk image and open it. No account, no sign-up wall.',
+      },
+      {
+        h: 'Copy it out of the disk image',
+        p: 'Drag the Whisper Face folder — and the app beside it — somewhere writable like Documents. The installer checks for this and will not run from the read-only image.',
+      },
+      {
+        h: 'Run Install.command',
+        p: 'From that copy, one repeatable flow sets up the app, locked dependencies, models, the native helper, login services, and health checks.',
+      },
+      {
+        h: 'Grant mic and accessibility',
+        p: 'macOS asks once for microphone and accessibility access — that is what lets Whisper Face hear you and type for you.',
+      },
+    ],
   },
   {
-    h: 'Copy it out of the disk image',
-    p: 'Drag the Whisper Face folder — and the app beside it — somewhere writable like Documents. The installer checks for this and will not run from the read-only image.',
-  },
-  {
-    h: 'Run Install.command',
-    p: 'From that copy, one repeatable flow sets up the app, locked dependencies, models, the native helper, login services, and health checks.',
-  },
-  {
-    h: 'Grant mic and accessibility',
-    p: 'macOS asks once for microphone and accessibility access — that is what lets Whisper Face hear you and type for you.',
+    id: 'windows',
+    label: 'Windows',
+    href: RELEASE.windows,
+    meta: `${RELEASE.version} · ${RELEASE.windowsSize}`,
+    requires: 'Windows 10 or 11, 64-bit.',
+    steps: [
+      {
+        h: 'Download and unzip',
+        p: 'Unzip it somewhere writable like Documents. The installer will not run from inside the zip.',
+      },
+      {
+        h: 'Run Install.bat',
+        p: 'Double-click it. One repeatable flow sets up the app, locked dependencies, models, a login task, and health checks — and it is safe to run again later.',
+      },
+      {
+        h: 'Let SmartScreen through',
+        p: 'The build is not code-signed, so Windows may say it protected your PC. Choose More info, then Run anyway — or check the download against SHA256SUMS first.',
+      },
+      {
+        h: 'Hold Right Alt and talk',
+        p: 'Windows uses Right Alt in place of Right Option, and Whisper Face lives in the tray rather than the menu bar.',
+      },
+    ],
   },
 ];
 ---
@@ -30,41 +64,89 @@ const steps = [
 
   <div class="install-grid">
     <div class="install-steps">
+      <div class="platform-tabs" role="tablist" aria-label="Choose your platform">
+        {
+          platforms.map((platform, index) => (
+            <button
+              type="button"
+              class="platform-tab"
+              role="tab"
+              id={`tab-${platform.id}`}
+              aria-controls={`panel-${platform.id}`}
+              aria-selected={index === 0 ? 'true' : 'false'}
+              tabindex={index === 0 ? 0 : -1}
+              data-platform={platform.id}
+              data-jelly
+            >
+              {platform.label}
+            </button>
+          ))
+        }
+      </div>
+
       {
-        steps.map((s, i) => (
-          <div class="istep" data-jelly>
-            <div class="n">{i + 1}</div>
-            <div>
-              <h4>{s.h}</h4>
-              <p>{s.p}</p>
+        platforms.map((platform, index) => (
+          <div
+            class="platform-panel"
+            role="tabpanel"
+            id={`panel-${platform.id}`}
+            aria-labelledby={`tab-${platform.id}`}
+            data-platform={platform.id}
+            hidden={index !== 0}
+          >
+            {platform.steps.map((s, i) => (
+              <div class="istep" data-jelly>
+                <div class="n">{i + 1}</div>
+                <div>
+                  <h4>{s.h}</h4>
+                  <p>{s.p}</p>
+                </div>
+              </div>
+            ))}
+            <div class="cta-row" style="margin-top:8px">
+              <a class="btn btn-primary" data-jelly href={platform.href} download>
+                Download for {platform.label}
+                <span class="btn-meta">{platform.meta}</span>
+              </a>
+              <a class="btn btn-ghost" data-jelly href="/docs/getting-started">Read the guide</a>
             </div>
+            <p class="install-note">
+              {platform.requires} <a href={RELEASE.notes}>Release notes</a> &middot;
+              <a href="https://github.com/Aiml3ss/whisper-face">Source on GitHub</a>
+            </p>
           </div>
         ))
       }
-      <div class="cta-row" style="margin-top:8px">
-        <a class="btn btn-primary" data-jelly href={RELEASE.dmg} download>
-          Download for Mac
-          <span class="btn-meta">{RELEASE.version} &middot; {RELEASE.size}</span>
-        </a>
-        <a class="btn btn-ghost" data-jelly href="/docs/getting-started">Read the guide</a>
-      </div>
-      <p class="install-note">
-        Apple Silicon, macOS 14 or newer. <a href={RELEASE.notes}>Release notes</a> &middot;
-        <a href="https://github.com/Aiml3ss/whisper-face">Source on GitHub</a>
-      </p>
+
       {
         RELEASE.unsigned && (
           <p class="install-warn">
-            <b>This build is not notarized yet</b>, so macOS will say it cannot verify the
-            developer. Right-click <code>Install.command</code> and choose <b>Open</b>, then
-            confirm. You can check the download against{' '}
-            <a href={RELEASE.checksums}>SHA256SUMS</a>. A signed release is on the way.
+            <b>This build is not signed yet.</b> macOS will say it cannot verify the developer —
+            right-click <code>Install.command</code> and choose <b>Open</b>, then confirm. Windows
+            may show SmartScreen — choose <b>More info</b>, then <b>Run anyway</b>. You can check
+            either download against <a href={RELEASE.checksums}>SHA256SUMS</a>. Signed builds are on
+            the way.
+          </p>
+        )
+      }
+      {
+        RELEASE.windowsPreview && (
+          <p class="install-note">
+            <b>Windows is a preview.</b> It shares the same recognition and cleanup pipeline, and
+            its installer runs in CI on every change — but it has not yet been through a full
+            dictation on real Windows hardware. It lives in the tray instead of a window, and text
+            is inserted by a plain paste rather than the Mac's verified insertion transaction.
           </p>
         )
       }
     </div>
 
-    <div class="terminal" role="img" aria-label="Terminal showing the Install.command setup running and reporting all checks passed">
+    <div
+      class="terminal"
+      data-platform="mac"
+      role="img"
+      aria-label="Terminal showing the Install.command setup running on a Mac and reporting all checks passed"
+    >
       <div class="bar"><i></i><i></i><i></i></div>
       <pre><code><span class="muted"># from the Whisper Face folder</span>
 <span class="p">you@mac</span> ~/Whisper<span class="muted">-</span>Face $ <span class="c">./Install.command</span>
@@ -77,5 +159,64 @@ const steps = [
 
 <span class="muted">Hold your key and start talking →</span></code></pre>
     </div>
+
+    <div
+      class="terminal"
+      data-platform="windows"
+      role="img"
+      aria-label="Command prompt showing Install.bat running on Windows and reporting all checks passed"
+      hidden
+    >
+      <div class="bar"><i></i><i></i><i></i></div>
+      <pre><code><span class="muted">:: from the unzipped Whisper Face folder</span>
+<span class="p">C:\Users\you\Documents\Whisper Face></span> <span class="c">Install.bat</span>
+
+<span class="c">✓</span> app installed
+<span class="c">✓</span> models ready        <span class="muted">(offline)</span>
+<span class="c">✓</span> login task registered
+<span class="c">✓</span> microphone available
+<span class="c">✓</span> health checks passed
+
+<span class="muted">Hold Right Alt and start talking →</span></code></pre>
+    </div>
   </div>
 </section>
+
+<script>
+  // Show the visitor's own platform first, and keep the tabs operable by
+  // keyboard. Static-safe: with JS off the Mac panel is the one already
+  // rendered visible and both downloads stay reachable by tabbing.
+  const tabs = Array.from(
+    document.querySelectorAll('#install .platform-tab'),
+  ) as HTMLButtonElement[];
+  // Panels and terminals both switch: a Windows visitor reading about
+  // Install.bat beside a macOS terminal is worse than no terminal at all.
+  const panels = Array.from(
+    document.querySelectorAll('#install .platform-panel, #install .terminal'),
+  ) as HTMLElement[];
+
+  function select(id: string, focus = false) {
+    for (const tab of tabs) {
+      const active = tab.dataset.platform === id;
+      tab.setAttribute('aria-selected', String(active));
+      tab.tabIndex = active ? 0 : -1;
+      if (active && focus) tab.focus();
+    }
+    for (const panel of panels) {
+      panel.hidden = panel.dataset.platform !== id;
+    }
+  }
+
+  for (const tab of tabs) {
+    tab.addEventListener('click', () => select(tab.dataset.platform as string));
+    tab.addEventListener('keydown', (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      event.preventDefault();
+      const step = event.key === 'ArrowRight' ? 1 : -1;
+      const next = tabs[(tabs.indexOf(tab) + step + tabs.length) % tabs.length];
+      select(next.dataset.platform as string, true);
+    });
+  }
+
+  if (navigator.userAgent.includes('Windows')) select('windows');
+</script>
