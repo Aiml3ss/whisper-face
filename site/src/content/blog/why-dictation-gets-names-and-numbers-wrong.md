@@ -40,19 +40,25 @@ That sounds fussy. It exists because a model that is 99% reliable at preserving 
 
 Protection prevents corruption. It does not, on its own, make the first guess better. Two things do:
 
+**Write paths so they are recognizable as paths.** Anchor detection keys off shape. `./src/api/handlers.py` and `/src/api/handlers.py` are protected whole; a bare `src/api/handlers.py` is not — only the segments that look like identifiers on their own survive. If a path matters, say the leading dot-slash or slash.
+
 **Give it your vocabulary.** Recognizers accept a prompt that biases them toward expected terms. Names of colleagues, product names, jargon your field uses and nobody else does — supplied up front, these stop losing to common words that merely sound similar.
 
-**Let corrections stick.** When you fix a word, that is a signal. In Whisper Face a correction becomes a scoped local rule — but only if it passes a regression suite of your own past corrections with zero regressions, and only for the app you were in. Corrections that would fix one thing and break two are rejected. Contradicting evidence later demotes a rule. Every rule is inspectable and removable.
+**Let corrections stick.** When you fix a word, that is a signal — but one signal is not evidence. In Whisper Face the same correction has to appear twice in one app, or three times overall, before it is even a candidate. It then has to pass a regression suite built from your own past corrections with zero regressions. Corrections that would fix one thing and break two are rejected, contradicting evidence later demotes a rule, and every rule is inspectable and removable.
+
+The threshold is deliberate and it is worth knowing before you test it: fix a word once and nothing visible happens. That is the design working, not learning being broken.
 
 ## What to check in any dictation tool
 
 - Dictate a long number and a real surname. Do they survive?
 - Dictate a file path. Does it come back as a path or as prose?
-- Fix a word it got wrong. Does it learn, and can you see and undo what it learned?
+- Fix a word it got wrong, a few times. Does it learn, how many corrections does it take, and can you see and undo what it learned?
 - If it uses a language model to clean up, can it show you what that model changed?
 
 The last one matters most. A tool that cannot tell you what was altered is asking you to proofread every sentence, which is most of the time dictation was supposed to save.
 
-Whisper Face keeps a per-result view of which anchors were protected, which proposed edits were accepted or rejected, and whether surrounding context influenced the outcome — without storing a transcript of what you said.
+Whisper Face keeps a per-result view of which anchors were protected, which proposed edits were accepted or rejected, and whether surrounding context influenced the outcome.
+
+To be exact about what that costs: Whisper Face does keep a local dictation history. Each completed dictation appends the raw and cleaned text to `transcripts.jsonl` on your machine — that file is what the learning loop and the recent-dictations list read from. It is local, it is yours, and it is not sent anywhere, but "nothing is stored" would be the wrong thing to take away. The *receipts* are transcript-free; the history is not.
 
 [Get started](/docs/getting-started), or read about [how corrections are learned](/blog/your-voice-stays-local).

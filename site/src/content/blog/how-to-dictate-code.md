@@ -30,11 +30,11 @@ In Whisper Face this is one of six modes on the same gesture. The modifier choos
 
 ## What "compiled as code" actually has to do
 
-**Glyph names become glyphs.** "Open paren", "close brace", "underscore", "arrow", "colon" — spoken names for characters resolve to the characters, in context, so "dot" in `user.name` is punctuation while "dot" in a sentence stays a word.
+**Glyph names become glyphs.** A fixed table of spoken names for ASCII characters — "open paren", "close brace", "underscore", "arrow" — resolves to the characters, and the spacing rules around them stop the result being pulled apart into prose.
 
-**Casing conventions are spoken.** "Camel case handle submit" → `handleSubmit`. "Snake case max retry count" → `max_retry_count`. "Constant max retries" → `MAX_RETRIES`. You are naming the convention, not spelling it out.
+Be concrete about the boundary, because it matters if you are deciding whether this is useful: Whisper Face's code mode today is that glyph table plus spacing. It does **not** convert spoken casing conventions — saying "camel case handle submit" gives you those words, not `handleSubmit`. If you want an identifier, spell the shape you want with glyph names, or type it.
 
-**Paths and identifiers stay intact.** Anything that looks like a path, an identifier, or a command is a protected anchor: cleanup may rearrange the sentence around it but may not rewrite it. This is the same machinery that stops an invoice number being rounded.
+**Paths and identifiers are protected where they are recognizable.** Anchor detection keys off shape: `./src/api/handlers.py` or `/src/api/handlers.py` is protected whole, and cleanup may not rewrite it. A bare `src/api/handlers.py` is not — only segments that look like identifiers on their own survive. Say the leading slash if the path matters.
 
 **Terminals are treated differently from editors.** Text going into a terminal should be verbatim. Text going into a code comment can be tidied. Per-app tone handles that — technical in editors, verbatim in terminals — so the same spoken sentence lands appropriately in each.
 
@@ -53,7 +53,7 @@ One safety note worth stating plainly. Whisper Face's command mode operates on a
 1. Put the names your codebase uses — services, models, unusual spellings — into your vocabulary, so the recognizer stops losing them to common words.
 2. Set your editor and terminal tones once. Technical for the editor, verbatim for the terminal.
 3. Use code mode for identifiers and paths; use ordinary dictation for comments and messages.
-4. When it gets a term wrong, fix it once. The correction becomes a scoped local rule after it passes a regression check against your own past corrections.
+4. When it gets a term wrong, fix it. The same correction twice in one app, or three times overall, makes it a candidate; it becomes a scoped local rule only after passing a regression check against your own past corrections. One fix on its own will not stick, by design.
 
 Then dictate the commit message instead of typing it, and see whether the loop is worth keeping.
 

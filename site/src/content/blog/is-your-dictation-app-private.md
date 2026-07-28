@@ -60,7 +60,11 @@ If it is open, you can also check something stronger than the README: does the c
 
 We would rather hand you the checklist than the conclusion, so:
 
-Recognition and cleanup both run on your Mac — pull the plug and see. There is no account. Audio lives in memory and is never written to disk; the optional Flight Recorder buffer is RAM-only and clears on use, pause, disable, and quit. The private files it creates are documented as a list, written with restrictive permissions, and each is inspectable and deletable from the app. The support bundle is built from an allowlist and excludes transcripts, paths, usernames, hostnames, and timestamps — and it is never uploaded; you choose where it is saved.
+Recognition and cleanup both run on your Mac — pull the plug and see. There is no account. Audio lives in memory and is never written to disk; the optional Flight Recorder buffer is RAM-only and clears on use, pause, disable, and quit. The support bundle is built from an allowlist and excludes transcripts, paths, usernames, hostnames, and timestamps — and it is never uploaded; you choose where it is saved.
+
+Text is a different story from audio, and this is where we should be precise rather than flattering. Whisper Face keeps a local dictation history: each completed dictation appends its raw and cleaned text to `transcripts.jsonl`, which is what the learning loop and the recent-dictations list read. The files it creates are documented as a list and written with restrictive permissions, but **the app does not expose a delete button for all of them**. Snippets, learned corrections, and acoustic keywords can be inspected and forgotten in the UI. `transcripts.jsonl`, `preferences.json`, `dictionary.txt`, `tones.json`, and the runtime logs are ordinary files you remove from the filesystem, or with the uninstaller's personal-data option.
+
+That is a real gap between "your data is local and yours" and "you can erase it from inside the app", and we would rather name it than let you discover it.
 
 On the last point: the repository contains tests that fail if a module on the dictation path gains the ability to reach the network, and that drive a synthetic sentence through the real pipeline and fail on any outbound connection to anything but the local model. They exist so the promise is enforced rather than merely stated.
 
