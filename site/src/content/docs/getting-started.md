@@ -21,9 +21,13 @@ Whisper Face installs in one flow and checks its own work along the way. Here is
 ## Install on Windows
 
 1. Download the Windows zip and unzip it somewhere writable like Documents. The installer will not run from inside the zip.
-2. Double-click `Install.bat`. It provisions the app, its locked dependencies, the speech models, a login task, and a round of health checks.
+2. Double-click `Install.cmd`. It starts the bundled setup script for you — Windows blocks a double-clicked PowerShell script by default — and provisions the app, its locked dependencies, the speech models, a login task, and a round of health checks. It needs [winget](https://learn.microsoft.com/windows/package-manager/winget/) (App Installer, from the Microsoft Store) the first time.
 3. If Windows says it protected your PC, choose **More info** and then **Run anyway**. The build is not code-signed yet; you can check your download against the release's `SHA256SUMS` first if you would rather verify than trust.
 4. Allow microphone access when Windows asks.
+
+The folder also contains `Install.command` and `setup.sh`. Those are the macOS versions of the same installer and do nothing on Windows — the similar name is all they share with `Install.cmd`.
+
+To check an existing install without changing anything, open PowerShell in that folder and run `.\setup.ps1 --verify`.
 
 Windows is a **preview**. It runs the same recognition and cleanup pipeline as the Mac, and its installer is exercised in CI on every change — but it has not yet been through a full dictation on real Windows hardware, so expect rough edges and please report them.
 

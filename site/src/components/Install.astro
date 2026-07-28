@@ -39,8 +39,8 @@ const platforms = [
         p: 'Unzip it somewhere writable like Documents. The installer will not run from inside the zip.',
       },
       {
-        h: 'Run Install.bat',
-        p: 'Double-click it. One repeatable flow sets up the app, locked dependencies, models, a login task, and health checks — and it is safe to run again later.',
+        h: 'Run Install.cmd',
+        p: 'Double-click it — it starts the bundled setup script, which Windows blocks if you launch it directly. One repeatable flow sets up the app, locked dependencies, models, a login task, and health checks, and it is safe to run again later. It needs winget (App Installer, from the Microsoft Store) the first time.',
       },
       {
         h: 'Let SmartScreen through',
@@ -164,12 +164,12 @@ const platforms = [
       class="terminal"
       data-platform="windows"
       role="img"
-      aria-label="Command prompt showing Install.bat running on Windows and reporting all checks passed"
+      aria-label="Command prompt showing Install.cmd running on Windows and reporting all checks passed"
       hidden
     >
       <div class="bar"><i></i><i></i><i></i></div>
       <pre><code><span class="muted">:: from the unzipped Whisper Face folder</span>
-<span class="p">C:\Users\you\Documents\Whisper Face></span> <span class="c">Install.bat</span>
+<span class="p">C:\Users\you\Documents\Whisper Face></span> <span class="c">Install.cmd</span>
 
 <span class="c">✓</span> app installed
 <span class="c">✓</span> models ready        <span class="muted">(offline)</span>
@@ -190,7 +190,7 @@ const platforms = [
     document.querySelectorAll('#install .platform-tab'),
   ) as HTMLButtonElement[];
   // Panels and terminals both switch: a Windows visitor reading about
-  // Install.bat beside a macOS terminal is worse than no terminal at all.
+  // Install.cmd beside a macOS terminal is worse than no terminal at all.
   const panels = Array.from(
     document.querySelectorAll('#install .platform-panel, #install .terminal'),
   ) as HTMLElement[];
