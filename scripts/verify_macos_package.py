@@ -200,7 +200,12 @@ def verify_tree(root: Path, version: str, revision: str) -> dict:
     return receipt
 
 
-def _verify_exact_checkout(root: Path, version: str, revision: str) -> None:
+def verify_exact_checkout(root: Path, version: str, revision: str) -> None:
+    """Prove a staged tree is the untouched checkout of one Git revision.
+
+    Shared with ``scripts/windows_bundle.py``: both platforms ship the same
+    exact-source claim, so they must prove it the same way.
+    """
     metadata_path = root / RELEASE_METADATA_NAME
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -337,13 +342,13 @@ def verify_artifacts(
         _extract_zip(source_zip, extracted)
         zip_root = extracted / expected_root
         zip_receipt = verify_tree(zip_root, version, revision)
-        _verify_exact_checkout(zip_root, version, revision)
+        verify_exact_checkout(zip_root, version, revision)
 
         mount_point, device = _attach_disk_image(disk_image)
         try:
             dmg_root = mount_point / expected_root
             dmg_receipt = verify_tree(dmg_root, version, revision)
-            _verify_exact_checkout(dmg_root, version, revision)
+            verify_exact_checkout(dmg_root, version, revision)
             _verify_generic_launcher(mount_point / LAUNCHER_NAME, dmg_root)
             if dmg_receipt != zip_receipt:
                 raise PackageError("ZIP and DMG package receipts differ")

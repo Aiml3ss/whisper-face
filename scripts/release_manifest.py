@@ -27,6 +27,31 @@ SEMVER = re.compile(
     r"(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$"
 )
 REVISION = re.compile(r"^[0-9a-f]{40}$")
+WINDOWS_BUNDLE_SUFFIX = "-windows-x64.zip"
+
+# Both platforms install by running the shipped source bundle in place; only
+# the clickable entry point and the no-change verification command differ.
+_SHARED_INSTALLATION = {
+    "automatic_cross_checkout_migration": False,
+    "preserves_private_state": False,
+    "same_checkout_reinstall_preserves_private_state": True,
+    "separate_checkout_requires_manual_private_state_migration": True,
+    "strategy": "source-bundle-in-place",
+}
+MACOS_INSTALLATION = {
+    **_SHARED_INSTALLATION,
+    "entrypoint": "Install.command",
+    "verification": "./setup.sh --verify",
+}
+WINDOWS_INSTALLATION = {
+    **_SHARED_INSTALLATION,
+    "entrypoint": "Install.cmd",
+    "verification": ".\\setup.ps1 --verify",
+}
+MINIMUM_OS = {
+    "Install.command": ("minimum_macos", "14.0"),
+    "Install.cmd": ("minimum_windows", "10"),
+}
 
 
 class ManifestError(ValueError):
@@ -96,12 +121,33 @@ def _atomic_json(path: Path, payload: dict) -> None:
 
 
 def _artifact_kind(path: Path) -> tuple[str, str, list[str]]:
+    """Classify a release artifact by its published name, not its extension.
+
+    The Windows bundle and the corresponding-source archive are both ZIPs, so
+    the suffix alone cannot tell them apart. Keying off the release filename
+    keeps a Windows installer from being published, and trusted, as a plain
+    source archive.
+    """
     lower = path.name.casefold()
     if lower.endswith(".dmg"):
         return "macos-disk-image", "installer", ["arm64"]
+    if lower.endswith(WINDOWS_BUNDLE_SUFFIX):
+        return "windows-source-bundle", "installer", ["x64"]
     if lower.endswith(".zip"):
         return "source-archive", "corresponding-source", ["any"]
     raise ManifestError(f"unsupported release artifact type: {path.name}")
+
+
+def _installation(kinds: set[str]) -> dict:
+    """Return the install contract the artifact set actually describes."""
+    windows = "windows-source-bundle" in kinds
+    macos = "macos-disk-image" in kinds
+    if windows and macos:
+        raise ManifestError(
+            "a release manifest describes one platform's install path; "
+            "package Windows and macOS artifacts into separate manifests"
+        )
+    return dict(WINDOWS_INSTALLATION if windows else MACOS_INSTALLATION)
 
 
 def create_manifest(args: argparse.Namespace) -> dict:
@@ -180,19 +226,14 @@ def create_manifest(args: argparse.Namespace) -> dict:
             "supported": False,
         }
 
+    installation = _installation({item["kind"] for item in artifacts})
+    minimum_key, minimum_value = MINIMUM_OS[installation["entrypoint"]]
+
     return {
         "artifacts": artifacts,
         "channel": args.channel,
-        "installation": {
-            "automatic_cross_checkout_migration": False,
-            "entrypoint": "Install.command",
-            "preserves_private_state": False,
-            "same_checkout_reinstall_preserves_private_state": True,
-            "separate_checkout_requires_manual_private_state_migration": True,
-            "strategy": "source-bundle-in-place",
-            "verification": "./setup.sh --verify",
-        },
-        "minimum_macos": "14.0",
+        "installation": installation,
+        minimum_key: minimum_value,
         "product": PRODUCT,
         "published_at": _published_at(args.published_at),
         "rollback": rollback,
@@ -239,6 +280,7 @@ def verify_manifest(path: Path, artifact_dir: Path) -> dict:
     if not isinstance(artifacts, list) or not artifacts:
         raise ManifestError("manifest must list at least one artifact")
     seen_names: set[str] = set()
+    kinds: set[str] = set()
     for artifact in artifacts:
         if not isinstance(artifact, dict):
             raise ManifestError("each artifact must be an object")
@@ -251,6 +293,7 @@ def verify_manifest(path: Path, artifact_dir: Path) -> dict:
         )
         if artifact.get("kind") != expected_kind or artifact.get("role") != expected_role:
             raise ManifestError(f"artifact kind/role mismatch: {name}")
+        kinds.add(expected_kind)
         if artifact.get("architectures") != expected_architectures:
             raise ManifestError(f"artifact architecture mismatch: {name}")
         local = artifact_dir / name
@@ -276,6 +319,18 @@ def verify_manifest(path: Path, artifact_dir: Path) -> dict:
         is not True
     ):
         raise ManifestError("separate-checkout migration requirement is missing")
+    # A Windows bundle published under the Mac install contract would tell the
+    # person who downloaded it to double-click a file it does not contain.
+    expected_installation = _installation(kinds)
+    if installation != expected_installation:
+        raise ManifestError(
+            "installation contract does not match the artifacts: expected "
+            f"entrypoint {expected_installation['entrypoint']!r} and "
+            f"verification {expected_installation['verification']!r}"
+        )
+    minimum_key, minimum_value = MINIMUM_OS[expected_installation["entrypoint"]]
+    if payload.get(minimum_key) != minimum_value:
+        raise ManifestError(f"manifest must declare {minimum_key} {minimum_value}")
     return payload
 
 

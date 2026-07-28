@@ -78,6 +78,7 @@ before submitting outside contributions.
 - [ ] `uv run tests/test_installers.py`
 - [ ] `uv run tests/test_repository_governance.py`
 - [ ] `uv run tests/test_macos_distribution.py`
+- [ ] `uv run tests/test_windows_distribution.py`
 - [ ] `uv run tests/test_safe_update_advisor.py`
 - [ ] `uv run tests/test_side_by_side_update.py`
 - [ ] `uv run tests/test_self_update.py`
