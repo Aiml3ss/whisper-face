@@ -1085,6 +1085,18 @@ section.band {
 .terminal .muted {
   color: #93a297;
 }
+.sec-note {
+  margin: 10px auto 0;
+  max-width: 62ch;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+  font-weight: 500;
+}
+.sec-note a {
+  color: var(--ink);
+  text-underline-offset: 3px;
+}
 .install-note {
   margin: 14px 0 0;
   font-size: 13.5px;
