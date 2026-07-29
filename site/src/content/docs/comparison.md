@@ -16,7 +16,8 @@ statement:
 - **Measurements** — head-to-head numbers on the same tasks and hardware.
   **We have none yet.** See [what we have not measured](#what-we-have-not-measured).
 
-Competitor details below were reviewed on **21 July 2026**. Prices and
+Competitor details below were reviewed on **21 July 2026**, and Whisper Face's
+own rows were last checked on **28 July 2026**. Prices and
 features change; check the linked sources before relying on any of it.
 
 ## The difference that actually matters
@@ -81,7 +82,7 @@ written to disk, and it is off until you turn it on.
 
 | | Where transcription runs | Platforms | Price |
 |---|---|---|---|
-| **Whisper Face** | On your Mac | macOS (Windows shares the core) | Free, open source, no cap |
+| **Whisper Face** | On your own machine | macOS; Windows preview | Free, open source, no cap |
 | **Wispr Flow** | Cloud ([privacy](https://wisprflow.ai/privacy)) | Mac, Windows, iPhone, Android | Free tier with word limits; Pro $15/mo or $12/user/mo annual ([pricing](https://wisprflow.ai/pricing)) |
 | **Superwhisper** | Local or cloud, configurable | Mac, Windows, iOS | Free tier; Pro ~$8.49/mo, annual and lifetime options |
 | **MacWhisper** | Local, with optional cloud | Mac | Free tier; Pro ~EUR 64 once |
@@ -94,8 +95,11 @@ written to disk, and it is off until you turn it on.
 mobile product — it is deliberately deferred until the Mac experience is
 finished.
 
-**Wispr Flow supports far more languages.** They publish 100+. Whisper Face is
-English-focused today.
+**Wispr Flow supports far more languages.** They publish 100+. Whisper Face
+ships eleven — English, Spanish, French, German, Italian, Portuguese, Dutch,
+Russian, Japanese, Korean, and Chinese — chosen for recognition quality and
+script coverage rather than breadth. If your language is not on that list,
+this is not the tool for you yet.
 
 **Signed, frictionless installation.** Commercial alternatives are signed and
 notarized, so they open without a warning and keep their permissions across
