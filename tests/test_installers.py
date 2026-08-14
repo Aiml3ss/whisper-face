@@ -33,6 +33,7 @@ PERSONAL_FILES = (
     "relisten_activation.json",
     "dictate.log",
     "ollama.log",
+    "install.log",
 )
 
 # Tools Whisper Face installs alongside itself but does not own. Someone else
