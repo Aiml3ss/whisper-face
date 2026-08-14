@@ -75,6 +75,7 @@ FORBIDDEN_BUNDLE_ENTRIES = (
     "demonstrations.json",
     "dictate.log",
     "dictionary.txt",
+    "install.log",
     "learned.json",
     "ollama-error.log",
     "ollama.log",
