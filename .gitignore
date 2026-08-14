@@ -31,11 +31,14 @@ dictionary.txt
 dictate.log
 ollama.log
 ollama-error.log
+install.log
 .dictate.lock
 .models/
 .windows/
 __pycache__/
 .build/
+# release artifacts (scripts/package_macos.sh, scripts/package_windows.sh)
+/dist/
 # Local ASR corpora and generated bakeoff hypotheses are never repository data.
 benchmarks/asr-local/
 # Local design-linter cache.
