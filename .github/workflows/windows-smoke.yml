@@ -116,6 +116,7 @@ jobs:
           $help = Invoke-Installer @("--help")
           if ($help.Code -ne 0) { throw "--help exited $($help.Code)" }
           if ($help.Output -notmatch "Usage: ") { throw "--help printed no usage" }
+          Write-Host "ok: --help"
 
           # A dry-run uninstall prints a plan and changes nothing, which makes
           # it safe here and runs most of the script's runtime helpers.
@@ -125,6 +126,7 @@ jobs:
           if ($plan.Output -match "would remove.*scheduled task") {
             throw "--uninstall plans to remove a task this runner never installed"
           }
+          Write-Host "ok: --uninstall dry run"
 
           function Assert-Rejected([string[]]$InstallerArgs) {
             $rejected = Invoke-Installer $InstallerArgs
@@ -135,6 +137,7 @@ jobs:
           Assert-Rejected @("--nonsense")
           Assert-Rejected @("--uninstall", "--verify")
           Assert-Rejected @("--yes")
+          Write-Host "ok: bad arguments rejected"
 
           # A failing run has to end with the banner naming the log, because
           # that file is all a user has to send back after an install fails.
@@ -144,3 +147,8 @@ jobs:
             throw "a failing run printed no failure banner"
           }
           if (-not (Test-Path .\install.log)) { throw "no install.log was written" }
+          Write-Host "ok: failure banner and install.log"
+
+          # Every check above passed. This shell exits with $LASTEXITCODE, and
+          # the --verify run deliberately left it non-zero, so say so directly.
+          exit 0
