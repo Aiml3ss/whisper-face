@@ -10494,7 +10494,7 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertEqual(result.text, "tiny")
         self.assertEqual(pool.calls, ["tiny"])
 
-    def test_mac_parakeet_route_verifies_even_confident_tiny(self):
+    def test_mac_parakeet_route_runs_parakeet_even_when_tiny_is_confident(self):
         class ImmediatePool:
             def __init__(self):
                 self.calls = []
