@@ -370,9 +370,9 @@ class CleanupCompilerTests(unittest.TestCase):
                 self.assertEqual(plan.edits, [])
 
     def test_a_counted_new_line_noun_phrase_is_not_a_command(self):
-        # A count in front and a plural after make the phrase a noun:
-        # "two new line cooks" are cooks. The first is what the real
-        # recognizer wrote.
+        # A count in front makes the phrase a noun, whatever the noun is:
+        # "two new line cooks" are cooks and "two new line staff" are
+        # staff. The first is what the real recognizer wrote.
         for spoken in (
             "We hired two new line cooks.",
             "We hired 2 new line cooks.",
@@ -381,7 +381,24 @@ class CleanupCompilerTests(unittest.TestCase):
             "I drafted three new paragraph styles.",
             "The kitchen has 12 new line cooks this year.",
             "Order 1,500 new line cards.",
+            # Not a regular plural: a mass noun, an irregular plural, a
+            # possessive, the first word of a compound.
+            "We hired two new line staff.",
+            "We hired 12 new line staff.",
+            "We hired twenty new line people.",
+            "I need 2 new line cooks' aprons.",
+            "We posted two new line cook positions.",
+            "Two new line cook jobs opened today.",
+            "We opened two new line manager roles.",
+            "We need three new paragraph style options.",
+            # Counts that are not numbers.
+            "We hired a dozen new line cooks.",
+            "We hired a couple new line cooks.",
+            "We hired a couple of new line cooks.",
+            "Hundreds of new line cooks applied.",
             "We hired several new line cooks.",
+            "All new line cooks must sign in.",
+            "Most new line cooks quit in a month.",
             "Do we have any new line cooks?",
             "There is no new line at the end of the file.",
             "Those new line cooks are fast.",
@@ -392,36 +409,50 @@ class CleanupCompilerTests(unittest.TestCase):
                 self.assertEqual(plan.text, spoken)
                 self.assertEqual(plan.edits, [])
 
-    def test_a_number_before_an_unpaused_command_does_not_block_it(self):
-        # The real recognizer writes an unpaused command without marks, so
-        # a count before it cannot make it prose on its own.
+    def test_an_unpaused_command_needs_no_punctuation(self):
+        # The real recognizer writes an unpaused command without marks.
         for spoken, expected in (
             ("Milk new line eggs new line bread", "Milk\neggs\nbread"),
             ("First item new line second item", "First item\nsecond item"),
-            ("Step 1 new line step 2 new line step 3",
-             "Step 1\nstep 2\nstep 3"),
-            ("Call me at 5 new line see you then",
-             "Call me at 5\nsee you then"),
-            ("Eggs 12 new line milk 2 new line bread",
-             "Eggs 12\nmilk 2\nbread"),
-            ("The total is twenty new paragraph thanks for the update",
-             "The total is twenty\n\nthanks for the update"),
-            ("Room 4 new line this is the big one",
-             "Room 4\nthis is the big one"),
-            # A pause puts a mark between the count and the command.
+            ("Dear team new paragraph the launch is on Friday.",
+             "Dear team\n\nthe launch is on Friday."),
+            # A pause puts a mark after a count, which then ends its line.
             ("We need 2. New line. Cooks start Monday.",
              "We need 2.\nCooks start Monday."),
+            ("Step 1, new line, step 2, new line, step 3",
+             "Step 1\nstep 2\nstep 3"),
+            ("We need 2, new line, cooks start Monday.",
+             "We need 2\ncooks start Monday."),
+            ("The total is twenty. New paragraph. Thanks for the update.",
+             "The total is twenty.\n\nThanks for the update."),
+            # A price, a clock time and a phone number count nothing.
+            ("The total is $40 new line thanks for the update",
+             "The total is $40\nthanks for the update"),
+            ("Call me at 3:30 new line see you then",
+             "Call me at 3:30\nsee you then"),
+            ("Call me at 5 pm new line see you then",
+             "Call me at 5 pm\nsee you then"),
+            ("Call me at 555-0100 new line see you then",
+             "Call me at 555-0100\nsee you then"),
         ):
             with self.subTest(spoken=spoken):
                 plan = compile_cleanup(spoken)
                 self.assertEqual(plan.text, expected)
                 self.assertEqual(plan.edit_kinds, ["spoken_structure"])
 
-    def test_a_count_and_a_plural_around_a_command_keep_the_words(self):
-        # Command or noun phrase cannot be told apart here, so nothing is
-        # removed. "new line item" is a noun wherever it appears.
+    def test_a_count_directly_before_an_unpaused_command_keeps_the_words(self):
+        # "Room 4 new line guests arrive" and "12 new line staff arrive"
+        # have the same shape, so nothing is removed: the command is typed
+        # as words, where the speaker sees it. "new line item" is a noun
+        # wherever it appears.
         for spoken in (
+            "Step 1 new line step 2 new line step 3",
+            "Step one new line step two new line step three",
+            "Call me at 5 new line see you then",
+            "Eggs 12 new line milk 2 new line bread",
             "Eggs 12 new line apples 6",
+            "Room 4 new line this is the big one",
+            "The total is twenty new paragraph thanks for the update",
             "Item 2 new line item 3",
         ):
             with self.subTest(spoken=spoken):

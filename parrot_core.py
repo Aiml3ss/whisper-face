@@ -48,19 +48,11 @@ STRUCTURE_LITERAL_BEFORE = frozenset({
     "a", "an", "the", "this", "that", "another", "each", "every", "one",
     "per", "brand", "whole", "our", "my", "your", "his", "her", "their",
     "its", "these", "those", "some", "several", "many", "few", "both",
-    "any", "no", "more", "other",
+    "any", "no", "more", "other", "all", "most", "of", "dozen", "couple",
 })
 STRUCTURE_LITERAL_AFTER = frozenset({
     "of", "item", "items", "character", "characters", "break", "breaks",
     "feed",
-})
-# A count in front makes the phrase a noun only with a plural after it:
-# "two new line cooks". On its own a count also ends the line before an
-# unpaused command ("Step 1 new line step 2"). These end in "s" and are
-# not plurals.
-STRUCTURE_NOT_PLURAL = frozenset({
-    "was", "has", "does", "as", "yes", "its", "always", "perhaps",
-    "sometimes", "thanks",
 })
 SCRATCH_RE = re.compile(r"\bscratch[ \t]+that\b", re.I)
 # "let's scratch that idea" uses the words as a verb. These are the words
@@ -462,14 +454,16 @@ def _adjacent_word(text: str, *, before: bool) -> str:
     return match.group(1).casefold() if match else ""
 
 
-def _is_counted_plural(head: str, after_word: str) -> bool:
-    """Whether a count ends ``head`` and ``after_word`` reads as a plural."""
-    counted = (_adjacent_word(head, before=True) in NUMBER_WORDS
-               or re.search(r"(?:^|\s)\d[\d,]*[ \t]+$", head))
-    return bool(
-        counted and after_word.endswith("s")
-        and not after_word.endswith(("ss", "us", "is", "'s", "’s"))
-        and after_word not in STRUCTURE_NOT_PLURAL)
+def _ends_with_count(head: str) -> bool:
+    """Whether a spelled or written whole number is the last thing in ``head``.
+
+    A count makes the phrase after it a noun ("two new line cooks", "12 new
+    line staff"). It also ends the line before an unpaused command ("Room 4
+    new line guests arrive"), and nothing tells the two apart, so the words
+    stay. A price, a clock time and a phone number are not counts.
+    """
+    return bool(_adjacent_word(head, before=True) in NUMBER_WORDS
+                or re.search(r"(?:^|\s)\d+(?:,\d+)*[ \t]+$", head))
 
 
 def _expand_spoken_structure(text: str) -> str:
@@ -487,7 +481,7 @@ def _expand_spoken_structure(text: str) -> str:
         if (_adjacent_word(head, before=True) in STRUCTURE_LITERAL_BEFORE
                 or after_word in STRUCTURE_LITERAL_AFTER
                 or tail[:1] in ("-", "_", "/")
-                or _is_counted_plural(head, after_word)):
+                or _ends_with_count(head)):
             continue
         lead = re.search(r"(?:[ \t]*[,;—–]|[ \t]+-)?[ \t]*$", head)
         trail = re.match(r"[ \t]*(?:[.,;:!?]+|[—–])?[ \t]*", tail)
