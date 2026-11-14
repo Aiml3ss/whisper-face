@@ -1664,6 +1664,7 @@ class ParakeetClientTests(unittest.TestCase):
                     "subprocess": subprocess,
                     "threading": threading,
                     "struct": struct,
+                    "time": time,
                     "json": json,
                     "np": np,
                     "PARAKEET_STARTUP_TIMEOUT": 10.0,
@@ -1830,6 +1831,7 @@ class ParakeetClientTests(unittest.TestCase):
                     "subprocess": subprocess,
                     "threading": threading,
                     "struct": struct,
+                    "time": time,
                     "np": np,
                     "PARAKEET_STARTUP_TIMEOUT": 10.0,
                     "PARAKEET_MIN_REQUEST_TIMEOUT": 3.0,
@@ -1850,6 +1852,136 @@ class ParakeetClientTests(unittest.TestCase):
         self.assertTrue(first_process.terminated)
         self.assertTrue(first_process.killed)
         self.assertEqual(first_process.wait_calls, 2)
+
+    @staticmethod
+    def client(directory, *, process_factory, exchange, clock=None,
+               printed=None):
+        helper = Path(directory) / "parrot-asr-helper"
+        helper.write_bytes(b"helper")
+        ns = load_definitions(
+            "ParakeetClient",
+            extra={
+                "PARAKEET_HELPER": helper,
+                "PARAKEET_ENABLED": True,
+                "Path": Path,
+                "subprocess": subprocess,
+                "threading": threading,
+                "struct": struct,
+                "time": time,
+                "np": np,
+                "PARAKEET_STARTUP_TIMEOUT": 10.0,
+                "PARAKEET_MIN_REQUEST_TIMEOUT": 3.0,
+                "PARAKEET_MAX_REQUEST_TIMEOUT": 10.0,
+                "PARAKEET_PROFILE": PARAKEET_PROFILE,
+                "mark_model_warm_path_observed": lambda _provider: True,
+                "print": lambda *args, **_kwargs: (
+                    printed.append(" ".join(str(arg) for arg in args))
+                    if printed is not None else None),
+            },
+        )
+        return ns["ParakeetClient"](
+            helper=helper, process_factory=process_factory,
+            exchange=exchange, clock=clock)
+
+    def test_helper_that_cannot_be_spawned_falls_back_to_whisper(self):
+        # A zero-byte or non-executable helper file exists, so the route is
+        # taken, and the spawn itself is what fails.
+        for error in (PermissionError(13, "Permission denied"),
+                      OSError(8, "Exec format error")):
+            with self.subTest(error=type(error).__name__), \
+                    tempfile.TemporaryDirectory() as directory:
+                printed = []
+
+                def refuse(*_args, _error=error, **_kwargs):
+                    raise _error
+
+                client = self.client(
+                    directory, process_factory=refuse,
+                    exchange=lambda *_args, **_kwargs: self.fail(
+                        "no process to talk to"),
+                    printed=printed)
+                audio = np.ones(160, dtype=np.float32)
+                self.assertIsNone(client.transcribe(audio))
+
+                recognition, decodes = ParakeetCrosscheckTests.cascade(
+                    parakeet=client,
+                    scripted={"tiny-repo": ("Ship the installer today.", 0.9)},
+                    cached={"tiny-repo"})
+                self.assertEqual(recognition.text, "Ship the installer today.")
+                self.assertEqual(recognition.engine, "tiny")
+                self.assertEqual(len(printed), 1)
+
+    def test_failed_start_is_remembered_and_retried_after_a_backoff(self):
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = io.BytesIO()
+                self.stdout = io.BytesIO()
+                self.alive = True
+
+            def poll(self):
+                return None if self.alive else 1
+
+            def terminate(self):
+                self.alive = False
+
+            def wait(self, timeout=None):
+                return 0
+
+        now = [1_000.0]
+        spawned = []
+        ready = [False]
+        printed = []
+
+        def factory(*_args, **_kwargs):
+            spawned.append(FakeProcess())
+            return spawned[-1]
+
+        def exchange(_process, chunks, *, timeout):
+            if not chunks:
+                if not ready[0]:
+                    raise TimeoutError("helper response timed out")
+                return {"ready": True, "load_s": 12.25}
+            return {"ok": True, "text": "hello", "processing_s": 0.02}
+
+        audio = np.ones(160, dtype=np.float32)
+        with tempfile.TemporaryDirectory() as directory:
+            client = self.client(
+                directory, process_factory=factory, exchange=exchange,
+                clock=lambda: now[0], printed=printed)
+
+            # One slow start costs one start-up timeout, not one per decode.
+            for _decode in range(4):
+                self.assertIsNone(client.transcribe(audio))
+            self.assertEqual(len(spawned), 1)
+            self.assertFalse(spawned[0].alive)
+
+            now[0] += 29.0
+            self.assertIsNone(client.transcribe(audio))
+            self.assertEqual(len(spawned), 1)
+            now[0] += 2.0
+            self.assertIsNone(client.transcribe(audio))
+            self.assertEqual(len(spawned), 2)
+
+            # A second failure in a row waits twice as long.
+            now[0] += 59.0
+            self.assertIsNone(client.transcribe(audio))
+            self.assertEqual(len(spawned), 2)
+            now[0] += 2.0
+            ready[0] = True
+            self.assertEqual(client.transcribe(audio), ("hello", 0.02))
+            self.assertEqual(len(spawned), 3)
+
+            # A helper that started and later died is restarted at once: the
+            # backoff is for starts that fail, and a success clears it.
+            spawned[-1].alive = False
+            self.assertEqual(client.transcribe(audio), ("hello", 0.02))
+            self.assertEqual(len(spawned), 4)
+
+        failures = [line for line in printed if "did not start" in line]
+        self.assertEqual(len(failures), 2)
+        for line in failures:
+            self.assertNotIn(directory, line)
+            self.assertNotIn("timed out", line)
 
     def test_parakeet_processing_time_reaches_recognition_evidence(self):
         class ImmediatePool:
@@ -4037,6 +4169,59 @@ class CleanupGuardTests(unittest.TestCase):
             "com.openai.codex",
         )
         self.assertEqual(result.text, "Use Qwen here")
+
+    def test_dictionary_and_screen_names_anchor_without_replacing_words(self):
+        from voice_compiler import ContextObservation, ContextRouter
+
+        dictionary = ContextPack(tuple(
+            ContextCandidate(term, 3.5, "dictionary")
+            for term in ("AI", "CI", "PR")))
+        ns = load_definitions(
+            "compile_voice_evidence",
+            extra={
+                "Recognition": Recognition,
+                "WordEvidence": WordEvidence,
+                "RecognitionHypothesis": RecognitionHypothesis,
+                "ContextCandidate": ContextCandidate,
+                "ContextPack": ContextPack,
+                "VoiceIR": VoiceIR,
+                "VOICE_COMPILER": VoiceCompiler(),
+                "learned_alternatives": lambda *_args: [],
+                "compiler_personal_priors": lambda _bundle: (),
+                "np": np,
+                "analyze_prosody": lambda *_args: (),
+                "SAMPLE_RATE": 16_000,
+                "GLOSS": {
+                    "lock": threading.Lock(),
+                    "anchor_pack": dictionary,
+                },
+            },
+        )
+        # Parakeet's transcript at the confidence one disagreeing word in two
+        # leaves it with, Tiny's as the alternative, and the Context Pack the
+        # router builds for the frontmost app and window.
+        for app, title, parakeet, tiny in (
+                ("Slack", "", "Who is on call today?", "Hu is on call to day?"),
+                ("Code", "dictate.py", "Looks good.", "Look good."),
+                ("Messages", "Nate Smith", "Not yet.", "Nah yet."),
+                ("Zed", "", "She said the site is down.",
+                 "Shi set the side is down."),
+        ):
+            with self.subTest(app=app):
+                voice, result = ns["compile_voice_evidence"](
+                    Recognition(parakeet, confidence=0.69,
+                                engine="parakeet-unified", alternative=tiny),
+                    bundle="com.example.app",
+                    context_pack=ContextRouter().collect(ContextObservation(
+                        app=app, bundle="com.example.app",
+                        window_title=title)),
+                )
+                self.assertEqual(result.text, parakeet)
+                self.assertEqual(result.decisions, ())
+                self.assertEqual(
+                    {candidate.text for candidate in voice.context.candidates
+                     if candidate.source == "dictionary"},
+                    {"AI", "CI", "PR"})
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -8492,7 +8677,7 @@ class ParakeetCrosscheckTests(unittest.TestCase):
                                      model_repo="turbo",
                                      crosscheck_text=None,
                                      _skip_parakeet=False,
-                                     language="en"):
+                                     language="en", _prepared=False):
             # Record the language rather than merely tolerating it. The
             # cross-check is only meaningful against Parakeet's English, and
             # the caller's `except Exception` would otherwise swallow a
@@ -8505,6 +8690,8 @@ class ParakeetCrosscheckTests(unittest.TestCase):
         ns = load_definitions(
             "_parakeet_crosschecked",
             "_clean_native_processing_s",
+            "crosscheck_agreement",
+            assignments={"CROSSCHECK_MAJORITY_AGREEMENT"},
             extra={
                 "PARAKEET_IO_POOL": ImmediatePool(),
                 "PARAKEET": SimpleNamespace(
@@ -8563,18 +8750,249 @@ class ParakeetCrosscheckTests(unittest.TestCase):
             parakeet_result=None, tiny_text="anything")
         self.assertIsNone(recognition)
 
-    def test_severe_disagreement_escalates_once_and_keeps_the_winner(self):
+    def test_severe_disagreement_escalates_once_and_keeps_the_majority(self):
+        # Turbo's confidence is deliberately the lowest number in play: the
+        # vote is on what was heard, never on scores from different scales.
         fallback = Recognition(
-            text="completely different words", confidence=0.9,
-            engine="turbo")
+            text="One two three four.", confidence=0.2, engine="turbo")
         recognition, calls = self.crosschecked(
-            parakeet_result=("alpha beta gamma delta", 0.05),
+            parakeet_result=("Alpha beta gamma delta.", 0.05),
             tiny_text="one two three four",
             fallback=fallback)
+        self.assertEqual(
+            [repo for repo, _skip, _lang in calls],
+            ["tiny-repo", "turbo-repo"])
         self.assertIn(("turbo-repo", True, "en"), calls)
-        self.assertEqual(recognition.text, "completely different words")
+        self.assertEqual(recognition.text, "One two three four.")
+        self.assertEqual(recognition.engine, "turbo")
         self.assertTrue(recognition.verified)
-        self.assertEqual(recognition.alternative, "alpha beta gamma delta")
+        self.assertEqual(recognition.alternative, "Alpha beta gamma delta.")
+
+    def test_turbo_agreeing_with_parakeet_keeps_parakeet_verified(self):
+        # Turbo out-scores Parakeet's agreement-derived number here. It still
+        # only gets a vote, and it votes for the words Parakeet heard.
+        fallback = Recognition(
+            text="ping Priya about Qwen", confidence=0.97, engine="turbo")
+        recognition, _ = self.crosschecked(
+            parakeet_result=("Ping Priya about Qwen.", 0.05),
+            tiny_text="Being pre-about Gwen.",
+            fallback=fallback)
+        self.assertEqual(recognition.text, "Ping Priya about Qwen.")
+        self.assertEqual(recognition.engine, "parakeet-unified")
+        self.assertTrue(recognition.verified)
+        # Two engines agree, so the route confidence is no longer the one
+        # Tiny's dissent produced.
+        self.assertAlmostEqual(recognition.confidence, 0.93)
+        self.assertEqual(recognition.alternative, "ping Priya about Qwen")
+
+    def test_three_way_disagreement_keeps_parakeet_unverified(self):
+        fallback = Recognition(
+            text="Red green blue pink.", confidence=0.97, engine="turbo")
+        recognition, _ = self.crosschecked(
+            parakeet_result=("Alpha beta gamma delta.", 0.05),
+            tiny_text="One two three four.",
+            fallback=fallback)
+        self.assertEqual(recognition.text, "Alpha beta gamma delta.")
+        self.assertEqual(recognition.engine, "parakeet-unified")
+        self.assertFalse(recognition.verified)
+        self.assertLess(recognition.confidence, 0.52)
+        self.assertEqual(recognition.alternative, "Red green blue pink.")
+
+    def test_agreement_ignores_case_punctuation_and_digit_grouping(self):
+        # The same words written two ways are not two hearings: no lowered
+        # confidence, no escalation, no Turbo decode.
+        for parakeet_text, tiny_text in (
+                ("Don\u2019t ship 1,500 units.", "don't ship 1500 units"),
+                ("Okay, let's go.", "okay lets go"),
+                ("Looks good.", "LOOKS GOOD!"),
+        ):
+            with self.subTest(parakeet=parakeet_text):
+                recognition, calls = self.crosschecked(
+                    parakeet_result=(parakeet_text, 0.05),
+                    tiny_text=tiny_text,
+                    fallback=Recognition(
+                        text="something else", confidence=0.99,
+                        engine="turbo"))
+                self.assertEqual(recognition.text, parakeet_text)
+                self.assertAlmostEqual(recognition.confidence, 0.93)
+                self.assertEqual(
+                    [repo for repo, _skip, _lang in calls], ["tiny-repo"])
+
+    @staticmethod
+    def cascade(*, parakeet_text=None, scripted, cached, parakeet=None,
+                audio=None, levels=None, definitions=(), overrides=None):
+        """Run the production cascade against scripted model outputs.
+
+        ``cached`` is the set of Whisper snapshots on disk and ``scripted``
+        maps a snapshot to ``(text, confidence)``. Model selection, the
+        cross-check, the escalation and the arbitration are all production
+        code; only the three recognizers are scripted. ``levels`` collects
+        the peak level each recognizer was handed.
+        """
+        import math
+        from parrot_core import (
+            confidence_from_segments,
+            hypothesis_agreement,
+            parakeet_confidence_from_agreement,
+            recognition_words_from_segments,
+            should_escalate_uncertain,
+        )
+        decodes = []
+
+        class ImmediatePool:
+            def submit(self, fn, *args, **kwargs):
+                return SimpleNamespace(result=lambda: fn(*args, **kwargs))
+
+        def heard(name, samples):
+            if levels is not None:
+                levels[name] = round(float(np.max(np.abs(samples))), 4)
+
+        def parakeet_transcribe(samples):
+            heard("parakeet", samples)
+            return (parakeet_text, 0.05)
+
+        def mlx_transcribe(_audio, *, path_or_hf_repo, **_kwargs):
+            decodes.append(path_or_hf_repo)
+            heard(path_or_hf_repo, _audio)
+            text, confidence = scripted[path_or_hf_repo]
+            return {"text": f" {text}", "segments": [{
+                "text": text, "start": 0.0, "end": 2.0,
+                "avg_logprob": math.log(confidence)}]}
+
+        def resolve(repo):
+            if repo not in cached:
+                raise FileNotFoundError("snapshot is not cached")
+            return repo
+
+        ns = load_definitions(
+            "transcribe_detailed", "_parakeet_crosschecked",
+            "_clean_native_processing_s", "crosscheck_agreement",
+            "asr_decode_target", *definitions,
+            assignments={"ASR_DEGRADED_NOTICES",
+                         "CROSSCHECK_MAJORITY_AGREEMENT"},
+            extra={
+                "np": np,
+                "Recognition": Recognition,
+                "GLOSS": {"lock": threading.Lock(), "prompt": None},
+                "IS_MACOS": True,
+                "PARAKEET_ENABLED": True,
+                "PARAKEET": parakeet or SimpleNamespace(
+                    transcribe=parakeet_transcribe),
+                "PARAKEET_IO_POOL": ImmediatePool(),
+                "PARAKEET_CROSSCHECK": True,
+                "PARAKEET_CROSSCHECK_MAX_SECONDS": 90.0,
+                "PARAKEET_ROUTE_CONFIDENCE": 0.84,
+                "SAMPLE_RATE": 16_000,
+                "MIN_SECONDS": 0.4,
+                "LOW_CONFIDENCE": 0.52,
+                "WHISPER_REPO": "turbo-repo",
+                "FAST_WHISPER_REPO": "tiny-repo",
+                "asr_model_is_cached": lambda repo: repo in cached,
+                "resolve_asr_model": resolve,
+                "prepare_asr_audio": lambda audio: audio,
+                "mlx_whisper": SimpleNamespace(transcribe=mlx_transcribe),
+                "hypothesis_agreement": hypothesis_agreement,
+                "parakeet_confidence_from_agreement":
+                    parakeet_confidence_from_agreement,
+                "should_escalate_uncertain": should_escalate_uncertain,
+                "confidence_from_segments": confidence_from_segments,
+                "recognition_words_from_segments":
+                    recognition_words_from_segments,
+                "mark_model_warm_path_observed": lambda _provider: None,
+                "WHISPER_TINY_PROFILE": SimpleNamespace(provider_id="tiny"),
+                "WHISPER_LARGE_TURBO_PROFILE": SimpleNamespace(
+                    provider_id="turbo"),
+                "print": lambda *args, **kwargs: None,
+                **(overrides or {}),
+            },
+        )
+        if audio is None:
+            audio = np.full(16_000 * 2, 0.3, dtype=np.float32)
+        recognition = ns["transcribe_detailed"](audio, language="en")
+        return recognition, decodes
+
+    def test_default_install_never_lets_tiny_overrule_parakeet(self):
+        # A default install has Parakeet and Tiny only. Tiny's own confidence
+        # beats the number its disagreement leaves Parakeet with in every row,
+        # and it must not matter.
+        for parakeet_text, tiny_text, tiny_confidence in (
+                ("Qwen.", "Gwen.", 0.70),
+                ("Thanks.", "Thank you.", 0.70),
+                ("Ship the Kubernetes patch.",
+                 "Shipped a cube and his patch.", 0.55),
+                ("Call Dr. Nguyen.", "Call Doctor Win.", 0.72),
+        ):
+            with self.subTest(parakeet=parakeet_text):
+                recognition, decodes = self.cascade(
+                    parakeet_text=parakeet_text,
+                    scripted={"tiny-repo": (tiny_text, tiny_confidence)},
+                    cached={"tiny-repo"})
+                self.assertEqual(recognition.text, parakeet_text)
+                self.assertEqual(recognition.engine, "parakeet-unified")
+                self.assertFalse(recognition.verified)
+                self.assertEqual(recognition.alternative, tiny_text)
+                # One cross-check decode. "Escalating" to a Turbo that is
+                # not installed used to decode the same audio with Tiny again.
+                self.assertEqual(decodes, ["tiny-repo"])
+
+    def test_default_install_compiles_parakeet_as_the_primary_hypothesis(self):
+        # The compiler ranks the delivered transcript first and demotes the
+        # alternative. Parakeet must be the one it ranks first.
+        recognition, _ = self.cascade(
+            parakeet_text="Ping Priya about Qwen.",
+            scripted={"tiny-repo": ("Being pre-about Gwen.", 0.71)},
+            cached={"tiny-repo"})
+        ns = load_definitions(
+            "compile_voice_evidence",
+            extra={
+                "np": np,
+                "WordEvidence": WordEvidence,
+                "RecognitionHypothesis": RecognitionHypothesis,
+                "ContextCandidate": ContextCandidate,
+                "ContextPack": ContextPack,
+                "VoiceIR": VoiceIR,
+                "VOICE_COMPILER": VoiceCompiler(),
+                "GLOSS": {"lock": threading.Lock(), "anchor_pack": None},
+                "learned_alternatives": lambda _text, _bundle: [],
+                "compiler_personal_priors": lambda _bundle: (),
+                "analyze_prosody": lambda *_args: (),
+                "SAMPLE_RATE": 16_000,
+            },
+        )
+        voice, compiled = ns["compile_voice_evidence"](recognition)
+        self.assertEqual(compiled.text, "Ping Priya about Qwen.")
+        primary, alternative = voice.hypotheses
+        self.assertEqual(
+            (primary.text, primary.engine),
+            ("Ping Priya about Qwen.", "parakeet-unified"))
+        self.assertEqual(alternative.text, "Being pre-about Gwen.")
+        self.assertGreater(primary.confidence, alternative.confidence)
+
+    def test_full_install_escalates_to_the_real_turbo_and_takes_the_vote(self):
+        recognition, decodes = self.cascade(
+            parakeet_text="Ping Priya about Qwen.",
+            scripted={
+                "tiny-repo": ("Being pre-about Gwen.", 0.71),
+                "turbo-repo": ("Ping Priya about Qwen.", 0.40),
+            },
+            cached={"tiny-repo", "turbo-repo"})
+        self.assertEqual(decodes, ["tiny-repo", "turbo-repo"])
+        self.assertEqual(recognition.text, "Ping Priya about Qwen.")
+        self.assertEqual(recognition.engine, "parakeet-unified")
+        self.assertTrue(recognition.verified)
+
+        recognition, decodes = self.cascade(
+            parakeet_text="Being pre-about Gwen.",
+            scripted={
+                "tiny-repo": ("Ping Priya about Qwen.", 0.71),
+                "turbo-repo": ("Ping Priya about Qwen.", 0.40),
+            },
+            cached={"tiny-repo", "turbo-repo"})
+        self.assertEqual(decodes, ["tiny-repo", "turbo-repo"])
+        self.assertEqual(recognition.text, "Ping Priya about Qwen.")
+        self.assertEqual(recognition.engine, "turbo")
+        self.assertTrue(recognition.verified)
+        self.assertEqual(recognition.alternative, "Being pre-about Gwen.")
 
     def test_escalation_failure_keeps_the_primary_transcript(self):
         # A raising Turbo fallback must not turn a working dictation into a
@@ -8592,6 +9010,8 @@ class ParakeetCrosscheckTests(unittest.TestCase):
         ns = load_definitions(
             "_parakeet_crosschecked",
             "_clean_native_processing_s",
+            "crosscheck_agreement",
+            assignments={"CROSSCHECK_MAJORITY_AGREEMENT"},
             extra={
                 "PARAKEET_IO_POOL": ImmediatePool(),
                 "PARAKEET": SimpleNamespace(
@@ -8620,8 +9040,32 @@ class ParakeetCrosscheckTests(unittest.TestCase):
         audio = np.zeros(16_000 * 4, dtype=np.float32)
         recognition = ns["_parakeet_crosschecked"](audio, None, verify=True)
         self.assertEqual(recognition.text, "alpha beta gamma delta")
-        self.assertTrue(recognition.verified)
+        # No third decode came back, so nothing verified this transcript.
+        self.assertFalse(recognition.verified)
         self.assertEqual(recognition.alternative, "one two three four")
+
+    def test_quiet_speech_gain_reaches_every_recognizer_once(self):
+        # A whisper-level take is lifted by the capped gain before decoding.
+        # The cross-check and the escalation decode the same prepared audio;
+        # preparing it again lifted it past the cap for Whisper alone.
+        levels = {}
+        self.cascade(
+            parakeet_text="Ping Priya about Qwen.",
+            scripted={
+                "tiny-repo": ("Being pre-about Gwen.", 0.71),
+                "turbo-repo": ("Ping Priya about Qwen.", 0.40),
+            },
+            cached={"tiny-repo", "turbo-repo"},
+            audio=np.full(16_000 * 2, 0.004, dtype=np.float32),
+            levels=levels,
+            definitions=("prepare_asr_audio",),
+            overrides={
+                "active_calibration_settings": lambda: None,
+                "CalibrationSettings": type("CalibrationSettings", (), {}),
+            })
+        self.assertEqual(
+            levels,
+            {"parakeet": 0.1, "tiny-repo": 0.1, "turbo-repo": 0.1})
 
     def test_low_confidence_escalation_loser_stays_inspectable(self):
         fallback = Recognition(
@@ -8632,7 +9076,7 @@ class ParakeetCrosscheckTests(unittest.TestCase):
             fallback=fallback)
         self.assertIn(("turbo-repo", True, "en"), calls)
         self.assertEqual(recognition.text, "alpha beta gamma delta")
-        self.assertTrue(recognition.verified)
+        self.assertFalse(recognition.verified)
         self.assertEqual(recognition.alternative, "different words")
 
     def test_speculative_crosscheck_text_skips_the_extra_tiny_decode(self):
@@ -8656,6 +9100,8 @@ class ParakeetCrosscheckTests(unittest.TestCase):
         ns = load_definitions(
             "_parakeet_crosschecked",
             "_clean_native_processing_s",
+            "crosscheck_agreement",
+            assignments={"CROSSCHECK_MAJORITY_AGREEMENT"},
             extra={
                 "PARAKEET_IO_POOL": ImmediatePool(),
                 "PARAKEET": SimpleNamespace(

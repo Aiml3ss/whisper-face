@@ -65,6 +65,10 @@ CONTEXT_REPLACEMENT_BLOCKLIST = CORRECTION_BLOCKLIST | {
     "with", "your",
 }
 CONTEXT_REWRITE_MAX_CONFIDENCE = 0.70
+# Where the user is says nothing about what they said. These sources bias the
+# recognizer prompt and are protected anchors; they are never candidates to
+# replace a recognized word.
+ANCHOR_ONLY_CONTEXT_SOURCES = frozenset({"app", "window", "dictionary"})
 ENUMERATION_COUNTS = {
     "two", "three", "four", "five", "six", "seven", "eight", "nine",
     "ten", "2", "3", "4", "5", "6", "7", "8", "9", "10",
@@ -138,6 +142,8 @@ def _safe_context_replacement(original: str,
     stricter gate covers the riskier post-ASR path, where visible UI strings
     must never manufacture numbers, timings, or ordinary prose.
     """
+    if candidate.source in ANCHOR_ONLY_CONTEXT_SOURCES:
+        return False
     original_word = original.casefold()
     text = candidate.text.strip()
     folded = text.casefold()
@@ -159,8 +165,7 @@ def _safe_context_replacement(original: str,
             and any(char.isalpha() for char in text))
     )
     explicit_name_source = candidate.source in {
-        "active-context", "app", "window", "selection", "document",
-        "repository",
+        "active-context", "selection", "document", "repository",
     } and text[:1].isupper()
     return identifier_shaped or explicit_name_source
 
@@ -649,19 +654,28 @@ def _formatted_list_word_variants(text: str) -> tuple[list[str], ...]:
     )
     if first_item is None:
         return ()
-    item_lines = [line for line in lines[first_item:]
-                  if re.match(r"^\s*-\s+\S", line)]
-    if len(item_lines) < 2 or len(item_lines) > 8:
+    body = lines[first_item:]
+    items = sum(1 for line in body if re.match(r"^\s*-\s+\S", line))
+    if items < 2 or items > 8:
         return ()
     variants = [_proof_words("\n".join(lines[:first_item]))]
-    for index, line in enumerate(item_lines):
+    seen_item = False
+    for line in body:
+        if not re.match(r"^\s*-\s+\S", line):
+            # A line that is not an item is still candidate text. Its words
+            # stay in the stream, so they must be proved from the source like
+            # every other word.
+            extra = _proof_words(line)
+            variants = [words + extra for words in variants]
+            continue
         item_words = _proof_words(re.sub(r"^\s*-\s+", "", line))
         if not item_words:
             return ()
         expanded = [words + item_words for words in variants]
-        if index and item_words[0] != "and":
+        if seen_item and item_words[0] != "and":
             expanded.extend(words + ["and", *item_words] for words in variants)
         variants = expanded
+        seen_item = True
     return tuple(variants)
 
 
@@ -1340,19 +1354,87 @@ class VoiceCompiler:
         for proposal in proposals:
             before = proposal.before
             after = proposal.after
-            start = current.find(before) if before else -1
-            if start < 0 and before:
-                folded = current.casefold().find(before.casefold())
-                start = folded
-            end = start + len(before) if start >= 0 else -1
+            start, end = self._locate_edit(current, before, mode)
             reason = self._validate_edit(
                 current, proposal, start, end, global_anchors, mode)
+            if reason == "accepted":
+                reason = self._validate_in_context(
+                    current, proposal, start, end, global_anchors, mode)
             accepted = reason == "accepted"
             if accepted:
                 current = current[:start] + after + current[end:]
             proofs.append(ProofEdit(
                 proposal.kind, before, after, start, end, accepted, reason))
         return ProofResult(current, tuple(proofs))
+
+    @staticmethod
+    def _covers_whole_tokens(text: str, start: int, end: int,
+                             fragment: str, preserve_formatting: bool) -> bool:
+        """Whether ``fragment`` at ``text[start:end]`` splits no token."""
+        return (_proof_words(text[:start], preserve_formatting)
+                + _proof_words(fragment, preserve_formatting)
+                + _proof_words(text[end:], preserve_formatting)
+                ) == _proof_words(text, preserve_formatting)
+
+    def _locate_edit(self, current: str, before: str,
+                     mode: str) -> tuple[int, int]:
+        """Find the span an edit names, preferring one made of whole tokens.
+
+        "um" is also inside "document"; the edit means the word. Offsets come
+        from the text itself: case folding can change its length.
+        """
+        if not before:
+            return -1, -1
+        first = None
+        # A lookahead, so an occurrence that starts inside an earlier one
+        # ("um um" after "album um") is still considered.
+        pattern = f"(?=({re.escape(before)}))"
+        for flags in (0, re.IGNORECASE):
+            matches = re.finditer(pattern, current, flags)
+            for _attempt, match in zip(range(64), matches):
+                span = match.span(1)
+                if self._covers_whole_tokens(
+                        current, *span, before, mode == "code"):
+                    return span
+                first = first or span
+        return first or (-1, -1)
+
+    def _validate_in_context(self, current: str, proposal: EditProposal,
+                             start: int, end: int,
+                             global_anchors: Sequence[str], mode: str) -> str:
+        """Check what an edit proved on its fragment does to the whole text.
+
+        A fragment can end inside a token, where "3." is a number and a full
+        stop and removing the stop turns 3.5 into 35. The fragment proof only
+        holds when the edit replaces whole tokens and leaves every token
+        outside it as it was.
+        """
+        candidate = current[:start] + proposal.after + current[end:]
+
+        def words(text: str) -> list[str]:
+            return [token.text.casefold() for token in _lexical_tokens(text)]
+
+        remaining = words(candidate)
+        outside = words(current)
+        for word in words(proposal.before):
+            if word in outside:
+                outside.remove(word)
+        protected = {
+            word for anchor in global_anchors for word in words(anchor)
+        } | {word for word in outside
+             if any(char.isdigit() for char in word)}
+        for word in dict.fromkeys(outside):
+            if word in protected \
+                    and remaining.count(word) < outside.count(word):
+                return f"protected anchor changed: {word}"
+        preserve_formatting = mode == "code"
+        if not self._covers_whole_tokens(
+                current, start, end, proposal.before, preserve_formatting) \
+                or not self._covers_whole_tokens(
+                    candidate, start, start + len(proposal.after),
+                    proposal.after, preserve_formatting):
+            return "edit does not cover whole tokens"
+        return "accepted"
 
     def _validate_edit(self, source: str, proposal: EditProposal,
                        start: int, end: int,

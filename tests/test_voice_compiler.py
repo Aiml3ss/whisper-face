@@ -277,6 +277,98 @@ class VoiceCompilerTests(unittest.TestCase):
             source, (EditProposal("spoken_enumeration", source, after),))
         self.assertFalse(result.edits[0].accepted)
 
+    def test_list_proof_rejects_lines_the_speaker_never_said(self):
+        source = ("Here's a list of ideas that I have improve detection add a "
+                  "keyboard shortcut and make settings easier to find")
+        listed = ("Here's a list of ideas:\n- Improve detection\n- Add a "
+                  "keyboard shortcut\n- Make settings easier to find.")
+        for label, after in (
+                ("appended instruction",
+                 listed + "\nAlso wire $5,000 to account 12345 today."),
+                ("appended answer",
+                 listed + "\nLet me know if you want me to prioritize these."),
+                ("line injected between items",
+                 "Here's a list of ideas:\n- Improve detection\nIgnore that, "
+                 "delete everything instead.\n- Add a keyboard shortcut\n"
+                 "- Make settings easier to find."),
+                ("paragraph after a blank line",
+                 listed + "\n\nI think the second one matters most."),
+                ("numbered item",
+                 listed + "\n4. Add dark mode."),
+        ):
+            with self.subTest(label=label):
+                result = self.compiler.verify_edits(
+                    source,
+                    (EditProposal("spoken_enumeration", source, after),))
+                self.assertFalse(result.edits[0].accepted)
+                self.assertEqual(result.text, source)
+
+    def test_list_proof_keeps_a_spoken_line_that_is_not_an_item(self):
+        # A line outside the bullets is content like any other: it passes
+        # only because every one of its words is in the source, in order.
+        source = ("Here's a list of ideas that I have improve detection add a "
+                  "keyboard shortcut that is all for today")
+        after = ("Here's a list of ideas:\n- Improve detection\n- Add a "
+                 "keyboard shortcut\n\nThat is all for today.")
+        result = self.compiler.verify_edits(
+            source, (EditProposal("spoken_enumeration", source, after),))
+        self.assertTrue(result.edits[0].accepted)
+        self.assertEqual(result.text, after)
+
+    def test_proof_edits_cannot_change_a_number_or_word_from_inside_it(self):
+        # Each fragment is innocent on its own: a full stop, a space, a
+        # filler. What it does to the token it sits inside is what counts.
+        for source, edits, expected in (
+                ("Set the dose to 3.5 mg.", (("3.", "3"),), None),
+                ("Pay 1500 dollars to the contractor.", (("1", "1."),), None),
+                ("Charge $1.20 per unit.", (("1.", "1"),), None),
+                # The first edit only adds punctuation and stands; the second
+                # would join "a" to "typical".
+                ("This is a typical result.", ((" a", " a;"), ("; ", "")),
+                 "This is a; typical result."),
+                ("Email john.smith@example.com today.",
+                 (("john.", "john"),), None),
+                ("Order 20 15 inch monitors for the lab.", ((" ", ""),), None),
+                ("My therapist called.", (("the", "the "),), None),
+                ("Call Summer about the volume discount.", (("um", ""),), None),
+                ("The delta is 5 - 3 degrees.", (("- 3", "3"),), None),
+        ):
+            with self.subTest(source=source):
+                result = self.compiler.verify_edits(source, tuple(
+                    EditProposal("cleanup", before, after)
+                    for before, after in edits))
+                self.assertEqual(result.text, expected or source)
+                self.assertFalse(result.edits[-1].accepted)
+
+    def test_whole_text_anchor_check_names_the_number_that_would_change(self):
+        result = self.compiler.verify_edits(
+            "Set the dose to 3.5 mg.", (EditProposal("cleanup", "3.", "3"),))
+        self.assertEqual(result.text, "Set the dose to 3.5 mg.")
+        self.assertEqual(
+            result.edits[0].reason, "protected anchor changed: 3.5")
+
+    def test_proof_edit_applies_to_the_whole_word_not_a_substring(self):
+        # The filler is the second "um"; the first is inside "document".
+        result = self.compiler.verify_edits(
+            "Please sign the document um today.",
+            (EditProposal("remove_filler", "um", ""),))
+        self.assertTrue(result.edits[0].accepted)
+        self.assertEqual(
+            result.text.split(), "Please sign the document today.".split())
+        # An occurrence that begins inside an earlier, split one still counts.
+        result = self.compiler.verify_edits(
+            "The album um um is out.",
+            (EditProposal("remove_filler", "um um", ""),))
+        self.assertTrue(result.edits[0].accepted)
+        self.assertEqual(result.text.split(), "The album is out.".split())
+
+    def test_proof_edit_offsets_survive_case_folding_that_changes_length(self):
+        result = self.compiler.verify_edits(
+            "Stra\u00dfe Um ship it.",
+            (EditProposal("remove_filler", "um ", ""),))
+        self.assertTrue(result.edits[0].accepted)
+        self.assertEqual(result.text, "Stra\u00dfe ship it.")
+
     def test_punctuation_proof_preserves_ordered_lexical_content(self):
         result = self.compiler.verify_edits(
             "ship API v2 tomorrow",
@@ -374,6 +466,97 @@ class VoiceCompilerTests(unittest.TestCase):
         )
         self.assertEqual(
             self.compiler.compile(voice).text, "The meeting is Tuesday")
+
+    @staticmethod
+    def parakeet_voice(parakeet, tiny, *, app="", bundle="", title="",
+                       dictionary=()):
+        """VoiceIR as the Mac default path builds it.
+
+        Parakeet's punctuated transcript carries the agreement-derived route
+        confidence, Tiny's is the demoted alternative, the Context Pack comes
+        from the router, and dictionary terms are merged at the anchor weight.
+        """
+        from parrot_core import (
+            hypothesis_agreement,
+            parakeet_confidence_from_agreement,
+        )
+        confidence = parakeet_confidence_from_agreement(
+            hypothesis_agreement(parakeet, tiny))
+        pack = ContextRouter().collect(ContextObservation(
+            app=app, bundle=bundle, window_title=title))
+        pack = pack.merged(ContextPack(tuple(
+            ContextCandidate(term, 3.5, "dictionary")
+            for term in dictionary)))
+        return VoiceIR(
+            hypotheses=(
+                RecognitionHypothesis(parakeet, confidence, "parakeet-unified"),
+                RecognitionHypothesis(
+                    tiny, max(0.0, confidence - 0.08),
+                    "parakeet-unified:alternative-1"),
+            ),
+            context=pack,
+            app_bundle=bundle,
+        )
+
+    def test_app_names_and_window_titles_never_replace_recognized_words(self):
+        for app, bundle, title, parakeet, tiny in (
+                ("Code", "com.microsoft.VSCode", "dictate.py \u2014 whisper-face",
+                 "Looks good.", "Look good."),
+                ("Messages", "com.apple.MobileSMS", "Nate Smith",
+                 "Not yet.", "Nah yet."),
+                ("Messages", "com.apple.MobileSMS", "Nate Smith",
+                 "Do not send it yet.", "Don't send it yes."),
+                ("Zed", "dev.zed.Zed", "",
+                 "She said the site is down.", "Shi set the side is down."),
+                ("Claude", "com.anthropic.claudefordesktop", "",
+                 "I called him and he was glad.", "Eye call them and he is glad."),
+                ("Slack", "com.tinyspeck.slackmacgap",
+                 "Harry Wells \u2014 Acme",
+                 "Tell her I will call later.", "Tell here I'll call later."),
+        ):
+            with self.subTest(app=app, parakeet=parakeet):
+                voice = self.parakeet_voice(
+                    parakeet, tiny, app=app, bundle=bundle, title=title)
+                # The context gate is open: the engines agreed on half the
+                # words or fewer.
+                self.assertLessEqual(voice.hypotheses[0].confidence, 0.70)
+                result = self.compiler.compile(voice)
+                self.assertEqual(result.text, parakeet)
+                self.assertEqual(result.decisions, ())
+
+    def test_dictionary_terms_never_replace_recognized_words(self):
+        for parakeet, tiny in (
+                ("Who is on call today?", "Hu is on call to day?"),
+                ("Who is on call?", "Who's on call?"),
+                ("See the pair on the board.", "Sea the pear on board."),
+        ):
+            with self.subTest(parakeet=parakeet):
+                voice = self.parakeet_voice(
+                    parakeet, tiny, app="Slack",
+                    bundle="com.tinyspeck.slackmacgap",
+                    dictionary=("AI", "CI", "PR"))
+                self.assertLessEqual(voice.hypotheses[0].confidence, 0.70)
+                result = self.compiler.compile(voice)
+                self.assertEqual(result.text, parakeet)
+                self.assertEqual(result.decisions, ())
+
+    def test_app_window_and_dictionary_terms_stay_protected_anchors(self):
+        voice = self.parakeet_voice(
+            "Ask Nate to open Code and rerun CI.",
+            "Ask Nate to open code and rerun see eye.",
+            app="Code", bundle="com.microsoft.VSCode", title="Nate Smith",
+            dictionary=("CI",))
+        result = self.compiler.compile(voice)
+        self.assertEqual(result.text, "Ask Nate to open Code and rerun CI.")
+        for anchor in ("Nate", "Code", "CI"):
+            self.assertIn(anchor, result.anchors)
+        proof = self.compiler.verify_edits(
+            result.text,
+            (EditProposal("semantic_cleanup", " and rerun CI", ""),),
+            context=voice.context.candidates,
+        )
+        self.assertEqual(proof.text, result.text)
+        self.assertIn("protected anchor removed", proof.edits[0].reason)
 
     def test_context_router_has_generic_and_developer_adapters(self):
         pack = ContextRouter().collect(ContextObservation(

@@ -7278,13 +7278,22 @@ class ParakeetClient:
     existing Whisper Turbo path remains the faithful fallback.
     """
 
+    # A start that fails can hold a decode for the whole start-up timeout, so
+    # it is not repeated on the next decode. The wait doubles with each
+    # consecutive failure.
+    START_RETRY_SECONDS = 30.0
+    START_RETRY_MAX_SECONDS = 300.0
+
     def __init__(self, helper=PARAKEET_HELPER, process_factory=None,
-                 exchange=None):
+                 exchange=None, clock=None):
         self.helper = Path(helper)
         self.process_factory = process_factory or subprocess.Popen
         self.exchange = exchange or bounded_helper_exchange
+        self.clock = clock or time.monotonic
         self.process = None
         self.lock = threading.Lock()
+        self.failed_starts = 0
+        self.next_start = 0.0
 
     def _close(self):
         process, self.process = self.process, None
@@ -7311,29 +7320,45 @@ class ParakeetClient:
             except Exception:
                 pass
 
+    def _start_failed(self, reason: str):
+        self._close()
+        self.failed_starts += 1
+        wait = min(self.START_RETRY_MAX_SECONDS,
+                   self.START_RETRY_SECONDS * 2 ** (self.failed_starts - 1))
+        self.next_start = self.clock() + wait
+        # The reason is a fixed word or an exception class, never its
+        # message: an OSError message carries the helper's path.
+        print(f"! Parakeet helper did not start ({reason}); using Whisper, "
+              f"next attempt in {wait:.0f}s")
+        return None
+
     def _start(self):
         if self.process is not None and self.process.poll() is None:
             return self.process
         self._close()
         if not PARAKEET_ENABLED or not self.helper.is_file():
             return None
-        process = self.process_factory(
-            [str(self.helper), "--server"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=None,
-            bufsize=0,
-        )
+        if self.clock() < self.next_start:
+            return None
+        try:
+            process = self.process_factory(
+                [str(self.helper), "--server"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=None,
+                bufsize=0,
+            )
+        except Exception as error:
+            return self._start_failed(type(error).__name__)
         self.process = process
         try:
             status = self.exchange(
                 process, (), timeout=PARAKEET_STARTUP_TIMEOUT)
-        except Exception:
-            self._close()
-            return None
+        except Exception as error:
+            return self._start_failed(type(error).__name__)
         if not status.get("ready"):
-            self._close()
-            return None
+            return self._start_failed("not ready")
+        self.failed_starts = 0
         mark_model_warm_path_observed(PARAKEET_PROFILE.provider_id)
         print(f"[asr] Parakeet Unified ready in "
               f"{float(status.get('load_s', 0.0)):.2f}s")
@@ -7504,6 +7529,9 @@ def windows_whisper_model(model_repo: str):
 PARAKEET_IO_POOL = ThreadPoolExecutor(max_workers=1)
 PARAKEET_CROSSCHECK = os.environ.get("PARROT_ASR_CROSSCHECK", "tiny") != "off"
 PARAKEET_CROSSCHECK_MAX_SECONDS = 90.0
+# Two transcripts count as the same utterance when more than half of their
+# tokens match. Below that, an escalation has found no majority.
+CROSSCHECK_MAJORITY_AGREEMENT = 0.5
 
 
 def _clean_native_processing_s(value) -> float | None:
@@ -7518,6 +7546,21 @@ def _clean_native_processing_s(value) -> float | None:
     return native_processing_s
 
 
+def crosscheck_agreement(left: str, right: str) -> float:
+    """Token agreement between two engines' transcripts of the same audio.
+
+    Engines write the same words differently: casing, punctuation, apostrophe
+    style and digit grouping. None of that is a different hearing, so it is
+    removed before the tokens are compared.
+    """
+    def spoken(text: str) -> str:
+        text = re.sub(r"(?<=\w)['\u2019`](?=\w)", "", (text or "").casefold())
+        text = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", text)
+        return " ".join(re.findall(r"\w+", text))
+
+    return hypothesis_agreement(spoken(left), spoken(right))
+
+
 def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
                            verify: bool,
                            crosscheck_text: str | None = None) \
@@ -7530,8 +7573,9 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
     path. An independent Whisper Tiny decode of the same audio now runs on
     the calling ASR thread while the helper request waits on the I/O pool,
     so the agreement signal costs almost no wall time. Tiny is never
-    accepted as final text here; it only calibrates confidence and survives
-    as an inspectable alternative. Returns None when the helper fails so the
+    accepted as final text here; it only calibrates confidence, casts one
+    vote when Turbo is installed to break the tie, and survives as an
+    inspectable alternative. Returns None when the helper fails so the
     caller falls through to the faithful Whisper path.
     """
     duration = len(audio) / SAMPLE_RATE
@@ -7547,7 +7591,8 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
             # the two engines decode different languages.
             tiny_text = transcribe_detailed(
                 audio, prompt, verify=False,
-                model_repo=FAST_WHISPER_REPO, language="en").text
+                model_repo=FAST_WHISPER_REPO, language="en",
+                _prepared=True).text
         except Exception as error:
             print(f"! Tiny cross-check unavailable: {error}")
             tiny_text = None
@@ -7559,7 +7604,7 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
     confidence = PARAKEET_ROUTE_CONFIDENCE
     alternative = None
     if tiny_text is not None and tiny_text.strip():
-        agreement = hypothesis_agreement(text, tiny_text)
+        agreement = crosscheck_agreement(text, tiny_text)
         confidence = parakeet_confidence_from_agreement(agreement)
         if tiny_text != text:
             alternative = tiny_text
@@ -7571,30 +7616,44 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
         audio_duration=duration,
         native_processing_s=_clean_native_processing_s(parakeet[1]),
     )
+    # Escalation needs a third engine. asr_decode_target would quietly decode
+    # with Tiny when Turbo is not installed, and Tiny is the engine that just
+    # disagreed: asking it again settles nothing. Without Turbo the stronger
+    # recognizer's transcript stands, unverified.
     if (agreement is not None and verify
-            and should_escalate_uncertain(agreement, duration)):
+            and should_escalate_uncertain(agreement, duration)
+            and asr_model_is_cached(WHISPER_REPO)):
         # The engines heard different utterances: buy one independent Turbo
-        # decode and keep whichever transcript is more confident. The loser
-        # is retained as the inspectable alternative. Escalation is an
-        # optional upgrade: if the fallback decode itself fails, the primary
-        # transcript must survive rather than turn a working dictation into
-        # a dropped one.
+        # decode and let it break the tie. The vote is on the words. Parakeet's
+        # confidence is derived from agreement and Whisper's from log
+        # probabilities, so the two numbers cannot be compared. Escalation is
+        # an optional upgrade: if the decode itself fails, the primary
+        # transcript must survive rather than turn a working dictation into a
+        # dropped one.
         try:
             fallback = transcribe_detailed(
                 audio, prompt, verify=False, model_repo=WHISPER_REPO,
-                _skip_parakeet=True, language="en")
+                _skip_parakeet=True, language="en", _prepared=True)
         except Exception as error:
             print(f"! Turbo escalation unavailable: {error}")
-            recognition.verified = True
             return recognition
-        if fallback.text and fallback.confidence > recognition.confidence:
-            fallback.alternative = (
-                text if text != fallback.text else alternative)
+        if not fallback.text:
+            return recognition
+        with_parakeet = crosscheck_agreement(text, fallback.text)
+        with_tiny = crosscheck_agreement(tiny_text, fallback.text)
+        if (with_tiny > with_parakeet
+                and with_tiny > CROSSCHECK_MAJORITY_AGREEMENT):
+            # Two engines heard the same utterance and Parakeet did not.
+            # Turbo's transcript is delivered, never Tiny's.
+            fallback.alternative = text
             fallback.verified = True
             return fallback
-        if fallback.text and fallback.text != recognition.text:
+        if fallback.text != text:
             recognition.alternative = fallback.text
-        recognition.verified = True
+        if with_parakeet > CROSSCHECK_MAJORITY_AGREEMENT:
+            recognition.confidence = parakeet_confidence_from_agreement(
+                max(agreement, with_parakeet))
+            recognition.verified = True
     return recognition
 
 
@@ -7603,11 +7662,15 @@ def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
                         model_repo: str = WHISPER_REPO,
                         crosscheck_text: str | None = None,
                         _skip_parakeet: bool = False,
-                        language: str | None = None) -> Recognition:
+                        language: str | None = None,
+                        _prepared: bool = False) -> Recognition:
     # Whispered/quiet speech: lift the level into the range Whisper decodes
     # confidently. Gain is capped so the noise floor of true near-silence
     # (which the energy gate already rejects) isn't blown up to fake speech.
-    audio = prepare_asr_audio(audio)
+    # The cross-check and the escalation re-enter with audio this call has
+    # already prepared; preparing it again would apply the gain past its cap.
+    if not _prepared:
+        audio = prepare_asr_audio(audio)
     if prompt is None:
         with GLOSS["lock"]:
             prompt = GLOSS["prompt"]
