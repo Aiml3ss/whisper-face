@@ -3482,6 +3482,7 @@ class WhisperFaceViewModel:
         self.locale = resolve_locale(locale)
         self._clock = clock
         self._notice_issued_at = clock()
+        self._carrying_notice = False
         self._status_error_notice = ""
         self._issue_notice = ("", "")
         self.state = GUIState()
@@ -3500,13 +3501,23 @@ class WhisperFaceViewModel:
 
     @state.setter
     def state(self, value: GUIState) -> None:
-        # Every write goes through here, so a new notice is stamped wherever
-        # it was set, including by the window controller.
+        # Every write goes through here, so a notice is stamped wherever it
+        # was set, including by the window controller. Posting the same text
+        # again stamps it again; only _carry keeps the old stamp.
         previous = self.__dict__.get("_state")
         if previous is None or (value.notice, value.notice_level) != (
-                previous.notice, previous.notice_level):
+                previous.notice, previous.notice_level) or (
+                    value.notice and not self._carrying_notice):
             self._notice_issued_at = self._clock()
         self._state = value
+
+    def _carry(self, value: GUIState) -> None:
+        """Write state that keeps the current notice without reissuing it."""
+        self._carrying_notice = True
+        try:
+            self.state = value
+        finally:
+            self._carrying_notice = False
 
     def _surviving_notice(self) -> tuple[str, str]:
         notice, level = self.state.notice, self.state.notice_level
@@ -3540,7 +3551,7 @@ class WhisperFaceViewModel:
                 self._hotkey_practiced = True
             snapshot["hotkey_practiced"] = self._hotkey_practiced
             notice, notice_level = self._surviving_notice()
-            self.state = normalize_snapshot(
+            self._carry(normalize_snapshot(
                 snapshot,
                 section=self.state.section,
                 verification=self.state.verification,
@@ -3550,7 +3561,7 @@ class WhisperFaceViewModel:
                 settings_pane=self.state.settings_pane,
                 settings=self.state.settings,
                 locale=self.locale,
-            )
+            ))
             self._status_error_notice = ""
             # An issue's own notice is only true while that issue is reported.
             issue_key, issue_detail = self._issue_notice
@@ -3570,10 +3581,10 @@ class WhisperFaceViewModel:
     def acknowledge_onboarding(self, acknowledged: bool = True) -> GUIState:
         """Remember that a completed first run need not be shown again."""
         self._onboarding_acknowledged = bool(acknowledged)
-        self.state = replace(
+        self._carry(replace(
             self.state,
             onboarding_acknowledged=self._onboarding_acknowledged,
-        )
+        ))
         return self.state
 
     def select_section(self, section: str) -> GUIState:
@@ -4948,7 +4959,7 @@ class WhisperFaceViewModel:
                 "diagnostics.verification.failed", error=error)
 
     def set_verification(self, status: str) -> GUIState:
-        self.state = replace(self.state, verification=status)
+        self._carry(replace(self.state, verification=status))
         return self.state
 
 

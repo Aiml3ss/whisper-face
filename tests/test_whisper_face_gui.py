@@ -2489,6 +2489,37 @@ class ViewModelTests(unittest.TestCase):
         now[0] += 8.0
         self.assertEqual(model.refresh().notice, "")
 
+    def test_the_same_success_posted_again_gets_its_own_lifetime(self):
+        now = [100.0]
+        model = WhisperFaceViewModel(
+            GUIActions(status_snapshot=lambda: {},
+                       save_snippet=lambda *_args: None),
+            clock=lambda: now[0])
+        first = model.save_snippet("signature", "Kind regards").notice
+        now[0] += 6.0
+        second = model.save_snippet("signature", "Kind regards").notice
+        self.assertEqual(second, first)
+
+        now[0] += 6.0
+        self.assertEqual(model.refresh().notice, second)
+        now[0] += 2.0
+        self.assertEqual(model.refresh().notice, "")
+
+    def test_refreshes_and_side_updates_never_extend_a_notice(self):
+        now = [100.0]
+        model = WhisperFaceViewModel(
+            GUIActions(status_snapshot=lambda: {},
+                       save_snippet=lambda *_args: None),
+            clock=lambda: now[0])
+        saved = model.save_snippet("signature", "Kind regards").notice
+        for _tick in range(3):
+            now[0] += 2.0
+            self.assertEqual(model.refresh().notice, saved)
+        model.set_verification("Checks passed")
+        model.acknowledge_onboarding()
+        now[0] += 2.0
+        self.assertEqual(model.refresh().notice, "")
+
     def test_a_status_error_clears_once_status_reads_again(self):
         failing = [True]
 
