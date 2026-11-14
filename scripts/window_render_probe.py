@@ -22,7 +22,7 @@ advanced}-
 first-run stage, into ``.probe-renders/`` by default.
 
 Pass ``--size WIDTHxHEIGHT`` to review a different window size; the window's
-880x600 minimum is where truncation shows up first.
+minimum size is where truncation shows up first.
 """
 
 from __future__ import annotations
@@ -46,7 +46,6 @@ import whisper_face_gui as gui  # noqa: E402
 from whisper_face_gui import (  # noqa: E402
     GUIActions,
     GUIState,
-    ModelStatus,
     ResultInspection,
     WhisperFaceViewModel,
     WhisperFaceWindowController,
@@ -66,6 +65,7 @@ STATE = GUIState(
     service_status="Running",
     microphone_status="Ready",
     accessibility_status="Granted",
+    input_monitoring_status="Granted",
     version="2DEDE55",
     onboarding_acknowledged=True,
     active_engine="parakeet-unified",
@@ -87,12 +87,18 @@ STATE = GUIState(
         protected_anchor_count=2,
         alternatives_considered=2,
     ),
-    models=(
-        ModelStatus("Parakeet Unified", "primary recognition", "Ready"),
-        ModelStatus("Whisper Tiny", "fast preview", "Ready"),
-        ModelStatus("Whisper large-v3-turbo", "fallback", "Warming"),
-        ModelStatus("Qwen3.5-4B", "semantic cleanup", "Ready"),
-    ),
+    # A default install, through the same normalizer the window uses.
+    models=gui.normalize_snapshot({"models": [
+        {"name": name, "role": role, "install_state": install_state,
+         "required": required, "warm": install_state == "installed"}
+        for name, role, install_state, required in (
+            ("Parakeet Unified 0.6B", "Primary recognition", "installed",
+             True),
+            ("Whisper Tiny", "Fast recognition preview", "installed", True),
+            ("Whisper large-v3-turbo", "Recognition fallback",
+             "not_installed", False),
+            ("qwen3.5:4b", "Selective cleanup", "not_installed", False),
+        )]}).models,
 )
 
 # The first-run fixtures drive the onboarding poster from real runtime
@@ -101,46 +107,39 @@ STATE = GUIState(
 # completion state can all be reviewed as images.
 ONBOARDING_RUNTIME = {
     "service_status": "Running",
-    "microphone_status": "Not requested",
-    "accessibility_status": "Not requested",
+    "microphone_status": "Starting",
+    "accessibility_status": "Needs attention",
+    "input_monitoring_status": "Needs attention",
     "capture_state": "Ready",
     "hotkey_label": "Right Option",
     "models": [{
-        "name": "Parakeet Unified",
-        "role": "primary recognition",
-        "status": "Warming",
+        "name": "Parakeet Unified 0.6B",
+        "role": "Primary recognition",
+        "install_state": "checking",
+        "required": True,
+        "warm": False,
     }],
 }
+GRANTED = {
+    "microphone_status": "Ready",
+    "accessibility_status": "Granted",
+    "input_monitoring_status": "Granted",
+}
+READY_MODELS = [{
+    "name": "Parakeet Unified 0.6B",
+    "role": "Primary recognition",
+    "install_state": "installed",
+    "required": True,
+    "warm": True,
+}]
 ONBOARDING_STAGES = (
     ("permissions", {}),
-    ("hotkey", {
-        "microphone_status": "Ready",
-        "accessibility_status": "Granted",
-    }),
-    ("models", {
-        "microphone_status": "Ready",
-        "accessibility_status": "Granted",
-        "hotkey_practiced": True,
-    }),
+    ("hotkey", GRANTED),
+    ("models", {**GRANTED, "hotkey_practiced": True}),
     ("first-dictation", {
-        "microphone_status": "Ready",
-        "accessibility_status": "Granted",
-        "hotkey_practiced": True,
-        "models": [{
-            "name": "Parakeet Unified",
-            "role": "primary recognition",
-            "status": "Ready",
-        }],
-    }),
+        **GRANTED, "hotkey_practiced": True, "models": READY_MODELS}),
     ("complete", {
-        "microphone_status": "Ready",
-        "accessibility_status": "Granted",
-        "hotkey_practiced": True,
-        "models": [{
-            "name": "Parakeet Unified",
-            "role": "primary recognition",
-            "status": "Ready",
-        }],
+        **GRANTED, "hotkey_practiced": True, "models": READY_MODELS,
         "last_word_count": 9,
     }),
 )

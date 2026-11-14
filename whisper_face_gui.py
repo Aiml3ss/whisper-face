@@ -449,7 +449,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "models.state.checking": "Checking",
         "models.detail.ready": "Installed and answered on this Mac",
         "models.detail.installed": "Installed · warms up on first use",
-        "models.detail.optional": "Not installed · optional upgrade, add it with ./setup.sh --models",
+        "models.detail.optional": "Not installed · add it with ./setup.sh --models",
         "models.detail.not_installed": "Not installed · dictation needs it, run Install.command again",
         "models.detail.failed": "Files are incomplete · run the installer again to repair",
         "models.detail.mismatch": "A different version is installed · run the installer again to repair",
