@@ -3,9 +3,10 @@
 Last audited: **2026-07-27**
 
 Every benchmark corpus in this repository is synthetic text, scenario labels,
-protocol definitions, or model pins. None of them contains a recording, a
-transcript, or any personal dictation. That is what makes them safe to publish
-— and it is also the boundary of what they can prove.
+protocol definitions, model pins, or what the real recognizer wrote for
+synthetic speech. None of them contains a recording or any personal
+dictation. That is what makes them safe to publish — and it is also the
+boundary of what they can prove.
 
 This page answers one question precisely: **what can somebody who is not us
 actually re-run?**
@@ -58,6 +59,18 @@ tests/test_whole_program.py` dictates every sentence through the real
 and needs a macOS host; `uv run quality_gate.py` also runs each sentence
 through the deterministic cleanup.
 
+`recognizer_transcripts.json` (76 sentences) is not part of the scorecard
+either. It holds what the real Parakeet helper wrote for each sentence when
+the macOS speech synthesizer spoke it, and every final text a person would
+accept. `uv run benchmarks/recognizer_replay.py check` types each transcript
+through the real `dictate.py` on the fake Mac and prints every sentence that
+does not arrive as accepted; `tests/test_whole_program.py` runs the same
+replay in the release gate. Like the default-path sentences it needs a macOS
+host but no audio, model or network. Synthetic speech shows how the
+recognizer punctuates, capitalises and formats numbers. It says nothing about
+how accurately it hears a person's voice. See
+[recording the transcripts again](#recording-the-transcripts-again).
+
 The aggregate view is one command:
 
 ```sh
@@ -97,6 +110,43 @@ uv run competitor_benchmark.py benchmarks/competitor_run_template.json
 The template is a schema demonstration, not evidence. A test asserts it can
 never carry a measured value.
 
+## Recording the transcripts again
+
+Replaying `recognizer_transcripts.json` needs only a clone. Recording it needs
+an Apple Silicon Mac with Whisper Face installed, because the transcripts come
+from the installed Parakeet helper:
+
+```sh
+uv run benchmarks/recognizer_replay.py record \
+  --helper <install>/.models/bin/parrot-asr-helper
+uv run benchmarks/recognizer_replay.py check
+```
+
+`record` has the synthesizer (`say`) speak each case's `said` text into a
+temporary file, so no sound is played, converts it to 16 kHz mono, and sends
+it to the helper over the framed protocol the app uses. `--voice` picks a
+synthesizer voice. It rewrites only the recognizer's side of each case
+(`transcript`, `voice`, `recognizer`) and prints every transcript that
+differs from the last recording. It never writes `accept`,
+`recognizer_error` or `known_failure`: those are written by a person, from
+what the speaker meant, never from what the program types. When a transcript
+changes, review those fields before committing. To add a sentence, add a case
+with `id`, `covers`, `said` and `accept`, then record.
+
+A person's own speech takes the same path:
+
+```sh
+uv run benchmarks/recognizer_replay.py record \
+  --helper <install>/.models/bin/parrot-asr-helper --wav-dir <folder>
+```
+
+The folder holds recordings (`.wav`, `.aiff`, `.m4a` or `.caf`), each with a
+sidecar `<name>.txt` saying what was meant; that text seeds the new case's
+`accept`. Recordings are never committed: the tool refuses a folder inside the
+checkout and only reads the audio. The transcripts and sidecar text do go into
+the transcripts file, so if what was said is private, pass `--transcripts` a
+file outside the checkout and replay it with `check --transcripts`.
+
 ## What these corpora deliberately cannot prove
 
 - **Nothing here is acoustic.** `representative_dictation_cases.json` declares
@@ -104,6 +154,10 @@ never carry a measured value.
   those dimensions using scenario labels only. Five of its cases carry explicit
   unfulfilled recording requirements. A text fixture cannot prove acoustic
   performance, and the corpus command says so rather than crediting itself.
+  `recognizer_transcripts.json` did come from a real recognizer, but every
+  case was spoken by a speech synthesizer: it shows how the recognizer
+  punctuates, capitalises and formats numbers, not how accurately it hears a
+  person.
 - **Nothing here touches a real application.** The insertion suite is an
   adapter simulation and prints zero real apps exercised. Point-and-Speak and
   Drop-to-Target resolve synthetic scenes; there is no drag path in the

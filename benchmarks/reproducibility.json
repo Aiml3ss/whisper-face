@@ -85,6 +85,15 @@
    "notes": "Everyday sentences with the exact text a fresh install must type, dictated through the real dictate.py booted on a fake Mac: no models, audio device, or network. The harness needs a macOS host because it runs the runtime's macOS path, and skips elsewhere. quality_gate.py also runs every sentence through the deterministic cleanup."
   },
   {
+   "path": "benchmarks/recognizer_transcripts.json",
+   "case_key": "cases",
+   "cases": 76,
+   "content": "recognizer-transcripts-of-synthetic-speech",
+   "requirement": "clone-only",
+   "command": "uv run benchmarks/recognizer_replay.py check",
+   "notes": "What the real Parakeet helper wrote for sentences spoken by the macOS speech synthesizer, each with every final text a person would accept. Replaying them through the real dictate.py on the fake Mac needs no audio, model or network, but needs a macOS host; tests/test_whole_program.py runs the same replay in the release gate. Re-recording (record --helper) needs an Apple Silicon Mac with the installed Parakeet helper. Synthetic speech shows how the recognizer punctuates, capitalises and formats numbers, not how accurately it hears a person's voice. No audio is stored."
+  },
+  {
    "path": "benchmarks/cleanup_latency_cases.json",
    "case_key": "cases",
    "cases": 30,
