@@ -7239,13 +7239,22 @@ class ParakeetClient:
     existing Whisper Turbo path remains the faithful fallback.
     """
 
+    # A start that fails can hold a decode for the whole start-up timeout, so
+    # it is not repeated on the next decode. The wait doubles with each
+    # consecutive failure.
+    START_RETRY_SECONDS = 30.0
+    START_RETRY_MAX_SECONDS = 300.0
+
     def __init__(self, helper=PARAKEET_HELPER, process_factory=None,
-                 exchange=None):
+                 exchange=None, clock=None):
         self.helper = Path(helper)
         self.process_factory = process_factory or subprocess.Popen
         self.exchange = exchange or bounded_helper_exchange
+        self.clock = clock or time.monotonic
         self.process = None
         self.lock = threading.Lock()
+        self.failed_starts = 0
+        self.next_start = 0.0
 
     def _close(self):
         process, self.process = self.process, None
@@ -7272,29 +7281,45 @@ class ParakeetClient:
             except Exception:
                 pass
 
+    def _start_failed(self, reason: str):
+        self._close()
+        self.failed_starts += 1
+        wait = min(self.START_RETRY_MAX_SECONDS,
+                   self.START_RETRY_SECONDS * 2 ** (self.failed_starts - 1))
+        self.next_start = self.clock() + wait
+        # The reason is a fixed word or an exception class, never its
+        # message: an OSError message carries the helper's path.
+        print(f"! Parakeet helper did not start ({reason}); using Whisper, "
+              f"next attempt in {wait:.0f}s")
+        return None
+
     def _start(self):
         if self.process is not None and self.process.poll() is None:
             return self.process
         self._close()
         if not PARAKEET_ENABLED or not self.helper.is_file():
             return None
-        process = self.process_factory(
-            [str(self.helper), "--server"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=None,
-            bufsize=0,
-        )
+        if self.clock() < self.next_start:
+            return None
+        try:
+            process = self.process_factory(
+                [str(self.helper), "--server"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=None,
+                bufsize=0,
+            )
+        except Exception as error:
+            return self._start_failed(type(error).__name__)
         self.process = process
         try:
             status = self.exchange(
                 process, (), timeout=PARAKEET_STARTUP_TIMEOUT)
-        except Exception:
-            self._close()
-            return None
+        except Exception as error:
+            return self._start_failed(type(error).__name__)
         if not status.get("ready"):
-            self._close()
-            return None
+            return self._start_failed("not ready")
+        self.failed_starts = 0
         mark_model_warm_path_observed(PARAKEET_PROFILE.provider_id)
         print(f"[asr] Parakeet Unified ready in "
               f"{float(status.get('load_s', 0.0)):.2f}s")

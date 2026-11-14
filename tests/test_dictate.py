@@ -1663,6 +1663,7 @@ class ParakeetClientTests(unittest.TestCase):
                     "subprocess": subprocess,
                     "threading": threading,
                     "struct": struct,
+                    "time": time,
                     "json": json,
                     "np": np,
                     "PARAKEET_STARTUP_TIMEOUT": 10.0,
@@ -1829,6 +1830,7 @@ class ParakeetClientTests(unittest.TestCase):
                     "subprocess": subprocess,
                     "threading": threading,
                     "struct": struct,
+                    "time": time,
                     "np": np,
                     "PARAKEET_STARTUP_TIMEOUT": 10.0,
                     "PARAKEET_MIN_REQUEST_TIMEOUT": 3.0,
@@ -1849,6 +1851,136 @@ class ParakeetClientTests(unittest.TestCase):
         self.assertTrue(first_process.terminated)
         self.assertTrue(first_process.killed)
         self.assertEqual(first_process.wait_calls, 2)
+
+    @staticmethod
+    def client(directory, *, process_factory, exchange, clock=None,
+               printed=None):
+        helper = Path(directory) / "parrot-asr-helper"
+        helper.write_bytes(b"helper")
+        ns = load_definitions(
+            "ParakeetClient",
+            extra={
+                "PARAKEET_HELPER": helper,
+                "PARAKEET_ENABLED": True,
+                "Path": Path,
+                "subprocess": subprocess,
+                "threading": threading,
+                "struct": struct,
+                "time": time,
+                "np": np,
+                "PARAKEET_STARTUP_TIMEOUT": 10.0,
+                "PARAKEET_MIN_REQUEST_TIMEOUT": 3.0,
+                "PARAKEET_MAX_REQUEST_TIMEOUT": 10.0,
+                "PARAKEET_PROFILE": PARAKEET_PROFILE,
+                "mark_model_warm_path_observed": lambda _provider: True,
+                "print": lambda *args, **_kwargs: (
+                    printed.append(" ".join(str(arg) for arg in args))
+                    if printed is not None else None),
+            },
+        )
+        return ns["ParakeetClient"](
+            helper=helper, process_factory=process_factory,
+            exchange=exchange, clock=clock)
+
+    def test_helper_that_cannot_be_spawned_falls_back_to_whisper(self):
+        # A zero-byte or non-executable helper file exists, so the route is
+        # taken, and the spawn itself is what fails.
+        for error in (PermissionError(13, "Permission denied"),
+                      OSError(8, "Exec format error")):
+            with self.subTest(error=type(error).__name__), \
+                    tempfile.TemporaryDirectory() as directory:
+                printed = []
+
+                def refuse(*_args, _error=error, **_kwargs):
+                    raise _error
+
+                client = self.client(
+                    directory, process_factory=refuse,
+                    exchange=lambda *_args, **_kwargs: self.fail(
+                        "no process to talk to"),
+                    printed=printed)
+                audio = np.ones(160, dtype=np.float32)
+                self.assertIsNone(client.transcribe(audio))
+
+                recognition, decodes = ParakeetCrosscheckTests.cascade(
+                    parakeet=client,
+                    scripted={"tiny-repo": ("Ship the installer today.", 0.9)},
+                    cached={"tiny-repo"})
+                self.assertEqual(recognition.text, "Ship the installer today.")
+                self.assertEqual(recognition.engine, "tiny")
+                self.assertEqual(len(printed), 1)
+
+    def test_failed_start_is_remembered_and_retried_after_a_backoff(self):
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = io.BytesIO()
+                self.stdout = io.BytesIO()
+                self.alive = True
+
+            def poll(self):
+                return None if self.alive else 1
+
+            def terminate(self):
+                self.alive = False
+
+            def wait(self, timeout=None):
+                return 0
+
+        now = [1_000.0]
+        spawned = []
+        ready = [False]
+        printed = []
+
+        def factory(*_args, **_kwargs):
+            spawned.append(FakeProcess())
+            return spawned[-1]
+
+        def exchange(_process, chunks, *, timeout):
+            if not chunks:
+                if not ready[0]:
+                    raise TimeoutError("helper response timed out")
+                return {"ready": True, "load_s": 12.25}
+            return {"ok": True, "text": "hello", "processing_s": 0.02}
+
+        audio = np.ones(160, dtype=np.float32)
+        with tempfile.TemporaryDirectory() as directory:
+            client = self.client(
+                directory, process_factory=factory, exchange=exchange,
+                clock=lambda: now[0], printed=printed)
+
+            # One slow start costs one start-up timeout, not one per decode.
+            for _decode in range(4):
+                self.assertIsNone(client.transcribe(audio))
+            self.assertEqual(len(spawned), 1)
+            self.assertFalse(spawned[0].alive)
+
+            now[0] += 29.0
+            self.assertIsNone(client.transcribe(audio))
+            self.assertEqual(len(spawned), 1)
+            now[0] += 2.0
+            self.assertIsNone(client.transcribe(audio))
+            self.assertEqual(len(spawned), 2)
+
+            # A second failure in a row waits twice as long.
+            now[0] += 59.0
+            self.assertIsNone(client.transcribe(audio))
+            self.assertEqual(len(spawned), 2)
+            now[0] += 2.0
+            ready[0] = True
+            self.assertEqual(client.transcribe(audio), ("hello", 0.02))
+            self.assertEqual(len(spawned), 3)
+
+            # A helper that started and later died is restarted at once: the
+            # backoff is for starts that fail, and a success clears it.
+            spawned[-1].alive = False
+            self.assertEqual(client.transcribe(audio), ("hello", 0.02))
+            self.assertEqual(len(spawned), 4)
+
+        failures = [line for line in printed if "did not start" in line]
+        self.assertEqual(len(failures), 2)
+        for line in failures:
+            self.assertNotIn(directory, line)
+            self.assertNotIn("timed out", line)
 
     def test_parakeet_processing_time_reaches_recognition_evidence(self):
         class ImmediatePool:
@@ -8097,7 +8229,7 @@ class ParakeetCrosscheckTests(unittest.TestCase):
                     [repo for repo, _skip, _lang in calls], ["tiny-repo"])
 
     @staticmethod
-    def cascade(*, parakeet_text, scripted, cached):
+    def cascade(*, parakeet_text=None, scripted, cached, parakeet=None):
         """Run the production cascade against scripted model outputs.
 
         ``cached`` is the set of Whisper snapshots on disk and ``scripted``
@@ -8143,7 +8275,7 @@ class ParakeetCrosscheckTests(unittest.TestCase):
                 "GLOSS": {"lock": threading.Lock(), "prompt": None},
                 "IS_MACOS": True,
                 "PARAKEET_ENABLED": True,
-                "PARAKEET": SimpleNamespace(
+                "PARAKEET": parakeet or SimpleNamespace(
                     transcribe=lambda _audio: (parakeet_text, 0.05)),
                 "PARAKEET_IO_POOL": ImmediatePool(),
                 "PARAKEET_CROSSCHECK": True,
