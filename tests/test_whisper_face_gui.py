@@ -536,6 +536,7 @@ class SnapshotTests(unittest.TestCase):
                 "operation.keyword.forget_failed",
                 "operation.face.change_failed",
                 "operation.flight.update_failed",
+                "operation.self_correction.update_failed",
                 "operation.acoustic.update_failed",
                 "operation.relisten.update_failed",
                 "operation.acoustic.play_failed",
@@ -3075,6 +3076,40 @@ class ControlSettingsViewModelTests(unittest.TestCase):
         model.refresh()
         self.assertEqual(len(model.recent_dictations()), 1)
 
+    def test_the_actually_correction_is_off_unless_settings_say_on(self):
+        self.assertFalse(GUIActions().set_self_correction(True))
+        self.assertFalse(normalize_settings({}).self_correction)
+        self.assertFalse(
+            normalize_settings({"self_correction": "yes"}).self_correction)
+        self.assertTrue(
+            normalize_settings({"self_correction": True}).self_correction)
+
+    def test_the_actually_correction_switch_shows_what_the_runtime_stored(
+            self):
+        stored = {"self_correction": False}
+
+        def set_self_correction(enabled):
+            self.calls.append(enabled)
+            stored["self_correction"] = enabled
+            return enabled
+
+        model = self.model(
+            settings_snapshot=lambda: dict(stored),
+            set_self_correction=set_self_correction)
+        self.assertFalse(model.select_section("Settings").settings
+                         .self_correction)
+        state = model.set_self_correction(True)
+        self.assertEqual(self.calls, [True])
+        self.assertTrue(state.settings.self_correction)
+        self.assertTrue(model.refresh().settings.self_correction)
+        self.assertFalse(model.set_self_correction(False)
+                         .settings.self_correction)
+
+    def test_a_refused_actually_correction_leaves_the_switch_off(self):
+        model = self.model(set_self_correction=lambda _enabled: False)
+        self.assertFalse(
+            model.set_self_correction(True).settings.self_correction)
+
     def test_a_runtime_that_raises_never_takes_the_window_down(self):
         def explode(*_args, **_kwargs):
             raise RuntimeError("private detail")
@@ -3084,12 +3119,17 @@ class ControlSettingsViewModelTests(unittest.TestCase):
             set_sound_theme=explode, set_recent_dictations=explode,
             recent_dictations=explode, reveal_recent_dictation=explode,
             insert_recent_dictation=explode, undo_last_dictation=explode,
-            preview_sound=explode, describe_hotkey=explode)
+            preview_sound=explode, describe_hotkey=explode,
+            set_self_correction=explode)
         model.choose_hotkey("f13")
         model.choose_undo_hotkey("f14")
         model.choose_sound_theme("silent")
         model.set_recent_dictations(True)
         self.assertEqual(model.recent_dictations(), ())
+        state = model.set_self_correction(True)
+        self.assertFalse(state.settings.self_correction)
+        self.assertEqual(state.notice_level, "error")
+        self.assertNotIn("Flight Recorder", state.notice)
         self.assertEqual(model.reveal_recent_dictation("a"), "")
         model.insert_recent_dictation("a")
         model.undo_last_dictation()

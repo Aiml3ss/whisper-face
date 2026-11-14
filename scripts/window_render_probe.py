@@ -187,12 +187,14 @@ for appearance_name, suffix in (
     # The worst case for the Controls pane is a capture key that shares a
     # modifier with two voice modes and an undo key that is bound: both
     # detail lines are at their longest, which is where truncation shows up.
+    # The "actually" switch is on, so its on-state copy is reviewed too.
     model.state = replace(
         STATE, section="Settings", settings_pane="Controls",
         hotkey="ctrl_r", hotkey_label="Right Control",
         hotkey_shared_modes=("reply", "command", "code"),
         undo_hotkey="f14", undo_hotkey_label="F14",
-        undo_available=True, sound_theme="whisper")
+        undo_available=True, sound_theme="whisper",
+        settings=replace(STATE.settings, self_correction=True))
     controller.render()
     snapshot(f"window-settings-controls-shared-{suffix}")
 
