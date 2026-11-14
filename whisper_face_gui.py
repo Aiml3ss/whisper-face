@@ -6095,6 +6095,10 @@ if APPKIT_AVAILABLE:
             self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
                 NSMakeRect(0, 0, 1000, 640), style,
                 NSBackingStoreBuffered, False)
+            # The controller is a plain NSObject, not an NSWindowController,
+            # so AppKit would free the window on close while self.window
+            # still points at it; the next open would message freed memory.
+            self.window.setReleasedWhenClosed_(False)
             self.window.setTitle_(APP_NAME)
             self.window.setDelegate_(self)
             self.window.setContentMinSize_((880.0, 600.0))
@@ -9933,6 +9937,15 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         }
         require(expected_calls.issubset(set(calls)), "model actions")
         require(not bool(controller.window.isVisible()), "window activation")
+        # Close, then do what the next "Open Whisper Face" does short of
+        # ordering the window on screen.
+        require(
+            not bool(controller.window.isReleasedWhenClosed()),
+            "closing keeps the window")
+        controller.window.close()
+        require(not bool(controller.window.isVisible()), "closed window hidden")
+        model.refresh()
+        controller.render()
         return {
             "sections": len(SECTIONS),
             "sidebar_rows": len(controller.sidebar_rows),
