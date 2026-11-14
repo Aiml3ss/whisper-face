@@ -436,6 +436,34 @@ class MacDistributionContractTests(unittest.TestCase):
             self.assertIn("ad-hoc signature is invalid", result.stderr)
             self.assertEqual(contents(corrupted), first)
 
+            # A damaged or partial bundle with the right layout but files that
+            # do not even parse is judged, not trusted: it is set aside and a
+            # launcher is built here, and the verify command refuses it with
+            # its usual exit code instead of a traceback.
+            damages = {
+                "Info.plist": ("Contents/Info.plist", b"garbage"),
+                "source digest": ("Contents/Resources/launcher-source-sha256",
+                                  b"\xff\xfe\xfa"),
+            }
+            for damage, (relative, data) in damages.items():
+                with self.subTest(damage=damage):
+                    damaged = root / f"damaged-{len(relative)}" / "Whisper Face.app"
+                    subprocess.run(["ditto", str(app), str(damaged)], check=True)
+                    (damaged / relative).write_bytes(data)
+                    rebuilt, result = install(
+                        damaged, ROOT, f"rejected-damaged-{len(relative)}")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("not using the app beside this folder",
+                                  result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertEqual(contents(rebuilt), first)
+                    verify = subprocess.run([
+                        sys.executable, str(LAUNCHER_TOOL), "verify",
+                        "--app", str(damaged),
+                    ], cwd=ROOT, text=True, capture_output=True)
+                    self.assertEqual(verify.returncode, 2, verify.stderr)
+                    self.assertNotIn("Traceback", verify.stderr)
+
             # The release gate refuses an ad-hoc signed bundle: only a Developer
             # ID signature satisfies --require-signed.
             require_signed = subprocess.run([

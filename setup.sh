@@ -1326,7 +1326,8 @@ if [ "$MODE" = "full" ]; then
             && [ "$packaged_launcher_app" != "$launcher_app" ]; then
         launcher_install_args+=(--source-app "$packaged_launcher_app")
     fi
-    python3 "$DIR/scripts/macos_launcher_app.py" "${launcher_install_args[@]}"
+    python3 "$DIR/scripts/macos_launcher_app.py" "${launcher_install_args[@]}" \
+        || fail "the Whisper Face launcher app could not be installed; its reason is above"
 fi
 
 log_start=1

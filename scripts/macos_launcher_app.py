@@ -290,8 +290,12 @@ def verify_owned_app(app: Path) -> None:
 def verify_generic_app(app: Path, *, policy: Path = DEFAULT_POLICY, require_signed: bool = False) -> None:
     app = app.expanduser().resolve(); entries = _entries(app) if app.is_dir() else set()
     if entries != BASE_FILES | SIGNATURE_FILES: raise LauncherError("generic launcher contains missing or unexpected files")
-    if plistlib.loads((app / "Contents/Info.plist").read_bytes()) != _expected_plist(): raise LauncherError("launcher Info.plist contract mismatch")
-    if (app / "Contents/Resources/launcher-source-sha256").read_text().strip() != _source_digest(): raise LauncherError("launcher source contract mismatch")
+    try: plist = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+    except ValueError as exc: raise LauncherError("launcher Info.plist is invalid") from exc
+    if plist != _expected_plist(): raise LauncherError("launcher Info.plist contract mismatch")
+    try: recorded_source = (app / "Contents/Resources/launcher-source-sha256").read_text(encoding="utf-8").strip()
+    except ValueError as exc: raise LauncherError("launcher source contract is unreadable") from exc
+    if recorded_source != _source_digest(): raise LauncherError("launcher source contract mismatch")
     executable = app / "Contents/MacOS" / EXECUTABLE
     if not executable.stat().st_mode & stat.S_IXUSR or executable.read_bytes()[:4] != b"\xcf\xfa\xed\xfe": raise LauncherError("launcher executable is not an arm64 Mach-O")
     if _is_adhoc_signed(app):
@@ -344,7 +348,7 @@ def install_app(app: Path, checkout: Path, receipt: Path, source_app: Path | Non
         source_app = source_app.expanduser().resolve()
         try:
             _verify_packaged_app(source_app, checkout, policy)
-        except (LauncherError, OSError) as exc:
+        except (LauncherError, OSError, ValueError) as exc:
             # A packaged app that cannot be accepted is not a reason to stop
             # an install that has already downloaded everything else.
             print(f"macOS launcher: not using the app beside this folder ({exc}); building one here instead", file=sys.stderr)
