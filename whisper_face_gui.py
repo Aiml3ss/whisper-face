@@ -24,6 +24,7 @@ from whisper_face_theme import (
     LIGHT_PALETTE,
     MOTION_SPECS,
     SURFACE_SPECS,
+    contrast_ratio,
     palette_for_appearance,
 )
 
@@ -4950,8 +4951,10 @@ try:  # The view-model above remains usable in headless test environments.
         NSBoxCustom,
         NSButton,
         NSColor,
+        NSColorSpace,
         NSControlStateValueOff,
         NSControlStateValueOn,
+        NSAppearance,
         NSAppearanceNameAqua,
         NSAppearanceNameDarkAqua,
         NSEvent,
@@ -5670,10 +5673,14 @@ if APPKIT_AVAILABLE:
                 _brand_text_color(dark) if tone == "good"
                 else _theme_color(palette.ink_soft) if tone == "neutral"
                 else _amber_text_color(dark))
+            # A quiet pill draws grey ink on a grey tint; at the 16% light
+            # tint that pair falls just under AA, 12% clears it.
+            alpha = (0.30 if dark
+                     else 0.12 if tone == "neutral" else 0.16)
             layer = pill.layer()
             if layer is not None:
                 layer.setBackgroundColor_(
-                    _theme_color(fill, 0.30 if dark else 0.16).CGColor())
+                    _theme_color(fill, alpha).CGColor())
             pill.setTextColor_(text_color)
 
         @objc.python_method
@@ -10162,6 +10169,57 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                 lowest >= notice_frame.origin.y + notice_frame.size.height,
                 f"{page_name} fits at the window minimum")
         controller.window.setContentSize_(WINDOW_DEFAULT_SIZE)
+
+        # In light appearance, read the colours the window actually draws: a
+        # default install's optional model is quiet, not amber, and error
+        # text (the failure notice still shown, the degraded phase) is AA.
+        def drawn_rgb(color: Any) -> tuple[float, float, float]:
+            rgb = color.colorUsingColorSpace_(
+                NSColorSpace.genericRGBColorSpace())
+            return (float(rgb.redComponent()), float(rgb.greenComponent()),
+                    float(rgb.blueComponent()))
+
+        controller.window.setAppearance_(
+            NSAppearance.appearanceNamed_(NSAppearanceNameAqua))
+        runtime["models"] = [
+            {"name": "Parakeet Unified 0.6B", "role": "Primary recognition",
+             "install_state": "installed", "required": True, "warm": True,
+             "status": "RESOLVED", "detail": "Exact pinned files resolved"},
+            {"name": "Whisper large-v3-turbo", "role": "Optional recognition",
+             "install_state": "not_installed", "required": False,
+             "warm": False, "status": "UNAVAILABLE",
+             "detail": "Exact pinned files not resolved"},
+        ]
+        runtime["microphone_status"] = "Unavailable"
+        model.refresh()
+        controller.render()
+        light = palette_for_appearance(False)
+        optional_index = next(
+            index for index, row in enumerate(model.state.models)
+            if row.install_state == "not_installed" and not row.required)
+        optional_pill = controller.dynamic["model_rows"][optional_index][3]
+        require(
+            all(abs(drawn - expected) < 0.01 for drawn, expected in zip(
+                drawn_rgb(optional_pill.textColor()), light.ink_soft)),
+            "an optional model that was never installed draws a quiet pill")
+        tint = NSColor.colorWithCGColor_(
+            optional_pill.layer().backgroundColor())
+        tint_rgb, tint_alpha = drawn_rgb(tint), float(tint.alphaComponent())
+        # Model rows sit on a card, so the tint lies over the card surface.
+        require(
+            contrast_ratio(light.ink_soft, tuple(
+                t * tint_alpha + under * (1 - tint_alpha)
+                for t, under in zip(tint_rgb, light.surface))) >= 4.5,
+            "the quiet pill's text meets AA in light appearance")
+        require(model.state.notice_level == "error", "light error notice")
+        require(model.state.status_phase == "degraded", "light degraded phase")
+        for key in ("notice", "overview_phase"):
+            drawn = drawn_rgb(controller.dynamic[key].textColor())
+            require(
+                min(contrast_ratio(drawn, light.bg),
+                    contrast_ratio(drawn, light.surface)) >= 4.5,
+                f"{key} error text meets AA in light appearance")
+        controller.window.setAppearance_(None)
 
         # Close, then do what the next "Open Whisper Face" does short of
         # ordering the window on screen.
