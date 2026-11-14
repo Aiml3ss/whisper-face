@@ -970,6 +970,19 @@ class SnapshotTests(unittest.TestCase):
         self.assertFalse(onboarding_presentation(
             complete.onboarding_steps, acknowledged=True).visible)
 
+    def test_a_permission_still_being_checked_offers_no_system_settings(self):
+        starting = normalize_snapshot({
+            "microphone_status": "Starting",
+            "accessibility_status": "Granted",
+            "input_monitoring_status": "Granted",
+        })
+        self.assertEqual(starting.missing_permissions, ())
+        presentation = onboarding_presentation(
+            starting.onboarding_steps, acknowledged=False,
+            permission_missing=bool(starting.missing_permissions))
+        self.assertEqual(presentation.current_key, "permissions")
+        self.assertEqual(presentation.action_title, "Keep Going")
+
     def test_onboarding_copy_explains_observed_practice_and_recovery(self):
         state = normalize_snapshot({
             "service_status": "Running",

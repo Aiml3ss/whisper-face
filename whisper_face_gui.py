@@ -2739,6 +2739,7 @@ def onboarding_presentation(
     *,
     acknowledged: bool,
     locale: str = "en",
+    permission_missing: bool = True,
 ) -> OnboardingPresentation:
     """Build the active-step or explicit completion presentation."""
 
@@ -2763,15 +2764,18 @@ def onboarding_presentation(
             action_help=localized_string(
                 "onboarding.action.finish.help", locale=locale),
         )
+    # While permissions are still being checked there is nothing to grant.
+    open_settings = next_step.key == "permissions" and permission_missing
     action_key = {
-        "permissions": "onboarding.action.open_system_settings",
+        "permissions": ("onboarding.action.open_system_settings"
+                        if open_settings else "onboarding.action.continue"),
         "hotkey": "onboarding.action.hotkey",
         "models": "onboarding.action.models",
         "first_dictation": "onboarding.action.first_dictation",
     }.get(next_step.key, "onboarding.action.continue")
     help_key = (
         "onboarding.action.open_system_settings.help"
-        if next_step.key == "permissions"
+        if open_settings
         else "onboarding.action.help"
     )
     return OnboardingPresentation(
@@ -7695,6 +7699,7 @@ if APPKIT_AVAILABLE:
                 state.onboarding_steps,
                 acknowledged=state.onboarding_acknowledged,
                 locale=self.view_model.locale,
+                permission_missing=bool(state.missing_permissions),
             )
             self._onboarding_presentation = presentation
             self.dynamic["onboarding_card"].setHidden_(
@@ -9560,6 +9565,21 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             ("open_system_settings", "microphone") in calls,
             "permission recovery opens the missing permission's pane")
         require(model.state.section == "Home", "permission recovery route")
+        require(
+            str(controller.dynamic["onboarding_action"].title()) ==
+            localized_string("onboarding.action.open_system_settings"),
+            "a missing permission offers System Settings")
+        runtime.update(
+            microphone_status="Starting",
+            accessibility_status="Granted",
+            input_monitoring_status="Granted",
+        )
+        model.refresh()
+        controller.render()
+        require(
+            str(controller.dynamic["onboarding_action"].title()) ==
+            localized_string("onboarding.action.continue"),
+            "a permission still being checked offers no System Settings")
         runtime.update(
             service_status="Running",
             microphone_status="Ready",
