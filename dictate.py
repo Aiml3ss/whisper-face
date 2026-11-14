@@ -9521,6 +9521,17 @@ def committed_paste_receipt(rec, snapshot: FocusSnapshot | None,
 CORRECTION_STABLE_POLLS = 5
 
 
+class SentUnchanged(str):
+    """A paste that settled unedited and whose field was then cleared.
+
+    Its words were accepted, which is evidence about them. It is not an
+    observed zero-edit outcome: a field reads the same after the user deletes
+    everything as it does after a send.
+    """
+
+    sent = True
+
+
 def observe_paste_outcome(receipt: PasteReceipt, timeout=None,
                           poll_interval=None, reader=None, clock=None,
                           sleeper=None, stable_polls=None) -> str | None:
@@ -9528,10 +9539,16 @@ def observe_paste_outcome(receipt: PasteReceipt, timeout=None,
 
     A poll almost always lands in the middle of an edit, so one changed read
     is never a correction. The range has to read the same for
-    ``stable_polls`` consecutive polls; the last value that did is returned
-    when the window ends or the field goes away (chat composers are cleared
-    on submit). An unchanged paste is reported only while it is still present
-    at the end of the window. None means nothing safe was observed.
+    ``stable_polls`` consecutive polls, and the value is reported only if it
+    was still what the range read when observation ended: an edit under way
+    at that moment means an earlier pause was a pause, not a result.
+
+    Observation ends with the window, when the field stays unreadable, or as
+    soon as the field is emptied after the paste was read. A chat composer is
+    emptied by a send, and what is typed into it next is another message. An
+    unchanged paste is returned as itself while it is still present, and as
+    ``SentUnchanged`` when the field was emptied. None means nothing safe was
+    observed.
     """
     timeout = CORRECTION_DELAY if timeout is None else max(0.0, float(timeout))
     poll_interval = CORRECTION_POLL_INTERVAL if poll_interval is None \
@@ -9567,25 +9584,33 @@ def observe_paste_outcome(receipt: PasteReceipt, timeout=None,
 
     deadline = clock() + timeout
     previous = unread = object()
-    value = last = settled = None
+    value = last = shown = settled = None
     streak = absent = 0
     while True:
         current = reader(receipt.element)
+        blank = current is not None and not current.strip()
         if previous is unread or current != previous:
             previous = current
-            value = pasted_range(current)
+            value = None if blank else pasted_range(current)
+        if value is not None:
+            shown = value
         if value is not None and value == last:
             streak += 1
         else:
             last, streak = value, int(value is not None)
         if streak >= stable_polls:
             settled = value
+        # None is an Accessibility read that failed and may recover; an
+        # empty field after the paste was read will not hold the paste again.
+        emptied = blank and shown is not None
         absent = 0 if current else absent + 1
         remaining = deadline - clock()
-        if remaining <= 0 or absent >= stable_polls:
-            if settled is not None and settled != pasted:
+        if emptied or remaining <= 0 or absent >= stable_polls:
+            if settled is None or shown != settled:
+                return None
+            if settled != pasted or value == pasted:
                 return settled
-            return pasted if settled == pasted and value == pasted else None
+            return SentUnchanged(pasted) if emptied else None
         sleeper(min(poll_interval, remaining))
 
 
@@ -9659,14 +9684,16 @@ def learn_from_corrections(receipt: PasteReceipt | None):
     if utterance_was_undone(event_id):
         print("[learn] skipped: insertion was undone")
         return
-    record_paste_outcome(receipt, revised)
+    if not getattr(revised, "sent", False):
+        record_paste_outcome(receipt, revised)
 
     def strip(word):
         return word.strip(",.;:!?\"'()[]")
 
     if revised == receipt.pasted:
-        # A paste left alone is evidence against every candidate mapping
-        # whose heard word it contains: the word was right as recognized.
+        # A paste left alone, or sent as it was, is evidence against every
+        # candidate mapping whose heard word it contains: the word was right
+        # as recognized.
         left_alone = {strip(word).casefold() for word in revised.split()}
         with LEARN_LOCK:
             state = load_learned()

@@ -4739,7 +4739,7 @@ class LearningTests(unittest.TestCase):
             "learn_snippet_edit", "paste_snippet_and_watch",
             "save_snippet_edit", "suggest_snippet_edit",
             "apply_pending_snippet_edit", "forget_snippet_edit",
-            "forget_gui_correction",
+            "forget_gui_correction", "SentUnchanged", "finish_and_process",
             assignments={
                 "AUTO_MARKER", "PROMOTE_MIN_COUNT", "PERSONAL_APP_MIN_COUNT",
                 "PERSONAL_GLOBAL_MIN_COUNT", "ANCHOR_MAX_TERMS",
@@ -4890,6 +4890,50 @@ class LearningTests(unittest.TestCase):
                          "Ask Jon about the kubernetes rollout.")
         self.assertEqual(runtime.observed[1][1], "Run Qwen locally.")
 
+    def test_a_pause_in_the_middle_of_retyping_is_not_a_correction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+
+            # The user stops for a second on half a word, late in the
+            # window, and is typing again when the window closes.
+            runtime.dictate("Restart kubernetis now.", [
+                (8.4, "kubernetis", "kubernet"),
+                (9.5, "kubernet", "kubernetes")])
+            paused = runtime.state()
+            for _ in range(2):
+                runtime.dictate("Restart kubernetis now.",
+                                [(3.0, "kubernetis", "kubernetes")])
+            learned = runtime.compiled("Restart kubernetis now.")
+
+        self.assertEqual(paused["confusions"], {})
+        self.assertEqual(paused["counts"], {})
+        self.assertEqual(runtime.observed[:1], [(
+            "Restart kubernetis now.", "Restart kubernetes now.")])
+        # Nothing stale stands in the way of the real correction.
+        self.assertEqual(learned, "Restart kubernetes now.")
+
+    def test_a_message_typed_after_sending_is_not_an_edit(self):
+        message = "Thanks Gwen, see you at noon."
+        following = "Thanks Owen, see you at one."
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+
+            # Sent after two seconds; the next message is typed straight
+            # into the emptied composer and then sits there.
+            for _ in range(2):
+                runtime.dictate(message, [
+                    (2.0, message, ""), (2.3, "", "Thanks"),
+                    (2.5, "Thanks", following)])
+
+            state = runtime.state()
+            lab = runtime.ns["GLOSS"]["regression"]
+            compiled = runtime.compiled("Ask Gwen about it at noon.")
+        self.assertEqual(runtime.observed, [])
+        self.assertEqual(state["confusions"], {})
+        self.assertEqual(state["counts"], {})
+        self.assertEqual(lab.promoted, ())
+        self.assertEqual(compiled, "Ask Gwen about it at noon.")
+
     def test_a_confirmed_correction_rewrites_on_the_parakeet_engine(self):
         codex, mail = "com.openai.codex", "com.apple.mail"
         with tempfile.TemporaryDirectory() as directory:
@@ -5038,6 +5082,39 @@ class LearningTests(unittest.TestCase):
         self.assertEqual(kept, {"com.slack": 2})
         self.assertEqual(held, "Call Mark tomorrow.")
         self.assertEqual(active, "Call Mary tomorrow.")
+
+    def test_messages_sent_unedited_count_against_a_candidate_correction(
+            self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+
+            def sent(text, fix=()):
+                """Dictate into a chat composer that is emptied by the send,
+                five seconds later."""
+                final = text
+                for _delay, old, new in fix:
+                    final = final.replace(old, new, 1)
+                return runtime.dictate(text, [*fix, (5.0, final, "")])
+
+            fix = [(3.0, "Mark", "Mary")]
+            sent("Call Mark tomorrow.", fix)
+            # The heard word is dictated, read and sent as it is, twice.
+            sent("Mark is on call.")
+            sent("Thank Mark for me.")
+            recorded = list(runtime.observed)
+            sent("Ask Mark about it.", fix)
+            held = runtime.compiled("Call Mark tomorrow.")
+            kept = runtime.state()["confusions"]["mark->mary"]["kept"]
+            sent("Ping Mark later.", fix)
+            active = runtime.compiled("Call Mark tomorrow.")
+
+        self.assertEqual(kept, {"com.slack": 2})
+        self.assertEqual(held, "Call Mark tomorrow.")
+        self.assertEqual(active, "Call Mary tomorrow.")
+        # An emptied field is not an observed zero-edit outcome: it reads
+        # the same when the user deletes the dictation.
+        self.assertEqual(recorded, [
+            ("Call Mark tomorrow.", "Call Mary tomorrow.")])
 
     def test_destination_edit_of_a_snippet_is_only_a_suggestion(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5439,6 +5516,11 @@ class LearningTests(unittest.TestCase):
         self.assertIsNone(observe(lambda at: (
             document + pasted if at < 9.7
             else document + " Ask Gw about it.")))
+        # Nor is the half word the user paused on before going on typing.
+        self.assertIsNone(observe(lambda at: (
+            document + pasted if at < 8.4
+            else document + " Ask Gw about it." if at < 9.5
+            else document + " Ask Qwen about it.")))
         # An edit that settled and was then taken back is a zero-edit paste.
         self.assertEqual(
             observe(lambda at: (
@@ -5471,6 +5553,53 @@ class LearningTests(unittest.TestCase):
         )
 
         self.assertIsNone(observed)
+
+    def test_an_emptied_composer_ends_the_observation(self):
+        ns = load_definitions(
+            "observe_paste_outcome", "SentUnchanged",
+            assignments={"CORRECTION_STABLE_POLLS"},
+            extra={
+                "PasteReceipt": object,
+                "infer_revised_insertion": infer_revised_insertion,
+            },
+        )
+        message = "Thanks Gwen, see you at noon."
+        receipt = SimpleNamespace(
+            element=object(), before="", selection=(0, 0), pasted=message)
+        elapsed = [0.0]
+
+        def observe(field_at):
+            elapsed[0] = 0.0
+            return ns["observe_paste_outcome"](
+                receipt, timeout=10.0, poll_interval=0.2,
+                reader=lambda _element: field_at(elapsed[0]),
+                clock=lambda: elapsed[0],
+                sleeper=lambda seconds: elapsed.__setitem__(
+                    0, elapsed[0] + seconds),
+            )
+
+        # Sent unedited, and the next message typed at once: the watcher
+        # stops at the send and never reads the next message.
+        observed = observe(lambda at: (
+            message if at < 2.0 else "" if at < 2.3
+            else "Thanks Owen, see you at one."))
+        self.assertEqual(observed, message)
+        self.assertTrue(observed.sent)
+        self.assertLess(elapsed[0], 2.3)
+        # A composer that reads as a lone newline when empty is as empty.
+        self.assertTrue(observe(
+            lambda at: message if at < 2.0 else "\n").sent)
+        # Sent while a word was being retyped, after a pause on half of it.
+        self.assertIsNone(observe(lambda at: (
+            message if at < 1.0
+            else "Thanks Gw, see you at noon." if at < 2.4
+            else "Thanks Qwe, see you at noon." if at < 2.6 else "")))
+        # A read that fails for a moment is not an emptied field.
+        self.assertEqual(observe(lambda at: (
+            None if 2.0 <= at < 2.5
+            else message if at < 3.0
+            else "Thanks Qwen, see you at noon.")),
+            "Thanks Qwen, see you at noon.")
 
     def test_wrong_shaped_learned_state_uses_safe_defaults(self):
         ns = load_definitions("load_learned")
