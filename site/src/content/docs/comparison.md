@@ -100,6 +100,8 @@ until you turn it on.
 
 ## Published positions, as reviewed
 
+<div class="table-scroll" role="region" aria-label="Published positions, as reviewed" tabindex="0">
+
 | | Where transcription runs | Platforms | Price |
 |---|---|---|---|
 | **Whisper Face** | On your own machine | macOS; Windows preview | Free, open source, no cap |
@@ -108,6 +110,8 @@ until you turn it on.
 | **MacWhisper** | Local, with optional cloud | Mac | Free tier; Pro ~EUR 64 once |
 | **OpenWhispr** | Local or cloud, configurable | Mac, Windows, Linux | Free, MIT |
 | **Handy** | Local | Mac, Windows, Linux | Free, MIT |
+
+</div>
 
 ## What other tools do better
 
