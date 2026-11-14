@@ -3854,6 +3854,59 @@ class CleanupGuardTests(unittest.TestCase):
         )
         self.assertEqual(result.text, "Use Qwen here")
 
+    def test_dictionary_and_screen_names_anchor_without_replacing_words(self):
+        from voice_compiler import ContextObservation, ContextRouter
+
+        dictionary = ContextPack(tuple(
+            ContextCandidate(term, 3.5, "dictionary")
+            for term in ("AI", "CI", "PR")))
+        ns = load_definitions(
+            "compile_voice_evidence",
+            extra={
+                "Recognition": Recognition,
+                "WordEvidence": WordEvidence,
+                "RecognitionHypothesis": RecognitionHypothesis,
+                "ContextCandidate": ContextCandidate,
+                "ContextPack": ContextPack,
+                "VoiceIR": VoiceIR,
+                "VOICE_COMPILER": VoiceCompiler(),
+                "learned_alternatives": lambda *_args: [],
+                "compiler_personal_priors": lambda _bundle: (),
+                "np": np,
+                "analyze_prosody": lambda *_args: (),
+                "SAMPLE_RATE": 16_000,
+                "GLOSS": {
+                    "lock": threading.Lock(),
+                    "anchor_pack": dictionary,
+                },
+            },
+        )
+        # Parakeet's transcript at the confidence one disagreeing word in two
+        # leaves it with, Tiny's as the alternative, and the Context Pack the
+        # router builds for the frontmost app and window.
+        for app, title, parakeet, tiny in (
+                ("Slack", "", "Who is on call today?", "Hu is on call to day?"),
+                ("Code", "dictate.py", "Looks good.", "Look good."),
+                ("Messages", "Nate Smith", "Not yet.", "Nah yet."),
+                ("Zed", "", "She said the site is down.",
+                 "Shi set the side is down."),
+        ):
+            with self.subTest(app=app):
+                voice, result = ns["compile_voice_evidence"](
+                    Recognition(parakeet, confidence=0.69,
+                                engine="parakeet-unified", alternative=tiny),
+                    bundle="com.example.app",
+                    context_pack=ContextRouter().collect(ContextObservation(
+                        app=app, bundle="com.example.app",
+                        window_title=title)),
+                )
+                self.assertEqual(result.text, parakeet)
+                self.assertEqual(result.decisions, ())
+                self.assertEqual(
+                    {candidate.text for candidate in voice.context.candidates
+                     if candidate.source == "dictionary"},
+                    {"AI", "CI", "PR"})
+
 
 class ConfigurationTests(unittest.TestCase):
     def test_mac_permission_recovery_opens_generic_system_settings(self):

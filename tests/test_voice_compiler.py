@@ -327,6 +327,97 @@ class VoiceCompilerTests(unittest.TestCase):
         self.assertEqual(
             self.compiler.compile(voice).text, "The meeting is Tuesday")
 
+    @staticmethod
+    def parakeet_voice(parakeet, tiny, *, app="", bundle="", title="",
+                       dictionary=()):
+        """VoiceIR as the Mac default path builds it.
+
+        Parakeet's punctuated transcript carries the agreement-derived route
+        confidence, Tiny's is the demoted alternative, the Context Pack comes
+        from the router, and dictionary terms are merged at the anchor weight.
+        """
+        from parrot_core import (
+            hypothesis_agreement,
+            parakeet_confidence_from_agreement,
+        )
+        confidence = parakeet_confidence_from_agreement(
+            hypothesis_agreement(parakeet, tiny))
+        pack = ContextRouter().collect(ContextObservation(
+            app=app, bundle=bundle, window_title=title))
+        pack = pack.merged(ContextPack(tuple(
+            ContextCandidate(term, 3.5, "dictionary")
+            for term in dictionary)))
+        return VoiceIR(
+            hypotheses=(
+                RecognitionHypothesis(parakeet, confidence, "parakeet-unified"),
+                RecognitionHypothesis(
+                    tiny, max(0.0, confidence - 0.08),
+                    "parakeet-unified:alternative-1"),
+            ),
+            context=pack,
+            app_bundle=bundle,
+        )
+
+    def test_app_names_and_window_titles_never_replace_recognized_words(self):
+        for app, bundle, title, parakeet, tiny in (
+                ("Code", "com.microsoft.VSCode", "dictate.py \u2014 whisper-face",
+                 "Looks good.", "Look good."),
+                ("Messages", "com.apple.MobileSMS", "Nate Smith",
+                 "Not yet.", "Nah yet."),
+                ("Messages", "com.apple.MobileSMS", "Nate Smith",
+                 "Do not send it yet.", "Don't send it yes."),
+                ("Zed", "dev.zed.Zed", "",
+                 "She said the site is down.", "Shi set the side is down."),
+                ("Claude", "com.anthropic.claudefordesktop", "",
+                 "I called him and he was glad.", "Eye call them and he is glad."),
+                ("Slack", "com.tinyspeck.slackmacgap",
+                 "Harry Wells \u2014 Acme",
+                 "Tell her I will call later.", "Tell here I'll call later."),
+        ):
+            with self.subTest(app=app, parakeet=parakeet):
+                voice = self.parakeet_voice(
+                    parakeet, tiny, app=app, bundle=bundle, title=title)
+                # The context gate is open: the engines agreed on half the
+                # words or fewer.
+                self.assertLessEqual(voice.hypotheses[0].confidence, 0.70)
+                result = self.compiler.compile(voice)
+                self.assertEqual(result.text, parakeet)
+                self.assertEqual(result.decisions, ())
+
+    def test_dictionary_terms_never_replace_recognized_words(self):
+        for parakeet, tiny in (
+                ("Who is on call today?", "Hu is on call to day?"),
+                ("Who is on call?", "Who's on call?"),
+                ("See the pair on the board.", "Sea the pear on board."),
+        ):
+            with self.subTest(parakeet=parakeet):
+                voice = self.parakeet_voice(
+                    parakeet, tiny, app="Slack",
+                    bundle="com.tinyspeck.slackmacgap",
+                    dictionary=("AI", "CI", "PR"))
+                self.assertLessEqual(voice.hypotheses[0].confidence, 0.70)
+                result = self.compiler.compile(voice)
+                self.assertEqual(result.text, parakeet)
+                self.assertEqual(result.decisions, ())
+
+    def test_app_window_and_dictionary_terms_stay_protected_anchors(self):
+        voice = self.parakeet_voice(
+            "Ask Nate to open Code and rerun CI.",
+            "Ask Nate to open code and rerun see eye.",
+            app="Code", bundle="com.microsoft.VSCode", title="Nate Smith",
+            dictionary=("CI",))
+        result = self.compiler.compile(voice)
+        self.assertEqual(result.text, "Ask Nate to open Code and rerun CI.")
+        for anchor in ("Nate", "Code", "CI"):
+            self.assertIn(anchor, result.anchors)
+        proof = self.compiler.verify_edits(
+            result.text,
+            (EditProposal("semantic_cleanup", " and rerun CI", ""),),
+            context=voice.context.candidates,
+        )
+        self.assertEqual(proof.text, result.text)
+        self.assertIn("protected anchor removed", proof.edits[0].reason)
+
     def test_context_router_has_generic_and_developer_adapters(self):
         pack = ContextRouter().collect(ContextObservation(
             app="Codex", bundle="com.openai.codex",

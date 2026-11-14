@@ -64,6 +64,10 @@ CONTEXT_REPLACEMENT_BLOCKLIST = CORRECTION_BLOCKLIST | {
     "with", "your",
 }
 CONTEXT_REWRITE_MAX_CONFIDENCE = 0.70
+# Where the user is says nothing about what they said. These sources bias the
+# recognizer prompt and are protected anchors; they are never candidates to
+# replace a recognized word.
+ANCHOR_ONLY_CONTEXT_SOURCES = frozenset({"app", "window", "dictionary"})
 ENUMERATION_COUNTS = {
     "two", "three", "four", "five", "six", "seven", "eight", "nine",
     "ten", "2", "3", "4", "5", "6", "7", "8", "9", "10",
@@ -137,6 +141,8 @@ def _safe_context_replacement(original: str,
     stricter gate covers the riskier post-ASR path, where visible UI strings
     must never manufacture numbers, timings, or ordinary prose.
     """
+    if candidate.source in ANCHOR_ONLY_CONTEXT_SOURCES:
+        return False
     original_word = original.casefold()
     text = candidate.text.strip()
     folded = text.casefold()
@@ -158,8 +164,7 @@ def _safe_context_replacement(original: str,
             and any(char.isalpha() for char in text))
     )
     explicit_name_source = candidate.source in {
-        "active-context", "app", "window", "selection", "document",
-        "repository",
+        "active-context", "selection", "document", "repository",
     } and text[:1].isupper()
     return identifier_shaped or explicit_name_source
 
