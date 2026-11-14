@@ -601,6 +601,63 @@ class VoiceCompilerTests(unittest.TestCase):
                 self.assertEqual(result.text, parakeet)
                 self.assertEqual(result.decisions, ())
 
+    @staticmethod
+    def screen_packs(screen):
+        """The screen text in each place a Context Pack takes it from, at
+        the weight the runtime gives that place."""
+        developer = {"app": "Code", "bundle": "com.microsoft.VSCode"}
+        return {
+            "selection": ContextRouter().collect(ContextObservation(
+                selected_text=screen, **developer)),
+            "field": ContextRouter().collect(ContextObservation(
+                field_text=screen, **developer)),
+            "clipboard": ContextRouter().collect(ContextObservation(
+                clipboard=screen, **developer)),
+            "document": ContextRouter().collect(ContextObservation(
+                document=screen, **developer)),
+            "repository": ContextRouter().collect(ContextObservation(
+                sibling_names=tuple(screen.split()), **developer)),
+            "active-context": ContextPack(tuple(
+                ContextCandidate(term, 4.5, "active-context")
+                for term in screen.split())),
+        }
+
+    def test_on_screen_context_never_replaces_a_common_word(self):
+        for parakeet, tiny, screen in (
+                ("Looks good.", "Look good.", "Open Code now"),
+                ("Not yet.", "Nah yet.", "Nate"),
+                ("Who is on call today?", "Hu is on call to day?", "AI"),
+        ):
+            for source, pack in self.screen_packs(screen).items():
+                for confidence in (0.70, 0.55, 0.40):
+                    with self.subTest(parakeet=parakeet, source=source,
+                                      confidence=confidence):
+                        voice = self.parakeet_voice(parakeet, tiny)
+                        voice = replace(
+                            voice, context=pack, hypotheses=(
+                                replace(voice.hypotheses[0],
+                                        confidence=confidence),
+                                voice.hypotheses[1]))
+                        result = self.compiler.compile(voice)
+                        self.assertEqual(result.text, parakeet)
+                        self.assertEqual(result.decisions, ())
+
+    def test_on_screen_context_repairs_a_name_only_when_unsure(self):
+        for source, pack in self.screen_packs("Qwen").items():
+            for tiny, expected in (
+                    ("As when two view it.", "Ask Qwen to review it."),
+                    ("Ask Gwen to review it.", "Ask Gwen to review it.")):
+                with self.subTest(source=source, tiny=tiny):
+                    voice = replace(
+                        self.parakeet_voice("Ask Gwen to review it.", tiny),
+                        context=pack)
+                    result = self.compiler.compile(voice)
+                    if source in {"field", "clipboard"}:
+                        # Weaker places to see a name: they cannot outvote
+                        # Parakeet's own word.
+                        expected = "Ask Gwen to review it."
+                    self.assertEqual(result.text, expected)
+
     def test_dictionary_terms_never_replace_recognized_words(self):
         for parakeet, tiny in (
                 ("Who is on call today?", "Hu is on call to day?"),

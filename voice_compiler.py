@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Iterable, Protocol, Sequence
 
 from parrot_core import find_self_correction
+from personal_regression import is_common_word
 from phonetic_keys import double_metaphone
 from process_verifier import RefusalReason, VerificationReceipt
 
@@ -57,12 +58,6 @@ CORRECTION_BLOCKLIST = {
     "am", "are", "can", "could", "did", "do", "does", "had", "has",
     "have", "he", "i", "is", "it", "she", "should", "that", "they",
     "this", "we", "were", "will", "would", "you",
-}
-CONTEXT_REPLACEMENT_BLOCKLIST = CORRECTION_BLOCKLIST | {
-    "a", "an", "and", "as", "at", "be", "been", "being", "best",
-    "but", "by", "for", "from", "in", "into", "my", "of", "on",
-    "or", "our", "right", "sure", "the", "their", "then", "to",
-    "with", "your",
 }
 CONTEXT_REWRITE_MAX_CONFIDENCE = 0.70
 # Where the user is says nothing about what they said. These sources bias the
@@ -144,11 +139,11 @@ def _safe_context_replacement(original: str,
     """
     if candidate.source in ANCHOR_ONLY_CONTEXT_SOURCES:
         return False
-    original_word = original.casefold()
     text = candidate.text.strip()
-    folded = text.casefold()
-    if original_word in CONTEXT_REPLACEMENT_BLOCKLIST \
-            or folded in CONTEXT_REPLACEMENT_BLOCKLIST:
+    # Screen text can repair a name the recognizer misspelled ("Gwen" for a
+    # visible Qwen), never an ordinary word: "good", "not" and "who" sound
+    # enough like Code, Nate and AI to pass the phonetic gate.
+    if is_common_word(original) or is_common_word(text):
         return False
     # Progress bars and UI timings such as ``0.00s`` or ``2042.76it/s`` are
     # useful screen context but are not acoustic alternatives.  Underscored

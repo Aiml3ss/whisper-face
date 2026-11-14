@@ -255,6 +255,8 @@ class TextField:
         self.selection = (len(text) if caret is None else caret, 0)
         self.bundle = bundle
         self.secure = False
+        # The file URL an editor reports for the open document, or None.
+        self.document = None
         # An app that changes what is pasted into it (smart quotes, an added
         # newline) is modelled by a function from pasted to typed text.
         self.rewrite = rewrite
@@ -920,6 +922,8 @@ def _accessibility(desktop: Desktop) -> dict:
             if attribute == "AXSelectedText":
                 start, length = element.selection
                 return 0, element.text[start:start + length]
+            if attribute == "AXDocument" and element.document is not None:
+                return 0, element.document
             if attribute == "AXRole":
                 return 0, "AXTextField"
             if attribute == "AXSubrole":
