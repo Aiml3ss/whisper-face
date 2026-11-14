@@ -10789,14 +10789,18 @@ def audio_gate_measurements(audio: np.ndarray) -> tuple[float, float]:
 
 def collapse_repeats(text: str) -> tuple[str, bool]:
     """Collapse a long run of one repeated token to two of it — the
-    signature of an ASR decode loop ("Unraid" x40). Returns (text, looped)
-    where looped means a substantial run was removed.
+    signature of an ASR decode loop ("Unraid" x40). Returns (text, looped).
 
     A word said a few times is speech, with or without the commas a pause
     leaves ("very, very, very good", "no no no no"), and is kept whole. A
     stuck decoder repeats until the segment ends, so only a run of eight
-    or more is a loop. A shorter loop is left in: extra words are visible
+    or more is cut. A shorter loop is left in: extra words are visible
     and easy to delete, and a dropped word is neither.
+
+    ``looped`` says repetition dominates the transcript, whether or not
+    anything was cut: runs of three or more, counted as two each, would
+    leave at most 60% of the words. The glossary-echo guard drops a
+    transcript on it, and an echo is often one term four or five times.
 
     Whitespace tokenization means this cannot see inside a Japanese or
     Chinese transcript, which arrives as a single token. It fails closed
@@ -10811,18 +10815,24 @@ def collapse_repeats(text: str) -> tuple[str, bool]:
     words = text.split()
     keys = [w.strip(",.;:!?…\"'。、！？「」").casefold() for w in words]
     out = []
+    remaining = 0
     start = 0
     while start < len(words):
         key = keys[start]
         end = start + 1
         while end < len(words) and keys[end] == key:
             end += 1
-        is_loop = (end - start >= loop_min_run and len(key) > 1
-                   and key not in NUMBER_WORDS
-                   and not any(char.isdigit() for char in key))
-        out.extend(words[start:start + 2] if is_loop else words[start:end])
+        run = end - start
+        repeatable = (len(key) > 1 and key not in NUMBER_WORDS
+                      and not any(char.isdigit() for char in key))
+        if repeatable and run >= loop_min_run:
+            # The last token carries the mark that ends the run.
+            out.extend((words[start], words[end - 1]))
+        else:
+            out.extend(words[start:end])
+        remaining += min(run, 2) if repeatable else run
         start = end
-    return " ".join(out), bool(words) and len(out) <= 0.6 * len(words)
+    return " ".join(out), bool(words) and remaining <= 0.6 * len(words)
 
 
 def looks_like_prompt_echo(text: str) -> bool:

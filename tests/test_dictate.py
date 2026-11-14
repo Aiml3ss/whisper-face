@@ -4758,8 +4758,7 @@ class CleanupGuardTests(unittest.TestCase):
             "Ha ha ha ha ha ha ha, very funny.",
         ):
             with self.subTest(spoken=spoken):
-                self.assertEqual(
-                    ns["collapse_repeats"](spoken), (spoken, False))
+                self.assertEqual(ns["collapse_repeats"](spoken)[0], spoken)
 
     def test_repeat_collapse_still_removes_a_decode_loop(self):
         ns = load_definitions(
@@ -4768,18 +4767,89 @@ class CleanupGuardTests(unittest.TestCase):
         self.assertEqual(
             collapse("Restart " + "Unraid " * 40 + "tonight."),
             ("Restart Unraid Unraid tonight.", True))
-        # A loop on a glossary term echoes the prompt's commas.
+        # A loop on a glossary term echoes the prompt's commas. The cut
+        # keeps the run's own last mark.
         self.assertEqual(
             collapse("Common terms: " + "Unraid, " * 30 + "Unraid."),
-            ("Common terms: Unraid, Unraid,", True))
+            ("Common terms: Unraid, Unraid.", True))
+        self.assertEqual(
+            collapse("Very, very, very, very, very, very, very, very good."),
+            ("Very, very good.", True))
+        self.assertEqual(
+            collapse("Ha ha ha ha ha ha ha ha, very funny."),
+            ("Ha ha, very funny.", True))
         # Seven is still a person; eight is a decoder.
         seven = "Okay " * 7 + "then."
-        self.assertEqual(collapse(seven), (seven, False))
+        self.assertEqual(collapse(seven)[0], seven)
         self.assertEqual(
             collapse("Okay " * 8 + "then."), ("Okay Okay then.", True))
         self.assertEqual(
             collapse("No no, that is wrong."),
             ("No no, that is wrong.", False))
+
+    def test_a_short_repeat_is_kept_and_still_reported_as_a_loop(self):
+        # The flag is what the glossary-echo guard keys on, so it follows
+        # the repetition and not what was cut: a run of three or more that
+        # makes up 40% of the words, as before the run was kept whole.
+        ns = load_definitions(
+            "collapse_repeats", extra={"NUMBER_WORDS": NUMBER_WORDS})
+        collapse = ns["collapse_repeats"]
+        for spoken, looped in (
+            ("Unraid, Unraid, Unraid, Unraid.", True),
+            ("Unraid Unraid Unraid Unraid Unraid Unraid Unraid", True),
+            ("Okay " * 7 + "then.", True),
+            ("No, no, no, no, no. Stop.", True),
+            # Three of one word alone were never enough.
+            ("Unraid, Unraid, Unraid.", False),
+            ("Unraid, Proxmox.", False),
+            # Emphasis inside a sentence, as the real recognizer wrote it.
+            ("That was very, very, very good", False),
+            ("No, no, no, that's wrong.", False),
+            ("Really really really good work.", False),
+            ("Blah blah blah, he kept talking.", False),
+            # Numbers and letters repeat in speech and never count.
+            ("5 5 5 5 5 5", False),
+            ("five five five five five", False),
+            ("w w w w", False),
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(collapse(spoken), (spoken, looped))
+
+    def test_a_short_glossary_echo_is_dropped_on_the_phone_path(self):
+        # Whisper decoding near-silence reads the glossary prompt back,
+        # often as one term a few times over.
+        ns = load_definitions(
+            "collapse_repeats", "looks_like_prompt_echo", "phone_clean",
+            "quick_clean", "needs_llm_cleanup", "extract_tone_override",
+            assignments={"TONE", "TONE_OVERRIDE_RE", "TONE_ALIASES"},
+            extra={
+                "GLOSS": {"lock": threading.Lock(),
+                          "terms": ["Unraid", "Proxmox"]},
+                "compile_cleanup": compile_cleanup,
+                "NUMBER_WORDS": NUMBER_WORDS,
+                "is_hallucination": lambda *_args: False,
+                "apply_learned_fixes": lambda raw: raw,
+                "apply_vocabulary_casing": lambda text: text,
+            },
+        )
+        clean = ns["phone_clean"]
+        for echoed in (
+            "Unraid, Unraid, Unraid, Unraid.",
+            "Unraid Unraid Unraid Unraid Unraid Unraid Unraid",
+            "Unraid, " * 30 + "Unraid.",
+        ):
+            with self.subTest(echoed=echoed):
+                self.assertEqual(clean(echoed), "")
+        # The same terms in a sentence, and emphasis that is not a
+        # glossary term, are speech.
+        for spoken in (
+            "Move Unraid to Proxmox tonight.",
+            "Unraid, Proxmox.",
+            "That was very, very, very good.",
+            "No no no no, don't send that.",
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(clean(spoken), spoken)
 
     def test_spoken_tone_override_needs_the_tone_keyword(self):
         ns = load_definitions(

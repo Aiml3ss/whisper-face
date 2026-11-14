@@ -351,6 +351,42 @@ class FreshInstallDictationTests(unittest.TestCase):
             "Restart " + "Unraid " * 40 + "tonight.", field=TextField())
         self.assertEqual(field.text, "Restart Unraid Unraid tonight.")
 
+    def test_a_short_echo_of_the_glossary_prompt_is_not_typed(self):
+        # A recognizer primed with the user's terms reads them back when
+        # it hears no speech, often as one term a few times over. That is
+        # too short to cut as a loop and is still not dictation.
+        mac = booted()
+        dictate = mac.dictate
+        with dictate.GLOSS["lock"]:
+            terms = dictate.GLOSS["terms"]
+            dictate.GLOSS["terms"] = ["Unraid", "Proxmox"]
+        try:
+            for echoed in (
+                "Unraid, Unraid, Unraid, Unraid.",
+                "Unraid Unraid Unraid Unraid Unraid Unraid Unraid",
+            ):
+                with self.subTest(echoed=echoed):
+                    field = TextField("Notes: ")
+                    pastes = len(mac.desktop.pastes)
+                    mac.dictate_sentence(echoed, field=field)
+                    self.assertEqual(field.text, "Notes: ")
+                    self.assertEqual(len(mac.desktop.pastes), pastes)
+                    self.assertEqual(
+                        dictate.CAPTION["text"],
+                        "That didn't sound like dictation — try again")
+            # The same terms in a sentence, and a word said three times
+            # for emphasis, are dictation.
+            for spoken in (
+                "Move Unraid to Proxmox tonight.",
+                "That was very, very, very good.",
+            ):
+                with self.subTest(spoken=spoken):
+                    field = mac.dictate_sentence(spoken, field=TextField())
+                    self.assertEqual(field.text, spoken)
+        finally:
+            with dictate.GLOSS["lock"]:
+                dictate.GLOSS["terms"] = terms
+
     def test_edit_without_the_cleanup_model_leaves_the_selection_alone(self):
         # A default install has no rewrite model. What was dictated is an
         # instruction about the selection, never text to put in its place.
