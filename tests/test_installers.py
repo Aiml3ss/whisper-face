@@ -1001,8 +1001,7 @@ class InstallerContractTests(unittest.TestCase):
                       ready.stdout)
 
     def test_installers_fail_before_side_effects_for_read_only_checkouts(self):
-        mac_probe = self.shell.index("confirm_writable_checkout()")
-        mac_call = self.shell.index("confirm_writable_checkout\n", mac_probe)
+        mac_call = self.shell.index("\ncheck_install_location\n")
         mac_homebrew = self.shell.index("installing Homebrew")
         mac_ollama = self.shell.index(
             "# --- Ollama service and cleanup model")
@@ -1033,6 +1032,47 @@ class InstallerContractTests(unittest.TestCase):
         ):
             with self.subTest(required=required):
                 self.assertIn(required, self.powershell)
+
+    def test_running_from_the_disk_image_says_so_instead_of_disk_space(self):
+        # A mounted image has a few megabytes free, so checking space first
+        # told people with hundreds of gigabytes free that they needed 5 GB.
+        functions = ["fail", "checkout_volume_is_read_only",
+                     "confirm_writable_checkout", "check_install_location"]
+        image = "/Volumes/Whisper Face 1.2.3"
+        df = ("cat <<'DF'\n"
+              "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+              f"/dev/disk9s1 38176 25416 12128 68% {image}\n"
+              "DF")
+        cases = (
+            ("read-only image", True, f"/dev/disk9s1 on {image} "
+             "(apfs, local, nodev, nosuid, read-only, noowners)",
+             "running from the disk image, which is read-only"),
+            ("read-only folder elsewhere", True, "/dev/disk3s5 on "
+             "/System/Volumes/Data (apfs, local, journaled)",
+             "checkout is not writable"),
+            ("writable but full", False, "/dev/disk3s5 on "
+             "/System/Volumes/Data (apfs, local, journaled)",
+             "at least 5 GB of free disk space is required"),
+        )
+        for name, read_only, mounts, expected in cases:
+            with self.subTest(case=name), \
+                    tempfile.TemporaryDirectory() as directory:
+                checkout = Path(directory) / "Whisper Face 1.2.3"
+                checkout.mkdir()
+                if read_only:
+                    checkout.chmod(0o555)
+                try:
+                    result = run_setup_functions(
+                        functions, "check_install_location\n",
+                        variables={"DIR": checkout, "VERIFY_ONLY": 0,
+                                   "required_kb": 5242880, "required_gb": 5},
+                        stubs={"df": df, "mount": f"echo '{mounts}'"})
+                finally:
+                    checkout.chmod(0o755)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(expected, result.stderr)
+                if read_only:
+                    self.assertNotIn("free disk space", result.stderr)
 
     def test_mac_installer_adopts_an_installed_homebrew_missing_from_path(self):
         # The self-updater runs this installer from a detached launchd job, and

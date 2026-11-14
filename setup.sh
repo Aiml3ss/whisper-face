@@ -152,7 +152,32 @@ provision_private_log() {
         || fail "private runtime log permissions could not be verified: $path"
 }
 
+checkout_volume_is_read_only() {
+    # A mounted disk image is read-only. Every field after the fifth is the
+    # mount point, which for an image is "/Volumes/Whisper Face <version>".
+    local mount_point
+    mount_point="$(df -P "$DIR" 2>/dev/null | awk 'NR == 2 {
+        for (i = 6; i <= NF; i++) printf "%s%s", $i, (i < NF ? " " : "")
+    }')"
+    [ -n "$mount_point" ] || return 1
+    mount | grep -F " on $mount_point (" | grep -q "read-only"
+}
+
+check_install_location() {
+    # Writability first: a disk image has only a few megabytes free, and
+    # "not enough space" sent people hunting for gigabytes they already had.
+    local available_kb
+    confirm_writable_checkout
+    available_kb="$(df -Pk "$DIR" | awk 'NR == 2 {print $4}')"
+    if [ "${available_kb:-0}" -lt "$required_kb" ]; then
+        fail "at least $required_gb GB of free disk space is required"
+    fi
+}
+
 confirm_writable_checkout() {
+    if checkout_volume_is_read_only; then
+        fail "Whisper Face is running from the disk image, which is read-only. Drag the Whisper Face folder out of the disk image into a folder of your own, then open Install.command from there."
+    fi
     if ! (
         umask 077
         proof="$(mktemp "$DIR/.whisper-face-write.XXXXXXXX")" || exit 1
@@ -1007,12 +1032,7 @@ if [ "$WITH_ALL_MODELS" -eq 1 ]; then
     required_kb=8388608
     required_gb=8
 fi
-available_kb="$(df -Pk "$DIR" | awk 'NR == 2 {print $4}')"
-if [ "${available_kb:-0}" -lt "$required_kb" ]; then
-    fail "at least $required_gb GB of free disk space is required"
-fi
-
-confirm_writable_checkout
+check_install_location
 
 # Create and lock logs before either service can create them with a default
 # mode. Existing logs are retained; rerunning setup repairs their mode.
