@@ -45,6 +45,12 @@ for system_path in /usr/bin /bin /usr/sbin /sbin; do
 done
 export PATH
 
+# Every uv call here, and the login service, runs on this one interpreter.
+# Left to itself uv takes the newest CPython it can find or download, and the
+# lock has no wheels for mlx or torch on one newer than dictate.py allows.
+PYTHON_VERSION="3.12"
+export UV_PYTHON="$PYTHON_VERSION"
+
 MODE="full"
 VERIFY_ONLY=0
 # A default install downloads only what dictation needs to work at all:
@@ -1266,6 +1272,7 @@ render_plist com.berg.dictate.plist.template "$dictate_plist" \
     -e "$launcher_prefix_sed" \
     -e "s|__UV__|$escaped_uv|g" \
     -e "s|__DIR__|$escaped_dir|g" \
+    -e "s|__PYTHON__|$PYTHON_VERSION|g" \
     -e "$extra_sed"
 
 if [ "$MODE" = "full" ]; then

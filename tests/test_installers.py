@@ -5,6 +5,7 @@
 
 import ast
 import os
+import plistlib
 import re
 import subprocess
 import tempfile
@@ -1580,6 +1581,57 @@ class InstallerContractTests(unittest.TestCase):
                 )
         for package in ("mlx-whisper", "faster-whisper", "pywin32"):
             self.assertIn(f'name = "{package.lower()}"', self.lock.lower())
+
+    def test_every_uv_call_runs_on_one_python_the_lock_supports(self):
+        # uv otherwise picks the newest CPython it can find or download, and
+        # the lock has no mlx, torch, ctranslate2, or onnxruntime wheels for
+        # 3.15; every fresh install would stop at its first uv call.
+        def satisfies(version, specifier):
+            for clause in specifier.replace(" ", "").split(","):
+                operator, bound = re.match(r"(>=|<=|<|>|==)(.+)", clause).groups()
+                left = tuple(int(part) for part in version.split("."))
+                right = tuple(int(part) for part in bound.split("."))
+                width = max(len(left), len(right))
+                left += (0,) * (width - len(left))
+                right += (0,) * (width - len(right))
+                if not {">=": left >= right, "<=": left <= right,
+                        "<": left < right, ">": left > right,
+                        "==": left == right}[operator]:
+                    return False
+            return True
+
+        declared = re.search(
+            r'(?m)^# requires-python = "([^"]+)"$', self.script).group(1)
+        locked = re.search(
+            r'(?m)^requires-python = "([^"]+)"$', self.lock).group(1)
+        self.assertEqual(declared.replace(" ", ""), locked.replace(" ", ""))
+        self.assertFalse(satisfies("3.15", declared))
+        self.assertTrue(satisfies("3.14", declared))
+
+        mac = re.search(r'(?m)^PYTHON_VERSION="([0-9.]+)"$', self.shell)
+        windows = re.search(r'(?m)^\$PythonVersion = "([0-9.]+)"$',
+                            self.powershell)
+        self.assertIsNotNone(mac)
+        self.assertIsNotNone(windows)
+        self.assertEqual(mac.group(1), windows.group(1))
+        self.assertTrue(satisfies(mac.group(1), declared))
+        self.assertIn('export UV_PYTHON="$PYTHON_VERSION"', self.shell)
+        self.assertIn("$env:UV_PYTHON = $PythonVersion", self.powershell)
+
+        # The login service must ask for the same interpreter, or it builds
+        # a second environment on whatever Python is first on its PATH.
+        template = (ROOT / "com.berg.dictate.plist.template").read_text(
+            encoding="utf-8")
+        rendered = re.sub(r"(?m)^.*__(LAUNCHER_PREFIX|EXTRA_ARGS)__.*\n", "",
+                          template)
+        rendered = (rendered.replace("__UV__", "/opt/homebrew/bin/uv")
+                    .replace("__DIR__", "/checkout")
+                    .replace("__PYTHON__", mac.group(1)))
+        service = plistlib.loads(rendered.encode("utf-8"))
+        self.assertEqual(service["EnvironmentVariables"]["UV_PYTHON"],
+                         mac.group(1))
+        self.assertIn('-e "s|__PYTHON__|$PYTHON_VERSION|g"', self.shell)
+        self.assertIn('`$env:UV_PYTHON = "$PythonVersion"', self.powershell)
 
     def test_windows_runtime_uses_equivalent_models_and_native_service(self):
         self.assertIn('else "turbo"', self.script)

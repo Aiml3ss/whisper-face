@@ -40,6 +40,9 @@
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>PYTHONUNBUFFERED</key>
         <string>1</string>
+        <!-- The interpreter setup.sh built the locked environment for. -->
+        <key>UV_PYTHON</key>
+        <string>__PYTHON__</string>
     </dict>
 
     <key>StandardOutPath</key>

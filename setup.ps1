@@ -7,6 +7,12 @@ Set-StrictMode -Version Latest
 
 $Repo = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Repo
+# Every uv call here, and the login task, runs on this one interpreter. Left
+# to itself uv takes the newest CPython it can find or download, and the lock
+# has no ctranslate2 or onnxruntime wheels for one newer than dictate.py
+# allows.
+$PythonVersion = "3.12"
+$env:UV_PYTHON = $PythonVersion
 $Mode = "full"
 $VerifyOnly = $false
 $Uninstall = $false
@@ -659,6 +665,7 @@ function Confirm-TaskLauncherBinding {
     $EscapedScript = (Join-Path $Repo "dictate.py").Replace("'", "''")
     $EscapedLog = $Log.Replace("'", "''")
     foreach ($RequiredLauncherText in @(
+            ('$env:UV_PYTHON = "' + $PythonVersion + '"'),
             "Set-Location '$EscapedRepo'",
             "run --locked --script '$EscapedScript'",
             "*>> '$EscapedLog'")) {
@@ -869,6 +876,7 @@ $EscapedScript = (Join-Path $Repo "dictate.py").Replace("'", "''")
 $EscapedLog = $Log.Replace("'", "''")
 $LauncherBody = @"
 `$env:PYTHONUNBUFFERED = "1"
+`$env:UV_PYTHON = "$PythonVersion"
 Set-Location '$($Repo.Replace("'", "''"))'
 & '$EscapedUv' run --locked --script '$EscapedScript'$ExtraArgument *>> '$EscapedLog'
 "@
