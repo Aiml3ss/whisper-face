@@ -521,8 +521,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.controls.hotkey.detail": "Hold {hotkey} to dictate",
         "settings.controls.hotkey.shared": "Hold {hotkey} to dictate · {modes} need the other {family} key",
         "settings.controls.undo": "Undo key",
-        "settings.controls.undo.detail": "Press {hotkey} to undo the last dictation",
-        "settings.controls.undo.unset": "Not set — undo stays in the menu bar",
+        "settings.controls.undo.detail": "Press {hotkey}, or use Undo Last Dictation in the menu bar",
+        "settings.controls.undo.unset": "Not set — use Undo Last Dictation in the menu bar",
         "settings.controls.sound": "Feedback sounds",
         "settings.controls.sound.system": "macOS",
         "settings.controls.sound.whisper": "Whisper Face",
@@ -530,13 +530,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.controls.sound.detail.system": "Borrowed macOS system sounds",
         "settings.controls.sound.detail.whisper": "Short first-party cues for start, finish, and trouble",
         "settings.controls.sound.detail.silent": "No sound at all",
-        "settings.controls.undo_now": "Undo last dictation",
-        "settings.controls.undo_now.ready": "Restores the destination's exact prior text",
-        "settings.controls.undo_now.none": "Nothing to undo yet",
         "settings.controls.action.change": "Change…",
-        "settings.controls.action.undo": "Undo",
-        "settings.accessibility.undo.label": "Undo last dictation",
-        "settings.accessibility.undo.help": "Put the destination back the way it was before the last insertion.",
         "settings.controls.action.preview": "Preview",
         "settings.dialog.hotkey.title": "Choose your capture key",
         "settings.dialog.hotkey.message": "Press the key you want to hold while dictating. Modifier keys and function keys only — an ordinary key would swallow your typing everywhere.",
@@ -570,9 +564,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.privacy.recent.browse": "Browse…",
         "settings.privacy.recent.browse.help": "List recent dictations by time, length, and app.",
         "settings.accessibility.recent.label": "Recent dictations",
-        "settings.accessibility.recent.help": "Show recent dictations so they can be revealed or inserted again.",
+        "settings.accessibility.recent.help": "Show recent dictations so their words can be revealed.",
         "settings.dialog.recent.title": "Recent dictations",
-        "settings.dialog.recent.message": "Metadata only. Reveal a dictation to see its words, or insert it again through the usual safe insertion.",
+        "settings.dialog.recent.message": "Metadata only. Reveal a dictation to see its words. To insert one again, click where it should go and use Recent Dictations in the menu bar.",
         "settings.dialog.recent.empty": "Nothing recorded yet.",
         "settings.dialog.recent.row": "{when} · {words} · {app}",
         "settings.dialog.recent.words": "{count} words",
@@ -583,11 +577,10 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "recent.age.days": "{count}d ago",
         "recent.app.unknown": "unknown app",
         "settings.dialog.recent.reveal": "Reveal Text…",
-        "settings.dialog.recent.insert": "Insert Again",
         "settings.dialog.recent.revealed.title": "Recent dictation",
         "settings.dialog.recent.revealed.gone": "That dictation is no longer in the local log.",
         "settings.accessibility.recent_list.label": "Recent dictations list",
-        "settings.accessibility.recent_list.help": "Choose one recent dictation to reveal or insert.",
+        "settings.accessibility.recent_list.help": "Choose one recent dictation to reveal.",
         "settings.notice.hotkey": "Capture key is now {hotkey}.",
         "settings.notice.undo_hotkey": "Undo key is now {hotkey}.",
         "settings.notice.undo_hotkey.cleared": "Undo key cleared.",
@@ -4916,6 +4909,8 @@ try:  # The view-model above remains usable in headless test environments.
         NSLayoutConstraint,
         NSLineBorder,
         NSMakeRect,
+        NSMenu,
+        NSMenuItem,
         NSNoBorder,
         NSNoTitle,
         NSProgressIndicator,
@@ -6969,13 +6964,6 @@ if APPKIT_AVAILABLE:
                  "changeUndoHotkey:", "settings.controls.action.change",
                  "settings.accessibility.undo_hotkey.label",
                  "settings.accessibility.undo_hotkey.help"),
-                # The same action the menu bar and the bound key run. It is
-                # here as well so undo is discoverable before anyone knows a
-                # key exists for it.
-                ("undo", "settings.controls.undo_now", "undoLastDictation:",
-                 "settings.controls.action.undo",
-                 "settings.accessibility.undo.label",
-                 "settings.accessibility.undo.help"),
                 # Voice modes are six modifier combinations of the capture
                 # key, so they belong beside the key rather than under
                 # Personalize, where they were only ever a reference table.
@@ -7806,9 +7794,6 @@ if APPKIT_AVAILABLE:
                             hotkey=state.undo_hotkey_label)
                     if state.undo_hotkey_label
                     else self._l("settings.controls.undo.unset")),
-                "undo": (self._l("settings.controls.undo_now.ready")
-                         if state.undo_available
-                         else self._l("settings.controls.undo_now.none")),
             }
             for key, value in setting_summaries.items():
                 set_accessible_text(
@@ -7861,9 +7846,6 @@ if APPKIT_AVAILABLE:
                 label=self._l("settings.accessibility.recent.label"))
             self.dynamic["recent_dictations_browse"].setEnabled_(
                 state.recent_dictations)
-            # Undo offers itself only while there is something to restore.
-            self.dynamic["settings_undo_button"].setEnabled_(
-                state.undo_available)
             self.dynamic["settings_tones_button"].setEnabled_(
                 bool(settings.app_tones))
             self.dynamic["settings_snippets_button"].setEnabled_(True)
@@ -8671,10 +8653,6 @@ if APPKIT_AVAILABLE:
             self.view_model.set_recent_dictations(enabled)
             self.render()
 
-        def undoLastDictation_(self, _sender: Any) -> None:
-            self.view_model.undo_last_dictation()
-            self.render()
-
         @objc.python_method
         def _capture_hotkey(self, *, title_key: str, message_key: str,
                             current_label: str,
@@ -8795,9 +8773,17 @@ if APPKIT_AVAILABLE:
             if entries:
                 chooser = NSPopUpButton.alloc().initWithFrame_pullsDown_(
                     NSMakeRect(0, 0, 460, 26), False)
+                # Rows are metadata, so two can read the same, and
+                # addItemWithTitle: drops duplicates. Each item carries its
+                # entry id instead.
                 for entry in entries:
-                    chooser.addItemWithTitle_(recent_dictation_row(
-                        entry, locale=self.view_model.locale))
+                    item = NSMenuItem.alloc() \
+                        .initWithTitle_action_keyEquivalent_(
+                            recent_dictation_row(
+                                entry, locale=self.view_model.locale),
+                            None, "")
+                    item.setRepresentedObject_(str(entry.get("id") or ""))
+                    chooser.menu().addItem_(item)
                 _accessible(
                     chooser,
                     self._l("settings.accessibility.recent_list.label"),
@@ -8805,14 +8791,11 @@ if APPKIT_AVAILABLE:
                 alert.setAccessoryView_(chooser)
                 alert.addButtonWithTitle_(
                     self._l("settings.dialog.recent.reveal"))
-                alert.addButtonWithTitle_(
-                    self._l("settings.dialog.recent.insert"))
             alert.addButtonWithTitle_(self._l("settings.action.done"))
             response = self._run_modal(alert)
-            if chooser is None:
+            if chooser is None or chooser.selectedItem() is None:
                 return
-            selected = entries[chooser.indexOfSelectedItem()]
-            entry_id = str(selected.get("id") or "")
+            entry_id = str(chooser.selectedItem().representedObject() or "")
             if response == 1000:
                 revealed = self.view_model.reveal_recent_dictation(entry_id)
                 detail = NSAlert.alloc().init()
@@ -8823,8 +8806,6 @@ if APPKIT_AVAILABLE:
                         "settings.dialog.recent.revealed.gone"))
                 detail.addButtonWithTitle_(self._l("settings.action.done"))
                 self._run_modal(detail)
-            elif response == 1001:
-                self.view_model.insert_recent_dictation(entry_id)
             self.render()
 
         def viewModes_(self, _sender: Any) -> None:
@@ -9234,10 +9215,17 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         set_sound_theme=set_sound_theme,
         preview_sound=lambda cue: calls.append(("preview_sound", cue)) or True,
         set_recent_dictations=set_recent_dictations,
+        # Two entries share one metadata row, as two short dictations into
+        # the same app within a minute do.
         recent_dictations=lambda: (
             {"id": "smoke-1", "at": 0.0, "age_seconds": 90.0,
-             "words": 4, "app": "Mail"},),
-        reveal_recent_dictation=lambda entry_id: None,
+             "words": 4, "app": "Mail"},
+            {"id": "smoke-2", "at": 0.0, "age_seconds": 90.0,
+             "words": 1, "app": "Slack"},
+            {"id": "smoke-3", "at": 0.0, "age_seconds": 90.0,
+             "words": 1, "app": "Slack"}),
+        reveal_recent_dictation=lambda entry_id: calls.append(
+            ("reveal_recent", entry_id)) and None,
         insert_recent_dictation=lambda entry_id: {
             "inserted": False, "reason": "unavailable"},
         undo_last_dictation=lambda: {
@@ -9657,13 +9645,22 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             not bool(controller.dynamic[
                 "recent_dictations_browse"].isEnabled()),
             "recent dictations stay unbrowsable while off")
+
+        def window_actions(view: Any) -> set[str]:
+            found = set()
+            if view.respondsToSelector_("action") and view.action():
+                found.add(str(view.action()))
+            for child in view.subviews():
+                found |= window_actions(child)
+            return found
+
+        # Undo and re-insert act on the frontmost app's focused field. From a
+        # window that is itself frontmost they can only act on the window,
+        # so they live in the menu bar and on the bound key instead.
         require(
-            not bool(controller.dynamic["settings_undo_button"].isEnabled()),
-            "undo offers nothing while there is nothing to undo")
-        require(
-            str(controller.dynamic["settings_undo_detail"].stringValue()) ==
-            localized_string("settings.controls.undo_now.none"),
-            "undo summary reports an empty slot")
+            not window_actions(controller.window.contentView()) & {
+                "undoLastDictation:", "insertRecentDictation:"},
+            "no window control acts on the frontmost app")
         for pane_name in SETTINGS_PANES:
             require(
                 len(controller.dynamic["settings_key_views"][pane_name]) >= 2,
@@ -9709,7 +9706,29 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             bool(controller.dynamic["recent_dictations_browse"].isEnabled()),
             "recent dictations become browsable once enabled")
         require(
-            len(model.recent_dictations()) == 1, "recent metadata reaches UI")
+            len(model.recent_dictations()) == 3, "recent metadata reaches UI")
+        recent_dialogs: list[Any] = []
+
+        def reveal_last_row(alert: Any) -> int:
+            recent_dialogs.append(alert)
+            if len(recent_dialogs) == 1:
+                alert.accessoryView().selectItemAtIndex_(2)
+            return 1000
+
+        controller.modal_responder = reveal_last_row
+        controller.browseRecentDictations_(None)
+        controller.modal_responder = None
+        require(
+            int(recent_dialogs[0].accessoryView().numberOfItems()) == 3,
+            "every recent dictation is listed, even with equal rows")
+        require(
+            ("reveal_recent", "smoke-3") in calls,
+            "recent dictation acts on the selected entry")
+        require(
+            localized_string("settings.dialog.recent.reveal") in [
+                str(button.title()) for button in recent_dialogs[0].buttons()]
+            and len(recent_dialogs[0].buttons()) == 2,
+            "recent dictations offer reveal only")
         require(
             recent_dictation_row(model.recent_dictations()[0])
             == "1 min ago · 4 words · Mail", "recent row is metadata only")
