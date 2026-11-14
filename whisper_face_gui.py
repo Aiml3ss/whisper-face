@@ -32,8 +32,8 @@ APP_NAME = "Whisper Face"
 DEFAULTS_SUITE = "com.whisperface.app"
 SECTIONS = ("Home", "Settings", "Advanced")
 # Keys and sounds get their own pane rather than crowding Personalize: at the
-# 880x600 minimum the character card plus six 44pt rows fills the pane
-# exactly, and shrinking the row rhythm or the character card to fit more
+# window minimum the character card plus six 44pt rows fills the pane, and
+# shrinking the row rhythm or the character card to fit more
 # would cost more than the extra segment does. A seventh row overflows into
 # the notice band, so anything new here has to displace something.
 SETTINGS_PANES = ("Personalize", "Controls", "Privacy")
@@ -5028,8 +5028,13 @@ if APPKIT_AVAILABLE:
 
     # The notice band reserves one 11pt line; a two-line failure message
     # grows upward into the column's bottom padding rather than pushing the
-    # page and clipping its last row at the 880x600 minimum.
+    # page and clipping its last row at the window minimum.
     NOTICE_LINE_HEIGHT = 16.0
+    # Advanced is the tallest page (536pt) and sits under 104pt of chrome;
+    # 8pt more leaves room for a two-line notice. The native smoke fails if
+    # any page's content falls below its page at this minimum.
+    WINDOW_MIN_SIZE = (880.0, 648.0)
+    WINDOW_DEFAULT_SIZE = (1000.0, 680.0)
     NOTICE_WRAPPED_HEIGHT = 28.0
 
     # Mirrored from GUIState by render() so jelly springs on native controls
@@ -6130,7 +6135,7 @@ if APPKIT_AVAILABLE:
                      NSWindowStyleMaskMiniaturizable |
                      NSWindowStyleMaskResizable)
             self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-                NSMakeRect(0, 0, 1000, 640), style,
+                NSMakeRect(0, 0, *WINDOW_DEFAULT_SIZE), style,
                 NSBackingStoreBuffered, False)
             # The controller is a plain NSObject, not an NSWindowController,
             # so AppKit would free the window on close while self.window
@@ -6138,7 +6143,7 @@ if APPKIT_AVAILABLE:
             self.window.setReleasedWhenClosed_(False)
             self.window.setTitle_(APP_NAME)
             self.window.setDelegate_(self)
-            self.window.setContentMinSize_((880.0, 600.0))
+            self.window.setContentMinSize_(WINDOW_MIN_SIZE)
             self.window.center()
             root = self.window.contentView()
             root.setWantsLayer_(True)
@@ -6931,8 +6936,8 @@ if APPKIT_AVAILABLE:
             personalize_key_views: list[Any] = list(picker.chips)
             # Language leads the list: it decides which recognizer runs, so
             # it outranks every personalization below it. It shares the same
-            # grouped card and 44pt rhythm as the rest — at the 880x600
-            # minimum this pane has room for exactly six rows, which is why
+            # grouped card and 44pt rhythm as the rest — at the window
+            # minimum this pane has room for six rows, which is why
             # "Voice modes" (a reference table about the capture key) now
             # sits in Controls beside the key it describes.
             rows = (
@@ -10027,6 +10032,40 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         }
         require(expected_calls.issubset(set(calls)), "model actions")
         require(not bool(controller.window.isVisible()), "window activation")
+        def visible_leaves(view: Any) -> list[Any]:
+            children = [child for child in view.subviews()
+                        if not bool(child.isHidden())]
+            if not children:
+                return [view]
+            return [leaf for child in children
+                    for leaf in visible_leaves(child)]
+
+        # At the window minimum every page's content stays clear of a
+        # two-line failure notice in the band below it.
+        controller.window.setContentSize_(controller.window.contentMinSize())
+        model.state = replace(
+            model.state, notice=localized_string(
+                "operation.snippet.save_failed",
+                error=localized_string("validation.snippet.name")),
+            notice_level="error")
+        controller.render()
+        root_view = controller.window.contentView()
+        for page_name, page in controller.pages.items():
+            was_hidden = bool(page.isHidden())
+            page.setHidden_(False)
+            root_view.layoutSubtreeIfNeeded()
+            notice_frame = root_view.convertRect_fromView_(
+                controller.dynamic["notice"].bounds(),
+                controller.dynamic["notice"])
+            lowest = min(
+                root_view.convertRect_fromView_(leaf.bounds(), leaf).origin.y
+                for leaf in visible_leaves(page))
+            page.setHidden_(was_hidden)
+            require(
+                lowest >= notice_frame.origin.y + notice_frame.size.height,
+                f"{page_name} fits at the window minimum")
+        controller.window.setContentSize_(WINDOW_DEFAULT_SIZE)
+
         # Close, then do what the next "Open Whisper Face" does short of
         # ordering the window on screen.
         require(
