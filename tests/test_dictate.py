@@ -4704,6 +4704,431 @@ class InlineSnippetExpansionTests(unittest.TestCase):
 
 
 class LearningTests(unittest.TestCase):
+    @staticmethod
+    def learning_runtime(directory, *, manual=(), learned=None):
+        """The real learning, glossary and compile functions over scratch
+        state, with a scripted Accessibility field and a fake clock."""
+        root = Path(directory)
+        clock = [0.0]
+        field = {"timeline": []}
+        observed = []
+
+        def read(_element):
+            current = None
+            for at, text in field["timeline"]:
+                if at <= clock[0] + 1e-9:
+                    current = text
+            return current
+
+        (root / "dictionary.txt").write_text(
+            "".join(f"{term}\n" for term in manual), encoding="utf-8")
+        (root / "snippets.json").write_text("{}", encoding="utf-8")
+        if learned is not None:
+            (root / "learned.json").write_text(
+                json.dumps(learned), encoding="utf-8")
+        ns = load_definitions(
+            "parse_dictionary", "load_learned", "save_learned",
+            "personal_regression_lab", "write_auto_section",
+            "refresh_glossary", "apply_vocabulary_casing",
+            "apply_learned_fixes", "learned_alternatives",
+            "compiler_personal_priors", "compile_voice_evidence",
+            "FocusSnapshot", "PasteReceipt", "make_paste_receipt",
+            "committed_paste_receipt", "_learned_count",
+            "insertion_join_prefix", "commit_insertion",
+            "observe_paste_outcome", "learn_from_corrections",
+            "learn_snippet_edit", "paste_snippet_and_watch",
+            "save_snippet_edit", "suggest_snippet_edit",
+            "apply_pending_snippet_edit", "forget_snippet_edit",
+            "forget_gui_correction",
+            assignments={
+                "AUTO_MARKER", "PROMOTE_MIN_COUNT", "PERSONAL_APP_MIN_COUNT",
+                "PERSONAL_GLOBAL_MIN_COUNT", "ANCHOR_MAX_TERMS",
+                "CORRECTION_DELAY", "CORRECTION_POLL_INTERVAL",
+                "CORRECTION_MAX_LEARN", "CORRECTION_STABLE_POLLS",
+                "VOCAB_WORD_RE",
+            },
+            extra={
+                "Path": Path,
+                "dataclass": dataclass,
+                "difflib": __import__("difflib"),
+                "np": np,
+                "print": lambda *_args, **_kwargs: None,
+                "atomic_write_text":
+                    lambda path, value: path.write_text(value),
+                "time": SimpleNamespace(
+                    monotonic=lambda: clock[0],
+                    sleep=lambda seconds: clock.__setitem__(
+                        0, clock[0] + seconds),
+                    time=lambda: 1000.0 + clock[0],
+                ),
+                "DICTIONARY_FILE": root / "dictionary.txt",
+                "LEARNED_FILE": root / "learned.json",
+                "SNIPPETS_FILE": root / "snippets.json",
+                "DICTIONARY_LOCK": threading.RLock(),
+                "LEARN_LOCK": threading.Lock(),
+                "SNIPPETS_LOCK": threading.Lock(),
+                "GLOSS": {
+                    "terms": [], "prompt": None, "confusions": {},
+                    "regression": PersonalRegressionLab(),
+                    "anchor_pack": ContextPack(), "vocabulary": {},
+                    "lock": threading.Lock(),
+                },
+                "PIPELINE_STATE": {},
+                "ACOUSTIC_KEYWORD_MEMORY_LOCK": threading.Lock(),
+                "ACOUSTIC_KEYWORD_ACTIVATION_FILE": root / "activation.json",
+                "_load_acoustic_keyword_memory":
+                    lambda: (AcousticKeywordMemory(), "missing"),
+                "active_acoustic_keywords":
+                    lambda _path, _memory: ((), "missing"),
+                "measured_keyword_hints": tuple,
+                "remember_explicit_acoustic_keyword_correction":
+                    lambda *_args, **_kwargs: True,
+                "utterance_was_undone": lambda _event_id: False,
+                "record_paste_outcome": lambda receipt, value:
+                    observed.append((receipt.pasted, value)),
+                "focused_snapshot": lambda: None,
+                "paste": lambda _text: None,
+                "ReceiptState": ReceiptState,
+                "_ax_text": read,
+                "infer_revised_insertion": infer_revised_insertion,
+                "correction_similarity": __import__(
+                    "parrot_core").correction_similarity,
+                "PersonalRegressionLab": PersonalRegressionLab,
+                "PersonalPrior": __import__("voice_compiler").PersonalPrior,
+                "ContextPack": ContextPack,
+                "ContextCandidate": ContextCandidate,
+                "Recognition": Recognition,
+                "WordEvidence": WordEvidence,
+                "RecognitionHypothesis": RecognitionHypothesis,
+                "VoiceIR": VoiceIR,
+                "VOICE_COMPILER": VoiceCompiler(),
+                "analyze_prosody": lambda *_args: (),
+                "SAMPLE_RATE": 16_000,
+            },
+        )
+        ns["refresh_glossary"]()
+
+        def dictate(text, edits=(), *, before="", bundle="com.slack",
+                    learn=True):
+            """Commit ``text`` after ``before`` the way the pipeline does,
+            script the user's later edits as (seconds, old, new), and run
+            the watcher. Returns the receipt the watcher was given."""
+            snapshot = ns["FocusSnapshot"](
+                element=object(), text=before, selection=(len(before), 0))
+            rec = SimpleNamespace(
+                insertion_lease=None, insertion_receipt=None, language="en")
+            ns["commit_insertion"](rec, text, bundle, snapshot)
+            receipt = ns["committed_paste_receipt"](
+                rec, snapshot, text, bundle, "capture",
+                f"event-{clock[0]}")
+            current = before + rec.committed_text
+            field["timeline"] = [(clock[0], current)]
+            for delay, old, new in edits:
+                current = current.replace(old, new, 1)
+                field["timeline"].append((clock[0] + delay, current))
+            if learn:
+                ns["learn_from_corrections"](receipt)
+            return receipt
+
+        def compiled(text, bundle="com.slack", engine="parakeet-unified"):
+            return ns["compile_voice_evidence"](
+                Recognition(text, confidence=0.9, engine=engine),
+                bundle=bundle)[1].text
+
+        return SimpleNamespace(
+            ns=ns, clock=clock, field=field, observed=observed,
+            dictate=dictate, compiled=compiled,
+            state=lambda: ns["load_learned"](),
+            snippets=lambda: json.loads(
+                (root / "snippets.json").read_text(encoding="utf-8")),
+        )
+
+    def test_correction_after_a_finished_sentence_is_learned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+
+            receipt = runtime.dictate(
+                "Ask Gwen about it.", [(3.0, "Gwen", "Qwen")],
+                before="First sentence.")
+            untouched = runtime.dictate(
+                "Then ship it.", before="First sentence. Ask Qwen about it.")
+
+            state = runtime.state()
+        # The paste joined itself to the sentence before it with a space, and
+        # the watcher has to expect that space instead of taking it for the
+        # user's first edit.
+        self.assertEqual(receipt.pasted, " Ask Gwen about it.")
+        self.assertEqual(list(state["confusions"]), ["gwen->qwen"])
+        self.assertEqual(runtime.observed, [
+            (" Ask Gwen about it.", " Ask Qwen about it."),
+            (untouched.pasted, untouched.pasted),
+        ])
+
+    def test_a_correction_typed_key_by_key_is_learned_whole(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+            # 150 ms per keystroke against the 200 ms poll: every poll during
+            # the edit sees a different half-typed word.
+            steps = ["kuberneti", "kubernet", "kuberne", "kubernet",
+                     "kubernete", "kubernetes"]
+            edits, last = [], "kubernetis"
+            for index, step in enumerate(steps):
+                edits.append((2.0 + 0.15 * index, last, step))
+                last = step
+            runtime.dictate("Ask Jon about the kubernetis rollout.", edits)
+            # Select the word and type over it.
+            runtime.dictate("Run Gwen locally.", [
+                (2.0, "Gwen", "Q"), (2.15, "Q", "Qw"),
+                (2.3, "Qw", "Qwe"), (2.45, "Qwe", "Qwen")])
+
+            state = runtime.state()
+        self.assertEqual(
+            sorted(state["confusions"]),
+            ["gwen->qwen", "kubernetis->kubernetes"])
+        self.assertEqual(sorted(state["counts"]), ["Qwen", "kubernetes"])
+        self.assertEqual(runtime.observed[0][1],
+                         "Ask Jon about the kubernetes rollout.")
+        self.assertEqual(runtime.observed[1][1], "Run Qwen locally.")
+
+    def test_a_confirmed_correction_rewrites_on_the_parakeet_engine(self):
+        codex, mail = "com.openai.codex", "com.apple.mail"
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+            fix = [(3.0, "Gwen", "Qwen")]
+
+            runtime.dictate("Run Gwen locally.", fix, bundle=codex)
+            once = runtime.compiled("Run Gwen locally.", codex)
+            runtime.dictate("Ask Gwen to rebase.", fix, bundle=codex)
+            # Every dictation reloads the lab from disk; so does this.
+            runtime.ns["refresh_glossary"]()
+            twice = {
+                (app, engine): runtime.compiled(
+                    "Run Gwen locally.", app, engine)
+                for app in (codex, mail)
+                for engine in ("parakeet-unified", "turbo", "tiny")}
+            runtime.dictate("Email Gwen today.", fix, bundle=mail)
+            runtime.ns["refresh_glossary"]()
+            thrice = {
+                app: runtime.compiled("Gwen is ready. Ask Gwen.", app)
+                for app in (codex, mail, "com.apple.Notes")}
+            for _ in range(2):
+                runtime.dictate(
+                    "Restart kubernetis now.",
+                    [(3.0, "kubernetis", "kubernetes")], bundle=codex)
+            ordinary = runtime.compiled(
+                "Kubernetis is down. Restart kubernetis.", codex)
+
+        self.assertEqual(once, "Run Gwen locally.")
+        for (app, engine), text in twice.items():
+            with self.subTest(app=app, engine=engine):
+                self.assertEqual(
+                    text,
+                    "Run Qwen locally." if app == codex
+                    else "Run Gwen locally.")
+        # The third correction promotes the mapping everywhere, and the app
+        # that taught it keeps it.
+        self.assertEqual(set(thrice.values()), {"Qwen is ready. Ask Qwen."})
+        self.assertEqual(ordinary, "Kubernetes is down. Restart kubernetes.")
+
+    def test_homophone_corrections_never_become_a_rule(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+
+            runtime.dictate("I think there car is outside.",
+                            [(3.0, "there", "their")])
+            runtime.dictate("Is there manager joining?",
+                            [(3.0, "there", "their")])
+            runtime.dictate("We can ship it today.",
+                            [(3.0, "can", "can't")])
+            runtime.dictate("We can make the release.",
+                            [(3.0, "can", "can't")])
+
+            state = runtime.state()
+            gloss = runtime.ns["GLOSS"]
+            for engine in ("parakeet-unified", "tiny"):
+                with self.subTest(engine=engine):
+                    self.assertEqual(
+                        runtime.compiled(
+                            "Is there a problem over there?", engine=engine),
+                        "Is there a problem over there?")
+                    self.assertEqual(
+                        runtime.compiled(
+                            "Yes, we can ship it today.", engine=engine),
+                        "Yes, we can ship it today.")
+            self.assertEqual(
+                runtime.ns["apply_vocabulary_casing"](
+                    "Their plan is fine. Their team agreed."),
+                "Their plan is fine. Their team agreed.")
+        self.assertEqual(state["confusions"], {})
+        self.assertEqual(state["counts"], {})
+        self.assertEqual(gloss["regression"].promoted, ())
+        self.assertIsNone(gloss["prompt"])
+        self.assertEqual(gloss["anchor_pack"].candidates, ())
+
+    def test_one_correction_does_not_promote_its_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+            gloss = runtime.ns["GLOSS"]
+
+            runtime.dictate("Run Gwen locally.", [(3.0, "Gwen", "Qwen")])
+            after_one = (gloss["prompt"], gloss["anchor_pack"].candidates,
+                         dict(gloss["vocabulary"]))
+            runtime.dictate("Ask Gwen to rebase.", [(3.0, "Gwen", "Qwen")])
+
+            self.assertEqual(after_one, (None, (), {}))
+            self.assertEqual(gloss["prompt"], "Common terms: Qwen.")
+            self.assertEqual(
+                [item.text for item in gloss["anchor_pack"].candidates],
+                ["Qwen"])
+
+    def test_a_promotion_count_left_by_an_old_correction_is_inert(self):
+        # Earlier versions set the target's count straight to the promotion
+        # threshold, so a learned.json in the field still holds these.
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(
+                directory, learned={"counts": {"their": 2, "The": 6}})
+            gloss = runtime.ns["GLOSS"]
+
+            self.assertIsNone(gloss["prompt"])
+            self.assertEqual(gloss["anchor_pack"].candidates, ())
+            self.assertEqual(
+                runtime.ns["apply_vocabulary_casing"](
+                    "Their plan is fine. the end."),
+                "Their plan is fine. the end.")
+
+    def test_reverting_a_learned_correction_demotes_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+            fix = [(3.0, "Mark", "Mary")]
+            runtime.dictate("Call Mark tomorrow.", fix)
+            runtime.dictate("Ask Mark about it.", fix)
+            learned = runtime.compiled("Call Mark tomorrow.")
+
+            # The mapping now writes "Mary"; the user changes it back.
+            runtime.dictate(learned, [(3.0, "Mary", "Mark")])
+            reverted = runtime.compiled("Call Mark tomorrow.")
+            runtime.dictate("Ping Mark later.", fix)
+            runtime.ns["refresh_glossary"]()
+            still = runtime.compiled("Call Mark tomorrow.")
+            state = runtime.state()
+
+        self.assertEqual(learned, "Call Mary tomorrow.")
+        self.assertEqual(reverted, "Call Mark tomorrow.")
+        self.assertEqual(still, "Call Mark tomorrow.")
+        # The revert is not learned as the opposite rule.
+        self.assertEqual(list(state["confusions"]), ["mark->mary"])
+        self.assertEqual(
+            runtime.compiled("Call Mary tomorrow."), "Call Mary tomorrow.")
+
+    def test_unedited_pastes_count_against_a_candidate_correction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+            fix = [(3.0, "Mark", "Mary")]
+            runtime.dictate("Call Mark tomorrow.", fix)
+            # Twice the heard word is pasted and left alone for the whole
+            # correction window.
+            runtime.dictate("Mark is on call.")
+            runtime.dictate("Thank Mark for me.")
+            runtime.dictate("Ask Mark about it.", fix)
+            held = runtime.compiled("Call Mark tomorrow.")
+            kept = runtime.state()["confusions"]["mark->mary"]["kept"]
+            runtime.dictate("Ping Mark later.", fix)
+            active = runtime.compiled("Call Mark tomorrow.")
+
+        self.assertEqual(kept, {"com.slack": 2})
+        self.assertEqual(held, "Call Mark tomorrow.")
+        self.assertEqual(active, "Call Mary tomorrow.")
+
+    def test_destination_edit_of_a_snippet_is_only_a_suggestion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+            ns, clock, field = runtime.ns, runtime.clock, runtime.field
+            (Path(directory) / "snippets.json").write_text(json.dumps({
+                "email": "john@example.com",
+                "bank details": "GB29 NWBK 6016 1331 9268 19",
+            }))
+
+            def insert(name, before, edits=()):
+                """Paste a saved snippet after ``before`` and run the
+                observer over the scripted (seconds, old, new) edits."""
+                snippet = runtime.snippets()[name]
+                ns["focused_snapshot"] = lambda: ns["FocusSnapshot"](
+                    element=object(), text=before,
+                    selection=(len(before), 0))
+                rec = SimpleNamespace(
+                    insertion_lease=None, insertion_receipt=None,
+                    language="en")
+                started = []
+                receipt = ns["paste_snippet_and_watch"](
+                    name, snippet, "com.google.Chrome", "capture",
+                    starter=lambda target, args:
+                        started.append((target, args)),
+                    rec=rec)
+                current = before + rec.committed_text
+                field["timeline"] = [(clock[0], current)]
+                for delay, old, new in edits:
+                    current = current.replace(old, new, 1)
+                    field["timeline"].append((clock[0] + delay, current))
+                target, args = started[0]
+                target(*args)
+                return receipt
+
+            # Pasted after "Email:" the snippet gains a joining space. Left
+            # alone, that space must not come back as an edit of the snippet.
+            receipt = insert("email", "Email:")
+            self.assertEqual(receipt.pasted, " john@example.com")
+            self.assertEqual(runtime.state()["snippet_edits"], {})
+
+            # A field that reformats its own content, or a user fixing the
+            # address: either way the saved snippet is not rewritten.
+            insert("email", "Email:", [(0.5, "john@", "jon@")])
+            insert("bank details", "",
+                   [(0.5, "GB29 NWBK 6016 1331 9268 19",
+                     "GB33 EVIL 0000 0000 0000 00")])
+            self.assertEqual(runtime.snippets(), {
+                "email": "john@example.com",
+                "bank details": "GB29 NWBK 6016 1331 9268 19",
+            })
+            self.assertEqual(runtime.state()["snippet_edits"]["email"], {
+                "from": "john@example.com", "to": "jon@example.com",
+                "n": 0, "app": "com.google.Chrome", "pending": True,
+            })
+
+            # The user accepts one suggestion by name and dismisses the other.
+            self.assertTrue(ns["apply_pending_snippet_edit"]("email"))
+            self.assertFalse(ns["apply_pending_snippet_edit"]("email"))
+            self.assertTrue(ns["forget_snippet_edit"]("bank details"))
+            self.assertFalse(ns["apply_pending_snippet_edit"]("bank details"))
+            self.assertEqual(runtime.snippets(), {
+                "email": "jon@example.com",
+                "bank details": "GB29 NWBK 6016 1331 9268 19",
+            })
+            applied = runtime.state()
+            self.assertEqual(applied["snippet_edits"], {"email": {
+                "from": "john@example.com", "to": "jon@example.com",
+                "n": 1, "app": "com.google.Chrome",
+            }})
+            # Nothing in history repeats a snippet's text.
+            self.assertNotIn("example.com", json.dumps(applied["history"]))
+            self.assertNotIn("GB", json.dumps(applied["history"]))
+
+    def test_a_stale_snippet_suggestion_is_dropped_not_applied(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+            ns = runtime.ns
+            snippets = Path(directory) / "snippets.json"
+            snippets.write_text(json.dumps({"email": "john@example.com"}))
+            self.assertTrue(ns["suggest_snippet_edit"](
+                "email", "john@example.com", "jon@example.com", "com.slack"))
+            # The user edits the snippet in Settings before deciding.
+            snippets.write_text(json.dumps({"email": "j.doe@example.com"}))
+
+            self.assertFalse(ns["apply_pending_snippet_edit"]("email"))
+
+            self.assertEqual(
+                runtime.snippets(), {"email": "j.doe@example.com"})
+            self.assertEqual(runtime.state()["snippet_edits"], {})
+
     def test_snippet_edit_is_persisted_and_exposed_as_learning(self):
         ns = load_definitions(
             "load_learned", "save_learned", "save_snippet_edit",
@@ -4750,12 +5175,13 @@ class LearningTests(unittest.TestCase):
         events = []
         receipt = SimpleNamespace(pasted="EDIT ME: your street address")
         ns = load_definitions(
-            "paste_snippet_and_watch",
+            "paste_snippet_and_watch", "committed_paste_receipt",
             extra={
                 "threading": threading,
                 "focused_snapshot": lambda: events.append("snapshot") or
                     "focus",
-                "make_paste_receipt": lambda snapshot, pasted, bundle, mode:
+                "make_paste_receipt":
+                    lambda snapshot, pasted, bundle, mode, event_id="":
                     receipt if snapshot == "focus" else None,
                 "paste": lambda text: events.append(("paste", text)),
                 "learn_snippet_edit": lambda name, value:
@@ -4773,16 +5199,17 @@ class LearningTests(unittest.TestCase):
         self.assertEqual(events[0], "snapshot")
         self.assertEqual(events[1], ("paste", "EDIT ME: your street address"))
         self.assertEqual(events[2][0], "start")
-        self.assertEqual(events[2][2], ("address", receipt))
+        self.assertEqual(events[2][2], (
+            "address", receipt, "EDIT ME: your street address"))
 
-    def test_snippet_observer_saves_the_revised_insertion(self):
+    def test_snippet_observer_suggests_the_revised_insertion(self):
         saved = []
         ns = load_definitions(
             "learn_snippet_edit",
             extra={
                 "observe_paste_outcome": lambda _receipt:
                     "7623 Opal Ridge Lane, Bainbridge Island, 98110 WA",
-                "save_snippet_edit": lambda name, old, new, bundle:
+                "suggest_snippet_edit": lambda name, old, new, bundle:
                     saved.append((name, old, new, bundle)) or True,
             },
         )
@@ -4839,6 +5266,8 @@ class LearningTests(unittest.TestCase):
         ns = load_definitions(
             "load_learned", "save_learned", "observe_paste_outcome",
             "personal_regression_lab", "learn_from_corrections",
+            "_learned_count",
+            assignments={"CORRECTION_STABLE_POLLS"},
             extra={
                 "Path": Path,
                 "PasteReceipt": object,
@@ -4860,7 +5289,15 @@ class LearningTests(unittest.TestCase):
                 "PERSONAL_GLOBAL_MIN_COUNT": 3,
             },
         )
-        values = iter(["Hello Gwen world", "Hello Qwen world", ""])
+        # The correction is made at once, holds for a second, and the chat
+        # composer is then cleared by the user submitting the message.
+        def corrected_then_submitted():
+            started = elapsed[0]
+            return lambda _element: (
+                "Hello Gwen world" if elapsed[0] == started
+                else "Hello Qwen world" if elapsed[0] - started < 1.5
+                else "")
+
         with tempfile.TemporaryDirectory() as td:
             learned = Path(td) / "learned.json"
             ns.update({
@@ -4870,7 +5307,7 @@ class LearningTests(unittest.TestCase):
                 "CORRECTION_POLL_INTERVAL": 0.2,
                 "CORRECTION_MAX_LEARN": 3,
                 "PROMOTE_MIN_COUNT": 2,
-                "_ax_text": lambda _element: next(values),
+                "_ax_text": corrected_then_submitted(),
             })
             receipt = SimpleNamespace(
                 element=object(),
@@ -4885,11 +5322,11 @@ class LearningTests(unittest.TestCase):
             ns["learn_from_corrections"](receipt)
 
             below_threshold = json.loads(learned.read_text())
-            values = iter(["Hello Gwen world", "Hello Qwen world"])
+            ns["_ax_text"] = corrected_then_submitted()
             ns["learn_from_corrections"](receipt)
 
             state = json.loads(learned.read_text())
-            values = iter(["Hello Gwen world", "Hello Qwen world"])
+            ns["_ax_text"] = corrected_then_submitted()
             ns["learn_from_corrections"](receipt)
             global_state = json.loads(learned.read_text())
         self.assertEqual(observed, ["Qwen", "Qwen", "Qwen"])
@@ -4916,6 +5353,7 @@ class LearningTests(unittest.TestCase):
     def test_correction_is_observed_before_chat_composer_clears(self):
         ns = load_definitions(
             "observe_paste_outcome",
+            assignments={"CORRECTION_STABLE_POLLS"},
             extra={
                 "PasteReceipt": object,
                 "infer_revised_insertion": infer_revised_insertion,
@@ -4927,25 +5365,91 @@ class LearningTests(unittest.TestCase):
             selection=(6, 0),
             pasted="Gwen",
         )
-        values = iter(["Hello Gwen world", "Hello Qwen world", ""])
         elapsed = [0.0]
 
-        observed = ns["observe_paste_outcome"](
-            receipt,
-            timeout=10.0,
-            poll_interval=0.2,
-            reader=lambda _element: next(values),
-            clock=lambda: elapsed[0],
-            sleeper=lambda seconds: elapsed.__setitem__(
-                0, elapsed[0] + seconds),
-        )
+        def observe(field_at):
+            elapsed[0] = 0.0
+            return ns["observe_paste_outcome"](
+                receipt,
+                timeout=10.0,
+                poll_interval=0.2,
+                reader=lambda _element: field_at(elapsed[0]),
+                clock=lambda: elapsed[0],
+                sleeper=lambda seconds: elapsed.__setitem__(
+                    0, elapsed[0] + seconds),
+            )
 
+        # Corrected, left alone for a second, then submitted: the composer
+        # clears, and the settled correction is still reported, early.
+        observed = observe(lambda at: (
+            "Hello Gwen world" if at < 0.2
+            else "Hello Qwen world" if at < 1.5 else ""))
         self.assertEqual(observed, "Qwen")
         self.assertLess(elapsed[0], 10.0)
+        # Submitted in the middle of retyping the word: the last read before
+        # the composer cleared was half a word, and it is not reported.
+        self.assertIsNone(observe(lambda at: (
+            "Hello Gwen world" if at < 0.2
+            else "Hello Gw world" if at < 0.4
+            else "Hello Qw world" if at < 0.6 else "")))
+
+    def test_only_a_settled_edit_of_the_pasted_range_is_reported(self):
+        ns = load_definitions(
+            "observe_paste_outcome",
+            assignments={"CORRECTION_STABLE_POLLS"},
+            extra={"PasteReceipt": object},
+        )
+        document = "lorem ipsum dolor sit amet " * 800
+        pasted = " Ask Gwen about it."
+        receipt = SimpleNamespace(
+            element=object(), before=document,
+            selection=(len(document), 0), pasted=pasted)
+        elapsed = [0.0]
+        compared = []
+
+        def infer(before, selection, text, current):
+            compared.append(len(before) + len(current))
+            return infer_revised_insertion(before, selection, text, current)
+
+        ns["infer_revised_insertion"] = infer
+
+        def observe(field_at):
+            elapsed[0] = 0.0
+            return ns["observe_paste_outcome"](
+                receipt,
+                reader=lambda _element: field_at(elapsed[0]),
+                timeout=10.0, poll_interval=0.2,
+                clock=lambda: elapsed[0],
+                sleeper=lambda seconds: elapsed.__setitem__(
+                    0, elapsed[0] + seconds),
+            )
+
+        # The user keeps typing after the paste for the whole window. The
+        # pasted range itself never changes, so that is a zero-edit paste,
+        # and no poll compares more than the range and a bounded tail.
+        typed = " and then some more typing that goes on for a while"
+        self.assertEqual(
+            observe(lambda at: document + pasted
+                    + typed[:int(at * 5) % len(typed)]),
+            pasted)
+        self.assertTrue(compared)
+        self.assertLess(max(compared), 600)
+        # An edit still in progress when the window closes is not reported
+        # as anything, least of all as an unchanged paste.
+        self.assertIsNone(observe(lambda at: (
+            document + pasted if at < 9.7
+            else document + " Ask Gw about it.")))
+        # An edit that settled and was then taken back is a zero-edit paste.
+        self.assertEqual(
+            observe(lambda at: (
+                document + " Ask Qwen about it." if 2.0 <= at < 5.0
+                else document + pasted)),
+            pasted)
 
     def test_cleared_chat_composer_is_not_reported_as_unchanged(self):
         ns = load_definitions(
             "observe_paste_outcome",
+            assignments={"CORRECTION_STABLE_POLLS"},
             extra={
                 "PasteReceipt": object,
                 "infer_revised_insertion": infer_revised_insertion,
@@ -8654,8 +9158,9 @@ class CorrectionLearningUndoSuppressionTests(unittest.TestCase):
     def namespace(self, undone, *, revised="Hello Qwen world"):
         recorded = []
         return load_definitions(
-            "learn_from_corrections",
+            "learn_from_corrections", "_learned_count",
             extra={
+                "PersonalRegressionLab": PersonalRegressionLab,
                 "observe_paste_outcome": lambda _receipt: revised,
                 "record_paste_outcome":
                     lambda *args: recorded.append(args),
@@ -8673,6 +9178,8 @@ class CorrectionLearningUndoSuppressionTests(unittest.TestCase):
                     "history": [], "regression_lab": {}},
                 "save_learned": lambda _state: None,
                 "personal_regression_lab": lambda _state: SimpleNamespace(
+                    promoted=(),
+                    record_revert=lambda *_a, **_k: False,
                     record_correction=lambda *_a, **_k: None,
                     propose=lambda *_a, **_k: SimpleNamespace(passed=True),
                     to_dict=lambda: {}),

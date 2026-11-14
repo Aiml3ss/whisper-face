@@ -383,7 +383,9 @@ class SettingsSnapshotTests(unittest.TestCase):
                     "confusions": {
                         "gwen": {"from": "Gwen", "to": "Qwen", "n": "bad"}},
                     "snippet_edits": {
-                        "signature": {"to": "Cheers", "n": 2}},
+                        "signature": {"to": "Cheers", "n": 2},
+                        "address": {"to": "7623 Opal Ridge Lane", "n": 0,
+                                    "pending": True}},
                 },
             )
             snapshot = ns["gui_settings_snapshot"]()
@@ -400,6 +402,12 @@ class SettingsSnapshotTests(unittest.TestCase):
             self.assertEqual(
                 snapshot["corrections"][1]["global_decision"], "learning")
             self.assertEqual(snapshot["corrections"][1]["app_scopes"], [])
+            # An observed snippet edit the user has not applied is not
+            # reported as saved.
+            self.assertEqual(
+                [(row["key"], row["global_decision"])
+                 for row in snapshot["corrections"] if row["kind"] == "snippet"],
+                [("signature", "saved"), ("address", "pending")])
 
     def test_snapshot_projects_scope_decisions_without_private_cases(self):
         lab = PersonalRegressionLab()

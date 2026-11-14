@@ -5449,7 +5449,8 @@ def gui_settings_snapshot() -> dict:
                 "key": name, "source": f"Snippet: {name}",
                 "target": target, "count": safe_count(info.get("n")),
                 "kind": "snippet",
-                "global_decision": "saved",
+                "global_decision": (
+                    "pending" if info.get("pending") else "saved"),
                 "app_scopes": [],
             })
     corrections.sort(key=lambda item: (-item["count"], item["source"].casefold()))
@@ -6341,7 +6342,8 @@ def refresh_glossary():
     )
     promoted = []
     for term, count in learned_sorted:
-        if count >= PROMOTE_MIN_COUNT and term.casefold() not in seen:
+        if (count >= PROMOTE_MIN_COUNT and term.casefold() not in seen
+                and not PersonalRegressionLab.is_common_word(term)):
             promoted.append(term)
             seen.add(term.casefold())
 
@@ -8380,6 +8382,63 @@ def save_snippet_edit(name: str, old: str, new: str, bundle: str) -> bool:
     return True
 
 
+def suggest_snippet_edit(name: str, old: str, new: str, bundle: str) -> bool:
+    """Record an observed edit of a pasted snippet as a pending suggestion.
+
+    The destination application can produce the edit as easily as the user
+    can (an input mask, a page that reformats its own field), so an
+    observation never rewrites a saved snippet. It waits in ``snippet_edits``
+    until ``apply_pending_snippet_edit`` or ``forget_snippet_edit``.
+    """
+    if not new.strip() or new == old or len(new) > 4000:
+        return False
+    with SNIPPETS_LOCK:
+        try:
+            snippets = json.loads(SNIPPETS_FILE.read_text())
+        except Exception as error:
+            print("! snippets.json unreadable while noting edit "
+                  f"({type(error).__name__})")
+            return False
+        if not isinstance(snippets, dict) or snippets.get(name) != old:
+            return False
+        with LEARN_LOCK:
+            state = load_learned()
+            prior = state["snippet_edits"].get(name, {})
+            state["snippet_edits"][name] = {
+                "from": old,
+                "to": new,
+                "n": int(prior.get("n", 0)),
+                "app": bundle,
+                "pending": True,
+            }
+            save_learned(state)
+    print("[learn] snippet edit suggested")
+    return True
+
+
+def apply_pending_snippet_edit(name: str) -> bool:
+    """Apply the pending suggested edit of one snippet, by snippet name.
+
+    A suggestion made against text the snippet no longer has is dropped
+    instead of applied.
+    """
+    with LEARN_LOCK:
+        info = load_learned()["snippet_edits"].get(name)
+    if not isinstance(info, dict) or not info.get("pending"):
+        return False
+    old, new = info.get("from"), info.get("to")
+    if (isinstance(old, str) and isinstance(new, str)
+            and save_snippet_edit(name, old, new, str(info.get("app", "")))):
+        return True
+    with LEARN_LOCK:
+        state = load_learned()
+        current = state["snippet_edits"].get(name)
+        if isinstance(current, dict) and current.get("pending"):
+            state["snippet_edits"].pop(name)
+            save_learned(state)
+    return False
+
+
 def forget_snippet_edit(name: str) -> bool:
     """Forget one learned snippet edit, restoring it only if still current."""
     with SNIPPETS_LOCK:
@@ -9439,64 +9498,121 @@ def record_paste_outcome(receipt: PasteReceipt, observed_text: str) -> bool:
     return False
 
 
+def _learned_count(value) -> int:
+    """A stored evidence count, tolerant of a hand-edited learned.json."""
+    return value if isinstance(value, int) and value > 0 else 0
+
+
+def committed_paste_receipt(rec, snapshot: FocusSnapshot | None,
+                            text: str, bundle: str, mode: str,
+                            event_id: str = "") -> PasteReceipt | None:
+    """Receipt for the string that reached the field, not the one handed in.
+
+    ``commit_insertion`` may put a joining separator in front of ``text``.
+    A receipt that leaves it out makes the watcher take that separator for
+    the user's first edit.
+    """
+    committed = getattr(rec, "committed_text", None) or text
+    return make_paste_receipt(snapshot, committed, bundle, mode, event_id)
+
+
+# Consecutive identical reads of the pasted range, about a second, before
+# its value counts as something the user settled on.
+CORRECTION_STABLE_POLLS = 5
+
+
 def observe_paste_outcome(receipt: PasteReceipt, timeout=None,
                           poll_interval=None, reader=None, clock=None,
-                          sleeper=None) -> str | None:
-    """Return the first safe correction before a transient field disappears.
+                          sleeper=None, stable_polls=None) -> str | None:
+    """Return what the pasted range settled to during the correction window.
 
-    Chat composers are commonly cleared as soon as the user submits. Polling
-    throughout the correction window preserves a correction made just before
-    submission; an unchanged paste is reported only when it is still present
-    at the end of the window.
+    A poll almost always lands in the middle of an edit, so one changed read
+    is never a correction. The range has to read the same for
+    ``stable_polls`` consecutive polls; the last value that did is returned
+    when the window ends or the field goes away (chat composers are cleared
+    on submit). An unchanged paste is reported only while it is still present
+    at the end of the window. None means nothing safe was observed.
     """
     timeout = CORRECTION_DELAY if timeout is None else max(0.0, float(timeout))
     poll_interval = CORRECTION_POLL_INTERVAL if poll_interval is None \
         else max(0.01, float(poll_interval))
+    stable_polls = CORRECTION_STABLE_POLLS if stable_polls is None \
+        else max(1, int(stable_polls))
     reader = reader or _ax_text
     clock = clock or time.monotonic
     sleeper = sleeper or time.sleep
     start, length = receipt.selection
     if start < 0 or length < 0 or start + length > len(receipt.before):
         return None
-    expected = (receipt.before[:start] + receipt.pasted
-                + receipt.before[start + length:])
-    deadline = clock() + timeout
+    prefix = receipt.before[:start]
+    suffix = receipt.before[start + length:]
+    pasted = receipt.pasted
+    # Only the pasted range is ever compared. With nothing after it, text
+    # typed past the paste is bounded so a long document is not re-diffed.
+    reach = len(pasted) + max(256, len(pasted))
 
+    def pasted_range(current):
+        if not current or current == receipt.before \
+                or not current.startswith(prefix):
+            return None
+        body = current[len(prefix):]
+        if suffix:
+            if not body.endswith(suffix):
+                return None
+            return body[:len(body) - len(suffix)]
+        if body == pasted:
+            return pasted
+        revised = infer_revised_insertion("", (0, 0), pasted, body[:reach])
+        return pasted if revised is None else revised
+
+    deadline = clock() + timeout
+    previous = unread = object()
+    value = last = settled = None
+    streak = absent = 0
     while True:
         current = reader(receipt.element)
-        if current and current not in {receipt.before, expected}:
-            revised = infer_revised_insertion(
-                receipt.before,
-                receipt.selection,
-                receipt.pasted,
-                current,
-            )
-            if revised is not None:
-                return revised
+        if previous is unread or current != previous:
+            previous = current
+            value = pasted_range(current)
+        if value is not None and value == last:
+            streak += 1
+        else:
+            last, streak = value, int(value is not None)
+        if streak >= stable_polls:
+            settled = value
+        absent = 0 if current else absent + 1
         remaining = deadline - clock()
-        if remaining <= 0:
-            return receipt.pasted if current == expected else None
+        if remaining <= 0 or absent >= stable_polls:
+            if settled is not None and settled != pasted:
+                return settled
+            return pasted if settled == pasted and value == pasted else None
         sleeper(min(poll_interval, remaining))
 
 
 @with_cocoa_pool
-def learn_snippet_edit(name: str, receipt: PasteReceipt):
-    """Turn a user's in-place edit of a pasted snippet into its saved value.
+def learn_snippet_edit(name: str, receipt: PasteReceipt,
+                       snippet: str | None = None):
+    """Offer a settled in-place edit of a pasted snippet as its new value.
 
     Same Accessibility polling loop as ``learn_from_corrections``, on its own
-    thread, so it owns a pool too.
+    thread, so it owns a pool too. ``snippet`` is the stored text; the receipt
+    holds what was pasted, which may start with a joining separator.
     """
     revised = observe_paste_outcome(receipt)
     if revised is None or revised == receipt.pasted:
         return
-    save_snippet_edit(name, receipt.pasted, revised, receipt.bundle)
+    stored = receipt.pasted if snippet is None else snippet
+    if receipt.pasted.endswith(stored):
+        joined = receipt.pasted[:len(receipt.pasted) - len(stored)]
+        if joined and revised.startswith(joined):
+            revised = revised[len(joined):]
+    suggest_snippet_edit(name, stored, revised, receipt.bundle)
 
 
 def paste_snippet_and_watch(name: str, snippet: str, bundle: str, mode: str,
                             starter=None, rec=None) -> PasteReceipt | None:
     """Paste a snippet after capturing the field needed to learn its edit."""
     snapshot = focused_snapshot()
-    receipt = make_paste_receipt(snapshot, snippet, bundle, mode)
     if rec is None:
         paste(snippet)
     else:
@@ -9504,17 +9620,18 @@ def paste_snippet_and_watch(name: str, snippet: str, bundle: str, mode: str,
         if (integrity is not None
                 and integrity.state != ReceiptState.VERIFIED):
             return None
+    receipt = committed_paste_receipt(rec, snapshot, snippet, bundle, mode)
     if receipt is None:
         print("! [snippet] cannot observe edits in this field")
         return None
     if starter is None:
         threading.Thread(
             target=learn_snippet_edit,
-            args=(name, receipt),
+            args=(name, receipt, snippet),
             daemon=True,
         ).start()
     else:
-        starter(learn_snippet_edit, (name, receipt))
+        starter(learn_snippet_edit, (name, receipt, snippet))
     return receipt
 
 
@@ -9543,14 +9660,34 @@ def learn_from_corrections(receipt: PasteReceipt | None):
         print("[learn] skipped: insertion was undone")
         return
     record_paste_outcome(receipt, revised)
+
+    def strip(word):
+        return word.strip(",.;:!?\"'()[]")
+
     if revised == receipt.pasted:
+        # A paste left alone is evidence against every candidate mapping
+        # whose heard word it contains: the word was right as recognized.
+        left_alone = {strip(word).casefold() for word in revised.split()}
+        with LEARN_LOCK:
+            state = load_learned()
+            counted = False
+            for info in state["confusions"].values():
+                if not isinstance(info, dict) \
+                        or str(info.get("from", "")).casefold() \
+                        not in left_alone:
+                    continue
+                kept = info.get("kept")
+                if not isinstance(kept, dict):
+                    kept = info["kept"] = {}
+                kept[receipt.bundle] = _learned_count(
+                    kept.get(receipt.bundle)) + 1
+                counted = True
+            if counted:
+                save_learned(state)
         return
     p_words, c_words = receipt.pasted.split(), revised.split()
     if not p_words or not c_words:
         return
-
-    def strip(word):
-        return word.strip(",.;:!?\"'()[]")
 
     learned = []
     sm = difflib.SequenceMatcher(None, [w.casefold() for w in p_words],
@@ -9566,7 +9703,9 @@ def learn_from_corrections(receipt: PasteReceipt | None):
             ratio = correction_similarity(old, new)
             clean = new.replace("-", "").replace("'", "")
             # similar-but-different, word-shaped: a respelling, not a rewrite
-            if 0.4 <= ratio < 1.0 and clean.isalnum() and 2 <= len(new) <= 30:
+            if (0.4 <= ratio < 1.0 and clean.isalnum() and 2 <= len(new) <= 30
+                    and not PersonalRegressionLab.remaps_common_words(
+                        old, new)):
                 learned.append((old, new))
 
     if not learned:
@@ -9580,14 +9719,22 @@ def learn_from_corrections(receipt: PasteReceipt | None):
         changed = False
         for correction_index, (old, term) in enumerate(
                 learned[:CORRECTION_MAX_LEARN]):
-            # dictionary: the corrected spelling is a strong signal
+            # Changing an active mapping's output back to the heard word is
+            # evidence against that mapping, not a new mapping the other way.
+            if regression.record_revert(
+                    term, old, app=receipt.bundle or None):
+                state["regression_lab"] = regression.to_dict()
+                changed = True
+                print("[learn] correction reverted; mapping held back")
+                continue
+            # dictionary: each correction is one observation of the spelling,
+            # so a single edit never promotes a term on its own
             if term.casefold() not in known \
-                    and state["counts"].get(term, 0) < PROMOTE_MIN_COUNT:
-                state["counts"][term] = PROMOTE_MIN_COUNT
+                    and not PersonalRegressionLab.is_common_word(term):
+                state["counts"][term] = _learned_count(
+                    state["counts"].get(term)) + 1
                 changed = True
                 print("[learn] correction observed for dictionary")
-            # fix rule: the same old->new correction seen twice becomes a
-            # deterministic post-ASR replacement
             key = old.casefold()
             fix = state["fixes"].get(key, {"to": term, "n": 0})
             if fix["to"].casefold() == term.casefold():
@@ -9610,18 +9757,28 @@ def learn_from_corrections(receipt: PasteReceipt | None):
             apps = confusion.setdefault("apps", {})
             apps[receipt.bundle] = int(apps.get(receipt.bundle, 0)) + 1
             state["confusions"][confusion_key] = confusion
+            active_before = regression.promoted
             regression.record_correction(
                 old, term, app=receipt.bundle or None)
+            kept = confusion.get("kept")
+            kept = kept if isinstance(kept, dict) else {}
             if (receipt.bundle
                     and apps[receipt.bundle] >= PERSONAL_APP_MIN_COUNT):
                 result = regression.propose(
-                    old, term, app=receipt.bundle)
+                    old, term, app=receipt.bundle,
+                    corrected=apps[receipt.bundle],
+                    kept=_learned_count(kept.get(receipt.bundle)))
                 if not result.passed:
                     print("[learn] app prior quarantined")
             if confusion["n"] >= PERSONAL_GLOBAL_MIN_COUNT:
-                result = regression.propose(old, term)
+                result = regression.propose(
+                    old, term, corrected=confusion["n"],
+                    kept=sum(_learned_count(count)
+                             for count in kept.values()))
                 if not result.passed:
                     print("[learn] global prior quarantined")
+            if set(regression.promoted) - set(active_before):
+                print("[learn] fix rule active")
             state["regression_lab"] = regression.to_dict()
             state["history"].append({
                 "ts": time.time(),
@@ -9632,8 +9789,6 @@ def learn_from_corrections(receipt: PasteReceipt | None):
                 "mode": receipt.mode,
             })
             state["history"] = state["history"][-100:]
-            if fix["n"] == PERSONAL_GLOBAL_MIN_COUNT:
-                print("[learn] fix rule active")
             if isinstance(event_id, str) and event_id:
                 accepted_keywords.append(
                     (term, f"{event_id}:{correction_index}"))
@@ -11443,14 +11598,14 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         else:
             insertion_target = focused_snapshot() if learn_correction else None
         event_id = rec.utterance_id or f"{time.time_ns():x}-{id(rec):x}"
-        receipt = make_paste_receipt(
-            insertion_target, text, bundle, rec.mode, event_id) \
-            if learn_correction else None
         phase = "insertion"
         insertion_started_at = time.perf_counter()
         integrity_receipt = commit_insertion(
             rec, text, bundle, insertion_target)
         t_insert = time.perf_counter() - insertion_started_at
+        receipt = committed_paste_receipt(
+            rec, insertion_target, text, bundle, rec.mode, event_id) \
+            if learn_correction else None
         # Insertion is already terminal before any audio is copied. Playback
         # retention is strictly optional and failures cannot affect the paste.
         retain_consequence_microspans(
