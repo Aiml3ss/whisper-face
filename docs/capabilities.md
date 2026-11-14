@@ -127,8 +127,9 @@ Qwen3.5-4B, and has no Parakeet.
   the recognizer and protect words but never replace a recognized word. Other
   on-screen text (the selection, the open document, the repository, the
   focused field, the clipboard) can only *repair a name*: the recognizer
-  must have been unsure of the word (confidence 0.70 or lower) and must
-  itself have written it as a name or identifier — capitalized in the middle
+  must have been unsure of the take (confidence 0.70 or lower, scored for the
+  whole utterance, not per word) and must itself have written the word as a
+  name or identifier — capitalized in the middle
   of a sentence, or containing a digit, an underscore, or an inner capital —
   and the on-screen term must sound like it. So a visible "Qwen" repairs "Ask
   Gwen to review it." What it cannot do: replace or introduce a common word

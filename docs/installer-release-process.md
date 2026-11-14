@@ -131,7 +131,8 @@ carry the same *subset* of that list as each other: the tests that hold on a
 Windows host. They deliberately omit gates that assert a macOS-only runtime
 path — the AppKit smoke command, the whole-program harness
 (`tests/test_whole_program.py`, which boots the macOS runtime path of
-`dictate.py` on a fake Mac), the Whisper/Parakeet verifier adapters, the
+`dictate.py` on a fake Mac and replays the recorded recognizer transcripts
+through it), the Whisper/Parakeet verifier adapters, the
 networkless worker, the point-and-speak snapshot, the voice-object and
 relisten seams — because a Windows runner cannot execute what they describe.
 Do not add a gate to the Windows workflow without first confirming it passes
