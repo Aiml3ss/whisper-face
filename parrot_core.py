@@ -34,7 +34,31 @@ DISCOURSE_FILLER_RE = re.compile(
 AMBIGUOUS_FILLER_RE = re.compile(r"\b(?:you know|I mean)\b", re.I)
 LITERAL_FILLER_RE = re.compile(
     r"\b(?:phrase|words?|expression)\s+(?:you know|I mean)\b", re.I)
-STRUCTURE_RE = re.compile(r"\bnew (line|paragraph)\b", re.I)
+STRUCTURE_RE = re.compile(r"\bnew[ \t]+(line|paragraph)\b", re.I)
+# "a new line of products" and "add new line items" are prose. A word on
+# either side that makes the phrase a noun keeps it literal.
+STRUCTURE_LITERAL_BEFORE = frozenset({
+    "a", "an", "the", "this", "that", "another", "each", "every", "one",
+    "per", "brand", "whole", "our", "my", "your", "his", "her", "their",
+    "its",
+})
+STRUCTURE_LITERAL_AFTER = frozenset({
+    "of", "item", "items", "character", "characters", "break", "breaks",
+    "feed",
+})
+SCRATCH_RE = re.compile(r"\bscratch[ \t]+that\b", re.I)
+# "let's scratch that idea" uses the words as a verb. These are the words
+# that put a subject or an auxiliary directly in front of it.
+SCRATCH_LITERAL_BEFORE = frozenset({
+    "to", "let's", "let’s", "lets", "i", "we", "you", "they", "he", "she",
+    "should", "could", "would", "can", "will", "must", "might", "just",
+    "not", "never",
+})
+# Punctuation ends a clause only where it ends a written item, so the comma
+# in "1,500" and the point in "$3.50" are never boundaries.
+SENTENCE_BOUNDARY_RE = re.compile(r"[.!?…](?=\s|$)|\n")
+CLAUSE_BOUNDARY_RE = re.compile(r"[.!?…,;](?=\s|$)|—|\n")
+
 NUMBER_WORDS = frozenset({
     "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
     "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
@@ -379,6 +403,38 @@ def normalize_spacing(text: str, spaced: bool = True) -> str:
     return text.strip()
 
 
+def _adjacent_word(text: str, *, before: bool) -> str:
+    """The word touching a position with only spaces between, casefolded."""
+    match = re.search(r"([A-Za-z'’]+)[ \t]+$", text) if before \
+        else re.match(r"[ \t]+([A-Za-z'’]+)", text)
+    return match.group(1).casefold() if match else ""
+
+
+def _expand_spoken_structure(text: str) -> str:
+    """Turn spoken "new line" / "new paragraph" into line breaks.
+
+    A recognizer hears the pause around a command as punctuation ("approved.
+    New line. Second"), so the command takes its own trailing mark and a
+    comma or dash in front of it. The sentence terminator before it stays.
+    """
+    out: list[str] = []
+    cursor = 0
+    for match in STRUCTURE_RE.finditer(text):
+        head, tail = text[cursor:match.start()], text[match.end():]
+        if (_adjacent_word(head, before=True) in STRUCTURE_LITERAL_BEFORE
+                or _adjacent_word(tail, before=False)
+                in STRUCTURE_LITERAL_AFTER
+                or tail[:1] in ("-", "_", "/")):
+            continue
+        lead = re.search(r"(?:[ \t]*[,;—–]|[ \t]+-)?[ \t]*$", head)
+        trail = re.match(r"[ \t]*(?:[.,;:!?]+|[—–])?[ \t]*", tail)
+        out.append(head[:lead.start()])
+        out.append("\n" if match.group(1).casefold() == "line" else "\n\n")
+        cursor = match.end() + trail.end()
+    out.append(text[cursor:])
+    return "".join(out)
+
+
 def _unit_key(unit: str | None) -> str:
     key = re.sub(r"[.'’]", "", (unit or "").casefold())
     return key[:-1] if len(key) > 2 and key.endswith("s") else key
@@ -459,15 +515,59 @@ def find_self_correction(text: str) -> tuple[int, int, str] | None:
     return None
 
 
+def _resolve_scratch_that(text: str) -> tuple[str, bool]:
+    """Apply the last spoken "scratch that"; returns (text, unresolved).
+
+    ``unresolved`` means the command was heard but how much to remove could
+    not be decided, so the source is kept for semantic cleanup.
+    """
+    command = None
+    for match in SCRATCH_RE.finditer(text):
+        subject = _adjacent_word(text[:match.start()], before=True)
+        if subject not in SCRATCH_LITERAL_BEFORE and not subject.endswith(
+                ("'ll", "’ll", "n't", "n’t")):
+            command = match
+    if command is None:
+        return text, False
+    # The marks a recognizer writes around the command are the command's own:
+    # "Tuesday. Scratch that. Wednesday" and "savings, scratch that, to".
+    lead = re.search(r"[.!?…,;:—–]*[ \t]*$", text[:command.start()].rstrip())
+    trail = re.match(r"[ \t]*[.!?…,;:]*", text[command.end():])
+    left = text[:command.start()].rstrip()[:lead.start()].rstrip()
+    right = text[command.end() + trail.end():].lstrip()
+    if not left:
+        return text, True
+    own_sentence = bool(re.search(r"[.!?…]", lead.group(0))
+                        and re.search(r"[.!?…]", trail.group(0)))
+    boundaries = list((SENTENCE_BOUNDARY_RE if own_sentence
+                       else CLAUSE_BOUNDARY_RE).finditer(left))
+    if boundaries or own_sentence:
+        # Spoken as its own sentence, the command drops the sentence before
+        # it. Inline, it drops the clause it interrupts.
+        kept = left[:boundaries[-1].end()] if boundaries else ""
+        joiner = "" if not kept or kept.endswith("\n") else " "
+        return (kept.rstrip(" \t") + joiner + right).strip(), False
+    right_word = re.match(r"[A-Za-z0-9_'’-]+", right)
+    repeated = tuple(re.finditer(
+        rf"\b{re.escape(right_word.group(0))}\b", left, re.I)) \
+        if right_word else ()
+    # Without a repeated boundary, preserve the source and route it
+    # to semantic cleanup instead of guessing how much context to delete.
+    if not repeated:
+        return text, True
+    cut = repeated[-1].start()
+    return (left[:cut].rstrip() + " " + right).strip(), False
+
+
 def compile_cleanup(raw: str, language: str = "en") -> CleanupPlan:
     """Compile safe spoken transformations into explicit, reversible edits.
 
     Every rule below is English by construction: the filler and
     self-correction patterns are English words, "scratch that" is an English
-    phrase whose length is baked into the offset arithmetic, and the list
-    formatter reads English cardinals and ordinals. Applied to another
-    language they cannot help and can silently delete real words, so a
-    non-English utterance gets whitespace normalization and nothing else.
+    phrase, and the list formatter reads English cardinals and ordinals.
+    Applied to another language they cannot help and can silently delete
+    real words, so a non-English utterance gets whitespace normalization and
+    nothing else.
     """
     code = str(language or "en").strip().casefold()
     if code != "en":
@@ -482,23 +582,19 @@ def compile_cleanup(raw: str, language: str = "en") -> CleanupPlan:
 
     # Expand spoken line boundaries first so discourse fillers at the start of
     # a newly dictated line can be distinguished from meaningful prose.
-    had_spoken_structure = bool(STRUCTURE_RE.search(text))
+    before = text
+    text = _expand_spoken_structure(text)
+    had_spoken_structure = text != before
     if had_spoken_structure:
-        before = text
-        text = STRUCTURE_RE.sub(
-            lambda match: "\n" if match.group(1).lower() == "line" else "\n\n",
-            text,
-        )
         edits.append(CleanupEdit("spoken_structure", before, text))
 
     for regex, kind in (
         (SIMPLE_FILLER_RE, "remove_filler"),
         (DISCOURSE_FILLER_RE, "remove_discourse_filler"),
     ):
-        matches = [match.group(0) for match in regex.finditer(text)]
-        if matches:
-            before = text
-            text = regex.sub(" ", text)
+        before = text
+        text = regex.sub(" ", text)
+        if text != before:
             edits.append(CleanupEdit(kind, before, text))
 
     while True:
@@ -510,32 +606,10 @@ def compile_cleanup(raw: str, language: str = "en") -> CleanupPlan:
         text = text[:start] + replacement + text[end:]
         edits.append(CleanupEdit("self_correction", before, text))
 
-    lowered = text.casefold()
-    scratch_needs_semantic = False
-    scratch_at = lowered.rfind("scratch that")
-    if scratch_at >= 0:
-        before = text
-        left, right = text[:scratch_at].rstrip(), text[scratch_at + 12:].lstrip()
-        sentence = max(left.rfind("."), left.rfind("!"), left.rfind("?"),
-                       left.rfind("\n"))
-        clause = max(left.rfind(","), left.rfind(";"), left.rfind("—"))
-        boundary = max(sentence + 1, clause + 1)
-        if boundary:
-            text = (left[:boundary].rstrip() + " " + right).strip()
-            edits.append(CleanupEdit("scratch_that", before, text))
-        else:
-            right_word = re.match(r"[A-Za-z0-9_'’-]+", right)
-            repeated = tuple(re.finditer(
-                rf"\b{re.escape(right_word.group(0))}\b", left, re.I)) \
-                if right_word else ()
-            # Without a repeated boundary, preserve the source and route it
-            # to semantic cleanup instead of guessing how much context to delete.
-            if repeated:
-                cut = repeated[-1].start()
-                text = (left[:cut].rstrip() + " " + right).strip()
-                edits.append(CleanupEdit("scratch_that", before, text))
-            else:
-                scratch_needs_semantic = True
+    before = text
+    text, scratch_needs_semantic = _resolve_scratch_that(text)
+    if text != before:
+        edits.append(CleanupEdit("scratch_that", before, text))
 
     text = normalize_spacing(text)
     deterministic_list = (

@@ -71,6 +71,16 @@ class CleanupCompilerTests(unittest.TestCase):
              "remove_discourse_filler", "self_correction"],
         )
 
+    def test_punctuated_fillers_structure_and_correction_compile_the_same(self):
+        plan = compile_cleanup(
+            "Um, Tuesday, actually Wednesday. New paragraph. I mean, ship it.")
+        self.assertEqual(plan.text, "Wednesday.\n\nship it.")
+        self.assertEqual(
+            plan.edit_kinds,
+            ["spoken_structure", "remove_filler",
+             "remove_discourse_filler", "self_correction"],
+        )
+
     def test_actually_as_an_adverb_changes_nothing(self):
         for spoken in (
             "I didn't actually finish the report",
@@ -156,6 +166,100 @@ class CleanupCompilerTests(unittest.TestCase):
         self.assertEqual(find_self_correction("at 3:30 actually 4:30"),
                          (3, 21, "4:30"))
         self.assertIsNone(find_self_correction("it is actually fine"))
+
+    def test_spoken_structure_takes_its_own_punctuation(self):
+        for spoken, expected in (
+            ("First line is approved. New line. Second line needs revision.",
+             "First line is approved.\nSecond line needs revision."),
+            ("First line is approved, new line, second line needs revision.",
+             "First line is approved\nsecond line needs revision."),
+            ("First line is approved. New line second line needs revision.",
+             "First line is approved.\nsecond line needs revision."),
+            ("Thanks for the update. New paragraph. I will review tonight.",
+             "Thanks for the update.\n\nI will review tonight."),
+            ("Thanks for the update — new paragraph — I will review tonight.",
+             "Thanks for the update\n\nI will review tonight."),
+            # A break before any text has nothing to separate.
+            ("New paragraph. Thanks for the update.",
+             "Thanks for the update."),
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, expected)
+                self.assertEqual(plan.edit_kinds, ["spoken_structure"])
+                self.assertFalse(plan.needs_semantic_cleanup)
+
+    def test_new_line_as_a_noun_phrase_is_not_a_command(self):
+        for spoken in (
+            "We are launching a new line of products next quarter",
+            "We are launching a new line of products next quarter.",
+            "Let me start a new line of thinking.",
+            "Add new line items to the invoice.",
+            "The new paragraph reads better.",
+            "It is a whole new line for us.",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken)
+                self.assertEqual(plan.edits, [])
+
+    def test_scratch_that_takes_its_own_punctuation(self):
+        for spoken, expected in (
+            ("Move the meeting to Tuesday. Scratch that. Move it to "
+             "Wednesday.", "Move it to Wednesday."),
+            ("Keep this sentence. Remove this part. Scratch that. Use this "
+             "instead.", "Keep this sentence. Use this instead."),
+            ("Keep this sentence. Remove this part, scratch that, use this "
+             "instead.", "Keep this sentence. use this instead."),
+            ("Tell Morgan the migration starts at six, scratch that, at "
+             "seven.", "Tell Morgan the migration starts at seven."),
+            ("Tell Morgan the migration starts at six. Scratch that, at "
+             "seven.", "Tell Morgan the migration starts at seven."),
+            ("Transfer 1500 dollars to savings, scratch that, to checking.",
+             "Transfer 1500 dollars to checking."),
+            # The dropped sentence leaves an earlier spoken line break alone.
+            ("Line one. New line. Line two. Scratch that. Line three.",
+             "Line one.\nLine three."),
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, expected)
+                self.assertIn("scratch_that", plan.edit_kinds)
+                self.assertFalse(plan.needs_semantic_cleanup)
+
+    def test_scratch_that_never_cuts_inside_a_number_or_an_amount(self):
+        for spoken, expected in (
+            ("transfer 1,500 dollars to savings scratch that to checking",
+             "transfer 1,500 dollars to checking"),
+            ("Transfer 1,500 dollars to savings, scratch that, to checking.",
+             "Transfer 1,500 dollars to checking."),
+            ("pay $3.50 to Sam scratch that to Alex", "pay $3.50 to Alex"),
+            ("Pay $3.50 to Sam, scratch that, to Alex.",
+             "Pay $3.50 to Alex."),
+            ("Version 2.5 ships to beta scratch that to production",
+             "Version 2.5 ships to production"),
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(compile_cleanup(spoken).text, expected)
+
+    def test_punctuated_ambiguous_scratch_that_still_fails_closed(self):
+        raw = "Move the meeting Tuesday, scratch that, Wednesday."
+        plan = compile_cleanup(raw)
+        self.assertEqual(plan.text, raw)
+        self.assertNotIn("scratch_that", plan.edit_kinds)
+        self.assertTrue(plan.needs_semantic_cleanup)
+
+    def test_scratch_that_as_a_verb_phrase_is_not_a_command(self):
+        for spoken in (
+            "We need to rethink it. Let's scratch that idea and start over.",
+            "I think we should scratch that plan entirely.",
+            "We'll scratch that from the list.",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken)
+                self.assertEqual(plan.edits, [])
+                self.assertFalse(plan.needs_semantic_cleanup)
 
     def test_scratch_that_removes_only_the_latest_clause(self):
         plan = compile_cleanup(
@@ -308,6 +412,12 @@ class CleanupCompilerTests(unittest.TestCase):
         self.assertEqual(
             plan.text, "first line is approved\nsecond line needs revision")
         self.assertFalse(plan.needs_semantic_cleanup)
+        punctuated = compile_cleanup(
+            "First line is approved. New line. Second line needs revision.")
+        self.assertEqual(
+            punctuated.text,
+            "First line is approved.\nSecond line needs revision.")
+        self.assertFalse(punctuated.needs_semantic_cleanup)
 
     def test_literal_ambiguous_filler_phrases_are_preserved_without_qwen(self):
         for spoken in (
