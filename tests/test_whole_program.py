@@ -300,6 +300,40 @@ class FreshInstallDictationTests(unittest.TestCase):
         mac.dictate_sentence("See you soon.", field=field)
         self.assertEqual(field.text, "Thanks 👍🏽 See you soon. and bye")
 
+    def test_actually_corrects_only_after_the_user_turns_it_on(self):
+        mac = booted()
+        dictate = mac.dictate
+        spoken = "Let's meet Tuesday, actually Wednesday."
+
+        def typed(sentence):
+            return mac.dictate_sentence(sentence, field=TextField()).text
+
+        # A fresh install starts from the shipped template, which says off.
+        self.assertIs(json.loads(
+            (ROOT / "preferences.template.json").read_text())[
+                "self_correction"], False)
+        self.assertIs(dictate.gui_settings_snapshot()["self_correction"],
+                      False)
+        self.assertEqual(typed(spoken), spoken)
+        self.assertIs(dictate.set_self_correction(True), True)
+        try:
+            self.assertIs(
+                dictate.gui_settings_snapshot()["self_correction"], True)
+            self.assertIs(json.loads(
+                dictate.PREFERENCES_FILE.read_text())["self_correction"],
+                True)
+            self.assertEqual(typed(spoken), "Let's meet Wednesday.")
+            self.assertEqual(dictate.PIPELINE_STATE["last_cleanup_edits"],
+                             ["self_correction"])
+            # The adverb is still the speaker's word.
+            self.assertEqual(typed("I didn't actually finish the report."),
+                             "I didn't actually finish the report.")
+        finally:
+            self.assertIs(dictate.set_self_correction(False), False)
+        self.assertIs(json.loads(
+            dictate.PREFERENCES_FILE.read_text())["self_correction"], False)
+        self.assertEqual(typed(spoken), spoken)
+
     def test_a_filled_snippet_expands_only_when_asked_for(self):
         mac = booted()
         template = json.loads(
@@ -441,9 +475,9 @@ class DefaultPathCorpusTests(unittest.TestCase):
         self.assertGreaterEqual(len(cases), 60)
         self.assertEqual(len({case["id"] for case in cases}), len(cases))
         covers = {case["covers"] for case in cases}
-        for kind in ("actually-adverb", "snippet-name", "sign-off", "numbers",
-                     "scratch-that", "new-line", "tone-word-opening",
-                     "repeats", "emoji"):
+        for kind in ("actually-adverb", "actually-contrast", "snippet-name",
+                     "sign-off", "numbers", "scratch-that", "new-line",
+                     "tone-word-opening", "repeats", "emoji"):
             with self.subTest(covers=kind):
                 self.assertIn(kind, covers)
         adverbs = [case for case in cases if case["covers"] == "actually-adverb"]
@@ -452,6 +486,13 @@ class DefaultPathCorpusTests(unittest.TestCase):
         # A rule that deletes words needs more must-not-fire cases than
         # must-fire ones.
         self.assertGreater(len(adverbs), len(corrections))
+        # The correction is opt-in, so on a fresh install every sentence
+        # with "actually" in it is typed as spoken.
+        for case in cases:
+            if "actually" in case["spoken"].casefold():
+                with self.subTest(case=case["id"]):
+                    self.assertIn(case["spoken"].rstrip("."),
+                                  case["expected"])
         snippets = json.loads(
             (ROOT / "snippets.template.json").read_text(encoding="utf-8"))
         spoken = " ".join(case["spoken"].casefold() for case in cases)

@@ -1514,6 +1514,7 @@ PREFERENCES = {
     "undo_hotkey": "",
     "sounds": SOUND_THEME_DEFAULT,
     "recent_dictations": False,
+    "self_correction": False,
     "language": LANGUAGE_DEFAULT,
 }
 ACOUSTIC_TIME_MACHINE = AcousticTimeMachine()
@@ -1966,6 +1967,10 @@ def load_preferences():
     PREFERENCES["sounds"] = normalize_sound_theme(loaded.get("sounds"))
     PREFERENCES["recent_dictations"] = bool(
         loaded.get("recent_dictations") is True)
+    # "X, actually Y" replaces X only for a user who asked for it. Any other
+    # value, and a file written before the key existed, leaves it off.
+    PREFERENCES["self_correction"] = bool(
+        loaded.get("self_correction") is True)
     # Cross-platform: both mlx-whisper and faster-whisper take the same bare
     # ISO 639-1 code, so one preference drives Mac and Windows alike.
     PREFERENCES["language"] = normalize_language(loaded.get("language"))
@@ -2044,6 +2049,7 @@ def save_preferences():
             PREFERENCES["undo_hotkey"], default=""),
         "sounds": normalize_sound_theme(PREFERENCES["sounds"]),
         "recent_dictations": bool(PREFERENCES["recent_dictations"]),
+        "self_correction": bool(PREFERENCES["self_correction"]),
         "language": normalize_language(PREFERENCES["language"]),
     }
     atomic_write_text(
@@ -2158,6 +2164,13 @@ def set_recent_dictations_enabled(enabled: bool) -> bool:
     PREFERENCES["recent_dictations"] = bool(enabled)
     save_preferences()
     return PREFERENCES["recent_dictations"]
+
+
+def set_self_correction(enabled: bool) -> bool:
+    """Persist the off-by-default "X, actually Y" correction opt-in."""
+    PREFERENCES["self_correction"] = bool(enabled)
+    save_preferences()
+    return PREFERENCES["self_correction"]
 
 
 def set_voice_object_commands_enabled(enabled: bool) -> None:
@@ -5692,6 +5705,7 @@ def gui_settings_snapshot() -> dict:
         "manual_vocabulary": manual,
         "banned_vocabulary": sorted(banned),
         "corrections": corrections,
+        "self_correction": bool(PREFERENCES["self_correction"]),
     }
 
 
@@ -10847,7 +10861,7 @@ def quick_clean(text: str, verbatim: bool = False,
     if verbatim or not t:
         return t
     language = str(language or "").strip().casefold() or LANGUAGE_DEFAULT
-    t = compile_cleanup(t, language).text
+    t = compile_cleanup(t, language, PREFERENCES["self_correction"]).text
     if not t:
         return ""
     if language != "en":
@@ -10881,7 +10895,8 @@ def needs_llm_cleanup(raw: str, tone_override: str | None,
     language = str(language or "").strip().casefold() or LANGUAGE_DEFAULT
     if language != "en":
         return False
-    plan = plan or compile_cleanup(raw, language)
+    plan = plan or compile_cleanup(
+        raw, language, PREFERENCES["self_correction"])
     return bool(not verbatim and (
         mode in {"compose", "reply", "edit"}
         or
@@ -11026,6 +11041,7 @@ def build_delayed_cleanup_proposal(
          for edit in semantic_edits),
         voice_ir.context.candidates,
         mode="capture",
+        self_correction=PREFERENCES["self_correction"],
     )
     if proof.text != candidate:
         return None
@@ -12464,8 +12480,10 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             # Verbatim is a hard contract: retain acoustic text rather than a
             # context/personal compiler substitution.
             raw, tone_override = extract_tone_override(recognized_raw)
-        plan = compile_code_dictation(raw, rec.language) \
-            if rec.mode == "code" else compile_cleanup(raw, rec.language)
+        self_correction = PREFERENCES["self_correction"]
+        plan = compile_code_dictation(raw, rec.language, self_correction) \
+            if rec.mode == "code" else compile_cleanup(
+                raw, rec.language, self_correction)
         compiled = plan.text
         verbatim = ((is_verbatim_app(bundle) or tone_override == "verbatim")
                     and rec.mode in {"capture", "code"})
@@ -12533,6 +12551,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                      for edit in semantic_edits),
                     voice_ir.context.candidates,
                     mode=rec.mode,
+                    self_correction=self_correction,
                 )
                 proof_edits = proof.edits
                 proof_reconstruction_match = proof.text == candidate

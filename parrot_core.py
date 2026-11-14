@@ -649,7 +649,8 @@ def _resolve_scratch_that(text: str) -> tuple[str, bool]:
     return (left[:cut].rstrip() + " " + right).strip(), False
 
 
-def compile_cleanup(raw: str, language: str = "en") -> CleanupPlan:
+def compile_cleanup(raw: str, language: str = "en",
+                    self_correction: bool = False) -> CleanupPlan:
     """Compile safe spoken transformations into explicit, reversible edits.
 
     Every rule below is English by construction: the filler and
@@ -658,6 +659,11 @@ def compile_cleanup(raw: str, language: str = "en") -> CleanupPlan:
     Applied to another language they cannot help and can silently delete
     real words, so a non-English utterance gets whitespace normalization and
     nothing else.
+
+    ``self_correction`` turns on the "X, actually Y" rule. It is off unless
+    the user asked for it: a speaker says the same words to contrast two
+    things ("I thought it was Tuesday, actually Wednesday"), and no rule can
+    tell that from a slip being taken back.
     """
     code = str(language or "en").strip().casefold()
     if code != "en":
@@ -692,7 +698,7 @@ def compile_cleanup(raw: str, language: str = "en") -> CleanupPlan:
         if text != before:
             edits.append(CleanupEdit(kind, before, text))
 
-    while True:
+    while self_correction:
         correction = find_self_correction(text)
         if correction is None:
             break
@@ -831,14 +837,15 @@ CODE_PHRASES = (
 )
 
 
-def compile_code_dictation(raw: str, language: str = "en") -> CleanupPlan:
+def compile_code_dictation(raw: str, language: str = "en",
+                           self_correction: bool = False) -> CleanupPlan:
     """Compile spoken code punctuation while preserving ordinary identifiers.
 
     CODE_PHRASES are English names for ASCII glyphs, and the spacing rules
     below are Latin code conventions, so a non-English utterance keeps
     ``compile_cleanup``'s language-safe result untouched.
     """
-    plan = compile_cleanup(raw, language)
+    plan = compile_cleanup(raw, language, self_correction)
     if str(language or "en").strip().casefold() != "en":
         return plan
     text = plan.text

@@ -63,7 +63,8 @@ class ContextTests(unittest.TestCase):
 class CleanupCompilerTests(unittest.TestCase):
     def test_compiles_fillers_structure_and_correction(self):
         plan = compile_cleanup(
-            "um Tuesday actually Wednesday new paragraph I mean, ship it")
+            "um Tuesday actually Wednesday new paragraph I mean, ship it",
+            self_correction=True)
         self.assertEqual(plan.text, "Wednesday\n\nship it")
         self.assertEqual(
             plan.edit_kinds,
@@ -73,13 +74,42 @@ class CleanupCompilerTests(unittest.TestCase):
 
     def test_punctuated_fillers_structure_and_correction_compile_the_same(self):
         plan = compile_cleanup(
-            "Um, Tuesday, actually Wednesday. New paragraph. I mean, ship it.")
+            "Um, Tuesday, actually Wednesday. New paragraph. I mean, ship it.",
+            self_correction=True)
         self.assertEqual(plan.text, "Wednesday.\n\nship it.")
         self.assertEqual(
             plan.edit_kinds,
             ["spoken_structure", "remove_filler",
              "remove_discourse_filler", "self_correction"],
         )
+
+    def test_self_correction_is_off_unless_asked_for(self):
+        # What the real recognizer wrote for a speaker contrasting two
+        # things. The words are the same as a correction's, so by default
+        # both are typed as spoken.
+        for spoken in (
+            "I thought it was Tuesday, actually Wednesday.",
+            "The invoice says 400, actually 450",
+            "We expected 20, actually 12 showed up.",
+            "I guessed March, actually April.",
+            "Everyone assumed Monday, actually Tuesday.",
+            "She said five, actually six",
+            "Out of ten, actually four past.",
+            "Let's meet Tuesday, actually Wednesday",
+            "It starts at 3, actually 4.",
+            "Send five actually six copies.",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken)
+                self.assertEqual(plan.edits, [])
+                self.assertFalse(plan.needs_semantic_cleanup)
+                self.assertEqual(compile_code_dictation(spoken).text, spoken)
+                asked = compile_cleanup(spoken, self_correction=True)
+                self.assertEqual(asked.edit_kinds, ["self_correction"])
+                self.assertEqual(
+                    compile_code_dictation(
+                        spoken, self_correction=True).text, asked.text)
 
     def test_actually_as_an_adverb_changes_nothing(self):
         for spoken in (
@@ -96,7 +126,7 @@ class CleanupCompilerTests(unittest.TestCase):
             "I actually think we should wait.",
         ):
             with self.subTest(spoken=spoken):
-                plan = compile_cleanup(spoken)
+                plan = compile_cleanup(spoken, self_correction=True)
                 self.assertEqual(plan.text, spoken)
                 self.assertNotIn("self_correction", plan.edit_kinds)
                 self.assertFalse(plan.needs_semantic_cleanup)
@@ -139,7 +169,7 @@ class CleanupCompilerTests(unittest.TestCase):
             ("Call at noon, actually 1 pm.", "Call at 1 pm."),
         ):
             with self.subTest(spoken=spoken):
-                plan = compile_cleanup(spoken)
+                plan = compile_cleanup(spoken, self_correction=True)
                 self.assertEqual(plan.text, expected)
                 self.assertEqual(plan.edit_kinds, ["self_correction"])
 
@@ -155,14 +185,14 @@ class CleanupCompilerTests(unittest.TestCase):
             "We shipped version 2, actually version 3.",
         ):
             with self.subTest(spoken=spoken):
-                plan = compile_cleanup(spoken)
+                plan = compile_cleanup(spoken, self_correction=True)
                 self.assertEqual(plan.text, spoken)
                 self.assertNotIn("self_correction", plan.edit_kinds)
 
     def test_a_number_is_one_item_inside_a_self_correction(self):
         # "30" is the minutes of a clock time, not a number of its own.
         raw = "Meet at 3:30, actually 4 dollars is the fee."
-        self.assertEqual(compile_cleanup(raw).text, raw)
+        self.assertEqual(compile_cleanup(raw, self_correction=True).text, raw)
         self.assertEqual(find_self_correction("at 3:30 actually 4:30"),
                          (3, 21, "4:30"))
         self.assertIsNone(find_self_correction("it is actually fine"))
@@ -202,7 +232,7 @@ class CleanupCompilerTests(unittest.TestCase):
             "Monday through Wednesday, actually Thursday.",
         ):
             with self.subTest(spoken=spoken):
-                plan = compile_cleanup(spoken)
+                plan = compile_cleanup(spoken, self_correction=True)
                 self.assertEqual(plan.text, spoken)
                 self.assertNotIn("self_correction", plan.edit_kinds)
                 self.assertIsNone(find_self_correction(spoken))
@@ -229,7 +259,7 @@ class CleanupCompilerTests(unittest.TestCase):
             "Don't call at 3 pm — actually, 4 pm.",
         ):
             with self.subTest(spoken=spoken):
-                plan = compile_cleanup(spoken)
+                plan = compile_cleanup(spoken, self_correction=True)
                 self.assertEqual(plan.text, spoken)
                 self.assertNotIn("self_correction", plan.edit_kinds)
                 self.assertIsNone(find_self_correction(spoken))
@@ -252,7 +282,7 @@ class CleanupCompilerTests(unittest.TestCase):
              "Another note is due Tuesday."),
         ):
             with self.subTest(spoken=spoken):
-                plan = compile_cleanup(spoken)
+                plan = compile_cleanup(spoken, self_correction=True)
                 self.assertEqual(plan.text, expected)
                 self.assertEqual(plan.edit_kinds, ["self_correction"])
 
@@ -281,7 +311,7 @@ class CleanupCompilerTests(unittest.TestCase):
              "Room 4 is free. Seat 4 people there."),
         ):
             with self.subTest(spoken=spoken):
-                plan = compile_cleanup(spoken)
+                plan = compile_cleanup(spoken, self_correction=True)
                 self.assertEqual(plan.text, expected)
                 self.assertEqual(plan.edit_kinds, ["self_correction"])
 
@@ -830,11 +860,12 @@ class NonEnglishCleanupTests(unittest.TestCase):
     """Every rule in compile_cleanup is English by construction."""
 
     def test_english_rules_still_apply_to_english(self):
-        plan = compile_cleanup("um, ship it Tuesday actually Wednesday")
+        plan = compile_cleanup(
+            "um, ship it Tuesday actually Wednesday", self_correction=True)
         self.assertEqual(plan.text, "ship it Wednesday")
         self.assertIn("remove_filler", [edit.kind for edit in plan.edits])
         punctuated = compile_cleanup(
-            "Um, ship it Tuesday, actually Wednesday.")
+            "Um, ship it Tuesday, actually Wednesday.", self_correction=True)
         self.assertEqual(punctuated.text, "ship it Wednesday.")
 
     def test_the_same_rules_never_run_on_another_language(self):
@@ -848,7 +879,7 @@ class NonEnglishCleanupTests(unittest.TestCase):
             ("nl", "um dat is prima"),
         ):
             with self.subTest(language=language):
-                plan = compile_cleanup(text, language)
+                plan = compile_cleanup(text, language, self_correction=True)
                 self.assertEqual(plan.edits, [])
                 self.assertFalse(plan.needs_semantic_cleanup)
                 # Whitespace normalization is the one rule that holds

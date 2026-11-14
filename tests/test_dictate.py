@@ -57,6 +57,7 @@ from parrot_core import (  # noqa: E402
 from voice_compiler import (  # noqa: E402
     ContextCandidate,
     ContextPack,
+    EditProposal,
     RecognitionHypothesis,
     VoiceCompiler,
     VoiceIR,
@@ -2648,6 +2649,7 @@ class FacePreferenceTests(unittest.TestCase):
                 "undo_hotkey": "",
                 "sounds": "system",
                 "recent_dictations": False,
+                "self_correction": False,
                 "language": "en",
             })
 
@@ -2698,6 +2700,64 @@ class FacePreferenceTests(unittest.TestCase):
             self.assertEqual(ns["PREFERENCES"]["undo_hotkey"], "")
             self.assertEqual(ns["PREFERENCES"]["sounds"], "system")
             self.assertFalse(ns["PREFERENCES"]["recent_dictations"])
+
+    def test_self_correction_is_off_unless_the_file_says_true(self):
+        with tempfile.TemporaryDirectory() as directory:
+            preferences = Path(directory) / "preferences.json"
+            ns = load_definitions(
+                "normalize_face", "current_face", "load_preferences",
+                "save_preferences", "normalize_hotkey",
+                "normalize_sound_theme", "set_self_correction",
+                "quick_clean", "needs_llm_cleanup",
+                assignments={
+                    "FACE_CHOICES", "DEFAULT_FACE", "PREFERENCES",
+                    "HOTKEY_CHOICES", "HOTKEY_DEFAULT",
+                    "SOUND_THEMES", "SOUND_THEME_DEFAULT",
+                },
+                extra={
+                    "PREFERENCES_FILE": preferences,
+                    "IS_MACOS": True,
+                    "ACOUSTIC_TIME_MACHINE": AcousticTimeMachine(),
+                    "json": json,
+                    "apply_hotkey_bindings": lambda: None,
+                    "atomic_write_text": lambda path, value:
+                        path.write_text(value, encoding="utf-8"),
+                    "compile_cleanup": compile_cleanup,
+                },
+            )
+            spoken = "I thought it was Tuesday, actually Wednesday."
+            self.assertFalse(ns["PREFERENCES"]["self_correction"])
+            # An install from before the key existed, and every value that
+            # is not the JSON literal true.
+            for stored in ({}, {"self_correction": "true"},
+                           {"self_correction": 1},
+                           {"self_correction": None},
+                           {"self_correction": False}):
+                with self.subTest(stored=stored):
+                    ns["PREFERENCES"]["self_correction"] = True
+                    preferences.write_text(
+                        json.dumps(stored), encoding="utf-8")
+                    ns["load_preferences"]()
+                    self.assertIs(
+                        ns["PREFERENCES"]["self_correction"], False)
+                    self.assertEqual(ns["quick_clean"](spoken), spoken)
+
+            self.assertIs(ns["set_self_correction"](True), True)
+            self.assertIs(json.loads(preferences.read_text(
+                encoding="utf-8"))["self_correction"], True)
+            self.assertEqual(
+                ns["quick_clean"](spoken), "I thought it was Wednesday.")
+            self.assertEqual(
+                ns["quick_clean"]("Let's meet Tuesday, actually Wednesday"),
+                "Let's meet Wednesday.")
+            ns["PREFERENCES"]["self_correction"] = False
+            ns["load_preferences"]()
+            self.assertIs(ns["PREFERENCES"]["self_correction"], True)
+
+            self.assertIs(ns["set_self_correction"](False), False)
+            self.assertIs(json.loads(preferences.read_text(
+                encoding="utf-8"))["self_correction"], False)
+            self.assertEqual(ns["quick_clean"](spoken), spoken)
 
     def test_privacy_preferences_are_mac_only_and_default_off(self):
         for is_macos, acoustic, voice_objects, expected in (
@@ -6626,7 +6686,7 @@ class LearningTests(unittest.TestCase):
                 "PIPELINE_STATE": {"last_consequence_route": "standard"},
                 "_mask_snippets_inline": lambda raw, _snippets: (raw, {}),
                 "extract_tone_override": lambda raw: (raw, None),
-                "compile_cleanup": lambda raw, _language: SimpleNamespace(
+                "compile_cleanup": lambda raw, *_options: SimpleNamespace(
                     text=raw, edits=[]),
                 "cursor_context": lambda: before,
                 "TONE": {"default": ""},
@@ -10996,7 +11056,8 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
             proof_text = "clean github"
 
             def verify_edits(
-                    self, original, proposals, candidates, *, mode):
+                    self, original, proposals, candidates, *, mode,
+                    self_correction):
                 verified.append(
                     (original, tuple(proposals), candidates, mode))
                 return SimpleNamespace(text=self.proof_text)
@@ -11045,9 +11106,42 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
             namespace["build_delayed_cleanup_proposal"](
                 "raw github", "tone", voice_ir, **kwargs))
 
+    def test_delayed_proposal_corrects_only_for_a_user_who_asked(self):
+        compiled = "The invoice says 400, actually 450."
+        namespace = load_definitions(
+            "build_delayed_cleanup_proposal",
+            extra={
+                "VOICE_COMPILER": VoiceCompiler(),
+                "EditProposal": EditProposal,
+                "llm_clean_with_edits": lambda *_args: (
+                    "The invoice says 450.",
+                    (SimpleNamespace(
+                        kind="self_correction",
+                        before="400, actually 450", after="450"),),
+                ),
+                "quick_clean": lambda text, **_kwargs: text,
+                "strip_casual_period": lambda text: text,
+                "apply_vocabulary_casing": lambda text: text,
+                "_restore_snippet_sentinels": lambda text, _restore: text,
+            },
+        )
+        voice_ir = SimpleNamespace(context=SimpleNamespace(candidates=()))
+
+        def propose():
+            return namespace["build_delayed_cleanup_proposal"](
+                compiled, "tone", voice_ir, continuing=False,
+                context_tail="", context_text=None, tone_key="default",
+                snippet_restore={})
+
+        self.assertIs(namespace["PREFERENCES"]["self_correction"], False)
+        self.assertIsNone(propose())
+        namespace["PREFERENCES"]["self_correction"] = True
+        self.assertEqual(propose(), "The invoice says 450.")
+
     def test_delayed_proposal_keeps_a_word_that_starts_with_the_field(self):
         class Compiler:
-            def verify_edits(self, original, proposals, candidates, *, mode):
+            def verify_edits(self, original, proposals, candidates, *, mode,
+                             self_correction):
                 return SimpleNamespace(text="tomorrow works for me")
 
         namespace = load_definitions(

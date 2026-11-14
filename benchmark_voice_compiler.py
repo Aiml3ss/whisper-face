@@ -171,9 +171,12 @@ def evaluate_case(case: dict[str, Any],
                 before=str(item["before"]),
                 after=str(item["after"]),
             ) for item in case.get("proposals", ()))
+            # The "X, actually Y" rule is opt-in at runtime. A case that
+            # measures it says so; every other case runs the default.
             result = compiler.verify_edits(
                 str(case["source"]), proposals,
                 _context(case.get("context", {})).candidates,
+                self_correction=case.get("self_correction") is True,
             )
             accepted = [index for index, edit in enumerate(result.edits)
                         if edit.accepted]
