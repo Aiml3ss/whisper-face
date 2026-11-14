@@ -2738,6 +2738,103 @@ class AccessoryActivationOrderTests(unittest.TestCase):
         self.assertIn("orderFrontRegardless", self._show_source())
 
 
+class ConfirmationKeyTests(unittest.TestCase):
+    """Escape cancels a confirmation; Return never reaches a destructive one.
+
+    The objects stand in for NSAlert, its NSButtons and a key-down NSEvent,
+    answering the same selectors the window calls on the real ones.
+    """
+
+    ESCAPE, RETURN, PERIOD, COMMAND = 53, 36, 47, 1 << 20
+
+    class Button:
+        def __init__(self, title, key, destructive=False):
+            self.title, self.key, self.destructive = title, key, destructive
+            self.clicks = 0
+
+        def keyEquivalent(self):
+            return self.key
+
+        def hasDestructiveAction(self):
+            return self.destructive
+
+        def performClick_(self, _sender):
+            self.clicks += 1
+
+    class Alert:
+        def __init__(self, *buttons):
+            self._buttons = buttons
+            self._window = object()
+
+        def buttons(self):
+            return self._buttons
+
+        def window(self):
+            return self._window
+
+    class Event:
+        def __init__(self, window, key_code, characters, flags=0):
+            self._window, self._key_code = window, key_code
+            self._characters, self._flags = characters, flags
+
+        def window(self):
+            return self._window
+
+        def keyCode(self):
+            return self._key_code
+
+        def charactersIgnoringModifiers(self):
+            return self._characters
+
+        def modifierFlags(self):
+            return self._flags
+
+    def destructive_confirmation(self):
+        delete = self.Button("Delete", "", destructive=True)
+        cancel = self.Button("Cancel", "\r")
+        return self.Alert(delete, cancel), delete, cancel
+
+    def test_return_and_escape_both_route_to_cancel_when_it_destroys(self):
+        alert, _delete, _cancel = self.destructive_confirmation()
+        self.assertEqual(gui_module.alert_key_routes(alert), (1, 1))
+
+    def test_escape_clicks_cancel_and_never_the_destructive_button(self):
+        alert, delete, cancel = self.destructive_confirmation()
+        handler = gui_module.alert_escape_handler(alert)
+        self.assertIsNotNone(handler)
+        escape = self.Event(alert.window(), self.ESCAPE, "\x1b")
+        self.assertIsNone(handler(escape))
+        command_period = self.Event(
+            alert.window(), self.PERIOD, ".", self.COMMAND)
+        self.assertIsNone(handler(command_period))
+        self.assertEqual((delete.clicks, cancel.clicks), (0, 2))
+
+    def test_other_keys_and_other_windows_pass_through_untouched(self):
+        alert, delete, cancel = self.destructive_confirmation()
+        handler = gui_module.alert_escape_handler(alert)
+        for event in (
+                self.Event(alert.window(), self.RETURN, "\r"),
+                self.Event(alert.window(), self.PERIOD, "."),
+                self.Event(object(), self.ESCAPE, "\x1b")):
+            with self.subTest(key=event.keyCode()):
+                self.assertIs(handler(event), event)
+        self.assertEqual((delete.clicks, cancel.clicks), (0, 0))
+
+    def test_a_confirmation_that_destroys_nothing_keeps_appkit_keys(self):
+        # Return confirms, and Escape is Cancel's own key equivalent, so
+        # AppKit answers both and no monitor is needed.
+        alert = self.Alert(
+            self.Button("Compose", "\r"), self.Button("Cancel", "\x1b"))
+        self.assertEqual(gui_module.alert_key_routes(alert), (0, 1))
+        self.assertIsNone(gui_module.alert_escape_handler(alert))
+
+    def test_escape_is_not_invented_for_a_dialog_without_a_safe_button(self):
+        alert = self.Alert(
+            self.Button("Review", "\r"), self.Button("Done", ""))
+        self.assertEqual(gui_module.alert_key_routes(alert), (0, None))
+        self.assertIsNone(gui_module.alert_escape_handler(alert))
+
+
 class BoundKeyCopyTests(unittest.TestCase):
     """A1: no surface may claim a key that is not the one bound."""
 

@@ -4942,6 +4942,65 @@ def set_accessible_text(view: Any, value: str, *, label: str) -> None:
     sync_accessibility(view, value, label=label)
 
 
+_ESCAPE_KEY_CODE = 53
+_COMMAND_KEY_FLAG = 1 << 20
+
+
+def alert_key_routes(alert: Any) -> tuple[int | None, int | None]:
+    """Which button index Return and Escape answer in an alert.
+
+    A button holds one key equivalent, and AppKit's default button cell is
+    simply the button holding Return, so a safe button that holds Return
+    cannot also hold Escape. When another button is destructive, Escape is
+    routed to the Return button by ``alert_escape_handler``.
+    """
+    buttons = list(alert.buttons())
+    keys = [str(button.keyEquivalent()) for button in buttons]
+    return_index = keys.index("\r") if "\r" in keys else None
+    if "\x1b" in keys:
+        return return_index, keys.index("\x1b")
+    if return_index is not None and any(
+            _has_destructive_action(button)
+            for index, button in enumerate(buttons) if index != return_index):
+        return return_index, return_index
+    return return_index, None
+
+
+def _has_destructive_action(button: Any) -> bool:
+    try:
+        return bool(button.hasDestructiveAction())
+    except Exception:
+        return False
+
+
+def alert_escape_handler(alert: Any) -> Callable[[Any], Any] | None:
+    """A key-down monitor that gives Escape to the alert's safe button.
+
+    None when AppKit already answers Escape through a key equivalent, or the
+    alert has no safe button to give it to.
+    """
+    _return_index, escape_index = alert_key_routes(alert)
+    if escape_index is None:
+        return None
+    target = list(alert.buttons())[escape_index]
+    if str(target.keyEquivalent()) == "\x1b":
+        return None
+    window = alert.window()
+
+    def handle(event: Any) -> Any:
+        if event.window() != window:
+            return event
+        command_period = (
+            bool(int(event.modifierFlags()) & _COMMAND_KEY_FLAG)
+            and str(event.charactersIgnoringModifiers()) == ".")
+        if int(event.keyCode()) == _ESCAPE_KEY_CODE or command_period:
+            target.performClick_(None)
+            return None
+        return event
+
+    return handle
+
+
 try:  # The view-model above remains usable in headless test environments.
     import objc
     from AppKit import (
@@ -8211,10 +8270,26 @@ if APPKIT_AVAILABLE:
         @objc.python_method
         def _run_modal(self, alert: Any) -> int:
             """Run one dialog; the native smoke answers through a responder."""
-            responder = getattr(self, "modal_responder", None)
-            if responder is not None:
-                return int(responder(alert))
-            return int(alert.runModal())
+            escape = alert_escape_handler(alert)
+            monitor = None
+            if escape is not None:
+                try:
+                    monitor = (
+                        NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+                            NSEventMaskKeyDown, escape))
+                except Exception:
+                    monitor = None
+            try:
+                responder = getattr(self, "modal_responder", None)
+                if responder is not None:
+                    return int(responder(alert))
+                return int(alert.runModal())
+            finally:
+                if monitor is not None:
+                    try:
+                        NSEvent.removeMonitor_(monitor)
+                    except Exception:
+                        pass
 
         @objc.python_method
         def _confirm(self, title: str, message: str,
@@ -8224,19 +8299,28 @@ if APPKIT_AVAILABLE:
             alert.setInformativeText_(message)
             alert.addButtonWithTitle_(primary)
             alert.addButtonWithTitle_(self._l("settings.action.cancel"))
-            self._default_to_safe(
-                alert, destructive=0, safe=1, mark_destructive=destructive)
+            if destructive:
+                self._default_to_safe(alert, destructive=0, safe=1)
+            else:
+                # AppKit gives Escape only to a button titled exactly
+                # "Cancel" in English, so it is set for every locale.
+                buttons = alert.buttons()
+                buttons[0].setKeyEquivalent_("\r")
+                buttons[1].setKeyEquivalent_("\x1b")
             return self._run_modal(alert) == 1000
 
         @objc.python_method
         def _default_to_safe(self, alert: Any, *, destructive: int,
-                             safe: int, mark_destructive: bool = True) -> None:
-            """Return picks the safe button; the destructive one needs a click."""
+                             safe: int) -> None:
+            """Return and Escape pick the safe button; the other needs a click.
+
+            The safe button holds Return, which also draws it as the default.
+            Escape reaches it through ``alert_escape_handler`` in _run_modal.
+            """
             buttons = alert.buttons()
             buttons[destructive].setKeyEquivalent_("")
             try:
-                buttons[destructive].setHasDestructiveAction_(
-                    mark_destructive)
+                buttons[destructive].setHasDestructiveAction_(True)
             except Exception:
                 pass
             buttons[safe].setKeyEquivalent_("\r")
@@ -10117,6 +10201,8 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             str(dialogs[1].buttons()[1].keyEquivalent()) == "\r"
             and str(dialogs[1].buttons()[0].keyEquivalent()) == "",
             "learned correction review defaults to Done")
+        require(alert_key_routes(dialogs[1]) == (1, 1),
+                "Return and Escape both leave a learned correction alone")
         dialogs.clear()
         controller.modal_responder = review_then_forget
         controller._confirm("Delete?", "Gone for good.", "Delete")
@@ -10126,12 +10212,18 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             "confirmations default to the safe button")
         require(bool(dialogs[0].buttons()[0].hasDestructiveAction()),
                 "a deletion is marked destructive")
-        controller._confirm("Send?", "Opens Mail.", "Compose",
-                            destructive=False)
-        require(
-            str(dialogs[1].buttons()[1].keyEquivalent()) == "\r"
-            and not bool(dialogs[1].buttons()[0].hasDestructiveAction()),
-            "a confirmation that destroys nothing is not marked destructive")
+        require(alert_key_routes(dialogs[0]) == (1, 1)
+                and alert_escape_handler(dialogs[0]) is not None,
+                "Escape cancels a destructive confirmation")
+        for primary in ("Compose", "Acknowledge", "Copy Draft"):
+            controller._confirm("Sure?", "Nothing is lost.", primary,
+                                destructive=False)
+            dialog = dialogs[-1]
+            require(
+                alert_key_routes(dialog) == (0, 1)
+                and str(dialog.buttons()[1].keyEquivalent()) == "\x1b"
+                and not bool(dialog.buttons()[0].hasDestructiveAction()),
+                f"{primary}: Return confirms and Escape cancels")
         controller.modal_responder = None
         require(keyword_reads[0] == 0, "keyword inspection stays on demand")
         keyword_inspection = model.inspect_acoustic_keywords()
