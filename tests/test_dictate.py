@@ -311,6 +311,274 @@ class PhoneEndpointBindingTests(unittest.TestCase):
                     f"http://{expected_display}:8787/", output.getvalue())
 
 
+class _FakePasteboardItem:
+    def __init__(self):
+        self.data = {}
+
+    @classmethod
+    def alloc(cls):
+        return cls()
+
+    def init(self):
+        return self
+
+    def types(self):
+        return list(self.data)
+
+    def dataForType_(self, kind):
+        return self.data.get(kind)
+
+    def setData_forType_(self, data, kind):
+        self.data[kind] = data
+        return True
+
+    def setString_forType_(self, text, kind):
+        self.data[kind] = text
+        return True
+
+
+class _FakePasteboard:
+    """The parts of NSPasteboard the clipboard round-trip uses."""
+
+    def __init__(self, text=None):
+        self.items = []
+        self.change = 0
+        self.options = None
+        if text is not None:
+            self.user_copies(text)
+
+    def user_copies(self, text):
+        item = _FakePasteboardItem()
+        item.setString_forType_(text, "public.utf8-plain-text")
+        self.change += 1
+        self.items = [item]
+
+    def pasteboardItems(self):
+        return list(self.items)
+
+    def changeCount(self):
+        return self.change
+
+    def clearContents(self):
+        self.change += 1
+        self.items = []
+        self.options = None
+
+    def prepareForNewContentsWithOptions_(self, options):
+        self.clearContents()
+        self.options = options
+
+    def writeObjects_(self, objects):
+        self.items.extend(objects)
+        return True
+
+    def setString_forType_(self, text, kind):
+        item = _FakePasteboardItem()
+        item.setString_forType_(text, kind)
+        self.items = [item]
+        return True
+
+    def text(self):
+        return [item.data.get("public.utf8-plain-text")
+                for item in self.items]
+
+
+class _FakeTimer:
+    def __init__(self, delay, function):
+        self.function = function
+        self.cancelled = False
+        self.started = False
+
+    def start(self):
+        self.started = True
+
+    def cancel(self):
+        self.cancelled = True
+
+    def fire(self):
+        if not self.cancelled:
+            self.function()
+
+
+class _FakeKeyboard:
+    def __init__(self, pasted):
+        self.pasted = pasted
+
+    @contextlib.contextmanager
+    def pressed(self, _key):
+        yield
+
+    def press(self, key):
+        self.pasted.append(key)
+
+    def release(self, _key):
+        pass
+
+
+class ClipboardRoundTripTests(unittest.TestCase):
+    """Dictated text borrows the clipboard briefly and gives it back."""
+
+    NAMES = ("paste", "snapshot_pasteboard", "restore_pasteboard",
+             "write_private_pasteboard", "_begin_paste_burst",
+             "_finish_paste_burst", "snapshot_windows_clipboard",
+             "restore_windows_clipboard", "write_private_windows_clipboard")
+    ASSIGNMENTS = ("PASTEBOARD_MARKER_TYPES", "PASTEBOARD_CURRENT_HOST_ONLY",
+                   "WINDOWS_CLIPBOARD_EXCLUSIONS", "PASTE_RESTORE")
+
+    def mac(self, pasteboard):
+        timers = []
+        presses = []
+
+        def timer(delay, function):
+            timers.append(_FakeTimer(delay, function))
+            return timers[-1]
+
+        ns = load_definitions(
+            *self.NAMES, assignments=self.ASSIGNMENTS,
+            extra={
+                "IS_WINDOWS": False,
+                "NSPasteboard": SimpleNamespace(
+                    generalPasteboard=lambda: pasteboard),
+                "NSPasteboardItem": _FakePasteboardItem,
+                "NSPasteboardTypeString": "public.utf8-plain-text",
+                "NSData": SimpleNamespace(data=lambda: b""),
+                "kb": _FakeKeyboard(presses),
+                "keyboard": SimpleNamespace(
+                    Key=SimpleNamespace(cmd="cmd", ctrl="ctrl")),
+                "time": SimpleNamespace(sleep=lambda _s: None),
+                "threading": SimpleNamespace(
+                    Timer=timer, Lock=threading.Lock),
+            },
+        )
+        return ns, timers, presses
+
+    def test_dictated_text_is_marked_transient_concealed_and_local(self):
+        pasteboard = _FakePasteboard("tracking 1Z999AA10123456784")
+        ns, _, presses = self.mac(pasteboard)
+
+        ns["paste"]("Meet at the north entrance.")
+
+        self.assertEqual(presses, ["v"])
+        self.assertEqual(pasteboard.text(), ["Meet at the north entrance."])
+        kinds = set(pasteboard.items[0].types())
+        self.assertIn("org.nspasteboard.TransientType", kinds)
+        self.assertIn("org.nspasteboard.ConcealedType", kinds)
+        # NSPasteboardContentsCurrentHostOnly: not offered to other devices.
+        self.assertEqual(pasteboard.options, 1)
+
+    def test_back_to_back_pastes_restore_the_users_clipboard(self):
+        pasteboard = _FakePasteboard("tracking 1Z999AA10123456784")
+        ns, timers, _ = self.mac(pasteboard)
+
+        ns["paste"]("First dictation.")
+        ns["paste"]("Second dictation.")
+        for timer in timers:
+            timer.fire()
+
+        self.assertEqual(pasteboard.text(), ["tracking 1Z999AA10123456784"])
+
+    def test_an_empty_clipboard_is_left_empty_after_the_paste(self):
+        pasteboard = _FakePasteboard()
+        ns, timers, _ = self.mac(pasteboard)
+
+        ns["paste"]("My account number is in the notes.")
+        for timer in timers:
+            timer.fire()
+
+        self.assertEqual(pasteboard.items, [])
+
+    def test_a_clipboard_the_user_changed_since_is_left_alone(self):
+        pasteboard = _FakePasteboard("older")
+        ns, timers, _ = self.mac(pasteboard)
+
+        ns["paste"]("Dictated.")
+        pasteboard.user_copies("copied just now")
+        ns["paste"]("Dictated again.")
+        for timer in timers:
+            timer.fire()
+
+        self.assertEqual(pasteboard.text(), ["copied just now"])
+
+    def test_windows_text_is_excluded_from_history_and_cloud_and_restored(self):
+        CF_UNICODETEXT = 13
+        state = {"formats": {CF_UNICODETEXT: "user's own text"}}
+        registered = {}
+
+        class Clipboard:
+            CF_UNICODETEXT = 13
+
+            @staticmethod
+            def OpenClipboard():
+                pass
+
+            @staticmethod
+            def CloseClipboard():
+                pass
+
+            @staticmethod
+            def EmptyClipboard():
+                state["formats"] = {}
+
+            @staticmethod
+            def EnumClipboardFormats(previous):
+                keys = sorted(state["formats"])
+                later = [key for key in keys if key > previous]
+                return later[0] if later else 0
+
+            @staticmethod
+            def GetClipboardData(kind):
+                return state["formats"][kind]
+
+            @staticmethod
+            def SetClipboardData(kind, data):
+                state["formats"][kind] = data
+
+            @staticmethod
+            def SetClipboardText(text, kind):
+                state["formats"][kind] = text
+
+            @staticmethod
+            def RegisterClipboardFormat(name):
+                return registered.setdefault(name, 0xC000 + len(registered))
+
+        timers = []
+        ns = load_definitions(
+            *self.NAMES, assignments=self.ASSIGNMENTS,
+            extra={
+                "IS_WINDOWS": True,
+                "win32clipboard": Clipboard,
+                "pyperclip": SimpleNamespace(
+                    paste=lambda: state["formats"].get(CF_UNICODETEXT, ""),
+                    copy=lambda text: self.fail("pyperclip.copy was used")),
+                "kb": _FakeKeyboard([]),
+                "keyboard": SimpleNamespace(
+                    Key=SimpleNamespace(cmd="cmd", ctrl="ctrl")),
+                "time": SimpleNamespace(sleep=lambda _s: None),
+                "threading": SimpleNamespace(
+                    Timer=lambda delay, function: timers.append(
+                        _FakeTimer(delay, function)) or timers[-1],
+                    Lock=threading.Lock),
+            },
+        )
+
+        ns["paste"]("First dictation.")
+        during = dict(state["formats"])
+        ns["paste"]("Second dictation.")
+        for timer in timers:
+            timer.fire()
+
+        self.assertEqual(during[CF_UNICODETEXT], "First dictation.")
+        for name in ("ExcludeClipboardContentFromMonitorProcessing",
+                     "CanIncludeInClipboardHistory",
+                     "CanUploadToCloudClipboard"):
+            with self.subTest(name=name):
+                self.assertIn(registered[name], during)
+        self.assertEqual(
+            during[registered["CanIncludeInClipboardHistory"]],
+            b"\0\0\0\0")
+        self.assertEqual(state["formats"], {CF_UNICODETEXT: "user's own text"})
+
+
 class GuiLauncherActivationTests(unittest.TestCase):
     def namespace(self, cleanups):
         return load_definitions(

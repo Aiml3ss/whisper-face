@@ -10726,49 +10726,134 @@ def restore_windows_clipboard(items: list):
             pass
 
 
-def paste(text: str):
-    if IS_WINDOWS:
-        try:
-            saved = snapshot_windows_clipboard()
-        except Exception:
-            saved = []
-        pyperclip.copy(text)
-        time.sleep(0.05)
-        with kb.pressed(keyboard.Key.ctrl):
-            kb.press("v")
-            kb.release("v")
-        if saved:
-            def restore():
-                try:
-                    if pyperclip.paste() == text:
-                        restore_windows_clipboard(saved)
-                except Exception:
-                    pass
-            threading.Timer(1.0, restore).start()
-        return
-    pb = NSPasteboard.generalPasteboard()
-    try:
-        saved = snapshot_pasteboard(pb)
-    except Exception:
-        saved = []
-    pb.clearContents()
-    pb.setString_forType_(text, NSPasteboardTypeString)
-    our_change = pb.changeCount()
-    time.sleep(0.05)
-    with kb.pressed(keyboard.Key.cmd):
-        kb.press("v")
-        kb.release("v")
-    if not saved:
-        return                      # empty before -> leave the text in place
+# Clipboard managers that follow the nspasteboard.org convention neither
+# record nor show an item carrying these types.
+PASTEBOARD_MARKER_TYPES = (
+    "org.nspasteboard.TransientType",
+    "org.nspasteboard.ConcealedType",
+)
+PASTEBOARD_CURRENT_HOST_ONLY = 1     # NSPasteboardContentsCurrentHostOnly
+# Windows clipboard history, cloud clipboard and clipboard monitors skip
+# content that carries these registered formats; a zero DWORD means "no".
+WINDOWS_CLIPBOARD_EXCLUSIONS = (
+    ("ExcludeClipboardContentFromMonitorProcessing", b"\0\0\0\0"),
+    ("CanIncludeInClipboardHistory", b"\0\0\0\0"),
+    ("CanUploadToCloudClipboard", b"\0\0\0\0"),
+)
+# One saved clipboard per burst of pastes. A paste made while the previous
+# paste's restore is pending keeps that earlier snapshot, so the user's own
+# clipboard comes back instead of the previous dictation.
+PASTE_RESTORE = {"lock": threading.Lock(), "timer": None, "saved": None,
+                 "still_ours": None}
 
-    def restore():
+
+def write_private_pasteboard(pb, text: str) -> int:
+    """Put dictated text on the pasteboard, kept off history and Handoff."""
+    pb.prepareForNewContentsWithOptions_(PASTEBOARD_CURRENT_HOST_ONLY)
+    item = NSPasteboardItem.alloc().init()
+    item.setString_forType_(text, NSPasteboardTypeString)
+    for marker in PASTEBOARD_MARKER_TYPES:
+        item.setData_forType_(NSData.data(), marker)
+    pb.writeObjects_([item])
+    return pb.changeCount()
+
+
+def write_private_windows_clipboard(text: str):
+    """Put dictated text on the clipboard, kept off history and the cloud."""
+    for attempt in range(10):
         try:
-            if pb.changeCount() == our_change:   # nothing copied since us
-                restore_pasteboard(pb, saved)
+            win32clipboard.OpenClipboard()
+            break
+        except Exception:
+            if attempt == 9:
+                raise
+            time.sleep(0.05)
+    try:
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
+        for name, data in WINDOWS_CLIPBOARD_EXCLUSIONS:
+            win32clipboard.SetClipboardData(
+                win32clipboard.RegisterClipboardFormat(name), data)
+    finally:
+        win32clipboard.CloseClipboard()
+
+
+def _begin_paste_burst(snapshot) -> list:
+    """The clipboard to give back after this paste; caller holds the lock."""
+    pending = PASTE_RESTORE["timer"]
+    saved = PASTE_RESTORE["saved"]
+    still_ours = PASTE_RESTORE["still_ours"]
+    PASTE_RESTORE["timer"] = PASTE_RESTORE["saved"] = None
+    PASTE_RESTORE["still_ours"] = None
+    if pending is not None:
+        pending.cancel()
+        try:
+            if saved is not None and still_ours():
+                return saved
         except Exception:
             pass
+    try:
+        return snapshot()
+    except Exception:
+        return []
 
-    threading.Timer(1.0, restore).start()
+
+def _finish_paste_burst(saved: list, still_ours, restore):
+    """Give the clipboard back in a second unless someone copied since.
+
+    An empty snapshot restores to an empty clipboard, so dictated text never
+    outlives the paste. Caller holds the lock.
+    """
+    def run():
+        with PASTE_RESTORE["lock"]:
+            if PASTE_RESTORE["timer"] is not timer:
+                return
+            PASTE_RESTORE["timer"] = PASTE_RESTORE["saved"] = None
+            PASTE_RESTORE["still_ours"] = None
+            try:
+                if still_ours():
+                    restore(saved)
+            except Exception:
+                pass
+
+    timer = threading.Timer(1.0, run)
+    PASTE_RESTORE["timer"] = timer
+    PASTE_RESTORE["saved"] = saved
+    PASTE_RESTORE["still_ours"] = still_ours
+    timer.start()
+
+
+def paste(text: str):
+    with PASTE_RESTORE["lock"]:
+        if IS_WINDOWS:
+            def still_ours():
+                return pyperclip.paste() == text
+
+            saved = _begin_paste_burst(snapshot_windows_clipboard)
+            try:
+                write_private_windows_clipboard(text)
+            except Exception:
+                pyperclip.copy(text)
+            time.sleep(0.05)
+            with kb.pressed(keyboard.Key.ctrl):
+                kb.press("v")
+                kb.release("v")
+            _finish_paste_burst(saved, still_ours, restore_windows_clipboard)
+            return
+        pb = NSPasteboard.generalPasteboard()
+        our_change = None
+
+        def still_ours():
+            return pb.changeCount() == our_change   # nothing copied since us
+
+        saved = _begin_paste_burst(lambda: snapshot_pasteboard(pb))
+        our_change = write_private_pasteboard(pb, text)
+        time.sleep(0.05)
+        with kb.pressed(keyboard.Key.cmd):
+            kb.press("v")
+            kb.release("v")
+        _finish_paste_burst(
+            saved, still_ours, lambda items: restore_pasteboard(pb, items))
 
 
 def execute_voice_command(raw: str) -> bool:
