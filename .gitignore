@@ -27,6 +27,9 @@ delayed_cleanup_physical_cases.json
 acoustic_keyword_activation.json
 acoustic_calibration_activation.json
 relisten_activation.json
+# --server-only bearer token, and its temporary file while it is written
+phone_token.txt
+.phone_token.txt.*
 dictionary.txt
 dictate.log
 ollama.log

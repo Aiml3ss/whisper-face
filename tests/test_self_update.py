@@ -199,7 +199,9 @@ class CheckForUpdateTests(unittest.TestCase):
         # Stage a bundle the way scripts/package_macos.sh does: an archive of
         # one revision, its shallow Git metadata, and the two receipts the
         # packager writes beside it. Finder adds a .DS_Store once the folder
-        # is opened. None of that is a local change to the source.
+        # is opened, and a server-only install keeps its bearer token (and,
+        # mid-write, that token's temporary file) in the checkout. None of
+        # that is a local change to the source.
         def git(*arguments, cwd):
             subprocess.run(["git", *arguments], cwd=cwd, check=True,
                            capture_output=True)
@@ -241,7 +243,8 @@ class CheckForUpdateTests(unittest.TestCase):
             git("remote", "add", "origin",
                 "https://example.invalid/whisper-face.git", cwd=bundle)
             for name in ("PACKAGE-CONTENTS.json", "RELEASE-METADATA.json",
-                         ".DS_Store"):
+                         ".DS_Store", "phone_token.txt",
+                         ".phone_token.txt.k2x9q1"):
                 (bundle / name).write_text("{}\n")
 
             report = self_update.check_for_update(

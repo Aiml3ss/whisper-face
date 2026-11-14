@@ -1007,9 +1007,10 @@ print_install_outcome() {
         else
             echo "== server-only installation is ready."
             echo "== A client must send the bearer token as"
-            echo "== 'Authorization: Bearer <token>'. A new one is created at"
-            echo "== every restart and written once to $DIR/dictate.log"
-            echo "== (the line starting \"Phone endpoint token\")."
+            echo "== 'Authorization: Bearer <token>'. It is kept, readable only"
+            echo "== by you, in $DIR/phone_token.txt"
+            echo "== and survives restarts. To replace it, delete that file and"
+            echo "== restart the service."
         fi
     else
         echo "== Not finished yet: Whisper Face is installed, but it cannot hear"

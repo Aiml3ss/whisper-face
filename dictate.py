@@ -902,6 +902,7 @@ CORRECTION_POLL_INTERVAL = 0.2
 CORRECTION_MAX_LEARN = 3     # per dictation
 
 PHONE_PORT = 8787            # /v1/audio/transcriptions for the Diction app
+PHONE_TOKEN_FILE = HERE / "phone_token.txt"   # --server-only bearer token
 SERVER_ONLY = "--server-only" in sys.argv   # headless: endpoint only
 
 # Session-scoped evidence-collection override, read exactly once from the
@@ -11579,6 +11580,23 @@ def phone_bind_host(server_only: bool) -> str:
     return "0.0.0.0" if server_only else "127.0.0.1"
 
 
+def load_phone_token(path: Path) -> str:
+    """The server-only bearer token, made once and kept owner-only so a
+    paired phone survives a restart. Anything other than one well-formed
+    token in a regular file is replaced; a failed save raises OSError."""
+    try:
+        if stat.S_ISREG(path.lstat().st_mode):
+            token = path.read_text(encoding="utf-8").strip()
+            if re.fullmatch(r"[0-9a-f]{64}", token):
+                os.chmod(path, 0o600)
+                return token
+    except (OSError, UnicodeDecodeError):
+        pass
+    token = os.urandom(32).hex()
+    atomic_write_text(path, token + "\n")
+    return token
+
+
 def phone_server():
     bind_host = phone_bind_host(SERVER_ONLY)
     try:
@@ -11588,11 +11606,19 @@ def phone_server():
         return
     display_host = lan_ip() if SERVER_ONLY else bind_host
     if SERVER_ONLY:
-        PHONE_TOKEN["value"] = os.urandom(32).hex()
         print(f"Phone endpoint: http://{display_host}:{PHONE_PORT}"
               f"/v1/audio/transcriptions")
-        print("Phone endpoint token, shown once; send it as "
-              f"'Authorization: Bearer <token>': {PHONE_TOKEN['value']}")
+        # The token itself never reaches the log: dictate.log is not private.
+        try:
+            PHONE_TOKEN["value"] = load_phone_token(PHONE_TOKEN_FILE)
+        except OSError as e:
+            print(f"! phone endpoint token could not be saved to "
+                  f"{PHONE_TOKEN_FILE} ({type(e).__name__}); every "
+                  "transcription request will be refused")
+        else:
+            print(f"Phone endpoint token: in {PHONE_TOKEN_FILE}; send it as "
+                  "'Authorization: Bearer <token>'. Delete that file and "
+                  "restart to replace the token.")
     else:
         print(f"Health endpoint: http://{display_host}:{PHONE_PORT}/health")
     srv.serve_forever()

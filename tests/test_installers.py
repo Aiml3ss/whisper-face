@@ -1179,9 +1179,9 @@ class InstallerContractTests(unittest.TestCase):
                       ready.stdout)
 
     def test_a_server_only_install_says_where_the_bearer_token_is(self):
-        # The endpoint refuses every request without the token, and the
-        # login service prints it only into dictate.log. An install that
-        # ends at "ready" left the owner with a server no client could use.
+        # The endpoint refuses every request without the token. The runtime
+        # keeps it in one private file across restarts and never logs it, so
+        # the install has to name that file and how to replace the token.
         ready = run_setup_functions(
             ["print_install_outcome"],
             "skipped_models=()\nprint_install_outcome ready\n",
@@ -1190,16 +1190,20 @@ class InstallerContractTests(unittest.TestCase):
         self.assertEqual(ready.returncode, 0, ready.stderr)
         self.assertIn("== server-only installation is ready.", ready.stdout)
         self.assertIn("bearer token", ready.stdout)
-        self.assertIn("/checkout/dictate.log", ready.stdout)
-        self.assertIn("every restart", ready.stdout)
+        self.assertIn("/checkout/phone_token.txt", ready.stdout)
+        self.assertIn("survives restarts", ready.stdout)
+        self.assertIn("delete that file", ready.stdout)
+        self.assertNotIn("every restart", ready.stdout)
         self.assertNotIn("release to paste", ready.stdout)
         # No PowerShell runs here, so the Windows branch is read as text.
         windows = self.powershell[
             self.powershell.index('"== server-only installation is ready."'):
             self.powershell.index('Write-Host "== Logs: $Log"')]
         self.assertIn("bearer token", windows)
-        self.assertIn("$Log", windows)
-        self.assertIn("every restart", windows)
+        self.assertIn("phone_token.txt", windows)
+        self.assertIn("survives restarts", windows)
+        self.assertIn("delete that file", windows)
+        self.assertNotIn("every restart", windows)
 
     def test_installers_fail_before_side_effects_for_read_only_checkouts(self):
         mac_call = self.shell.index("\ncheck_install_location\n")

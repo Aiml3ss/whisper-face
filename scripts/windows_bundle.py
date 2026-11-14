@@ -87,6 +87,7 @@ FORBIDDEN_BUNDLE_ENTRIES = (
     "learned.json",
     "ollama-error.log",
     "ollama.log",
+    "phone_token.txt",
     "preferences.json",
     "relisten_activation.json",
     "snippets.json",
