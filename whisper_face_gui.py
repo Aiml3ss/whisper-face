@@ -30,6 +30,9 @@ from whisper_face_theme import (
 
 APP_NAME = "Whisper Face"
 DEFAULTS_SUITE = "com.whisperface.app"
+# The palette's error coral is a fill colour: as text on the light surfaces
+# it reaches only 2.1-2.3:1, so light-mode error text uses this darker ink.
+ERROR_TEXT_ON_LIGHT = (0.702, 0.255, 0.180)   # ≈ #B3412E
 SECTIONS = ("Home", "Settings", "Advanced")
 # Keys and sounds get their own pane rather than crowding Personalize: at the
 # window minimum the character card plus six 44pt rows fills the pane, and
@@ -216,6 +219,16 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "nav.home": "Home",
         "nav.settings": "Settings",
         "nav.advanced": "Advanced",
+        "menu.edit": "Edit",
+        "menu.edit.undo": "Undo",
+        "menu.edit.redo": "Redo",
+        "menu.edit.cut": "Cut",
+        "menu.edit.copy": "Copy",
+        "menu.edit.paste": "Paste",
+        "menu.edit.select_all": "Select All",
+        "menu.window": "Window",
+        "menu.window.close": "Close",
+        "menu.window.minimize": "Minimize",
         "nav.selected": "Selected",
         "app.face_chip.label": "Whisper Face mascot",
         "app.face_chip.help": "Gives the mascot a friendly wobble. Nothing else changes.",
@@ -4936,6 +4949,7 @@ try:  # The view-model above remains usable in headless test environments.
         NSEventMaskFlagsChanged,
         NSEventMaskKeyDown,
         NSEventModifierFlagCommand,
+        NSEventModifierFlagShift,
         NSFont,
         NSFontAttributeName,
         NSFontDescriptorSystemDesignRounded,
@@ -5410,6 +5424,10 @@ if APPKIT_AVAILABLE:
     def _amber_text_color(dark: bool) -> Any:
         palette = palette_for_appearance(dark)
         return _theme_color(palette.accent if dark else AMBER_TEXT_ON_LIGHT)
+
+    def _error_text_color(dark: bool) -> Any:
+        palette = palette_for_appearance(dark)
+        return _theme_color(palette.error if dark else ERROR_TEXT_ON_LIGHT)
 
     def _accessible(view: Any, label: str, help_text: str = "") -> Any:
         """Apply explicit VoiceOver copy without depending on visual text."""
@@ -6145,6 +6163,7 @@ if APPKIT_AVAILABLE:
             self.window.setDelegate_(self)
             self.window.setContentMinSize_(WINDOW_MIN_SIZE)
             self.window.center()
+            self._install_main_menu()
             root = self.window.contentView()
             root.setWantsLayer_(True)
 
@@ -7576,7 +7595,7 @@ if APPKIT_AVAILABLE:
                 "processing": _amber_text_color(dark),
                 "starting": _amber_text_color(dark),
                 "recovery": _amber_text_color(dark),
-                "degraded": _theme_color(phase_palette.error),
+                "degraded": _error_text_color(dark),
                 "paused": _theme_color(phase_palette.ink_soft),
             }
             self.dynamic["overview_phase"].setTextColor_(
@@ -8065,7 +8084,7 @@ if APPKIT_AVAILABLE:
                 )
             notice_palette = palette_for_appearance(dark)
             notice_color = (
-                _theme_color(notice_palette.error)
+                _error_text_color(dark)
                 if state.notice_level == "error"
                 else _brand_text_color(dark)
                 if state.notice_level == "success"
@@ -8112,10 +8131,61 @@ if APPKIT_AVAILABLE:
             scroll.setBorderType_(1)
             editor = NSTextView.alloc().initWithFrame_(
                 NSMakeRect(0, 0, frame.size.width, frame.size.height))
+            # Editors hold exact strings (vocabulary the spell checker does
+            # not know, code and shell snippets), so nothing rewrites them.
+            editor.setRichText_(False)
+            editor.setAutomaticQuoteSubstitutionEnabled_(False)
+            editor.setAutomaticDashSubstitutionEnabled_(False)
+            editor.setAutomaticTextReplacementEnabled_(False)
+            editor.setAutomaticSpellingCorrectionEnabled_(False)
+            editor.setAllowsUndo_(True)
             editor.setString_(value)
             _accessible(editor, label, help_text)
             scroll.setDocumentView_(editor)
             return scroll, editor
+
+        @objc.python_method
+        def _install_main_menu(self) -> None:
+            """Give the window the standard Edit and Window key equivalents.
+
+            The runtime is an accessory app, so this menu is never drawn, but
+            AppKit still routes Cmd-W, Cmd-M and the edit shortcuts through
+            it; without one they do nothing in the window and its editors.
+            """
+            app = NSApplication.sharedApplication()
+            if app.mainMenu() is not None:
+                return
+            main = NSMenu.alloc().initWithTitle_(APP_NAME)
+            command = NSEventModifierFlagCommand
+            for title_key, entries in (
+                ("menu.edit", (
+                    ("menu.edit.undo", "undo:", "z", command),
+                    ("menu.edit.redo", "redo:", "z",
+                     command | NSEventModifierFlagShift),
+                    ("menu.edit.cut", "cut:", "x", command),
+                    ("menu.edit.copy", "copy:", "c", command),
+                    ("menu.edit.paste", "paste:", "v", command),
+                    ("menu.edit.select_all", "selectAll:", "a", command),
+                )),
+                ("menu.window", (
+                    ("menu.window.close", "performClose:", "w", command),
+                    ("menu.window.minimize", "performMiniaturize:", "m",
+                     command),
+                )),
+            ):
+                submenu = NSMenu.alloc().initWithTitle_(self._l(title_key))
+                for item_key, action, key, mask in entries:
+                    item = NSMenuItem.alloc() \
+                        .initWithTitle_action_keyEquivalent_(
+                            self._l(item_key), action, key)
+                    item.setKeyEquivalentModifierMask_(mask)
+                    submenu.addItem_(item)
+                holder = NSMenuItem.alloc() \
+                    .initWithTitle_action_keyEquivalent_(
+                        self._l(title_key), None, "")
+                holder.setSubmenu_(submenu)
+                main.addItem_(holder)
+            app.setMainMenu_(main)
 
         @objc.python_method
         def _run_modal(self, alert: Any) -> int:
@@ -9901,6 +9971,24 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             accessible_value(editor, "accessibilityLabel") ==
             localized_string("settings.dialog.snippet.value"),
             "editor accessibility")
+        require(
+            not bool(editor.isRichText())
+            and not bool(editor.isAutomaticQuoteSubstitutionEnabled())
+            and not bool(editor.isAutomaticDashSubstitutionEnabled())
+            and not bool(editor.isAutomaticTextReplacementEnabled())
+            and not bool(editor.isAutomaticSpellingCorrectionEnabled())
+            and bool(editor.allowsUndo()),
+            "editors keep exactly what was typed")
+        menu_keys = {
+            (str(item.keyEquivalent()), str(item.action()))
+            for top in NSApplication.sharedApplication().mainMenu().itemArray()
+            if top.submenu() is not None
+            for item in top.submenu().itemArray()}
+        require(
+            {("w", "performClose:"), ("m", "performMiniaturize:"),
+             ("z", "undo:"), ("x", "cut:"), ("c", "copy:"),
+             ("v", "paste:"), ("a", "selectAll:")} <= menu_keys,
+            "window and edit shortcuts have a main menu to route through")
 
         model.set_app_tone("com.example.mail", "casual")
         model.save_snippet(

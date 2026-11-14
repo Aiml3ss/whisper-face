@@ -1026,6 +1026,13 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(microphone_failed.degraded_issues[0].key, "microphone")
         self.assertNotIn("not blocked", microphone_failed.status_title.casefold())
 
+    def test_error_text_meets_aa_on_light_surfaces(self):
+        from whisper_face_theme import LIGHT_PALETTE, contrast_ratio
+
+        for surface in (LIGHT_PALETTE.bg, LIGHT_PALETTE.surface):
+            self.assertGreaterEqual(
+                contrast_ratio(gui_module.ERROR_TEXT_ON_LIGHT, surface), 4.5)
+
     def test_ready_fallback_remains_usable_while_warning_is_explained(self):
         state = normalize_snapshot({
             "service_status": "Running",
