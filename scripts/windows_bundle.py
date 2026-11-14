@@ -61,9 +61,17 @@ REQUIRED_BUNDLE_FILES = (
 # excludes every one of these; the verifier refuses to publish a bundle where
 # that stopped being true.
 FORBIDDEN_BUNDLE_ENTRIES = (
+    ".claude",
     ".evidence",
+    ".impeccable",
+    ".llm-wiki",
     ".models",
+    ".probe-baseline",
+    ".probe-baseline-chibi",
+    ".probe-min",
     ".probe-renders",
+    ".raw",
+    ".wrangler",
     ".windows",
     "__pycache__",
     ".DS_Store",

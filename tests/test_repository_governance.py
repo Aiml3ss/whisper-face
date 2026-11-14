@@ -194,6 +194,37 @@ class RepositoryGovernanceTests(unittest.TestCase):
         self.assertEqual(ran, expected)
         self.assertGreater(len(ran), 50)
 
+    def test_release_archives_and_the_index_carry_no_development_state(self):
+        # Release bundles are `git archive` output. Without export rules every
+        # download carried ~11.5 MB of unused render baselines, the wiki
+        # tool's state, and a Cloudflare account cache.
+        tracked = subprocess.run(
+            ["git", "ls-files"], cwd=ROOT, text=True, capture_output=True,
+            check=True).stdout.splitlines()
+        self.assertEqual(
+            [path for path in tracked if path.startswith(".wrangler/")], [])
+        for path in (".DS_Store", "site/.DS_Store", ".wrangler/cache/x.json",
+                     "site/.wrangler/state", "PACKAGE-CONTENTS.json",
+                     "RELEASE-METADATA.json"):
+            with self.subTest(ignored=path):
+                ignored = subprocess.run(
+                    ["git", "check-ignore", "-q", "--no-index", path],
+                    cwd=ROOT)
+                self.assertEqual(ignored.returncode, 0)
+        archive = subprocess.run(
+            ["git", "archive", "--worktree-attributes", "HEAD"],
+            cwd=ROOT, capture_output=True, check=True).stdout
+        listing = subprocess.run(
+            ["tar", "-t"], input=archive, capture_output=True,
+            check=True).stdout.decode("utf-8").splitlines()
+        self.assertIn("dictate.py", listing)
+        for prefix in (".probe-", ".raw/", "wiki/.llm-wiki/", ".wrangler/",
+                       ".claude/", ".impeccable/"):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(
+                    [entry for entry in listing if entry.startswith(prefix)],
+                    [])
+
     def test_readme_explains_license_and_historical_boundary(self):
         readme = self.read("README.md")
         self.assertIn("AGPL-3.0-only", readme)

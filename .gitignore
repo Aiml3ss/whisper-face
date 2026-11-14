@@ -45,6 +45,8 @@ __pycache__/
 /RELEASE-METADATA.json
 # Finder writes these into any folder it opens.
 .DS_Store
+# Wrangler's account cache and local state, wherever wrangler was run from.
+.wrangler/
 # Local ASR corpora and generated bakeoff hypotheses are never repository data.
 benchmarks/asr-local/
 # Local design-linter cache.
