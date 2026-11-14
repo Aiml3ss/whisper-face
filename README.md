@@ -26,7 +26,7 @@ product is a future workstream, not a current setup promise.
 | Product promise | What Whisper Face does |
 |---|---|
 | **Setup is part of the product** | `Install.command` provisions the app, locked dependencies, models, native helper, login services, and health checks in one repeatable flow. |
-| **Speech evidence stays authoritative** | Local recognizers produce hypotheses; on-screen context can bias recognition but never replace a recognized word, and the optional cleanup model may only make edits it can prove. Deterministic cleanup still applies a small set of written rules (fillers, spoken structure, typed self-corrections), described under [Daily use](#daily-use). |
+| **Speech evidence stays authoritative** | Local recognizers produce hypotheses; app names, window titles, and dictionary terms can bias recognition but never replace a recognized word, other on-screen terms may replace one only above an anchor-aware threshold with a recorded decision, and the optional cleanup model may only make edits it can prove. Deterministic cleanup still applies a small set of written rules (fillers, spoken structure, typed self-corrections), described under [Daily use](#daily-use). |
 | **Fast by architecture** | Models stay warm, long speech is recognized while you talk, installed model paths resolve offline, and routine cleanup stays deterministic unless the words truly require semantic work. |
 | **Insertion is a transaction** | The target is leased and revalidated before one paste attempt; destination drift goes to a recoverable Voice Outbox instead of the wrong field. |
 | **Personal without surveillance** | Corrections become scoped, inspectable local rules and regression cases—not a cloud transcript dossier. |

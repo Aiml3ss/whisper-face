@@ -101,9 +101,12 @@ Qwen3.5-4B, and has no Parakeet.
   Edit are rewrites by design and are not held to the proof. The deterministic
   path applies only the written rules above (fillers, spoken structure, typed
   self-correction, snippets on the explicit cue).
-- **Context never replaces a word.** App names, window titles, and dictionary
-  terms bias the recognizer and protect words but never replace a recognized
-  word. Nothing is read from secure text fields or private clipboards.
+- **Bounded context.** App names, window titles, and dictionary terms bias
+  the recognizer and protect words but never replace a recognized word. Terms
+  from the selection, the document, or the repository can still replace a
+  similar-sounding word when they clear an anchor-aware threshold, and each
+  such swap is recorded as an inspectable decision. Nothing is read from
+  secure text fields or private clipboards.
 - **Insertion is a transaction.** The destination is leased at key-down and
   revalidated before exactly one paste attempt. Drift in focus, selection, or
   surrounding text fails closed.
