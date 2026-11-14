@@ -303,6 +303,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "onboarding.status.try": "Try it now",
         "onboarding.status.warming": "Warming up",
         "onboarding.status.turn": "Your turn",
+        "onboarding.status.checking": "Checking",
         "onboarding.progress": "SETTING UP · {completed} OF {total} DONE",
         "onboarding.step.permissions": "Permissions",
         "onboarding.step.hotkey": "Your key",
@@ -311,7 +312,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "onboarding.step.summary": "{step}\n{status}",
         "onboarding.action.permissions": "Review Permissions",
         "onboarding.action.open_system_settings": "Open System Settings",
-        "onboarding.action.open_system_settings.help": "Open macOS System Settings so you can review Microphone, Accessibility, and Input Monitoring. Whisper Face does not change permissions.",
+        "onboarding.action.open_system_settings.help": "Open the Privacy & Security pane for the permission that is missing. Whisper Face does not change permissions.",
         "onboarding.action.hotkey": "Show Me How",
         "onboarding.action.models": "Check On Them",
         "onboarding.action.first_dictation": "Show Me How",
@@ -470,7 +471,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "diagnostics.action.export_support.help": "Save a local, transcript-free support bundle. You choose the destination; Whisper Face never uploads it. The bundle contains only health, permission, build, model, and aggregate result metadata.",
         "diagnostics.action.verify": "Run Verification",
         "diagnostics.action.open_system_settings": "Open System Settings",
-        "diagnostics.action.open_system_settings.help": "Open macOS System Settings so you can review Microphone, Accessibility, and Input Monitoring. Whisper Face does not change permissions.",
+        "diagnostics.action.open_system_settings.help": "Open the Privacy & Security pane for the permission that is missing. Whisper Face does not change permissions.",
         "diagnostics.action.licenses": "License Notices",
         "diagnostics.action.source": "Exact Source",
         "diagnostics.verification.not_run": "Not run",
@@ -508,6 +509,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "issue.microphone.detail": "Open System Settings › Privacy & Security › Microphone and enable Whisper Face. Other settings remain available.",
         "issue.accessibility.title": "Safe insertion needs Accessibility permission",
         "issue.accessibility.detail": "Open System Settings › Privacy & Security › Accessibility. Until then, recoverable text stays in the Voice Outbox.",
+        "issue.input_monitoring.title": "Your key needs Input Monitoring permission",
+        "issue.input_monitoring.detail": "Open System Settings › Privacy & Security › Input Monitoring and enable Whisper Face.",
         "issue.models.title": "A model dictation needs is missing",
         "issue.models.detail": "Run Install.command again to restore {models}. Your settings stay.",
         "issue.fallback.title": "An optional model needs repair",
@@ -1194,7 +1197,7 @@ class GUIActions:
     pause: Callable[[], None] = _noop
     resume: Callable[[], None] = _noop
     open_log: Callable[[], None] = _noop
-    open_system_settings: Callable[[], None] = _noop
+    open_system_settings: Callable[[str], None] = _noop
     copy_support_snapshot: Callable[[str], None] = _noop
     open_source_and_license: Callable[[], None] = _noop
     open_local_license_notices: Callable[[], None] = _noop
@@ -1654,6 +1657,9 @@ class GUIState:
     service_status: str = localized_string("default.status.unknown")
     microphone_status: str = localized_string("default.status.unknown")
     accessibility_status: str = localized_string("default.status.unknown")
+    input_monitoring_status: str = localized_string("default.status.unknown")
+    # Permissions the runtime reports as missing, in the order to fix them.
+    missing_permissions: tuple[str, ...] = field(default_factory=tuple)
     version: str = localized_string("default.build.development")
     models: tuple[ModelStatus, ...] = field(default_factory=tuple)
     model_wallet_advisory: str = localized_string(
@@ -1698,6 +1704,13 @@ def _support_status(value: object) -> str:
         "unavailable": "unavailable",
         "unknown": "unknown",
     }.get(normalized, "unknown")
+
+
+def _support_permission(value: str) -> str:
+    """Granted, unavailable (missing) or unknown, from the runtime's words."""
+    normalized = value.strip().casefold()
+    return {"granted": "granted", "needs attention": "unavailable"}.get(
+        normalized, "unknown")
 
 
 def _support_model_status(model: ModelStatus) -> str:
@@ -1835,7 +1848,7 @@ def support_snapshot_text(state: GUIState) -> str:
             "microphone_status": _support_status(state.microphone_status),
         },
         "permissions": {
-            "accessibility_status": _support_status(
+            "accessibility_status": _support_permission(
                 state.accessibility_status),
         },
         "build": (
@@ -2625,10 +2638,38 @@ def model_pill_tone(model: ModelStatus) -> str:
     return "warn"
 
 
+PERMISSIONS = ("microphone", "accessibility", "input_monitoring")
+
+
+def _permission_states(
+    *, microphone_status: str, accessibility_status: str,
+    input_monitoring_status: str,
+) -> dict[str, str]:
+    """Read the runtime's exact permission words as granted/missing/checking.
+
+    The microphone reports Ready, Starting or Unavailable; the two event
+    permissions report Granted, Needs attention or Unknown. Anything else is
+    not evidence either way.
+    """
+    microphone = microphone_status.strip().casefold()
+    states = {
+        "microphone": (
+            "granted" if microphone == "ready"
+            else "missing" if microphone == "unavailable" else "checking"),
+    }
+    for key, value in (("accessibility", accessibility_status),
+                       ("input_monitoring", input_monitoring_status)):
+        normalized = value.strip().casefold()
+        states[key] = (
+            "granted" if normalized == "granted"
+            else "missing" if normalized == "needs attention"
+            else "checking")
+    return states
+
+
 def _build_onboarding_steps(
     *,
-    microphone_status: str,
-    accessibility_status: str,
+    permissions: Mapping[str, str],
     hotkey_label: str,
     hotkey_practiced: bool,
     models: Sequence[ModelStatus],
@@ -2638,19 +2679,19 @@ def _build_onboarding_steps(
     def copy(key: str, **values: Any) -> str:
         return localized_string(key, locale=locale, **values)
 
-    microphone_ready = _status_contains(
-        microphone_status, ("ready", "granted", "available"))
-    accessibility_ready = _status_contains(
-        accessibility_status, ("ready", "granted", "trusted"))
-    permissions_ready = microphone_ready and accessibility_ready
+    permissions_ready = all(
+        permissions.get(key) == "granted" for key in PERMISSIONS)
+    permissions_missing = any(
+        permissions.get(key) == "missing" for key in PERMISSIONS)
     model_readiness = _models_readiness(models)
     model_ready = model_readiness == "ready"
     return (
         OnboardingStep(
             "permissions", copy("onboarding.permissions.title"),
             copy("onboarding.permissions.detail"),
-            copy("onboarding.status.done") if permissions_ready else copy(
-                "onboarding.status.attention"),
+            copy("onboarding.status.done") if permissions_ready
+            else copy("onboarding.status.attention") if permissions_missing
+            else copy("onboarding.status.checking"),
             permissions_ready,
         ),
         OnboardingStep(
@@ -2737,8 +2778,7 @@ def onboarding_presentation(
 def _build_degraded_issues(
     *,
     service_status: str,
-    microphone_status: str,
-    accessibility_status: str,
+    permissions: Mapping[str, str],
     models: Sequence[ModelStatus],
     locale: str = "en",
 ) -> tuple[DegradedIssue, ...]:
@@ -2751,16 +2791,11 @@ def _build_degraded_issues(
         issues.append(DegradedIssue(
             "service", copy("issue.service.title"),
             copy("issue.service.detail")))
-    if _status_contains(microphone_status, (
-            "needs attention", "denied", "missing", "failed", "unavailable")):
-        issues.append(DegradedIssue(
-            "microphone", copy("issue.microphone.title"),
-            copy("issue.microphone.detail")))
-    if _status_contains(accessibility_status, (
-            "needs attention", "denied", "not granted", "failed", "unavailable")):
-        issues.append(DegradedIssue(
-            "accessibility", copy("issue.accessibility.title"),
-            copy("issue.accessibility.detail")))
+    for key in PERMISSIONS:
+        if permissions.get(key) == "missing":
+            issues.append(DegradedIssue(
+                key, copy(f"issue.{key}.title"),
+                copy(f"issue.{key}.detail")))
     missing = [
         model.name for model in models
         if model.required and model.install_state in MODEL_BROKEN_STATES]
@@ -3270,6 +3305,12 @@ def normalize_snapshot(
         source.get("microphone_status"), unknown_status)
     accessibility_status = _clean_text(
         source.get("accessibility_status"), unknown_status)
+    input_monitoring_status = _clean_text(
+        source.get("input_monitoring_status"), unknown_status)
+    permissions = _permission_states(
+        microphone_status=microphone_status,
+        accessibility_status=accessibility_status,
+        input_monitoring_status=input_monitoring_status)
     models = _normalize_models(source.get("models"), locale=locale)
     model_wallet_advisory = _model_wallet_advisory_copy(
         source.get("model_wallet_shadow"), locale=locale)
@@ -3284,8 +3325,7 @@ def normalize_snapshot(
         or successful_dictation
         or _status_contains(capture_state, ("listen", "record", "captur")))
     onboarding_steps = _build_onboarding_steps(
-        microphone_status=microphone_status,
-        accessibility_status=accessibility_status,
+        permissions=permissions,
         hotkey_label=hotkey_label,
         hotkey_practiced=hotkey_practiced,
         models=models,
@@ -3294,8 +3334,7 @@ def normalize_snapshot(
     )
     degraded_issues = _build_degraded_issues(
         service_status=service_status,
-        microphone_status=microphone_status,
-        accessibility_status=accessibility_status,
+        permissions=permissions,
         models=models,
         locale=locale,
     )
@@ -3348,6 +3387,9 @@ def normalize_snapshot(
         service_status=service_status,
         microphone_status=microphone_status,
         accessibility_status=accessibility_status,
+        input_monitoring_status=input_monitoring_status,
+        missing_permissions=tuple(
+            key for key in PERMISSIONS if permissions[key] == "missing"),
         version=_clean_text(
             source.get("version"), localized_string(
                 "default.build.development", locale=locale)),
@@ -4675,16 +4717,16 @@ class WhisperFaceViewModel:
         return self.state
 
     def permission_recovery_needed(self) -> bool:
-        """True only while the evidence-backed permission step is incomplete."""
-        return bool(self.state.onboarding_steps) and not bool(
-            self.state.onboarding_steps[0].complete)
+        """True only while the runtime reports a permission as missing."""
+        return bool(self.state.missing_permissions)
 
     def open_system_settings(self) -> GUIState:
-        """Open the user-controlled macOS permission surface without guessing a grant."""
+        """Open the pane of the first missing permission; never grant one."""
         if not self.permission_recovery_needed():
             return self.state
         try:
-            self.actions.open_system_settings()
+            self.actions.open_system_settings(
+                self.state.missing_permissions[0])
             self.state = replace(
                 self.state,
                 notice=self.localized(
@@ -9022,6 +9064,7 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         "service_status": "Running",
         "microphone_status": "Unavailable",
         "accessibility_status": "Needs attention",
+        "input_monitoring_status": "Needs attention",
         "hotkey": "alt_r",
         "hotkey_label": "Right Option",
         "hotkey_shared_modes": [],
@@ -9152,8 +9195,8 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         keyword_reads[0] += 1
         return dict(private_keyword_export)
 
-    def open_system_settings() -> None:
-        calls.append(("open_system_settings",))
+    def open_system_settings(pane: str) -> None:
+        calls.append(("open_system_settings", pane))
 
     # The runtime owns the guard rules; the smoke fixture mirrors the shape it
     # returns so the window is exercised against a real verdict, not a stub.
@@ -9403,12 +9446,15 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                     "diagnostics.accessibility.open_system_settings"),
             "permission recovery accessibility")
         controller.continueSetup_(None)
-        require(("open_system_settings",) in calls, "permission recovery")
+        require(
+            ("open_system_settings", "microphone") in calls,
+            "permission recovery opens the missing permission's pane")
         require(model.state.section == "Home", "permission recovery route")
         runtime.update(
             service_status="Running",
             microphone_status="Ready",
             accessibility_status="Granted",
+            input_monitoring_status="Granted",
         )
         model.refresh()
         controller.render()

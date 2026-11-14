@@ -492,13 +492,24 @@ if IS_MACOS:
     from whisper_face_gui import GUIActions, create_gui  # noqa: E402
 
 
-def open_mac_system_settings() -> None:
-    """Open the user-controlled macOS settings app without changing TCC."""
+def open_mac_system_settings(pane: str | None = None) -> None:
+    """Open the user-controlled macOS settings app without changing TCC.
+
+    A known permission opens its own Privacy & Security pane; anything else
+    opens System Settings itself.
+    """
 
     if not IS_MACOS:
         raise RuntimeError("System Settings recovery is available only on macOS")
+    anchor = {
+        "microphone": "Privacy_Microphone",
+        "accessibility": "Privacy_Accessibility",
+        "input_monitoring": "Privacy_ListenEvent",
+    }.get(pane or "")
     subprocess.run(
-        ["open", "-a", "System Settings"],
+        ["open", "x-apple.systempreferences:"
+         f"com.apple.preference.security?{anchor}"]
+        if anchor else ["open", "-a", "System Settings"],
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -5597,11 +5608,15 @@ def runtime_status_snapshot() -> dict:
         from Quartz import (
             CGPreflightListenEventAccess, CGPreflightPostEventAccess,
         )
-        trusted = bool(
-            CGPreflightListenEventAccess() and CGPreflightPostEventAccess())
-        accessibility = "Granted" if trusted else "Needs attention"
+        # Input Monitoring lets the capture key be heard; Accessibility lets
+        # the words be typed. macOS grants them separately, and each has its
+        # own pane, so each is reported on its own.
+        input_monitoring = (
+            "Granted" if CGPreflightListenEventAccess() else "Needs attention")
+        accessibility = (
+            "Granted" if CGPreflightPostEventAccess() else "Needs attention")
     except Exception:
-        accessibility = "Unknown"
+        input_monitoring = accessibility = "Unknown"
     helper_ready = PARAKEET_ENABLED and PARAKEET_HELPER.is_file()
     try:
         helper_running = bool(
@@ -5707,6 +5722,7 @@ def runtime_status_snapshot() -> dict:
         "service_status": "Running" if bar is not None else "Starting",
         "microphone_status": AUDIO_POOL.readiness(),
         "accessibility_status": accessibility,
+        "input_monitoring_status": input_monitoring,
         "version": "Local checkout",
         "model_wallet_shadow": model_wallet_shadow,
         "models": model_status_rows_from_shadow(model_wallet_shadow),

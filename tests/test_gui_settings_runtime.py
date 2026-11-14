@@ -693,6 +693,48 @@ class RuntimeStatusWindowContractTests(unittest.TestCase):
         self.assertIn("Parakeet Unified 0.6B", state.degraded_issues[0].detail)
         self.assertEqual(state.status_phase, "degraded")
 
+    def test_missing_input_monitoring_is_not_reported_as_accessibility(self):
+        state = self.window(self.snapshot(input_monitoring=False))
+
+        self.assertEqual(
+            [issue.key for issue in state.degraded_issues],
+            ["input_monitoring"])
+        self.assertEqual(state.missing_permissions, ("input_monitoring",))
+        self.assertEqual(state.accessibility_status, "Granted")
+
+    def test_a_failed_microphone_is_missing_and_a_starting_one_is_not(self):
+        failed = self.window(self.snapshot(microphone="Unavailable"))
+        starting = self.window(self.snapshot(microphone="Starting"))
+
+        self.assertEqual(failed.missing_permissions, ("microphone",))
+        self.assertFalse(failed.onboarding_steps[0].complete)
+        self.assertEqual(starting.missing_permissions, ())
+        self.assertEqual(starting.degraded_issues, ())
+
+    def test_each_permission_opens_its_own_settings_pane(self):
+        from types import SimpleNamespace
+
+        commands = []
+        ns = load_definitions(
+            "open_mac_system_settings",
+            extra={"IS_MACOS": True, "subprocess": SimpleNamespace(
+                DEVNULL=None,
+                run=lambda command, **_kwargs: commands.append(command))},
+        )
+        for pane in ("microphone", "accessibility", "input_monitoring",
+                     "something else"):
+            ns["open_mac_system_settings"](pane)
+
+        self.assertEqual(commands, [
+            ["open", "x-apple.systempreferences:"
+             "com.apple.preference.security?Privacy_Microphone"],
+            ["open", "x-apple.systempreferences:"
+             "com.apple.preference.security?Privacy_Accessibility"],
+            ["open", "x-apple.systempreferences:"
+             "com.apple.preference.security?Privacy_ListenEvent"],
+            ["open", "-a", "System Settings"],
+        ])
+
     def test_support_snapshot_names_healthy_models(self):
         from whisper_face_gui import support_snapshot_text
 
