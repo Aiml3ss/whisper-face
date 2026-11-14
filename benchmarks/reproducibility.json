@@ -76,6 +76,15 @@
    "notes": "Every observation is 'unavailable' with reason 'not_run'. It exists so a third party can execute the evaluator end to end and see the output shape without collecting anything. It contains no measurement by construction, and a test enforces that."
   },
   {
+   "path": "benchmarks/default_path_sentences.json",
+   "case_key": "cases",
+   "cases": 92,
+   "content": "synthetic-text",
+   "requirement": "clone-only",
+   "command": "uv run tests/test_whole_program.py",
+   "notes": "Everyday sentences with the exact text a fresh install must type, dictated through the real dictate.py booted on a fake Mac: no models, audio device, or network. The harness needs a macOS host because it runs the runtime's macOS path, and skips elsewhere. quality_gate.py also runs every sentence through the deterministic cleanup."
+  },
+  {
    "path": "benchmarks/cleanup_latency_cases.json",
    "case_key": "cases",
    "cases": 30,

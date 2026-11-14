@@ -28,6 +28,7 @@ from fake_platform import Key, TextField
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CORPUS = ROOT / "benchmarks" / "default_path_sentences.json"
 MAC = None
 
 
@@ -60,6 +61,10 @@ def transcript_records() -> list[dict]:
         return []
     return [json.loads(line) for line in path.read_text().splitlines()
             if line.strip()]
+
+
+def load_corpus() -> list[dict]:
+    return json.loads(CORPUS.read_text(encoding="utf-8"))["cases"]
 
 
 class ImportTests(unittest.TestCase):
@@ -304,6 +309,68 @@ class FreshInstallDictationTests(unittest.TestCase):
         dead.running = False
         field = mac.dictate_sentence("Back in business.", field=TextField())
         self.assertEqual(field.text, "Back in business.")
+
+
+class DefaultPathCorpusTests(unittest.TestCase):
+    """benchmarks/default_path_sentences.json, typed as written."""
+
+    def test_the_corpus_covers_what_a_fresh_install_gets_wrong_easily(self):
+        cases = load_corpus()
+        self.assertGreaterEqual(len(cases), 60)
+        self.assertEqual(len({case["id"] for case in cases}), len(cases))
+        covers = {case["covers"] for case in cases}
+        for kind in ("actually-adverb", "snippet-name", "sign-off", "numbers",
+                     "scratch-that", "new-line", "tone-word-opening",
+                     "repeats", "emoji"):
+            with self.subTest(covers=kind):
+                self.assertIn(kind, covers)
+        adverbs = [case for case in cases if case["covers"] == "actually-adverb"]
+        corrections = [case for case in cases
+                       if case["covers"] == "actually-correction"]
+        # A rule that deletes words needs more must-not-fire cases than
+        # must-fire ones.
+        self.assertGreater(len(adverbs), len(corrections))
+        snippets = json.loads(
+            (ROOT / "snippets.template.json").read_text(encoding="utf-8"))
+        spoken = " ".join(case["spoken"].casefold() for case in cases)
+        for name in snippets:
+            with self.subTest(snippet=name):
+                self.assertIn(name.casefold(), spoken)
+
+    def test_every_sentence_arrives_as_written(self):
+        mac = booted()
+        for case in load_corpus():
+            if case.get("known_failure"):
+                continue
+            field = TextField(case.get("field", ""),
+                              bundle=case.get("app", "com.apple.TextEdit"))
+            # A dictation that cannot start or finish fails the whole test
+            # at once rather than once per sentence.
+            mac.dictate_sentence(case["spoken"], field=field)
+            with self.subTest(case=case["id"]):
+                self.assertEqual(field.text, case["expected"])
+
+
+def _known_failure_test(case):
+    def test(self):
+        mac = booted()
+        field = TextField(case.get("field", ""),
+                          bundle=case.get("app", "com.apple.TextEdit"))
+        mac.dictate_sentence(case["spoken"], field=field)
+        self.assertEqual(field.text, case["expected"])
+
+    test.__doc__ = case["known_failure"]
+    return unittest.expectedFailure(test)
+
+
+# Cases the default path still gets wrong. Each names its defect in the
+# corpus; the test keeps failing until the defect is fixed, and then fails as
+# an unexpected success until the case loses its "known_failure".
+for _case in load_corpus():
+    if _case.get("known_failure"):
+        setattr(DefaultPathCorpusTests,
+                "test_known_failure_" + _case["id"].replace("-", "_"),
+                _known_failure_test(_case))
 
 
 if __name__ == "__main__":
