@@ -425,6 +425,20 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "models.unknown": "Unknown",
         "models.waiting.detail": "Leave this window open — each model appears as startup reports it",
         "models.guidance": "Models prepare locally and can finish in the background.",
+        "models.state.ready": "Ready",
+        "models.state.installed": "Installed",
+        "models.state.optional": "Optional",
+        "models.state.not_installed": "Missing",
+        "models.state.failed": "Needs repair",
+        "models.state.mismatch": "Wrong version",
+        "models.state.checking": "Checking",
+        "models.detail.ready": "Installed and answered on this Mac",
+        "models.detail.installed": "Installed · warms up on first use",
+        "models.detail.optional": "Not installed · optional upgrade, add it with ./setup.sh --models",
+        "models.detail.not_installed": "Not installed · dictation needs it, run Install.command again",
+        "models.detail.failed": "Files are incomplete · run the installer again to repair",
+        "models.detail.mismatch": "A different version is installed · run the installer again to repair",
+        "models.detail.checking": "Checking the files on this Mac",
         "models.relisten.label": "Selective Re-listen",
         "models.relisten.status.off": "Off",
         "models.relisten.status.ready": "On · verifier ready",
@@ -493,10 +507,10 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "issue.microphone.detail": "Open System Settings › Privacy & Security › Microphone and enable Whisper Face. Other settings remain available.",
         "issue.accessibility.title": "Safe insertion needs Accessibility permission",
         "issue.accessibility.detail": "Open System Settings › Privacy & Security › Accessibility. Until then, recoverable text stays in the Voice Outbox.",
-        "issue.models.title": "Local recognition models are still unavailable",
-        "issue.models.detail": "Keep Whisper Face open while models finish preparing, then run Verification if their status does not change.",
-        "issue.fallback.title": "A fallback model needs attention",
-        "issue.fallback.detail": "Dictation can continue with a ready engine. Check: {models}.",
+        "issue.models.title": "A model dictation needs is missing",
+        "issue.models.detail": "Run Install.command again to restore {models}. Your settings stay.",
+        "issue.fallback.title": "An optional model needs repair",
+        "issue.fallback.detail": "Dictation still works. Run the installer again to repair {models}.",
         "settings.title": "Settings",
         "settings.subtitle": "Personal language, appearance, keys, sound, and privacy in one place.",
         "settings.pane.personalize": "Personalize",
@@ -1205,6 +1219,15 @@ class ModelStatus:
     role: str = ""
     status: str = localized_string("default.status.unknown")
     detail: str = ""
+    # Machine fields from the runtime; display copy above is derived from
+    # them, never the other way round.
+    install_state: str = "unknown"
+    required: bool = False
+    warm: bool = False
+
+
+MODEL_INSTALL_STATES = (
+    "installed", "not_installed", "failed", "mismatch", "checking", "unknown")
 
 
 @dataclass(frozen=True)
@@ -1680,6 +1703,17 @@ def _support_status(value: object) -> str:
     }.get(normalized, "unknown")
 
 
+def _support_model_status(model: ModelStatus) -> str:
+    """Map the runtime's install fields onto the bundle's closed vocabulary."""
+    if model.install_state == "installed":
+        return "ready" if model.warm else "installed"
+    if model.install_state == "checking":
+        return "checking"
+    if model.install_state in MODEL_BROKEN_STATES:
+        return "unavailable"
+    return _support_status(model.status)
+
+
 def _support_model_family(value: object) -> str:
     """Classify a known local model without copying its display label."""
     normalized = str(value).strip().casefold()
@@ -1814,13 +1848,13 @@ def support_snapshot_text(state: GUIState) -> str:
         "models": [
             {
                 "family": _support_model_family(model.name),
-                "status": _support_status(model.status),
+                "status": _support_model_status(model),
             }
             for model in sorted(
                 state.models,
                 key=lambda model: (
                     _support_model_family(model.name),
-                    _support_status(model.status),
+                    _support_model_status(model),
                 ))
         ],
         "last_result": {
@@ -1870,12 +1904,33 @@ def _normalize_models(
         if isinstance(item, Mapping):
             name = _clean_text(item.get("name"), localized_string(
                 "default.model.name", locale=locale))
+            install_state = str(item.get("install_state", "unknown"))
+            if install_state not in MODEL_INSTALL_STATES:
+                install_state = "unknown"
+            required = item.get("required") is True
+            warm = install_state == "installed" and item.get("warm") is True
+            if install_state == "unknown":
+                status = _clean_text(item.get("status"), localized_string(
+                    "default.status.unknown", locale=locale))
+                detail = _clean_text(item.get("detail"), "")
+            else:
+                state_key = (
+                    "ready" if warm
+                    else "optional" if (
+                        install_state == "not_installed" and not required)
+                    else install_state)
+                status = localized_string(
+                    f"models.state.{state_key}", locale=locale)
+                detail = localized_string(
+                    f"models.detail.{state_key}", locale=locale)
             models.append(ModelStatus(
                 name=name,
                 role=_clean_text(item.get("role"), ""),
-                status=_clean_text(item.get("status"), localized_string(
-                    "default.status.unknown", locale=locale)),
-                detail=_clean_text(item.get("detail"), ""),
+                status=status,
+                detail=detail,
+                install_state=install_state,
+                required=required,
+                warm=warm,
             ))
         elif isinstance(item, str) and item.strip():
             models.append(ModelStatus(
@@ -2549,10 +2604,28 @@ def _status_contains(value: str, words: Sequence[str]) -> bool:
     return any(word in normalized for word in words)
 
 
-def _models_ready(models: Sequence[ModelStatus]) -> bool:
-    return any(_status_contains(model.status, ("ready", "running", "installed"))
-               or "warm path observed" in model.detail.casefold()
-               for model in models)
+MODEL_BROKEN_STATES = frozenset({"not_installed", "failed", "mismatch"})
+
+
+def _models_readiness(models: Sequence[ModelStatus]) -> str:
+    """Return ready, preparing or missing for the models dictation needs."""
+    required = [model for model in models if model.required]
+    if any(model.install_state in MODEL_BROKEN_STATES for model in required):
+        return "missing"
+    if required and all(
+            model.install_state == "installed" for model in required):
+        return "ready"
+    return "preparing"
+
+
+def model_pill_tone(model: ModelStatus) -> str:
+    """Green for installed, quiet for a choice or a check, amber for faults."""
+    if model.install_state == "installed":
+        return "good"
+    if model.install_state == "checking" or (
+            model.install_state == "not_installed" and not model.required):
+        return "neutral"
+    return "warn"
 
 
 def _build_onboarding_steps(
@@ -2573,7 +2646,8 @@ def _build_onboarding_steps(
     accessibility_ready = _status_contains(
         accessibility_status, ("ready", "granted", "trusted"))
     permissions_ready = microphone_ready and accessibility_ready
-    model_ready = _models_ready(models)
+    model_readiness = _models_readiness(models)
+    model_ready = model_readiness == "ready"
     return (
         OnboardingStep(
             "permissions", copy("onboarding.permissions.title"),
@@ -2592,8 +2666,10 @@ def _build_onboarding_steps(
         OnboardingStep(
             "models", copy("onboarding.models.title"),
             copy("onboarding.models.detail"),
-            copy("onboarding.status.done") if model_ready else copy(
-                "onboarding.status.warming"),
+            copy("onboarding.status.done") if model_ready
+            else copy("onboarding.status.attention")
+            if model_readiness == "missing"
+            else copy("onboarding.status.warming"),
             model_ready,
         ),
         OnboardingStep(
@@ -2688,14 +2764,21 @@ def _build_degraded_issues(
         issues.append(DegradedIssue(
             "accessibility", copy("issue.accessibility.title"),
             copy("issue.accessibility.detail")))
-    if models and not _models_ready(models):
+    missing = [
+        model.name for model in models
+        if model.required and model.install_state in MODEL_BROKEN_STATES]
+    if missing:
         issues.append(DegradedIssue(
             "models", copy("issue.models.title"),
-            copy("issue.models.detail"),
+            copy("issue.models.detail", models=", ".join(missing)),
         ))
-    elif models:
-        unavailable = [model.name for model in models if _status_contains(
-            model.status, ("failed", "missing", "unavailable"))]
+    else:
+        # An optional model that was never installed is a choice, not a
+        # fault; only a damaged optional install is worth a warning.
+        unavailable = [
+            model.name for model in models
+            if not model.required
+            and model.install_state in {"failed", "mismatch"}]
         if unavailable:
             issues.append(DegradedIssue(
                 "fallback", copy("issue.fallback.title"),
@@ -3050,6 +3133,7 @@ def _status_presentation(
     outbox_count: int,
     service_status: str,
     degraded_issues: Sequence[DegradedIssue],
+    models_preparing: bool = False,
     locale: str = "en",
 ) -> tuple[str, str, str]:
     def copy(key: str, **values: Any) -> str:
@@ -3080,7 +3164,8 @@ def _status_presentation(
         return (
             "degraded", copy("overview.status.degraded.title"),
             errors[0].detail)
-    if _status_contains(service_status, ("starting", "warming", "unknown")):
+    if models_preparing or _status_contains(
+            service_status, ("starting", "warming", "unknown")):
         return (
             "starting", copy("overview.status.starting.title"),
             copy("overview.status.starting.detail"))
@@ -3224,6 +3309,8 @@ def normalize_snapshot(
         outbox_count=outbox_count,
         service_status=service_status,
         degraded_issues=degraded_issues,
+        models_preparing=(
+            bool(models) and _models_readiness(models) == "preparing"),
         locale=locale,
     )
     normalized_latency = max(0.0, latency) if latency is not None else None
@@ -5464,9 +5551,12 @@ if APPKIT_AVAILABLE:
         @objc.python_method
         def _set_pill_tone(self, pill: Any, tone: str, dark: bool) -> None:
             palette = palette_for_appearance(dark)
-            fill = palette.brand if tone == "good" else palette.accent
+            fill = (palette.brand if tone == "good"
+                    else palette.ink_soft if tone == "neutral"
+                    else palette.accent)
             text_color = (
                 _brand_text_color(dark) if tone == "good"
+                else _theme_color(palette.ink_soft) if tone == "neutral"
                 else _amber_text_color(dark))
             layer = pill.layer()
             if layer is not None:
@@ -7783,11 +7873,7 @@ if APPKIT_AVAILABLE:
                         " · ".join(part for part in (model.role, model.detail) if part))
                     status_label.setStringValue_(model.status)
                     self._set_pill_tone(
-                        status_label,
-                        "good" if _status_contains(
-                            model.status, ("ready", "running", "installed"))
-                        else "warn",
-                        dark)
+                        status_label, model_pill_tone(model), dark)
                     self._fit_pill(status_label)
                     sync_accessibility(
                         name, model.name,
@@ -8871,9 +8957,9 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         "flight_recorder": False,
         "capture_state": "Ready",
         "active_engine": "Smoke ASR",
-        "service_status": "Not started",
-        "microphone_status": "Not requested",
-        "accessibility_status": "Not requested",
+        "service_status": "Running",
+        "microphone_status": "Unavailable",
+        "accessibility_status": "Needs attention",
         "hotkey": "alt_r",
         "hotkey_label": "Right Option",
         "hotkey_shared_modes": [],
@@ -8883,10 +8969,16 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         "sounds": "system",
         "language": LANGUAGE_DEFAULT,
         "recent_dictations": False,
+        # Shaped like runtime_status_snapshot before the first readiness
+        # receipt: nothing inspected yet.
         "models": [{
-            "name": "Smoke ASR",
-            "role": "Construction fixture",
-            "status": "Not loaded",
+            "name": "Parakeet Unified 0.6B",
+            "role": "Primary recognition",
+            "install_state": "checking",
+            "required": True,
+            "warm": False,
+            "status": "UNAVAILABLE",
+            "detail": "Exact pinned files not resolved",
         }],
         "last_context_firewall": {
             "mode": "shadow-only",
@@ -9273,7 +9365,8 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                  if not step.complete).key == "models",
             "model readiness")
         runtime["capture_state"] = "Ready"
-        runtime["models"][0]["status"] = "Running"
+        runtime["models"][0].update(
+            install_state="installed", warm=True, status="RESOLVED")
         model.refresh()
         require(
             next(step for step in model.state.onboarding_steps

@@ -62,6 +62,21 @@ from whisper_face_gui import (
 )
 import whisper_face_gui as gui_module
 
+# Model rows in the shape runtime_status_snapshot emits them.
+READY_MODEL = {
+    "name": "Parakeet Unified 0.6B", "role": "Primary recognition",
+    "install_state": "installed", "required": True, "warm": True,
+    "status": "RESOLVED",
+    "detail": "Exact pinned files resolved · Warm path observed · Runtime "
+              "readiness not attested · Capability bounds unavailable",
+}
+PREPARING_MODEL = {
+    **READY_MODEL, "install_state": "checking", "warm": False,
+    "status": "UNAVAILABLE",
+    "detail": "Exact pinned files not resolved · Runtime readiness not "
+              "attested · Capability bounds unavailable",
+}
+
 
 class SnapshotTests(unittest.TestCase):
     @staticmethod
@@ -587,7 +602,7 @@ class SnapshotTests(unittest.TestCase):
             "microphone_status": "Ready",
             "accessibility_status": "Granted",
             "hotkey_label": "Right Option",
-            "models": [{"name": "Parakeet", "status": "Running"}],
+            "models": [READY_MODEL],
         }
         listening = normalize_snapshot({
             **common, "capture_state": "Listening",
@@ -773,7 +788,7 @@ class SnapshotTests(unittest.TestCase):
             "version": "Local checkout",
             "models": [
                 {"name": "Whisper", "status": "Installed"},
-                {"name": "Parakeet", "status": "Running"},
+                READY_MODEL,
             ],
             "active_engine": "Parakeet",
             "last_latency_ms": 123.4,
@@ -807,7 +822,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(payload["kind"], "whisper-face/support-snapshot")
         self.assertEqual(payload["models"], [
-            {"family": "parakeet", "status": "running"},
+            {"family": "parakeet", "status": "ready"},
             {"family": "whisper", "status": "installed"},
         ])
         self.assertEqual(payload["last_result"]["cleanup_edits_count"], 2)
@@ -860,7 +875,7 @@ class SnapshotTests(unittest.TestCase):
             "microphone_status": "Ready",
             "accessibility_status": "Granted",
             "hotkey_label": "Right Option",
-            "models": [{"name": "Parakeet", "status": "Running"}],
+            "models": [READY_MODEL],
             "last_word_count": 7,
         })
         self.assertTrue(state.onboarding_complete)
@@ -874,7 +889,7 @@ class SnapshotTests(unittest.TestCase):
             "service_status": "Starting",
             "microphone_status": "Needs attention",
             "accessibility_status": "Needs attention",
-            "models": [{"name": "Parakeet", "status": "Preparing"}],
+            "models": [PREPARING_MODEL],
         })
         self.assertFalse(first_run.onboarding_complete)
         self.assertEqual(first_run.onboarding_steps[0].key, "permissions")
@@ -886,7 +901,7 @@ class SnapshotTests(unittest.TestCase):
             "microphone_status": "Not requested",
             "accessibility_status": "Not requested",
             "capture_state": "Ready",
-            "models": [{"name": "Parakeet", "status": "Preparing"}],
+            "models": [PREPARING_MODEL],
         }
         model = WhisperFaceViewModel(GUIActions(
             status_snapshot=lambda: dict(runtime)), locale="en-US")
@@ -911,7 +926,7 @@ class SnapshotTests(unittest.TestCase):
             "models",
         )
         runtime["capture_state"] = "Ready"
-        runtime["models"] = [{"name": "Parakeet", "status": "Running"}]
+        runtime["models"] = [READY_MODEL]
         self.assertEqual(
             next(step for step in model.refresh().onboarding_steps
                  if not step.complete).key,
@@ -937,7 +952,7 @@ class SnapshotTests(unittest.TestCase):
             "microphone_status": "Ready",
             "accessibility_status": "Granted",
             "hotkey_practiced": True,
-            "models": [{"name": "Parakeet", "status": "Running"}],
+            "models": [READY_MODEL],
             "last_word_count": 5,
         })
         celebration = onboarding_presentation(
@@ -956,7 +971,7 @@ class SnapshotTests(unittest.TestCase):
             "microphone_status": "Ready",
             "accessibility_status": "Granted",
             "hotkey_label": "Right Option",
-            "models": [{"name": "Parakeet", "status": "Running"}],
+            "models": [READY_MODEL],
         })
         hotkey = next(
             step for step in state.onboarding_steps if step.key == "hotkey")
@@ -974,7 +989,7 @@ class SnapshotTests(unittest.TestCase):
             "service_status": "Running",
             "microphone_status": "Ready",
             "accessibility_status": "Granted",
-            "models": [{"name": "Parakeet", "status": "Running"}],
+            "models": [READY_MODEL],
         }
         listening = normalize_snapshot({**common, "capture_state": "Listening"})
         self.assertEqual(listening.status_phase, "recording")
@@ -1010,14 +1025,18 @@ class SnapshotTests(unittest.TestCase):
             "microphone_status": "Ready",
             "accessibility_status": "Granted",
             "models": [
-                {"name": "Parakeet", "status": "Running"},
-                {"name": "Whisper fallback", "status": "Unavailable"},
+                READY_MODEL,
+                {**READY_MODEL, "name": "Whisper large-v3-turbo",
+                 "required": False, "install_state": "mismatch",
+                 "warm": False, "status": "UNAVAILABLE"},
             ],
         })
         self.assertEqual(state.status_phase, "ready")
         self.assertEqual(len(state.degraded_issues), 1)
         self.assertEqual(state.degraded_issues[0].severity, "warning")
-        self.assertIn("continue", state.degraded_issues[0].detail)
+        self.assertIn("still works", state.degraded_issues[0].detail)
+        self.assertIn(
+            "Whisper large-v3-turbo", state.degraded_issues[0].detail)
 
     def test_result_inspector_is_evidence_only_and_honors_reduced_motion(self):
         self.assertIsNone(normalize_snapshot({
@@ -2488,7 +2507,7 @@ class ViewModelTests(unittest.TestCase):
             "service_status": "Running",
             "microphone_status": "Needs attention",
             "accessibility_status": "Needs attention",
-            "models": [{"name": "Parakeet", "status": "Preparing"}],
+            "models": [PREPARING_MODEL],
         }
         model = WhisperFaceViewModel(GUIActions(
             status_snapshot=lambda: runtime))
@@ -2609,8 +2628,7 @@ class BoundKeyCopyTests(unittest.TestCase):
             "service_status": "Running",
             "microphone_status": "Ready",
             "accessibility_status": "Granted",
-            "models": [{"name": "Parakeet", "role": "primary",
-                        "status": "Ready"}],
+            "models": [READY_MODEL],
         })
         self.assertEqual(state.hotkey_label, "F13")
         self.assertIn("F13", state.status_detail)
