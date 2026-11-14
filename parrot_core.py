@@ -544,9 +544,10 @@ def _resolve_scratch_that(text: str) -> tuple[str, bool]:
         return text, False
     # The marks a recognizer writes around the command are the command's own:
     # "Tuesday. Scratch that. Wednesday" and "savings, scratch that, to".
-    lead = re.search(r"[.!?…,;:—–]*[ \t]*$", text[:command.start()].rstrip())
+    head = text[:command.start()].rstrip()
+    lead = re.search(r"[.!?…,;:—–]*$", head)
     trail = re.match(r"[ \t]*[.!?…,;:]*", text[command.end():])
-    left = text[:command.start()].rstrip()[:lead.start()].rstrip()
+    left = head[:lead.start()].rstrip()
     right = text[command.end() + trail.end():].lstrip()
     if not left:
         return text, True

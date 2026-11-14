@@ -1578,7 +1578,7 @@ def weak_whisper_evidence(recognition: Recognition | None) -> bool:
 
 def is_hallucination(text: str, language: str = LANGUAGE_DEFAULT,
                      recognition: Recognition | None = None) -> bool:
-    """Reject punctuation-only output and weakly supported silent-audio phrases.
+    """Reject punctuation-only output and unsupported silent-audio phrases.
 
     Normalize punctuation rather than enumerating every possible terminal
     mark ("Thank you.", "Thank you!", and "THANK YOU..." are equivalent).
