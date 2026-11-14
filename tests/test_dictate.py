@@ -14,6 +14,7 @@ import builtins
 import contextlib
 import copy
 import ctypes
+import enum
 import functools
 import hashlib
 import io
@@ -47,9 +48,11 @@ from parrot_core import (  # noqa: E402
     NUMBER_WORDS,
     Recognition,
     RecognitionWord,
+    can_reuse_speculation,
     compile_cleanup,
     infer_revised_insertion,
     mode_from_modifiers,
+    should_start_speculation,
 )
 from voice_compiler import (  # noqa: E402
     ContextCandidate,
@@ -2110,6 +2113,39 @@ class FakeStream:
         self.closed = True
 
 
+class FakePortAudio:
+    """sounddevice over PortAudio on macOS, reduced to the device table.
+
+    Pa_Initialize snapshots the default input; Pa_GetDefaultInputDevice only
+    reads that snapshot. Terminating with a stream open would free it under
+    its Python owner, so the fake refuses.
+    """
+
+    def __init__(self, default):
+        self.system_default = default
+        self.cached_default = default
+        self.streams = []
+        self.reinitializations = 0
+
+    def InputStream(self, **kwargs):
+        stream = FakeStream(**kwargs)
+        stream.device = self.cached_default
+        self.streams.append(stream)
+        return stream
+
+    def open_devices(self):
+        return [stream.device for stream in self.streams if not stream.closed]
+
+    def _terminate(self):
+        if self.open_devices():
+            raise AssertionError("PortAudio terminated with a stream open")
+        self.cached_default = None
+
+    def _initialize(self):
+        self.cached_default = self.system_default
+        self.reinitializations += 1
+
+
 class ParakeetClientTests(unittest.TestCase):
     def test_native_helper_protocol_keeps_audio_in_memory(self):
         class FakeProcess:
@@ -3420,6 +3456,132 @@ class AudioPoolTests(unittest.TestCase):
         self.assertEqual(len(streams), 2)
         pool.release(slot)
 
+    def recorder_namespace(self, factory, clock):
+        ns = load_definitions(
+            "AudioSlot", "AudioPool", "CapturedAudio", "Recorder",
+            "stalled_take_action",
+            assignments={"SAMPLE_RATE", "CAPTURE_BLOCK_SECONDS",
+                         "NO_AUDIO_SECONDS", "CHUNK_MIN_SECONDS",
+                         "CHUNK_CUT_SILENCE", "SPECULATIVE_MIN_SECONDS",
+                         "SPECULATIVE_SILENCE"},
+            extra={
+                "np": np,
+                "LEVELS": [],
+                "calibrated_vad_threshold": lambda: 0.008,
+                "should_start_speculation": should_start_speculation,
+                "can_reuse_speculation": can_reuse_speculation,
+                "time": SimpleNamespace(
+                    perf_counter=lambda: clock["now"],
+                    time_ns=time.time_ns),
+                "ContextPack": SimpleNamespace,
+                "FLIGHT": SimpleNamespace(attach=lambda _recorder: False),
+                "print": lambda *_args: None,
+            },
+        )
+        ns["AUDIO_POOL"] = ns["AudioPool"](size=1, stream_factory=factory)
+        ns["AUDIO_POOL"].warm()
+        return ns
+
+    def test_a_stream_that_delivers_nothing_is_detected_and_replaced(self):
+        streams = []
+        clock = {"now": 100.0}
+
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        ns = self.recorder_namespace(factory, clock)
+        pool = ns["AUDIO_POOL"]
+        recorder = ns["Recorder"]()
+        recorder.start(100.0)
+        dead = streams[0]
+
+        clock["now"] = 100.0 + ns["NO_AUDIO_SECONDS"] - 0.01
+        self.assertIsNone(ns["stalled_take_action"](recorder, clock["now"]))
+        clock["now"] = 100.0 + ns["NO_AUDIO_SECONDS"]
+        self.assertEqual(
+            ns["stalled_take_action"](recorder, clock["now"]), "abandon")
+
+        self.assertEqual(len(recorder.stop()), 0)
+
+        # The silent stream is never handed to the next take.
+        self.assertTrue(dead.closed)
+        self.assertTrue(pool.wait_for_recovery())
+        replacement = ns["Recorder"]()
+        replacement.start(clock["now"])
+        self.assertIsNot(replacement.slot.stream, dead)
+        replacement.stop()
+
+    def test_a_stream_that_stops_mid_take_keeps_its_audio_and_is_replaced(self):
+        # The microphone is unplugged, or its Bluetooth link drops, after
+        # the speaker has started: callbacks simply stop.
+        streams = []
+        clock = {"now": 100.0}
+
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        ns = self.recorder_namespace(factory, clock)
+        pool = ns["AUDIO_POOL"]
+        recorder = ns["Recorder"]()
+        recorder.start(100.0)
+        dead = streams[0]
+        for _ in range(50):
+            clock["now"] += 0.01
+            dead.callback(
+                np.full((160, 1), 0.02, dtype=np.float32), 160, None, None)
+        stalled_at = clock["now"]
+
+        clock["now"] = stalled_at + ns["NO_AUDIO_SECONDS"] - 0.01
+        self.assertIsNone(ns["stalled_take_action"](recorder, clock["now"]))
+        clock["now"] = stalled_at + ns["NO_AUDIO_SECONDS"]
+        # Speech was heard, so the take finishes rather than being dropped.
+        self.assertEqual(
+            ns["stalled_take_action"](recorder, clock["now"]), "finish")
+
+        self.assertEqual(len(recorder.stop()), 8_000)
+        self.assertTrue(dead.closed)
+        self.assertTrue(pool.wait_for_recovery())
+        replacement = ns["Recorder"]()
+        replacement.start(clock["now"])
+        self.assertIsNot(replacement.slot.stream, dead)
+        replacement.stop()
+
+    def test_a_stream_that_delivers_audio_is_kept(self):
+        streams = []
+        clock = {"now": 100.0}
+
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        ns = self.recorder_namespace(factory, clock)
+        pool = ns["AUDIO_POOL"]
+        recorder = ns["Recorder"]()
+        recorder.start(100.0)
+        # Ten seconds of 0.1 s blocks, as a live stream delivers them.
+        for _ in range(100):
+            clock["now"] += 0.1
+            streams[0].callback(
+                np.full((1600, 1), 0.01, dtype=np.float32), 1600, None, None)
+            self.assertIsNone(
+                ns["stalled_take_action"](recorder, clock["now"]))
+
+        self.assertEqual(len(recorder.stop()), 160_000)
+        self.assertEqual(pool.readiness(), "Ready")
+        self.assertFalse(streams[0].closed)
+        # Too short to judge: a quick tap that heard nothing is not a fault.
+        tap = ns["Recorder"]()
+        tap.start(110.0)
+        clock["now"] = 110.3
+        tap.stop()
+        self.assertEqual(pool.readiness(), "Ready")
+        self.assertEqual(len(streams), 1)
+
     def test_stop_failure_never_reuses_slot_and_preserves_other_active_take(self):
         class FailingStopStream(FakeStream):
             def __init__(self, **kwargs):
@@ -3528,21 +3690,230 @@ class MacAudioRecoveryNotificationTests(unittest.TestCase):
         def removeObserver_(self, token):
             self.removed.append(token)
 
-    def test_runtime_invalidation_covers_pool_and_flight_recorder(self):
-        calls = []
+    @staticmethod
+    def device_namespace(portaudio, requests=None, *, flight=True):
+        """The production pool, Flight Recorder and recovery entry point."""
         ns = load_definitions(
+            "AudioSlot", "AudioPool", "FlightRecorder",
             "_invalidate_default_audio_inputs",
+            "refresh_default_audio_inputs", "_reinitialize_portaudio",
+            assignments={"SAMPLE_RATE", "FLIGHT_BUFFER_SECONDS"},
             extra={
-                "AUDIO_POOL": SimpleNamespace(
-                    recover_default_device=lambda: calls.append("pool")),
-                "FLIGHT": SimpleNamespace(
-                    invalidate=lambda: calls.append("flight")),
+                "sd": portaudio,
+                "deque": __import__("collections").deque,
+                "np": np,
+                "time": time,
             },
         )
+        hook = None if requests is None else (
+            lambda: requests.append("refresh") or True)
+        ns["AUDIO_POOL"] = ns["AudioPool"](size=2, request_refresh=hook)
+        # restore_allowed stands in for the stored Flight Recorder opt-in.
+        ns["FLIGHT"] = ns["FlightRecorder"](
+            restore_allowed=lambda: flight, request_refresh=hook)
+        return ns
 
+    def test_a_default_input_change_rebinds_every_stream(self):
+        portaudio = FakePortAudio("built-in")
+        ns = self.device_namespace(portaudio)
+        ns["AUDIO_POOL"].warm()
+        ns["FLIGHT"].enable()
+        self.assertEqual(portaudio.open_devices(), ["built-in"] * 3)
+
+        portaudio.system_default = "usb"
         ns["_invalidate_default_audio_inputs"]()
 
-        self.assertEqual(calls, ["pool", "flight"])
+        self.assertEqual(portaudio.open_devices(), ["usb"] * 3)
+        self.assertEqual(ns["AUDIO_POOL"].readiness(), "Ready")
+        self.assertTrue(ns["FLIGHT"].is_enabled())
+        self.assertEqual(portaudio.reinitializations, 1)
+
+    def test_a_removed_launch_device_does_not_leave_dictation_dead(self):
+        # Launched on AirPods; they go back in the case and the built-in
+        # microphone becomes the default. Opening the vanished device fails.
+        portaudio = FakePortAudio("airpods")
+        opened = portaudio.InputStream
+
+        def open_existing(**kwargs):
+            if portaudio.cached_default == "airpods" and (
+                    portaudio.system_default != "airpods"):
+                raise RuntimeError("private device detail")
+            return opened(**kwargs)
+
+        portaudio.InputStream = open_existing
+        ns = self.device_namespace(portaudio, flight=False)
+        ns["AUDIO_POOL"].warm()
+
+        portaudio.system_default = "built-in"
+        ns["_invalidate_default_audio_inputs"]()
+
+        self.assertEqual(ns["AUDIO_POOL"].readiness(), "Ready")
+        slot = ns["AUDIO_POOL"].acquire(
+            SimpleNamespace(_callback=lambda *_args: None))
+        self.assertEqual(slot.stream.device, "built-in")
+        ns["AUDIO_POOL"].release(slot)
+
+    def test_a_live_pool_take_defers_the_refresh_to_its_release(self):
+        portaudio = FakePortAudio("built-in")
+        requests = []
+        ns = self.device_namespace(portaudio, requests, flight=False)
+        pool = ns["AUDIO_POOL"]
+        slot = pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+
+        portaudio.system_default = "usb"
+        ns["_invalidate_default_audio_inputs"]()
+
+        # The take keeps recording on its stream; nothing was terminated.
+        self.assertFalse(slot.stream.closed)
+        self.assertEqual(portaudio.reinitializations, 0)
+        self.assertTrue(pool.recovery_pending)
+
+        pool.release(slot)
+        self.assertEqual(requests, ["refresh"])
+        self.assertEqual(portaudio.open_devices(), [])
+        ns["_invalidate_default_audio_inputs"]()
+
+        self.assertEqual(portaudio.open_devices(), ["usb", "usb"])
+        self.assertEqual(portaudio.reinitializations, 1)
+
+    def test_a_refresh_never_terminates_while_a_release_is_closing(self):
+        # PortAudio is not thread-safe and Pa_Terminate closes every open
+        # stream itself, so a terminate that overlaps a close on another
+        # thread disposes the same stream twice.
+        closing = threading.Event()
+        finish_close = threading.Event()
+        overlaps = []
+
+        class SlowClosePortAudio(FakePortAudio):
+            def InputStream(self, **kwargs):
+                stream = super().InputStream(**kwargs)
+                close = stream.close
+
+                def slow_close():
+                    closing.set()
+                    finish_close.wait(2.0)
+                    close()
+                stream.close = slow_close
+                return stream
+
+            def _terminate(self):
+                if closing.is_set() and not finish_close.is_set():
+                    overlaps.append("terminate during close")
+                super()._terminate()
+
+        portaudio = SlowClosePortAudio("built-in")
+        requests = []
+        ns = self.device_namespace(portaudio, requests, flight=False)
+        pool = ns["AUDIO_POOL"]
+        slot = pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+        portaudio.system_default = "usb"
+        ns["_invalidate_default_audio_inputs"]()      # deferred: take is live
+
+        releaser = threading.Thread(target=pool.release, args=(slot,))
+        releaser.start()
+        self.assertTrue(closing.wait(2.0))
+        # A second default-input notification, or a wake, lands mid-close.
+        refresher = threading.Thread(
+            target=ns["_invalidate_default_audio_inputs"])
+        refresher.start()
+        refresher.join(0.2)
+        finish_close.set()
+        releaser.join(2.0)
+        refresher.join(2.0)
+
+        self.assertEqual(overlaps, [])
+        self.assertEqual(portaudio.open_devices(), ["usb", "usb"])
+        self.assertEqual(portaudio.reinitializations, 1)
+
+    def test_a_failed_reinitialization_is_retried_after_a_keypress(self):
+        class FlakyPortAudio(FakePortAudio):
+            initialized = True
+            failures = 1
+
+            def InputStream(self, **kwargs):
+                if not self.initialized:
+                    raise RuntimeError("PortAudio not initialized")
+                return super().InputStream(**kwargs)
+
+            def _terminate(self):
+                super()._terminate()
+                self.initialized = False
+
+            def _initialize(self):
+                if self.failures:
+                    self.failures -= 1
+                    raise RuntimeError("Error initializing PortAudio")
+                super()._initialize()
+                self.initialized = True
+
+        portaudio = FlakyPortAudio("built-in")
+        requests = []
+        ns = self.device_namespace(portaudio, requests, flight=False)
+        pool = ns["AUDIO_POOL"]
+        pool.warm()
+        portaudio.system_default = "usb"
+        ns["_invalidate_default_audio_inputs"]()
+        self.assertEqual(pool.readiness(), "Unavailable")
+
+        # The keypress cannot open anything, so it asks the recovery worker
+        # to initialize PortAudio again.
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+        self.assertEqual(requests, ["refresh"])
+        ns["_invalidate_default_audio_inputs"]()
+
+        self.assertEqual(pool.readiness(), "Ready")
+        slot = pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+        self.assertEqual(slot.stream.device, "usb")
+        pool.release(slot)
+
+    def test_a_live_flight_take_defers_the_refresh_to_its_detach(self):
+        portaudio = FakePortAudio("built-in")
+        requests = []
+        ns = self.device_namespace(portaudio, requests)
+        flight = ns["FLIGHT"]
+        flight.enable()
+        recorder = SimpleNamespace(_callback=lambda *_args: None)
+        self.assertTrue(flight.attach(recorder))
+
+        portaudio.system_default = "usb"
+        ns["_invalidate_default_audio_inputs"]()
+        self.assertEqual(portaudio.reinitializations, 0)
+        # The idle pool reopens at once, still on the launch-time table.
+        self.assertEqual(portaudio.open_devices(), ["built-in"] * 3)
+
+        flight.detach(recorder)
+        # Detach hands the refresh to the recovery worker instead of
+        # reopening on PortAudio's stale table.
+        self.assertEqual(requests, ["refresh"])
+        ns["_invalidate_default_audio_inputs"]()
+
+        self.assertEqual(portaudio.open_devices(), ["usb"] * 3)
+        self.assertEqual(portaudio.reinitializations, 1)
+        self.assertTrue(flight.is_enabled())
+
+    def test_refresh_requests_reach_only_a_running_recovery_worker(self):
+        ns = load_definitions(
+            "MacAudioRecoveryNotifications",
+            extra={"IS_MACOS": True, "threading": threading, "time": time},
+        )
+        refreshes = []
+        recovery = ns["MacAudioRecoveryNotifications"](
+            lambda: refreshes.append(True),
+            core_audio=self.CoreAudio(),
+            workspace_center=self.WorkspaceCenter(),
+            wake_name="wake",
+        )
+        # Not started: the caller reopens locally rather than waiting on a
+        # worker that does not exist.
+        self.assertFalse(recovery.request())
+
+        recovery.start()
+        self.assertTrue(recovery.request())
+        self.assertTrue(recovery.wait_for_idle())
+        self.assertEqual(refreshes, [True])
+        recovery.close()
+        self.assertFalse(recovery.request())
 
     def test_default_device_and_wake_events_are_content_free_and_coalesced(self):
         core = self.CoreAudio()
@@ -8383,6 +8754,99 @@ class HotkeyListenerRecoveryTests(unittest.TestCase):
         self.assertEqual(cleanups, [])
         self.assertFalse(state["recovering"])
 
+    class ExitedListener(threading.Thread):
+        """pynput's AbstractListener shape: a thread whose ``running`` flag
+        is set in run() and cleared only by stop(). When the platform loop
+        returns by itself the flag stays set and the thread is gone."""
+
+        def __init__(self):
+            super().__init__(daemon=True)
+            self._running = False
+
+        @property
+        def running(self):
+            return self._running
+
+        def run(self):
+            self._running = True
+
+    def test_a_listener_thread_that_exited_is_replaced(self):
+        ns = load_definitions(
+            "restart_dead_hotkey_listener",
+            extra={"print": lambda *_args: None},
+        )
+        exited = self.ExitedListener()
+        exited.start()
+        exited.join(timeout=1.0)
+        self.assertTrue(exited.running)
+        self.assertFalse(exited.is_alive())
+        replacement = SimpleNamespace(running=True)
+        cleanups = []
+        state = {"l": exited, "make": lambda: replacement,
+                 "recovering": False}
+
+        self.assertTrue(ns["restart_dead_hotkey_listener"](
+            lambda: cleanups.append(True), state))
+
+        self.assertIs(state["l"], replacement)
+        self.assertEqual(cleanups, [True])
+
+    def test_a_listener_that_keeps_exiting_is_logged_once(self):
+        logged = []
+        ns = load_definitions(
+            "restart_dead_hotkey_listener",
+            extra={"print": logged.append},
+        )
+
+        def exited_listener():
+            listener = self.ExitedListener()
+            listener.start()
+            listener.join(timeout=1.0)
+            return listener
+
+        state = {"l": exited_listener(), "make": exited_listener,
+                 "recovering": False}
+        for _ in range(5):
+            self.assertTrue(ns["restart_dead_hotkey_listener"](
+                lambda: None, state))
+        self.assertEqual(logged, [
+            "! hotkey listener died — restarting it",
+            "! hotkey listener keeps exiting — still restarting it",
+        ])
+
+        # Once a replacement stays up, a later death is reported again.
+        state["l"] = SimpleNamespace(running=True)
+        self.assertFalse(ns["restart_dead_hotkey_listener"](
+            lambda: None, state))
+        state["l"] = exited_listener()
+        self.assertTrue(ns["restart_dead_hotkey_listener"](
+            lambda: None, state))
+        self.assertEqual(
+            logged[-1], "! hotkey listener died — restarting it")
+        self.assertEqual(len(logged), 3)
+
+    def test_a_running_listener_thread_is_left_alone(self):
+        ns = load_definitions("restart_dead_hotkey_listener")
+        release = threading.Event()
+
+        class Live(self.ExitedListener):
+            def run(self):
+                self._running = True
+                release.wait(timeout=5.0)
+
+        live = Live()
+        live.start()
+        try:
+            state = {"l": live,
+                     "make": lambda: self.fail("live listener replaced"),
+                     "recovering": False}
+            self.assertFalse(ns["restart_dead_hotkey_listener"](
+                lambda: self.fail("cleanup ran"), state))
+            self.assertIs(state["l"], live)
+        finally:
+            release.set()
+            live.join(timeout=1.0)
+
     def test_dead_listener_cleanup_runs_once_across_restart_retries(self):
         ns = load_definitions(
             "restart_dead_hotkey_listener",
@@ -8448,6 +8912,119 @@ class HotkeyListenerRecoveryTests(unittest.TestCase):
         self.assertEqual(modifiers, set())
         self.assertEqual(events.get_nowait(), (
             "listener_recovery", 12.5, frozenset()))
+
+    @staticmethod
+    def hold_namespace():
+        return load_definitions(
+            "latch_hotkey_press", "supervise_hotkey_latch",
+            assignments={"MAX_TAKE_SECONDS", "HOLD_KEY_UP_POLLS"},
+        )
+
+    @staticmethod
+    def drain(events):
+        drained = []
+        while not events.empty():
+            drained.append(events.get_nowait())
+        return drained
+
+    def test_a_lost_key_up_ends_the_take_through_a_release(self):
+        # Right Shift released while Left Shift is still held: pynput reads
+        # the family flag, so no release event ever arrives.
+        ns = self.hold_namespace()
+        latch, lock, events = {"on": False}, threading.Lock(), queue.Queue()
+        modifiers = {"shift"}
+        ns["latch_hotkey_press"](latch, 100.0)
+        readings = iter([True, True, False, False])
+        step = functools.partial(
+            ns["supervise_hotkey_latch"], latch, lock, events, modifiers,
+            lambda: next(readings))
+
+        outcomes = [step(now) for now in (100.25, 100.5, 100.75, 101.0)]
+
+        self.assertEqual(outcomes, [None, None, None, "key_up_lost"])
+        self.assertEqual(self.drain(events), [
+            ("release", 101.0, frozenset({"shift"}))])
+        self.assertFalse(latch["on"])
+        # The next real press is accepted again.
+        self.assertIsNone(step(101.25))
+
+    def test_an_unreadable_key_state_never_ends_a_hold_early(self):
+        # A remapped key or a missing permission reads "up" while held. With
+        # no "down" reading during the hold, only the cap applies.
+        ns = self.hold_namespace()
+        latch, lock, events = {"on": False}, threading.Lock(), queue.Queue()
+        ns["latch_hotkey_press"](latch, 0.0)
+        cap = ns["MAX_TAKE_SECONDS"]
+        for reading in (False, None):
+            with self.subTest(reading=reading):
+                for now in (0.25, 0.5, 60.0, cap - 0.01):
+                    self.assertIsNone(ns["supervise_hotkey_latch"](
+                        latch, lock, events, set(), lambda: reading, now))
+                self.assertTrue(latch["on"])
+                self.assertEqual(self.drain(events), [])
+
+    def test_the_take_cap_finishes_once_and_keeps_the_key_latched(self):
+        ns = self.hold_namespace()
+        latch, lock, events = {"on": False}, threading.Lock(), queue.Queue()
+        ns["latch_hotkey_press"](latch, 0.0)
+        cap = ns["MAX_TAKE_SECONDS"]
+        self.assertEqual(cap, 600.0)
+        held = functools.partial(
+            ns["supervise_hotkey_latch"], latch, lock, events, set(),
+            lambda: True)
+
+        self.assertEqual(held(cap), "take_limit")
+        self.assertIsNone(held(cap + 0.25))
+        self.assertIsNone(held(cap + 30.0))
+
+        self.assertEqual(self.drain(events), [("release", cap, frozenset())])
+        # Still latched: a held function key's auto-repeat cannot start a
+        # new take, and a later lost key-up only clears the latch.
+        self.assertTrue(latch["on"])
+        for now in (cap + 31.0, cap + 31.25):
+            ns["supervise_hotkey_latch"](
+                latch, lock, events, set(), lambda: False, now)
+        self.assertFalse(latch["on"])
+        self.assertEqual(self.drain(events), [])
+
+    def test_a_real_key_event_during_a_poll_wins(self):
+        ns = self.hold_namespace()
+        latch, lock, events = {"on": False}, threading.Lock(), queue.Queue()
+        ns["latch_hotkey_press"](latch, 0.0)
+        latch.update(confirmed=True, up_polls=1)
+
+        def released_then_pressed_again():
+            # The listener releases and re-presses while the poll reads.
+            with lock:
+                latch["on"] = False
+                ns["latch_hotkey_press"](latch, 0.2)
+            return False
+
+        self.assertIsNone(ns["supervise_hotkey_latch"](
+            latch, lock, events, set(), released_then_pressed_again, 0.25))
+        self.assertTrue(latch["on"])
+        self.assertEqual(latch["at"], 0.2)
+        self.assertEqual(self.drain(events), [])
+
+    def test_physical_key_state_reads_the_bound_key_code(self):
+        reads = []
+        quartz = types.ModuleType("Quartz")
+        quartz.kCGEventSourceStateHIDSystemState = 1
+        quartz.CGEventSourceKeyState = (
+            lambda source, vk: reads.append((source, vk)) or vk == 61)
+        ns = load_definitions(
+            "physical_key_is_down",
+            extra={"IS_MACOS": True, "IS_WINDOWS": False, "ctypes": ctypes})
+        right_option = SimpleNamespace(value=SimpleNamespace(vk=61))
+        with mock.patch.dict(sys.modules, {"Quartz": quartz}):
+            self.assertTrue(ns["physical_key_is_down"](right_option))
+            self.assertFalse(ns["physical_key_is_down"](
+                SimpleNamespace(value=SimpleNamespace(vk=60))))
+            quartz.CGEventSourceKeyState = mock.Mock(
+                side_effect=RuntimeError("no access"))
+            self.assertIsNone(ns["physical_key_is_down"](right_option))
+        self.assertEqual(reads, [(1, 61), (1, 60)])
+        self.assertIsNone(ns["physical_key_is_down"](None))
 
     def test_active_hotkey_recovery_surfaces_retry_feedback(self):
         source = (ROOT / "dictate.py").read_text(encoding="utf-8")
@@ -8998,6 +9575,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "CHUNK_PREP_POOL": prep_pool,
                 "_transcribe_frames": object(),
                 "_caption_add": lambda *_args: None,
+                "time": time,
             },
         )
         recorder = ns["Recorder"]()
@@ -9013,6 +9591,93 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertIs(scheduled.future, future)
         self.assertEqual((scheduled.start_sample, scheduled.end_sample), (
             0, 16_000))
+
+    def soft_speech_take(self, segments, block=1024):
+        """Run the production rolling plan over synthetic audio, then the
+        release choice finish_and_process makes, and return what nothing
+        decodes. Futures never finish, as on a busy decode pool."""
+        class Pending:
+            def cancel(self):
+                return False
+
+            def done(self):
+                return False
+
+            def add_done_callback(self, _callback):
+                pass
+
+        ns = load_definitions(
+            "CapturedAudio", "BoundedRecognitionFuture", "Recorder",
+            "peak_rms",
+            assignments={
+                "SAMPLE_RATE", "CAPTURE_BLOCK_SECONDS", "SILENCE_RMS",
+                "GATE_PEAK_RMS", "CHUNK_MIN_SECONDS", "CHUNK_CUT_SILENCE",
+                "SPECULATIVE_MIN_SECONDS", "SPECULATIVE_SILENCE",
+                "NO_AUDIO_SECONDS",
+            },
+            extra={
+                "dataclass": dataclass,
+                "np": np,
+                "time": time,
+                "ContextPack": SimpleNamespace,
+                "LEVELS": [],
+                "should_start_speculation": should_start_speculation,
+                "can_reuse_speculation": can_reuse_speculation,
+                "CHUNK_PREP_POOL": SimpleNamespace(
+                    submit=lambda *_args, **_kwargs: Pending()),
+                "_speculative_frames": object(),
+                "_transcribe_frames": object(),
+                "_caption_add": lambda *_args: None,
+            },
+        )
+        ns["calibrated_vad_threshold"] = lambda: ns["SILENCE_RMS"]
+        recorder = ns["Recorder"]()
+        recorder.recording = True
+        rng = np.random.default_rng(0)
+        for seconds, rms in segments:
+            for _ in range(int(seconds * 16_000 / block)):
+                noise = rng.standard_normal((block, 1)).astype(np.float32)
+                recorder._callback(
+                    noise * (rms / float(np.sqrt(np.mean(noise ** 2)))),
+                    block, None, None)
+
+        audio = recorder.stop()
+        ranges = [(c.start_sample, c.end_sample) for c in recorder.chunks]
+        reused = can_reuse_speculation(
+            recorder.speculative_future is not None,
+            recorder.speculative_invalid,
+            recorder.speculative_start,
+            recorder.cut_samples)
+        if reused:
+            ranges.append(
+                (recorder.speculative_start, recorder.speculative_end))
+        else:
+            ranges.append((recorder.cut_samples, len(audio)))
+        covered = np.zeros(len(audio), dtype=bool)
+        for start, end in ranges:
+            covered[start:end] = True
+        return SimpleNamespace(
+            skipped_peak=ns["peak_rms"](audio[~covered]),
+            gate=ns["GATE_PEAK_RMS"], reused=reused)
+
+    def test_quiet_speech_after_a_pause_is_decoded_at_release(self):
+        # Loud opening, a short pause, then speech under the rolling silence
+        # threshold (0.008) but well above the speech gate (0.002).
+        take = self.soft_speech_take(
+            [(1.5, 0.05), (0.3, 0.0005), (1.5, 0.0042)])
+        self.assertLess(take.skipped_peak, take.gate)
+
+    def test_quiet_speech_across_a_chunk_cut_is_decoded(self):
+        take = self.soft_speech_take(
+            [(1.0, 0.05), (3.6, 0.0045), (1.5, 0.05), (0.7, 0.0005)])
+        self.assertLess(take.skipped_peak, take.gate)
+
+    def test_a_silent_tail_still_reuses_the_speculation(self):
+        # Room noise under the gate after the pause: the speculative decode
+        # is still the whole remainder, so release pays for nothing new.
+        take = self.soft_speech_take([(1.5, 0.05), (0.8, 0.0005)])
+        self.assertTrue(take.reused)
+        self.assertLess(take.skipped_peak, take.gate)
 
     def test_release_attaches_capture_bounds_to_remainder_decode(self):
         class Pool:
@@ -11217,6 +11882,7 @@ class HotkeyBindingTests(unittest.TestCase):
         return load_definitions(
             "normalize_hotkey", "hotkey_label_for", "hotkey_shared_modes",
             "hotkey_binding_decision", "modifier_pressed_by",
+            "hotkey_matches",
             assignments={"HOTKEY_CHOICES", "HOTKEY_DEFAULT",
                          "HOTKEY_MODIFIER_FAMILY",
                          "HOTKEY_MODES_BY_MODIFIER"},
@@ -11329,6 +11995,192 @@ class HotkeyBindingTests(unittest.TestCase):
         self.assertEqual(contributes("cmd_r", "shift_r", families), "command")
         self.assertIsNone(contributes("alt_r", "alt_r", families))
         self.assertIsNone(contributes("f13", "alt_r", families))
+
+    class _Win32KeyCode:
+        """pynput 1.8.2 ``keyboard._base.KeyCode`` equality, with the
+        ``_flags``/``_scan`` platform extensions ``keyboard._win32`` adds.
+
+        pynput itself is not a test dependency; this keeps exactly the
+        comparison its enum members use.
+        """
+
+        _PLATFORM_EXTENSIONS = ("_flags", "_scan")
+
+        def __init__(self, vk=None, char=None, _flags=None, _scan=None):
+            self.vk, self.char, self.is_dead = vk, char, False
+            self._flags, self._scan = _flags, _scan
+
+        def __repr__(self):
+            return repr(self.char) if self.char is not None else (
+                "<%d>" % self.vk)
+
+        def __eq__(self, other):
+            if not isinstance(other, self.__class__):
+                return False
+            if self.char is not None and other.char is not None:
+                return (self.char == other.char
+                        and self.is_dead == other.is_dead)
+            return self.vk == other.vk and all(
+                getattr(self, name) == getattr(other, name)
+                for name in self._PLATFORM_EXTENSIONS)
+
+        def __hash__(self):
+            return hash(repr(self))
+
+    def win32_keyboard(self):
+        """The Windows Key table as pynput 1.8.2 defines and delivers it."""
+        code = self._Win32KeyCode
+        extended = 1   # KEYBDINPUT.EXTENDEDKEY, as KeyCode._from_ext sets
+        key = enum.Enum("Key", [
+            ("alt", code(0x12)),
+            ("alt_l", code(0xA4)),
+            ("alt_r", code(0xA5, _flags=extended)),
+            ("alt_gr", code(0xA5)),
+            ("cmd", code(0x5B)),
+            ("cmd_l", code(0x5B)),
+            ("cmd_r", code(0x5C)),
+            ("ctrl", code(0x11)),
+            ("ctrl_l", code(0xA2)),
+            ("ctrl_r", code(0xA3, _flags=extended)),
+            ("shift", code(0xA0)),
+            ("shift_l", code(0xA0)),
+            ("shift_r", code(0xA1)),
+            ("f13", code(0x7C)),
+        ])
+        # keyboard._win32.Listener._SPECIAL_KEYS: the later member wins.
+        delivered = {member.value.vk: member for member in key}
+        return SimpleNamespace(Key=key), delivered
+
+    def win32_namespace(self, keyboard):
+        return load_definitions(
+            "normalize_hotkey", "hotkey_key_object", "hotkey_matches",
+            "modifier_pressed_by", "windows_hotkey_event_filter",
+            assignments={"HOTKEY_CHOICES", "HOTKEY_DEFAULT",
+                         "WINDOWS_VK_LCONTROL",
+                         "WINDOWS_ALTGR_SYNTHETIC_CTRL_SCAN"},
+            extra={"IS_MACOS": False, "IS_WINDOWS": True,
+                   "keyboard": keyboard},
+        )
+
+    def test_windows_right_alt_starts_the_default_capture_key(self):
+        keyboard, delivered = self.win32_keyboard()
+        ns = self.win32_namespace(keyboard)
+        bound = ns["hotkey_key_object"]("alt_r")
+        right_alt = delivered[0xA5]
+
+        # The library shape behind the defect: Right Alt is delivered as a
+        # member that is not equal to the one the default binding names.
+        self.assertIs(right_alt, keyboard.Key.alt_gr)
+        self.assertNotEqual(right_alt, bound)
+
+        self.assertTrue(ns["hotkey_matches"](right_alt, bound))
+        for other in (0xA4, 0xA2, 0xA3, 0xA0, 0xA1, 0x5B, 0x7C):
+            with self.subTest(vk=hex(other)):
+                self.assertFalse(ns["hotkey_matches"](delivered[other], bound))
+        self.assertFalse(ns["hotkey_matches"](right_alt, None))
+        # Every other bindable Windows key is still matched by itself only.
+        for name in ("alt_l", "ctrl_r", "ctrl_l", "shift_r", "cmd_r", "f13"):
+            with self.subTest(name=name):
+                key = ns["hotkey_key_object"](name)
+                self.assertTrue(ns["hotkey_matches"](
+                    delivered[key.value.vk], key))
+                self.assertFalse(ns["hotkey_matches"](right_alt, key))
+
+    def test_altgr_layouts_start_capture_not_reply(self):
+        keyboard, delivered = self.win32_keyboard()
+        ns = self.win32_namespace(keyboard)
+        Key = keyboard.Key
+
+        class KBDLLHOOKSTRUCT(ctypes.Structure):
+            _fields_ = [
+                ("vkCode", ctypes.c_uint32),
+                ("scanCode", ctypes.c_uint32),
+                ("flags", ctypes.c_uint32),
+                ("time", ctypes.c_uint32),
+                ("dwExtraInfo", ctypes.c_void_p),
+            ]
+
+        families = (
+            ("shift", {Key.shift, Key.shift_l, Key.shift_r}),
+            ("command", {Key.cmd, Key.cmd_l, Key.cmd_r}),
+            ("control", {Key.ctrl, Key.ctrl_l, Key.ctrl_r}),
+        )
+        bound = ns["hotkey_key_object"]("alt_r")
+        # German, French and Spanish layouts: Right Alt is AltGr, and Windows
+        # sends a synthetic Left Ctrl (scan 0x21D) first.
+        events = (KBDLLHOOKSTRUCT(0xA2, 0x21D), KBDLLHOOKSTRUCT(0xA5, 0x38))
+        modifiers = set()
+        started = []
+        for data in events:
+            if ns["windows_hotkey_event_filter"](0x0104, data) is False:
+                continue
+            key = delivered[data.vkCode]
+            modifier = ns["modifier_pressed_by"](key, bound, families)
+            if modifier is not None:
+                modifiers.add(modifier)
+            if ns["hotkey_matches"](key, bound):
+                started.append(mode_from_modifiers(
+                    "shift" in modifiers, "command" in modifiers,
+                    "control" in modifiers))
+
+        self.assertEqual(started, ["capture"])
+        # A real Left Ctrl (scan 0x1D) still reaches the listener, so Reply
+        # stays reachable by holding it on purpose.
+        self.assertTrue(ns["windows_hotkey_event_filter"](
+            0x0100, KBDLLHOOKSTRUCT(0xA2, 0x1D)))
+
+    def settings_namespace(self, path):
+        return load_definitions(
+            "set_hotkey", "set_undo_hotkey", "apply_hotkey_bindings",
+            "normalize_hotkey", "hotkey_key_object", "save_preferences",
+            "normalize_sound_theme", "hotkey_binding_decision",
+            "hotkey_label_for", "hotkey_shared_modes",
+            assignments={
+                "PREFERENCES", "HOTKEY_CHOICES", "HOTKEY_DEFAULT",
+                "HOTKEY_MODIFIER_FAMILY", "HOTKEY_MODES_BY_MODIFIER",
+                "SOUND_THEMES", "SOUND_THEME_DEFAULT",
+            },
+            extra={
+                "IS_MACOS": True,
+                "PREFERENCES_FILE": path,
+                "keyboard": SimpleNamespace(Key=SimpleNamespace(
+                    alt_r="alt_r", f13="f13", f14="f14")),
+                "current_face": lambda: "parrot",
+                "print": lambda *_a, **_k: None,
+                "atomic_write_text": lambda target, value:
+                    target.write_text(value, encoding="utf-8"),
+            },
+        )
+
+    def test_the_capture_key_cannot_take_the_undo_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "preferences.json"
+            ns = self.settings_namespace(path)
+            self.assertTrue(ns["set_undo_hotkey"]("f14")["accepted"])
+
+            verdict = ns["set_hotkey"]("f14")
+
+            self.assertFalse(verdict["accepted"])
+            self.assertEqual(verdict["reason"], "conflicts_with_undo")
+            stored = json.loads(path.read_text())
+            self.assertEqual(
+                (stored["hotkey"], stored["undo_hotkey"]), ("alt_r", "f14"))
+            self.assertEqual(ns["HOTKEY"], "alt_r")
+            self.assertEqual(ns["UNDO_HOTKEY"], "f14")
+            # Any other key is still accepted.
+            self.assertTrue(ns["set_hotkey"]("f13")["accepted"])
+
+    def test_a_stored_undo_key_equal_to_the_capture_key_is_dropped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "preferences.json"
+            ns = self.settings_namespace(path)
+            ns["PREFERENCES"].update(hotkey="f14", undo_hotkey="f14")
+
+            self.assertEqual(ns["apply_hotkey_bindings"](), ("f14", ""))
+
+            self.assertEqual(ns["HOTKEY"], "f14")
+            self.assertIsNone(ns["UNDO_HOTKEY"])
+            self.assertEqual(ns["PREFERENCES"]["undo_hotkey"], "")
 
 
 class RecentDictationTests(unittest.TestCase):

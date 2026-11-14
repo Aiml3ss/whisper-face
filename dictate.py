@@ -608,6 +608,40 @@ def hotkey_key_object(name: object):
     return getattr(keyboard.Key, normalize_hotkey(name), keyboard.Key.alt_r)
 
 
+def hotkey_matches(key, hotkey) -> bool:
+    """Whether a delivered key is the bound key.
+
+    pynput on Windows defines Right Alt twice, as ``Key.alt_r`` (extended
+    flag) and ``Key.alt_gr``, and delivers ``alt_gr`` for VK_RMENU. The two
+    are distinct members with one virtual-key code, so special keys are
+    matched by that code. On macOS the two names are one member.
+    """
+    if key is None or hotkey is None:
+        return False
+    if key == hotkey:
+        return True
+    if type(key) is not type(hotkey):
+        return False
+    key_vk = getattr(getattr(key, "value", None), "vk", None)
+    return key_vk is not None and key_vk == getattr(
+        getattr(hotkey, "value", None), "vk", None)
+
+
+# AltGr layouts make Windows send a synthetic Left Ctrl, scan code 0x21D,
+# ahead of Right Alt. Delivered, it would select Reply mode on every take.
+WINDOWS_VK_LCONTROL = 0xA2
+WINDOWS_ALTGR_SYNTHETIC_CTRL_SCAN = 0x21D
+
+
+def windows_hotkey_event_filter(_msg, data) -> bool:
+    """pynput ``win32_event_filter``: drop AltGr's synthetic Left Ctrl."""
+    return not (
+        getattr(data, "vkCode", None) == WINDOWS_VK_LCONTROL
+        and getattr(data, "scanCode", None)
+        == WINDOWS_ALTGR_SYNTHETIC_CTRL_SCAN
+    )
+
+
 def modifier_pressed_by(key, hotkey, families) -> str | None:
     """Name the voice-mode modifier a key press contributes, if any.
 
@@ -616,7 +650,7 @@ def modifier_pressed_by(key, hotkey, families) -> str | None:
     somebody bound a Shift, Command, or Control key, because every press
     would arrive already carrying that modifier.
     """
-    if hotkey is not None and key == hotkey:
+    if hotkey_matches(key, hotkey):
         return None
     for modifier, keys in families:
         if key in keys:
@@ -2015,6 +2049,12 @@ def apply_hotkey_bindings() -> tuple[str, str]:
     HOTKEY = hotkey_key_object(HOTKEY_NAME)
     UNDO_HOTKEY_NAME = normalize_hotkey(
         PREFERENCES["undo_hotkey"], default="")
+    if UNDO_HOTKEY_NAME == HOTKEY_NAME:
+        # A hand-edited or older preferences file can name one key for both.
+        # Capture wins; the undo binding is dropped rather than letting each
+        # press delete the previous dictation.
+        UNDO_HOTKEY_NAME = ""
+        PREFERENCES["undo_hotkey"] = ""
     UNDO_HOTKEY = (hotkey_key_object(UNDO_HOTKEY_NAME)
                    if UNDO_HOTKEY_NAME else None)
     return HOTKEY_NAME, UNDO_HOTKEY_NAME
@@ -2025,6 +2065,12 @@ def set_hotkey(name: str) -> dict:
     decision = hotkey_binding_decision(name)
     if not decision["accepted"]:
         return decision
+    if decision["name"] == normalize_hotkey(
+            PREFERENCES["undo_hotkey"], default=""):
+        # The mirror of set_undo_hotkey's guard: one key cannot both start a
+        # dictation and undo the previous one.
+        return {"accepted": False, "reason": "conflicts_with_undo",
+                "name": "", "label": "", "shared_modes": ()}
     PREFERENCES["hotkey"] = decision["name"]
     apply_hotkey_bindings()
     save_preferences()
@@ -4186,10 +4232,13 @@ class FlightRecorder:
     """Opt-in continuous capture with a bounded, RAM-only audio deque."""
 
     def __init__(self, seconds=FLIGHT_BUFFER_SECONDS, stream_factory=None,
-                 restore_allowed=None):
+                 restore_allowed=None, request_refresh=None):
         self.max_samples = int(seconds * SAMPLE_RATE)
         self.stream_factory = stream_factory
         self.restore_allowed = restore_allowed or (lambda: True)
+        # Returns True when a device refresh will rebind this stream, so a
+        # deferred recovery is handed off instead of reopened here.
+        self.request_refresh = request_refresh
         self.frames = deque()
         self.total_samples = 0
         self.stream = None
@@ -4260,17 +4309,20 @@ class FlightRecorder:
                 if report:
                     print(f"! Flight Recorder stream close failed: {error}")
 
-    def _recover_locked(self):
-        """Replace an idle stale stream without exposing device details."""
+    def _suspend_locked(self) -> bool:
+        """Close an idle stale stream; defer while a take is attached."""
         with self.lock:
             if self.target is not None:
                 self.recovery_pending = True
-                return
+                return False
             stream, self.stream = self.stream, None
             self.frames.clear()
             self.total_samples = 0
             self.recovery_pending = False
         self._close_stream(stream)
+        return True
+
+    def _restore_locked(self):
         try:
             should_restore = bool(self.restore_allowed())
         except Exception:
@@ -4283,6 +4335,11 @@ class FlightRecorder:
             # A later native event can retry. Recovery never logs device
             # details or disrupts the rest of the audio path.
             pass
+
+    def _recover_locked(self):
+        """Replace an idle stale stream without exposing device details."""
+        if self._suspend_locked():
+            self._restore_locked()
 
     def enable(self):
         if self.is_enabled():
@@ -4313,14 +4370,18 @@ class FlightRecorder:
                 self.target = recorder
                 return True
 
-    def detach(self, recorder):
+    def detach(self, recorder, *, delivered_audio=True):
         with self.init_lock:
             with self.lock:
                 if self.target is not recorder:
                     return
                 self.target = None
+                if not delivered_audio:
+                    # The take's stream stopped delivering audio.
+                    self.recovery_pending = True
                 should_recover = self.recovery_pending
-            if should_recover:
+            if should_recover and not (
+                    self.request_refresh and self.request_refresh()):
                 self._recover_locked()
 
     def clear(self):
@@ -4337,8 +4398,11 @@ class FlightRecorder:
         return extract_recent_utterance(np.concatenate(frames).reshape(-1))
 
 
-FLIGHT = FlightRecorder(restore_allowed=lambda: (
-    bool(PREFERENCES.get("flight_recorder", False)) and not PAUSED["on"]))
+FLIGHT = FlightRecorder(
+    restore_allowed=lambda: (
+        bool(PREFERENCES.get("flight_recorder", False)) and not PAUSED["on"]),
+    request_refresh=lambda: _request_default_audio_refresh(),
+)
 
 
 def _capture_retrospective_flight_tap(recorder) -> np.ndarray:
@@ -4400,9 +4464,13 @@ class AudioPool:
     without leaving the microphone actively recording.
     """
 
-    def __init__(self, size: int = 2, stream_factory=None):
+    def __init__(self, size: int = 2, stream_factory=None,
+                 request_refresh=None):
         self.size = size
         self.stream_factory = stream_factory
+        # Returns True when a device refresh will reopen the pool, so a
+        # deferred recovery is handed off instead of reopened here.
+        self.request_refresh = request_refresh
         self.slots = []
         self.busy = set()
         self.lock = threading.Lock()
@@ -4474,11 +4542,14 @@ class AudioPool:
                 raise RuntimeError("microphone stream unavailable") from None
 
     def acquire(self, recorder):
-        stale_slots = []
         with self.init_lock:
             try:
                 self._warm_locked()
             except Exception:
+                # A failed PortAudio re-initialization leaves nothing that
+                # can open, and only a device refresh initializes it again.
+                if self.request_refresh is not None:
+                    self.request_refresh()
                 raise RuntimeError("microphone stream unavailable") from None
             with self.lock:
                 if self.recovery_pending:
@@ -4501,33 +4572,39 @@ class AudioPool:
                 with self.lock:
                     self.busy.discard(slot)
                     self.warm_error = type(error).__name__
-                stale_slots = self._invalidate_locked(reset_error=False)
-        self._close_slots(stale_slots)
+                # Closed under init_lock, so a device refresh can never
+                # terminate PortAudio while a close is still running.
+                self._close_slots(self._invalidate_locked(reset_error=False))
         raise RuntimeError("microphone stream unavailable") from None
 
-    def release(self, slot):
+    def release(self, slot, *, delivered_audio=True):
         if slot is None:
             return
-        stale_slots = []
         stop_error = None
         try:
             slot.stop()
         except Exception as error:
             stop_error = type(error).__name__
         finally:
+            failure = stop_error or (None if delivered_audio else "NoAudio")
             with self.init_lock:
                 with self.lock:
                     self.busy.discard(slot)
-                    if stop_error is not None:
-                        self.warm_error = stop_error
+                    if failure is not None:
+                        # A stream that stopped delivering audio is as
+                        # stale as one that failed to stop: never hand it
+                        # to the next take.
+                        self.warm_error = failure
                         self.recovery_pending = True
                     should_recover = (
                         self.recovery_pending and not self.busy)
                 if should_recover:
-                    stale_slots = self._invalidate_locked(
-                        reset_error=stop_error is None)
-            self._close_slots(stale_slots)
-            if should_recover:
+                    # Closed under init_lock, so a device refresh can never
+                    # terminate PortAudio while a close is still running.
+                    self._close_slots(self._invalidate_locked(
+                        reset_error=failure is None))
+            if should_recover and not (
+                    self.request_refresh and self.request_refresh()):
                 self.warm_async()
         if stop_error is not None:
             raise RuntimeError("microphone stream stop failed") from None
@@ -4586,8 +4663,7 @@ class AudioPool:
     def invalidate(self):
         """Forget stale default-device streams without cutting off a take."""
         with self.init_lock:
-            stale_slots = self._invalidate_locked()
-        self._close_slots(stale_slots)
+            self._close_slots(self._invalidate_locked())
 
     def close(self):
         with self.init_lock:
@@ -4597,7 +4673,7 @@ class AudioPool:
                 self.busy.clear()
                 self.recovery_pending = False
                 self.closed = True
-        self._close_slots(slots)
+            self._close_slots(slots)
 
 
 class _AudioObjectPropertyAddress(ctypes.Structure):
@@ -4707,6 +4783,13 @@ class MacAudioRecoveryNotifications:
             self.requested += 1
             self.event.set()
 
+    def request(self) -> bool:
+        """Queue a refresh from code that may hold an audio lock."""
+        if not self.started:
+            return False
+        self._signal()
+        return True
+
     def _run(self):
         while True:
             self.event.wait()
@@ -4789,20 +4872,67 @@ class MacAudioRecoveryNotifications:
         self.started = False
 
 
-AUDIO_POOL = AudioPool(size=2)
+AUDIO_POOL = AudioPool(
+    size=2, request_refresh=lambda: _request_default_audio_refresh())
+
+
+def _reinitialize_portaudio():
+    """Re-read PortAudio's device list and default input."""
+    try:
+        sd._terminate()
+    finally:
+        sd._initialize()
+
+
+def refresh_default_audio_inputs(pool, flight, reinitialize) -> bool:
+    """Rebind every stream to the input that is the default now.
+
+    PortAudio reads the device list and the default input once, in
+    Pa_Initialize, so reopening a stream alone binds the device that was the
+    default at launch. The library may only be re-initialized with no stream
+    open. A live take keeps its stream and defers the refresh; its release
+    asks for the refresh again. Returns whether PortAudio was re-initialized.
+    """
+    refreshed = False
+    with pool.init_lock:
+        with flight.init_lock:
+            pool._close_slots(pool._invalidate_locked())
+            flight_idle = flight._suspend_locked()
+            with pool.lock:
+                pool_idle = not pool.recovery_pending
+            if pool_idle and flight_idle:
+                try:
+                    reinitialize()
+                    refreshed = True
+                except Exception:
+                    # Opening below then fails and reports Unavailable; the
+                    # next device event, or a keypress whose open fails and
+                    # requests a refresh, retries.
+                    pass
+            if flight_idle:
+                flight._restore_locked()
+        if pool_idle:
+            try:
+                pool._warm_locked()
+            except Exception:
+                pass
+    return refreshed
 
 
 def _invalidate_default_audio_inputs():
-    """Refresh every stream bound to the prior macOS default input."""
-    try:
-        AUDIO_POOL.recover_default_device()
-    finally:
-        FLIGHT.invalidate()
+    """Rebind every stream to the current macOS default input."""
+    refresh_default_audio_inputs(
+        AUDIO_POOL, FLIGHT, _reinitialize_portaudio)
 
 
 AUDIO_RECOVERY = (
     MacAudioRecoveryNotifications(_invalidate_default_audio_inputs)
     if IS_MACOS else None)
+
+
+def _request_default_audio_refresh() -> bool:
+    """Hand a deferred refresh to the recovery worker when one is running."""
+    return AUDIO_RECOVERY is not None and AUDIO_RECOVERY.request()
 
 
 def _transcribe_frames(frames, prompt=None, language=None) -> Recognition:
@@ -4932,6 +5062,11 @@ class CapturedAudio:
         return np.concatenate(frames)
 
 
+# A started stream that has delivered no frame for this long is dead: a
+# warm stream calls back every few tens of milliseconds.
+NO_AUDIO_SECONDS = 2.0
+
+
 class Recorder:
     def __init__(self):
         self.frames = CapturedAudio()
@@ -4939,6 +5074,7 @@ class Recorder:
         self.recording = False
         self.press_at = None
         self.capture_ready_at = None
+        self.last_frame_at = None
         self.released_at = None
         self.audio_status = []
         self.captured_via_flight = False
@@ -4986,6 +5122,7 @@ class Recorder:
         self.source = "hold"
         self.uncertain = False
         self.feedback_seconds = 0.0
+        self.last_frame_at = None
         self.press_at = press_at or time.perf_counter()
         self.utterance_id = f"{time.time_ns():x}-{id(self):x}"
         self.insertion_lease = None
@@ -5020,6 +5157,7 @@ class Recorder:
     def _callback(self, indata, frames, time_info, status):
         if not self.recording:
             return
+        self.last_frame_at = time.perf_counter()
         if status and len(self.audio_status) < 3:
             self.audio_status.append(str(status))
         self.frames.append(indata)
@@ -5100,26 +5238,57 @@ class Recorder:
             self.speculative_start = 0
             self.speculative_end = 0
             self.speculative_invalid = False
-            self.cut_samples = self.total_samples
+            # A reused speculation ends where it was taken. Audio after that
+            # counted as silence to the rolling threshold but may be quiet
+            # speech, so it opens the next segment rather than being skipped.
+            self.cut_samples = decode_end
             self.voiced_since_cut = False
 
     def snapshot(self) -> np.ndarray:
         """Audio so far, without stopping the stream."""
         return self.frames.array()
 
+    def audio_stalled(self, now: float) -> bool:
+        """Whether this take's running stream has stopped delivering audio,
+        whether it never started or stopped partway through."""
+        if not self.recording or self.capture_ready_at is None:
+            return False
+        latest = self.capture_ready_at
+        if self.last_frame_at is not None:
+            latest = max(latest, self.last_frame_at)
+        return now - latest >= NO_AUDIO_SECONDS
+
     def stop(self) -> np.ndarray:
+        delivered_audio = not self.audio_stalled(time.perf_counter())
         self.recording = False
         if self.captured_via_flight:
-            FLIGHT.detach(self)
+            FLIGHT.detach(self, delivered_audio=delivered_audio)
         if self.slot is not None:
             slot, self.slot = self.slot, None
-            AUDIO_POOL.release(slot)
+            AUDIO_POOL.release(slot, delivered_audio=delivered_audio)
         if self.audio_status:
             print(f"! audio callback status: {'; '.join(self.audio_status)}")
         audio = self.frames.array()
+        if (self.speculative_future is not None
+                and not self.speculative_invalid
+                and peak_rms(audio[self.speculative_end:]) >= GATE_PEAK_RMS):
+            # Speech under the rolling silence threshold but above the speech
+            # gate followed the speculation; the release must decode it.
+            self.speculative_invalid = True
         if self.captured_via_flight and self.source == "hold":
             FLIGHT.clear()                   # never let a hold paste twice
         return audio
+
+
+def stalled_take_action(rec, now: float) -> str | None:
+    """How to end a take whose microphone stopped delivering audio.
+
+    A take that heard nothing is abandoned. A take that heard speech first
+    finishes like a release, so the words spoken before the stall are kept.
+    """
+    if rec is None or not rec.audio_stalled(now):
+        return None
+    return "abandon" if rec.total_samples == 0 else "finish"
 
 
 # ------------------------- glossary & learning -------------------------
@@ -6986,8 +7155,14 @@ def restart_dead_hotkey_listener(on_dead, listener_state=None) -> bool:
     """Replace one dead listener without losing retry state."""
     state = LISTENER if listener_state is None else listener_state
     listener = state.get("l")
-    if listener is None or getattr(listener, "running", False):
+    # pynput clears ``running`` only in stop(), after a callback raises. A
+    # listener thread whose run loop returned on its own still reads as
+    # running, so a thread that has exited counts as dead too.
+    is_alive = getattr(listener, "is_alive", None)
+    if listener is None or (getattr(listener, "running", False)
+                            and (not callable(is_alive) or is_alive())):
         state["recovering"] = False
+        state["restarts"] = 0
         return False
     if not state.get("recovering", False):
         state["recovering"] = True
@@ -6995,7 +7170,14 @@ def restart_dead_hotkey_listener(on_dead, listener_state=None) -> bool:
             on_dead()
         except Exception as e:
             print(f"! hotkey recovery cleanup failed: {e}")
-    print("! hotkey listener died — restarting it")
+    # A listener whose event tap cannot be created (no Accessibility
+    # permission) exits at once, so it is replaced on every check. Log the
+    # loop once rather than every few seconds.
+    restarts = state.get("restarts", 0)
+    if restarts == 0:
+        print("! hotkey listener died — restarting it")
+    elif restarts == 1:
+        print("! hotkey listener keeps exiting — still restarting it")
     try:
         replacement = state["make"]()
     except Exception as e:
@@ -7003,6 +7185,7 @@ def restart_dead_hotkey_listener(on_dead, listener_state=None) -> bool:
         return False
     state["l"] = replacement
     state["recovering"] = False
+    state["restarts"] = restarts + 1
     return True
 
 
@@ -7026,6 +7209,96 @@ def hotkey_watchdog_loop(on_dead):
             restart_dead_hotkey_listener(on_dead)
         except Exception as e:
             print(f"! hotkey watchdog recovered from error: {e}")
+
+
+# A key-up can be lost: pynput reads a modifier's release from the
+# family-wide flag bit, so releasing Right Shift while Left Shift is held
+# reports nothing, and a disabled or dead event tap reports nothing at all.
+MAX_TAKE_SECONDS = 600.0
+HOLD_POLL_SECONDS = 0.25
+# Consecutive "up" readings before a latched key counts as released. The
+# real key-up event normally wins this race by a wide margin.
+HOLD_KEY_UP_POLLS = 2
+
+
+def physical_key_is_down(key) -> bool | None:
+    """The bound key's hardware state; None when it cannot be read."""
+    vk = getattr(getattr(key, "value", None), "vk", None)
+    if vk is None:
+        return None
+    try:
+        if IS_MACOS:
+            from Quartz import (
+                CGEventSourceKeyState,
+                kCGEventSourceStateHIDSystemState,
+            )
+            return bool(CGEventSourceKeyState(
+                kCGEventSourceStateHIDSystemState, vk))
+        if IS_WINDOWS:
+            return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
+    except Exception:
+        return None
+    return None
+
+
+def latch_hotkey_press(latch: dict, pressed_at: float):
+    """Start supervising one capture-key hold; the caller holds the lock."""
+    latch.update(on=True, at=pressed_at, confirmed=False, up_polls=0,
+                 capped=False)
+
+
+def supervise_hotkey_latch(latch: dict, lock, events, modifiers: set,
+                           key_is_down, now: float) -> str | None:
+    """End a hold whose key-up never arrived, or that ran past the cap.
+
+    Either way a ``release`` is queued, so the take finishes through the
+    normal release path. A key that reads "up" is trusted only after it
+    has once read "down" during this hold: a remapped key or a missing
+    permission can make the hardware state unreadable, and then only the
+    cap applies. The cap leaves the latch set, so a held function key's
+    auto-repeat cannot start a second take.
+    """
+    with lock:
+        if not latch.get("on"):
+            return None
+        pressed_at = latch["at"]
+    physical = key_is_down()
+    with lock:
+        if not latch.get("on") or latch["at"] != pressed_at:
+            return None
+        if physical is True:
+            latch["confirmed"] = True
+            latch["up_polls"] = 0
+        elif physical is False and latch["confirmed"]:
+            latch["up_polls"] += 1
+            if latch["up_polls"] >= HOLD_KEY_UP_POLLS:
+                latch["on"] = False
+                if latch["capped"]:
+                    return None          # the cap already finished the take
+                events.put(("release", now, frozenset(modifiers)))
+                return "key_up_lost"
+        if not latch["capped"] and now - pressed_at >= MAX_TAKE_SECONDS:
+            latch["capped"] = True
+            events.put(("release", now, frozenset(modifiers)))
+            return "take_limit"
+    return None
+
+
+def hold_supervisor_loop(step):
+    """Poll a held capture key independently of the event tap."""
+    while True:
+        time.sleep(HOLD_POLL_SECONDS)
+        try:
+            outcome = step()
+        except Exception as e:
+            print(f"! hold supervisor recovered from error: "
+                  f"{type(e).__name__}")
+            continue
+        if outcome == "key_up_lost":
+            print("[hotkey] key release was not seen — ending the take")
+        elif outcome == "take_limit":
+            print(f"[hotkey] take reached {MAX_TAKE_SECONDS / 60:.0f} "
+                  "minutes — finishing it")
 
 
 def keepwarm_loop():
@@ -13020,6 +13293,25 @@ def main():
                                 "recovery"),
                         )
                         continue
+                    if ev == "no_audio":
+                        rec = active["rec"]
+                        now = time.perf_counter()
+                        action = stalled_take_action(rec, now)
+                        if action == "abandon":
+                            abandon_active_recording(
+                                rec,
+                                caption="Listening failed — try again",
+                                log_message=(
+                                    "! microphone delivered no audio — "
+                                    "reopening it"),
+                            )
+                        if action != "finish":
+                            continue
+                        print("! microphone stopped delivering audio — "
+                              "finishing the take with what was heard")
+                        CAPTION["text"] = (
+                            "Microphone stopped — text may be incomplete")
+                        ev, event_at = "release", now
                     if (ev == "press" and active["rec"] is None
                             and not PAUSED["on"]):
                         LAST_USE["t"] = time.time()
@@ -13110,6 +13402,9 @@ def main():
     threading.Thread(target=hotkey_worker, daemon=True).start()
 
     key_down = {"on": False}
+    # Serializes the latch between the listener and the hold supervisor, so
+    # one hold queues exactly one release.
+    key_lock = threading.Lock()
     undo_down = {"on": False}
     modifiers = set()
     shift_keys = {keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r}
@@ -13127,11 +13422,13 @@ def main():
         modifier = modifier_pressed_by(key, HOTKEY, modifier_families)
         if modifier is not None:
             modifiers.add(modifier)
-        if key == HOTKEY and not key_down["on"]:
-            key_down["on"] = True
-            events.put(("press", time.perf_counter(), frozenset(modifiers)))
-        if (UNDO_HOTKEY is not None and key == UNDO_HOTKEY
-                and not undo_down["on"]):
+        if hotkey_matches(key, HOTKEY):
+            with key_lock:
+                if not key_down["on"]:
+                    pressed_at = time.perf_counter()
+                    latch_hotkey_press(key_down, pressed_at)
+                    events.put(("press", pressed_at, frozenset(modifiers)))
+        if hotkey_matches(key, UNDO_HOTKEY) and not undo_down["on"]:
             # Latched, so holding the key repeats nothing. Undo runs off the
             # dictation path entirely — it never opens a stream — so its own
             # thread cannot delay or reorder a capture.
@@ -13140,17 +13437,22 @@ def main():
                 target=undo_last_dictation, daemon=True).start()
 
     def on_release(key):
-        if key == HOTKEY and key_down["on"]:
-            key_down["on"] = False
-            events.put(("release", time.perf_counter(), frozenset(modifiers)))
-        if UNDO_HOTKEY is not None and key == UNDO_HOTKEY:
+        if hotkey_matches(key, HOTKEY):
+            with key_lock:
+                if key_down["on"]:
+                    key_down["on"] = False
+                    events.put((
+                        "release", time.perf_counter(), frozenset(modifiers)))
+        if hotkey_matches(key, UNDO_HOTKEY):
             undo_down["on"] = False
         modifier = modifier_pressed_by(key, HOTKEY, modifier_families)
         if modifier is not None:
             modifiers.discard(modifier)
 
     def make_listener():
-        lst = keyboard.Listener(on_press=on_press, on_release=on_release)
+        lst = keyboard.Listener(
+            on_press=on_press, on_release=on_release,
+            win32_event_filter=windows_hotkey_event_filter)
         lst.start()
         return lst
 
@@ -13159,7 +13461,16 @@ def main():
         # state before the replacement starts, then let the serialized worker
         # stop any orphaned capture ahead of the next real key event.
         undo_down["on"] = False
-        queue_hotkey_listener_recovery(key_down, modifiers, events)
+        with key_lock:
+            queue_hotkey_listener_recovery(key_down, modifiers, events)
+
+    def supervise_hold():
+        now = time.perf_counter()
+        if stalled_take_action(active.get("rec"), now) is not None:
+            events.put(("no_audio", now, frozenset()))
+        return supervise_hotkey_latch(
+            key_down, key_lock, events, modifiers,
+            lambda: physical_key_is_down(HOTKEY), time.perf_counter())
 
     LISTENER["make"] = make_listener
     LISTENER["l"] = make_listener()
@@ -13167,6 +13478,9 @@ def main():
         target=hotkey_watchdog_loop,
         args=(recover_listener_state,),
         daemon=True,
+    ).start()
+    threading.Thread(
+        target=hold_supervisor_loop, args=(supervise_hold,), daemon=True,
     ).start()
 
     AppHelper.runEventLoop(installInterrupt=True)
