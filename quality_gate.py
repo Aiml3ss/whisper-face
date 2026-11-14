@@ -7,7 +7,8 @@
 
 Every deterministic quality suite in the repository already measures
 something -- the Voice Compiler golden corpus, the five synthetic scorecard
-suites, the cleanup proof-recovery mediator, and the compiler stress loop.
+suites, the cleanup proof-recovery mediator, the compiler stress loop, and
+the deterministic cleanup every dictation passes through.
 What none of them did was *remember*: a regression only failed a release if
 some expectation inside a test happened to cover it. This gate replays the
 deterministic collectors, flattens the numbers that describe dictation
@@ -168,11 +169,59 @@ def collect_compiler_stress() -> dict[str, Any]:
     }
 
 
+# Every checked-in sentence, as (corpus, list key, text field). Each one is
+# run through the deterministic cleanup that every dictation passes through.
+CLEANUP_CORPORA = (
+    ("benchmarks/cleanup_latency_cases.json", "cases", "raw"),
+    ("benchmarks/representative_dictation_cases.json", "cases", "reference"),
+    ("benchmarks/default_path_sentences.json", "cases", "spoken"),
+)
+
+
+def collect_default_cleanup() -> dict[str, Any]:
+    """Run ``parrot_core.compile_cleanup`` over every corpus sentence.
+
+    The other collectors never call it, so a cleanup that raised on every
+    dictation still passed this gate. A raise here fails the gate with the
+    collector named; the counts pin how much the cleanup changes.
+    """
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    from parrot_core import compile_cleanup
+
+    metrics: dict[str, Any] = {
+        "default_cleanup.cases": 0,
+        "default_cleanup.changed": 0,
+        "default_cleanup.emptied": 0,
+        "default_cleanup.needs_semantic_cleanup": 0,
+    }
+    for relative, key, field in CLEANUP_CORPORA:
+        cases = json.loads(
+            (HERE / relative).read_text(encoding="utf-8"))[key]
+        for case in cases:
+            text = case[field]
+            plan = compile_cleanup(text, "en")
+            if not isinstance(plan.text, str):
+                raise RuntimeError(
+                    f"{relative} {case.get('id')}: cleanup returned "
+                    f"{type(plan.text).__name__}, not text")
+            metrics["default_cleanup.cases"] += 1
+            metrics["default_cleanup.changed"] += plan.text != text.strip()
+            metrics["default_cleanup.emptied"] += not plan.text
+            metrics["default_cleanup.needs_semantic_cleanup"] += bool(
+                plan.needs_semantic_cleanup)
+            for kind in plan.edit_kinds:
+                name = f"default_cleanup.edits.{kind}"
+                metrics[name] = metrics.get(name, 0) + 1
+    return metrics
+
+
 COLLECTORS: tuple[tuple[str, Callable[[], dict[str, Any]]], ...] = (
     ("voice_compiler", collect_voice_compiler),
     ("synthetic_scorecard", collect_synthetic_scorecard),
     ("proof_recovery", collect_proof_recovery),
     ("compiler_stress", collect_compiler_stress),
+    ("default_cleanup", collect_default_cleanup),
 )
 
 
