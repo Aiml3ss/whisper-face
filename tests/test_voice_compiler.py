@@ -3,7 +3,7 @@
 # dependencies = []
 # ///
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 import sys
 import unittest
@@ -86,13 +86,45 @@ class VoiceCompilerTests(unittest.TestCase):
             "Gwen", "Qwen", count=1,
             apps=(("com.openai.codex", 2),),
         )
+        for engine in ("parakeet-unified", "parakeet-unified+turbo", "turbo"):
+            with self.subTest(engine=engine):
+                voice = VoiceIR(
+                    hypotheses=(RecognitionHypothesis(
+                        "Run Gwen locally.", 0.9, engine),),
+                    personal_priors=(prior,),
+                    app_bundle="com.openai.codex",
+                )
+                self.assertEqual(
+                    self.compiler.compile(voice).text, "Run Qwen locally.")
+                elsewhere = replace(voice, app_bundle="com.apple.mail")
+                self.assertEqual(
+                    self.compiler.compile(elsewhere).text,
+                    "Run Gwen locally.")
+
+    def test_personal_prior_is_an_exact_recorded_replacement(self):
         voice = VoiceIR(
             hypotheses=(RecognitionHypothesis(
-                "Run Gwen locally", 0.72, "tiny"),),
-            personal_priors=(prior,),
-            app_bundle="com.openai.codex",
+                "Kubernetis is up. Restart kubernetis and Gwen's pod.",
+                0.9, "parakeet-unified"),),
+            personal_priors=(
+                PersonalPrior("kubernetis", "kubernetes", count=3),
+                PersonalPrior("Gwen", "Qwen", count=3),
+            ),
         )
-        self.assertEqual(self.compiler.compile(voice).text, "Run Qwen locally")
+
+        result = self.compiler.compile(voice)
+
+        # Whole words only ("Gwen's" is another token), with the capital the
+        # recognizer put on the sentence start kept.
+        self.assertEqual(
+            result.text,
+            "Kubernetes is up. Restart kubernetes and Gwen's pod.")
+        self.assertEqual(
+            [(decision.before, decision.after, decision.reason)
+             for decision in result.decisions
+             if decision.reason == "personal-prior"],
+            [("Kubernetis", "Kubernetes", "personal-prior"),
+             ("kubernetis", "kubernetes", "personal-prior")])
 
     def test_proof_edits_accept_filler_but_protect_facts(self):
         source = "Um ship API v2 at 15:30 tomorrow"
