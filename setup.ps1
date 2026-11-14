@@ -876,9 +876,11 @@ $EscapedScript = (Join-Path $Repo "dictate.py").Replace("'", "''")
 $EscapedLog = $Log.Replace("'", "''")
 $LauncherBody = @"
 `$env:PYTHONUNBUFFERED = "1"
+`$env:PYTHONUTF8 = "1"
 `$env:UV_PYTHON = "$PythonVersion"
 Set-Location '$($Repo.Replace("'", "''"))'
 & '$EscapedUv' run --locked --script '$EscapedScript'$ExtraArgument *>> '$EscapedLog'
+exit `$LASTEXITCODE
 "@
 Set-Content -Path $Launcher -Value $LauncherBody -Encoding UTF8
 $LauncherDigest = Get-LauncherDigest $Launcher
@@ -895,8 +897,13 @@ foreach ($ExistingName in @($TaskName, $LegacyTaskName)) {
 $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument `
     "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Launcher`""
 $Trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+# Task Scheduler's defaults do not fit an always-on service: a task does not
+# start on battery and is stopped when a laptop is unplugged, and priority 7
+# runs it below normal. The launcher exits with uv's code, so a crash counts
+# as a failure and the restart policy applies.
 $Settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) `
-    -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Priority 4
 Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger `
     -Settings $Settings -Description "Local Whisper Face dictation" `
     -User $env:USERNAME -RunLevel Limited -Force | Out-Null

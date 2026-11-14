@@ -1312,6 +1312,28 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn('if ((Invoke-Native $Ollama @("show", "qwen3.5:4b"))',
                       self.powershell)
 
+    def test_windows_login_task_keeps_running_on_battery_and_restarts(self):
+        # Static, because no PowerShell runs here. Task Scheduler defaults
+        # stop a task when a laptop is unplugged, never start it on battery,
+        # and run it at below-normal priority; and a launcher that drops
+        # uv's exit code makes every crash look like success, so the restart
+        # policy never fires.
+        settings_start = self.powershell.index(
+            "$Settings = New-ScheduledTaskSettingsSet")
+        settings = self.powershell[settings_start:self.powershell.index(
+            "Register-ScheduledTask", settings_start)]
+        for option in ("-AllowStartIfOnBatteries",
+                       "-DontStopIfGoingOnBatteries", "-Priority 4",
+                       "-RestartCount 3"):
+            with self.subTest(option=option):
+                self.assertIn(option, settings)
+        launcher = self.powershell[
+            self.powershell.index('$LauncherBody = @"'):]
+        launcher = launcher[:launcher.index('"@')]
+        lines = [line for line in launcher.splitlines() if line.strip()]
+        self.assertEqual(lines[-1], "exit `$LASTEXITCODE")
+        self.assertIn('`$env:PYTHONUTF8 = "1"', launcher)
+
     def test_windows_verify_binds_login_task_to_its_current_checkout(self):
         helper_start = self.powershell.index("function Confirm-TaskLauncherBinding")
         helper_end = self.powershell.index("function Confirm-Installation", helper_start)
