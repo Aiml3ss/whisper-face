@@ -875,10 +875,18 @@ class LocalModelProxyTests(unittest.TestCase):
         dictate = str(ROOT / "dictate.py")
         environment = {key: value for key, value in os.environ.items()
                        if key != "VIRTUAL_ENV"}
-        subprocess.run(
-            [uv, "sync", "--script", dictate, "--locked", "--quiet"],
-            cwd=ROOT, env=environment, check=True, capture_output=True,
+        # Offline: this file never reaches the real network. The release
+        # gate's earlier `uv run --locked --script dictate.py` fills the cache.
+        synced = subprocess.run(
+            [uv, "sync", "--script", dictate, "--locked", "--offline",
+             "--quiet"],
+            cwd=ROOT, env=environment, capture_output=True, text=True,
             timeout=900)
+        self.assertEqual(
+            synced.returncode, 0,
+            "the locked runtime is not in the uv cache; run "
+            "`uv sync --script dictate.py --locked` once, then retry\n"
+            + synced.stderr)
         python = subprocess.run(
             [uv, "python", "find", "--script", dictate],
             cwd=ROOT, env=environment, check=True, capture_output=True,
