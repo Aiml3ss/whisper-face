@@ -357,6 +357,7 @@ from parrot_core import (  # noqa: E402
     transform_last_insertion,
     compile_cleanup,
     compile_code_dictation,
+    NUMBER_WORDS,
     confidence_from_segments,
     correction_similarity,
     hypothesis_agreement,
@@ -967,12 +968,14 @@ ENUM_RE = re.compile(
     r"(things|points|items|thoughts|questions|updates|ideas|issues)\b", re.I
 )
 # Spoken tone override: start a dictation with "formal tone, ..." /
-# "casual, ..." / "verbatim: ..." to force a style regardless of app. The
-# punctuation after the tone word is required — Whisper inserts it for the
-# natural pause, and it keeps "Formal education is..." from matching.
+# "casual style, ..." / "verbatim mode: ..." to force a style regardless of
+# app. The keyword is required: "Code, tests, and docs are updated" opens
+# with a tone word and a comma, and without the keyword it lost its first
+# word. The punctuation after the keyword is required too — a recognizer
+# writes it for the natural pause.
 TONE_OVERRIDE_RE = re.compile(
     r"^(formal|casual|code|technical|neutral|verbatim)"
-    r"(?:\s+(?:tone|style|mode))?\s*[,.:]\s+", re.I)
+    r"\s+(?:tone|style|mode)\s*[,.:]\s+", re.I)
 TONE_ALIASES = {"technical": "code", "neutral": "default"}
 
 # The cleanup model answering/refusing instead of cleaning (it happens on
@@ -985,6 +988,12 @@ REFUSAL_RE = re.compile(
 HALLUCINATIONS = {
     "thank you", "thanks for watching", "thank you for watching", "you", "bye",
 }
+# The phrases above are what Whisper prints for audio with no speech in it.
+# They are also ordinary things to say, so a match counts only against a
+# decode from one of these engines that is itself weak evidence.
+WHISPER_ENGINES = frozenset({"tiny", "turbo"})
+# Slower than one word every this many seconds is not a spoken phrase.
+HALLUCINATION_SECONDS_PER_WORD = 2.0
 
 CASUAL_APPS = {"com.tinyspeck.slackmacgap", "com.apple.MobileSMS",
                "com.hnc.Discord"}
@@ -1545,11 +1554,39 @@ def exception_origin(error: BaseException) -> str:
             f"({os.path.basename(code.co_filename)}:{frame.tb_lineno})")
 
 
-def is_hallucination(text: str, language: str = LANGUAGE_DEFAULT) -> bool:
-    """Reject punctuation-only output and known silent-audio phrases.
+def weak_whisper_evidence(recognition: Recognition | None) -> bool:
+    """Whether a decode could be Whisper filling silence rather than speech.
+
+    Only a Whisper decode qualifies: Parakeet does not produce these
+    artifacts, and its route confidence measures agreement with Whisper Tiny,
+    not how likely the words are. Within Whisper the decode must be doubtful
+    on its own terms, by a low confidence or by too few words for the audio
+    it was given.
+    """
+    if recognition is None:
+        return False
+    engines = [name for name in str(recognition.engine or "").split("+")
+               if name]
+    if not engines or any(name not in WHISPER_ENGINES for name in engines):
+        return False
+    if recognition.confidence < LOW_CONFIDENCE:
+        return True
+    words = len(re.findall(r"\w+", recognition.text, flags=re.UNICODE))
+    return bool(words) and (
+        recognition.audio_duration >= words * HALLUCINATION_SECONDS_PER_WORD)
+
+
+def is_hallucination(text: str, language: str = LANGUAGE_DEFAULT,
+                     recognition: Recognition | None = None) -> bool:
+    """Reject punctuation-only output and unsupported silent-audio phrases.
 
     Normalize punctuation rather than enumerating every possible terminal
     mark ("Thank you.", "Thank you!", and "THANK YOU..." are equivalent).
+
+    "Thank you" and "Bye" are also real replies and real sign-offs, so the
+    phrase list applies only when ``recognition`` shows a weak Whisper decode
+    (see ``weak_whisper_evidence``). Without that evidence the words are the
+    speaker's and are kept.
 
     The token class is Unicode: the old ``[a-z0-9]`` matched nothing at all in
     Japanese, Chinese, Russian, or Korean, so every correct transcript in
@@ -1562,7 +1599,8 @@ def is_hallucination(text: str, language: str = LANGUAGE_DEFAULT) -> bool:
         return True
     if str(language or "").strip().casefold() != "en":
         return False
-    return " ".join(words) in HALLUCINATIONS
+    return (" ".join(words) in HALLUCINATIONS
+            and weak_whisper_evidence(recognition))
 
 
 def load_app_tones():
@@ -2757,7 +2795,8 @@ def _caption_add(fut, context_terms=(), bundle="", context_pack=None,
             t = str(result or "").strip()
     except Exception:
         return
-    if t and not is_hallucination(t, language):
+    evidence = result if isinstance(result, Recognition) else None
+    if t and not is_hallucination(t, language, evidence):
         current = CAPTION["text"]
         if current == "Listening" or current.endswith(" mode"):
             current = ""
@@ -8248,10 +8287,20 @@ def context_firewall_state_snapshot() -> dict:
     }
 
 
+def _snippet_is_placeholder(text: str) -> bool:
+    """True for a template value the user has not replaced yet.
+
+    Both installers seed snippets.json with "EDIT ME ..." values. Until one
+    is filled in it is not something the user asked to have typed, so it is
+    never inserted: the dictation is delivered as spoken instead.
+    """
+    return text.lstrip().startswith("EDIT ME")
+
+
 def match_snippet(raw: str) -> tuple[str, str] | None:
     """Whole-dictation snippet trigger: "insert my address" pastes
-    snippets.json["address"]. Unknown names return None so the phrase
-    falls through as ordinary dictation."""
+    snippets.json["address"]. Unknown names and unfilled placeholders return
+    None so the phrase falls through as ordinary dictation."""
     m = SNIPPET_RE.match(raw.strip())
     if not m or not SNIPPETS_FILE.exists():
         return None
@@ -8270,7 +8319,7 @@ def match_snippet(raw: str) -> tuple[str, str] | None:
         return None
     for name, text in snippets.items():
         if isinstance(text, str) and key == snippet_name_key(name):
-            return name, text
+            return None if _snippet_is_placeholder(text) else (name, text)
     return None
 
 
@@ -8294,23 +8343,32 @@ def _load_snippet_map() -> dict[str, str]:
 
 
 def _compile_snippet_pattern(snippets: dict[str, str]):
-    """One whole-word, case-insensitive alternation over every trigger. Triggers
-    are ordered longest-first so a compound trigger ("email signature") wins over
-    a prefix ("email"), each is re.escape'd, and the boundaries are stricter than
-    \\b — (?<!\\w)(...)(?!\\w) — so "address" never fires inside "addressed"."""
-    if not snippets:
+    """The spoken cue "insert my <name>" over every usable snippet name.
+
+    A bare name is never a trigger: the names people give snippets ("email",
+    "address", "signature") are ordinary words, and expanding them inside
+    "send me your email" would replace what was said with private text. The
+    cue is the one the whole-utterance command uses. Names are ordered
+    longest-first so "email signature" wins over "email", and the boundaries
+    are stricter than \\b so "address" never fires inside "addresses".
+    Unfilled placeholders and names with no word characters are left out.
+    """
+    triggers = sorted(
+        (name for name, text in snippets.items()
+         if snippet_name_key(name) and not _snippet_is_placeholder(text)),
+        key=len, reverse=True)
+    if not triggers:
         return None
-    triggers = sorted(snippets, key=len, reverse=True)
     alternation = "|".join(re.escape(trigger) for trigger in triggers)
-    return re.compile(rf"(?<!\w)({alternation})(?!\w)", re.I)
+    return re.compile(rf"(?<!\w)insert\s+my\s+({alternation})(?!\w)", re.I)
 
 
 def expand_snippets_inline(raw: str, snippets: dict[str, str] | None = None) -> str:
-    """Pure, side-effect-free inline expansion: replace each whole-word snippet
-    trigger embedded in a longer dictation with its canonical expansion,
-    case-insensitively and longest-trigger-first. Returns raw unchanged when
-    there are no snippets or no trigger fires. snippets defaults to the live
-    snippets.json via _load_snippet_map()."""
+    """Pure, side-effect-free inline expansion: replace each spoken
+    "insert my <name>" embedded in a longer dictation with that snippet's
+    text, case-insensitively and longest-name-first. Returns raw unchanged
+    when there are no snippets or the cue is not spoken. snippets defaults to
+    the live snippets.json via _load_snippet_map()."""
     if snippets is None:
         snippets = _load_snippet_map()
     pattern = _compile_snippet_pattern(snippets)
@@ -8338,10 +8396,10 @@ def _snippet_sentinel(index: int) -> str:
 
 def _mask_snippets_inline(
         raw: str, snippets: dict[str, str]) -> tuple[str, dict[str, str]]:
-    """Round-trip masking half of inline expansion: replace each whole-word
-    trigger (same matching as expand_snippets_inline) with an opaque sentinel and
-    return (masked_text, sentinel -> expansion). An empty mapping means nothing
-    matched, and the caller must leave raw untouched."""
+    """Round-trip masking half of inline expansion: replace each spoken
+    "insert my <name>" (same matching as expand_snippets_inline) with an opaque
+    sentinel and return (masked_text, sentinel -> expansion). An empty mapping
+    means nothing matched, and the caller must leave raw untouched."""
     pattern = _compile_snippet_pattern(snippets)
     if pattern is None:
         return raw, {}
@@ -9817,6 +9875,10 @@ def collapse_repeats(text: str) -> tuple[str, bool]:
     Chinese transcript, which arrives as a single token. It fails closed
     there — the text is returned untouched and ``looped`` is False — rather
     than guessing at character-level repetition and eating real speech.
+
+    Digits, number words and single characters are never collapsed: a zip
+    code ("1 0 0 0 1"), a phone number ("five five five") and a spelled
+    address ("w w w") repeat a token three times in real speech.
     """
     words = text.split()
     out, prev, run = [], None, 0
@@ -9824,7 +9886,8 @@ def collapse_repeats(text: str) -> tuple[str, bool]:
         key = w.strip(",.;:!?…\"'。、！？「」").casefold()
         run = run + 1 if key == prev else 1
         prev = key
-        if run <= 2:
+        if (run <= 2 or len(key) <= 1 or key in NUMBER_WORDS
+                or any(char.isdigit() for char in key)):
             out.append(w)
     return " ".join(out), bool(words) and len(out) <= 0.6 * len(words)
 
@@ -9842,6 +9905,31 @@ def looks_like_prompt_echo(text: str) -> bool:
         vocab.update(re.findall(r"[a-z0-9'&+-]+", t.casefold()))
     hits = sum(1 for w in words if w in vocab)
     return hits / len(words) >= 0.8
+
+
+def strip_context_echo(text: str, context_tail: str) -> str:
+    """Drop a leading repeat of the field's own tail from a continuation.
+
+    Cleanup is told what the field already ends with and sometimes repeats
+    it. Only a whole-word repeat with new words after it counts as that: a
+    field holding "to" is also the start of "Tomorrow", and cutting there
+    pastes "morrow".
+    """
+    tail = context_tail[-40:]
+    if (len(context_tail) > 40 and context_tail[-41].isalnum()
+            and tail[:1].isalnum()):
+        # The 40-character window opened inside a word; start at the next.
+        parts = tail.split(None, 1)
+        tail = parts[1] if len(parts) > 1 else ""
+    tail = tail.lower()
+    if not tail or not text.lower().startswith(tail):
+        return text
+    rest = text[len(tail):]
+    if rest[:1].isalnum() or rest[:1] in ("_", "'", "’", "-"):
+        return text
+    if not any(char.isalnum() for char in rest):
+        return text
+    return rest.lstrip()
 
 
 def quick_clean(text: str, verbatim: bool = False,
@@ -10034,9 +10122,7 @@ def build_delayed_cleanup_proposal(
         text = strip_casual_period(text)
     text = apply_vocabulary_casing(text)
     if continuing and text:
-        tail40 = context_tail[-40:].lower()
-        if tail40 and text.lower().startswith(tail40):
-            text = text[len(tail40):].lstrip()
+        text = strip_context_echo(text, context_tail)
         if (context_text and not context_text[-1].isspace()
                 and text[:1] not in ",.;:!?…"):
             text = " " + text
@@ -10956,7 +11042,13 @@ def assemble_raw(chunk_futs: list, pre_future,
             words_valid = False if has_bounds else timing_reliable
             elapsed += duration
         t = result.text.strip()
-        if t and not is_hallucination(t, language):
+        if t and is_hallucination(t, language, result):
+            # The rejected words stay out of the log; the evidence does not.
+            print("[dropped] ASR part rejected as non-speech "
+                  f"({result.engine or 'unknown engine'}, confidence "
+                  f"{result.confidence:.2f}, {duration:.1f}s)")
+            t = ""
+        if t:
             parts.append(t)
             confidences.append(result.confidence)
             for word, start, end in normalized_words:
@@ -11119,7 +11211,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         phase = "release-order"
         DICTATION_PROCESS_ORDER.wait(rec.process_ticket)
         raw = recognition.text
-        if not raw or is_hallucination(raw, rec.language):
+        if not raw or is_hallucination(raw, rec.language, recognition):
             report_dictation_problem(
                 rec,
                 hud,
@@ -11298,8 +11390,8 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             return
 
         # Inline snippet expansion is additive to the whole-utterance command
-        # handled above: a trigger embedded in a longer dictation ("text him my
-        # address and say thanks") expands only the trigger words while the
+        # handled above: the same cue inside a longer dictation ("send it to
+        # insert my address and say thanks") expands only the cue while the
         # surrounding phrase still flows through normal cleanup. Mask each hit
         # with an opaque sentinel now and restore the exact expansion after
         # cleanup (below), so multiline boilerplate is never reflowed. Limited
@@ -11411,6 +11503,20 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 text = candidate
         elif rec.mode == "code":
             text = compiled
+        elif rec.mode in {"edit", "compose", "reply"}:
+            # Reached only when the rewrite model was not asked, which today
+            # means a language it does not handle. What was dictated is then
+            # still an instruction or a brief, and pasting it would replace
+            # the very selection it was about.
+            report_dictation_problem(
+                rec,
+                hud,
+                f"{rec.mode.capitalize()} mode needs English — "
+                "nothing changed",
+                f"[{rec.mode}] rewrite model not available for this "
+                "language; nothing changed",
+            )
+            return
         else:
             text = quick_clean(
                 compiled, verbatim=verbatim, continuing=continuing,
@@ -11440,9 +11546,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             PIPELINE_STATE["last_alternatives"] = list(
                 dict.fromkeys(cleaned_alternatives))[:3]
         if continuing and text:
-            tail40 = stripped_ctx[-40:].lower()
-            if tail40 and text.lower().startswith(tail40):
-                text = text[len(tail40):].lstrip()      # model echoed context
+            text = strip_context_echo(text, stripped_ctx)
             if (not ctx[-1].isspace() and text[:1] not in ",.;:!?…。、！？"
                     and language_uses_spaces(rec.language)):
                 text = " " + text                       # joining needs a space

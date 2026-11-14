@@ -183,6 +183,54 @@ class VoiceCompilerTests(unittest.TestCase):
                     before, (EditProposal("self_correction", before, after),))
                 self.assertFalse(result.edits[0].accepted)
 
+    def test_self_correction_is_proved_only_between_items_of_one_kind(self):
+        for before, after in (
+            ("not actually approved", "approved"),
+            ("Morgan actually signed", "signed"),
+            ("Nobody actually reviewed", "reviewed"),
+            ("Alex actually Alexis", "Alexis"),
+            # A typed correction proves its own span, not words before it.
+            ("to Tuesday actually Wednesday", "Wednesday"),
+        ):
+            with self.subTest(before=before):
+                result = self.compiler.verify_edits(
+                    f"The payment was {before} today",
+                    (EditProposal("self_correction", before, after),))
+                self.assertFalse(result.edits[0].accepted)
+        for before, after in (
+            ("Tuesday, actually Wednesday", "Wednesday"),
+            ("March 3, actually March 4", "March 4"),
+            ("45 actually 54 dollars", "54 dollars"),
+            ("3 pm, actually 4 pm", "4 pm"),
+        ):
+            with self.subTest(before=before):
+                result = self.compiler.verify_edits(
+                    f"Move it to {before} please",
+                    (EditProposal("self_correction", before, after),))
+                self.assertTrue(result.edits[0].accepted)
+                self.assertEqual(result.text, f"Move it to {after} please")
+
+    def test_self_correction_is_never_proved_inside_a_compound_item(self):
+        # "9 to 5" is one item. A proposal that starts at its last word
+        # would splice the two versions together ("From 9 to 9 to 6").
+        for source, before, after in (
+            ("Open from 9 to 5, actually 9 to 6 on Friday.",
+             "5, actually 9 to 6", "9 to 6"),
+            ("Open from 9 to 5, actually 9 to 6 on Friday.",
+             "5, actually 9", "9"),
+            ("Call 555 1234, actually 555 1235 today.",
+             "1234, actually 555", "555"),
+            ("It took 3 hours 20 minutes, actually 4 hours today.",
+             "20 minutes, actually 4 hours", "4 hours"),
+            ("Monday to Friday, actually Monday to Thursday works.",
+             "Friday, actually Monday", "Monday"),
+        ):
+            with self.subTest(before=before):
+                result = self.compiler.verify_edits(
+                    source, (EditProposal("self_correction", before, after),))
+                self.assertFalse(result.edits[0].accepted)
+                self.assertEqual(result.text, source)
+
     def test_counted_enumeration_can_be_proved_as_a_list(self):
         source = ("Two things first ship the installer and second update "
                   "the docs")

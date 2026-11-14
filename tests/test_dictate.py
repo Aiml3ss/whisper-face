@@ -43,6 +43,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from parrot_core import (  # noqa: E402
+    NUMBER_WORDS,
     Recognition,
     RecognitionWord,
     compile_cleanup,
@@ -3552,13 +3553,165 @@ class FlightRecorderTests(unittest.TestCase):
 
 
 class CleanupGuardTests(unittest.TestCase):
+    HALLUCINATION_GUARD = {
+        "HALLUCINATIONS", "WHISPER_ENGINES", "LOW_CONFIDENCE",
+        "HALLUCINATION_SECONDS_PER_WORD",
+    }
+
     def test_hallucinations_ignore_terminal_punctuation(self):
-        ns = load_definitions("is_hallucination", assignments={"HALLUCINATIONS"})
+        ns = load_definitions(
+            "is_hallucination", "weak_whisper_evidence",
+            assignments=self.HALLUCINATION_GUARD)
         guard = ns["is_hallucination"]
-        for text in ("!", ".", "Thank you!", "THANK YOU...", "Bye?"):
+        weak = Recognition(
+            "", confidence=0.31, engine="tiny", audio_duration=1.4)
+        for text in ("Thank you!", "THANK YOU...", "Bye?", "you"):
+            with self.subTest(text=text):
+                self.assertTrue(guard(text, "en", weak))
+        # Output with no words in it is nothing, whoever produced it.
+        for text in ("!", ".", "  ...  "):
             with self.subTest(text=text):
                 self.assertTrue(guard(text))
-        self.assertFalse(guard("This is real speech!"))
+                self.assertTrue(guard(text, "en", Recognition(
+                    text, confidence=0.93, engine="parakeet-unified")))
+        self.assertFalse(guard("This is real speech!", "en", weak))
+
+    def test_silent_audio_phrases_need_a_weak_whisper_decode(self):
+        ns = load_definitions(
+            "is_hallucination", "weak_whisper_evidence",
+            assignments=self.HALLUCINATION_GUARD)
+        guard = ns["is_hallucination"]
+        kept = (
+            # Parakeet never produces Whisper's silent-audio artifacts, at
+            # any confidence its cross-check can assign.
+            Recognition("Thank you.", confidence=0.93,
+                        engine="parakeet-unified", audio_duration=1.2),
+            Recognition("Thank you.", confidence=0.45,
+                        engine="parakeet-unified", audio_duration=9.0),
+            Recognition("Bye!", confidence=0.69,
+                        engine="parakeet-unified", audio_duration=0.8),
+            # A confident Whisper decode of a clip the phrase fills.
+            Recognition("Thank you.", confidence=0.84, engine="tiny",
+                        audio_duration=1.3),
+            Recognition("Bye.", confidence=0.77, engine="turbo",
+                        audio_duration=0.9),
+            # No engine named: nothing says this was Whisper.
+            Recognition("Thank you.", confidence=0.2, audio_duration=8.0),
+        )
+        for recognition in kept:
+            with self.subTest(recognition=recognition):
+                self.assertFalse(guard(recognition.text, "en", recognition))
+        # With no evidence at all the phrase is the speaker's.
+        self.assertFalse(guard("Thank you."))
+        dropped = (
+            # Low confidence.
+            Recognition("Thank you.", confidence=0.38, engine="tiny",
+                        audio_duration=1.3),
+            Recognition("You", confidence=0.5, engine="turbo",
+                        audio_duration=0.7),
+            # Two words decoded out of seven seconds of audio.
+            Recognition("Thank you.", confidence=0.84, engine="tiny",
+                        audio_duration=7.0),
+            Recognition("Thanks for watching!", confidence=0.9,
+                        engine="tiny+turbo", audio_duration=12.0),
+        )
+        for recognition in dropped:
+            with self.subTest(recognition=recognition):
+                self.assertTrue(guard(recognition.text, "en", recognition))
+
+    def test_repeat_collapse_keeps_digits_number_words_and_letters(self):
+        ns = load_definitions(
+            "collapse_repeats", extra={"NUMBER_WORDS": NUMBER_WORDS})
+        for spoken in (
+            "the zip is 1 0 0 0 1",
+            "The zip is 1, 0, 0, 0, 1.",
+            "my number is five five five one two one two",
+            "Dial 555 555 555 and wait.",
+            "w w w dot example dot com",
+            "The grade was A A A plus.",
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(
+                    ns["collapse_repeats"](spoken), (spoken, False))
+
+    def test_repeat_collapse_still_removes_a_decode_loop(self):
+        ns = load_definitions(
+            "collapse_repeats", extra={"NUMBER_WORDS": NUMBER_WORDS})
+        collapse = ns["collapse_repeats"]
+        self.assertEqual(
+            collapse("Restart " + "Unraid " * 40 + "tonight."),
+            ("Restart Unraid Unraid tonight.", True))
+        self.assertEqual(
+            collapse("No no, that is wrong."),
+            ("No no, that is wrong.", False))
+
+    def test_spoken_tone_override_needs_the_tone_keyword(self):
+        ns = load_definitions(
+            "extract_tone_override",
+            assignments={"TONE_OVERRIDE_RE", "TONE_ALIASES"})
+        extract = ns["extract_tone_override"]
+        for spoken, expected in (
+            ("Formal tone, please confirm the meeting.",
+             ("please confirm the meeting.", "formal")),
+            ("Casual style: see you at six.", ("see you at six.", "casual")),
+            ("Verbatim mode. Keep every word.",
+             ("Keep every word.", "verbatim")),
+            ("technical tone, restart the worker",
+             ("restart the worker", "code")),
+            ("Neutral tone, send the summary.",
+             ("send the summary.", "default")),
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(extract(spoken), expected)
+        # A sentence that merely opens with one of the tone words keeps it.
+        for spoken in (
+            "Code, tests, and docs are all updated.",
+            "Code: 4471 opens the side gate.",
+            "Casual, but not sloppy.",
+            "Technical, legal, and financial review is done.",
+            "Neutral. That is my position.",
+            "Verbatim: keep every word.",
+            "Formal education is expensive.",
+            "Formal tone.",
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(extract(spoken), (spoken, None))
+
+    def test_context_echo_is_stripped_only_as_whole_words(self):
+        strip = load_definitions("strip_context_echo")["strip_context_echo"]
+        # The field's short text is also the start of the next word.
+        for field, text in (
+            ("to", "Tomorrow works for me"),
+            ("ok", "Okay, see you then"),
+            ("no", "Nobody told me"),
+            ("I", "It works now"),
+            ("a", "Another thing"),
+            ("I", "I'm on my way"),
+            ("re", "re-send the invoice"),
+        ):
+            with self.subTest(field=field, text=text):
+                self.assertEqual(strip(text, field), text)
+        # Repeating the field is not an echo when nothing follows it.
+        self.assertEqual(strip("Ok.", "ok"), "Ok.")
+        # A real echo of the field's tail, followed by the new words.
+        self.assertEqual(
+            strip("see you at six thirty", "see you at"), "six thirty")
+        self.assertEqual(
+            strip("See you at, six thirty", "see you at"), ", six thirty")
+        long_field = (
+            "Thanks for the update on the quarterly migration plan and")
+        self.assertEqual(
+            long_field[-40:], "date on the quarterly migration plan and")
+        self.assertEqual(
+            strip("on the quarterly migration plan and the budget",
+                  long_field),
+            "the budget")
+        # The 40-character window opens inside "update". "date" is a word,
+        # but the field never said it.
+        dated = "date on the quarterly migration plan and the budget"
+        self.assertEqual(strip(dated, long_field), dated)
+        self.assertEqual(strip("six thirty", "see you at"), "six thirty")
+        self.assertEqual(strip("six thirty", ""), "six thirty")
 
     def test_simple_fillers_stay_on_the_fast_path(self):
         ns = load_definitions(
@@ -3573,6 +3726,11 @@ class CleanupGuardTests(unittest.TestCase):
         self.assertEqual(ns["quick_clean"]("already punctuated,"),
                          "Already punctuated.")
         self.assertEqual(ns["quick_clean"]("Two things:"), "Two things:")
+        # A filler on its own leaves nothing to paste, not its period.
+        self.assertEqual(ns["quick_clean"]("Um."), "")
+        self.assertEqual(
+            ns["quick_clean"]("I studied at UM for four years"),
+            "I studied at UM for four years.")
         self.assertEqual(
             ns["quick_clean"]("I, um, think this is ready"),
             "I think this is ready.",
@@ -3817,13 +3975,39 @@ class CleanupGuardTests(unittest.TestCase):
                 "CAPTION": caption,
                 "compile_voice_evidence": lambda *_args, **_kwargs: (
                     None, SimpleNamespace(stable_prefix="stable words")),
-                "is_hallucination": lambda _text, _language="en": False,
+                "is_hallucination": lambda *_args: False,
             },
         )
         future = SimpleNamespace(result=lambda: Recognition(
             "stable words provisional tail"))
         ns["_caption_add"](future)
         self.assertEqual(caption["text"], "stable words")
+
+    def test_live_caption_follows_the_silent_audio_rule_of_final_text(self):
+        def caption_after(recognition):
+            caption = {"text": "Listening"}
+            ns = load_definitions(
+                "_caption_add", "is_hallucination", "weak_whisper_evidence",
+                assignments=CleanupGuardTests.HALLUCINATION_GUARD,
+                extra={
+                    "Recognition": Recognition,
+                    "CAPTION": caption,
+                    "compile_voice_evidence": lambda result, *_args, **_kw: (
+                        None, SimpleNamespace(stable_prefix=result.text)),
+                    "join_recognized_parts":
+                        lambda parts, _language: " ".join(filter(None, parts)),
+                },
+            )
+            ns["_caption_add"](SimpleNamespace(result=lambda: recognition))
+            return caption["text"]
+
+        # Whisper filling a pause must not flash in the caption either.
+        self.assertEqual(caption_after(Recognition(
+            "Thank you.", confidence=0.31, engine="tiny",
+            audio_duration=3.0)), "Listening")
+        self.assertEqual(caption_after(Recognition(
+            "Thank you.", confidence=0.93, engine="parakeet-unified",
+            audio_duration=1.2)), "Thank you.")
 
     def test_active_context_is_compiled_before_cleanup(self):
         ns = load_definitions(
@@ -4511,7 +4695,7 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_wrong_shaped_snippets_file_is_ignored(self):
         ns = load_definitions(
-            "match_snippet", "snippet_name_key",
+            "match_snippet", "snippet_name_key", "_snippet_is_placeholder",
             assignments={"SNIPPET_RE"},
         )
         with tempfile.TemporaryDirectory() as td:
@@ -4524,7 +4708,7 @@ class ConfigurationTests(unittest.TestCase):
         # The old key stripped [^a-z0-9 ], so every non-Latin name
         # collapsed to "" and matched whichever snippet came first.
         ns = load_definitions(
-            "match_snippet", "snippet_name_key",
+            "match_snippet", "snippet_name_key", "_snippet_is_placeholder",
             assignments={"SNIPPET_RE"},
         )
         with tempfile.TemporaryDirectory() as td:
@@ -4550,7 +4734,7 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_a_name_that_normalizes_to_nothing_matches_nothing(self):
         ns = load_definitions(
-            "match_snippet", "snippet_name_key",
+            "match_snippet", "snippet_name_key", "_snippet_is_placeholder",
             assignments={"SNIPPET_RE"},
         )
         with tempfile.TemporaryDirectory() as td:
@@ -4559,6 +4743,32 @@ class ConfigurationTests(unittest.TestCase):
             ns["SNIPPETS_FILE"] = snippets
             # Empty key on both sides must never count as equality.
             self.assertIsNone(ns["match_snippet"]("insert ..."))
+
+    def test_an_unfilled_placeholder_is_not_a_snippet(self):
+        ns = load_definitions(
+            "match_snippet", "snippet_name_key", "_snippet_is_placeholder",
+            assignments={"SNIPPET_RE"},
+        )
+        with tempfile.TemporaryDirectory() as td:
+            snippets = Path(td) / "snippets.json"
+            # What both installers copy into place on a fresh install.
+            template = json.loads(
+                (ROOT / "snippets.template.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                sorted(template), ["address", "email", "signature"])
+            snippets.write_text(json.dumps(template), encoding="utf-8")
+            ns["SNIPPETS_FILE"] = snippets
+            for name in template:
+                with self.subTest(name=name):
+                    self.assertIsNone(
+                        ns["match_snippet"](f"Insert my {name}."))
+            # The same name is a snippet once the user has filled it in.
+            template["email"] = "andrew@example.com"
+            snippets.write_text(json.dumps(template), encoding="utf-8")
+            self.assertEqual(
+                ns["match_snippet"]("Insert my email."),
+                ("email", "andrew@example.com"))
+            self.assertIsNone(ns["match_snippet"]("Insert my address."))
 
     def test_network_source_offer_names_license_and_corresponding_source(self):
         ns = load_definitions(
@@ -4586,16 +4796,38 @@ class ConfigurationTests(unittest.TestCase):
 
 
 class InlineSnippetExpansionTests(unittest.TestCase):
-    """Inline (embedded-trigger) snippet expansion. Additive to the
-    whole-utterance command covered by ConfigurationTests; must never alter a
-    non-matching dictation and must survive a missing or damaged file."""
+    """Inline snippet expansion inside a longer dictation.
+
+    A snippet expands only on the spoken cue "insert my <name>", the cue the
+    whole-utterance command uses. A bare name is an ordinary word, and an
+    unfilled installer placeholder is never text to insert.
+    """
+
+    INLINE = (
+        "expand_snippets_inline",
+        "_load_snippet_map",
+        "_compile_snippet_pattern",
+        "_snippet_is_placeholder",
+        "snippet_name_key",
+    )
+    PIPELINE = (
+        "_load_snippet_map",
+        "_compile_snippet_pattern",
+        "_snippet_is_placeholder",
+        "snippet_name_key",
+        "_snippet_sentinel",
+        "_mask_snippets_inline",
+        "_restore_snippet_sentinels",
+        "quick_clean",
+    )
+    PERSONAL = {
+        "email": "andrew@example.com",
+        "address": "7623 Opal Ridge Lane\nBainbridge Island, WA 98110",
+        "signature": "Best,\nAndrew",
+    }
 
     def _expander(self, mapping=None):
-        ns = load_definitions(
-            "expand_snippets_inline",
-            "_load_snippet_map",
-            "_compile_snippet_pattern",
-        )
+        ns = load_definitions(*self.INLINE)
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         path = Path(directory.name) / "snippets.json"
@@ -4604,47 +4836,110 @@ class InlineSnippetExpansionTests(unittest.TestCase):
         ns["SNIPPETS_FILE"] = path
         return ns["expand_snippets_inline"]
 
-    def test_inline_hit_inside_a_sentence(self):
-        expand = self._expander({"email": "andrew@example.com"})
+    def _dictate(self, spoken, snippets_text):
+        """The capture pipeline's order: mask, clean up, restore."""
+        ns = load_definitions(
+            *self.PIPELINE,
+            assignments={"_SNIPPET_SENTINEL_MARK"},
+            extra={"compile_cleanup": compile_cleanup},
+        )
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "snippets.json"
+        path.write_text(snippets_text, encoding="utf-8")
+        ns["SNIPPETS_FILE"] = path
+        masked, restore = ns["_mask_snippets_inline"](
+            spoken, ns["_load_snippet_map"]())
+        cleaned = ns["quick_clean"](masked if restore else spoken)
+        return ns["_restore_snippet_sentinels"](cleaned, restore)
+
+    ORDINARY = (
+        "Send me your email.",
+        "Email me when you land.",
+        "Can you send me an email about the address change?",
+        "What's your address?",
+        "Let me address that in the meeting tomorrow.",
+        "We need it before the signature deadline.",
+        "Text him my email, please.",
+        "My signature is on the last page.",
+    )
+
+    def test_shipped_template_names_are_ordinary_words(self):
+        template = (ROOT / "snippets.template.json").read_text(
+            encoding="utf-8")
+        for name in json.loads(template):
+            self.assertTrue(any(
+                name in sentence.casefold() for sentence in self.ORDINARY))
+        for spoken in self.ORDINARY:
+            with self.subTest(spoken=spoken):
+                self.assertEqual(self._dictate(spoken, template), spoken)
+
+    def test_filled_in_snippets_never_expand_on_a_bare_name(self):
+        for spoken in self.ORDINARY:
+            with self.subTest(spoken=spoken):
+                self.assertEqual(
+                    self._dictate(spoken, json.dumps(self.PERSONAL)), spoken)
+
+    def test_an_unfilled_placeholder_never_expands_even_on_the_cue(self):
+        template = (ROOT / "snippets.template.json").read_text(
+            encoding="utf-8")
+        for name in json.loads(template):
+            with self.subTest(name=name):
+                spoken = f"Please use insert my {name} for now."
+                self.assertEqual(self._dictate(spoken, template), spoken)
+
+    def test_the_spoken_cue_expands_inside_a_sentence(self):
         self.assertEqual(
-            expand("text him my email please"),
-            "text him my andrew@example.com please",
+            self._dictate(
+                "You can reach me at insert my email, or call.",
+                json.dumps(self.PERSONAL)),
+            "You can reach me at andrew@example.com, or call.",
         )
 
-    def test_expansion_is_case_insensitive(self):
+    def test_the_cue_is_case_insensitive(self):
         expand = self._expander({"email": "andrew@example.com"})
-        self.assertEqual(expand("send EMAIL now"), "send andrew@example.com now")
+        self.assertEqual(
+            expand("send it to Insert My EMAIL now"),
+            "send it to andrew@example.com now")
 
     def test_partial_word_never_fires(self):
-        # "address" must not expand inside "addressed"; the boundary is
-        # stricter than \b so a suffix cannot trigger it.
+        # The name must end at a word boundary, so "address" does not fire
+        # inside "addresses".
         expand = self._expander({"address": "1 Main St"})
-        self.assertEqual(expand("he addressed the room"), "he addressed the room")
+        spoken = "please insert my addresses into the form"
+        self.assertEqual(expand(spoken), spoken)
 
-    def test_longest_trigger_wins(self):
+    def test_longest_name_wins(self):
         expand = self._expander({
             "email": "andrew@example.com",
             "email signature": "Best,\nAndrew",
         })
         self.assertEqual(
-            expand("use my email signature here"),
-            "use my Best,\nAndrew here",
+            expand("then insert my email signature here"),
+            "then Best,\nAndrew here",
         )
 
     def test_multiline_expansion_is_preserved(self):
-        expand = self._expander({"address": "7623 Opal Ridge Lane\nBainbridge Island, WA 98110"})
+        expand = self._expander(self.PERSONAL)
         self.assertEqual(
-            expand("mail it to my address today"),
-            "mail it to my 7623 Opal Ridge Lane\nBainbridge Island, WA 98110 today",
+            expand("mail it to insert my address today"),
+            "mail it to 7623 Opal Ridge Lane\nBainbridge Island, WA 98110 "
+            "today",
         )
 
-    def test_no_matching_trigger_returns_raw_unchanged(self):
+    def test_a_name_with_no_word_characters_is_never_a_trigger(self):
+        expand = self._expander({"": "BOOM", "!!!": "BOOM"})
+        spoken = "hello, insert my world. fine"
+        self.assertEqual(expand(spoken), spoken)
+
+    def test_no_cue_returns_raw_unchanged(self):
         expand = self._expander({"email": "andrew@example.com"})
         self.assertEqual(expand("just talking normally"), "just talking normally")
 
     def test_missing_file_returns_raw_unchanged(self):
         expand = self._expander(mapping=None)  # file never written
-        self.assertEqual(expand("send my email now"), "send my email now")
+        self.assertEqual(
+            expand("send insert my email now"), "send insert my email now")
 
     def test_wrong_shaped_snippets_file_returns_raw_unchanged(self):
         # Clone of ConfigurationTests.test_wrong_shaped_snippets_file_is_ignored,
@@ -4652,18 +4947,15 @@ class InlineSnippetExpansionTests(unittest.TestCase):
         # syntactically broken JSON both degrade to leaving the dictation alone.
         for payload in ("[]", "{not valid json"):
             with self.subTest(payload=payload):
-                ns = load_definitions(
-                    "expand_snippets_inline",
-                    "_load_snippet_map",
-                    "_compile_snippet_pattern",
-                )
+                ns = load_definitions(*self.INLINE)
                 with tempfile.TemporaryDirectory() as directory:
                     path = Path(directory) / "snippets.json"
                     path.write_text(payload)
                     ns["SNIPPETS_FILE"] = path
                     self.assertEqual(
-                        ns["expand_snippets_inline"]("send my email now"),
-                        "send my email now",
+                        ns["expand_snippets_inline"](
+                            "send insert my email now"),
+                        "send insert my email now",
                     )
 
     def test_masked_multiline_survives_deterministic_cleanup(self):
@@ -4672,6 +4964,8 @@ class InlineSnippetExpansionTests(unittest.TestCase):
         # restoration leaves no sentinel behind.
         ns = load_definitions(
             "_compile_snippet_pattern",
+            "_snippet_is_placeholder",
+            "snippet_name_key",
             "_snippet_sentinel",
             "_mask_snippets_inline",
             "_restore_snippet_sentinels",
@@ -4679,23 +4973,27 @@ class InlineSnippetExpansionTests(unittest.TestCase):
         )
         expansion = "Regards,\n    Andrew\n    Engineer"
         masked, restore = ns["_mask_snippets_inline"](
-            "here is my sig okay", {"my sig": expansion})
+            "here is insert my sig okay", {"sig": expansion})
         self.assertTrue(restore)
-        self.assertNotIn("my sig", masked)      # trigger was masked away
+        self.assertNotIn("sig", masked)         # cue and name were masked away
         cleaned = compile_cleanup(masked).text  # deterministic cleanup only
         restored = ns["_restore_snippet_sentinels"](cleaned, restore)
-        self.assertIn(expansion, restored)      # indentation intact
+        self.assertEqual(restored, f"here is {expansion} okay")
         self.assertEqual(restored.count("\ue000"), 0)  # no sentinel leaked
 
     def test_restoration_of_absent_sentinel_is_a_no_op(self):
         ns = load_definitions(
             "_compile_snippet_pattern",
+            "_snippet_is_placeholder",
+            "snippet_name_key",
             "_snippet_sentinel",
             "_mask_snippets_inline",
             "_restore_snippet_sentinels",
             assignments={"_SNIPPET_SENTINEL_MARK"},
         )
-        _, restore = ns["_mask_snippets_inline"]("my email", {"email": "X"})
+        _, restore = ns["_mask_snippets_inline"](
+            "insert my email", {"email": "X"})
+        self.assertTrue(restore)
         # A token the cleaned text no longer contains must not corrupt output.
         self.assertEqual(
             ns["_restore_snippet_sentinels"]("unrelated text", restore),
@@ -6352,7 +6650,7 @@ class ReleasePlanTests(unittest.TestCase):
                         Recognition(
                             "remainder", verified=True, engine="tiny"),
                 "peak_rms": lambda audio: 0.1,
-                "is_hallucination": lambda text, language="en": False,
+                "is_hallucination": lambda *_args: False,
                 "Recognition": Recognition,
             },
         )
@@ -6369,6 +6667,90 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertTrue(result.verified)
         self.assertEqual(result.engine, "tiny")
         self.assertEqual(pool.submissions, 1)
+
+    def _assemble_with_the_real_guard(self, lines):
+        return load_definitions(
+            "BoundedRecognitionFuture",
+            "assemble_raw",
+            "is_hallucination",
+            "weak_whisper_evidence",
+            assignments=CleanupGuardTests.HALLUCINATION_GUARD,
+            extra={
+                "dataclass": dataclass,
+                "np": SimpleNamespace(ndarray=object),
+                "SAMPLE_RATE": 16_000,
+                "GATE_PEAK_RMS": 0.002,
+                "ASR_POOL": SimpleNamespace(),
+                "transcribe_detailed": None,
+                "peak_rms": lambda _audio: 0.0,
+                "Recognition": Recognition,
+                "RecognitionWord": RecognitionWord,
+                "print": lines.append,
+            },
+        )
+
+    def test_a_sign_off_after_a_pause_is_part_of_the_dictation(self):
+        class Future:
+            def __init__(self, value):
+                self.value = value
+
+            def result(self):
+                return self.value
+
+        lines = []
+        ns = self._assemble_with_the_real_guard(lines)
+        bounded = ns["BoundedRecognitionFuture"]
+        # A rolling chunk cut at a pause, then the sign-off decoded on its
+        # own as the remainder: the shape of any longer dictated message.
+        body = Recognition(
+            "Let me know if you have any questions.", confidence=0.93,
+            engine="parakeet-unified", audio_duration=4.6)
+        sign_off = Recognition(
+            "Thank you.", confidence=0.93, engine="parakeet-unified",
+            audio_duration=1.4)
+
+        result = ns["assemble_raw"](
+            [bounded(Future(body), 0, 73_600)],
+            bounded(Future(sign_off), 73_600, 96_000), [], None, "en")
+
+        self.assertEqual(
+            result.text, "Let me know if you have any questions. Thank you.")
+        self.assertEqual(result.engine, "parakeet-unified")
+        self.assertEqual(lines, [])
+        # Spoken alone it is still the whole dictation.
+        alone = ns["assemble_raw"](
+            [], bounded(Future(sign_off), 0, 22_400), [], None, "en")
+        self.assertEqual(alone.text, "Thank you.")
+        self.assertFalse(ns["is_hallucination"](alone.text, "en", alone))
+
+    def test_a_rejected_part_is_logged_without_its_words(self):
+        class Future:
+            def __init__(self, value):
+                self.value = value
+
+            def result(self):
+                return self.value
+
+        lines = []
+        ns = self._assemble_with_the_real_guard(lines)
+        bounded = ns["BoundedRecognitionFuture"]
+        body = Recognition(
+            "Let me know if you have any questions.", confidence=0.81,
+            engine="turbo", audio_duration=4.6)
+        silence = Recognition(
+            "Thanks for watching!", confidence=0.34, engine="turbo",
+            audio_duration=3.0)
+
+        result = ns["assemble_raw"](
+            [bounded(Future(body), 0, 73_600)],
+            bounded(Future(silence), 73_600, 121_600), [], None, "en")
+
+        self.assertEqual(result.text, "Let me know if you have any questions.")
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("[dropped] "))
+        self.assertIn("turbo", lines[0])
+        for word in ("thanks", "watching"):
+            self.assertNotIn(word, lines[0].casefold())
 
     def test_assembly_offsets_word_evidence_across_chunks(self):
         class Future:
@@ -6387,7 +6769,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "ASR_POOL": SimpleNamespace(),
                 "transcribe_detailed": None,
                 "peak_rms": lambda _audio: 0.0,
-                "is_hallucination": lambda _text, _language="en": False,
+                "is_hallucination": lambda *_args: False,
                 "Recognition": Recognition,
                 "RecognitionWord": RecognitionWord,
             },
@@ -6426,7 +6808,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "ASR_POOL": SimpleNamespace(),
                 "transcribe_detailed": None,
                 "peak_rms": lambda _audio: 0.0,
-                "is_hallucination": lambda _text, _language="en": False,
+                "is_hallucination": lambda *_args: False,
                 "Recognition": Recognition,
                 "RecognitionWord": RecognitionWord,
             },
@@ -6479,7 +6861,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "ASR_POOL": SimpleNamespace(),
                 "transcribe_detailed": None,
                 "peak_rms": lambda _audio: 0.0,
-                "is_hallucination": lambda _text, _language="en": False,
+                "is_hallucination": lambda *_args: False,
                 "Recognition": Recognition,
                 "RecognitionWord": RecognitionWord,
             },
@@ -6575,7 +6957,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "audio_gate_measurements": lambda _audio: (1.0, 0.1),
                 "assemble_raw": assemble,
                 "Recognition": Recognition,
-                "is_hallucination": lambda _text, _language="en": False,
+                "is_hallucination": lambda *_args: False,
                 "report_dictation_problem": (
                     lambda _rec, _hud, caption, log, **_kwargs:
                     problems.append((caption, log))),
@@ -6638,6 +7020,179 @@ class ReleasePlanTests(unittest.TestCase):
             "[dropped] ASR gave nothing",
         )])
 
+    def _release(self, mode, language, spoken, selected="Hallo zusammen",
+                 field=None, recognition=None):
+        """Drive finish_and_process from a decoded take to its insertion.
+
+        ``field`` is the text already before the cursor. ``recognition``
+        replaces the default confident decode of ``spoken``.
+        """
+        pasted = []
+        problems = []
+
+        def commit(_rec, text, _bundle, _target):
+            pasted.append(text)
+            raise RuntimeError("stop after the insertion call")
+
+        compiled = SimpleNamespace(
+            text=spoken, confidence=0.93, decisions=(), anchors=(),
+            stable_prefix="")
+        ns = load_definitions(
+            "finish_and_process",
+            "collapse_repeats",
+            "extract_tone_override",
+            "needs_llm_cleanup",
+            "quick_clean",
+            "is_hallucination",
+            "weak_whisper_evidence",
+            "strip_context_echo",
+            assignments={
+                "TONE", "TONE_OVERRIDE_RE", "TONE_ALIASES", "CONT_END",
+            } | CleanupGuardTests.HALLUCINATION_GUARD,
+            extra={
+                "np": np,
+                "time": SimpleNamespace(
+                    perf_counter=lambda: 10.0, time=lambda: 10.0,
+                    time_ns=lambda: 10),
+                "NUMBER_WORDS": NUMBER_WORDS,
+                "compile_cleanup": compile_cleanup,
+                "release_should_wait_for_tail": lambda _rec: False,
+                "can_reuse_speculation": lambda *_args: False,
+                "ASR_POOL": SimpleNamespace(
+                    submit=lambda *_args, **_kwargs: SimpleNamespace()),
+                "BoundedRecognitionFuture": lambda *_args: SimpleNamespace(),
+                "transcribe_detailed": object(),
+                "SAMPLE_RATE": 16_000,
+                "MIN_SECONDS": 0.25,
+                "GATE_PEAK_RMS": 0.002,
+                "peak_rms": lambda _audio: 0.1,
+                "audio_gate_measurements": lambda _audio: (1.0, 0.1),
+                "assemble_raw": lambda *_args: recognition or Recognition(
+                    spoken, confidence=0.86, engine="turbo",
+                    audio_duration=1.0),
+                "Recognition": Recognition,
+                "looks_like_prompt_echo": lambda _text: False,
+                "consume_risky_action_confirmation_voice":
+                    lambda _text: False,
+                "clear_retained_consequence_spans": lambda: None,
+                "compile_voice_evidence": lambda *_args, **_kwargs: (
+                    SimpleNamespace(
+                        context=SimpleNamespace(candidates=())),
+                    compiled),
+                "runtime_consequence_evidence":
+                    lambda *_args, **_kwargs: 0.0,
+                "active_consequence_verifier": lambda: None,
+                "runtime_context_firewall_evidence": lambda *_args: 0.0,
+                "learned_alternatives": lambda _text, _bundle: [],
+                "PIPELINE_STATE": {},
+                "CAPTION": {},
+                "queue_voice_object_command": lambda *_args: False,
+                "apply_spoken_edit_command": lambda *_args: False,
+                "match_snippet": lambda _text: None,
+                "_load_snippet_map": lambda: {},
+                "_mask_snippets_inline": lambda text, _snippets: (text, {}),
+                "is_verbatim_app": lambda _bundle: False,
+                "cursor_context": lambda: field,
+                "tone_for": lambda _bundle: "default",
+                "apply_vocabulary_casing": lambda text: text,
+                "focused_snapshot": lambda: SimpleNamespace(),
+                "make_paste_receipt": lambda *_args: SimpleNamespace(),
+                "commit_insertion": commit,
+                "play": lambda _sound: None,
+                "report_dictation_problem": (
+                    lambda _rec, _hud, caption, log, **_kwargs:
+                    problems.append((caption, log))),
+                "dictation_feedback_delay": lambda _rec: 0.0,
+                "schedule_dictation_feedback_dismissal":
+                    lambda _rec, _hud, _active: None,
+                "DICTATION_PROCESS_ORDER": SimpleNamespace(
+                    wait=lambda _ticket: None),
+                "print": lambda *_args: None,
+                "LAST_USE": {},
+                "AppHelper": SimpleNamespace(callAfter=lambda *_args: None),
+            },
+        )
+        recorder = SimpleNamespace(
+            released_at=1.0,
+            speculative_future=None,
+            speculative_invalid=False,
+            speculative_start=0,
+            speculative_end=0,
+            prompt=None,
+            language=language,
+            process_ticket=None,
+            recording=False,
+            uncertain=False,
+            mode=mode,
+            bundle_at_press="com.apple.TextEdit",
+            context_terms=(),
+            context_pack=None,
+            utterance_id="take-1",
+            insertion_lease=None,
+            insertion_receipt=None,
+            focus_at_press=SimpleNamespace(
+                selected_text=selected, text=selected,
+                selection=(0, len(selected))),
+            stop=lambda: np.ones(16_000, dtype=np.float32),
+            cut_samples=8_000,
+            chunks=[],
+        )
+        ns["finish_and_process"](recorder, SimpleNamespace(), {})
+        return pasted, problems
+
+    def test_rewrite_modes_never_paste_the_instruction_without_the_model(self):
+        # The cleanup model is English-only. In another language Edit used
+        # to fall through to plain cleanup and paste the spoken instruction
+        # over the text it was meant to change.
+        for mode, spoken in (
+            ("edit", "mach das formeller"),
+            ("reply", "sag ihr dass ich zustimme"),
+            ("compose", "kurze absage an das team"),
+        ):
+            with self.subTest(mode=mode):
+                pasted, problems = self._release(mode, "de", spoken)
+                self.assertEqual(pasted, [])
+                self.assertEqual(len(problems), 1)
+                caption, log = problems[0]
+                self.assertIn("nothing changed", caption)
+                self.assertIn(mode.capitalize(), caption)
+                self.assertNotIn(spoken, log)
+
+    def test_plain_dictation_in_another_language_is_still_inserted(self):
+        pasted, _problems = self._release(
+            "capture", "de", "wir treffen uns morgen")
+        self.assertEqual(pasted, ["wir treffen uns morgen"])
+
+    def test_a_field_tail_is_stripped_from_the_paste_only_as_whole_words(self):
+        # The field ends in "to", which is also how "Tomorrow" starts. The
+        # old prefix strip pasted "morrow works for me."
+        pasted, _problems = self._release(
+            "capture", "en", "Tomorrow works for me.", field="to")
+        self.assertEqual(len(pasted), 1)
+        self.assertEqual(pasted[0].casefold(), " tomorrow works for me.")
+        # A real repeat of the field's own tail is still removed.
+        pasted, _problems = self._release(
+            "capture", "en", "See you at six thirty.", field="see you at")
+        self.assertEqual(pasted, [" six thirty."])
+
+    def test_a_short_reply_is_dropped_only_on_a_weak_whisper_decode(self):
+        pasted, _problems = self._release(
+            "capture", "en", "Thank you.", recognition=Recognition(
+                "Thank you.", confidence=0.93, engine="parakeet-unified",
+                audio_duration=1.2))
+        self.assertEqual(pasted, ["Thank you."])
+        # The same words from Whisper, unsure of itself, are its filler for
+        # silence. The take is refused with the cue and nothing is pasted.
+        pasted, problems = self._release(
+            "capture", "en", "Thank you.", recognition=Recognition(
+                "Thank you.", confidence=0.34, engine="turbo",
+                audio_duration=3.0))
+        self.assertEqual(pasted, [])
+        self.assertEqual(problems, [(
+            "I couldn't understand that — try again",
+            "[dropped] ASR hallucination detected",
+        )])
+
     def test_failed_chunk_downgrades_surviving_word_timing(self):
         class Future:
             def __init__(self, value=None, error=None):
@@ -6658,7 +7213,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "ASR_POOL": SimpleNamespace(),
                 "transcribe_detailed": None,
                 "peak_rms": lambda _audio: 0.0,
-                "is_hallucination": lambda _text, _language="en": False,
+                "is_hallucination": lambda *_args: False,
                 "Recognition": Recognition,
                 "RecognitionWord": RecognitionWord,
             },
@@ -7535,6 +8090,41 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
         self.assertIsNone(
             namespace["build_delayed_cleanup_proposal"](
                 "raw github", "tone", voice_ir, **kwargs))
+
+    def test_delayed_proposal_keeps_a_word_that_starts_with_the_field(self):
+        class Compiler:
+            def verify_edits(self, original, proposals, candidates, *, mode):
+                return SimpleNamespace(text="tomorrow works for me")
+
+        namespace = load_definitions(
+            "build_delayed_cleanup_proposal",
+            "strip_context_echo",
+            extra={
+                "VOICE_COMPILER": Compiler(),
+                "EditProposal": lambda kind, before, after:
+                    SimpleNamespace(
+                        kind=kind, before=before, after=after),
+                "llm_clean_with_edits": lambda *_args: (
+                    "tomorrow works for me", ()),
+                "quick_clean": lambda text, **_kwargs: text,
+                "strip_casual_period": lambda text: text,
+                "apply_vocabulary_casing": lambda text: text,
+                "_restore_snippet_sentinels": lambda text, _restore: text,
+            },
+        )
+        voice_ir = SimpleNamespace(
+            context=SimpleNamespace(candidates=()))
+
+        def propose(field):
+            return namespace["build_delayed_cleanup_proposal"](
+                "tomorrow works for me", "tone", voice_ir,
+                continuing=True, context_tail=field, context_text=field,
+                tone_key="default", snippet_restore={})
+
+        # The field holds "to": a prefix of the first word, not an echo.
+        self.assertEqual(propose("to"), " tomorrow works for me")
+        # The model repeated the field before continuing it.
+        self.assertEqual(propose("tomorrow"), " works for me")
 
     def test_finish_schedules_only_after_verified_commit(self):
         source = (ROOT / "dictate.py").read_text(encoding="utf-8")
@@ -8853,7 +9443,8 @@ class DictationLanguageTests(unittest.TestCase):
 
     def test_non_latin_transcripts_survive_the_hallucination_guard(self):
         ns = load_definitions(
-            "is_hallucination", assignments={"HALLUCINATIONS"})
+            "is_hallucination", "weak_whisper_evidence",
+            assignments=CleanupGuardTests.HALLUCINATION_GUARD)
         guard = ns["is_hallucination"]
         # The old ASCII-only token class matched nothing here, so every
         # correct transcript in these scripts was dropped as a hallucination.
@@ -8870,8 +9461,11 @@ class DictationLanguageTests(unittest.TestCase):
         self.assertTrue(guard("\u3002\u3002\u3002", "ja"))
         self.assertTrue(guard("  ...  ", "en"))
         # The phrase list is English, so it only fires for English.
-        self.assertTrue(guard("Thank you for watching.", "en"))
-        self.assertFalse(guard("Thank you for watching.", "de"))
+        weak = Recognition(
+            "Thank you for watching.", confidence=0.3, engine="turbo",
+            audio_duration=2.0)
+        self.assertTrue(guard("Thank you for watching.", "en", weak))
+        self.assertFalse(guard("Thank you for watching.", "de", weak))
 
     def test_english_only_text_rules_leave_other_languages_alone(self):
         ns = load_definitions(

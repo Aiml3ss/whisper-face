@@ -16,6 +16,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable, Protocol, Sequence
 
+from parrot_core import find_self_correction
 from phonetic_keys import double_metaphone
 from process_verifier import RefusalReason, VerificationReceipt
 
@@ -1365,17 +1366,23 @@ class VoiceCompiler:
         preserve_formatting = mode == "code"
         before_words = _proof_words(proposal.before, preserve_formatting)
         after_words = _proof_words(proposal.after, preserve_formatting)
-        correction_marker = None
-        if "actually" in before_words:
-            correction_marker = (len(before_words) - 1
-                                 - before_words[::-1].index("actually"))
-        explicit_correction = bool(
-            correction_marker is not None
-            and correction_marker == 1
-            and before_words[0] not in CORRECTION_BLOCKLIST
-            and before_words[correction_marker + 1:] == after_words
-            and len(after_words) == 1
-            and after_words)
+        # The model may claim a self-correction only where the deterministic
+        # pass would have made the same one: both sides of "actually" are the
+        # same kind of item. Any other "actually" is the speaker's adverb.
+        correction = find_self_correction(
+            proposal.before, source[:start], source[end:])
+        explicit_correction = False
+        if correction is not None:
+            corrected_from, corrected_to, replacement = correction
+            # The edit must begin at the corrected item, so the exemption
+            # from the anchor check below covers that item and nothing else.
+            explicit_correction = bool(
+                after_words
+                and not _proof_words(
+                    proposal.before[:corrected_from], preserve_formatting)
+                and _proof_words(
+                    replacement + proposal.before[corrected_to:],
+                    preserve_formatting) == after_words)
         for anchor in global_anchors:
             if anchor.casefold() in before_lower \
                     and anchor.casefold() not in after_lower \
