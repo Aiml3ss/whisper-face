@@ -31,6 +31,7 @@ from parrot_core import (  # noqa: E402
     confidence_from_segments,
     recognition_words_from_segments,
     correction_similarity,
+    find_self_correction,
     infer_revised_insertion,
     mode_from_modifiers,
     phonetic_key,
@@ -69,6 +70,92 @@ class CleanupCompilerTests(unittest.TestCase):
             ["spoken_structure", "remove_filler",
              "remove_discourse_filler", "self_correction"],
         )
+
+    def test_actually_as_an_adverb_changes_nothing(self):
+        for spoken in (
+            "I didn't actually finish the report",
+            "I don't actually know the answer.",
+            "she is not actually coming tomorrow",
+            "The payment was not actually approved.",
+            "We never actually shipped version 2.",
+            "Nobody actually reviewed the contract.",
+            "Siobhan actually approved the budget.",
+            "The price is actually 40 dollars.",
+            "The total is actually 500 dollars",
+            "that is actually a good idea",
+            "I actually think we should wait.",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken)
+                self.assertNotIn("self_correction", plan.edit_kinds)
+                self.assertFalse(plan.needs_semantic_cleanup)
+
+    def test_self_correction_resolves_two_items_of_the_same_kind(self):
+        for spoken, expected in (
+            # Weekdays, bare and in the forms a recognizer punctuates.
+            ("Move the meeting to Tuesday actually Wednesday.",
+             "Move the meeting to Wednesday."),
+            ("Move the meeting to Tuesday, actually Wednesday.",
+             "Move the meeting to Wednesday."),
+            ("Move the meeting to Tuesday — actually, Wednesday.",
+             "Move the meeting to Wednesday."),
+            # Months, with and without a day.
+            ("move the meeting from March 3 actually March 4",
+             "move the meeting from March 4"),
+            ("Move the meeting from March 3, actually March 4.",
+             "Move the meeting from March 4."),
+            ("Move the meeting from March 3, actually 4.",
+             "Move the meeting from March 4."),
+            ("It ships in March, actually April.", "It ships in April."),
+            # Numbers, as digits or words, with a unit or a currency.
+            ("charge 45 actually 54 dollars to the travel budget",
+             "charge 54 dollars to the travel budget"),
+            ("Charge 45 dollars, actually 54 dollars.",
+             "Charge 54 dollars."),
+            ("Charge 45 dollars, actually 54.", "Charge 54 dollars."),
+            ("Pay $1,500, actually $1,600.", "Pay $1,600."),
+            ("Raise it by 4.5%, actually 5.5%.", "Raise it by 5.5%."),
+            ("We need three, actually four, reviewers.",
+             "We need four, reviewers."),
+            ("Order twenty five, actually thirty.", "Order thirty."),
+            ("I have 3 apples, actually 4 apples.", "I have 4 apples."),
+            # Clock times.
+            ("Meet at 3 pm, actually 4 pm.", "Meet at 4 pm."),
+            ("Meet at 3 p.m., actually 4 p.m.", "Meet at 4 p.m."),
+            ("Meet at 3, actually 4 pm.", "Meet at 4 pm."),
+            ("Meet at 3 pm actually 4", "Meet at 4 pm"),
+            ("Meet at 10:30, actually 11:30.", "Meet at 11:30."),
+            ("Call at noon, actually 1 pm.", "Call at 1 pm."),
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, expected)
+                self.assertEqual(plan.edit_kinds, ["self_correction"])
+
+    def test_self_correction_needs_both_sides_to_be_the_same_kind(self):
+        for spoken in (
+            "send the draft to Alex actually Alexis Chen by Friday",
+            "use HTTP actually HTTPS for the callback URL",
+            "See you Tuesday, actually 4 works better.",
+            "We may actually march tomorrow.",
+            "Pay $45, actually 4 pm is too late.",
+            "Meet at 10:30, actually 45 dollars is fine.",
+            "I counted 30 and, actually 31 is right.",
+            "We shipped version 2, actually version 3.",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken)
+                self.assertNotIn("self_correction", plan.edit_kinds)
+
+    def test_a_number_is_one_item_inside_a_self_correction(self):
+        # "30" is the minutes of a clock time, not a number of its own.
+        raw = "Meet at 3:30, actually 4 dollars is the fee."
+        self.assertEqual(compile_cleanup(raw).text, raw)
+        self.assertEqual(find_self_correction("at 3:30 actually 4:30"),
+                         (3, 21, "4:30"))
+        self.assertIsNone(find_self_correction("it is actually fine"))
 
     def test_scratch_that_removes_only_the_latest_clause(self):
         plan = compile_cleanup(
@@ -420,6 +507,9 @@ class NonEnglishCleanupTests(unittest.TestCase):
         plan = compile_cleanup("um, ship it Tuesday actually Wednesday")
         self.assertEqual(plan.text, "ship it Wednesday")
         self.assertIn("remove_filler", [edit.kind for edit in plan.edits])
+        punctuated = compile_cleanup(
+            "Um, ship it Tuesday, actually Wednesday.")
+        self.assertEqual(punctuated.text, "ship it Wednesday.")
 
     def test_the_same_rules_never_run_on_another_language(self):
         # "um" is a real word in several languages, "actually" only marks a

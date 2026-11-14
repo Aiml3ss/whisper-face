@@ -35,12 +35,56 @@ AMBIGUOUS_FILLER_RE = re.compile(r"\b(?:you know|I mean)\b", re.I)
 LITERAL_FILLER_RE = re.compile(
     r"\b(?:phrase|words?|expression)\s+(?:you know|I mean)\b", re.I)
 STRUCTURE_RE = re.compile(r"\bnew (line|paragraph)\b", re.I)
-CORRECTION_RE = re.compile(
-    r"\b([A-Za-z0-9][A-Za-z0-9_'’-]{0,30})\s+"
-    r"(?:—\s*)?actually\s+"
-    r"([A-Za-z0-9][A-Za-z0-9_'’-]{0,30})\b",
+NUMBER_WORDS = frozenset({
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+    "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "thirty",
+    "forty", "fifty", "sixty", "seventy", "eighty", "ninety", "hundred",
+    "thousand", "million", "billion",
+})
+_NUMBER_WORD = "(?:" + "|".join(
+    sorted(NUMBER_WORDS, key=len, reverse=True)) + ")"
+# One written number or clock time: "45", "$3.50", "1,500", "45%", "10:30".
+# Separators count only between characters, never as trailing punctuation.
+_NUMERAL = r"[$€£¥]?\d(?:[\w%]|[.,:/-](?=\w))*"
+_NUMBER = (
+    rf"(?:{_NUMERAL}|noon|midnight|"
+    rf"{_NUMBER_WORD}(?:[ \t-]{_NUMBER_WORD})*)"
+)
+_UNIT = r"[A-Za-z]+(?:[.'’][A-Za-z]+)*\.?"
+_WEEKDAY = r"(?:mon|tues|wednes|thurs|fri|satur|sun)day"
+_MONTH = (
+    r"(?:january|february|march|april|may|june|july|august|september|"
+    r"october|november|december)(?:[ \t]+\d{1,2}(?:st|nd|rd|th)?)?"
+)
+# The spoken marker with the punctuation a recognizer puts around it:
+# "Tuesday actually Wednesday", "Tuesday, actually Wednesday",
+# "Tuesday — actually, Wednesday".
+CORRECTION_MARKER_RE = re.compile(
+    r"(?:[ \t]*[,—–][ \t]*|[ \t]+-[ \t]+|[ \t]+)actually"
+    r"(?:[ \t]*,[ \t]*|[ \t]+)",
     re.I,
 )
+# Per kind: the item ending just before the marker, and the item starting
+# just after it. A number may carry one following word as its unit.
+CORRECTION_SIDES = tuple(
+    (kind,
+     re.compile(rf"(?<!\S)(?P<item>{item}){unit}$", re.I),
+     re.compile(rf"(?P<item>{item})(?!\w){unit}", re.I))
+    for kind, item, unit in (
+        ("weekday", _WEEKDAY, ""),
+        ("month", _MONTH, ""),
+        ("number", _NUMBER, rf"(?:[ \t]+(?P<unit>{_UNIT}))?"),
+    )
+)
+# Units a corrected number keeps when only the first number carried one
+# ("45 dollars, actually 54"). Singular, without dots or apostrophes.
+CORRECTION_UNITS = frozenset({
+    "dollar", "buck", "cent", "euro", "pound", "yen", "percent", "am", "pm",
+    "oclock", "second", "minute", "hour", "day", "week", "month", "year",
+    "mile", "kilometer", "km", "meter", "foot", "feet", "kg", "kilogram",
+    "gram", "ounce", "degree",
+})
 LIST_INTENT_RE = re.compile(
     r"^(?:(?:okay|ok|alright)[, ]+)?(?:so\s+)?(?:"
     r"here(?:['’]s|\s+is)\s+(?:a|my)\s+list\b|"
@@ -335,6 +379,86 @@ def normalize_spacing(text: str, spaced: bool = True) -> str:
     return text.strip()
 
 
+def _unit_key(unit: str | None) -> str:
+    key = re.sub(r"[.'’]", "", (unit or "").casefold())
+    return key[:-1] if len(key) > 2 and key.endswith("s") else key
+
+
+def _is_clock_time(item: str, unit: str) -> bool:
+    return bool(re.match(r"\d{1,2}:\d{2}", item)
+                or item.casefold() in {"noon", "midnight"}
+                or unit in {"am", "pm", "oclock"})
+
+
+def _is_bare_hour(item: str, unit: str) -> bool:
+    if unit:
+        return False
+    if item.isdigit():
+        return 1 <= int(item) <= 12
+    return item.casefold() in {
+        "one", "two", "three", "four", "five", "six", "seven", "eight",
+        "nine", "ten", "eleven", "twelve"}
+
+
+def _corrected_item(kind: str, before: "re.Match[str]",
+                    after: "re.Match[str]") -> str | None:
+    """The text that replaces both sides, or None if they differ in kind."""
+    first, second = before.group("item"), after.group("item")
+    if kind == "weekday":
+        return second
+    if kind == "month":
+        # "may" and "march" are also verbs. A capital or a day number is
+        # what makes either one a month.
+        for side in (first, second):
+            if not (side[:1].isupper()
+                    or any(char.isdigit() for char in side)):
+                return None
+        return second
+    first_unit = _unit_key(before.group("unit"))
+    second_unit = _unit_key(after.group("unit"))
+    first_clock = _is_clock_time(first, first_unit)
+    second_clock = _is_clock_time(second, second_unit)
+    if first_clock != second_clock and not (
+            _is_bare_hour(second, second_unit) if first_clock
+            else _is_bare_hour(first, first_unit)):
+        return None
+    if not first_unit:
+        return second
+    if first_unit not in CORRECTION_UNITS:
+        # Any word may be a unit when the speaker repeats it on both sides
+        # ("3 apples, actually 4 apples"); otherwise it is just a word.
+        return second if second_unit == first_unit else None
+    if second_unit in CORRECTION_UNITS:
+        return second
+    return f"{second} {before.group('unit')}"
+
+
+def find_self_correction(text: str) -> tuple[int, int, str] | None:
+    """Locate the first spoken "X, actually Y" where X and Y are the same kind.
+
+    Returns ``(start, end, replacement)``: the span from X through Y and the
+    text that replaces it. The marker is a correction only between two
+    numbers (with any unit or currency), two weekdays, two months (with an
+    optional day), or two clock times. Everywhere else "actually" is an
+    ordinary adverb and the words around it are the speaker's: "I didn't
+    actually finish" must never lose "didn't". This is the one rule for the
+    deterministic pass and for the proof validator's acceptance of a model
+    ``self_correction`` edit.
+    """
+    for marker in CORRECTION_MARKER_RE.finditer(text):
+        left, right = text[:marker.start()], text[marker.end():]
+        for kind, left_re, right_re in CORRECTION_SIDES:
+            after = right_re.match(right)
+            before = left_re.search(left) if after else None
+            if before is None:
+                continue
+            replacement = _corrected_item(kind, before, after)
+            if replacement is not None:
+                return (before.start(), marker.end() + after.end("item"),
+                        replacement)
+    return None
+
+
 def compile_cleanup(raw: str, language: str = "en") -> CleanupPlan:
     """Compile safe spoken transformations into explicit, reversible edits.
 
@@ -378,11 +502,12 @@ def compile_cleanup(raw: str, language: str = "en") -> CleanupPlan:
             edits.append(CleanupEdit(kind, before, text))
 
     while True:
-        match = CORRECTION_RE.search(text)
-        if not match:
+        correction = find_self_correction(text)
+        if correction is None:
             break
+        start, end, replacement = correction
         before = text
-        text = text[:match.start()] + match.group(2) + text[match.end():]
+        text = text[:start] + replacement + text[end:]
         edits.append(CleanupEdit("self_correction", before, text))
 
     lowered = text.casefold()
