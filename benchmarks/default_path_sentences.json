@@ -105,6 +105,7 @@
 
     {"id": "filler-um-opening", "covers": "fillers", "spoken": "Um, I think the plan works.", "expected": "I think the plan works."},
     {"id": "filler-alone", "covers": "fillers", "field": "Draft: ", "spoken": "Um.", "expected": "Draft: "},
+    {"id": "filler-pair-alone", "covers": "fillers", "field": "Draft: ", "spoken": "Um, uh.", "expected": "Draft: "},
     {"id": "filler-before-word", "covers": "fillers", "spoken": "Uh, okay.", "expected": "Okay."},
     {"id": "filler-capital-um", "covers": "fillers", "spoken": "The UM campus is closed today.", "expected": "The UM campus is closed today."}
   ]
