@@ -985,6 +985,12 @@ REFUSAL_RE = re.compile(
 HALLUCINATIONS = {
     "thank you", "thanks for watching", "thank you for watching", "you", "bye",
 }
+# The phrases above are what Whisper prints for audio with no speech in it.
+# They are also ordinary things to say, so a match counts only against a
+# decode from one of these engines that is itself weak evidence.
+WHISPER_ENGINES = frozenset({"tiny", "turbo"})
+# Slower than one word every this many seconds is not a spoken phrase.
+HALLUCINATION_SECONDS_PER_WORD = 2.0
 
 CASUAL_APPS = {"com.tinyspeck.slackmacgap", "com.apple.MobileSMS",
                "com.hnc.Discord"}
@@ -1545,11 +1551,39 @@ def exception_origin(error: BaseException) -> str:
             f"({os.path.basename(code.co_filename)}:{frame.tb_lineno})")
 
 
-def is_hallucination(text: str, language: str = LANGUAGE_DEFAULT) -> bool:
-    """Reject punctuation-only output and known silent-audio phrases.
+def weak_whisper_evidence(recognition: Recognition | None) -> bool:
+    """Whether a decode could be Whisper filling silence rather than speech.
+
+    Only a Whisper decode qualifies: Parakeet does not produce these
+    artifacts, and its route confidence measures agreement with Whisper Tiny,
+    not how likely the words are. Within Whisper the decode must be doubtful
+    on its own terms, by a low confidence or by too few words for the audio
+    it was given.
+    """
+    if recognition is None:
+        return False
+    engines = [name for name in str(recognition.engine or "").split("+")
+               if name]
+    if not engines or any(name not in WHISPER_ENGINES for name in engines):
+        return False
+    if recognition.confidence < LOW_CONFIDENCE:
+        return True
+    words = len(re.findall(r"\w+", recognition.text, flags=re.UNICODE))
+    return bool(words) and (
+        recognition.audio_duration >= words * HALLUCINATION_SECONDS_PER_WORD)
+
+
+def is_hallucination(text: str, language: str = LANGUAGE_DEFAULT,
+                     recognition: Recognition | None = None) -> bool:
+    """Reject punctuation-only output and weakly supported silent-audio phrases.
 
     Normalize punctuation rather than enumerating every possible terminal
     mark ("Thank you.", "Thank you!", and "THANK YOU..." are equivalent).
+
+    "Thank you" and "Bye" are also real replies and real sign-offs, so the
+    phrase list applies only when ``recognition`` shows a weak Whisper decode
+    (see ``weak_whisper_evidence``). Without that evidence the words are the
+    speaker's and are kept.
 
     The token class is Unicode: the old ``[a-z0-9]`` matched nothing at all in
     Japanese, Chinese, Russian, or Korean, so every correct transcript in
@@ -1562,7 +1596,8 @@ def is_hallucination(text: str, language: str = LANGUAGE_DEFAULT) -> bool:
         return True
     if str(language or "").strip().casefold() != "en":
         return False
-    return " ".join(words) in HALLUCINATIONS
+    return (" ".join(words) in HALLUCINATIONS
+            and weak_whisper_evidence(recognition))
 
 
 def load_app_tones():
@@ -10975,7 +11010,13 @@ def assemble_raw(chunk_futs: list, pre_future,
             words_valid = False if has_bounds else timing_reliable
             elapsed += duration
         t = result.text.strip()
-        if t and not is_hallucination(t, language):
+        if t and is_hallucination(t, language, result):
+            # The rejected words stay out of the log; the evidence does not.
+            print("[dropped] ASR part rejected as non-speech "
+                  f"({result.engine or 'unknown engine'}, confidence "
+                  f"{result.confidence:.2f}, {duration:.1f}s)")
+            t = ""
+        if t:
             parts.append(t)
             confidences.append(result.confidence)
             for word, start, end in normalized_words:
@@ -11138,7 +11179,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         phase = "release-order"
         DICTATION_PROCESS_ORDER.wait(rec.process_ticket)
         raw = recognition.text
-        if not raw or is_hallucination(raw, rec.language):
+        if not raw or is_hallucination(raw, rec.language, recognition):
             report_dictation_problem(
                 rec,
                 hud,

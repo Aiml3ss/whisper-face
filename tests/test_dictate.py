@@ -3552,13 +3552,71 @@ class FlightRecorderTests(unittest.TestCase):
 
 
 class CleanupGuardTests(unittest.TestCase):
+    HALLUCINATION_GUARD = {
+        "HALLUCINATIONS", "WHISPER_ENGINES", "LOW_CONFIDENCE",
+        "HALLUCINATION_SECONDS_PER_WORD",
+    }
+
     def test_hallucinations_ignore_terminal_punctuation(self):
-        ns = load_definitions("is_hallucination", assignments={"HALLUCINATIONS"})
+        ns = load_definitions(
+            "is_hallucination", "weak_whisper_evidence",
+            assignments=self.HALLUCINATION_GUARD)
         guard = ns["is_hallucination"]
-        for text in ("!", ".", "Thank you!", "THANK YOU...", "Bye?"):
+        weak = Recognition(
+            "", confidence=0.31, engine="tiny", audio_duration=1.4)
+        for text in ("Thank you!", "THANK YOU...", "Bye?", "you"):
+            with self.subTest(text=text):
+                self.assertTrue(guard(text, "en", weak))
+        # Output with no words in it is nothing, whoever produced it.
+        for text in ("!", ".", "  ...  "):
             with self.subTest(text=text):
                 self.assertTrue(guard(text))
-        self.assertFalse(guard("This is real speech!"))
+                self.assertTrue(guard(text, "en", Recognition(
+                    text, confidence=0.93, engine="parakeet-unified")))
+        self.assertFalse(guard("This is real speech!", "en", weak))
+
+    def test_silent_audio_phrases_need_a_weak_whisper_decode(self):
+        ns = load_definitions(
+            "is_hallucination", "weak_whisper_evidence",
+            assignments=self.HALLUCINATION_GUARD)
+        guard = ns["is_hallucination"]
+        kept = (
+            # Parakeet never produces Whisper's silent-audio artifacts, at
+            # any confidence its cross-check can assign.
+            Recognition("Thank you.", confidence=0.93,
+                        engine="parakeet-unified", audio_duration=1.2),
+            Recognition("Thank you.", confidence=0.45,
+                        engine="parakeet-unified", audio_duration=9.0),
+            Recognition("Bye!", confidence=0.69,
+                        engine="parakeet-unified", audio_duration=0.8),
+            # A confident Whisper decode of a clip the phrase fills.
+            Recognition("Thank you.", confidence=0.84, engine="tiny",
+                        audio_duration=1.3),
+            Recognition("Bye.", confidence=0.77, engine="turbo",
+                        audio_duration=0.9),
+            # No engine named: nothing says this was Whisper.
+            Recognition("Thank you.", confidence=0.2, audio_duration=8.0),
+        )
+        for recognition in kept:
+            with self.subTest(recognition=recognition):
+                self.assertFalse(guard(recognition.text, "en", recognition))
+        # With no evidence at all the phrase is the speaker's.
+        self.assertFalse(guard("Thank you."))
+        dropped = (
+            # Low confidence.
+            Recognition("Thank you.", confidence=0.38, engine="tiny",
+                        audio_duration=1.3),
+            Recognition("You", confidence=0.5, engine="turbo",
+                        audio_duration=0.7),
+            # Two words decoded out of seven seconds of audio.
+            Recognition("Thank you.", confidence=0.84, engine="tiny",
+                        audio_duration=7.0),
+            Recognition("Thanks for watching!", confidence=0.9,
+                        engine="tiny+turbo", audio_duration=12.0),
+        )
+        for recognition in dropped:
+            with self.subTest(recognition=recognition):
+                self.assertTrue(guard(recognition.text, "en", recognition))
 
     def test_simple_fillers_stay_on_the_fast_path(self):
         ns = load_definitions(
@@ -6466,7 +6524,7 @@ class ReleasePlanTests(unittest.TestCase):
                         Recognition(
                             "remainder", verified=True, engine="tiny"),
                 "peak_rms": lambda audio: 0.1,
-                "is_hallucination": lambda text, language="en": False,
+                "is_hallucination": lambda *_args: False,
                 "Recognition": Recognition,
             },
         )
@@ -6483,6 +6541,90 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertTrue(result.verified)
         self.assertEqual(result.engine, "tiny")
         self.assertEqual(pool.submissions, 1)
+
+    def _assemble_with_the_real_guard(self, lines):
+        return load_definitions(
+            "BoundedRecognitionFuture",
+            "assemble_raw",
+            "is_hallucination",
+            "weak_whisper_evidence",
+            assignments=CleanupGuardTests.HALLUCINATION_GUARD,
+            extra={
+                "dataclass": dataclass,
+                "np": SimpleNamespace(ndarray=object),
+                "SAMPLE_RATE": 16_000,
+                "GATE_PEAK_RMS": 0.002,
+                "ASR_POOL": SimpleNamespace(),
+                "transcribe_detailed": None,
+                "peak_rms": lambda _audio: 0.0,
+                "Recognition": Recognition,
+                "RecognitionWord": RecognitionWord,
+                "print": lines.append,
+            },
+        )
+
+    def test_a_sign_off_after_a_pause_is_part_of_the_dictation(self):
+        class Future:
+            def __init__(self, value):
+                self.value = value
+
+            def result(self):
+                return self.value
+
+        lines = []
+        ns = self._assemble_with_the_real_guard(lines)
+        bounded = ns["BoundedRecognitionFuture"]
+        # A rolling chunk cut at a pause, then the sign-off decoded on its
+        # own as the remainder: the shape of any longer dictated message.
+        body = Recognition(
+            "Let me know if you have any questions.", confidence=0.93,
+            engine="parakeet-unified", audio_duration=4.6)
+        sign_off = Recognition(
+            "Thank you.", confidence=0.93, engine="parakeet-unified",
+            audio_duration=1.4)
+
+        result = ns["assemble_raw"](
+            [bounded(Future(body), 0, 73_600)],
+            bounded(Future(sign_off), 73_600, 96_000), [], None, "en")
+
+        self.assertEqual(
+            result.text, "Let me know if you have any questions. Thank you.")
+        self.assertEqual(result.engine, "parakeet-unified")
+        self.assertEqual(lines, [])
+        # Spoken alone it is still the whole dictation.
+        alone = ns["assemble_raw"](
+            [], bounded(Future(sign_off), 0, 22_400), [], None, "en")
+        self.assertEqual(alone.text, "Thank you.")
+        self.assertFalse(ns["is_hallucination"](alone.text, "en", alone))
+
+    def test_a_rejected_part_is_logged_without_its_words(self):
+        class Future:
+            def __init__(self, value):
+                self.value = value
+
+            def result(self):
+                return self.value
+
+        lines = []
+        ns = self._assemble_with_the_real_guard(lines)
+        bounded = ns["BoundedRecognitionFuture"]
+        body = Recognition(
+            "Let me know if you have any questions.", confidence=0.81,
+            engine="turbo", audio_duration=4.6)
+        silence = Recognition(
+            "Thanks for watching!", confidence=0.34, engine="turbo",
+            audio_duration=3.0)
+
+        result = ns["assemble_raw"](
+            [bounded(Future(body), 0, 73_600)],
+            bounded(Future(silence), 73_600, 121_600), [], None, "en")
+
+        self.assertEqual(result.text, "Let me know if you have any questions.")
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("[dropped] "))
+        self.assertIn("turbo", lines[0])
+        for word in ("thanks", "watching"):
+            self.assertNotIn(word, lines[0].casefold())
 
     def test_assembly_offsets_word_evidence_across_chunks(self):
         class Future:
@@ -6501,7 +6643,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "ASR_POOL": SimpleNamespace(),
                 "transcribe_detailed": None,
                 "peak_rms": lambda _audio: 0.0,
-                "is_hallucination": lambda _text, _language="en": False,
+                "is_hallucination": lambda *_args: False,
                 "Recognition": Recognition,
                 "RecognitionWord": RecognitionWord,
             },
@@ -6540,7 +6682,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "ASR_POOL": SimpleNamespace(),
                 "transcribe_detailed": None,
                 "peak_rms": lambda _audio: 0.0,
-                "is_hallucination": lambda _text, _language="en": False,
+                "is_hallucination": lambda *_args: False,
                 "Recognition": Recognition,
                 "RecognitionWord": RecognitionWord,
             },
@@ -6593,7 +6735,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "ASR_POOL": SimpleNamespace(),
                 "transcribe_detailed": None,
                 "peak_rms": lambda _audio: 0.0,
-                "is_hallucination": lambda _text, _language="en": False,
+                "is_hallucination": lambda *_args: False,
                 "Recognition": Recognition,
                 "RecognitionWord": RecognitionWord,
             },
@@ -6689,7 +6831,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "audio_gate_measurements": lambda _audio: (1.0, 0.1),
                 "assemble_raw": assemble,
                 "Recognition": Recognition,
-                "is_hallucination": lambda _text, _language="en": False,
+                "is_hallucination": lambda *_args: False,
                 "report_dictation_problem": (
                     lambda _rec, _hud, caption, log, **_kwargs:
                     problems.append((caption, log))),
@@ -6772,7 +6914,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "ASR_POOL": SimpleNamespace(),
                 "transcribe_detailed": None,
                 "peak_rms": lambda _audio: 0.0,
-                "is_hallucination": lambda _text, _language="en": False,
+                "is_hallucination": lambda *_args: False,
                 "Recognition": Recognition,
                 "RecognitionWord": RecognitionWord,
             },
@@ -8967,7 +9109,8 @@ class DictationLanguageTests(unittest.TestCase):
 
     def test_non_latin_transcripts_survive_the_hallucination_guard(self):
         ns = load_definitions(
-            "is_hallucination", assignments={"HALLUCINATIONS"})
+            "is_hallucination", "weak_whisper_evidence",
+            assignments=CleanupGuardTests.HALLUCINATION_GUARD)
         guard = ns["is_hallucination"]
         # The old ASCII-only token class matched nothing here, so every
         # correct transcript in these scripts was dropped as a hallucination.
@@ -8984,8 +9127,11 @@ class DictationLanguageTests(unittest.TestCase):
         self.assertTrue(guard("\u3002\u3002\u3002", "ja"))
         self.assertTrue(guard("  ...  ", "en"))
         # The phrase list is English, so it only fires for English.
-        self.assertTrue(guard("Thank you for watching.", "en"))
-        self.assertFalse(guard("Thank you for watching.", "de"))
+        weak = Recognition(
+            "Thank you for watching.", confidence=0.3, engine="turbo",
+            audio_duration=2.0)
+        self.assertTrue(guard("Thank you for watching.", "en", weak))
+        self.assertFalse(guard("Thank you for watching.", "de", weak))
 
     def test_english_only_text_rules_leave_other_languages_alone(self):
         ns = load_definitions(
