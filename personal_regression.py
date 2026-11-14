@@ -28,6 +28,131 @@ MAX_QUARANTINED = 64
 MAX_SPAN_CHARS = 80
 
 
+# A learned mapping must never turn one common word into another. The
+# repository carries no frequency list, so "common" is this built-in set: the
+# few hundred most frequent English words (function words, contractions, the
+# everyday verbs in their usual forms, plain nouns, adjectives and adverbs),
+# day, month and number words, and the usual homophone sets. A correction
+# between two of them is a choice the sentence makes ("there"/"their",
+# "want"/"won't", "got"/"get"), not a stable mishearing, so no context-free
+# rule may be built from it. Words are compared without their apostrophes, so
+# "cant" and "wont" count as the contractions they are. A mapping that adds or
+# removes a negation is refused whatever the other word is. Words outside the
+# set rely on evidence instead: a revert demotes the mapping, and pastes of
+# the heard word that were left alone, or sent as they were, count against
+# promoting it.
+def _plain(word: str) -> str:
+    return word.casefold().replace("\u2019", "'").replace("'", "")
+
+
+COMMON_WORDS = frozenset(_plain(word) for word in """
+a an the and or nor but if so as at by for from in into of off on onto out
+over under up down with without about after before between through during
+until while than then that this these those there their theirs they them
+they're they'll they've they'd there's he she it its it's him his her hers
+he's he'll he'd she's she'll she'd we us our ours we're we'll we've we'd
+you your yours you're you'll you've you'd i me my mine i'm i'll i've i'd
+who whom whose who's what what's when where which why how is are am was
+were be been being isn't aren't wasn't weren't do does did done doing
+don't doesn't didn't have has had having haven't hasn't hadn't will would
+shall should can could may might must won't wouldn't shouldn't can't
+cannot couldn't mustn't ain't shan't needn't mightn't not no yes know
+knows knew known new now here hear hears heard herd here's that's let's
+lets all any some none each every both either neither more most much many
+few less least other another such only own same very just also even still
+again ever never always often well good right write rite too to two for
+four fore one won ate eight buy bye by be bee see sea sees seas weather
+whether wear where affect effect accept except lose loose lost past passed
+piece peace break brake whole hole hour meet meat met week weak made maid
+sent cent scent son sun wait weight way weigh wood threw plain plane
+principal principle quiet quite lead led read reads red allowed aloud
+advice advise site sight cite pair pear bare bear fair fare mail male sale
+sail tail tale steal steel role roll sole soul great grate guessed guest
+knight night knot knows nose some sum than seem seam stair stare toe tow
+waist waste which witch die dye due dew cell sell board bored band banned
+base bass been bean blew blue course coarse council counsel desert dessert
+forth fourth lessen lesson loan lone mind mined scene seen so sew sow
+shore sure sweet suite vary wave waive real reel road rode root route
+say says said saying get gets got getting gotten make makes making go goes
+went gone going take takes took taken taking saw seeing come comes came
+coming think thinks thought thinking look looks looked looking want wants
+wanted wanting give gives gave given giving use uses used using find finds
+found finding tell tells told telling ask asks asked asking work works
+worked working seems seemed feel feels felt feeling try tries tried trying
+leave leaves left leaving call calls called calling need needs needed like
+likes liked put puts putting mean means meant keep keeps kept keeping let
+begin began begun help helps helped helping talk talks talked talking turn
+turns turned start starts started starting show shows showed shown play
+plays played run runs ran running move moves moved moving live lives lived
+believe hold holds held bring brings brought happen happens happened
+writes wrote written writing sit sat stand stood pay paid set sets learn
+learned change changes changed understand understood watch follow stop
+stopped create speak spoke allow add added spend spent grow open opened
+walk win offer remember love consider appear bought send expect build
+built stay fall fell cut reach remain check share
+time times year years people person way ways day days man men woman women
+thing things child children world life hand hands part place places case
+weeks point home room side house morning name question questions end fact
+lot kind line word words number numbers problem problems idea plan team
+job money something anything nothing everything someone anyone everyone
+nobody nowhere
+better best bad worse worst old big small large little long short high
+low next last early late young important different able true free full
+easy hard clear ready possible
+away back really already almost sometimes maybe perhaps soon later yet
+together around enough once twice rather ok okay please thanks thank hello
+hi hey sorry
+monday tuesday wednesday thursday friday saturday sunday january february
+march april june july august september october november december zero
+three five six seven nine ten eleven twelve thirteen fourteen fifteen
+sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty
+seventy eighty ninety hundred thousand million first second third today
+tonight tomorrow yesterday
+""".split())
+COMMON_WORDS_REASON = "common words are not remapped"
+_NEGATIONS = frozenset(
+    "not no nor never none neither nobody nothing nowhere cannot without "
+    "cant wont dont isnt arent wasnt werent doesnt didnt havent hasnt hadnt "
+    "wouldnt shouldnt couldnt mustnt aint shant neednt mightnt".split())
+_NUMBER = re.compile(r"\d[\d.,:/%-]*")
+
+
+def is_common_word(word: str) -> bool:
+    return _plain(word) in COMMON_WORDS
+
+
+def is_negation(word: str) -> bool:
+    spelled = word.casefold().replace("\u2019", "'")
+    return spelled.endswith("n't") or _plain(word) in _NEGATIONS
+
+
+def remaps_common_words(heard: str, preferred: str) -> bool:
+    """Whether a mapping would rewrite one common word, or number, as
+    another, or would add or remove a negation."""
+    if is_common_word(heard) and is_common_word(preferred):
+        return True
+    if is_negation(heard) != is_negation(preferred):
+        return True
+    return bool(_NUMBER.fullmatch(heard) and _NUMBER.fullmatch(preferred))
+
+
+def _in_heard_case(found: str, mapping: "LearnedMapping") -> str:
+    """Keep a capital the recognizer placed on an all-lowercase mapping."""
+    preferred = mapping.preferred
+    if (found[:1].isupper() and not mapping.heard[:1].isupper()
+            and preferred == preferred.lower()):
+        return preferred[:1].upper() + preferred[1:]
+    return preferred
+
+
+def _in_address(text: str, start: int, end: int) -> bool:
+    """Whether the span sits inside an email address, a handle or a URL."""
+    run = (re.search(r"\S*\Z", text[:start]).group()
+           + text[start:end]
+           + re.match(r"\S*", text[end:]).group())
+    return "@" in run or "://" in run
+
+
 def _valid_span(value: Any) -> bool:
     return isinstance(value, str) and 0 < len(value) <= MAX_SPAN_CHARS
 
@@ -125,18 +250,50 @@ class PersonalRegressionLab:
                 self._remember_quarantine(evaluation)
         return case
 
-    def propose(
+    def record_revert(
         self, heard: str, preferred: str, *, app: str | None = None
+    ) -> bool:
+        """Record that the user changed an active mapping's output back.
+
+        The heard word was right after all, so it becomes a case that expects
+        itself. That demotes the mapping and keeps it from being promoted
+        again in this scope until the user forgets it.
+        """
+        if not any(
+                mapping.heard.casefold() == heard.casefold()
+                and mapping.preferred.casefold() == preferred.casefold()
+                for mapping in self.active(app=app)):
+            return False
+        self.record_correction(heard, heard, app=app)
+        return True
+
+    def propose(
+        self, heard: str, preferred: str, *, app: str | None = None,
+        corrected: int | None = None, kept: int = 0,
     ) -> CandidateEvaluation:
+        """Gate one candidate mapping against the suite and its evidence.
+
+        ``corrected`` and ``kept`` are how often the heard word was corrected
+        this way and how often it was pasted and left alone in the candidate's
+        scope. Corrections have to outnumber the unedited pastes.
+        """
         if (not _valid_span(heard) or not _valid_span(preferred)
                 or not _valid_app(app)):
             raise ValueError("mapping spans must contain 1-80 characters")
         result = self.evaluate(heard, preferred, app=app)
+        key = (heard.casefold(), app)
+        mapping = LearnedMapping(heard, preferred, app)
+        if result.passed and corrected is not None and kept >= corrected:
+            result = replace(result, passed=False, reasons=(
+                f"left unchanged {kept} times against "
+                f"{corrected} corrections",))
+            # The same evidence that holds a candidate back takes down the
+            # mapping it would have confirmed.
+            if self._promoted.get(key) == mapping:
+                self._promoted.pop(key)
         if not result.passed:
             self._remember_quarantine(result)
             return result
-        key = (heard.casefold(), app)
-        mapping = LearnedMapping(heard, preferred, app)
         if self._promoted.get(key) == mapping:
             return replace(result, promoted=True)
 
@@ -233,6 +390,8 @@ class PersonalRegressionLab:
         )
         if not applicable:
             reasons = ("no applicable correction cases",)
+        if remaps_common_words(heard, preferred):
+            reasons = (COMMON_WORDS_REASON,)
         return CandidateEvaluation(
             heard=heard,
             preferred=preferred,
@@ -243,9 +402,10 @@ class PersonalRegressionLab:
             case_ids=tuple(case.id for case in applicable),
         )
 
-    def _apply_mappings(
-            self, text: str, *, app: str | None = None,
-            candidate: LearnedMapping | None = None) -> str:
+    def _chosen(
+            self, *, app: str | None = None,
+            candidate: LearnedMapping | None = None
+    ) -> dict[str, LearnedMapping]:
         chosen: dict[str, LearnedMapping] = {}
         mappings = list(self._promoted.values())
         if candidate is not None:
@@ -267,6 +427,19 @@ class PersonalRegressionLab:
         for mapping in mappings:
             if mapping.app is None or mapping.app == app:
                 chosen.setdefault(mapping.heard.casefold(), mapping)
+        return chosen
+
+    def active(self, *, app: str | None = None) -> tuple[LearnedMapping, ...]:
+        """The one mapping per heard span that applies in ``app``.
+
+        An app-scoped mapping takes precedence over a global one.
+        """
+        return tuple(self._chosen(app=app).values())
+
+    def _apply_mappings(
+            self, text: str, *, app: str | None = None,
+            candidate: LearnedMapping | None = None) -> str:
+        chosen = self._chosen(app=app, candidate=candidate)
         if not chosen:
             return text
         alternatives = sorted(
@@ -277,15 +450,21 @@ class PersonalRegressionLab:
             rf"(?<!\w)(?:{'|'.join(re.escape(v) for v in alternatives)})(?!\w)",
             flags=re.IGNORECASE,
         )
+        def replacement(match: re.Match[str]) -> str:
+            if _in_address(text, match.start(), match.end()):
+                return match.group(0)
+            return _in_heard_case(
+                match.group(0), chosen[match.group(0).casefold()])
+
         # One substitution pass over the original text prevents mapping chains
         # such as Gwen->Qwen and Qwen->When from recursively changing Gwen.
-        return pattern.sub(
-            lambda match: chosen[match.group(0).casefold()].preferred,
-            text,
-        )
+        return pattern.sub(replacement, text)
 
     def apply(self, text: str, *, app: str | None = None) -> str:
         return self._apply_mappings(text, app=app)
+
+    is_common_word = staticmethod(is_common_word)
+    remaps_common_words = staticmethod(remaps_common_words)
 
     def forget(self, heard: str, *, app: str | None = None) -> int:
         """Forget all evidence and decisions for one mapping scope."""
@@ -387,10 +566,19 @@ class PersonalRegressionLab:
                 app = raw.get("app", raw.get("bundle"))
                 if _valid_span(heard) and _valid_span(preferred) \
                         and _valid_app(app):
-                    try:
-                        lab.propose(heard, preferred, app=app)
-                    except ValueError:
-                        pass
+                    # Restore, do not replay: the shadow gate's "material
+                    # improvement" test is about activating something new,
+                    # and replayed it held back every app mapping that has
+                    # a global twin. A saved promotion only has to still
+                    # agree with the saved cases and the current rules.
+                    result = lab.evaluate(heard, preferred, app=app)
+                    if not result.passed:
+                        lab._remember_quarantine(result)
+                        continue
+                    lab._promoted[(heard.casefold(), app)] = LearnedMapping(
+                        heard, preferred, app)
+                    while len(lab._promoted) > MAX_MAPPINGS:
+                        lab._promoted.pop(next(iter(lab._promoted)))
         raw_quarantined = payload.get("quarantined", [])
         if isinstance(raw_quarantined, list):
             for raw in raw_quarantined:

@@ -1588,23 +1588,46 @@ class VoiceCompiler:
                     candidates[index][key] = (
                         context.text, score, f"context:{context.source}")
 
+        # A Personal Prior reaches the compiler only after the Personal
+        # Regression Lab activated it. It is a decided replacement of the
+        # exact heard word, never a score: scored, it lost to the engine
+        # bonus of every recognizer except Tiny.
+        decided: dict[int, str] = {}
         for index, token in enumerate(primary_tokens):
             for prior in voice.personal_priors:
-                if _norm(token.text) != _norm(prior.heard):
+                if token.text.casefold() != prior.heard.casefold():
                     continue
-                key = _norm(prior.preferred)
-                score = primary.confidence + min(0.35, prior.count * 0.055) \
-                    + min(0.28, prior.app_count(voice.app_bundle) * 0.10)
-                old = candidates[index].get(key)
-                if old is None or score > old[1]:
-                    candidates[index][key] = (
-                        prior.preferred, score, "personal-prior")
+                if prior.apps and not prior.app_count(voice.app_bundle):
+                    continue
+                # A word inside an email address, a handle or a URL is part
+                # of an identifier, not the word the prior was learned for.
+                run = (re.search(r"\S*\Z", primary.text[:token.start]).group()
+                       + re.match(r"\S*", primary.text[token.start:]).group())
+                if "@" in run or "://" in run:
+                    break
+                preferred = prior.preferred
+                # A capital the recognizer placed, such as a sentence start,
+                # survives an all-lowercase preferred spelling.
+                if (token.text[:1].isupper()
+                        and not prior.heard[:1].isupper()
+                        and preferred == preferred.lower()):
+                    preferred = preferred[:1].upper() + preferred[1:]
+                decided[index] = preferred
+                break
 
         replacements: list[tuple[int, int, str]] = []
         decisions: list[Decision] = []
         original_anchors = set(protected_anchors(primary.text))
         for index, options in enumerate(candidates):
             original = primary_tokens[index]
+            if index in decided:
+                if decided[index] != original.text:
+                    replacements.append(
+                        (original.start, original.end, decided[index]))
+                    decisions.append(Decision(
+                        "span-graph", original.text, decided[index], 1.0,
+                        "personal-prior"))
+                continue
             original_key = _norm(original.text)
             base = options.get(original_key, (original.text,
                                                primary.confidence, "primary"))
@@ -1615,11 +1638,10 @@ class VoiceCompiler:
             context_exact = _norm(winner[0]) in context_by_key
             is_anchor = original.text in original_anchors
             threshold = 0.12 if not is_anchor else (
-                0.18 if context_exact or winner[2] == "personal-prior" else 0.24)
+                0.18 if context_exact else 0.24)
             if delta < threshold:
                 continue
-            if (is_anchor and not context_exact
-                    and winner[2] != "personal-prior" and delta < 0.30):
+            if is_anchor and not context_exact and delta < 0.30:
                 continue
             replacements.append((original.start, original.end, winner[0]))
             decisions.append(Decision(

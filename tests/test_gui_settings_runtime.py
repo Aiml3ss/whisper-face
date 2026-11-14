@@ -162,11 +162,15 @@ class SnippetPersistenceTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.path = Path(self.directory.name) / "snippets.json"
+        self.learned = Path(self.directory.name) / "learned.json"
         self.ns = settings_namespace(
-            "save_gui_snippet", "delete_gui_snippet", "snippet_name_key")
+            "save_gui_snippet", "delete_gui_snippet", "snippet_name_key",
+            "load_learned", "save_learned")
         self.ns.update(
             SNIPPETS_FILE=self.path,
             SNIPPETS_LOCK=threading.Lock(),
+            LEARNED_FILE=self.learned,
+            LEARN_LOCK=threading.Lock(),
         )
 
     def test_atomic_round_trip_preserves_unrelated_snippets_and_private_mode(self):
@@ -228,6 +232,38 @@ class SnippetPersistenceTests(unittest.TestCase):
             "signature": "Cheers"})
         with self.assertRaises(RuntimeError):
             self.ns["delete_gui_snippet"]("missing", "old text")
+
+    def test_delete_also_removes_what_was_learned_about_the_snippet(self):
+        self.path.write_text(json.dumps({
+            "address": "7623 Opal Ridge Lane", "signature": "Cheers"}))
+        self.learned.write_text(json.dumps({
+            "snippet_edits": {
+                "address": {"from": "123 Main", "to": "7623 Opal Ridge Lane",
+                            "n": 1, "app": "com.apple.mail"},
+                "signature": {"from": "Bye", "to": "Cheers", "n": 1,
+                              "app": "com.apple.mail"},
+            },
+            "history": [
+                {"ts": 1.0, "kind": "snippet_edit", "name": "address",
+                 "from": "123 Main", "to": "7623 Opal Ridge Lane",
+                 "app": "com.apple.mail"},
+                {"ts": 2.0, "kind": "snippet_edit", "name": "signature",
+                 "from": "Bye", "to": "Cheers", "app": "com.apple.mail"},
+                {"ts": 3.0, "kind": "correction", "from": "Gwen",
+                 "to": "Qwen", "app": "com.apple.mail", "mode": "capture"},
+            ],
+        }))
+
+        self.ns["delete_gui_snippet"]("address", "7623 Opal Ridge Lane")
+
+        remaining = self.learned.read_text()
+        self.assertNotIn("Opal Ridge", remaining)
+        self.assertNotIn("123 Main", remaining)
+        state = json.loads(remaining)
+        self.assertEqual(list(state["snippet_edits"]), ["signature"])
+        self.assertEqual(
+            [entry["kind"] for entry in state["history"]],
+            ["snippet_edit", "correction"])
 
     def test_stale_delete_fails_without_rewriting_newer_content(self):
         self.path.write_text(json.dumps({
@@ -347,7 +383,10 @@ class SettingsSnapshotTests(unittest.TestCase):
                     "confusions": {
                         "gwen": {"from": "Gwen", "to": "Qwen", "n": "bad"}},
                     "snippet_edits": {
-                        "signature": {"to": "Cheers", "n": 2}},
+                        "signature": {"to": "Cheers", "n": 2},
+                        "address": {"suggested": {
+                            "from": "7623 Opal Ridge Lane",
+                            "to": "1 Attacker Way", "app": "com.example"}}},
                 },
             )
             snapshot = ns["gui_settings_snapshot"]()
@@ -364,6 +403,53 @@ class SettingsSnapshotTests(unittest.TestCase):
             self.assertEqual(
                 snapshot["corrections"][1]["global_decision"], "learning")
             self.assertEqual(snapshot["corrections"][1]["app_scopes"], [])
+            # An observed snippet edit the user has not applied is not in
+            # use, so nothing reports it as the snippet's saved text.
+            self.assertEqual(
+                [(row["key"], row["global_decision"])
+                 for row in snapshot["corrections"] if row["kind"] == "snippet"],
+                [("signature", "saved")])
+            self.assertNotIn("Attacker", json.dumps(snapshot))
+
+    def test_an_observed_snippet_edit_is_not_shown_as_the_saved_snippet(self):
+        from whisper_face_gui import normalize_settings
+
+        saved = "GB29 NWBK 6016 1331 9268 19"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "snippets.json").write_text(
+                json.dumps({"bank details": saved}))
+            ns = settings_namespace(
+                "gui_settings_snapshot", "load_learned", "save_learned",
+                "suggest_snippet_edit")
+            ns.update(
+                GUI_TONES={"auto", "formal", "default"},
+                APP_TONES={"map": {}, "lock": threading.Lock()},
+                recent_dictation_apps=lambda: [],
+                app_display_name=lambda bundle: bundle,
+                SNIPPETS_FILE=root / "snippets.json",
+                SNIPPETS_LOCK=threading.Lock(),
+                DICTIONARY_LOCK=threading.RLock(),
+                parse_dictionary=lambda: ([], set()),
+                LEARNED_FILE=root / "learned.json",
+                LEARN_LOCK=threading.Lock(),
+                personal_regression_lab=lambda _state: PersonalRegressionLab(),
+                PERSONAL_APP_MIN_COUNT=2,
+                PERSONAL_GLOBAL_MIN_COUNT=3,
+                print=lambda *_args, **_kwargs: None,
+            )
+            # A page rewrote the pasted bank details in its own field.
+            self.assertTrue(ns["suggest_snippet_edit"](
+                "bank details", saved, "GB33 EVIL 0000 0000 0000 00",
+                "com.google.Chrome"))
+            snapshot = ns["gui_settings_snapshot"]()
+
+        self.assertEqual(
+            snapshot["snippets"], [{"name": "bank details", "text": saved}])
+        self.assertEqual(snapshot["corrections"], [])
+        # The window is given nothing it could present as the snippet's
+        # replacement.
+        self.assertEqual(list(normalize_settings(snapshot).corrections), [])
 
     def test_snapshot_projects_scope_decisions_without_private_cases(self):
         lab = PersonalRegressionLab()
@@ -461,6 +547,66 @@ class SettingsSnapshotTests(unittest.TestCase):
             self.assertEqual(result["counts"], {"Private Project": 4})
             self.assertEqual(dictionary.read_bytes(), before_dictionary)
             self.assertEqual(refreshed, [True])
+
+    def test_forget_correction_clears_its_count_history_and_evidence(self):
+        lab = PersonalRegressionLab()
+        for app in ("com.example.mail", "com.example.mail", "com.example.chat"):
+            lab.record_correction("Sersha", "Saoirse", app=app)
+        lab.propose("Sersha", "Saoirse", app="com.example.mail")
+        lab.propose("Sersha", "Saoirse")
+        # The mapping was later undone in an app that never corrected it.
+        lab.record_revert("Sersha", "Saoirse", app="com.example.notes")
+        state = {
+            "counts": {"Saoirse": 3, "Private Project": 4},
+            "processed": 8,
+            "fixes": {"sersha": {"to": "Saoirse", "n": 3}},
+            "confusions": {
+                "sersha->saoirse": {
+                    "from": "Sersha", "to": "Saoirse", "n": 3,
+                    "apps": {"com.example.mail": 2, "com.example.chat": 1}},
+            },
+            "snippet_edits": {},
+            "regression_lab": lab.to_dict(),
+            "history": [
+                {"ts": 1.0, "kind": "correction", "from": "Sersha",
+                 "to": "Saoirse", "app": "com.example.mail",
+                 "mode": "capture"},
+                {"ts": 2.0, "kind": "correction", "from": "Gwen",
+                 "to": "Qwen", "app": "com.example.mail", "mode": "capture"},
+                {"ts": 3.0, "kind": "forgotten", "from": "Sersha",
+                 "to": "Saoirse"},
+            ],
+        }
+        saved = []
+        ns = load_definitions(
+            "forget_gui_correction", "personal_regression_lab",
+            extra={"time": time, "PersonalRegressionLab": PersonalRegressionLab},
+        )
+        ns.update(
+            LEARN_LOCK=threading.Lock(),
+            load_learned=lambda: state,
+            save_learned=lambda value: saved.append(
+                json.loads(json.dumps(value))),
+            refresh_glossary=lambda: None,
+        )
+
+        ns["forget_gui_correction"]("sersha->saoirse")
+
+        result = saved[0]
+        # Nothing left to promote the term again, and nothing that still
+        # spells the mapping out.
+        self.assertEqual(result["counts"], {"Private Project": 4})
+        encoded = json.dumps(result)
+        self.assertNotIn("Saoirse", encoded)
+        self.assertNotIn("Sersha", encoded)
+        self.assertEqual(
+            [entry["kind"] for entry in result["history"]],
+            ["correction", "forgotten"])
+        self.assertEqual(set(result["history"][-1]), {"ts", "kind"})
+        restored = PersonalRegressionLab.from_dict(result["regression_lab"])
+        self.assertEqual(
+            (restored.cases, restored.promoted, restored.quarantined),
+            ((), (), ()))
 
 
 class ResultEvidenceRuntimeTests(unittest.TestCase):
