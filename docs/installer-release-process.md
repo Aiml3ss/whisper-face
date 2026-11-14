@@ -61,6 +61,7 @@ uv run tests/test_benchmark_asr.py
 uv run tests/test_benchmark_macos_asr_warm_path.py
 uv run tests/test_performance_lab.py
 uv run tests/test_dictate.py
+uv run tests/test_whole_program.py
 uv run tests/test_gui_settings_runtime.py
 uv run tests/test_insertion_integrity.py
 uv run tests/test_benchmark_insertion_reliability.py
@@ -128,7 +129,9 @@ that the three hold exactly the same set of tests:
 `.github/workflows/windows-smoke.yml` and `.github/pull_request_template.md`
 carry the same *subset* of that list as each other: the tests that hold on a
 Windows host. They deliberately omit gates that assert a macOS-only runtime
-path — the AppKit smoke command, the Whisper/Parakeet verifier adapters, the
+path — the AppKit smoke command, the whole-program harness
+(`tests/test_whole_program.py`, which boots the macOS runtime path of
+`dictate.py` on a fake Mac), the Whisper/Parakeet verifier adapters, the
 networkless worker, the point-and-speak snapshot, the voice-object and
 relisten seams — because a Windows runner cannot execute what they describe.
 Do not add a gate to the Windows workflow without first confirming it passes

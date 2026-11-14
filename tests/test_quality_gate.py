@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +41,19 @@ class CollectMetricsTests(unittest.TestCase):
         self.assertEqual(metrics, {})
         self.assertEqual(len(errors), 1)
         self.assertIn("fake: corpus missing", errors[0])
+
+    def test_a_cleanup_that_raises_fails_the_gate(self):
+        import parrot_core
+
+        def broken(*_args, **_kwargs):
+            raise ValueError("cleanup failed")
+
+        gated = tuple(collector for collector in quality_gate.COLLECTORS
+                      if collector[0] == "default_cleanup")
+        with mock.patch.object(parrot_core, "compile_cleanup", broken):
+            metrics, errors = quality_gate.collect_metrics(gated)
+        self.assertEqual(metrics, {})
+        self.assertEqual(errors, ["default_cleanup: cleanup failed"])
 
     def test_non_numeric_and_duplicate_metrics_are_refused(self):
         collectors = (

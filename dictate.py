@@ -9789,11 +9789,6 @@ def commit_insertion(rec, text: str, bundle: str,
     return receipt
 
 
-def focused_text() -> str | None:
-    snapshot = focused_snapshot()
-    return snapshot.text if snapshot else None
-
-
 # Password managers and other privacy-aware apps mark what they copy with
 # these formats; such a clipboard is never read as context.
 WINDOWS_PRIVATE_CLIPBOARD_FORMATS = (
@@ -10890,12 +10885,17 @@ CONT_END = ".!?…:\n。！？；：」』"
 
 
 def cursor_context() -> str | None:
-    """Trailing text of the focused field, only for fields small enough
-    that the cursor is almost certainly at the end (chat inputs and drafts,
-    not documents)."""
-    txt = focused_text()
+    """Text just before the insertion point, only for fields small enough
+    to be chat inputs and drafts, not documents. A field that reports no
+    selection is read as having the cursor at its end."""
+    snapshot = focused_snapshot()
+    txt = snapshot.text if snapshot else None
     if not txt or not txt.strip() or len(txt) > 2000:
         return None
+    if snapshot.selection is not None:
+        txt = txt[:snapshot.selection[0]]
+        if not txt.strip():
+            return None
     return txt[-160:]
 
 
