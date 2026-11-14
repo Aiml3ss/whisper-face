@@ -20,7 +20,11 @@ Fakes sit only at the edge of the process:
   network      requests refuse and record; the phone endpoint server records
                its address instead of binding it
 
-Everything between the hotkey and the paste is the shipping code.
+Everything between the hotkey and the paste is the shipping code. Three
+runtime functions are wrapped, never replaced: finish_in_release_order (so
+a test knows when a dictation is done), ensure_single_instance (so the lock
+it takes can be released) and start_gui_activation_server (so its socket
+lives in the test's directory, not /tmp).
 
 The module replaces entries in ``sys.modules``. Each test file that uses it
 runs in its own process, as the release gate runs them; ``FakeMac.close()``
@@ -49,6 +53,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_RATE = 16_000
+# Kept before any FakeMac refuses spawning, for a test that needs a child.
+REAL_POPEN = subprocess.Popen
 
 # The private files setup.sh creates from templates on a fresh install.
 FRESH_INSTALL_TEMPLATES = (
@@ -712,6 +718,10 @@ class Desktop:
                            else [str(argv)])
         raise OSError("spawning a process is refused in this test")
 
+    def refuse_exec(self, path, argv):
+        self.spawns.append(["exec", *argv])
+        raise OSError("replacing the process is refused in this test")
+
     def spawn_helper(self, argv, **_kwargs):
         self.helper_spawns.append(list(argv))
         return HelperProcess(self, argv)
@@ -1061,6 +1071,9 @@ class FakeMac:
             return self._lock
 
         dictate.ensure_single_instance = ensure_single_instance
+        # A permission grant re-executes the process; here it never may.
+        dictate._wait_for_permission_grant_and_reexec.__kwdefaults__[
+            "execv"] = self.desktop.refuse_exec
 
     def boot(self):
         """Import the real module and run main() up to the event loop."""
@@ -1079,12 +1092,12 @@ class FakeMac:
         self._saved_stdout = sys.stdout
         sys.stdout = self.log
         self._install_modules()
-        dictate = self._import()
-        self.dictate = dictate
-        self.desktop.installed_models = {dictate.FAST_WHISPER_REPO}
-        self._redirect_state(dictate)
         started = time.perf_counter()
         try:
+            dictate = self._import()
+            self.dictate = dictate
+            self.desktop.installed_models = {dictate.FAST_WHISPER_REPO}
+            self._redirect_state(dictate)
             dictate.main()
         except BaseException as error:  # noqa: BLE001 - reported by a test
             self.boot_error = error

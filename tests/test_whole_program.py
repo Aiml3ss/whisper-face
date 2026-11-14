@@ -70,6 +70,8 @@ def load_corpus() -> list[dict]:
 class ImportTests(unittest.TestCase):
     def test_the_checkout_module_runs_on_the_fake_platform(self):
         dictate = MAC.dictate
+        if dictate is None:
+            booted()
         source = (ROOT / "dictate.py").resolve()
         self.assertEqual(Path(dictate.__file__).resolve(), source)
         self.assertEqual(
@@ -81,6 +83,8 @@ class ImportTests(unittest.TestCase):
 
     def test_private_state_is_the_shipped_templates_in_a_fresh_install(self):
         dictate = MAC.dictate
+        if dictate is None:
+            booted()
         state_files = {name: value for name, value in vars(dictate).items()
                        if name.endswith("_FILE") and isinstance(value, Path)}
         self.assertIn("PREFERENCES_FILE", state_files)
@@ -154,6 +158,52 @@ class BootTests(unittest.TestCase):
         allowed = {"afplay", "/bin/launchctl", "/bin/ps"}
         self.assertLessEqual(
             {argv[0] for argv in mac.desktop.spawns}, allowed)
+
+
+    def test_before_permissions_are_granted_nothing_listens_or_records(self):
+        # The first launch of a fresh install has neither Input Monitoring
+        # nor Accessibility. That is a second boot, so it runs in a child.
+        booted()
+        child = fake_platform.REAL_POPEN(
+            [sys.executable, "-c", PERMISSIONS_MISSING, str(ROOT / "tests")],
+            stdout=fake_platform.subprocess.PIPE,
+            stderr=fake_platform.subprocess.PIPE, text=True)
+        stdout, stderr = child.communicate(timeout=60)
+        self.assertEqual(child.returncode, 0, stderr)
+        result = json.loads(stdout.splitlines()[-1])
+        self.assertIsNone(result["boot_error"], result["log"])
+        self.assertTrue(result["event_loop"])
+        self.assertTrue(result["window"])
+        self.assertTrue(result["rechecking"])
+        self.assertEqual(result["listeners"], 0)
+        self.assertEqual(result["streams"], 0)
+        self.assertEqual(result["network"], [])
+
+
+PERMISSIONS_MISSING = """
+import json, sys, threading
+sys.path.insert(0, sys.argv[1])
+import fake_platform
+mac = fake_platform.FakeMac()
+mac.desktop.trusted = False
+mac.boot()
+desktop = mac.desktop
+result = {
+    "boot_error": repr(mac.boot_error) if mac.boot_error else None,
+    "event_loop": any(call[0] == "runEventLoop"
+                      for call in desktop.main_thread_calls),
+    "window": mac.dictate is not None
+              and mac.dictate.STATUS["bar"].gui is not None,
+    "rechecking": any(thread.name == "whisper-face-permission-recheck"
+                      for thread in threading.enumerate()),
+    "listeners": len(desktop.listeners),
+    "streams": len(desktop.streams),
+    "network": desktop.network,
+    "log": mac.log_tail(),
+}
+mac.close()
+print(json.dumps(result))
+"""
 
 
 class FreshInstallDictationTests(unittest.TestCase):
