@@ -1353,19 +1353,87 @@ class VoiceCompiler:
         for proposal in proposals:
             before = proposal.before
             after = proposal.after
-            start = current.find(before) if before else -1
-            if start < 0 and before:
-                folded = current.casefold().find(before.casefold())
-                start = folded
-            end = start + len(before) if start >= 0 else -1
+            start, end = self._locate_edit(current, before, mode)
             reason = self._validate_edit(
                 current, proposal, start, end, global_anchors, mode)
+            if reason == "accepted":
+                reason = self._validate_in_context(
+                    current, proposal, start, end, global_anchors, mode)
             accepted = reason == "accepted"
             if accepted:
                 current = current[:start] + after + current[end:]
             proofs.append(ProofEdit(
                 proposal.kind, before, after, start, end, accepted, reason))
         return ProofResult(current, tuple(proofs))
+
+    @staticmethod
+    def _covers_whole_tokens(text: str, start: int, end: int,
+                             fragment: str, preserve_formatting: bool) -> bool:
+        """Whether ``fragment`` at ``text[start:end]`` splits no token."""
+        return (_proof_words(text[:start], preserve_formatting)
+                + _proof_words(fragment, preserve_formatting)
+                + _proof_words(text[end:], preserve_formatting)
+                ) == _proof_words(text, preserve_formatting)
+
+    def _locate_edit(self, current: str, before: str,
+                     mode: str) -> tuple[int, int]:
+        """Find the span an edit names, preferring one made of whole tokens.
+
+        "um" is also inside "document"; the edit means the word. Offsets come
+        from the text itself: case folding can change its length.
+        """
+        if not before:
+            return -1, -1
+        first = None
+        # A lookahead, so an occurrence that starts inside an earlier one
+        # ("um um" after "album um") is still considered.
+        pattern = f"(?=({re.escape(before)}))"
+        for flags in (0, re.IGNORECASE):
+            matches = re.finditer(pattern, current, flags)
+            for _attempt, match in zip(range(64), matches):
+                span = match.span(1)
+                if self._covers_whole_tokens(
+                        current, *span, before, mode == "code"):
+                    return span
+                first = first or span
+        return first or (-1, -1)
+
+    def _validate_in_context(self, current: str, proposal: EditProposal,
+                             start: int, end: int,
+                             global_anchors: Sequence[str], mode: str) -> str:
+        """Check what an edit proved on its fragment does to the whole text.
+
+        A fragment can end inside a token, where "3." is a number and a full
+        stop and removing the stop turns 3.5 into 35. The fragment proof only
+        holds when the edit replaces whole tokens and leaves every token
+        outside it as it was.
+        """
+        candidate = current[:start] + proposal.after + current[end:]
+
+        def words(text: str) -> list[str]:
+            return [token.text.casefold() for token in _lexical_tokens(text)]
+
+        remaining = words(candidate)
+        outside = words(current)
+        for word in words(proposal.before):
+            if word in outside:
+                outside.remove(word)
+        protected = {
+            word for anchor in global_anchors for word in words(anchor)
+        } | {word for word in outside
+             if any(char.isdigit() for char in word)}
+        for word in dict.fromkeys(outside):
+            if word in protected \
+                    and remaining.count(word) < outside.count(word):
+                return f"protected anchor changed: {word}"
+        preserve_formatting = mode == "code"
+        if not self._covers_whole_tokens(
+                current, start, end, proposal.before, preserve_formatting) \
+                or not self._covers_whole_tokens(
+                    candidate, start, start + len(proposal.after),
+                    proposal.after, preserve_formatting):
+            return "edit does not cover whole tokens"
+        return "accepted"
 
     def _validate_edit(self, source: str, proposal: EditProposal,
                        start: int, end: int,

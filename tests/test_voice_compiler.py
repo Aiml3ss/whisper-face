@@ -267,6 +267,60 @@ class VoiceCompilerTests(unittest.TestCase):
         self.assertTrue(result.edits[0].accepted)
         self.assertEqual(result.text, after)
 
+    def test_proof_edits_cannot_change_a_number_or_word_from_inside_it(self):
+        # Each fragment is innocent on its own: a full stop, a space, a
+        # filler. What it does to the token it sits inside is what counts.
+        for source, edits, expected in (
+                ("Set the dose to 3.5 mg.", (("3.", "3"),), None),
+                ("Pay 1500 dollars to the contractor.", (("1", "1."),), None),
+                ("Charge $1.20 per unit.", (("1.", "1"),), None),
+                # The first edit only adds punctuation and stands; the second
+                # would join "a" to "typical".
+                ("This is a typical result.", ((" a", " a;"), ("; ", "")),
+                 "This is a; typical result."),
+                ("Email john.smith@example.com today.",
+                 (("john.", "john"),), None),
+                ("Order 20 15 inch monitors for the lab.", ((" ", ""),), None),
+                ("My therapist called.", (("the", "the "),), None),
+                ("Call Summer about the volume discount.", (("um", ""),), None),
+                ("The delta is 5 - 3 degrees.", (("- 3", "3"),), None),
+        ):
+            with self.subTest(source=source):
+                result = self.compiler.verify_edits(source, tuple(
+                    EditProposal("cleanup", before, after)
+                    for before, after in edits))
+                self.assertEqual(result.text, expected or source)
+                self.assertFalse(result.edits[-1].accepted)
+
+    def test_whole_text_anchor_check_names_the_number_that_would_change(self):
+        result = self.compiler.verify_edits(
+            "Set the dose to 3.5 mg.", (EditProposal("cleanup", "3.", "3"),))
+        self.assertEqual(result.text, "Set the dose to 3.5 mg.")
+        self.assertEqual(
+            result.edits[0].reason, "protected anchor changed: 3.5")
+
+    def test_proof_edit_applies_to_the_whole_word_not_a_substring(self):
+        # The filler is the second "um"; the first is inside "document".
+        result = self.compiler.verify_edits(
+            "Please sign the document um today.",
+            (EditProposal("remove_filler", "um", ""),))
+        self.assertTrue(result.edits[0].accepted)
+        self.assertEqual(
+            result.text.split(), "Please sign the document today.".split())
+        # An occurrence that begins inside an earlier, split one still counts.
+        result = self.compiler.verify_edits(
+            "The album um um is out.",
+            (EditProposal("remove_filler", "um um", ""),))
+        self.assertTrue(result.edits[0].accepted)
+        self.assertEqual(result.text.split(), "The album is out.".split())
+
+    def test_proof_edit_offsets_survive_case_folding_that_changes_length(self):
+        result = self.compiler.verify_edits(
+            "Stra\u00dfe Um ship it.",
+            (EditProposal("remove_filler", "um ", ""),))
+        self.assertTrue(result.edits[0].accepted)
+        self.assertEqual(result.text, "Stra\u00dfe ship it.")
+
     def test_punctuation_proof_preserves_ordered_lexical_content(self):
         result = self.compiler.verify_edits(
             "ship API v2 tomorrow",
