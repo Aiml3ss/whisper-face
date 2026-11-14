@@ -8240,7 +8240,7 @@ def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
 
 def transcribe(audio: np.ndarray, prompt: str | None = None,
                language: str | None = None) -> str:
-    """Compatibility wrapper for warmup, phone, and diagnostics."""
+    """Compatibility wrapper for warmup and diagnostics."""
     return transcribe_detailed(audio, prompt, language=language).text
 
 
@@ -11178,17 +11178,21 @@ def lan_ip() -> str:
         return "localhost"
 
 
-def phone_clean(raw: str) -> str:
+def phone_clean(raw: str, recognition: Recognition | None = None) -> str:
     """The local pipeline for network audio, minus app context: tone
     override and quick/LLM routing.
 
     Snippets are never expanded and nothing is logged: whoever holds the
     token must not be able to read a saved snippet back or write into the
     history the vocabulary miner learns from.
+
+    ``recognition`` is the decode ``raw`` came from. The silent-audio phrase
+    list applies only with that evidence; without it a silent upload to a
+    Whisper-only install comes back as "Thank you."
     """
     language = current_language()
     raw, looped = collapse_repeats(raw)
-    if not raw or is_hallucination(raw, language) \
+    if not raw or is_hallucination(raw, language, recognition) \
             or (looks_like_prompt_echo(raw) and looped):
         return ""
     raw = apply_learned_fixes(raw)
@@ -11523,8 +11527,9 @@ class PhoneHandler(BaseHTTPRequestHandler):
                 tmp.write(audio_bytes)
                 tmp.flush()
                 audio = decode_audio(tmp.name)
-            raw = ASR_POOL.submit(transcribe, audio).result()
-            text = phone_clean(raw)
+            recognition = ASR_POOL.submit(
+                transcribe_detailed, audio).result()
+            text = phone_clean(recognition.text, recognition)
 
             print(f"[{time.time() - t0:.2f}s | phone | "
                   f"{len(audio) / SAMPLE_RATE:.1f}s audio | "

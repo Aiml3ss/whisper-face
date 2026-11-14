@@ -333,6 +333,9 @@ class PhoneEndpointRequestTests(unittest.TestCase):
 
     def handler(self, server_only, transcribed="Insert my address."):
         calls = []
+        recognition = transcribed if isinstance(transcribed, Recognition) \
+            else Recognition(transcribed, confidence=0.93,
+                             engine="parakeet-unified", audio_duration=1.0)
 
         def decode_audio(path):
             calls.append(("decode", Path(path).read_bytes()))
@@ -354,12 +357,12 @@ class PhoneEndpointRequestTests(unittest.TestCase):
                 "LAST_USE": {"t": 0.0},
                 "SAMPLE_RATE": 16000,
                 "decode_audio": decode_audio,
-                "transcribe": lambda audio: transcribed,
+                "transcribe_detailed": lambda audio: recognition,
                 "ASR_POOL": SimpleNamespace(
                     submit=lambda fn, arg: SimpleNamespace(
                         result=lambda: fn(arg))),
-                "phone_clean": lambda raw: calls.append(("clean", raw))
-                or "Insert my address.",
+                "phone_clean": lambda raw, *_evidence: calls.append(
+                    ("clean", raw)) or "Insert my address.",
                 "source_metadata": lambda: {"source_revision": "abc"},
                 "local_license_notice": lambda: "notices",
             },
@@ -475,13 +478,54 @@ class PhoneEndpointRequestTests(unittest.TestCase):
         self.assertEqual(status, 500)
         self.assertNotIn(b"/Users", body)
 
+    def test_a_silent_upload_is_not_answered_with_whisper_filler(self):
+        clean = load_definitions(
+            "phone_clean", "is_hallucination", "weak_whisper_evidence",
+            assignments=CleanupGuardTests.HALLUCINATION_GUARD,
+            extra={
+                "collapse_repeats": lambda raw: (raw, False),
+                "looks_like_prompt_echo": lambda raw: False,
+                "apply_learned_fixes": lambda raw: raw,
+                "extract_tone_override": lambda raw: (raw, None),
+                "needs_llm_cleanup": lambda *args, **kwargs: False,
+                "quick_clean": lambda raw, verbatim=False, language="en": raw,
+                "apply_vocabulary_casing": lambda text: text,
+                "TONE": {"default": ""},
+            },
+        )["phone_clean"]
+        uploads = (
+            # Six seconds of room noise on a Whisper-only install.
+            (Recognition("Thank you.", confidence=0.31, engine="tiny",
+                         audio_duration=6.0), ""),
+            (Recognition("Thanks for watching!", confidence=0.74,
+                         engine="turbo", audio_duration=9.0), ""),
+            # Somebody saying it.
+            (Recognition("Thank you.", confidence=0.84, engine="turbo",
+                         audio_duration=1.2), "Thank you."),
+            (Recognition("Thank you.", confidence=0.93,
+                         engine="parakeet-unified", audio_duration=1.2),
+             "Thank you."),
+        )
+        for recognition, expected in uploads:
+            with self.subTest(recognition=recognition):
+                handler, _ = self.handler(
+                    server_only=True, transcribed=recognition)
+                handler.do_POST.__globals__["phone_clean"] = clean
+
+                status, body = self.drive(handler, self.request(
+                    "POST", "/v1/audio/transcriptions", body=b"RIFF-audio",
+                    headers=(f"Authorization: Bearer {self.TOKEN}",)))
+
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body), {"text": expected})
+
     def test_phone_text_never_expands_snippets_or_feeds_the_history(self):
         logged = []
         ns = load_definitions(
             "phone_clean",
             extra={
                 "collapse_repeats": lambda raw: (raw, False),
-                "is_hallucination": lambda raw, language: False,
+                "is_hallucination": lambda *_args: False,
                 "looks_like_prompt_echo": lambda raw: False,
                 "apply_learned_fixes": lambda raw: raw,
                 "match_snippet": lambda raw: (
