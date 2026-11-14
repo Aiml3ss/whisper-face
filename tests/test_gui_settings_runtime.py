@@ -462,6 +462,66 @@ class SettingsSnapshotTests(unittest.TestCase):
             self.assertEqual(dictionary.read_bytes(), before_dictionary)
             self.assertEqual(refreshed, [True])
 
+    def test_forget_correction_clears_its_count_history_and_evidence(self):
+        lab = PersonalRegressionLab()
+        for app in ("com.example.mail", "com.example.mail", "com.example.chat"):
+            lab.record_correction("Sersha", "Saoirse", app=app)
+        lab.propose("Sersha", "Saoirse", app="com.example.mail")
+        lab.propose("Sersha", "Saoirse")
+        # The mapping was later undone in an app that never corrected it.
+        lab.record_revert("Sersha", "Saoirse", app="com.example.notes")
+        state = {
+            "counts": {"Saoirse": 3, "Private Project": 4},
+            "processed": 8,
+            "fixes": {"sersha": {"to": "Saoirse", "n": 3}},
+            "confusions": {
+                "sersha->saoirse": {
+                    "from": "Sersha", "to": "Saoirse", "n": 3,
+                    "apps": {"com.example.mail": 2, "com.example.chat": 1}},
+            },
+            "snippet_edits": {},
+            "regression_lab": lab.to_dict(),
+            "history": [
+                {"ts": 1.0, "kind": "correction", "from": "Sersha",
+                 "to": "Saoirse", "app": "com.example.mail",
+                 "mode": "capture"},
+                {"ts": 2.0, "kind": "correction", "from": "Gwen",
+                 "to": "Qwen", "app": "com.example.mail", "mode": "capture"},
+                {"ts": 3.0, "kind": "forgotten", "from": "Sersha",
+                 "to": "Saoirse"},
+            ],
+        }
+        saved = []
+        ns = load_definitions(
+            "forget_gui_correction", "personal_regression_lab",
+            extra={"time": time, "PersonalRegressionLab": PersonalRegressionLab},
+        )
+        ns.update(
+            LEARN_LOCK=threading.Lock(),
+            load_learned=lambda: state,
+            save_learned=lambda value: saved.append(
+                json.loads(json.dumps(value))),
+            refresh_glossary=lambda: None,
+        )
+
+        ns["forget_gui_correction"]("sersha->saoirse")
+
+        result = saved[0]
+        # Nothing left to promote the term again, and nothing that still
+        # spells the mapping out.
+        self.assertEqual(result["counts"], {"Private Project": 4})
+        encoded = json.dumps(result)
+        self.assertNotIn("Saoirse", encoded)
+        self.assertNotIn("Sersha", encoded)
+        self.assertEqual(
+            [entry["kind"] for entry in result["history"]],
+            ["correction", "forgotten"])
+        self.assertEqual(set(result["history"][-1]), {"ts", "kind"})
+        restored = PersonalRegressionLab.from_dict(result["regression_lab"])
+        self.assertEqual(
+            (restored.cases, restored.promoted, restored.quarantined),
+            ((), (), ()))
+
 
 class ResultEvidenceRuntimeTests(unittest.TestCase):
     def test_explicit_snapshot_is_bounded_and_closed(self):

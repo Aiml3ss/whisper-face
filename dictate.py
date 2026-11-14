@@ -5568,14 +5568,27 @@ def forget_gui_correction(key: str):
         if isinstance(fix, dict) and str(fix.get("to", "")).casefold() == replacement:
             state["fixes"].pop(old, None)
         regression = personal_regression_lab(state)
-        regression.forget(old)
-        for app in removed.get("apps", {}):
-            regression.forget(old, app=str(app))
+        # Every scope, not only the apps that corrected it: a revert leaves
+        # its evidence in whichever app the mapping was undone in.
+        scopes = {None, *(str(app) for app in removed.get("apps", {}))}
+        scopes.update(
+            item.app for item in (*regression.cases, *regression.promoted,
+                                  *regression.quarantined)
+            if item.heard.casefold() == old)
+        for app in scopes:
+            regression.forget(old, app=app)
         state["regression_lab"] = regression.to_dict()
-        state["history"].append({
-            "ts": time.time(), "kind": "forgotten",
-            "from": removed.get("from"), "to": removed.get("to"),
-        })
+        # The dictionary count this correction earned would promote the term
+        # again, and history still spells the mapping out.
+        for term in [term for term in state["counts"]
+                     if str(term).casefold() == replacement]:
+            state["counts"].pop(term)
+        state["history"] = [
+            entry for entry in state["history"]
+            if not (isinstance(entry, dict)
+                    and str(entry.get("from", "")).casefold() == old
+                    and str(entry.get("to", "")).casefold() == replacement)]
+        state["history"].append({"ts": time.time(), "kind": "forgotten"})
         state["history"] = state["history"][-100:]
         save_learned(state)
     refresh_glossary()
