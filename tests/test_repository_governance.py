@@ -195,9 +195,11 @@ class RepositoryGovernanceTests(unittest.TestCase):
         self.assertGreater(len(ran), 50)
 
     def test_release_archives_and_the_index_carry_no_development_state(self):
-        # Release bundles are `git archive` output. Without export rules every
-        # download carried ~11.5 MB of unused render baselines, the wiki
-        # tool's state, and a Cloudflare account cache.
+        # A release bundle's working tree is `git archive` output. Without
+        # export rules it held ~11.5 MB of unused render baselines, the wiki
+        # tool's state, and a Cloudflare account cache. The bundle's shallow
+        # .git still holds those blobs, so this keeps them out of the
+        # installed folder, not out of the download.
         tracked = subprocess.run(
             ["git", "ls-files"], cwd=ROOT, text=True, capture_output=True,
             check=True).stdout.splitlines()
