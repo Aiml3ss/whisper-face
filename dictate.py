@@ -7564,8 +7564,12 @@ def asr_decode_target(model_repo: str, *, available=None,
     return FAST_WHISPER_REPO
 
 
-def windows_whisper_model(model_repo: str):
-    """Load the Windows CTranslate2 model once, preferring an NVIDIA GPU."""
+def windows_whisper_model(model_repo: str, *, local_files_only: bool = True):
+    """Load the Windows CTranslate2 model once, preferring an NVIDIA GPU.
+
+    Like the macOS path, runtime loading never contacts the model hub; only
+    the installer's preload opts into downloading.
+    """
     if model_repo in WINDOWS_ASR_MODELS:
         return WINDOWS_ASR_MODELS[model_repo]
     from faster_whisper.utils import download_model
@@ -7573,6 +7577,7 @@ def windows_whisper_model(model_repo: str):
         model_repo,
         cache_dir=str(HERE / ".models"),
         revision=ASR_MODEL_REVISIONS.get(model_repo),
+        local_files_only=local_files_only,
     )
     options = []
     if ctranslate2.get_cuda_device_count() > 0:
@@ -12122,7 +12127,7 @@ def preload_model_files(repos=None):
     if IS_WINDOWS:
         for repo in repos:
             print(f"Caching faster-Whisper {repo}...")
-            windows_whisper_model(repo)
+            windows_whisper_model(repo, local_files_only=False)
     else:
         for repo in repos:
             if asr_model_is_cached(repo):

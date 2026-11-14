@@ -4774,6 +4774,43 @@ class ConfigurationTests(unittest.TestCase):
         self.assertIn("Downloading org/turbo", out.getvalue())
         self.assertNotIn("Downloading org/tiny", out.getvalue())
 
+    def test_windows_runtime_loads_models_without_contacting_the_hub(self):
+        # faster-whisper's download_model asks the Hub for repo metadata
+        # before looking in its cache unless local_files_only is set. Only
+        # the installer's preload may go online.
+        fetched = []
+
+        def download_model(repo, **kwargs):
+            fetched.append((repo, kwargs.get("local_files_only", False)))
+            return f"C:/models/{repo}"
+
+        utils = types.ModuleType("faster_whisper.utils")
+        utils.download_model = download_model
+        package = types.ModuleType("faster_whisper")
+        package.utils = utils
+        ns = load_definitions(
+            "windows_whisper_model", "preload_model_files",
+            extra={
+                "IS_WINDOWS": True,
+                "HERE": Path("C:/Whisper Face"),
+                "ASR_MODEL_REVISIONS": {"tiny": "d90ca5fe", "turbo": "0a363e91"},
+                "WINDOWS_ASR_MODELS": {},
+                "FAST_WHISPER_REPO": "tiny",
+                "WHISPER_REPO": "turbo",
+                "ctranslate2": SimpleNamespace(
+                    get_cuda_device_count=lambda: 0),
+                "WhisperModel": lambda path, device, compute_type: path,
+            },
+        )
+        with mock.patch.dict(sys.modules, {
+                "faster_whisper": package, "faster_whisper.utils": utils}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            ns["windows_whisper_model"]("tiny")
+            ns["WINDOWS_ASR_MODELS"].clear()
+            ns["preload_model_files"](("turbo",))
+
+        self.assertEqual(fetched, [("tiny", True), ("turbo", False)])
+
     def test_model_inventory_reports_every_pinned_model_without_downloading(
             self):
         ns = load_definitions(
