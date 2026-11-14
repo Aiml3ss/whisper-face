@@ -291,6 +291,8 @@ class PhoneEndpointBindingTests(unittest.TestCase):
                     extra={
                         "SERVER_ONLY": server_only,
                         "PHONE_PORT": 8787,
+                        "PHONE_TOKEN": {"value": ""},
+                        "os": os,
                         "PhoneHandler": object(),
                         "ThreadingHTTPServer": FakeServer,
                         "lan_ip": lambda: "192.0.2.10",
@@ -309,6 +311,220 @@ class PhoneEndpointBindingTests(unittest.TestCase):
                 self.assertEqual(calls[-1], ("serve",))
                 self.assertIn(
                     f"http://{expected_display}:8787/", output.getvalue())
+                token = namespace["PHONE_TOKEN"]["value"]
+                if server_only:
+                    # Created at start and shown once, so the operator can
+                    # give it to the phone.
+                    self.assertRegex(token, r"^[0-9a-f]{64}$")
+                    self.assertEqual(output.getvalue().count(token), 1)
+                else:
+                    self.assertEqual(token, "")
+
+
+class PhoneEndpointRequestTests(unittest.TestCase):
+    """What a caller that reaches port 8787 can and cannot do."""
+
+    TOKEN = "a" * 64
+
+    def handler(self, server_only, transcribed="Insert my address."):
+        calls = []
+
+        def decode_audio(path):
+            calls.append(("decode", Path(path).read_bytes()))
+            return np.zeros(16000, dtype=np.float32)
+
+        ns = load_definitions(
+            "PhoneHandler", "parse_multipart", "phone_host_allowed",
+            "phone_token_matches",
+            assignments=("PHONE_MAX_BODY",),
+            extra={
+                "BaseHTTPRequestHandler": __import__(
+                    "http.server").server.BaseHTTPRequestHandler,
+                "email": __import__("email.policy"),
+                "hashlib": hashlib,
+                "tempfile": tempfile,
+                "time": time,
+                "SERVER_ONLY": server_only,
+                "PHONE_TOKEN": {"value": self.TOKEN if server_only else ""},
+                "LAST_USE": {"t": 0.0},
+                "SAMPLE_RATE": 16000,
+                "decode_audio": decode_audio,
+                "transcribe": lambda audio: transcribed,
+                "ASR_POOL": SimpleNamespace(
+                    submit=lambda fn, arg: SimpleNamespace(
+                        result=lambda: fn(arg))),
+                "phone_clean": lambda raw: calls.append(("clean", raw))
+                or "Insert my address.",
+                "source_metadata": lambda: {"source_revision": "abc"},
+                "local_license_notice": lambda: "notices",
+            },
+        )
+        return ns["PhoneHandler"], calls
+
+    @staticmethod
+    def drive(handler_class, request: bytes):
+        handler = handler_class.__new__(handler_class)
+        handler.rfile = io.BytesIO(request)
+        handler.wfile = io.BytesIO()
+        handler.client_address = ("127.0.0.1", 50000)
+        handler.server = None
+        handler.request_version = "HTTP/1.1"
+        handler.requestline = ""
+        handler.command = None
+        handler.close_connection = True
+        handler.raw_requestline = handler.rfile.readline()
+        handler.parse_request()
+        with contextlib.redirect_stdout(io.StringIO()):
+            getattr(handler, "do_" + handler.command)()
+        head, _, body = handler.wfile.getvalue().partition(b"\r\n\r\n")
+        return int(head.split(b" ")[1]), body
+
+    @staticmethod
+    def request(method, path, *, host="127.0.0.1:8787", body=b"",
+                headers=()):
+        lines = [f"{method} {path} HTTP/1.1", f"Host: {host}"]
+        lines += list(headers)
+        if method == "POST" and not any(
+                h.lower().startswith("content-length") for h in headers):
+            lines.append(f"Content-Length: {len(body)}")
+        return ("\r\n".join(lines) + "\r\n\r\n").encode() + body
+
+    def test_desktop_serves_only_the_health_check(self):
+        handler, calls = self.handler(server_only=False)
+
+        self.assertEqual(
+            self.drive(handler, self.request("GET", "/health")),
+            (200, b"ok"))
+        for path in ("/", "/source", "/license"):
+            with self.subTest(path=path):
+                status, _ = self.drive(handler, self.request("GET", path))
+                self.assertEqual(status, 404)
+        status, _ = self.drive(handler, self.request(
+            "POST", "/v1/audio/transcriptions", body=b"RIFF-audio",
+            headers=("Content-Type: text/plain",
+                     f"Authorization: Bearer {self.TOKEN}")))
+        self.assertEqual(status, 404)
+        self.assertEqual(calls, [])
+
+    def test_a_web_page_is_refused_even_on_the_health_check(self):
+        handler, _ = self.handler(server_only=False)
+        for request in (
+                self.request("GET", "/health", headers=(
+                    "Origin: https://evil.example",)),
+                self.request("GET", "/health", host="evil.example:8787")):
+            with self.subTest(request=request):
+                status, _ = self.drive(handler, request)
+                self.assertEqual(status, 403)
+
+    def test_server_mode_transcribes_only_for_the_token_holder(self):
+        handler, calls = self.handler(server_only=True)
+        audio = b"RIFF-short-audio"
+
+        refused = {
+            "no token": self.request(
+                "POST", "/v1/audio/transcriptions", body=audio),
+            "wrong token": self.request(
+                "POST", "/v1/audio/transcriptions", body=audio,
+                headers=("Authorization: Bearer " + "b" * 64,)),
+            "browser origin": self.request(
+                "POST", "/v1/audio/transcriptions", body=audio,
+                headers=(f"Authorization: Bearer {self.TOKEN}",
+                         "Origin: https://evil.example")),
+            "rebound host": self.request(
+                "POST", "/v1/audio/transcriptions", body=audio,
+                host="evil.example:8787",
+                headers=(f"Authorization: Bearer {self.TOKEN}",)),
+            "oversized body": self.request(
+                "POST", "/v1/audio/transcriptions", body=audio,
+                headers=(f"Authorization: Bearer {self.TOKEN}",
+                         f"Content-Length: {26 * 1024 * 1024}")),
+            "no length": self.request(
+                "POST", "/v1/audio/transcriptions",
+                headers=(f"Authorization: Bearer {self.TOKEN}",
+                         "Content-Length: -1")),
+        }
+        for reason, request in refused.items():
+            with self.subTest(reason=reason):
+                status, _ = self.drive(handler, request)
+                self.assertIn(status, {401, 403, 411, 413})
+        self.assertEqual(calls, [])
+
+        status, body = self.drive(handler, self.request(
+            "POST", "/v1/audio/transcriptions", host="192.0.2.10:8787",
+            body=audio, headers=(f"Authorization: Bearer {self.TOKEN}",)))
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"text": "Insert my address."})
+        self.assertEqual(calls, [
+            ("decode", audio), ("clean", "Insert my address.")])
+
+    def test_a_failed_request_reveals_no_local_detail(self):
+        handler, _ = self.handler(server_only=True)
+        handler_ns = handler.do_POST.__globals__
+        handler_ns["decode_audio"] = lambda path: (_ for _ in ()).throw(
+            RuntimeError(f"ffmpeg failed: {path}: /Users/someone/secret"))
+
+        status, body = self.drive(handler, self.request(
+            "POST", "/v1/audio/transcriptions", body=b"bad",
+            headers=(f"Authorization: Bearer {self.TOKEN}",)))
+
+        self.assertEqual(status, 500)
+        self.assertNotIn(b"/Users", body)
+
+    def test_phone_text_never_expands_snippets_or_feeds_the_history(self):
+        logged = []
+        ns = load_definitions(
+            "phone_clean",
+            extra={
+                "collapse_repeats": lambda raw: (raw, False),
+                "is_hallucination": lambda raw, language: False,
+                "looks_like_prompt_echo": lambda raw: False,
+                "apply_learned_fixes": lambda raw: raw,
+                "match_snippet": lambda raw: (
+                    "address", "742 Evergreen Terrace, Springfield"),
+                "_load_snippet_map": lambda: {
+                    "address": "742 Evergreen Terrace, Springfield"},
+                "_mask_snippets_inline": lambda raw, snippets: (
+                    raw.replace("address", "\ue000"),
+                    {"\ue000": snippets["address"]}),
+                "_restore_snippet_sentinels": lambda text, restore: (
+                    text.replace("\ue000", restore["\ue000"])),
+                "extract_tone_override": lambda raw: (raw, None),
+                "needs_llm_cleanup": lambda *args, **kwargs: False,
+                "quick_clean": lambda raw, verbatim=False, language="en": raw,
+                "llm_clean": lambda raw, tone: raw,
+                "apply_vocabulary_casing": lambda text: text,
+                "TONE": {"default": ""},
+                "append_transcript": lambda *args, **kwargs:
+                    logged.append(args),
+            },
+        )
+
+        text = ns["phone_clean"]("Insert my address.")
+
+        self.assertEqual(text, "Insert my address.")
+        self.assertNotIn("Evergreen", text)
+        self.assertEqual(logged, [])
+
+    def test_decoding_is_bounded_in_length_and_time(self):
+        seen = {}
+
+        def run(command, **kwargs):
+            seen["command"] = command
+            if kwargs.get("timeout") is None:
+                raise AssertionError("ffmpeg would run without a time limit")
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+        ns = load_definitions(
+            "decode_audio",
+            assignments=("PHONE_MAX_AUDIO_SECONDS", "PHONE_DECODE_TIMEOUT"),
+            extra={"subprocess": SimpleNamespace(
+                run=run, TimeoutExpired=subprocess.TimeoutExpired),
+                   "SAMPLE_RATE": 16000, "np": np},
+        )
+        with self.assertRaises(subprocess.TimeoutExpired):
+            ns["decode_audio"]("/tmp/upload.audio")
+        command = seen["command"]
+        self.assertEqual(command[command.index("-t") + 1], "600")
 
 
 class _FakePasteboardItem:

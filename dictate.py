@@ -10287,15 +10287,22 @@ def parse_multipart(content_type: str, body: bytes) -> dict:
     return parts
 
 
+PHONE_MAX_BODY = 25 * 1024 * 1024    # the transcription API's own ceiling
+PHONE_MAX_AUDIO_SECONDS = 600        # longer uploads are cut, not decoded
+PHONE_DECODE_TIMEOUT = 60
+PHONE_TOKEN = {"value": ""}          # bearer token, set at --server-only start
+
+
 def decode_audio(path: str) -> np.ndarray:
     """Any container -> 16k mono float32 via ffmpeg. Deliberately avoids
     mlx_whisper.audio.load_audio: that touches MLX, and any MLX call outside
     the single ASR_POOL thread aborts the process (Metal is one-thread-only
     for us)."""
     p = subprocess.run(
-        ["ffmpeg", "-nostdin", "-i", path, "-f", "s16le", "-ac", "1",
+        ["ffmpeg", "-nostdin", "-i", path,
+         "-t", str(PHONE_MAX_AUDIO_SECONDS), "-f", "s16le", "-ac", "1",
          "-ar", str(SAMPLE_RATE), "pipe:1"],
-        capture_output=True)
+        capture_output=True, timeout=PHONE_DECODE_TIMEOUT)
     if p.returncode != 0:
         raise RuntimeError("ffmpeg failed: " + p.stderr.decode()[-200:])
     return np.frombuffer(p.stdout, np.int16).astype(np.float32) / 32768.0
@@ -10313,41 +10320,27 @@ def lan_ip() -> str:
 
 
 def phone_clean(raw: str) -> str:
-    """The local pipeline, minus app context: snippets, tone override,
-    quick/LLM routing, transcript logging."""
+    """The local pipeline for network audio, minus app context: tone
+    override and quick/LLM routing.
+
+    Snippets are never expanded and nothing is logged: whoever holds the
+    token must not be able to read a saved snippet back or write into the
+    history the vocabulary miner learns from.
+    """
     language = current_language()
     raw, looped = collapse_repeats(raw)
     if not raw or is_hallucination(raw, language) \
             or (looks_like_prompt_echo(raw) and looped):
         return ""
     raw = apply_learned_fixes(raw)
-    hit = match_snippet(raw)
-    if hit is not None:
-        return hit[1]
-    # Inline snippet expansion, parity with the desktop pipeline. This path has
-    # no proof-checked LLM reconstruction, so when a trigger fires we shield it
-    # behind a sentinel and force the deterministic no-LLM route — the sentinel
-    # is never handed to the model — then restore the exact expansion after
-    # cleanup. With no trigger the mapping is empty and this path is unchanged.
-    masked, snippet_restore = _mask_snippets_inline(raw, _load_snippet_map())
-    if snippet_restore:
-        raw = masked
     raw, tone_override = extract_tone_override(raw)
     verbatim = tone_override == "verbatim"
     needs_llm = needs_llm_cleanup(
-        raw, tone_override, verbatim, language=language) \
-        and not snippet_restore
+        raw, tone_override, verbatim, language=language)
     tone_key = tone_override if tone_override in TONE else "default"
     text = llm_clean(raw, TONE[tone_key]) if needs_llm \
         else quick_clean(raw, verbatim=verbatim, language=language)
-    text = apply_vocabulary_casing(text)   # user's canonical term casing
-    if snippet_restore:
-        text = _restore_snippet_sentinels(text, snippet_restore)
-        raw = _restore_snippet_sentinels(raw, snippet_restore)
-    if text:
-        append_transcript(raw, text, "ios.diction", "phone",
-                          language=language)
-    return text
+    return apply_vocabulary_casing(text)   # user's canonical term casing
 
 
 def source_metadata() -> dict[str, str]:
@@ -10567,7 +10560,31 @@ def local_license_notice() -> str:
     return "\n".join(sections)
 
 
+def phone_host_allowed(host: str) -> bool:
+    """Accept an address or a local name; a DNS-rebinding page sends its own
+    domain as the Host."""
+    host = (host or "").strip().lower()
+    if host.startswith("["):
+        name = host[1:host.find("]")] if "]" in host else ""
+        return bool(re.fullmatch(r"[0-9a-f:.]+", name))
+    name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    return bool(re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", name)) \
+        or name == "localhost" or name.endswith(".local")
+
+
+def phone_token_matches(authorization: str) -> bool:
+    expected = PHONE_TOKEN["value"]
+    scheme, _, supplied = (authorization or "").partition(" ")
+    if not expected or scheme.lower() != "bearer":
+        return False
+    # Comparing digests keeps the comparison time independent of the token.
+    return hashlib.sha256(supplied.strip().encode()).digest() \
+        == hashlib.sha256(expected.encode()).digest()
+
+
 class PhoneHandler(BaseHTTPRequestHandler):
+    timeout = 30                            # a stalled client is dropped
+
     def log_message(self, *args):
         pass                                # our own log lines are enough
 
@@ -10578,16 +10595,27 @@ class PhoneHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _refuse_browser(self) -> bool:
+        """Browsers send Origin; the phone app and the installers do not."""
+        if self.headers.get("Origin") is None \
+                and phone_host_allowed(self.headers.get("Host", "")):
+            return False
+        self._reply(403, b"forbidden", "text/plain")
+        return True
+
     def do_GET(self):
-        if self.path in ("/", "/health"):
+        # The desktop listener exists only for the installers' health probe.
+        if self._refuse_browser():
+            return
+        if self.path == "/health":
             self._reply(200, b"ok", "text/plain")
-        elif self.path == "/source":
+        elif SERVER_ONLY and self.path == "/source":
             self._reply(
                 200,
                 json.dumps(source_metadata(), sort_keys=True).encode(),
                 "application/json",
             )
-        elif self.path == "/license":
+        elif SERVER_ONLY and self.path == "/license":
             self._reply(
                 200,
                 local_license_notice().encode(),
@@ -10597,13 +10625,28 @@ class PhoneHandler(BaseHTTPRequestHandler):
             self._reply(404, b"not found", "text/plain")
 
     def do_POST(self):
-        if not self.path.startswith("/v1/audio/transcriptions"):
+        if not SERVER_ONLY \
+                or not self.path.startswith("/v1/audio/transcriptions"):
             self._reply(404, b"not found", "text/plain")
+            return
+        if self._refuse_browser():
+            return
+        if not phone_token_matches(self.headers.get("Authorization", "")):
+            self._reply(401, b'{"error":"unauthorized"}', "application/json")
+            return
+        length = self.headers.get("Content-Length", "").strip()
+        if not length.isdigit():
+            self._reply(411, b'{"error":"length required"}',
+                        "application/json")
+            return
+        if int(length) > PHONE_MAX_BODY:
+            self._reply(413, b'{"error":"audio too large"}',
+                        "application/json")
             return
         try:
             LAST_USE["t"] = time.time()
             t0 = time.time()
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            body = self.rfile.read(int(length))
             ctype = self.headers.get("Content-Type", "")
             fmt = b"json"
             if "multipart/form-data" in ctype:
@@ -10633,8 +10676,8 @@ class PhoneHandler(BaseHTTPRequestHandler):
                 self._reply(200, json.dumps({"text": text}).encode(),
                             "application/json")
         except Exception as e:
-            print(f"! phone request failed: {e}")
-            self._reply(500, json.dumps({"error": str(e)}).encode(),
+            print(f"! phone request failed: {type(e).__name__}")
+            self._reply(500, b'{"error":"transcription failed"}',
                         "application/json")
 
 
@@ -10653,8 +10696,14 @@ def phone_server():
         print(f"! phone endpoint disabled: {e}")
         return
     display_host = lan_ip() if SERVER_ONLY else bind_host
-    print(f"Phone endpoint: http://{display_host}:{PHONE_PORT}"
-          f"/v1/audio/transcriptions")
+    if SERVER_ONLY:
+        PHONE_TOKEN["value"] = os.urandom(32).hex()
+        print(f"Phone endpoint: http://{display_host}:{PHONE_PORT}"
+              f"/v1/audio/transcriptions")
+        print("Phone endpoint token, shown once; send it as "
+              f"'Authorization: Bearer <token>': {PHONE_TOKEN['value']}")
+    else:
+        print(f"Health endpoint: http://{display_host}:{PHONE_PORT}/health")
     srv.serve_forever()
 
 
