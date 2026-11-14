@@ -337,7 +337,11 @@ parakeet_helper="$DIR/.models/bin/parrot-asr-helper"
 dictate_log="$DIR/dictate.log"
 ollama_log="$DIR/ollama.log"
 install_log="$DIR/install.log"
-qwen_manifest="${OLLAMA_MODELS:-$HOME/.ollama/models}/manifests/registry.ollama.ai/library/qwen3.5/4b"
+# Whisper Face's Ollama service sets no OLLAMA_MODELS, so its models live in
+# Ollama's default store. A value exported in the user's shell names another
+# Ollama's store, and the manifest check dictate.py runs would read it too.
+unset OLLAMA_MODELS
+qwen_manifest="$HOME/.ollama/models/manifests/registry.ollama.ai/library/qwen3.5/4b"
 
 # --- Installer log ----------------------------------------------------------
 # A failed install used to leave nothing to read. Homebrew, a multi-gigabyte

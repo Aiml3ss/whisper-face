@@ -817,6 +817,32 @@ class InstallerContractTests(unittest.TestCase):
             self.assertEqual(result.stdout.strip(), "verify_qwen=0")
             self.assertNotIn("refused", result.stderr)
 
+    def test_the_cleanup_model_is_looked_for_where_the_service_keeps_it(self):
+        # com.berg.ollama.plist sets no OLLAMA_MODELS, so the service stores
+        # models in Ollama's default place. A value exported in the user's
+        # shell made a rerun miss the installed model, read the service as
+        # one "left without a model", and unload a working cleanup service.
+        start = self.shell.index("\nlaunch_dir=") + 1
+        end = self.shell.index("\n", self.shell.index("\nqwen_manifest=") + 1)
+        paths = self.shell[start:end] + "\n"
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                ["/bin/bash", "-c",
+                 "set -euo pipefail\nDIR=/checkout\n" + paths
+                 + 'echo "$qwen_manifest"\n'
+                 + 'env | grep -c "^OLLAMA_MODELS=" || true\n'],
+                env={"HOME": directory, "PATH": "/usr/bin:/bin",
+                     "OLLAMA_MODELS": "/Volumes/Other/ollama-models"},
+                text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest, exported = result.stdout.split()
+            self.assertEqual(
+                manifest,
+                f"{directory}/.ollama/models/manifests/registry.ollama.ai/"
+                "library/qwen3.5/4b")
+            # Nor does the manifest check dictate.py runs read another store.
+            self.assertEqual(exported, "0")
+
     def test_setup_never_stops_or_fights_someone_elses_ollama(self):
         with tempfile.TemporaryDirectory() as directory:
             variables, stubs = self.ollama_sandbox(directory, listener=4242)
