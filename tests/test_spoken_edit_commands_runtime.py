@@ -5,6 +5,7 @@
 """Runtime seam tests for opt-in, stateless spoken edit commands."""
 
 import sys
+import unicodedata
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -90,7 +91,10 @@ def runtime_namespace(*, enabled, is_macos, last_insertion=None, snapshot=None):
     return load_definitions(
         "apply_spoken_edit_command",
         "_press_edit_chord",
+        "grapheme_count",
+        "_grapheme_attaches",
         extra={
+            "unicodedata": unicodedata,
             "IS_MACOS": is_macos,
             "PREFERENCES": {"spoken_edit_commands": enabled},
             "classify_edit_command": classify_edit_command,
@@ -227,6 +231,43 @@ class SpokenEditCommandRuntimeTests(unittest.TestCase):
                 self.assertEqual(last["text"], transformed)
                 self.assertEqual(
                     runtime["LAST_INSERTION"]["text"], transformed)
+
+    def test_tier2_rewrite_never_reaches_the_users_own_text(self):
+        # A skin-toned thumbs-up and a flag are one character each on screen
+        # but two code points each, and Shift+Left steps over one character.
+        user = list("Note: ")
+        inserted = list("thanks ") + [
+            "\U0001F44D\U0001F3FD", " ", "\U0001F1FA\U0001F1F8"]
+        field = {"characters": user + inserted, "anchor": None}
+        text = "".join(field["characters"])
+        last = {"text": "".join(inserted),
+                "element": _snapshot("elem-A", "", (0, 0)),
+                "bundle": BUNDLE, "utterance_id": "u1"}
+        runtime = runtime_namespace(
+            enabled=True, is_macos=True, last_insertion=last,
+            snapshot=_snapshot("elem-A", text, (len(text), 0)))
+        key = _FAKE_KEYBOARD.Key
+
+        def press(*keys):
+            if keys == (key.shift, key.left):
+                head = (len(field["characters"]) if field["anchor"] is None
+                        else field["anchor"])
+                field["anchor"] = max(0, head - 1)
+
+        def paste(replacement):
+            start = (len(field["characters"]) if field["anchor"] is None
+                     else field["anchor"])
+            field["characters"][start:] = [replacement]
+            field["anchor"] = None
+
+        runtime["_press_edit_chord"] = press
+        runtime["paste"] = paste
+        self.assertTrue(runtime["apply_spoken_edit_command"](
+            "Uppercase that.", _rec(), BUNDLE))
+
+        self.assertEqual(
+            "".join(field["characters"]),
+            "Note: THANKS \U0001F44D\U0001F3FD \U0001F1FA\U0001F1F8")
 
     def test_tier2_fail_closed_on_focus_drift(self):
         # Same text before the caret, but a different field element: never edit.

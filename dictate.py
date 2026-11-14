@@ -1307,7 +1307,6 @@ PIPELINE_STATE = {
     "last_alternatives": [],
     "last_cleanup_edits": [],
     "last_mode": "capture",
-    "last_readback_shape": "",
     "last_compiler_decisions": 0,
     "last_compiler_details": [],
     "last_protected_anchors": 0,
@@ -8730,7 +8729,45 @@ def _coerce_range(value) -> tuple[int, int] | None:
     return (int(match.group(1)), int(match.group(2))) if match else None
 
 
-def _ax_selection(element, text: str | None) -> tuple[int, int] | None:
+def utf16_range_to_code_points(text: str, utf16_range: tuple[int, int]) \
+        -> tuple[int, int] | None:
+    """Translate an Accessibility range into (start, length) indices of text.
+
+    Accessibility counts UTF-16 code units, as NSString does, while the bridged
+    value is a Python string indexed by code point: every character outside
+    the Basic Multilingual Plane, which is most emoji, is two units there and
+    one here. A range that runs past the text or splits a surrogate pair does
+    not describe this text, so it converts to None.
+    """
+    location, length = utf16_range
+    encoded = text.encode("utf-16-le", "surrogatepass")
+    end = location + length
+    if location < 0 or length < 0 or 2 * end > len(encoded):
+        return None
+    if len(encoded) == 2 * len(text):
+        return location, length
+    try:
+        start = len(encoded[:2 * location].decode("utf-16-le"))
+        stop = len(encoded[:2 * end].decode("utf-16-le"))
+    except UnicodeDecodeError:
+        return None
+    return start, stop - start
+
+
+def code_points_to_utf16_range(text: str, selection: tuple[int, int]) \
+        -> tuple[int, int] | None:
+    """The inverse of utf16_range_to_code_points, for writing a range back."""
+    start, length = selection
+    if start < 0 or length < 0 or start + length > len(text):
+        return None
+    before = len(text[:start].encode("utf-16-le", "surrogatepass")) // 2
+    span = len(text[start:start + length].encode(
+        "utf-16-le", "surrogatepass")) // 2
+    return before, span
+
+
+def _ax_reported_range(element) -> tuple[int, int] | None:
+    """AXSelectedTextRange exactly as reported: UTF-16 code units."""
     try:
         from ApplicationServices import (
             AXValueGetType,
@@ -8750,6 +8787,19 @@ def _ax_selection(element, text: str | None) -> tuple[int, int] | None:
             return _coerce_range(extracted)
     except Exception:
         pass
+    return None
+
+
+def _ax_selection(element, text: str | None) -> tuple[int, int] | None:
+    """The field's selection as (start, length) code-point indices of text."""
+    reported = _ax_reported_range(element)
+    if reported is not None:
+        # The lease, the join prefix, the readback and undo all slice text
+        # with this range, so it changes units here and nowhere else. A range
+        # that does not fit the text is withheld rather than guessed at.
+        if text is None:
+            return reported
+        return utf16_range_to_code_points(text, reported)
     # When a field exposes only selected text, locate a unique occurrence.
     try:
         from ApplicationServices import kAXSelectedTextAttribute
@@ -9071,24 +9121,12 @@ def resolve_insertion_target(rec, timeout: float = 0.12, reader=None,
         sleeper(min(0.02, remaining))
 
 
-READBACK_TIMEOUT = 0.02
-# Chromium publishes its accessibility value well after the paste actually
-# lands, so the tight native window reads stale text, calls a good insertion a
-# conflict, and fails it closed into the Voice Outbox. Electron targets get
-# room to catch up; native fields still verify on the first read.
-READBACK_TIMEOUT_ELECTRON = 0.35
-
-
-def readback_timeout_for_frontmost() -> float:
-    """Pick the readback window for whichever app is receiving this paste."""
-    if not IS_MACOS:
-        return READBACK_TIMEOUT
-    try:
-        app = NSWorkspace.sharedWorkspace().frontmostApplication()
-    except Exception:
-        return READBACK_TIMEOUT             # unreadable app: keep the default
-    return (READBACK_TIMEOUT_ELECTRON if is_electron_app(app)
-            else READBACK_TIMEOUT)
+# Chromium, in browsers and Electron apps alike, publishes its accessibility
+# value tens to hundreds of milliseconds after the paste lands, and reading
+# stale text calls a good insertion a conflict. The readback returns on the
+# first matching read, so a native field still verifies at once; only a
+# field that never matches waits out the whole window, after the paste.
+READBACK_TIMEOUT = 0.4
 
 
 def classify_readback_conflict(observed: str | None, expected: str) -> str:
@@ -9117,7 +9155,7 @@ def classify_readback_conflict(observed: str | None, expected: str) -> str:
 
 
 def insertion_readback(snapshot: FocusSnapshot, inserted: str,
-                       timeout: float = 0.02, reader=None,
+                       timeout: float = READBACK_TIMEOUT, reader=None,
                        clock=None, sleeper=None) -> ReadbackResult:
     """Prove the exact field mutation after paste without ever retrying it."""
     if snapshot.text is None or snapshot.selection is None:
@@ -9257,7 +9295,7 @@ def commit_insertion(rec, text: str, bundle: str,
         rec, lease, current, paste_available=True)
 
     def readback():
-        """Read back, and file the conflict shape so a repeat is diagnosable.
+        """Read back; the receipt carries the result's conflict shape.
 
         The shape is a category from READBACK_CONFLICT_SHAPES, never text, so
         one app failing every paste is finally identifiable from the private
@@ -9265,10 +9303,7 @@ def commit_insertion(rec, text: str, bundle: str,
         """
         if current is None or lease.opaque:
             return ReadbackResult.unverifiable()
-        result = insertion_readback(
-            current, text, timeout=readback_timeout_for_frontmost())
-        PIPELINE_STATE["last_readback_shape"] = result.detail or ""
-        return result
+        return insertion_readback(current, text, timeout=READBACK_TIMEOUT)
 
     current_bundle = frontmost_bundle()
     receipt = INSERTION_COORDINATOR.commit(
@@ -9408,13 +9443,19 @@ class UndoableInsertion:
 
 
 def undo_utterance_id(utterance_id: str) -> str:
-    """Namespace an undo inside the coordinator that owns the insertion.
+    """Name an undo after the insertion it reverses.
 
-    Sharing the coordinator is what makes undo single-use for free: a second
-    attempt cannot stage the same id twice, and a committed entry is terminal
-    before any keystroke is synthesized.
+    The undo coordinator cannot stage the same id twice, so an insertion can
+    be undone once, and a committed entry is terminal before any keystroke
+    is synthesized.
     """
     return f"undo:{utterance_id}"
+
+
+# Undo stages here and never in INSERTION_COORDINATOR, whose recoverable
+# entries are the Voice Outbox: an undo payload is the text a dictation
+# replaced, usually nothing, and never a dictation waiting to be delivered.
+UNDO_COORDINATOR = InsertionCoordinator()
 
 
 def build_undoable_insertion(rec, snapshot: "FocusSnapshot | None",
@@ -9488,35 +9529,147 @@ def undo_refusal(reason: str) -> dict:
     return {"undone": False, "reason": reason}
 
 
+def _grapheme_attaches(character: str) -> bool:
+    """True for a code point that never starts a character of its own.
+
+    Combining marks, plus what unicodedata does not call one: the joiners,
+    the Thai and Lao vowels that attach, halfwidth sound marks, variation
+    selectors, skin tones and emoji tags.
+    """
+    code = ord(character)
+    return (unicodedata.category(character) in ("Mn", "Mc", "Me")
+            or unicodedata.combining(character) != 0
+            or code in (0x200C, 0x200D, 0x0E33, 0x0EB3, 0xFF9E, 0xFF9F)
+            or 0xFE00 <= code <= 0xFE0F
+            or 0x1F3FB <= code <= 0x1F3FF
+            or 0xE0020 <= code <= 0xE007F
+            or 0xE0100 <= code <= 0xE01EF)
+
+
+def grapheme_count(text: str) -> int:
+    """Count the characters a caret steps over, as Shift+Left does.
+
+    An emoji with a skin tone, a flag, a ZWJ family, a keycap or a letter
+    with combining accents is one step though it is several code points.
+    Where Unicode's segmentation rules and this approximation could differ,
+    it joins rather than splits: a count that is too low leaves part of an
+    insertion in place, while one that is too high selects the user's text.
+    """
+    prepend = frozenset((
+        *range(0x0600, 0x0606), 0x06DD, 0x070F, 0x0890, 0x0891, 0x08E2,
+        0x0D4E, 0x110BD, 0x110CD, 0x111C2, 0x111C3, 0x1193F, 0x11941,
+        0x11A3A, *range(0x11A84, 0x11A8A), 0x11D46, 0x11F02))
+
+    def hangul(code: int) -> bool:
+        return (0x1100 <= code <= 0x11FF or 0xA960 <= code <= 0xA97F
+                or 0xAC00 <= code <= 0xD7A3 or 0xD7B0 <= code <= 0xD7FF)
+
+    count = 0
+    previous = None
+    regional_run = 0
+    for character in text:
+        code = ord(character)
+        regional = 0x1F1E6 <= code <= 0x1F1FF
+        before = ord(previous) if previous is not None else -1
+        joins = previous is not None and (
+            _grapheme_attaches(character)
+            or before == 0x200D
+            or (previous == "\r" and character == "\n")
+            or before in prepend
+            or (regional and regional_run % 2 == 1)
+            # An Indic virama fuses the next consonant into a conjunct.
+            or (unicodedata.combining(previous) == 9
+                and unicodedata.category(character).startswith("L"))
+            # Conjoining jamo, and a syllable after a leading consonant.
+            or (hangul(code) and not 0xAC00 <= code <= 0xD7A3
+                and hangul(before))
+            or (0xAC00 <= code <= 0xD7A3
+                and (0x1100 <= before <= 0x115F
+                     or 0xA960 <= before <= 0xA97F)))
+        if not joins:
+            count += 1
+        regional_run = regional_run + 1 if regional else 0
+        previous = character
+    return count
+
+
+def _ax_select_text_range(element, text: str, selection: tuple[int, int],
+                          expected: str, timeout: float = READBACK_TIMEOUT,
+                          clock=None, sleeper=None) -> bool | None:
+    """Select a code-point range of a field through Accessibility.
+
+    True only once the field reports exactly that range holding ``expected``.
+    None when the field does not take a selection this way, which leaves the
+    caret untouched for keyboard selection. False when the range does not
+    fit the text, or a request was made but never confirmed: the selection
+    may then be anywhere, so nothing may be deleted from it. Chromium applies
+    the request asynchronously, so the confirmation is polled for, like a
+    readback.
+    """
+    target = code_points_to_utf16_range(text, selection)
+    if target is None:
+        return False
+    try:
+        from ApplicationServices import (
+            AXUIElementIsAttributeSettable,
+            AXUIElementSetAttributeValue,
+            AXValueCreate,
+            kAXSelectedTextAttribute,
+            kAXSelectedTextRangeAttribute,
+            kAXValueCFRangeType,
+        )
+        err, settable = AXUIElementIsAttributeSettable(
+            element, kAXSelectedTextRangeAttribute, None)
+    except Exception:
+        return None
+    if err or not settable:
+        return None
+    clock = clock or time.monotonic
+    sleeper = sleeper or time.sleep
+    deadline = clock() + max(0.0, timeout)
+    try:
+        AXUIElementSetAttributeValue(
+            element, kAXSelectedTextRangeAttribute,
+            AXValueCreate(kAXValueCFRangeType, target))
+        while True:
+            selected = _ax_attribute(element, kAXSelectedTextAttribute)
+            if (_ax_reported_range(element) == target
+                    and (selected is None or selected == expected)):
+                return True
+            remaining = deadline - clock()
+            if remaining <= 0:
+                return False
+            sleeper(min(0.02, remaining))
+    except Exception:
+        return False
+
+
 @with_cocoa_pool
 def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
                         coordinator=None, presser=None, paster=None,
-                        readback=None) -> dict:
+                        readback=None, selector=None) -> dict:
     """Put the destination back exactly as it was before the last insertion.
 
     Undo is an insertion in reverse and is held to the same standard: it
-    stages against the same coordinator, validates against the same
-    ``DestinationObservation`` comparison, proves the result with the same
+    validates against the same ``DestinationObservation`` comparison, makes
+    one attempt through a coordinator, proves the result with the same
     readback, and reports the same content-free receipt vocabulary. If focus
     moved, the caret moved, or the surrounding text changed, it refuses and
     says which, rather than deleting whatever happens to be there now.
     """
     snapshot_reader = snapshot_reader or focused_snapshot
     bundle_reader = bundle_reader or frontmost_bundle
-    coordinator = coordinator or INSERTION_COORDINATOR
+    coordinator = coordinator or UNDO_COORDINATOR
     presser = presser or _press_edit_chord
     paster = paster or paste
     readback = readback or insertion_readback
+    selector = selector or _ax_select_text_range
     with UNDOABLE_INSERTION["lock"]:
         record = UNDOABLE_INSERTION["record"]
         if record is None:
             return undo_refusal("nothing_to_undo")
         if len(record.inserted) > UNDO_MAX_CHARACTERS:
             return undo_refusal("too_long_to_undo")
-        # Claim it before any platform work. A second press while the first
-        # undo is still synthesizing keystrokes finds nothing to undo, which
-        # is the same answer the coordinator would give a moment later.
-        UNDOABLE_INSERTION["record"] = None
 
     undo_id = undo_utterance_id(record.utterance_id)
     lease = InsertionLease.capture(
@@ -9529,21 +9682,40 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
             selection=record.caret,
         )) or "",
     )
+    current = snapshot_reader()
+    observation = destination_observation(current, bundle_reader())
+    # Refuse before claiming anything. Nothing has touched the field, so the
+    # same undo stays available for when the caret is back where it was.
+    refusal = coordinator.validate(lease, observation)
+    if refusal is not None:
+        print(f"[undo] refused ({refusal.value})")
+        return undo_refusal(refusal.value)
+    with UNDOABLE_INSERTION["lock"]:
+        # A second press, or a newer dictation, may have got here first.
+        if UNDOABLE_INSERTION["record"] is not record:
+            return undo_refusal("nothing_to_undo")
+        UNDOABLE_INSERTION["record"] = None
     try:
         coordinator.stage(lease, record.replaced)
     except ValueError:
         # Already staged: this insertion has been undone once already.
         return undo_refusal("already_undone")
 
-    current = snapshot_reader()
-    observation = destination_observation(current, bundle_reader())
-
     def perform(replacement: str) -> None:
         # Select exactly the inserted characters, then substitute in one
         # step, so no interval exists where the text is gone and its
         # replacement is not yet there.
-        for _ in range(len(record.inserted)):
-            presser(keyboard.Key.shift, keyboard.Key.left)
+        selected = selector(current.element, current.text,
+                            record.inserted_range, record.inserted)
+        if selected is False:
+            # The selection is somewhere this could not confirm, and deleting
+            # it could take the user's own text with it.
+            raise RuntimeError("undo selection was not confirmed")
+        if selected is None:
+            # Shift+Left steps over whole user-perceived characters, so the
+            # count is of those and never of code points.
+            for _ in range(grapheme_count(record.inserted)):
+                presser(keyboard.Key.shift, keyboard.Key.left)
         if replacement:
             paster(replacement)
         else:
@@ -9559,10 +9731,13 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
                 selection=record.inserted_range,
             ),
             record.replaced,
-            timeout=readback_timeout_for_frontmost(),
+            timeout=READBACK_TIMEOUT,
         )
 
     receipt = coordinator.commit(undo_id, observation, perform, prove)
+    # What undo staged is the text the dictation replaced, never something
+    # waiting to be delivered, so no payload outlives the attempt.
+    coordinator.acknowledge(undo_id)
     if receipt.state == ReceiptState.VERIFIED:
         # Suppress before announcing: the correction watcher may still be
         # inside its ten-second window on this very utterance.
@@ -11075,8 +11250,9 @@ def apply_spoken_edit_command(recognized_raw: str, rec, bundle: str) -> bool:
             return True
         # Select exactly the inserted characters, then paste over the selection
         # so the substitution is atomic: no interval exists where the text is
-        # deleted but its replacement is not yet in place.
-        for _ in range(len(inserted)):
+        # deleted but its replacement is not yet in place. Shift+Left steps
+        # over whole characters, so the count is of those, not code points.
+        for _ in range(grapheme_count(inserted)):
             _press_edit_chord(keyboard.Key.shift, keyboard.Key.left)
         paste(transformed)
         LAST_INSERTION["text"] = transformed
@@ -12042,7 +12218,9 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 if integrity_receipt is not None else "unsupported_field"),
             # How the destination differed, as a category only. Empty unless
             # a readback conflict happened.
-            "readback_shape": PIPELINE_STATE["last_readback_shape"],
+            "readback_shape": (
+                integrity_receipt.readback_shape
+                if integrity_receipt is not None else ""),
             "paste_attempted": attempted,
             "insertion_verified": verified,
             # The capability half of a compatibility observation. Absent

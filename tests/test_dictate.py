@@ -6714,7 +6714,7 @@ class InsertionAdapterTests(unittest.TestCase):
                     (left is original_element and right is current_element),
                 "insertion_readback": lambda *_args, **_kwargs:
                     ReadbackResult.verified(),
-                "readback_timeout_for_frontmost": lambda: 0.02,
+                "READBACK_TIMEOUT": 0.02,
                 "paste": pasted.append,
                 "PIPELINE_STATE": pipeline,
                 "frontmost_bundle": lambda: "com.openai.codex",
@@ -6751,6 +6751,7 @@ class InsertionAdapterTests(unittest.TestCase):
     def test_readback_proves_the_exact_field_mutation(self):
         ns = load_definitions(
             "insertion_readback",
+            assignments={"READBACK_TIMEOUT"},
             extra={
                 "FocusSnapshot": object,
                 "ReadbackResult": ReadbackResult,
@@ -6767,6 +6768,77 @@ class InsertionAdapterTests(unittest.TestCase):
         )
 
         self.assertEqual(result.state, ReceiptState.VERIFIED)
+
+    def commit_with_lagging_value(self, lag):
+        """Commit into a field whose Accessibility value trails the paste.
+
+        Chromium browsers and Electron apps both publish late, and nothing
+        about the app is consulted: every destination gets the same window.
+        """
+        import unicodedata
+        now = [0.0]
+        field = {"text": "Hello", "pasted_at": None}
+
+        def paste(text):
+            field["pasted_at"] = now[0]
+            field["text"] = "Hello" + text
+
+        def ax_text(_element):
+            if (field["pasted_at"] is None or lag is None
+                    or now[0] < field["pasted_at"] + lag):
+                return "Hello"
+            return field["text"]
+
+        lease = InsertionLease.capture(
+            "utterance-1", "field-a", (5, 0), "Hello")
+        rec = SimpleNamespace(
+            insertion_lease=lease, insertion_receipt=None,
+            bundle_at_press="com.google.Chrome", language="en")
+        ns = load_definitions(
+            "commit_insertion", "insertion_capability_buckets",
+            "insertion_join_prefix", "unresolved_destination_id",
+            "insertion_readback", "classify_readback_conflict",
+            assignments={"READBACK_TIMEOUT"},
+            extra={
+                "INSERTION_COORDINATOR": InsertionCoordinator(),
+                "destination_observation": lambda *_args:
+                    DestinationObservation.capture(
+                        "field-a", (5, 0), "Hello"),
+                "ReadbackResult": ReadbackResult,
+                "unicodedata": unicodedata,
+                "_ax_text": ax_text,
+                "paste": paste,
+                "PIPELINE_STATE": {},
+                "frontmost_bundle": lambda: "com.google.Chrome",
+                "time": SimpleNamespace(
+                    monotonic=lambda: now[0],
+                    sleep=lambda delay: now.__setitem__(0, now[0] + delay)),
+            },
+        )
+        receipt = ns["commit_insertion"](
+            rec, "World.", "com.google.Chrome", SimpleNamespace(
+                element=object(), text="Hello", selection=(5, 0)))
+        return receipt, now[0]
+
+    def test_a_value_published_late_still_verifies_in_any_app(self):
+        receipt, waited = self.commit_with_lagging_value(0.15)
+
+        self.assertEqual(receipt.state, ReceiptState.VERIFIED)
+        # Returned as soon as the value matched, not at the end of the window.
+        self.assertLess(waited, 0.2)
+
+    def test_a_value_published_at_once_is_read_once(self):
+        receipt, waited = self.commit_with_lagging_value(0.0)
+
+        self.assertEqual(receipt.state, ReceiptState.VERIFIED)
+        self.assertEqual(waited, 0.0)
+
+    def test_a_value_that_never_matches_fails_within_the_window(self):
+        receipt, waited = self.commit_with_lagging_value(None)
+
+        self.assertEqual(receipt.state, ReceiptState.CONFLICT)
+        self.assertGreaterEqual(waited, 0.35)
+        self.assertLessEqual(waited, 0.45)
 
     def test_hidden_field_lease_still_binds_to_original_application(self):
         ns = load_definitions(
@@ -6835,7 +6907,7 @@ class InsertionAdapterTests(unittest.TestCase):
                         "field-a", (0, 0), "nearby"),
                 "insertion_readback": lambda *_args, **_kwargs:
                     ReadbackResult.verified(),
-                "readback_timeout_for_frontmost": lambda: 0.02,
+                "READBACK_TIMEOUT": 0.02,
                 "paste": lambda _text: None,
                 "PIPELINE_STATE": {},
                 "frontmost_bundle": lambda: "com.openai.codex",
@@ -6898,6 +6970,44 @@ class InsertionAdapterTests(unittest.TestCase):
         ns["commit_insertion"](rec, "Ship it", "com.openai.codex", object())
 
         self.assertEqual(rec.insertion_capabilities["paste"], "unavailable")
+
+    def test_a_readback_shape_never_outlives_its_utterance(self):
+        ns = self.capability_namespace(
+            InsertionCoordinator(),
+            insertion_readback=lambda *_args, **_kwargs:
+                ReadbackResult.conflict("divergent"),
+        )
+        readable = SimpleNamespace(
+            insertion_lease=InsertionLease.capture(
+                "utterance-1", "field-a", (0, 0), "nearby"),
+            insertion_receipt=None, bundle_at_press="com.openai.codex")
+        first = ns["commit_insertion"](
+            readable, "Ship it", "com.openai.codex", object())
+        self.assertEqual(first.readback_shape, "divergent")
+
+        # Refused before the paste: no readback ran, so there is no shape.
+        drifted = SimpleNamespace(
+            insertion_lease=InsertionLease.capture_opaque(
+                "utterance-2", "com.apple.Terminal:window-7", "context"),
+            insertion_receipt=None, bundle_at_press="com.apple.Terminal")
+        receipt = ns["commit_insertion"](
+            drifted, "Ship it", "com.apple.Terminal", None)
+        self.assertFalse(receipt.paste_attempted)
+        self.assertEqual(receipt.readback_shape, "")
+
+        # A re-insert from the menu commits outside the release order, so it
+        # can land between a dictation's readback and its transcript record.
+        repaste = SimpleNamespace(
+            insertion_lease=InsertionLease.capture_opaque(
+                "repaste:1", "field-a", "nearby"),
+            insertion_receipt=None, bundle_at_press="com.openai.codex")
+        ns["commit_insertion"](repaste, "Ship it", "com.openai.codex", None)
+        self.assertEqual(readable.insertion_receipt.readback_shape,
+                         "divergent")
+
+        legacy = SimpleNamespace(insertion_lease=None, insertion_receipt=None)
+        self.assertIsNone(ns["commit_insertion"](
+            legacy, "Ship it", "com.openai.codex", None))
 
     def test_the_legacy_path_reports_no_capabilities_at_all(self):
         rec = SimpleNamespace(insertion_lease=None, insertion_receipt=None)
@@ -6983,6 +7093,160 @@ class InsertionAdapterTests(unittest.TestCase):
         ])
         with self.assertRaisesRegex(ValueError, "empty"):
             ns["copy_support_snapshot"]("  ")
+
+
+class AccessibilityRangeTests(unittest.TestCase):
+    """Accessibility counts UTF-16 units; the field text counts code points."""
+
+    BUNDLE = "com.apple.Notes"
+    APPLICATION_SERVICES = SimpleNamespace(
+        AXValueGetType=lambda _value: None,
+        AXValueGetValue=lambda *_args: None,
+        kAXSelectedTextRangeAttribute="AXSelectedTextRange",
+        kAXSelectedTextAttribute="AXSelectedText",
+        kAXValueCFRangeType=4,
+    )
+
+    @staticmethod
+    def utf16_units(text):
+        return len(text.encode("utf-16-le")) // 2
+
+    def field(self, text, caret):
+        """A field that reports its caret the way macOS does, in UTF-16."""
+        field = {"text": text, "caret": caret, "element": object()}
+
+        def ax_attribute(_element, attribute):
+            if attribute == "AXSelectedTextRange":
+                return (self.utf16_units(field["text"][:field["caret"]]), 0)
+            return None
+
+        def paste(inserted):
+            # The application inserts at its real caret, which is where the
+            # user sees it, whatever unit Accessibility reports it in.
+            field["text"] = (field["text"][:field["caret"]] + inserted
+                             + field["text"][field["caret"]:])
+            field["caret"] += len(inserted)
+
+        field["ax_attribute"] = ax_attribute
+        field["paste"] = paste
+        return field
+
+    def namespace(self, field, coordinator=None):
+        import unicodedata
+        return load_definitions(
+            "_ax_selection", "_ax_reported_range", "_coerce_range",
+            "utf16_range_to_code_points", "FocusSnapshot",
+            "bounded_focus_text", "focus_destination_id",
+            "focus_destination_matches", "opaque_focus_context",
+            "capture_insertion_lease", "unresolved_destination_id",
+            "destination_observation", "commit_insertion",
+            "insertion_capability_buckets", "insertion_join_prefix",
+            "insertion_readback", "classify_readback_conflict",
+            extra={
+                "dataclass": dataclass,
+                "time": time,
+                "unicodedata": unicodedata,
+                "InsertionLease": InsertionLease,
+                "DestinationObservation": DestinationObservation,
+                "INSERTION_COORDINATOR": coordinator or InsertionCoordinator(),
+                "ReadbackResult": ReadbackResult,
+                "ReceiptState": ReceiptState,
+                "_ax_attribute": field["ax_attribute"],
+                "_ax_text": lambda _element: field["text"],
+                "_ax_elements_equal": lambda left, right: left is right,
+                "frontmost_window_destination": lambda _bundle: None,
+                "frontmost_bundle": lambda: self.BUNDLE,
+                "READBACK_TIMEOUT": 0.0,
+                "paste": field["paste"],
+                "PIPELINE_STATE": {},
+            },
+        )
+
+    def snapshot(self, ns, field):
+        with mock.patch.dict(sys.modules, {
+                "ApplicationServices": self.APPLICATION_SERVICES}):
+            selection = ns["_ax_selection"](field["element"], field["text"])
+        return ns["FocusSnapshot"](
+            element=field["element"], text=field["text"], selection=selection)
+
+    def dictate(self, text, caret, words):
+        """Lease at press, then commit at release, as the runtime does."""
+        field = self.field(text, caret)
+        ns = self.namespace(field)
+        at_press = self.snapshot(ns, field)
+        lease = ns["capture_insertion_lease"](
+            at_press, self.BUNDLE, "utterance-1")
+        rec = SimpleNamespace(
+            insertion_lease=lease, insertion_receipt=None,
+            focus_at_press=at_press, bundle_at_press=self.BUNDLE,
+            language="en")
+        receipt = ns["commit_insertion"](
+            rec, words, self.BUNDLE, self.snapshot(ns, field))
+        return lease, receipt, field["text"]
+
+    def test_an_emoji_before_a_trailing_caret_still_verifies(self):
+        lease, receipt, result = self.dictate(
+            "Sounds good \U0001F44D", len("Sounds good \U0001F44D"),
+            "See you soon.")
+
+        self.assertFalse(lease.opaque)
+        self.assertEqual(receipt.state, ReceiptState.VERIFIED)
+        self.assertEqual(result, "Sounds good \U0001F44D See you soon.")
+
+    def test_a_caret_mid_text_after_an_emoji_joins_and_verifies(self):
+        text = "\U0001F389 Great news, the build is green."
+        caret = text.index(" the build")
+        lease, receipt, result = self.dictate(text, caret, "Ship it.")
+
+        self.assertFalse(lease.opaque)
+        self.assertEqual(receipt.state, ReceiptState.VERIFIED)
+        # The character left of the caret is the comma, so one space joins.
+        self.assertEqual(
+            result,
+            "\U0001F389 Great news, Ship it. the build is green.")
+
+    def test_a_joined_emoji_sequence_before_the_caret_verifies(self):
+        family = "\U0001F468‍\U0001F469‍\U0001F467"
+        text = f"Family photo {family} and \U0001F44D\U0001F3FD"
+        lease, receipt, result = self.dictate(text, len(text), "Lovely.")
+
+        self.assertFalse(lease.opaque)
+        self.assertEqual(receipt.state, ReceiptState.VERIFIED)
+        self.assertEqual(result, text + " Lovely.")
+
+    def test_a_field_without_emoji_still_verifies(self):
+        lease, receipt, result = self.dictate(
+            "Sounds good.", len("Sounds good."), "See you soon.")
+
+        self.assertFalse(lease.opaque)
+        self.assertEqual(receipt.state, ReceiptState.VERIFIED)
+        self.assertEqual(result, "Sounds good. See you soon.")
+
+    def test_a_selection_over_an_emoji_covers_one_code_point(self):
+        field = self.field("Ok \U0001F44D!", 3)
+        ns = self.namespace(field)
+        convert = ns["utf16_range_to_code_points"]
+
+        self.assertEqual(convert("Ok \U0001F44D!", (3, 2)), (3, 1))
+        self.assertEqual(convert("Ok \U0001F44D!", (5, 1)), (4, 1))
+
+    def test_a_range_that_does_not_fit_the_text_is_withheld(self):
+        field = self.field("Ok \U0001F44D!", 3)
+        ns = self.namespace(field)
+        convert = ns["utf16_range_to_code_points"]
+
+        # Inside the surrogate pair, and past the end of the text: neither
+        # describes this text, so nothing downstream may slice with it.
+        self.assertIsNone(convert("Ok \U0001F44D!", (4, 0)))
+        self.assertIsNone(convert("Ok \U0001F44D!", (7, 0)))
+        field["ax_attribute"] = lambda _element, attribute: (
+            (9, 0) if attribute == "AXSelectedTextRange" else None)
+        ns["_ax_attribute"] = field["ax_attribute"]
+        snapshot = self.snapshot(ns, field)
+        self.assertIsNone(snapshot.selection)
+        lease = ns["capture_insertion_lease"](
+            snapshot, self.BUNDLE, "utterance-1")
+        self.assertTrue(lease.opaque)
 
 
 class ElectronAccessibilityTests(unittest.TestCase):
@@ -9194,6 +9458,7 @@ class ReadbackEdgeWhitespaceTests(unittest.TestCase):
         from insertion_integrity import ReadbackResult
         return load_definitions(
             "insertion_readback", "classify_readback_conflict",
+            assignments={"READBACK_TIMEOUT"},
             extra={"ReadbackResult": ReadbackResult, "re": re,
                    "unicodedata": unicodedata},
         )
@@ -10257,7 +10522,7 @@ class UndoLastDictationTests(unittest.TestCase):
             "utterance_was_undone", "build_undoable_insertion",
             "bounded_focus_text", "destination_observation",
             "insertion_readback", "classify_readback_conflict",
-            "FocusSnapshot",
+            "FocusSnapshot", "grapheme_count", "_grapheme_attaches",
             extra={
                 "dataclass": dataclass,
                 "time": time,
@@ -10268,6 +10533,10 @@ class UndoLastDictationTests(unittest.TestCase):
                 "ReadbackResult": ReadbackResult,
                 "ReceiptState": ReceiptState,
                 "INSERTION_COORDINATOR": InsertionCoordinator(),
+                "UNDO_COORDINATOR": InsertionCoordinator(),
+                # A field that does not take a selection through
+                # Accessibility, so undo selects with the keyboard.
+                "_ax_select_text_range": lambda *_args: None,
                 "UNDOABLE_INSERTION": {"record": None,
                                        "lock": threading.RLock()},
                 "UNDONE_UTTERANCES": __import__("collections").deque(
@@ -10287,7 +10556,7 @@ class UndoLastDictationTests(unittest.TestCase):
                     else None),
                 "focus_destination_matches": lambda *_a: True,
                 "opaque_focus_context": lambda _snapshot: "",
-                "readback_timeout_for_frontmost": lambda: 0.0,
+                "READBACK_TIMEOUT": 0.0,
                 "_ax_text": lambda _element: state["text"],
                 "print": lambda *_a, **_k: None,
                 "paste": paste,
@@ -10406,13 +10675,267 @@ class UndoLastDictationTests(unittest.TestCase):
             snapshot_reader=lambda: self._snapshot(ns))
         self.assertTrue(first["undone"])
 
-        # Re-arming the same utterance cannot produce a second undo: the
-        # coordinator already holds a terminal entry for that id.
+        # Re-arming the same utterance cannot produce a second undo, even
+        # against a field that looks exactly as it did after the insertion:
+        # the coordinator already holds a terminal entry for that id.
+        ns["_state"]["text"] = self.BEFORE + self.INSERTED
+        keys_before = list(ns["_state"]["keys"])
         ns["record_undoable_insertion"](self._record(ns))
         second = ns["undo_last_dictation"](
-            snapshot_reader=lambda: self._snapshot(ns, text=self.BEFORE))
+            snapshot_reader=lambda: self._snapshot(ns))
         self.assertFalse(second["undone"])
         self.assertEqual(second["reason"], "already_undone")
+        self.assertEqual(ns["_state"]["keys"], keys_before)
+
+    def test_a_refusal_before_any_keystroke_keeps_the_undo(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._record(ns))
+        refused = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns, caret=(3, 0)))
+
+        self.assertEqual(refused["reason"], "selection_drift")
+        self.assertTrue(ns["undoable_insertion_status"]()["available"])
+        # The caret is back where the dictation left it: the same undo runs.
+        retried = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns))
+        self.assertTrue(retried["undone"])
+        self.assertEqual(ns["_state"]["text"], self.BEFORE)
+
+    def test_a_refused_undo_never_reaches_the_voice_outbox(self):
+        for name, kwargs in (
+                ("focus", {"bundle_reader": lambda: "com.other.app"}),
+                ("caret", {"caret": (3, 0)}),
+                ("unreadable", {"unreadable": True})):
+            with self.subTest(name):
+                ns = self.namespace()
+                ns["record_undoable_insertion"](self._record(ns))
+                caret = kwargs.get("caret")
+                reader = (lambda: None) if kwargs.get("unreadable") \
+                    else (lambda: self._snapshot(ns, caret=caret))
+                result = ns["undo_last_dictation"](
+                    snapshot_reader=reader,
+                    bundle_reader=kwargs.get("bundle_reader"))
+
+                self.assertFalse(result["undone"])
+                self.assertEqual(ns["INSERTION_COORDINATOR"].recoverable(), ())
+                self.assertEqual(ns["UNDO_COORDINATOR"].recoverable(), ())
+                self.assertEqual(ns["_state"]["keys"], [])
+
+    def test_an_unproven_undo_leaves_the_voice_outbox_as_it_was(self):
+        from insertion_integrity import (
+            DestinationObservation,
+            InsertionCoordinator,
+            InsertionLease,
+            ReadbackResult,
+        )
+
+        capacity = load_definitions(
+            assignments={"VOICE_OUTBOX_MAX_ITEMS"})["VOICE_OUTBOX_MAX_ITEMS"]
+        # The dictation replaced words the user had selected, so what undo
+        # stages is the user's own text and never a blank.
+        replaced = "it's \"great\" news."
+        for name in ("the app rewrote what undo pasted",
+                     "the selection was never confirmed"):
+            with self.subTest(name):
+                ns = self.namespace()
+                # A full Voice Outbox: dictations that never reached a field.
+                outbox = InsertionCoordinator(max_recoverable=capacity)
+                ns["INSERTION_COORDINATOR"] = outbox
+                elsewhere = DestinationObservation.capture(
+                    "com.apple.Notes:field-9", (0, 0), "")
+                for number in range(capacity):
+                    lease = InsertionLease.capture(
+                        f"waiting-{number}", "com.apple.mail:mail:field-1",
+                        (0, 0), "")
+                    outbox.stage(lease, f"See you at {number + 1}.")
+                    outbox.commit(lease.utterance_id, elsewhere,
+                                  lambda _text: None, ReadbackResult.verified)
+                waiting = outbox.recoverable()
+                self.assertEqual(len(waiting), capacity)
+
+                record = ns["UndoableInsertion"](
+                    element=ns["_element"], bundle="com.apple.mail",
+                    destination_id="com.apple.mail:mail:field-1",
+                    utterance_id="utterance-3", inserted=self.INSERTED,
+                    before=self.BEFORE + replaced,
+                    selection=(len(self.BEFORE), len(replaced)))
+                ns["record_undoable_insertion"](record)
+                ns["_state"]["text"] = record.expected
+
+                def smart_quotes(text):
+                    ns["_state"]["text"] = self.BEFORE + text.replace(
+                        "'", "’").replace("\"", "”")
+
+                attempt = ({"paster": smart_quotes}
+                           if name.startswith("the app")
+                           else {"selector": lambda *_args: False})
+                result = ns["undo_last_dictation"](
+                    snapshot_reader=lambda: ns["FocusSnapshot"](
+                        element=ns["_element"], text=ns["_state"]["text"],
+                        selection=record.caret),
+                    **attempt)
+
+                self.assertFalse(result["undone"])
+                self.assertEqual(outbox.recoverable(), waiting)
+                self.assertEqual(ns["UNDO_COORDINATOR"].recoverable(), ())
+
+    def test_undo_selects_through_accessibility_when_the_field_allows_it(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._record(ns))
+        requests = []
+
+        def select(element, text, selection, expected):
+            requests.append((element, text, selection, expected))
+            return True
+
+        result = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns), selector=select)
+
+        self.assertTrue(result["undone"])
+        self.assertEqual(requests, [(
+            ns["_element"], self.BEFORE + self.INSERTED,
+            (len(self.BEFORE), len(self.INSERTED)), self.INSERTED)])
+        self.assertEqual(ns["_state"]["keys"], [("backspace",)])
+        self.assertEqual(ns["_state"]["text"], self.BEFORE)
+
+    def test_an_unconfirmed_selection_deletes_nothing(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._record(ns))
+        result = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns),
+            selector=lambda *_args: False)
+
+        self.assertFalse(result["undone"])
+        self.assertEqual(ns["_state"]["keys"], [])
+        self.assertEqual(ns["_state"]["text"], self.BEFORE + self.INSERTED)
+        self.assertEqual(ns["INSERTION_COORDINATOR"].recoverable(), ())
+        self.assertEqual(ns["UNDO_COORDINATOR"].recoverable(), ())
+
+    def test_keyboard_selection_never_reaches_the_users_own_text(self):
+        # What the user sees as one character each: a heart with its
+        # presentation selector, a flag, a skin-toned ZWJ profession, an
+        # accented letter written with a combining mark.
+        user = "Dear Sam, "
+        inserted = ["t", "h", "a", "n", "k", "s", " ", "❤️", " ",
+                    "\U0001F1FA\U0001F1F8", " ",
+                    "\U0001F469\U0001F3FD‍\U0001F4BB", " ",
+                    "é", "!"]
+        field = {"characters": list(user) + inserted, "anchor": None}
+        ns = self.namespace()
+        ns["_state"]["text"] = "".join(field["characters"])
+
+        def press(*keys):
+            names = tuple(getattr(key, "name", key) for key in keys)
+            ns["_state"]["keys"].append(names)
+            end = len(field["characters"])
+            if names == ("shift", "left"):
+                # The system extends a selection by one whole character.
+                field["anchor"] = max(0, (end if field["anchor"] is None
+                                          else field["anchor"]) - 1)
+            elif names == ("backspace",):
+                del field["characters"][field["anchor"]:]
+                field["anchor"] = None
+            ns["_state"]["text"] = "".join(field["characters"])
+
+        record = ns["UndoableInsertion"](
+            element=ns["_element"], bundle="com.apple.mail",
+            destination_id="com.apple.mail:mail:field-1",
+            utterance_id="utterance-emoji", inserted="".join(inserted),
+            before=user, selection=(len(user), 0))
+        ns["record_undoable_insertion"](record)
+        result = ns["undo_last_dictation"](
+            snapshot_reader=lambda: ns["FocusSnapshot"](
+                element=ns["_element"], text=ns["_state"]["text"],
+                selection=record.caret),
+            presser=press)
+
+        self.assertTrue(result["undone"])
+        self.assertEqual(ns["_state"]["text"], user)
+        self.assertEqual(ns["_state"]["keys"].count(("shift", "left")),
+                         len(inserted))
+
+    def _accessibility_selection(self, text, caret, *, settable, applies):
+        state = {"range": (len(text[:caret].encode("utf-16-le")) // 2, 0),
+                 "selected": "", "writes": []}
+
+        def set_value(_element, _attribute, value):
+            state["writes"].append(value)
+            if applies:
+                start, length = value
+                encoded = text.encode("utf-16-le")
+                state["range"] = value
+                state["selected"] = encoded[
+                    2 * start:2 * (start + length)].decode("utf-16-le")
+            return 0
+
+        services = SimpleNamespace(
+            AXUIElementIsAttributeSettable=lambda *_args: (0, settable),
+            AXUIElementSetAttributeValue=set_value,
+            AXValueCreate=lambda _kind, value: value,
+            AXValueGetType=lambda _value: None,
+            AXValueGetValue=lambda *_args: None,
+            kAXSelectedTextAttribute="AXSelectedText",
+            kAXSelectedTextRangeAttribute="AXSelectedTextRange",
+            kAXValueCFRangeType=4,
+        )
+        now = [0.0]
+        ns = load_definitions(
+            "_ax_select_text_range", "code_points_to_utf16_range",
+            "_ax_reported_range", "_coerce_range",
+            assignments={"READBACK_TIMEOUT"},
+            extra={
+                "time": SimpleNamespace(
+                    monotonic=lambda: now[0],
+                    sleep=lambda delay: now.__setitem__(0, now[0] + delay)),
+                "_ax_attribute": lambda _element, attribute: (
+                    state["range"] if attribute == "AXSelectedTextRange"
+                    else state["selected"]),
+            },
+        )
+        with mock.patch.dict(sys.modules, {"ApplicationServices": services}):
+            result = ns["_ax_select_text_range"](
+                object(), text, (5, 7), "thanks!")
+        return result, state["writes"]
+
+    def test_accessibility_selection_is_written_in_utf16_and_confirmed(self):
+        text = "Ok \U0001F44D thanks!"
+        result, writes = self._accessibility_selection(
+            text, len(text), settable=True, applies=True)
+
+        self.assertIs(result, True)
+        self.assertEqual(writes, [(6, 7)])
+
+    def test_a_field_without_settable_selection_leaves_the_keyboard(self):
+        text = "Ok \U0001F44D thanks!"
+        result, writes = self._accessibility_selection(
+            text, len(text), settable=False, applies=False)
+
+        self.assertIsNone(result)
+        self.assertEqual(writes, [])
+
+    def test_a_selection_request_the_field_ignores_is_not_confirmed(self):
+        text = "Ok \U0001F44D thanks!"
+        result, writes = self._accessibility_selection(
+            text, len(text), settable=True, applies=False)
+
+        self.assertIs(result, False)
+        self.assertEqual(writes, [(6, 7)])
+
+    def test_whole_characters_are_counted_as_the_caret_moves(self):
+        count = self.namespace()["grapheme_count"]
+        for text, expected in (
+                ("thanks", 6),
+                ("\U0001F44D\U0001F3FD", 1),
+                ("\U0001F468‍\U0001F469‍\U0001F467", 1),
+                ("\U0001F1FA\U0001F1F8\U0001F1EC\U0001F1E7", 2),
+                ("1️⃣", 1),
+                ("é", 1),
+                ("\r\n", 1),
+                ("각", 1),
+                ("क्ष", 1),
+                ("", 0)):
+            with self.subTest(text=text):
+                self.assertEqual(count(text), expected)
 
     def test_nothing_to_undo_is_a_refusal_not_a_crash(self):
         ns = self.namespace()
