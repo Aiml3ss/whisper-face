@@ -177,6 +177,130 @@ class PersonalRegressionLabTests(unittest.TestCase):
             lab.apply("Gwen", app="com.openai.codex"), "Gwen")
         self.assertEqual(len(lab.quarantined), 1)
 
+    def test_reload_keeps_an_app_mapping_beside_its_global_twin(self):
+        lab = PersonalRegressionLab()
+        for app in ("com.openai.codex", "com.openai.codex", "com.apple.mail"):
+            lab.record_correction("Gwen", "Qwen", app=app)
+        self.assertTrue(
+            lab.propose("Gwen", "Qwen", app="com.openai.codex").promoted)
+        self.assertTrue(lab.propose("Gwen", "Qwen").promoted)
+        encoded = lab.dumps()
+
+        restored = PersonalRegressionLab.loads(encoded)
+
+        self.assertEqual(restored.promoted, lab.promoted)
+        self.assertEqual(restored.quarantined, ())
+        self.assertEqual(restored.dumps(), encoded)
+        # The global mapping is then held back by one conflicting correction
+        # elsewhere; the app that taught the mapping must keep it.
+        restored.record_correction("Gwen", "Gwyn", app="com.apple.mail")
+        reloaded = PersonalRegressionLab.loads(restored.dumps())
+        self.assertEqual(
+            reloaded.apply("Ask Gwen.", app="com.openai.codex"), "Ask Qwen.")
+        self.assertEqual(
+            reloaded.apply("Ask Gwen.", app="com.apple.Notes"), "Ask Gwen.")
+
+    def test_one_common_word_is_never_mapped_to_another(self):
+        for heard, preferred in (
+                ("there", "their"), ("their", "there"), ("can", "can't"),
+                ("can\u2019t", "can"), ("to", "too"), ("Tuesday", "Thursday"),
+                ("15", "50")):
+            with self.subTest(heard=heard, preferred=preferred):
+                lab = PersonalRegressionLab()
+                lab.record_correction(heard, preferred, app="com.slack")
+                lab.record_correction(heard, preferred, app="com.slack")
+
+                result = lab.propose(heard, preferred, app="com.slack")
+
+                self.assertFalse(result.promoted)
+                self.assertEqual(
+                    result.reasons, ("common words are not remapped",))
+                self.assertEqual(lab.promoted, ())
+                self.assertEqual(lab.quarantined, (result,))
+        # A mishearing of a common word, and a name, are still learnable.
+        for heard, preferred in (("teh", "the"), ("Gwen", "Qwen")):
+            with self.subTest(heard=heard, preferred=preferred):
+                lab = PersonalRegressionLab()
+                lab.record_correction(heard, preferred)
+                self.assertTrue(lab.propose(heard, preferred).promoted)
+
+    def test_a_saved_common_word_mapping_is_held_back_on_load(self):
+        restored = PersonalRegressionLab.from_dict({
+            "version": 1,
+            "cases": [{"heard": "there", "preferred": "their",
+                       "app": "com.slack"}],
+            "promoted": [{"heard": "there", "preferred": "their",
+                          "app": "com.slack"}],
+        })
+
+        self.assertEqual(restored.promoted, ())
+        self.assertEqual(
+            restored.quarantined[0].reasons,
+            ("common words are not remapped",))
+        self.assertEqual(
+            restored.apply("is there a problem over there", app="com.slack"),
+            "is there a problem over there")
+
+    def test_reverting_a_mapping_demotes_it_and_keeps_it_demoted(self):
+        lab = PersonalRegressionLab()
+        lab.record_correction("Mark", "Mary", app="com.slack")
+        lab.record_correction("Mark", "Mary", app="com.slack")
+        self.assertTrue(lab.propose("Mark", "Mary", app="com.slack").promoted)
+        # A correction that is not the inverse of an active mapping is not a
+        # revert, in this app or any other.
+        self.assertFalse(lab.record_revert("Mark", "Marc", app="com.slack"))
+        self.assertFalse(lab.record_revert("Mark", "Mary", app="com.mail"))
+
+        self.assertTrue(lab.record_revert("Mark", "Mary", app="com.slack"))
+
+        self.assertEqual(lab.promoted, ())
+        self.assertEqual(
+            lab.apply("Call Mark.", app="com.slack"), "Call Mark.")
+        # Making the original correction again does not bring it back: the
+        # user has shown that "Mark" is sometimes right here.
+        lab.record_correction("Mark", "Mary", app="com.slack")
+        self.assertFalse(
+            lab.propose("Mark", "Mary", app="com.slack").promoted)
+        reloaded = PersonalRegressionLab.loads(lab.dumps())
+        self.assertEqual(reloaded.promoted, ())
+        # Forgetting the scope clears the veto along with the evidence.
+        lab.forget("Mark", app="com.slack")
+        lab.record_correction("Mark", "Mary", app="com.slack")
+        self.assertTrue(lab.propose("Mark", "Mary", app="com.slack").promoted)
+
+    def test_unedited_pastes_of_the_heard_word_count_against_promotion(self):
+        lab = PersonalRegressionLab()
+        lab.record_correction("Mark", "Mary", app="com.slack")
+
+        held = lab.propose(
+            "Mark", "Mary", app="com.slack", corrected=2, kept=2)
+
+        self.assertFalse(held.promoted)
+        self.assertEqual(
+            held.reasons, ("left unchanged 2 times against 2 corrections",))
+        self.assertEqual(lab.promoted, ())
+        self.assertEqual(lab.quarantined, (held,))
+        self.assertTrue(lab.propose(
+            "Mark", "Mary", app="com.slack", corrected=3, kept=2).promoted)
+
+    def test_replacement_keeps_a_capital_the_recognizer_placed(self):
+        lab = PersonalRegressionLab()
+        lab.record_correction("kubernetis", "kubernetes")
+        lab.propose("kubernetis", "kubernetes")
+        lab.record_correction("Gwen", "qwen")
+        lab.propose("Gwen", "qwen")
+        lab.record_correction("iphone", "iPhone")
+        lab.propose("iphone", "iPhone")
+
+        self.assertEqual(
+            lab.apply("Kubernetis is up. Restart kubernetis."),
+            "Kubernetes is up. Restart kubernetes.")
+        # A correction that lowered the capital itself is applied as made,
+        # and a mixed-case spelling is never recapitalised.
+        self.assertEqual(lab.apply("Run Gwen."), "Run qwen.")
+        self.assertEqual(lab.apply("Iphone and iphone"), "iPhone and iPhone")
+        self.assertEqual(len(lab.active()), 3)
+
     def test_candidate_is_shadowed_against_unrelated_private_cases(self):
         lab = PersonalRegressionLab()
         lab.record_correction("Gwen", "Qwen")

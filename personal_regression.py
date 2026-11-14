@@ -28,6 +28,64 @@ MAX_QUARANTINED = 64
 MAX_SPAN_CHARS = 80
 
 
+# A learned mapping must never turn one common word into another. The
+# repository carries no frequency list, so "common" is this short built-in set:
+# high-frequency English function words and their contractions, day, month and
+# number words, and the usual homophone sets. A correction between two of them
+# is a choice the sentence makes ("there"/"their", "can"/"can't", "to"/"too"),
+# not a stable mishearing, so no context-free rule may be built from it. Words
+# outside the set rely on evidence instead: a revert demotes the mapping, and
+# unedited pastes of the heard word count against promoting it.
+COMMON_WORDS = frozenset("""
+a an the and or nor but if so as at by for from in into of off on onto out
+over under up down with without about after before between through during
+until while than then that this these those there their theirs they them
+they're they'll they've there's he she it its it's him his her hers he's
+she's we us our ours we're we'll we've you your yours you're you'll you've
+i me my mine i'm i'll i've i'd who whom whose who's what what's when where
+which why how is are am was were be been being isn't aren't wasn't weren't
+do does did done don't doesn't didn't have has had haven't hasn't hadn't
+will would shall should can could may might must won't wouldn't shouldn't
+can't cannot couldn't mustn't not no yes know knows knew new now here hear
+here's that's let's lets all any some none each every both either neither
+more most much many few less least other another such only own same very
+just also even still again ever never always often well good right write
+too to two for four fore one won ate eight buy bye by be bee see sea sees
+seas weather whether wear where we'd affect effect accept except lose
+loose past passed piece peace break brake whole hole hour meet meat week
+weak made maid sent cent scent son sun wait weight way weigh wood threw
+plain plane principal principle quiet quite lead led read red allowed
+aloud advice advise monday tuesday wednesday thursday friday saturday
+sunday january february march april may june july august september
+october november december zero three five six seven nine ten eleven
+twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen
+twenty thirty forty fifty sixty seventy eighty ninety hundred thousand
+million first second third today tomorrow yesterday
+""".split())
+COMMON_WORDS_REASON = "common words are not remapped"
+_NUMBER = re.compile(r"\d[\d.,:/%-]*")
+
+
+def is_common_word(word: str) -> bool:
+    return word.casefold().replace("\u2019", "'") in COMMON_WORDS
+
+
+def remaps_common_words(heard: str, preferred: str) -> bool:
+    """Whether a mapping would rewrite one common word, or number, as another."""
+    if is_common_word(heard) and is_common_word(preferred):
+        return True
+    return bool(_NUMBER.fullmatch(heard) and _NUMBER.fullmatch(preferred))
+
+
+def _in_heard_case(found: str, mapping: "LearnedMapping") -> str:
+    """Keep a capital the recognizer placed on an all-lowercase mapping."""
+    preferred = mapping.preferred
+    if (found[:1].isupper() and not mapping.heard[:1].isupper()
+            and preferred == preferred.lower()):
+        return preferred[:1].upper() + preferred[1:]
+    return preferred
+
+
 def _valid_span(value: Any) -> bool:
     return isinstance(value, str) and 0 < len(value) <= MAX_SPAN_CHARS
 
@@ -125,13 +183,41 @@ class PersonalRegressionLab:
                 self._remember_quarantine(evaluation)
         return case
 
-    def propose(
+    def record_revert(
         self, heard: str, preferred: str, *, app: str | None = None
+    ) -> bool:
+        """Record that the user changed an active mapping's output back.
+
+        The heard word was right after all, so it becomes a case that expects
+        itself. That demotes the mapping and keeps it from being promoted
+        again in this scope until the user forgets it.
+        """
+        if not any(
+                mapping.heard.casefold() == heard.casefold()
+                and mapping.preferred.casefold() == preferred.casefold()
+                for mapping in self.active(app=app)):
+            return False
+        self.record_correction(heard, heard, app=app)
+        return True
+
+    def propose(
+        self, heard: str, preferred: str, *, app: str | None = None,
+        corrected: int | None = None, kept: int = 0,
     ) -> CandidateEvaluation:
+        """Gate one candidate mapping against the suite and its evidence.
+
+        ``corrected`` and ``kept`` are how often the heard word was corrected
+        this way and how often it was pasted and left alone in the candidate's
+        scope. Corrections have to outnumber the unedited pastes.
+        """
         if (not _valid_span(heard) or not _valid_span(preferred)
                 or not _valid_app(app)):
             raise ValueError("mapping spans must contain 1-80 characters")
         result = self.evaluate(heard, preferred, app=app)
+        if result.passed and corrected is not None and kept >= corrected:
+            result = replace(result, passed=False, reasons=(
+                f"left unchanged {kept} times against "
+                f"{corrected} corrections",))
         if not result.passed:
             self._remember_quarantine(result)
             return result
@@ -233,6 +319,8 @@ class PersonalRegressionLab:
         )
         if not applicable:
             reasons = ("no applicable correction cases",)
+        if remaps_common_words(heard, preferred):
+            reasons = (COMMON_WORDS_REASON,)
         return CandidateEvaluation(
             heard=heard,
             preferred=preferred,
@@ -243,9 +331,10 @@ class PersonalRegressionLab:
             case_ids=tuple(case.id for case in applicable),
         )
 
-    def _apply_mappings(
-            self, text: str, *, app: str | None = None,
-            candidate: LearnedMapping | None = None) -> str:
+    def _chosen(
+            self, *, app: str | None = None,
+            candidate: LearnedMapping | None = None
+    ) -> dict[str, LearnedMapping]:
         chosen: dict[str, LearnedMapping] = {}
         mappings = list(self._promoted.values())
         if candidate is not None:
@@ -267,6 +356,19 @@ class PersonalRegressionLab:
         for mapping in mappings:
             if mapping.app is None or mapping.app == app:
                 chosen.setdefault(mapping.heard.casefold(), mapping)
+        return chosen
+
+    def active(self, *, app: str | None = None) -> tuple[LearnedMapping, ...]:
+        """The one mapping per heard span that applies in ``app``.
+
+        An app-scoped mapping takes precedence over a global one.
+        """
+        return tuple(self._chosen(app=app).values())
+
+    def _apply_mappings(
+            self, text: str, *, app: str | None = None,
+            candidate: LearnedMapping | None = None) -> str:
+        chosen = self._chosen(app=app, candidate=candidate)
         if not chosen:
             return text
         alternatives = sorted(
@@ -280,12 +382,16 @@ class PersonalRegressionLab:
         # One substitution pass over the original text prevents mapping chains
         # such as Gwen->Qwen and Qwen->When from recursively changing Gwen.
         return pattern.sub(
-            lambda match: chosen[match.group(0).casefold()].preferred,
+            lambda match: _in_heard_case(
+                match.group(0), chosen[match.group(0).casefold()]),
             text,
         )
 
     def apply(self, text: str, *, app: str | None = None) -> str:
         return self._apply_mappings(text, app=app)
+
+    is_common_word = staticmethod(is_common_word)
+    remaps_common_words = staticmethod(remaps_common_words)
 
     def forget(self, heard: str, *, app: str | None = None) -> int:
         """Forget all evidence and decisions for one mapping scope."""
@@ -387,10 +493,19 @@ class PersonalRegressionLab:
                 app = raw.get("app", raw.get("bundle"))
                 if _valid_span(heard) and _valid_span(preferred) \
                         and _valid_app(app):
-                    try:
-                        lab.propose(heard, preferred, app=app)
-                    except ValueError:
-                        pass
+                    # Restore, do not replay: the shadow gate's "material
+                    # improvement" test is about activating something new,
+                    # and replayed it held back every app mapping that has
+                    # a global twin. A saved promotion only has to still
+                    # agree with the saved cases and the current rules.
+                    result = lab.evaluate(heard, preferred, app=app)
+                    if not result.passed:
+                        lab._remember_quarantine(result)
+                        continue
+                    lab._promoted[(heard.casefold(), app)] = LearnedMapping(
+                        heard, preferred, app)
+                    while len(lab._promoted) > MAX_MAPPINGS:
+                        lab._promoted.pop(next(iter(lab._promoted)))
         raw_quarantined = payload.get("quarantined", [])
         if isinstance(raw_quarantined, list):
             for raw in raw_quarantined:
