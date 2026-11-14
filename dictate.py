@@ -6964,6 +6964,7 @@ def restart_dead_hotkey_listener(on_dead, listener_state=None) -> bool:
     if listener is None or (getattr(listener, "running", False)
                             and (not callable(is_alive) or is_alive())):
         state["recovering"] = False
+        state["restarts"] = 0
         return False
     if not state.get("recovering", False):
         state["recovering"] = True
@@ -6971,7 +6972,14 @@ def restart_dead_hotkey_listener(on_dead, listener_state=None) -> bool:
             on_dead()
         except Exception as e:
             print(f"! hotkey recovery cleanup failed: {e}")
-    print("! hotkey listener died — restarting it")
+    # A listener whose event tap cannot be created (no Accessibility
+    # permission) exits at once, so it is replaced on every check. Log the
+    # loop once rather than every few seconds.
+    restarts = state.get("restarts", 0)
+    if restarts == 0:
+        print("! hotkey listener died — restarting it")
+    elif restarts == 1:
+        print("! hotkey listener keeps exiting — still restarting it")
     try:
         replacement = state["make"]()
     except Exception as e:
@@ -6979,6 +6987,7 @@ def restart_dead_hotkey_listener(on_dead, listener_state=None) -> bool:
         return False
     state["l"] = replacement
     state["recovering"] = False
+    state["restarts"] = restarts + 1
     return True
 
 

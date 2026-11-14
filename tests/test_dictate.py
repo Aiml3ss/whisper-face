@@ -6400,6 +6400,40 @@ class HotkeyListenerRecoveryTests(unittest.TestCase):
         self.assertIs(state["l"], replacement)
         self.assertEqual(cleanups, [True])
 
+    def test_a_listener_that_keeps_exiting_is_logged_once(self):
+        logged = []
+        ns = load_definitions(
+            "restart_dead_hotkey_listener",
+            extra={"print": logged.append},
+        )
+
+        def exited_listener():
+            listener = self.ExitedListener()
+            listener.start()
+            listener.join(timeout=1.0)
+            return listener
+
+        state = {"l": exited_listener(), "make": exited_listener,
+                 "recovering": False}
+        for _ in range(5):
+            self.assertTrue(ns["restart_dead_hotkey_listener"](
+                lambda: None, state))
+        self.assertEqual(logged, [
+            "! hotkey listener died — restarting it",
+            "! hotkey listener keeps exiting — still restarting it",
+        ])
+
+        # Once a replacement stays up, a later death is reported again.
+        state["l"] = SimpleNamespace(running=True)
+        self.assertFalse(ns["restart_dead_hotkey_listener"](
+            lambda: None, state))
+        state["l"] = exited_listener()
+        self.assertTrue(ns["restart_dead_hotkey_listener"](
+            lambda: None, state))
+        self.assertEqual(
+            logged[-1], "! hotkey listener died — restarting it")
+        self.assertEqual(len(logged), 3)
+
     def test_a_running_listener_thread_is_left_alone(self):
         ns = load_definitions("restart_dead_hotkey_listener")
         release = threading.Event()
