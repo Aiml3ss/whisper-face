@@ -167,6 +167,93 @@ class CleanupCompilerTests(unittest.TestCase):
                          (3, 21, "4:30"))
         self.assertIsNone(find_self_correction("it is actually fine"))
 
+    def test_self_correction_leaves_a_compound_item_as_spoken(self):
+        # A range, score, size or grouped number is one item written as
+        # several. Correcting its last word alone splices the two versions
+        # ("From 9 to 9 to 6"), so neither version is touched.
+        for spoken in (
+            "From 9 to 5, actually 9 to 6.",
+            "Monday to Friday, actually Monday to Thursday.",
+            "The meeting runs from 2 to 3, actually 2 to 4.",
+            "Call 555 1234, actually 555 1235.",
+            "Score was 2 to 1, actually 3 to 1.",
+            "It is 3 by 5, actually 4 by 6 inches.",
+            "I was 1 of 10, actually 2 of 10.",
+            "March to May, actually March to June.",
+            "May 3 to May 5, actually May 3 to May 6.",
+            "From March 3 to 5, actually 3 to 6.",
+            "Open 9 - 5, actually 9 - 6.",
+            "Open 9–5, actually 9–6.",
+            "from nine to five, actually nine to six",
+            "It took 3 hours 20 minutes, actually 3 hours 30 minutes.",
+            "It took 3 hours 20 minutes, actually 4 hours.",
+            "It took 3 hours and 20 minutes, actually 4 hours.",
+            "He is 5 feet 10, actually 5 feet 11.",
+            "It takes 3 days, actually 4 to 5 days.",
+            "Open 9 am to 5 pm, actually 10 am to 6 pm.",
+            "It is 2 point 5, actually 2 point 6.",
+            # The restatement starts at an item the sentence already has.
+            "Seat 5 people in room 3, actually 5 people in room 4.",
+            "Open from 9 in the morning to 5, actually 9 in the morning to 6.",
+            "Book Monday at noon for Friday, actually Monday at noon for "
+            "Thursday.",
+            # Which end of a range a lone item corrects is not knowable.
+            "From 9 to 5, actually 6.",
+            "Monday through Wednesday, actually Thursday.",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken)
+                self.assertNotIn("self_correction", plan.edit_kinds)
+                self.assertIsNone(find_self_correction(spoken))
+
+    def test_self_correction_still_resolves_an_item_beside_other_items(self):
+        for spoken, expected in (
+            # A date and a time are two items, not one.
+            ("Let's meet March 5 at 3, actually 4 pm.",
+             "Let's meet March 5 at 4 pm."),
+            ("Let's meet on the 5th at 3, actually 4.",
+             "Let's meet on the 5th at 4."),
+            ("I ordered 2 pizzas for 45 dollars, actually 54.",
+             "I ordered 2 pizzas for 54 dollars."),
+            ("Charge 45, actually 54 dollars for 2 tickets.",
+             "Charge 54 dollars for 2 tickets."),
+            ("Send 3 copies on Tuesday, actually Wednesday.",
+             "Send 3 copies on Wednesday."),
+            ("In 2024, about 45, actually 54 people came.",
+             "In 2024, about 54 people came."),
+            # "may" the verb and the "ten" in "often" are not items.
+            ("It may be May 5, actually May 6.", "It may be May 6."),
+            ("We often meet at 3, actually 4.", "We often meet at 4."),
+            ("Tuesday, actually Wednesday night or Thursday.",
+             "Wednesday night or Thursday."),
+            # An equal item in an earlier sentence is not being restated.
+            ("Room 4 is free. Seat 3, actually 4 people there.",
+             "Room 4 is free. Seat 4 people there."),
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, expected)
+                self.assertEqual(plan.edit_kinds, ["self_correction"])
+
+    def test_self_correction_reads_the_words_around_a_bounded_span(self):
+        # The proof validator checks a span of a longer source; the words
+        # outside the span still decide whether the item is a compound.
+        self.assertEqual(
+            find_self_correction("5, actually 6"), (0, 13, "6"))
+        self.assertIsNone(find_self_correction(
+            "5, actually 6", context_before="From 9 to "))
+        self.assertIsNone(find_self_correction(
+            "20 minutes, actually 4", context_before="It took 3 hours ",
+            context_after=" hours."))
+        self.assertIsNone(find_self_correction(
+            "3, actually 4", context_after=" to 5 days."))
+        self.assertEqual(
+            find_self_correction(
+                "3, actually 4", context_before="Meet March 5 at ",
+                context_after=" pm."),
+            (0, 13, "4"))
+
     def test_spoken_structure_takes_its_own_punctuation(self):
         for spoken, expected in (
             ("First line is approved. New line. Second line needs revision.",

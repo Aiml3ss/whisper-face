@@ -210,6 +210,27 @@ class VoiceCompilerTests(unittest.TestCase):
                 self.assertTrue(result.edits[0].accepted)
                 self.assertEqual(result.text, f"Move it to {after} please")
 
+    def test_self_correction_is_never_proved_inside_a_compound_item(self):
+        # "9 to 5" is one item. A proposal that starts at its last word
+        # would splice the two versions together ("From 9 to 9 to 6").
+        for source, before, after in (
+            ("Open from 9 to 5, actually 9 to 6 on Friday.",
+             "5, actually 9 to 6", "9 to 6"),
+            ("Open from 9 to 5, actually 9 to 6 on Friday.",
+             "5, actually 9", "9"),
+            ("Call 555 1234, actually 555 1235 today.",
+             "1234, actually 555", "555"),
+            ("It took 3 hours 20 minutes, actually 4 hours today.",
+             "20 minutes, actually 4 hours", "4 hours"),
+            ("Monday to Friday, actually Monday to Thursday works.",
+             "Friday, actually Monday", "Monday"),
+        ):
+            with self.subTest(before=before):
+                result = self.compiler.verify_edits(
+                    source, (EditProposal("self_correction", before, after),))
+                self.assertFalse(result.edits[0].accepted)
+                self.assertEqual(result.text, source)
+
     def test_counted_enumeration_can_be_proved_as_a_list(self):
         source = ("Two things first ship the installer and second update "
                   "the docs")

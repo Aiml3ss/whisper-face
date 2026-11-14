@@ -104,6 +104,24 @@ CORRECTION_SIDES = tuple(
         ("number", _NUMBER, rf"(?:[ \t]+(?P<unit>{_UNIT}))?"),
     )
 )
+# X and Y must each be a whole item. A range, score, size or grouped number
+# is one item written as several: "9 to 5", "Monday through Friday",
+# "3 by 5", "555 1234", "3 hours 20". Before the corrected item, the earlier
+# part may be followed by its own unit and a joining word. "at" starts a
+# separate item ("March 5 at 3"). Per kind, in the order of CORRECTION_SIDES:
+# a part ending just before X, a part starting just after Y, and any item.
+_COMPOUND_JOINT = r"(?:to|and|or|by|of|through|thru|until|till|x)"
+_COMPOUND_DASH = r"[ \t]*[–—×][ \t]*|[ \t]+[-/:][ \t]+"
+CORRECTION_PARTS = tuple(
+    (re.compile(
+        rf"(?<!\w)(?P<item>{item})(?:(?:[ \t]+(?!at\b){_UNIT})?"
+        rf"(?:[ \t]+{_COMPOUND_JOINT})?[ \t]+|{_COMPOUND_DASH})$", re.I),
+     re.compile(
+        rf"(?:(?:[ \t]+{_COMPOUND_JOINT})?[ \t]+|{_COMPOUND_DASH})"
+        rf"(?P<item>{item})(?!\w)", re.I),
+     re.compile(rf"(?<!\w)(?P<item>{item})(?!\w)", re.I))
+    for item in (_WEEKDAY, _MONTH, _NUMBER)
+)
 # Units a corrected number keeps when only the first number carried one
 # ("45 dollars, actually 54"). Singular, without dots or apostrophes.
 CORRECTION_UNITS = frozenset({
@@ -469,6 +487,13 @@ def _is_bare_hour(item: str, unit: str) -> bool:
         "nine", "ten", "eleven", "twelve"}
 
 
+def _reads_as_item(kind: str, item: str) -> bool:
+    # "may" and "march" are also verbs. A capital or a day number is what
+    # makes either one a month.
+    return (kind != "month" or item[:1].isupper()
+            or any(char.isdigit() for char in item))
+
+
 def _corrected_item(kind: str, before: "re.Match[str]",
                     after: "re.Match[str]") -> str | None:
     """The text that replaces both sides, or None if they differ in kind."""
@@ -476,12 +501,8 @@ def _corrected_item(kind: str, before: "re.Match[str]",
     if kind == "weekday":
         return second
     if kind == "month":
-        # "may" and "march" are also verbs. A capital or a day number is
-        # what makes either one a month.
-        for side in (first, second):
-            if not (side[:1].isupper()
-                    or any(char.isdigit() for char in side)):
-                return None
+        if not (_reads_as_item(kind, first) and _reads_as_item(kind, second)):
+            return None
         return second
     first_unit = _unit_key(before.group("unit"))
     second_unit = _unit_key(after.group("unit"))
@@ -502,7 +523,30 @@ def _corrected_item(kind: str, before: "re.Match[str]",
     return f"{second} {before.group('unit')}"
 
 
-def find_self_correction(text: str) -> tuple[int, int, str] | None:
+def _is_part_of_a_longer_item(kind: str, parts, earlier: str, second: str,
+                              later: str) -> bool:
+    """Whether X or Y is one part of a range, score, size or grouped number.
+
+    ``earlier`` is everything before X, ``second`` is Y, ``later`` is
+    everything after Y.
+    """
+    part_before, part_after, any_item = parts
+    for part in (part_before.search(earlier), part_after.match(later)):
+        if part and _reads_as_item(kind, part.group("item")):
+            return True
+    # "5 people in room 3, actually 5 people in room 4": Y repeats an item
+    # the sentence already has, so the speaker restated from there, not
+    # from X.
+    sentence = re.split(r"[.!?…]\s", earlier)[-1]
+    return any(
+        item.group("item").casefold() == second.casefold()
+        and _reads_as_item(kind, item.group("item"))
+        for item in any_item.finditer(sentence))
+
+
+def find_self_correction(text: str, context_before: str = "",
+                         context_after: str = "",
+                         ) -> tuple[int, int, str] | None:
     """Locate the first spoken "X, actually Y" where X and Y are the same kind.
 
     Returns ``(start, end, replacement)``: the span from X through Y and the
@@ -513,13 +557,26 @@ def find_self_correction(text: str) -> tuple[int, int, str] | None:
     actually finish" must never lose "didn't". This is the one rule for the
     deterministic pass and for the proof validator's acceptance of a model
     ``self_correction`` edit.
+
+    X and Y must each be a whole item. When either is one part of a range, a
+    score, a size or a grouped number ("9 to 5, actually 9 to 6"), or Y
+    repeats an earlier item of the sentence, how much the speaker restated
+    cannot be read from one side, so nothing is corrected. ``context_before``
+    and ``context_after`` are the source around ``text`` when it is a span
+    of something longer; they count for that test.
     """
     for marker in CORRECTION_MARKER_RE.finditer(text):
         left, right = text[:marker.start()], text[marker.end():]
-        for kind, left_re, right_re in CORRECTION_SIDES:
+        for (kind, left_re, right_re), parts in zip(
+                CORRECTION_SIDES, CORRECTION_PARTS):
             after = right_re.match(right)
             before = left_re.search(left) if after else None
             if before is None:
+                continue
+            if _is_part_of_a_longer_item(
+                    kind, parts, context_before + left[:before.start()],
+                    after.group("item"),
+                    right[after.end():] + context_after):
                 continue
             replacement = _corrected_item(kind, before, after)
             if replacement is not None:

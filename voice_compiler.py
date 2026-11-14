@@ -1369,7 +1369,8 @@ class VoiceCompiler:
         # The model may claim a self-correction only where the deterministic
         # pass would have made the same one: both sides of "actually" are the
         # same kind of item. Any other "actually" is the speaker's adverb.
-        correction = find_self_correction(proposal.before)
+        correction = find_self_correction(
+            proposal.before, source[:start], source[end:])
         explicit_correction = False
         if correction is not None:
             corrected_from, corrected_to, replacement = correction
