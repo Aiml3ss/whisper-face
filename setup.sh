@@ -921,6 +921,45 @@ start_ollama_service() {
     mv -f "$receipt_temporary" "$ollama_service_receipt"
 }
 
+print_install_outcome() {
+    # $1 = ready | permissions. An install is complete only when the service
+    # is ready and verified. Until macOS grants Input Monitoring and
+    # Accessibility, no hotkey listener exists and nothing has been verified.
+    local skipped_model
+    echo
+    if [ "$1" = "ready" ]; then
+        echo "== installation complete"
+        if [ "$MODE" = "full" ]; then
+            echo "== Hold Right Option, speak, and release to paste."
+            echo "== Flight Recorder defaults off on a fresh install; an existing"
+            echo "== preference is preserved. Toggle it from the Whisper Face menu."
+            echo "== Launcher: $launcher_app"
+        else
+            echo "== server-only installation is ready."
+        fi
+    else
+        echo "== Not finished yet: Whisper Face is installed, but it cannot hear"
+        echo "== the hotkey or type for you until macOS grants three permissions."
+        echo "== Open System Settings -> Privacy & Security and turn on"
+        echo "== \"Whisper Face\" under each of these:"
+        echo "==   Input Monitoring  so it notices you holding Right Option"
+        echo "==   Accessibility     so it can paste where you are typing"
+        echo "==   Microphone        so it can hear you (macOS asks the first"
+        echo "==                     time you dictate; choose Allow)"
+        echo "== It starts listening by itself once the first two are on. Then"
+        echo "== hold Right Option, speak, and release. To check everything:"
+        echo "==   ./setup.sh --verify"
+    fi
+    if [ "${#skipped_models[@]}" -gt 0 ]; then
+        echo "== These optional models were skipped to keep the install small:"
+        for skipped_model in "${skipped_models[@]}"; do
+            echo "==   $skipped_model"
+        done
+        echo "== Dictation works without them. Add them with: ./setup.sh --models"
+    fi
+    echo "== Logs: $DIR/dictate.log"
+}
+
 # Adopt an already-installed Homebrew that is merely absent from PATH, before
 # anything looks for brew-installed tools. The self-updater runs this installer
 # from a detached launchd job, and launchd hands such a job the minimal PATH
@@ -1254,30 +1293,9 @@ if [ "$ready" -eq 1 ]; then
     curl -fsS --max-time 3 http://127.0.0.1:8787/health >/dev/null \
         || fail "dictation process launched but its health check failed"
     verify_install
+    print_install_outcome ready
 elif [ "$permissions_needed" -eq 1 ] && [ "$MODE" = "full" ]; then
-    echo "== software and models are installed; macOS permissions remain:"
-    echo "== System Settings -> Privacy & Security -> enable Whisper Face under"
-    echo "==   Input Monitoring, Accessibility, and Microphone."
-    echo "== The LaunchAgent rechecks automatically; then run ./setup.sh --verify"
+    print_install_outcome permissions
 else
     fail "dictation service did not become ready; inspect $DIR/dictate.log"
 fi
-
-echo
-echo "== installation complete"
-if [ "$MODE" = "full" ]; then
-    echo "== Hold Right Option, speak, and release to paste."
-    echo "== Flight Recorder defaults off on a fresh install; an existing"
-    echo "== preference is preserved. Toggle it from the Whisper Face menu."
-    echo "== Launcher: $launcher_app"
-else
-    echo "== server-only installation is ready."
-fi
-if [ "${#skipped_models[@]}" -gt 0 ]; then
-    echo "== These optional models were skipped to keep the install small:"
-    for skipped_model in "${skipped_models[@]}"; do
-        echo "==   $skipped_model"
-    done
-    echo "== Dictation works without them. Add them with: ./setup.sh --models"
-fi
-echo "== Logs: $DIR/dictate.log"

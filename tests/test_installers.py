@@ -972,6 +972,34 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2)
                 self.assertIn(expected, result.stdout)
 
+    def test_an_install_waiting_for_permissions_is_not_called_complete(self):
+        # On a first install macOS has granted nothing, so the service stops
+        # at "Waiting for permissions" with no hotkey listener and nothing
+        # verified. Printing "installation complete" and "Hold Right Option"
+        # there sent people to press a key that did nothing.
+        def outcome(state):
+            return run_setup_functions(
+                ["print_install_outcome"],
+                f"skipped_models=()\nprint_install_outcome {state}\n",
+                variables={"MODE": "full", "DIR": "/checkout",
+                           "launcher_app": "/Apps/Whisper Face.app"})
+
+        waiting = outcome("permissions")
+        self.assertEqual(waiting.returncode, 0, waiting.stderr)
+        self.assertNotIn("installation complete", waiting.stdout)
+        self.assertNotIn("release to paste", waiting.stdout)
+        self.assertIn("Not finished yet", waiting.stdout)
+        for permission in ("Input Monitoring", "Accessibility", "Microphone"):
+            with self.subTest(permission=permission):
+                self.assertIn(permission, waiting.stdout)
+        self.assertIn("./setup.sh --verify", waiting.stdout)
+
+        ready = outcome("ready")
+        self.assertEqual(ready.returncode, 0, ready.stderr)
+        self.assertIn("== installation complete", ready.stdout)
+        self.assertIn("Hold Right Option, speak, and release to paste.",
+                      ready.stdout)
+
     def test_installers_fail_before_side_effects_for_read_only_checkouts(self):
         mac_probe = self.shell.index("confirm_writable_checkout()")
         mac_call = self.shell.index("confirm_writable_checkout\n", mac_probe)

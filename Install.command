@@ -15,7 +15,7 @@ log_before="$(install_log_size)"
 status=$?
 echo
 if [ "$status" -eq 0 ]; then
-    echo "Whisper Face installation finished."
+    echo "Setup finished. If it listed steps above, finish them to start dictating."
 else
     echo "Installation failed with exit code $status."
     if [ "$(install_log_size)" != "$log_before" ]; then
