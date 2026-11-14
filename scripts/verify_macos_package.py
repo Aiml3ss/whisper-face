@@ -326,6 +326,21 @@ def _verify_generic_launcher(app: Path, source_root: Path) -> None:
         "--app", str(app),
         "--policy", str(source_root / "config/macos-signing-policy.json"),
     )
+    # setup.sh installs this app only when it matches the digest the bundle
+    # recorded, so a mismatch here would ship an app every install ignores.
+    try:
+        metadata = json.loads(
+            (source_root / RELEASE_METADATA_NAME).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PackageError(f"could not read {RELEASE_METADATA_NAME}: {exc}") from exc
+    digest = _run(
+        sys.executable,
+        str(source_root / "scripts/macos_launcher_app.py"),
+        "digest",
+        "--app", str(app),
+    )
+    if metadata.get("launcher_bundle_sha256") != digest:
+        raise PackageError("disk image launcher is not the one the bundle records")
 
 
 def verify_artifacts(

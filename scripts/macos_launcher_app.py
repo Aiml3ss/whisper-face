@@ -39,6 +39,10 @@ DEFAULT_RECEIPT = Path("Library/Application Support/Whisper Face/launcher-instal
 DEFAULT_POLICY = Path(__file__).resolve().parents[1] / "config/macos-signing-policy.json"
 DEFAULT_ICON = Path(__file__).resolve().parents[1] / f"icons/{ICON_NAME}.icns"
 TEAM_IDENTIFIER = re.compile(r"^[A-Z0-9]{10}$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
+# Written into a release bundle by scripts/package_macos.sh; it records the
+# digest of the launcher app shipped beside that bundle.
+RELEASE_METADATA = "RELEASE-METADATA.json"
 SWIFT_SOURCE = r'''import AppKit
 import Foundation
 
@@ -291,15 +295,15 @@ def verify_generic_app(app: Path, *, policy: Path = DEFAULT_POLICY, require_sign
     executable = app / "Contents/MacOS" / EXECUTABLE
     if not executable.stat().st_mode & stat.S_IXUSR or executable.read_bytes()[:4] != b"\xcf\xfa\xed\xfe": raise LauncherError("launcher executable is not an arm64 Mach-O")
     if _is_adhoc_signed(app):
-        # Local install path: a deterministic ad-hoc signature. Reject when a
-        # release signature is required; otherwise confirm the signature is
-        # structurally valid and bound to our identifier, then rebuild + re-sign
-        # from source and require the whole signed bundle to reproduce exactly.
+        # An ad-hoc signature seals the bundle but proves nothing about who
+        # built it, so it is never trusted here on its own: an installed app
+        # is bound by its receipt's digest (verify_installation) and a
+        # packaged one by the digest its release recorded (install_app).
+        # Recompiling to compare bytes is not used, because swiftc output
+        # carries the toolchain and SDK versions and no other Mac reproduces
+        # the release builder's binary.
         if require_signed: raise LauncherError("release launcher must be signed")
         _verify_adhoc_signature(app)
-        with tempfile.TemporaryDirectory() as directory:
-            reference = Path(directory) / f"{PRODUCT}.app"; _stage_bundle(reference)
-            if _bundle_digest(app) != _bundle_digest(reference): raise LauncherError("launcher compiled binary mismatch")
     else:
         _verify_pinned_signature(app, policy)
     for forbidden in ("checkout-path", "source-revision", "dictate.py", "setup.sh"):
@@ -312,25 +316,53 @@ def _write_receipt(receipt: Path, checkout: Path, app: Path) -> None:
     payload = {"app_bundle_sha256": _bundle_digest(app), "bundle_id": BUNDLE_ID, "checkout": str(checkout), "schema_version": 1, "source_revision": _revision(checkout)}
     _atomic_write(receipt, (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode(), 0o600)
 
+def recorded_launcher_digest(checkout: Path) -> str | None:
+    """The launcher digest a release bundle recorded, or None for a clone."""
+    try: payload = json.loads((checkout / RELEASE_METADATA).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError): return None
+    digest = payload.get("launcher_bundle_sha256") if isinstance(payload, dict) else None
+    return digest if isinstance(digest, str) and SHA256.fullmatch(digest) else None
+
+def _verify_packaged_app(source_app: Path, checkout: Path, policy: Path) -> None:
+    verify_generic_app(source_app, policy=policy)
+    if _is_adhoc_signed(source_app):
+        recorded = recorded_launcher_digest(checkout)
+        if recorded is None: raise LauncherError("this checkout records no launcher digest")
+        if _bundle_digest(source_app) != recorded: raise LauncherError("packaged launcher differs from the one its release recorded")
+
+def _is_current(app: Path, policy: Path) -> bool:
+    try:
+        verify_owned_app(app)
+        verify_generic_app(app, policy=policy)
+    except (LauncherError, OSError):
+        return False
+    return True
+
 def install_app(app: Path, checkout: Path, receipt: Path, source_app: Path | None, policy: Path) -> None:
     app = app.expanduser().resolve(); checkout = checkout.resolve(); app.parent.mkdir(parents=True, exist_ok=True)
-    if not source_app and app.exists():
+    if source_app:
+        source_app = source_app.expanduser().resolve()
         try:
-            verify_owned_app(app)
-            verify_generic_app(app, policy=policy)
-        except LauncherError:
-            pass
-        else:
-            # Keep the exact working bundle when launcher source is unchanged.
-            # Replacing an ad-hoc app unnecessarily can churn macOS privacy
-            # identity even though the runtime checkout is the source of truth.
-            _write_receipt(receipt, checkout, app)
-            verify_installation(app, checkout, receipt)
-            return
+            _verify_packaged_app(source_app, checkout, policy)
+        except (LauncherError, OSError) as exc:
+            # A packaged app that cannot be accepted is not a reason to stop
+            # an install that has already downloaded everything else.
+            print(f"macOS launcher: not using the app beside this folder ({exc}); building one here instead", file=sys.stderr)
+            source_app = None
+    current = app.exists() and _is_current(app, policy)
+    if source_app and current and (_is_adhoc_signed(source_app) or _bundle_digest(source_app) == _bundle_digest(app)):
+        # An ad-hoc app's privacy identity is its code hash, so swapping one
+        # working ad-hoc app for another costs the user every permission
+        # grant. Only a Developer ID app, whose identity survives, replaces it.
+        source_app = None
+    if not source_app and current:
+        # Keep the exact working bundle when launcher source is unchanged.
+        _write_receipt(receipt, checkout, app)
+        verify_installation(app, checkout, receipt)
+        return
     staging_root = Path(tempfile.mkdtemp(prefix=f".{app.name}.", dir=app.parent)); staging = staging_root / app.name
     try:
         if source_app:
-            source_app = source_app.expanduser().resolve(); verify_generic_app(source_app, policy=policy)
             subprocess.run(["/usr/bin/ditto", str(source_app), str(staging)], check=True)
             if _bundle_digest(source_app) != _bundle_digest(staging): raise LauncherError("installed launcher differs from packaged app")
         else:
@@ -359,9 +391,10 @@ def verify_installation(app: Path, checkout: Path, receipt: Path, *, policy: Pat
         if result.returncode: raise LauncherError("compiled launcher runtime verification failed")
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("command", choices=("build", "install", "verify")); parser.add_argument("--app", required=True); parser.add_argument("--checkout"); parser.add_argument("--receipt"); parser.add_argument("--source-app"); parser.add_argument("--policy", default=str(DEFAULT_POLICY)); parser.add_argument("--installed-runtime", action="store_true"); parser.add_argument("--require-signed", action="store_true")
+    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("command", choices=("build", "install", "verify", "digest")); parser.add_argument("--app", required=True); parser.add_argument("--checkout"); parser.add_argument("--receipt"); parser.add_argument("--source-app"); parser.add_argument("--policy", default=str(DEFAULT_POLICY)); parser.add_argument("--installed-runtime", action="store_true"); parser.add_argument("--require-signed", action="store_true")
     args = parser.parse_args(argv)
     try:
+        if args.command == "digest": print(_bundle_digest(Path(args.app).expanduser().resolve())); return 0
         if args.command == "build": build_app(Path(args.app)); verify_generic_app(Path(args.app), policy=Path(args.policy), require_signed=args.require_signed)
         elif args.command == "install":
             if not args.checkout or not args.receipt: raise LauncherError("install requires --checkout and --receipt")

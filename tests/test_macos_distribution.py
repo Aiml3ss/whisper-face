@@ -333,7 +333,8 @@ class MacDistributionContractTests(unittest.TestCase):
             self.assertEqual(verification.returncode, 0, verification.stderr)
 
             # A substituted binary that is re-signed ad-hoc carries a valid
-            # signature yet no longer reproduces byte-for-byte from source.
+            # signature. Without a recorded digest it is not trusted, and the
+            # install builds its own launcher instead of stopping.
             resigned = root / "resigned" / "Whisper Face.app"
             subprocess.run(["ditto", str(app), str(resigned)], check=True)
             resigned_executable = resigned / "Contents/MacOS/Whisper Face"
@@ -345,17 +346,84 @@ class MacDistributionContractTests(unittest.TestCase):
                 ["codesign", "--force", "--sign", "-", "--identifier",
                  "com.berg.whisper-face.launcher", str(resigned)],
                 check=True, capture_output=True)
-            resigned_rejected = subprocess.run([
-                sys.executable, str(LAUNCHER_TOOL), "install",
-                "--app", str(root / "rejected-resigned" / "Whisper Face.app"),
-                "--source-app", str(resigned), "--checkout", str(ROOT),
-                "--receipt", str(root / "rejected-resigned.json"),
+
+            def install(source, checkout, name):
+                target = root / name / "Whisper Face.app"
+                result = subprocess.run([
+                    sys.executable, str(LAUNCHER_TOOL), "install",
+                    "--app", str(target), "--source-app", str(source),
+                    "--checkout", str(checkout),
+                    "--receipt", str(root / f"{name}.json"),
+                ], cwd=ROOT, text=True, capture_output=True)
+                return target, result
+
+            def contents(bundle):
+                return {
+                    path.relative_to(bundle).as_posix(): path.read_bytes()
+                    for path in bundle.rglob("*") if path.is_file()
+                }
+
+            unrecorded, result = install(resigned, ROOT, "unrecorded")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("not using the app beside this folder",
+                          result.stderr)
+            self.assertEqual(contents(unrecorded), first)
+
+            # A release bundle records the digest of the app it ships, and
+            # that record, not a local recompile, is what accepts it. The
+            # recompile could only ever succeed on the release builder's
+            # exact toolchain.
+            release = root / "release-checkout"
+            release.mkdir()
+            subprocess.run(["git", "init", "-q", str(release)], check=True)
+            subprocess.run(
+                ["git", "-C", str(release), "-c", "user.name=t",
+                 "-c", "user.email=t@example.invalid",
+                 "-c", "commit.gpgsign=false", "commit", "-q",
+                 "--allow-empty", "-m", "release"], check=True)
+            recorded_digest = subprocess.run(
+                [sys.executable, str(LAUNCHER_TOOL), "digest",
+                 "--app", str(resigned)],
+                text=True, capture_output=True, check=True).stdout.strip()
+            (release / "RELEASE-METADATA.json").write_text(
+                json.dumps({"launcher_bundle_sha256": recorded_digest}),
+                encoding="utf-8")
+            recorded, result = install(resigned, release, "recorded")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(contents(recorded), contents(resigned))
+            verification = subprocess.run([
+                sys.executable, str(LAUNCHER_TOOL), "verify",
+                "--app", str(recorded), "--checkout", str(release),
+                "--receipt", str(root / "recorded.json"),
             ], cwd=ROOT, text=True, capture_output=True)
-            self.assertEqual(resigned_rejected.returncode, 2)
-            self.assertIn("compiled binary mismatch", resigned_rejected.stderr)
+            self.assertEqual(verification.returncode, 0, verification.stderr)
+
+            # The same app is refused against a record of a different one.
+            (release / "RELEASE-METADATA.json").write_text(
+                json.dumps({"launcher_bundle_sha256": "0" * 64}),
+                encoding="utf-8")
+            mismatched, result = install(resigned, release, "mismatched")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("differs from the one its release recorded",
+                          result.stderr)
+            self.assertEqual(contents(mismatched), first)
+
+            # A working installed app is kept rather than swapped for another
+            # ad-hoc one, even a recorded one, because its code hash is its
+            # privacy identity.
+            built_digest = subprocess.run(
+                [sys.executable, str(LAUNCHER_TOOL), "digest", "--app", str(app)],
+                text=True, capture_output=True, check=True).stdout.strip()
+            (release / "RELEASE-METADATA.json").write_text(
+                json.dumps({"launcher_bundle_sha256": built_digest}),
+                encoding="utf-8")
+            kept, result = install(app, release, "recorded")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("not using the app", result.stderr)
+            self.assertEqual(contents(kept), contents(resigned))
 
             # Modifying a signed executable without re-signing invalidates the
-            # ad-hoc signature outright.
+            # ad-hoc signature outright; the install still completes.
             corrupt = root / "corrupt" / "Whisper Face.app"
             subprocess.run(["ditto", str(app), str(corrupt)], check=True)
             corrupt_executable = corrupt / "Contents/MacOS/Whisper Face"
@@ -363,14 +431,10 @@ class MacDistributionContractTests(unittest.TestCase):
             middle = len(data) // 2
             corrupt_executable.write_bytes(
                 data[:middle] + bytes([data[middle] ^ 1]) + data[middle + 1:])
-            corrupt_rejected = subprocess.run([
-                sys.executable, str(LAUNCHER_TOOL), "install",
-                "--app", str(root / "rejected-corrupt" / "Whisper Face.app"),
-                "--source-app", str(corrupt), "--checkout", str(ROOT),
-                "--receipt", str(root / "rejected-corrupt.json"),
-            ], cwd=ROOT, text=True, capture_output=True)
-            self.assertEqual(corrupt_rejected.returncode, 2)
-            self.assertIn("ad-hoc signature is invalid", corrupt_rejected.stderr)
+            corrupted, result = install(corrupt, ROOT, "rejected-corrupt")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("ad-hoc signature is invalid", result.stderr)
+            self.assertEqual(contents(corrupted), first)
 
             # The release gate refuses an ad-hoc signed bundle: only a Developer
             # ID signature satisfies --require-signed.
