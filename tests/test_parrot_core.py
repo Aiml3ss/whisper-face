@@ -369,6 +369,66 @@ class CleanupCompilerTests(unittest.TestCase):
                 self.assertEqual(plan.text, spoken)
                 self.assertEqual(plan.edits, [])
 
+    def test_a_counted_new_line_noun_phrase_is_not_a_command(self):
+        # A count in front and a plural after make the phrase a noun:
+        # "two new line cooks" are cooks. The first is what the real
+        # recognizer wrote.
+        for spoken in (
+            "We hired two new line cooks.",
+            "We hired 2 new line cooks.",
+            "We hired twenty-five new line cooks.",
+            "Two new line cooks start Monday.",
+            "I drafted three new paragraph styles.",
+            "The kitchen has 12 new line cooks this year.",
+            "Order 1,500 new line cards.",
+            "We hired several new line cooks.",
+            "Do we have any new line cooks?",
+            "There is no new line at the end of the file.",
+            "Those new line cooks are fast.",
+            "Add one more new line after the title.",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken)
+                self.assertEqual(plan.edits, [])
+
+    def test_a_number_before_an_unpaused_command_does_not_block_it(self):
+        # The real recognizer writes an unpaused command without marks, so
+        # a count before it cannot make it prose on its own.
+        for spoken, expected in (
+            ("Milk new line eggs new line bread", "Milk\neggs\nbread"),
+            ("First item new line second item", "First item\nsecond item"),
+            ("Step 1 new line step 2 new line step 3",
+             "Step 1\nstep 2\nstep 3"),
+            ("Call me at 5 new line see you then",
+             "Call me at 5\nsee you then"),
+            ("Eggs 12 new line milk 2 new line bread",
+             "Eggs 12\nmilk 2\nbread"),
+            ("The total is twenty new paragraph thanks for the update",
+             "The total is twenty\n\nthanks for the update"),
+            ("Room 4 new line this is the big one",
+             "Room 4\nthis is the big one"),
+            # A pause puts a mark between the count and the command.
+            ("We need 2. New line. Cooks start Monday.",
+             "We need 2.\nCooks start Monday."),
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, expected)
+                self.assertEqual(plan.edit_kinds, ["spoken_structure"])
+
+    def test_a_count_and_a_plural_around_a_command_keep_the_words(self):
+        # Command or noun phrase cannot be told apart here, so nothing is
+        # removed. "new line item" is a noun wherever it appears.
+        for spoken in (
+            "Eggs 12 new line apples 6",
+            "Item 2 new line item 3",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken)
+                self.assertEqual(plan.edits, [])
+
     def test_scratch_that_takes_its_own_punctuation(self):
         for spoken, expected in (
             ("Move the meeting to Tuesday. Scratch that. Move it to "

@@ -83,6 +83,12 @@
     {"id": "new-line-noun-article", "covers": "new-line", "spoken": "The office got a new line for support.", "expected": "The office got a new line for support."},
     {"id": "new-line-command", "covers": "new-line", "spoken": "First item. New line. Second item.", "expected": "First item.\nSecond item."},
     {"id": "new-paragraph-command", "covers": "new-line", "spoken": "Hi team. New paragraph. The build is green.", "expected": "Hi team.\n\nThe build is green."},
+    {"id": "new-line-noun-counted", "covers": "new-line", "spoken": "We hired two new line cooks.", "expected": "We hired two new line cooks."},
+    {"id": "new-line-noun-counted-digit", "covers": "new-line", "spoken": "The kitchen has 12 new line cooks this year.", "expected": "The kitchen has 12 new line cooks this year."},
+    {"id": "new-paragraph-noun-counted", "covers": "new-line", "spoken": "I drafted three new paragraph styles.", "expected": "I drafted three new paragraph styles."},
+    {"id": "new-line-noun-no", "covers": "new-line", "spoken": "There is no new line at the end of the file.", "expected": "There is no new line at the end of the file."},
+    {"id": "new-line-command-unpaused", "covers": "new-line", "spoken": "Milk new line eggs new line bread", "expected": "Milk\neggs\nbread."},
+    {"id": "new-line-command-after-number", "covers": "new-line", "spoken": "Step 1 new line step 2 new line step 3", "expected": "Step 1\nstep 2\nstep 3."},
 
     {"id": "list-counted", "covers": "list", "spoken": "Here are two things. One, buy milk. Two, call mom.", "expected": "Here are two things:\n- Buy milk.\n- Call mom."},
     {"id": "new-line-noun-cooks", "covers": "new-line", "spoken": "The new line cooks start Monday.", "expected": "The new line cooks start Monday."},
