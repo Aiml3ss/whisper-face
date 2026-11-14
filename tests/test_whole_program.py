@@ -32,6 +32,9 @@ ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "benchmarks" / "default_path_sentences.json"
 MAC = None
 
+sys.path.append(str(ROOT / "benchmarks"))
+import recognizer_replay  # noqa: E402
+
 
 def setUpModule():
     global MAC
@@ -780,6 +783,65 @@ for _case in load_corpus():
         setattr(DefaultPathCorpusTests,
                 "test_known_failure_" + _case["id"].replace("-", "_"),
                 _known_failure_test(_case))
+
+
+class RecognizerReplayTests(unittest.TestCase):
+    """benchmarks/recognizer_transcripts.json, replayed through the program.
+
+    Each transcript is what the real Parakeet helper wrote for a sentence
+    the macOS synthesizer spoke. That shows how the recognizer punctuates,
+    capitalises and formats numbers; it says nothing about how accurately it
+    hears a person. benchmarks/recognizer_replay.py records the file and
+    runs the same replay as its check command.
+    """
+
+    def test_every_case_is_recorded_and_has_texts_to_accept(self):
+        data = recognizer_replay.load()
+        self.assertEqual(recognizer_replay.problems(data), [])
+        cases = data["cases"]
+        self.assertGreaterEqual(len(cases), 76)
+        for kind in ("actually-adverb", "actually-correction",
+                     "actually-contrast", "new-line", "scratch-that",
+                     "sign-off", "numbers", "repeats", "fillers"):
+            with self.subTest(covers=kind):
+                self.assertIn(kind, {case["covers"] for case in cases})
+        # The correction is opt-in, so on a fresh install every sentence the
+        # recognizer wrote "actually" in keeps it.
+        for case in cases:
+            if "actually" in case["transcript"].casefold():
+                for text in case["accept"]:
+                    with self.subTest(case=case["id"], accept=text):
+                        self.assertIn("actually", text.casefold())
+
+    def test_every_transcript_arrives_as_accepted(self):
+        mac = booted()
+        for case in recognizer_replay.load_cases():
+            if case.get("known_failure"):
+                continue
+            # A dictation that cannot start or finish fails the whole test
+            # at once rather than once per sentence.
+            typed = recognizer_replay.type_transcript(mac, case)
+            with self.subTest(case=case["id"], said=case["said"]):
+                self.assertTrue(
+                    recognizer_replay.arrives_as_accepted(case, typed),
+                    f"typed {typed!r} for {case['transcript']!r}; "
+                    f"accept {case['accept']!r}")
+
+
+def _known_replay_failure_test(case):
+    def test(self):
+        typed = recognizer_replay.type_transcript(booted(), case)
+        self.assertIn(typed, case["accept"])
+
+    test.__doc__ = case["known_failure"]
+    return unittest.expectedFailure(test)
+
+
+for _case in recognizer_replay.load_cases():
+    if _case.get("known_failure"):
+        setattr(RecognizerReplayTests,
+                "test_known_failure_" + _case["id"].replace("-", "_"),
+                _known_replay_failure_test(_case))
 
 
 if __name__ == "__main__":
