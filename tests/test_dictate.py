@@ -2708,11 +2708,13 @@ class FacePreferenceTests(unittest.TestCase):
                 "normalize_face", "current_face", "load_preferences",
                 "save_preferences", "normalize_hotkey",
                 "normalize_sound_theme", "set_self_correction",
-                "quick_clean", "needs_llm_cleanup",
+                "quick_clean", "needs_llm_cleanup", "phone_clean",
+                "collapse_repeats", "extract_tone_override",
                 assignments={
                     "FACE_CHOICES", "DEFAULT_FACE", "PREFERENCES",
                     "HOTKEY_CHOICES", "HOTKEY_DEFAULT",
                     "SOUND_THEMES", "SOUND_THEME_DEFAULT",
+                    "TONE", "TONE_OVERRIDE_RE", "TONE_ALIASES",
                 },
                 extra={
                     "PREFERENCES_FILE": preferences,
@@ -2723,6 +2725,11 @@ class FacePreferenceTests(unittest.TestCase):
                     "atomic_write_text": lambda path, value:
                         path.write_text(value, encoding="utf-8"),
                     "compile_cleanup": compile_cleanup,
+                    "NUMBER_WORDS": NUMBER_WORDS,
+                    "is_hallucination": lambda *_args: False,
+                    "looks_like_prompt_echo": lambda _raw: False,
+                    "apply_learned_fixes": lambda raw: raw,
+                    "apply_vocabulary_casing": lambda text: text,
                 },
             )
             spoken = "I thought it was Tuesday, actually Wednesday."
@@ -2741,6 +2748,7 @@ class FacePreferenceTests(unittest.TestCase):
                     self.assertIs(
                         ns["PREFERENCES"]["self_correction"], False)
                     self.assertEqual(ns["quick_clean"](spoken), spoken)
+                    self.assertEqual(ns["phone_clean"](spoken), spoken)
 
             self.assertIs(ns["set_self_correction"](True), True)
             self.assertIs(json.loads(preferences.read_text(
@@ -2750,6 +2758,8 @@ class FacePreferenceTests(unittest.TestCase):
             self.assertEqual(
                 ns["quick_clean"]("Let's meet Tuesday, actually Wednesday"),
                 "Let's meet Wednesday.")
+            self.assertEqual(
+                ns["phone_clean"](spoken), "I thought it was Wednesday.")
             ns["PREFERENCES"]["self_correction"] = False
             ns["load_preferences"]()
             self.assertIs(ns["PREFERENCES"]["self_correction"], True)
@@ -2758,6 +2768,7 @@ class FacePreferenceTests(unittest.TestCase):
             self.assertIs(json.loads(preferences.read_text(
                 encoding="utf-8"))["self_correction"], False)
             self.assertEqual(ns["quick_clean"](spoken), spoken)
+            self.assertEqual(ns["phone_clean"](spoken), spoken)
 
     def test_privacy_preferences_are_mac_only_and_default_off(self):
         for is_macos, acoustic, voice_objects, expected in (
