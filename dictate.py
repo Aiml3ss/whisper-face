@@ -357,6 +357,7 @@ from parrot_core import (  # noqa: E402
     transform_last_insertion,
     compile_cleanup,
     compile_code_dictation,
+    NUMBER_WORDS,
     confidence_from_segments,
     correction_similarity,
     hypothesis_agreement,
@@ -9871,6 +9872,10 @@ def collapse_repeats(text: str) -> tuple[str, bool]:
     Chinese transcript, which arrives as a single token. It fails closed
     there — the text is returned untouched and ``looped`` is False — rather
     than guessing at character-level repetition and eating real speech.
+
+    Digits, number words and single characters are never collapsed: a zip
+    code ("1 0 0 0 1"), a phone number ("five five five") and a spelled
+    address ("w w w") repeat a token three times in real speech.
     """
     words = text.split()
     out, prev, run = [], None, 0
@@ -9878,7 +9883,8 @@ def collapse_repeats(text: str) -> tuple[str, bool]:
         key = w.strip(",.;:!?…\"'。、！？「」").casefold()
         run = run + 1 if key == prev else 1
         prev = key
-        if run <= 2:
+        if (run <= 2 or len(key) <= 1 or key in NUMBER_WORDS
+                or any(char.isdigit() for char in key)):
             out.append(w)
     return " ".join(out), bool(words) and len(out) <= 0.6 * len(words)
 

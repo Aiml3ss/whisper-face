@@ -43,6 +43,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from parrot_core import (  # noqa: E402
+    NUMBER_WORDS,
     Recognition,
     RecognitionWord,
     compile_cleanup,
@@ -3617,6 +3618,32 @@ class CleanupGuardTests(unittest.TestCase):
         for recognition in dropped:
             with self.subTest(recognition=recognition):
                 self.assertTrue(guard(recognition.text, "en", recognition))
+
+    def test_repeat_collapse_keeps_digits_number_words_and_letters(self):
+        ns = load_definitions(
+            "collapse_repeats", extra={"NUMBER_WORDS": NUMBER_WORDS})
+        for spoken in (
+            "the zip is 1 0 0 0 1",
+            "The zip is 1, 0, 0, 0, 1.",
+            "my number is five five five one two one two",
+            "Dial 555 555 555 and wait.",
+            "w w w dot example dot com",
+            "The grade was A A A plus.",
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(
+                    ns["collapse_repeats"](spoken), (spoken, False))
+
+    def test_repeat_collapse_still_removes_a_decode_loop(self):
+        ns = load_definitions(
+            "collapse_repeats", extra={"NUMBER_WORDS": NUMBER_WORDS})
+        collapse = ns["collapse_repeats"]
+        self.assertEqual(
+            collapse("Restart " + "Unraid " * 40 + "tonight."),
+            ("Restart Unraid Unraid tonight.", True))
+        self.assertEqual(
+            collapse("No no, that is wrong."),
+            ("No no, that is wrong.", False))
 
     def test_simple_fillers_stay_on_the_fast_path(self):
         ns = load_definitions(
