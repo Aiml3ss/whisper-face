@@ -9105,6 +9105,9 @@ def commit_insertion(rec, text: str, bundle: str,
     """Commit through a lease when possible, otherwise preserve old behavior."""
     lease = getattr(rec, "insertion_lease", None)
     rec.insertion_capabilities = None
+    # Only a readback that runs for this utterance may name a shape; an
+    # opaque, refused or lease-less commit must not inherit the last one.
+    PIPELINE_STATE["last_readback_shape"] = ""
     # Join to whatever is already there before anything downstream sees the
     # text, so the staged string, the paste, the readback expectation, and
     # the observed range all agree on exactly one string.
