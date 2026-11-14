@@ -336,6 +336,29 @@ class CleanupCompilerTests(unittest.TestCase):
         self.assertNotIn("scratch_that", plan.edit_kinds)
         self.assertTrue(plan.needs_semantic_cleanup)
 
+    def test_a_hesitation_before_scratch_that_is_not_a_sentence_end(self):
+        # Recognizers write a trailing-off pause as an ellipsis. The command
+        # then interrupts its own sentence and must not drop all of it.
+        for raw in (
+            "Send it Tuesday... scratch that... Monday.",
+            "Send it Tuesday… scratch that… Monday.",
+            "Send it Tuesday... Scratch that. Monday.",
+        ):
+            with self.subTest(raw=raw):
+                plan = compile_cleanup(raw)
+                self.assertEqual(plan.text, raw)
+                self.assertNotIn("scratch_that", plan.edit_kinds)
+                self.assertTrue(plan.needs_semantic_cleanup)
+        self.assertEqual(
+            compile_cleanup(
+                "Tell Morgan it starts at six... scratch that... at seven."
+            ).text,
+            "Tell Morgan it starts at seven.")
+        # After a real sentence end the command still drops that sentence.
+        self.assertEqual(
+            compile_cleanup("Send it Tuesday. Scratch that... Monday.").text,
+            "Monday.")
+
     def test_scratch_that_as_a_verb_phrase_is_not_a_command(self):
         for spoken in (
             "We need to rethink it. Let's scratch that idea and start over.",

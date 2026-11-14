@@ -608,7 +608,9 @@ def _resolve_scratch_that(text: str) -> tuple[str, bool]:
     right = text[command.end() + trail.end():].lstrip()
     if not left:
         return text, True
-    own_sentence = bool(re.search(r"[.!?…]", lead.group(0))
+    # An ellipsis before the command is a hesitation inside the sentence
+    # ("Tuesday... scratch that... Monday"), not the end of one.
+    own_sentence = bool(re.search(r"[!?]|(?<!\.)\.(?!\.)", lead.group(0))
                         and re.search(r"[.!?…]", trail.group(0)))
     boundaries = list((SENTENCE_BOUNDARY_RE if own_sentence
                        else CLAUSE_BOUNDARY_RE).finditer(left))
