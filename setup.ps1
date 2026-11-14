@@ -939,6 +939,10 @@ if ($Mode -eq "full") {
     Write-Host "== The Whisper Face tray menu controls character, pause, Flight Recorder, logs, and quit."
 } else {
     Write-Host "== server-only installation is ready."
+    Write-Host "== A client must send the bearer token as"
+    Write-Host "== 'Authorization: Bearer <token>'. A new one is created at"
+    Write-Host "== every restart and written once to $Log"
+    Write-Host "== (the line starting 'Phone endpoint token')."
 }
 Write-Host "== Logs: $Log"
 

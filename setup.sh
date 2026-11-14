@@ -1006,6 +1006,10 @@ print_install_outcome() {
             echo "== Launcher: $launcher_app"
         else
             echo "== server-only installation is ready."
+            echo "== A client must send the bearer token as"
+            echo "== 'Authorization: Bearer <token>'. A new one is created at"
+            echo "== every restart and written once to $DIR/dictate.log"
+            echo "== (the line starting \"Phone endpoint token\")."
         fi
     else
         echo "== Not finished yet: Whisper Face is installed, but it cannot hear"
