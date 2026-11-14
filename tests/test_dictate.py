@@ -7890,13 +7890,14 @@ class OllamaChatTransportTests(unittest.TestCase):
     """Structured-output schema and streamed generation deadlines."""
 
     @staticmethod
-    def namespace(post):
+    def namespace(post, installed=True):
         return load_definitions(
             "ollama_chat", "_ollama_stream_reply",
             extra={
                 "OLLAMA_MODEL": "test-model",
-                "OLLAMA_URL": "http://localhost:11434/api/chat",
-                "requests": SimpleNamespace(post=post),
+                "OLLAMA_URL": "http://127.0.0.1:11434/api/chat",
+                "LOCAL_MODEL_SESSION": SimpleNamespace(post=post),
+                "cleanup_model_installed": lambda: installed,
                 "time": time,
             },
         )
@@ -7911,6 +7912,38 @@ class OllamaChatTransportTests(unittest.TestCase):
             close=lambda: None,
             raise_for_status=lambda: None,
         )
+
+    def test_nothing_is_sent_when_the_cleanup_model_is_not_installed(self):
+        # The default install has no cleanup model. Cleanup, warm-up,
+        # keep-warm and the learning pass all reach the model through
+        # ollama_chat, so none of them may put text on the wire.
+        posted = []
+        ns = load_definitions(
+            "ollama_chat", "_ollama_stream_reply", "cleanup_model_installed",
+            assignments=("OLLAMA_MODEL",),
+            extra={
+                "os": os,
+                "Path": Path,
+                "time": time,
+                "OLLAMA_URL": "http://127.0.0.1:11434/api/chat",
+                "LOCAL_MODEL_SESSION": SimpleNamespace(
+                    post=lambda *a, **k: posted.append(k) or self.response(
+                        body={"message": {"content": "ok"}})),
+            },
+        )
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.dict(os.environ, {"OLLAMA_MODELS": td}):
+            with self.assertRaises(RuntimeError):
+                ns["ollama_chat"](None, "Send the contract to Priya.")
+            self.assertEqual(posted, [])
+
+            manifest = (Path(td) / "manifests" / "registry.ollama.ai" /
+                        "library" / "qwen3.5" / "4b")
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text("{}")
+            out, _ = ns["ollama_chat"](None, "Send the contract to Priya.")
+        self.assertEqual(out, "ok")
+        self.assertEqual(len(posted), 1)
 
     def test_schema_is_sent_and_non_streaming_path_is_unchanged(self):
         posted = []

@@ -698,10 +698,17 @@ ASR_MODEL_REVISIONS = {
 }
 PARAKEET_MODEL_REPO = "FluidInference/parakeet-unified-en-0.6b-coreml"
 PARAKEET_MODEL_REVISION = "4252711f6f060f9a2f91e5f081a806d7f45eebd8"
-OLLAMA_URL = "http://localhost:11434/api/chat"
+# 127.0.0.1, not localhost: Ollama listens on IPv4 only, and "localhost"
+# resolves to ::1 first, where any local process could answer instead.
+OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 OLLAMA_MODEL = "qwen3.5:4b"
 OLLAMA_MODEL_MANIFEST_SHA256 = (
     "2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd")
+# Every request to the local model goes through this one client. With
+# trust_env off, no proxy from the environment or the system settings (and no
+# .netrc credential) is ever applied, so dictated text cannot be relayed.
+LOCAL_MODEL_SESSION = requests.Session()
+LOCAL_MODEL_SESSION.trust_env = False
 PROJECT_SOURCE_URL = os.environ.get(
     "WHISPER_FACE_SOURCE_URL",
     "https://github.com/Aiml3ss/whisper-face",
@@ -6683,6 +6690,19 @@ def insert_recent_dictation(entry_id: str) -> dict:
     return {"inserted": bool(verified), "reason": reason}
 
 
+def cleanup_model_installed() -> bool:
+    """Whether the cleanup model is on disk, from a local file check only.
+
+    A default install has no cleanup model; asking Ollama anyway would put the
+    dictation on the wire for nothing.
+    """
+    models_root = Path(os.environ.get(
+        "OLLAMA_MODELS", str(Path.home() / ".ollama" / "models")))
+    name, _, tag = OLLAMA_MODEL.partition(":")
+    return (models_root / "manifests" / "registry.ollama.ai" / "library"
+            / name / (tag or "latest")).is_file()
+
+
 def ollama_chat(system: str | None, user: str, num_predict: int = 512,
                 few_shot: list | None = None,
                 timeout: tuple = (2, 15),
@@ -6697,7 +6717,11 @@ def ollama_chat(system: str | None, user: str, num_predict: int = 512,
     rejects the schema). ``total_deadline`` switches to streaming: the read
     timeout then bounds the gap between chunks instead of the whole reply,
     and the deadline bounds the whole reply.
+
+    Raises before sending anything when the cleanup model is not installed.
     """
+    if not cleanup_model_installed():
+        raise RuntimeError(f"{OLLAMA_MODEL} is not installed")
     messages = ([{"role": "system", "content": system}] if system else [])
     messages += few_shot or []
     messages.append({"role": "user", "content": user})
@@ -6722,7 +6746,7 @@ def ollama_chat(system: str | None, user: str, num_predict: int = 512,
         payload["format"] = "json"
 
     def post(current: dict):
-        return requests.post(
+        return LOCAL_MODEL_SESSION.post(
             OLLAMA_URL, json=current, timeout=timeout, stream=streaming)
 
     r = post(payload)
