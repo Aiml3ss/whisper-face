@@ -1030,6 +1030,49 @@ class InstallerContractTests(unittest.TestCase):
         self.assertEqual(install.stdout, "")
         self.assertIn("!! no room", install.stderr)
 
+        # Every check verify_install makes names itself when it fails, so the
+        # app never shows "== verifying installation" as the reason.
+        checks = {
+            "plutil": ("plutil", "exit 1",
+                       "!! dictation LaunchAgent is not a valid property list"),
+            "uv lock --check": ("uv", 'case "$*" in lock*) exit 1;; esac',
+                                "!! the Python lock does not match dictate.py"),
+            "uv sync --check": ("uv", 'case "$*" in sync*) exit 1;; esac',
+                                "!! the locked Python environment is incomplete"),
+        }
+        for name, (tool, body, reason) in checks.items():
+            with self.subTest(check=name), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                helper = root / "parrot-asr-helper"
+                helper.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+                helper.chmod(0o755)
+                logs = (root / "dictate.log", root / "ollama.log")
+                for log in logs:
+                    log.write_text("", encoding="utf-8")
+                    log.chmod(0o600)
+                (root / "com.berg.dictate.plist").write_text(
+                    "x", encoding="utf-8")
+                stubs = {"uv": "exit 0", "ffmpeg": "exit 0", "swift": "exit 0",
+                         "swiftc": "exit 0", "plutil": "exit 0"}
+                stubs[tool] = body
+                result = run_setup_functions(
+                    ["fail", "step", "private_log_is_valid",
+                     "verify_cleanup_service", "verify_install"],
+                    "verify_install\n",
+                    variables={
+                        "VERIFY_ONLY": 1, "MODE": "server", "DIR": root,
+                        "parakeet_helper": helper,
+                        "dictate_plist": root / "com.berg.dictate.plist",
+                        "dictate_log": logs[0], "ollama_log": logs[1],
+                        "ollama_plist": root / "com.berg.ollama.plist",
+                    },
+                    stubs=stubs)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertTrue(
+                    result.stdout.strip().splitlines()[-1].startswith(reason),
+                    result.stdout)
+
     def test_install_command_names_the_log_only_when_this_run_wrote_it(self):
         # A copy of the shim drives a stand-in setup.sh, so nothing installs.
         for writes_log, expected in (

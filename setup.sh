@@ -823,7 +823,8 @@ verify_install() {
         private_log_is_valid "$private_log" \
             || fail "private runtime log is missing or has unsafe permissions"
     done
-    plutil -lint "$dictate_plist" >/dev/null
+    plutil -lint "$dictate_plist" >/dev/null \
+        || fail "dictation LaunchAgent is not a valid property list"
     verify_cleanup_service
     if [ "$MODE" = "full" ]; then
         python3 "$DIR/scripts/macos_launcher_app.py" verify \
@@ -832,8 +833,10 @@ verify_install() {
             --installed-runtime >/dev/null \
             || fail "Whisper Face launcher app is missing or stale"
     fi
-    "$uv_bin" lock --check --script "$DIR/dictate.py" >/dev/null
-    "$uv_bin" sync --locked --script "$DIR/dictate.py" --check >/dev/null
+    "$uv_bin" lock --check --script "$DIR/dictate.py" >/dev/null \
+        || fail "the Python lock does not match dictate.py; rerun ./setup.sh"
+    "$uv_bin" sync --locked --script "$DIR/dictate.py" --check >/dev/null \
+        || fail "the locked Python environment is incomplete; rerun ./setup.sh"
     if [ "$MODE" = "full" ]; then
         run_with_timeout 30 "$uv_bin" run --locked \
             --script "$DIR/dictate.py" --native-gui-smoke-test >/dev/null \
