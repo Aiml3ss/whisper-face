@@ -2437,6 +2437,30 @@ class ViewModelTests(unittest.TestCase):
         self.assertEqual(state.notice_level, "error")
         self.assertEqual(model.select_section("Home").notice, "")
 
+    def test_a_reviewed_issue_notice_clears_once_the_issue_recovers(self):
+        now = [100.0]
+        runtime = {"service_status": "Running",
+                   "microphone_status": "Unavailable",
+                   "accessibility_status": "Granted",
+                   "input_monitoring_status": "Granted",
+                   "capture_state": "Ready"}
+        model = WhisperFaceViewModel(
+            GUIActions(status_snapshot=lambda: dict(runtime)),
+            clock=lambda: now[0])
+        reviewed = model.show_issue()
+        self.assertEqual(reviewed.notice_level, "error")
+        self.assertTrue(reviewed.notice)
+
+        now[0] += 2.0
+        self.assertEqual(model.refresh().notice, reviewed.notice)
+
+        runtime["microphone_status"] = "Ready"
+        now[0] += 2.0
+        state = model.refresh()
+
+        self.assertEqual(state.degraded_issues, ())
+        self.assertEqual(state.notice, "")
+
     def test_a_success_notice_outlives_a_refresh_then_expires(self):
         now = [100.0]
         model = WhisperFaceViewModel(

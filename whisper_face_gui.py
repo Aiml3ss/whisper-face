@@ -3467,6 +3467,7 @@ class WhisperFaceViewModel:
         self._clock = clock
         self._notice_issued_at = clock()
         self._status_error_notice = ""
+        self._issue_notice = ("", "")
         self.state = GUIState()
         self._onboarding_acknowledged = False
         self._hotkey_practiced = False
@@ -3535,6 +3536,13 @@ class WhisperFaceViewModel:
                 locale=self.locale,
             )
             self._status_error_notice = ""
+            # An issue's own notice is only true while that issue is reported.
+            issue_key, issue_detail = self._issue_notice
+            if issue_detail and self.state.notice == issue_detail and (
+                    issue_key not in {
+                        issue.key for issue in self.state.degraded_issues}):
+                self.state = replace(self.state, notice="", notice_level="info")
+                self._issue_notice = ("", "")
         except Exception as error:
             self._status_error_notice = self.localized(
                 "overview.notice.status.error", error=error)
@@ -3837,6 +3845,7 @@ class WhisperFaceViewModel:
         self.state = replace(
             self.state, section=issue.route, notice=issue.detail,
             notice_level="error" if issue.severity == "error" else "info")
+        self._issue_notice = (issue.key, issue.detail)
         return self.state
 
     def choose_face(self, face: str) -> GUIState:
