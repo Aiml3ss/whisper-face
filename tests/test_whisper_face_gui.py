@@ -536,6 +536,7 @@ class SnapshotTests(unittest.TestCase):
                 "operation.keyword.forget_failed",
                 "operation.face.change_failed",
                 "operation.flight.update_failed",
+                "operation.self_correction.update_failed",
                 "operation.acoustic.update_failed",
                 "operation.relisten.update_failed",
                 "operation.acoustic.play_failed",
@@ -2488,6 +2489,37 @@ class ViewModelTests(unittest.TestCase):
         now[0] += 8.0
         self.assertEqual(model.refresh().notice, "")
 
+    def test_the_same_success_posted_again_gets_its_own_lifetime(self):
+        now = [100.0]
+        model = WhisperFaceViewModel(
+            GUIActions(status_snapshot=lambda: {},
+                       save_snippet=lambda *_args: None),
+            clock=lambda: now[0])
+        first = model.save_snippet("signature", "Kind regards").notice
+        now[0] += 6.0
+        second = model.save_snippet("signature", "Kind regards").notice
+        self.assertEqual(second, first)
+
+        now[0] += 6.0
+        self.assertEqual(model.refresh().notice, second)
+        now[0] += 2.0
+        self.assertEqual(model.refresh().notice, "")
+
+    def test_refreshes_and_side_updates_never_extend_a_notice(self):
+        now = [100.0]
+        model = WhisperFaceViewModel(
+            GUIActions(status_snapshot=lambda: {},
+                       save_snippet=lambda *_args: None),
+            clock=lambda: now[0])
+        saved = model.save_snippet("signature", "Kind regards").notice
+        for _tick in range(3):
+            now[0] += 2.0
+            self.assertEqual(model.refresh().notice, saved)
+        model.set_verification("Checks passed")
+        model.acknowledge_onboarding()
+        now[0] += 2.0
+        self.assertEqual(model.refresh().notice, "")
+
     def test_a_status_error_clears_once_status_reads_again(self):
         failing = [True]
 
@@ -2738,6 +2770,103 @@ class AccessoryActivationOrderTests(unittest.TestCase):
         self.assertIn("orderFrontRegardless", self._show_source())
 
 
+class ConfirmationKeyTests(unittest.TestCase):
+    """Escape cancels a confirmation; Return never reaches a destructive one.
+
+    The objects stand in for NSAlert, its NSButtons and a key-down NSEvent,
+    answering the same selectors the window calls on the real ones.
+    """
+
+    ESCAPE, RETURN, PERIOD, COMMAND = 53, 36, 47, 1 << 20
+
+    class Button:
+        def __init__(self, title, key, destructive=False):
+            self.title, self.key, self.destructive = title, key, destructive
+            self.clicks = 0
+
+        def keyEquivalent(self):
+            return self.key
+
+        def hasDestructiveAction(self):
+            return self.destructive
+
+        def performClick_(self, _sender):
+            self.clicks += 1
+
+    class Alert:
+        def __init__(self, *buttons):
+            self._buttons = buttons
+            self._window = object()
+
+        def buttons(self):
+            return self._buttons
+
+        def window(self):
+            return self._window
+
+    class Event:
+        def __init__(self, window, key_code, characters, flags=0):
+            self._window, self._key_code = window, key_code
+            self._characters, self._flags = characters, flags
+
+        def window(self):
+            return self._window
+
+        def keyCode(self):
+            return self._key_code
+
+        def charactersIgnoringModifiers(self):
+            return self._characters
+
+        def modifierFlags(self):
+            return self._flags
+
+    def destructive_confirmation(self):
+        delete = self.Button("Delete", "", destructive=True)
+        cancel = self.Button("Cancel", "\r")
+        return self.Alert(delete, cancel), delete, cancel
+
+    def test_return_and_escape_both_route_to_cancel_when_it_destroys(self):
+        alert, _delete, _cancel = self.destructive_confirmation()
+        self.assertEqual(gui_module.alert_key_routes(alert), (1, 1))
+
+    def test_escape_clicks_cancel_and_never_the_destructive_button(self):
+        alert, delete, cancel = self.destructive_confirmation()
+        handler = gui_module.alert_escape_handler(alert)
+        self.assertIsNotNone(handler)
+        escape = self.Event(alert.window(), self.ESCAPE, "\x1b")
+        self.assertIsNone(handler(escape))
+        command_period = self.Event(
+            alert.window(), self.PERIOD, ".", self.COMMAND)
+        self.assertIsNone(handler(command_period))
+        self.assertEqual((delete.clicks, cancel.clicks), (0, 2))
+
+    def test_other_keys_and_other_windows_pass_through_untouched(self):
+        alert, delete, cancel = self.destructive_confirmation()
+        handler = gui_module.alert_escape_handler(alert)
+        for event in (
+                self.Event(alert.window(), self.RETURN, "\r"),
+                self.Event(alert.window(), self.PERIOD, "."),
+                self.Event(object(), self.ESCAPE, "\x1b")):
+            with self.subTest(key=event.keyCode()):
+                self.assertIs(handler(event), event)
+        self.assertEqual((delete.clicks, cancel.clicks), (0, 0))
+
+    def test_a_confirmation_that_destroys_nothing_keeps_appkit_keys(self):
+        # Return confirms, and Escape is Cancel's own key equivalent, so
+        # AppKit answers both and no monitor is needed.
+        alert = self.Alert(
+            self.Button("Compose", "\r"), self.Button("Cancel", "\x1b"))
+        self.assertEqual(gui_module.alert_key_routes(alert), (0, 1))
+        self.assertIsNone(gui_module.alert_escape_handler(alert))
+
+    def test_escape_is_not_invented_for_a_dialog_without_a_safe_button(self):
+        alert = self.Alert(
+            self.Button("Review", "\r"), self.Button("Done", ""))
+        self.assertEqual(gui_module.alert_key_routes(alert), (0, None))
+        self.assertIsNone(gui_module.alert_escape_handler(alert))
+
+
 class BoundKeyCopyTests(unittest.TestCase):
     """A1: no surface may claim a key that is not the one bound."""
 
@@ -2978,6 +3107,40 @@ class ControlSettingsViewModelTests(unittest.TestCase):
         model.refresh()
         self.assertEqual(len(model.recent_dictations()), 1)
 
+    def test_the_actually_correction_is_off_unless_settings_say_on(self):
+        self.assertFalse(GUIActions().set_self_correction(True))
+        self.assertFalse(normalize_settings({}).self_correction)
+        self.assertFalse(
+            normalize_settings({"self_correction": "yes"}).self_correction)
+        self.assertTrue(
+            normalize_settings({"self_correction": True}).self_correction)
+
+    def test_the_actually_correction_switch_shows_what_the_runtime_stored(
+            self):
+        stored = {"self_correction": False}
+
+        def set_self_correction(enabled):
+            self.calls.append(enabled)
+            stored["self_correction"] = enabled
+            return enabled
+
+        model = self.model(
+            settings_snapshot=lambda: dict(stored),
+            set_self_correction=set_self_correction)
+        self.assertFalse(model.select_section("Settings").settings
+                         .self_correction)
+        state = model.set_self_correction(True)
+        self.assertEqual(self.calls, [True])
+        self.assertTrue(state.settings.self_correction)
+        self.assertTrue(model.refresh().settings.self_correction)
+        self.assertFalse(model.set_self_correction(False)
+                         .settings.self_correction)
+
+    def test_a_refused_actually_correction_leaves_the_switch_off(self):
+        model = self.model(set_self_correction=lambda _enabled: False)
+        self.assertFalse(
+            model.set_self_correction(True).settings.self_correction)
+
     def test_a_runtime_that_raises_never_takes_the_window_down(self):
         def explode(*_args, **_kwargs):
             raise RuntimeError("private detail")
@@ -2987,12 +3150,17 @@ class ControlSettingsViewModelTests(unittest.TestCase):
             set_sound_theme=explode, set_recent_dictations=explode,
             recent_dictations=explode, reveal_recent_dictation=explode,
             insert_recent_dictation=explode, undo_last_dictation=explode,
-            preview_sound=explode, describe_hotkey=explode)
+            preview_sound=explode, describe_hotkey=explode,
+            set_self_correction=explode)
         model.choose_hotkey("f13")
         model.choose_undo_hotkey("f14")
         model.choose_sound_theme("silent")
         model.set_recent_dictations(True)
         self.assertEqual(model.recent_dictations(), ())
+        state = model.set_self_correction(True)
+        self.assertFalse(state.settings.self_correction)
+        self.assertEqual(state.notice_level, "error")
+        self.assertNotIn("Flight Recorder", state.notice)
         self.assertEqual(model.reveal_recent_dictation("a"), "")
         model.insert_recent_dictation("a")
         model.undo_last_dictation()

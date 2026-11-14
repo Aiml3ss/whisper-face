@@ -547,6 +547,10 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.controls.sound.detail.system": "Borrowed macOS system sounds",
         "settings.controls.sound.detail.whisper": "Short first-party cues for start, finish, and trouble",
         "settings.controls.sound.detail.silent": "No sound at all",
+        "settings.controls.self_correction": "“Actually” corrections",
+        "settings.controls.self_correction.off": "Off. When on, “Meet at 3 pm, actually 4 pm” types “Meet at 4 pm” for numbers, days, months and times.",
+        "settings.controls.self_correction.on": "On. “Meet at 3 pm, actually 4 pm” types “Meet at 4 pm” for numbers, days, months and times.",
+        "settings.controls.self_correction.cost": "A real contrast changes too: “I thought it was Tuesday, actually Wednesday” loses “Tuesday”.",
         "settings.controls.action.change": "Change…",
         "settings.controls.action.preview": "Preview",
         "settings.dialog.hotkey.title": "Choose your capture key",
@@ -581,6 +585,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.privacy.recent.browse": "Browse…",
         "settings.privacy.recent.browse.help": "List recent dictations by time, length, and app.",
         "settings.accessibility.recent.label": "Recent dictations",
+        "settings.accessibility.self_correction.label": "“Actually” corrections",
+        "settings.accessibility.self_correction.help": "Off by default. When on, “Meet at 3 pm, actually 4 pm” types “Meet at 4 pm”: between two numbers, days, months or times, only the second is kept. A sentence contrasting two things, like “I thought it was Tuesday, actually Wednesday”, changes too.",
         "settings.accessibility.recent.help": "Show recent dictations so their words can be revealed.",
         "settings.dialog.recent.title": "Recent dictations",
         "settings.dialog.recent.message": "Metadata only. Reveal a dictation to see its words. To insert one again, click where it should go and use Recent Dictations in the menu bar.",
@@ -867,6 +873,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "operation.keyword.export_failed": "Could not copy the pronunciation keyword export: {error}. Nothing reached the clipboard — try Copy Export again.",
         "operation.keyword.forget_failed": "Could not forget that pronunciation keyword: {error}. Its evidence is unchanged — try Forget again.",
         "operation.face.change_failed": "Could not change your companion: {error}. The current face stays — pick it again.",
+        "operation.self_correction.update_failed": "Could not change “Actually” corrections: {error}. It stayed exactly as it was — try the switch again.",
         "operation.flight.update_failed": "Could not update Flight Recorder: {error}. It stayed exactly as it was — try the switch again.",
         "operation.acoustic.update_failed": "Could not update Acoustic Time Machine: {error}. It stayed exactly as it was — try the switch again.",
         "operation.relisten.update_failed": "Could not update Selective Re-listen: {error}. It stayed exactly as it was — try the switch again.",
@@ -1084,6 +1091,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "settings.accessibility.language.label",
             "settings.accessibility.flight.label",
             "settings.accessibility.acoustic.label",
+            "settings.accessibility.self_correction.label",
             "settings.accessibility.voice_objects.label",
             "settings.accessibility.voice_objects.inspector",
             "settings.accessibility.voice_objects.chooser",
@@ -1148,6 +1156,7 @@ class GUIActions:
     set_language: Callable[[str], str] = lambda _code: LANGUAGE_DEFAULT
     preview_sound: Callable[[str], bool] = lambda _cue: False
     set_recent_dictations: Callable[[bool], bool] = lambda _enabled: False
+    set_self_correction: Callable[[bool], bool] = lambda _enabled: False
     recent_dictations: Callable[[], Sequence[Mapping[str, Any]]] = lambda: ()
     reveal_recent_dictation: Callable[[str], str | None] = (
         lambda _entry_id: None)
@@ -1538,6 +1547,7 @@ class UnifiedSettings:
     manual_vocabulary: tuple[str, ...] = field(default_factory=tuple)
     banned_vocabulary: tuple[str, ...] = field(default_factory=tuple)
     corrections: tuple[CorrectionSetting, ...] = field(default_factory=tuple)
+    self_correction: bool = False
 
 
 def tone_for_app_index(
@@ -2459,6 +2469,7 @@ def normalize_settings(snapshot: Mapping[str, Any] | None) -> UnifiedSettings:
         manual_vocabulary=_text_items(source.get("manual_vocabulary")),
         banned_vocabulary=_text_items(source.get("banned_vocabulary")),
         corrections=tuple(corrections),
+        self_correction=source.get("self_correction") is True,
     )
 
 
@@ -3471,6 +3482,7 @@ class WhisperFaceViewModel:
         self.locale = resolve_locale(locale)
         self._clock = clock
         self._notice_issued_at = clock()
+        self._carrying_notice = False
         self._status_error_notice = ""
         self._issue_notice = ("", "")
         self.state = GUIState()
@@ -3489,13 +3501,23 @@ class WhisperFaceViewModel:
 
     @state.setter
     def state(self, value: GUIState) -> None:
-        # Every write goes through here, so a new notice is stamped wherever
-        # it was set, including by the window controller.
+        # Every write goes through here, so a notice is stamped wherever it
+        # was set, including by the window controller. Posting the same text
+        # again stamps it again; only _carry keeps the old stamp.
         previous = self.__dict__.get("_state")
         if previous is None or (value.notice, value.notice_level) != (
-                previous.notice, previous.notice_level):
+                previous.notice, previous.notice_level) or (
+                    value.notice and not self._carrying_notice):
             self._notice_issued_at = self._clock()
         self._state = value
+
+    def _carry(self, value: GUIState) -> None:
+        """Write state that keeps the current notice without reissuing it."""
+        self._carrying_notice = True
+        try:
+            self.state = value
+        finally:
+            self._carrying_notice = False
 
     def _surviving_notice(self) -> tuple[str, str]:
         notice, level = self.state.notice, self.state.notice_level
@@ -3529,7 +3551,7 @@ class WhisperFaceViewModel:
                 self._hotkey_practiced = True
             snapshot["hotkey_practiced"] = self._hotkey_practiced
             notice, notice_level = self._surviving_notice()
-            self.state = normalize_snapshot(
+            self._carry(normalize_snapshot(
                 snapshot,
                 section=self.state.section,
                 verification=self.state.verification,
@@ -3539,7 +3561,7 @@ class WhisperFaceViewModel:
                 settings_pane=self.state.settings_pane,
                 settings=self.state.settings,
                 locale=self.locale,
-            )
+            ))
             self._status_error_notice = ""
             # An issue's own notice is only true while that issue is reported.
             issue_key, issue_detail = self._issue_notice
@@ -3559,10 +3581,10 @@ class WhisperFaceViewModel:
     def acknowledge_onboarding(self, acknowledged: bool = True) -> GUIState:
         """Remember that a completed first run need not be shown again."""
         self._onboarding_acknowledged = bool(acknowledged)
-        self.state = replace(
+        self._carry(replace(
             self.state,
             onboarding_acknowledged=self._onboarding_acknowledged,
-        )
+        ))
         return self.state
 
     def select_section(self, section: str) -> GUIState:
@@ -3998,6 +4020,21 @@ class WhisperFaceViewModel:
             self.state = replace(
                 self.state, notice=self.localized(
                     "operation.flight.update_failed", error=error),
+                notice_level="error")
+        return self.state
+
+    def set_self_correction(self, enabled: bool) -> GUIState:
+        try:
+            stored = self.actions.set_self_correction(bool(enabled)) is True
+            self.state = replace(
+                self.state, settings=replace(
+                    self.state.settings, self_correction=stored),
+                notice="", notice_level="info")
+            return self.refresh()
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.self_correction.update_failed", error=error),
                 notice_level="error")
         return self.state
 
@@ -4922,7 +4959,7 @@ class WhisperFaceViewModel:
                 "diagnostics.verification.failed", error=error)
 
     def set_verification(self, status: str) -> GUIState:
-        self.state = replace(self.state, verification=status)
+        self._carry(replace(self.state, verification=status))
         return self.state
 
 
@@ -4940,6 +4977,65 @@ def set_accessible_text(view: Any, value: str, *, label: str) -> None:
     """Atomically update a dynamic text field's visual and VoiceOver state."""
     view.setStringValue_(value)
     sync_accessibility(view, value, label=label)
+
+
+_ESCAPE_KEY_CODE = 53
+_COMMAND_KEY_FLAG = 1 << 20
+
+
+def alert_key_routes(alert: Any) -> tuple[int | None, int | None]:
+    """Which button index Return and Escape answer in an alert.
+
+    A button holds one key equivalent, and AppKit's default button cell is
+    simply the button holding Return, so a safe button that holds Return
+    cannot also hold Escape. When another button is destructive, Escape is
+    routed to the Return button by ``alert_escape_handler``.
+    """
+    buttons = list(alert.buttons())
+    keys = [str(button.keyEquivalent()) for button in buttons]
+    return_index = keys.index("\r") if "\r" in keys else None
+    if "\x1b" in keys:
+        return return_index, keys.index("\x1b")
+    if return_index is not None and any(
+            _has_destructive_action(button)
+            for index, button in enumerate(buttons) if index != return_index):
+        return return_index, return_index
+    return return_index, None
+
+
+def _has_destructive_action(button: Any) -> bool:
+    try:
+        return bool(button.hasDestructiveAction())
+    except Exception:
+        return False
+
+
+def alert_escape_handler(alert: Any) -> Callable[[Any], Any] | None:
+    """A key-down monitor that gives Escape to the alert's safe button.
+
+    None when AppKit already answers Escape through a key equivalent, or the
+    alert has no safe button to give it to.
+    """
+    _return_index, escape_index = alert_key_routes(alert)
+    if escape_index is None:
+        return None
+    target = list(alert.buttons())[escape_index]
+    if str(target.keyEquivalent()) == "\x1b":
+        return None
+    window = alert.window()
+
+    def handle(event: Any) -> Any:
+        if event.window() != window:
+            return event
+        command_period = (
+            bool(int(event.modifierFlags()) & _COMMAND_KEY_FLAG)
+            and str(event.charactersIgnoringModifiers()) == ".")
+        if int(event.keyCode()) == _ESCAPE_KEY_CODE or command_period:
+            target.performClick_(None)
+            return None
+        return event
+
+    return handle
 
 
 try:  # The view-model above remains usable in headless test environments.
@@ -7119,6 +7215,39 @@ if APPKIT_AVAILABLE:
             control_key_views.extend([sound_preview, sound_control])
             self._stack(controls, controls_group, height=44.0 * row_count)
 
+            # The rows above share one 44pt rhythm and Personalize is full at
+            # the window minimum, so this switch gets its own card with room
+            # for what it does and the sentence it gets wrong.
+            correction_height = 58.0
+            correction_width = width - 16 - 40 - 16 - 16
+            correction_group = _card(
+                NSMakeRect(0, 0, width, correction_height))
+            self._register("card", correction_group)
+            correction_title, correction_detail, _y = self._group_row(
+                correction_group, index=0, count=1,
+                row_height=correction_height,
+                title=self._l("settings.controls.self_correction"),
+                detail_width=correction_width)
+            correction_title.setFrame_(NSMakeRect(16, 35, 300, 18))
+            correction_detail.setFrame_(
+                NSMakeRect(16, 19, correction_width, 14))
+            correction_cost = self._soft(
+                self._l("settings.controls.self_correction.cost"),
+                NSMakeRect(16, 5, correction_width, 14),
+                size=11, truncate=True)
+            correction_group.addSubview_(correction_cost)
+            correction_switch = self._switch(
+                NSMakeRect(width - 16 - 40, 18, 40, 22),
+                "selfCorrectionChanged:",
+                label=self._l("settings.accessibility.self_correction.label"),
+                help_text=self._l(
+                    "settings.accessibility.self_correction.help"))
+            correction_switch.setAutoresizingMask_(NSViewMinXMargin)
+            correction_group.addSubview_(correction_switch)
+            control_key_views.append(correction_switch)
+            self._stack(controls, correction_group, below=controls_group,
+                        gap=16, height=correction_height)
+
             privacy = panes["Privacy"]
             privacy_rows = (
                 ("voice_objects", "settings.privacy.voice_objects",
@@ -7212,6 +7341,8 @@ if APPKIT_AVAILABLE:
                 sound_theme_detail=sound_detail,
                 recent_dictations_toggle=recent,
                 recent_dictations_detail=recent_detail,
+                self_correction_toggle=correction_switch,
+                self_correction_detail=correction_detail,
                 recent_dictations_browse=browse_recent,
                 face_picker=picker,
                 flight_toggle=flight,
@@ -7933,6 +8064,21 @@ if APPKIT_AVAILABLE:
                 label=self._l("settings.accessibility.recent.label"))
             self.dynamic["recent_dictations_browse"].setEnabled_(
                 state.recent_dictations)
+            self_correction = settings.self_correction
+            self.dynamic["self_correction_toggle"].setState_(
+                NSControlStateValueOn if self_correction
+                else NSControlStateValueOff)
+            set_accessible_text(
+                self.dynamic["self_correction_detail"],
+                self._l("settings.controls.self_correction.on"
+                        if self_correction
+                        else "settings.controls.self_correction.off"),
+                label=self._l("settings.accessibility.self_correction.label"))
+            sync_accessibility(
+                self.dynamic["self_correction_toggle"],
+                self._l("settings.state.enabled") if self_correction
+                else self._l("settings.state.disabled"),
+                label=self._l("settings.accessibility.self_correction.label"))
             self.dynamic["settings_tones_button"].setEnabled_(
                 bool(settings.app_tones))
             self.dynamic["settings_snippets_button"].setEnabled_(True)
@@ -8211,10 +8357,26 @@ if APPKIT_AVAILABLE:
         @objc.python_method
         def _run_modal(self, alert: Any) -> int:
             """Run one dialog; the native smoke answers through a responder."""
-            responder = getattr(self, "modal_responder", None)
-            if responder is not None:
-                return int(responder(alert))
-            return int(alert.runModal())
+            escape = alert_escape_handler(alert)
+            monitor = None
+            if escape is not None:
+                try:
+                    monitor = (
+                        NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+                            NSEventMaskKeyDown, escape))
+                except Exception:
+                    monitor = None
+            try:
+                responder = getattr(self, "modal_responder", None)
+                if responder is not None:
+                    return int(responder(alert))
+                return int(alert.runModal())
+            finally:
+                if monitor is not None:
+                    try:
+                        NSEvent.removeMonitor_(monitor)
+                    except Exception:
+                        pass
 
         @objc.python_method
         def _confirm(self, title: str, message: str,
@@ -8224,19 +8386,28 @@ if APPKIT_AVAILABLE:
             alert.setInformativeText_(message)
             alert.addButtonWithTitle_(primary)
             alert.addButtonWithTitle_(self._l("settings.action.cancel"))
-            self._default_to_safe(
-                alert, destructive=0, safe=1, mark_destructive=destructive)
+            if destructive:
+                self._default_to_safe(alert, destructive=0, safe=1)
+            else:
+                # AppKit gives Escape only to a button titled exactly
+                # "Cancel" in English, so it is set for every locale.
+                buttons = alert.buttons()
+                buttons[0].setKeyEquivalent_("\r")
+                buttons[1].setKeyEquivalent_("\x1b")
             return self._run_modal(alert) == 1000
 
         @objc.python_method
         def _default_to_safe(self, alert: Any, *, destructive: int,
-                             safe: int, mark_destructive: bool = True) -> None:
-            """Return picks the safe button; the destructive one needs a click."""
+                             safe: int) -> None:
+            """Return and Escape pick the safe button; the other needs a click.
+
+            The safe button holds Return, which also draws it as the default.
+            Escape reaches it through ``alert_escape_handler`` in _run_modal.
+            """
             buttons = alert.buttons()
             buttons[destructive].setKeyEquivalent_("")
             try:
-                buttons[destructive].setHasDestructiveAction_(
-                    mark_destructive)
+                buttons[destructive].setHasDestructiveAction_(True)
             except Exception:
                 pass
             buttons[safe].setKeyEquivalent_("\r")
@@ -8805,6 +8976,11 @@ if APPKIT_AVAILABLE:
         def previewSound_(self, _sender: Any) -> None:
             self.view_model.preview_sound()
 
+        def selfCorrectionChanged_(self, sender: Any) -> None:
+            enabled = sender.state() == NSControlStateValueOn
+            self.view_model.set_self_correction(enabled)
+            self.render()
+
         def recentDictationsChanged_(self, sender: Any) -> None:
             enabled = sender.state() == NSControlStateValueOn
             self.view_model.set_recent_dictations(enabled)
@@ -9362,6 +9538,11 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         runtime["recent_dictations"] = bool(enabled)
         return bool(enabled)
 
+    def set_self_correction(enabled: bool) -> bool:
+        calls.append(("self_correction", enabled))
+        private_settings["self_correction"] = bool(enabled)
+        return bool(enabled)
+
     actions = GUIActions(
         status_snapshot=lambda: dict(runtime),
         settings_snapshot=lambda: dict(private_settings),
@@ -9373,6 +9554,7 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         set_sound_theme=set_sound_theme,
         preview_sound=lambda cue: calls.append(("preview_sound", cue)) or True,
         set_recent_dictations=set_recent_dictations,
+        set_self_correction=set_self_correction,
         # Two entries share one metadata row, as two short dictations into
         # the same app within a minute do.
         recent_dictations=lambda: (
@@ -9853,6 +10035,38 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                 "accessibilityLabel") == localized_string(
                     "settings.accessibility.recent.label"),
             "recent dictations accessibility label")
+        self_correction_toggle = controller.dynamic["self_correction_toggle"]
+        require(
+            accessible_value(self_correction_toggle, "accessibilityLabel")
+            == localized_string(
+                "settings.accessibility.self_correction.label")
+            and self_correction_toggle in controller.dynamic[
+                "settings_key_views"]["Controls"],
+            "the actually switch is labelled and reachable by keyboard")
+        require(
+            int(self_correction_toggle.state()) == int(NSControlStateValueOff)
+            and str(controller.dynamic["self_correction_detail"]
+                    .stringValue()) == localized_string(
+                        "settings.controls.self_correction.off"),
+            "the actually correction starts off and says so")
+        self_correction_toggle.setState_(NSControlStateValueOn)
+        controller.selfCorrectionChanged_(self_correction_toggle)
+        require(
+            ("self_correction", True) in calls
+            and model.state.settings.self_correction
+            and int(self_correction_toggle.state()) ==
+            int(NSControlStateValueOn)
+            and str(controller.dynamic["self_correction_detail"]
+                    .stringValue()) == localized_string(
+                        "settings.controls.self_correction.on")
+            and accessible_value(
+                self_correction_toggle, "accessibilityValue") ==
+            localized_string("settings.state.enabled"),
+            "the actually switch turns the correction on")
+        self_correction_toggle.setState_(NSControlStateValueOff)
+        controller.selfCorrectionChanged_(self_correction_toggle)
+        require(not model.state.settings.self_correction,
+                "the actually switch turns the correction off")
         require(
             hotkey_name_for_keycode(61) == "alt_r"
             and hotkey_name_for_keycode(0) == ""
@@ -10097,15 +10311,105 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         private_settings["corrections"] = [{
             "key": "teh", "source": "teh", "target": "the", "count": 3,
             "kind": "correction"}]
+        private_settings["snippets"] = [
+            {"name": "signature", "text": "Kind regards"}]
         model.load_settings()
         dialogs.clear()
 
+        # Keys cannot be pressed here, so the key-down monitor _run_modal
+        # installs is captured instead and handed stand-in key events while
+        # its dialog is up. Each button's action is pointed at a checkbox,
+        # which flips when that button is clicked and does nothing else.
+        key_monitors: list[dict[str, Any]] = []
+        key_outcomes: list[dict[str, Any]] = []
+
+        class RecordingKeyMonitors:
+            @staticmethod
+            def addLocalMonitorForEventsMatchingMask_handler_(
+                    mask: int, handler: Callable[[Any], Any]) -> Any:
+                token = object()
+                key_monitors.append({
+                    "token": token, "mask": mask, "handler": handler,
+                    "removed": False})
+                return token
+
+            @staticmethod
+            def removeMonitor_(token: Any) -> None:
+                for entry in key_monitors:
+                    if entry["token"] is token:
+                        entry["removed"] = True
+
+        class StandInKey:
+            def __init__(self, window: Any, key_code: int, characters: str,
+                         flags: int = 0) -> None:
+                self._window, self._key_code = window, key_code
+                self._characters, self._flags = characters, flags
+
+            def window(self) -> Any:
+                return self._window
+
+            def keyCode(self) -> int:
+                return self._key_code
+
+            def charactersIgnoringModifiers(self) -> str:
+                return self._characters
+
+            def modifierFlags(self) -> int:
+                return self._flags
+
+        def press_keys(alert: Any) -> None:
+            flags = []
+            for button in alert.buttons():
+                flag = NSButton.checkboxWithTitle_target_action_(
+                    "", None, None)
+                button.setTarget_(flag)
+                button.setAction_("performClick:")
+                flags.append(flag)
+            live = [entry for entry in key_monitors if not entry["removed"]]
+            outcome: dict[str, Any] = {
+                "title": str(alert.messageText()), "monitors": len(live),
+                "masks": [entry["mask"] for entry in live]}
+            for name, key_code, characters, modifiers in (
+                    ("escape", _ESCAPE_KEY_CODE, "\x1b", 0),
+                    ("command_period", 47, ".", _COMMAND_KEY_FLAG),
+                    ("return", 36, "\r", 0)):
+                for flag in flags:
+                    flag.setState_(NSControlStateValueOff)
+                event = StandInKey(
+                    alert.window(), key_code, characters, modifiers)
+                swallowed = any(
+                    entry["handler"](event) is not event for entry in live)
+                outcome[name] = (
+                    "swallowed" if swallowed else "passed",
+                    [index for index, flag in enumerate(flags)
+                     if int(flag.state()) == NSControlStateValueOn])
+            key_outcomes.append(outcome)
+
         def review_then_forget(alert: Any) -> int:
             dialogs.append(alert)
+            press_keys(alert)
             return 1000
 
-        controller.modal_responder = review_then_forget
-        controller.reviewCorrections_(None)
+        cancelled = {"escape": ("swallowed", [1]),
+                     "command_period": ("swallowed", [1]),
+                     "return": ("passed", [])}
+        appkit_keys = {"monitors": 0,
+                       "escape": ("passed", []),
+                       "command_period": ("passed", []),
+                       "return": ("passed", [])}
+
+        def keys_were(outcome: dict[str, Any],
+                      expected: dict[str, Any]) -> bool:
+            return all(outcome[name] == value
+                       for name, value in expected.items())
+
+        appkit_key_monitors = NSEvent
+        globals()["NSEvent"] = RecordingKeyMonitors
+        try:
+            controller.modal_responder = review_then_forget
+            controller.reviewCorrections_(None)
+        finally:
+            globals()["NSEvent"] = appkit_key_monitors
         require(len(dialogs) == 2, "learned correction review opens")
         require(
             str(dialogs[1].messageText()) == "teh → the"
@@ -10117,21 +10421,73 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             str(dialogs[1].buttons()[1].keyEquivalent()) == "\r"
             and str(dialogs[1].buttons()[0].keyEquivalent()) == "",
             "learned correction review defaults to Done")
+        require(alert_key_routes(dialogs[1]) == (1, 1),
+                "Return and Escape both leave a learned correction alone")
+        require(keys_were(key_outcomes[0], appkit_keys),
+                "the learned correction chooser adds no key monitor")
+        require(
+            keys_were(key_outcomes[1], cancelled)
+            and key_outcomes[1]["masks"] == [NSEventMaskKeyDown],
+            "Escape picks Done in a learned correction review")
+        require(len(key_monitors) == 1 and key_monitors[0]["removed"],
+                "the learned correction review removes its key monitor")
         dialogs.clear()
-        controller.modal_responder = review_then_forget
-        controller._confirm("Delete?", "Gone for good.", "Delete")
+        key_monitors.clear()
+        key_outcomes.clear()
+
+        def delete_then_cancel(alert: Any) -> int:
+            dialogs.append(alert)
+            press_keys(alert)
+            return 1002 if len(dialogs) == 1 else 1001
+
+        deletions_before = sum(call[0] == "delete_snippet" for call in calls)
+        globals()["NSEvent"] = RecordingKeyMonitors
+        try:
+            controller.modal_responder = delete_then_cancel
+            controller.editSnippets_(None)
+            controller.modal_responder = review_then_forget
+            controller._confirm("Delete?", "Gone for good.", "Delete")
+            for primary in ("Compose", "Acknowledge", "Copy Draft"):
+                controller._confirm("Sure?", "Nothing is lost.", primary,
+                                    destructive=False)
+        finally:
+            globals()["NSEvent"] = appkit_key_monitors
         require(
-            str(dialogs[0].buttons()[1].keyEquivalent()) == "\r"
-            and str(dialogs[0].buttons()[0].keyEquivalent()) == "",
-            "confirmations default to the safe button")
-        require(bool(dialogs[0].buttons()[0].hasDestructiveAction()),
-                "a deletion is marked destructive")
-        controller._confirm("Send?", "Opens Mail.", "Compose",
-                            destructive=False)
+            len(dialogs) == 6
+            and str(dialogs[1].messageText()) == localized_string(
+                "settings.dialog.delete.title", locale=model.locale),
+            "deleting a snippet asks first")
+        require(keys_were(key_outcomes[0], appkit_keys),
+                "the snippet chooser adds no key monitor")
+        for dialog, outcome in ((dialogs[1], key_outcomes[1]),
+                                (dialogs[2], key_outcomes[2])):
+            require(
+                str(dialog.buttons()[1].keyEquivalent()) == "\r"
+                and str(dialog.buttons()[0].keyEquivalent()) == "",
+                f"{outcome['title']}: the safe button is the default")
+            require(bool(dialog.buttons()[0].hasDestructiveAction()),
+                    f"{outcome['title']}: the deletion is marked destructive")
+            require(
+                keys_were(outcome, cancelled)
+                and outcome["masks"] == [NSEventMaskKeyDown],
+                f"{outcome['title']}: Escape and Command-period cancel, "
+                "Return is left to the safe button")
         require(
-            str(dialogs[1].buttons()[1].keyEquivalent()) == "\r"
-            and not bool(dialogs[1].buttons()[0].hasDestructiveAction()),
-            "a confirmation that destroys nothing is not marked destructive")
+            sum(call[0] == "delete_snippet" for call in calls)
+            == deletions_before,
+            "a cancelled snippet deletion deletes nothing")
+        for dialog, outcome in zip(dialogs[3:], key_outcomes[3:]):
+            primary = str(dialog.buttons()[0].title())
+            require(
+                alert_key_routes(dialog) == (0, 1)
+                and str(dialog.buttons()[1].keyEquivalent()) == "\x1b"
+                and not bool(dialog.buttons()[0].hasDestructiveAction())
+                and keys_were(outcome, appkit_keys),
+                f"{primary}: Return confirms and Escape cancels")
+        require(
+            len(key_monitors) == 2
+            and all(entry["removed"] for entry in key_monitors),
+            "each destructive confirmation removes its key monitor")
         controller.modal_responder = None
         require(keyword_reads[0] == 0, "keyword inspection stays on demand")
         keyword_inspection = model.inspect_acoustic_keywords()
