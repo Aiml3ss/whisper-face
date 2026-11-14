@@ -3726,6 +3726,11 @@ class CleanupGuardTests(unittest.TestCase):
         self.assertEqual(ns["quick_clean"]("already punctuated,"),
                          "Already punctuated.")
         self.assertEqual(ns["quick_clean"]("Two things:"), "Two things:")
+        # A filler on its own leaves nothing to paste, not its period.
+        self.assertEqual(ns["quick_clean"]("Um."), "")
+        self.assertEqual(
+            ns["quick_clean"]("I studied at UM for four years"),
+            "I studied at UM for four years.")
         self.assertEqual(
             ns["quick_clean"]("I, um, think this is ready"),
             "I think this is ready.",
