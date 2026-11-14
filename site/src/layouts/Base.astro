@@ -14,7 +14,7 @@ const motionCss = motionStylesheet();
 
 const {
   title,
-  description = 'Local, one-click voice input for Mac. Hold a key, talk, and trustworthy text appears at your cursor. No account, no cloud, no word cap.',
+  description = 'Local dictation for Mac, with a Windows preview. Hold a key, talk, and the text appears at your cursor. No account, no cloud, no word cap.',
 } = Astro.props;
 
 const ogImage = new URL('/og.png', Astro.site).href;
@@ -41,12 +41,6 @@ const CF_ANALYTICS_TOKEN = '';
     <meta property="og:image" content={ogImage} />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:image" content={ogImage} />
-    <script
-      type="module"
-      src="https://jelly-ui.com/dist/jelly.js"
-      integrity="sha384-ftCoNMap6OQSid+PyZ/rndaaw9grzCxUOYiXbTN1fxw1OYuI95Gm/HwyjOknBIG5"
-      crossorigin="anonymous"
-    ></script>
     <style is:inline set:html={motionCss}></style>
     <script is:inline>
       (function () {
@@ -56,8 +50,7 @@ const CF_ANALYTICS_TOKEN = '';
           if (t) root.setAttribute('data-theme', t);
         } catch (e) {}
         // Reduce Motion is switched off before first paint, and the flag is set
-        // explicitly rather than left to jelly.js's own fallback so the guarantee
-        // is auditable in the served HTML.
+        // explicitly so the guarantee is auditable in the served HTML.
         try {
           var mq = matchMedia('(prefers-reduced-motion: reduce)');
           var apply = function () {
@@ -71,31 +64,49 @@ const CF_ANALYTICS_TOKEN = '';
     </script>
   </head>
   <body class="clay">
-    <jelly-theme class="site-theme" mode="auto" accent="#4cc9a2">
-      <slot />
-    </jelly-theme>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <slot />
     <script>
       import { playJelly } from '../data/jelly';
 
-      const jellyTheme = document.querySelector<HTMLElement>('jelly-theme.site-theme');
-      const explicitTheme = document.documentElement.getAttribute('data-theme');
-      if (explicitTheme) jellyTheme?.setAttribute('mode', explicitTheme);
+      const currentTheme = () =>
+        document.documentElement.getAttribute('data-theme') ||
+        (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+
+      // The toggle reports "dark theme on" as its pressed state.
+      const syncToggles = () => {
+        const dark = String(currentTheme() === 'dark');
+        document
+          .querySelectorAll<HTMLElement>('[data-theme-toggle]')
+          .forEach((btn) => btn.setAttribute('aria-pressed', dark));
+      };
+      syncToggles();
+      window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', syncToggles);
 
       // Theme toggle (event delegation so it works for any [data-theme-toggle]).
       document.addEventListener('click', function (e) {
         const t = e.target as HTMLElement;
         const btn = t.closest ? t.closest('[data-theme-toggle]') : null;
         if (!btn) return;
-        let cur = document.documentElement.getAttribute('data-theme');
-        if (!cur) {
-          cur = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-        }
-        const next = cur === 'dark' ? 'light' : 'dark';
+        const next = currentTheme() === 'dark' ? 'light' : 'dark';
         document.documentElement.setAttribute('data-theme', next);
-        jellyTheme?.setAttribute('mode', next);
+        syncToggles();
         try {
           localStorage.setItem('wf-theme', next);
         } catch (e) {}
+      });
+
+      // Choosing a destination from the phone menu closes it.
+      document.addEventListener('click', function (e) {
+        const link = (e.target as HTMLElement).closest?.('.nav-menu a');
+        link?.closest('details')?.removeAttribute('open');
+      });
+      document.addEventListener('keydown', function (e) {
+        if (e.key !== 'Escape') return;
+        const menu = document.querySelector<HTMLDetailsElement>('.nav-menu[open]');
+        if (!menu) return;
+        menu.removeAttribute('open');
+        menu.querySelector<HTMLElement>('summary')?.focus();
       });
 
       // Shared soft-body motion. Every [data-jelly] object runs the same four

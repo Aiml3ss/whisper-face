@@ -24,6 +24,10 @@ fit, and Personal Prior without freely inventing words.
 
 **Context Candidate** — an ephemeral term or phrase retrieved from the focused
 application, document, repository, selection, clipboard, or user dictionary.
+Candidates from the app name, window title, and user dictionary are
+anchor-only: they bias the recognizer prompt and are protected, but never
+replace a recognized word. Nothing is taken from a secure text field or a
+clipboard marked concealed or transient.
 
 **Context Pack** — the ranked Context Candidates and formatting constraints
 provided by a Context Adapter for one Utterance.
@@ -36,7 +40,11 @@ scoped by application and surrounding language.
 
 **Personal Prior** — a local preference over competing spans learned from
 Correction Signals. A Personal Prior is contextual, inspectable, and
-forgettable; it is not an unconditional global replacement.
+forgettable; it is not an unconditional global replacement. Only a prior the
+Personal Regression Lab holds active is applied, as an exact whole-token
+replacement in its app scope, and never inside an email address, handle, or
+URL. No prior maps one common word to another, adds or removes a negation, or
+maps one number to another.
 
 **Protected Anchor** — factual or code-shaped content that cleanup must not
 delete or change without explicit spoken instruction: names, numbers, dates,
@@ -60,13 +68,18 @@ one paste attempt only if the current destination still matches the lease.
 unverifiable, conflicting, or unresolved, plus whether a paste was attempted.
 Only verified receipts may train Personal Priors.
 
-**Voice Outbox** — a bounded, RAM-only recovery queue for text that was not
+**Voice Outbox** — a bounded, in-memory recovery queue for text that was not
 proven delivered. It distinguishes text that was never pasted from text whose
-paste may have landed, and requires explicit copy-and-dismiss recovery.
+paste may have landed, and requires explicit copy-and-dismiss recovery. It
+never holds undo payloads or blank text. The same text is also written to the
+local transcript history, so the queue is RAM-only but the words are not.
 
 **Personal Regression Lab** — the bounded local suite of exact corrected spans
-used to test a candidate Personal Prior before activation and after reload.
-Conflicting or stale candidates are quarantined rather than applied.
+used to test a candidate Personal Prior before activation. On reload,
+promotions are restored with a conflict check rather than by replaying the
+gate. Conflicting or stale candidates are quarantined rather than applied, and
+evidence against a candidate (a revert, the heard word left alone, a paste
+sent unedited) counts too.
 
 **Prosody Event** — a pause, emphasis, pitch movement, or end-of-speech signal
 derived from audio and aligned to Word Evidence.

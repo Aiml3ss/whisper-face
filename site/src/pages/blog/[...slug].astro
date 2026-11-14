@@ -15,10 +15,10 @@ const { Content } = await render(post);
 
 <Base title={`${post.data.title} · Whisper Face`} description={post.data.description}>
   <Nav />
-  <main class="wrap" style="padding:44px 0 80px">
+  <main id="main" class="wrap" style="padding-block:44px 80px">
     <article class="prose" style="margin-inline:auto">
-      <p class="date" style="font-family:var(--mono);color:var(--brand);font-weight:600;margin:0 0 6px">
-        {post.data.date}
+      <p class="date" style="font-family:var(--mono);color:var(--brand-ink);font-weight:600;margin:0 0 6px">
+        <time datetime={post.data.date}>{post.data.date}</time>
       </p>
       <h1>{post.data.title}</h1>
       <p class="lead">{post.data.description}</p>

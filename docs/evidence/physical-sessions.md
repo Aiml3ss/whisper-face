@@ -281,7 +281,10 @@ how the runtime came back after the action, and how the machine itself behaved
 
 **Have both kinds of audio device to hand.** Do at least two switches in each
 direction. A switch that only ever adds a device does not prove the runtime
-survives losing one.
+survives losing one. Since November 2026, recovery re-initializes PortAudio so
+it opens the new default input rather than the one present at launch, and a
+microphone that stops mid-take ends the take with what it heard and a "text
+may be incomplete" caption. Include at least one unplug *during* a take.
 
 **Time.** About 80 minutes. The long-form runs alone are 10 minutes of talking,
 and the sleep/wake runs need a real minute of sleep each. Budget 100 minutes if

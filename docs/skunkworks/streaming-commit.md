@@ -119,7 +119,9 @@ hotkey press (`capture_insertion_lease`, dictate.py):
 3. One paste attempt of the span text, appended at the end of the
    previously committed range.
 4. Readback (`insertion_readback`) over the committed-so-far range, with
-   the existing per-surface windows (0.35 s Electron, 0.02 s native).
+   the existing adaptive window (up to 0.4 s for every app, returning on
+   the first matching read; the per-surface windows this note was written
+   against were replaced in November 2026).
    Every span terminates in its own receipt with the existing vocabulary:
    verified, unverifiable, conflict, unresolved.
 
@@ -261,8 +263,8 @@ approve anything ([evidence capture](../../wiki/evidence-capture.md)).
   our range): position arithmetic must anchor to the committed-range end
   found by readback, not to absolute offsets captured at press.
 - **Per-span receipts multiply AX traffic** in slow apps; the span
-  minimum size bounds this, and Electron's 0.35 s readback window caps
-  span cadence naturally.
+  minimum size bounds this, and the 0.4 s readback window, which a slow
+  destination uses in full, caps span cadence naturally.
 - **English-only EOU model** conflicts with the multilingual direction
   ([parakeet-tdt-v3](parakeet-tdt-v3.md)); streaming commit ships
   English-only until an equivalent signal exists elsewhere, and must say
