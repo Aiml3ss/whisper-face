@@ -8835,6 +8835,64 @@ class UndoLastDictationTests(unittest.TestCase):
                 self.assertEqual(ns["UNDO_COORDINATOR"].recoverable(), ())
                 self.assertEqual(ns["_state"]["keys"], [])
 
+    def test_an_unproven_undo_leaves_the_voice_outbox_as_it_was(self):
+        from insertion_integrity import (
+            DestinationObservation,
+            InsertionCoordinator,
+            InsertionLease,
+            ReadbackResult,
+        )
+
+        capacity = load_definitions(
+            assignments={"VOICE_OUTBOX_MAX_ITEMS"})["VOICE_OUTBOX_MAX_ITEMS"]
+        # The dictation replaced words the user had selected, so what undo
+        # stages is the user's own text and never a blank.
+        replaced = "it's \"great\" news."
+        for name in ("the app rewrote what undo pasted",
+                     "the selection was never confirmed"):
+            with self.subTest(name):
+                ns = self.namespace()
+                # A full Voice Outbox: dictations that never reached a field.
+                outbox = InsertionCoordinator(max_recoverable=capacity)
+                ns["INSERTION_COORDINATOR"] = outbox
+                elsewhere = DestinationObservation.capture(
+                    "com.apple.Notes:field-9", (0, 0), "")
+                for number in range(capacity):
+                    lease = InsertionLease.capture(
+                        f"waiting-{number}", "com.apple.mail:mail:field-1",
+                        (0, 0), "")
+                    outbox.stage(lease, f"See you at {number + 1}.")
+                    outbox.commit(lease.utterance_id, elsewhere,
+                                  lambda _text: None, ReadbackResult.verified)
+                waiting = outbox.recoverable()
+                self.assertEqual(len(waiting), capacity)
+
+                record = ns["UndoableInsertion"](
+                    element=ns["_element"], bundle="com.apple.mail",
+                    destination_id="com.apple.mail:mail:field-1",
+                    utterance_id="utterance-3", inserted=self.INSERTED,
+                    before=self.BEFORE + replaced,
+                    selection=(len(self.BEFORE), len(replaced)))
+                ns["record_undoable_insertion"](record)
+                ns["_state"]["text"] = record.expected
+
+                def smart_quotes(text):
+                    ns["_state"]["text"] = self.BEFORE + text.replace(
+                        "'", "’").replace("\"", "”")
+
+                attempt = ({"paster": smart_quotes}
+                           if name.startswith("the app")
+                           else {"selector": lambda *_args: False})
+                result = ns["undo_last_dictation"](
+                    snapshot_reader=lambda: ns["FocusSnapshot"](
+                        element=ns["_element"], text=ns["_state"]["text"],
+                        selection=record.caret),
+                    **attempt)
+
+                self.assertFalse(result["undone"])
+                self.assertEqual(outbox.recoverable(), waiting)
+                self.assertEqual(ns["UNDO_COORDINATOR"].recoverable(), ())
+
     def test_undo_selects_through_accessibility_when_the_field_allows_it(self):
         ns = self.namespace()
         ns["record_undoable_insertion"](self._record(ns))
