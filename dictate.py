@@ -9789,11 +9789,6 @@ def commit_insertion(rec, text: str, bundle: str,
     return receipt
 
 
-def focused_text() -> str | None:
-    snapshot = focused_snapshot()
-    return snapshot.text if snapshot else None
-
-
 # Password managers and other privacy-aware apps mark what they copy with
 # these formats; such a clipboard is never read as context.
 WINDOWS_PRIVATE_CLIPBOARD_FORMATS = (
