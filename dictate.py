@@ -5186,7 +5186,10 @@ class Recorder:
             self.speculative_start = 0
             self.speculative_end = 0
             self.speculative_invalid = False
-            self.cut_samples = self.total_samples
+            # A reused speculation ends where it was taken. Audio after that
+            # counted as silence to the rolling threshold but may be quiet
+            # speech, so it opens the next segment rather than being skipped.
+            self.cut_samples = decode_end
             self.voiced_since_cut = False
 
     def snapshot(self) -> np.ndarray:
@@ -5213,6 +5216,12 @@ class Recorder:
         if self.audio_status:
             print(f"! audio callback status: {'; '.join(self.audio_status)}")
         audio = self.frames.array()
+        if (self.speculative_future is not None
+                and not self.speculative_invalid
+                and peak_rms(audio[self.speculative_end:]) >= GATE_PEAK_RMS):
+            # Speech under the rolling silence threshold but above the speech
+            # gate followed the speculation; the release must decode it.
+            self.speculative_invalid = True
         if self.captured_via_flight and self.source == "hold":
             FLIGHT.clear()                   # never let a hold paste twice
         return audio

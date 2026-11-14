@@ -6890,6 +6890,93 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertEqual((scheduled.start_sample, scheduled.end_sample), (
             0, 16_000))
 
+    def soft_speech_take(self, segments, block=1024):
+        """Run the production rolling plan over synthetic audio, then the
+        release choice finish_and_process makes, and return what nothing
+        decodes. Futures never finish, as on a busy decode pool."""
+        class Pending:
+            def cancel(self):
+                return False
+
+            def done(self):
+                return False
+
+            def add_done_callback(self, _callback):
+                pass
+
+        ns = load_definitions(
+            "CapturedAudio", "BoundedRecognitionFuture", "Recorder",
+            "peak_rms",
+            assignments={
+                "SAMPLE_RATE", "CAPTURE_BLOCK_SECONDS", "SILENCE_RMS",
+                "GATE_PEAK_RMS", "CHUNK_MIN_SECONDS", "CHUNK_CUT_SILENCE",
+                "SPECULATIVE_MIN_SECONDS", "SPECULATIVE_SILENCE",
+                "NO_AUDIO_SECONDS",
+            },
+            extra={
+                "dataclass": dataclass,
+                "np": np,
+                "time": time,
+                "ContextPack": SimpleNamespace,
+                "LEVELS": [],
+                "should_start_speculation": should_start_speculation,
+                "can_reuse_speculation": can_reuse_speculation,
+                "CHUNK_PREP_POOL": SimpleNamespace(
+                    submit=lambda *_args, **_kwargs: Pending()),
+                "_speculative_frames": object(),
+                "_transcribe_frames": object(),
+                "_caption_add": lambda *_args: None,
+            },
+        )
+        ns["calibrated_vad_threshold"] = lambda: ns["SILENCE_RMS"]
+        recorder = ns["Recorder"]()
+        recorder.recording = True
+        rng = np.random.default_rng(0)
+        for seconds, rms in segments:
+            for _ in range(int(seconds * 16_000 / block)):
+                noise = rng.standard_normal((block, 1)).astype(np.float32)
+                recorder._callback(
+                    noise * (rms / float(np.sqrt(np.mean(noise ** 2)))),
+                    block, None, None)
+
+        audio = recorder.stop()
+        ranges = [(c.start_sample, c.end_sample) for c in recorder.chunks]
+        reused = can_reuse_speculation(
+            recorder.speculative_future is not None,
+            recorder.speculative_invalid,
+            recorder.speculative_start,
+            recorder.cut_samples)
+        if reused:
+            ranges.append(
+                (recorder.speculative_start, recorder.speculative_end))
+        else:
+            ranges.append((recorder.cut_samples, len(audio)))
+        covered = np.zeros(len(audio), dtype=bool)
+        for start, end in ranges:
+            covered[start:end] = True
+        return SimpleNamespace(
+            skipped_peak=ns["peak_rms"](audio[~covered]),
+            gate=ns["GATE_PEAK_RMS"], reused=reused)
+
+    def test_quiet_speech_after_a_pause_is_decoded_at_release(self):
+        # Loud opening, a short pause, then speech under the rolling silence
+        # threshold (0.008) but well above the speech gate (0.002).
+        take = self.soft_speech_take(
+            [(1.5, 0.05), (0.3, 0.0005), (1.5, 0.0042)])
+        self.assertLess(take.skipped_peak, take.gate)
+
+    def test_quiet_speech_across_a_chunk_cut_is_decoded(self):
+        take = self.soft_speech_take(
+            [(1.0, 0.05), (3.6, 0.0045), (1.5, 0.05), (0.7, 0.0005)])
+        self.assertLess(take.skipped_peak, take.gate)
+
+    def test_a_silent_tail_still_reuses_the_speculation(self):
+        # Room noise under the gate after the pause: the speculative decode
+        # is still the whole remainder, so release pays for nothing new.
+        take = self.soft_speech_take([(1.5, 0.05), (0.8, 0.0005)])
+        self.assertTrue(take.reused)
+        self.assertLess(take.skipped_peak, take.gate)
+
     def test_release_attaches_capture_bounds_to_remainder_decode(self):
         class Pool:
             def __init__(self):
