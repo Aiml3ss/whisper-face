@@ -229,15 +229,17 @@ def verify_exact_checkout(root: Path, version: str, revision: str) -> None:
         )
     except (OSError, subprocess.CalledProcessError) as exc:
         raise PackageError("packaged tracked source differs from its revision") from exc
+    # The packager's two receipts are ignored by the revision's own
+    # .gitignore, so a shipped checkout reads as clean. The in-app updater
+    # refuses any checkout that does not.
     status_output = _run(
         "git", "-C", str(root), "status", "--porcelain", "--untracked-files=all"
     )
-    expected_untracked = {
-        f"?? {RECEIPT_NAME}",
-        f"?? {RELEASE_METADATA_NAME}",
-    }
-    if set(status_output.splitlines()) != expected_untracked:
+    if status_output:
         raise PackageError("packaged checkout contains unexpected source files")
+    for name in (RECEIPT_NAME, RELEASE_METADATA_NAME):
+        if not (root / name).is_file():
+            raise PackageError(f"packaged checkout is missing {name}")
 
 
 def _check_zip_members(archive: Path, expected_root: str) -> None:
