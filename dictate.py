@@ -5532,6 +5532,17 @@ def delete_gui_snippet(name: str, expected_original: str):
                 "snippet changed since the editor was opened")
         snippets.pop(snippet_name)
         atomic_write_text(SNIPPETS_FILE, json.dumps(snippets, indent=2) + "\n")
+        # The edit record, and history written by older versions, still hold
+        # the snippet's old and new text; a deleted snippet leaves neither.
+        with LEARN_LOCK:
+            state = load_learned()
+            dropped = state["snippet_edits"].pop(snippet_name, None)
+            history = [entry for entry in state["history"]
+                       if not (isinstance(entry, dict)
+                               and entry.get("name") == snippet_name)]
+            if dropped is not None or len(history) != len(state["history"]):
+                state["history"] = history
+                save_learned(state)
 
 
 def save_gui_vocabulary(manual_values, banned_values):
@@ -8414,8 +8425,6 @@ def save_snippet_edit(name: str, old: str, new: str, bundle: str) -> bool:
                 "ts": time.time(),
                 "kind": "snippet_edit",
                 "name": name,
-                "from": old,
-                "to": new,
                 "app": bundle,
             })
             state["history"] = state["history"][-100:]
@@ -8441,6 +8450,11 @@ def forget_snippet_edit(name: str) -> bool:
                 snippets[name] = str(info.get("from", ""))
                 atomic_write_text(
                     SNIPPETS_FILE, json.dumps(snippets, indent=2) + "\n")
+            # History written by older versions holds the edit's text.
+            state["history"] = [
+                entry for entry in state["history"]
+                if not (isinstance(entry, dict)
+                        and entry.get("name") == name)]
             state["history"].append({
                 "ts": time.time(), "kind": "forgotten_snippet", "name": name,
             })

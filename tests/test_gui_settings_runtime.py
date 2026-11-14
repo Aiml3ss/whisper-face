@@ -162,11 +162,15 @@ class SnippetPersistenceTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.path = Path(self.directory.name) / "snippets.json"
+        self.learned = Path(self.directory.name) / "learned.json"
         self.ns = settings_namespace(
-            "save_gui_snippet", "delete_gui_snippet", "snippet_name_key")
+            "save_gui_snippet", "delete_gui_snippet", "snippet_name_key",
+            "load_learned", "save_learned")
         self.ns.update(
             SNIPPETS_FILE=self.path,
             SNIPPETS_LOCK=threading.Lock(),
+            LEARNED_FILE=self.learned,
+            LEARN_LOCK=threading.Lock(),
         )
 
     def test_atomic_round_trip_preserves_unrelated_snippets_and_private_mode(self):
@@ -228,6 +232,38 @@ class SnippetPersistenceTests(unittest.TestCase):
             "signature": "Cheers"})
         with self.assertRaises(RuntimeError):
             self.ns["delete_gui_snippet"]("missing", "old text")
+
+    def test_delete_also_removes_what_was_learned_about_the_snippet(self):
+        self.path.write_text(json.dumps({
+            "address": "7623 Opal Ridge Lane", "signature": "Cheers"}))
+        self.learned.write_text(json.dumps({
+            "snippet_edits": {
+                "address": {"from": "123 Main", "to": "7623 Opal Ridge Lane",
+                            "n": 1, "app": "com.apple.mail"},
+                "signature": {"from": "Bye", "to": "Cheers", "n": 1,
+                              "app": "com.apple.mail"},
+            },
+            "history": [
+                {"ts": 1.0, "kind": "snippet_edit", "name": "address",
+                 "from": "123 Main", "to": "7623 Opal Ridge Lane",
+                 "app": "com.apple.mail"},
+                {"ts": 2.0, "kind": "snippet_edit", "name": "signature",
+                 "from": "Bye", "to": "Cheers", "app": "com.apple.mail"},
+                {"ts": 3.0, "kind": "correction", "from": "Gwen",
+                 "to": "Qwen", "app": "com.apple.mail", "mode": "capture"},
+            ],
+        }))
+
+        self.ns["delete_gui_snippet"]("address", "7623 Opal Ridge Lane")
+
+        remaining = self.learned.read_text()
+        self.assertNotIn("Opal Ridge", remaining)
+        self.assertNotIn("123 Main", remaining)
+        state = json.loads(remaining)
+        self.assertEqual(list(state["snippet_edits"]), ["signature"])
+        self.assertEqual(
+            [entry["kind"] for entry in state["history"]],
+            ["snippet_edit", "correction"])
 
     def test_stale_delete_fails_without_rewriting_newer_content(self):
         self.path.write_text(json.dumps({
