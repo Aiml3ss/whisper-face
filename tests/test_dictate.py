@@ -10172,7 +10172,9 @@ class ReleasePlanTests(unittest.TestCase):
 
         self.assertEqual(result.text, "parakeet-or-whisper-fallback")
         self.assertEqual(result.alternative, "tiny")
-        self.assertTrue(result.verified)
+        # Tiny contradicted Parakeet and no third engine settled it, so the
+        # transcript stands unverified: the cascade said so.
+        self.assertFalse(result.verified)
         self.assertEqual(pool.calls, ["tiny", "parakeet-or-whisper-fallback"])
         # The speculative Tiny hypothesis rides along so the Parakeet route
         # can derive agreement confidence without a second Tiny decode.
@@ -10193,9 +10195,12 @@ class ReleasePlanTests(unittest.TestCase):
 
         pool = ImmediatePool()
 
+        verified_by_decoder = []
+
         def detailed(audio, prompt, verify, model,
                      crosscheck_text=None, language="en"):
-            return Recognition(model, 0.5 if model == "tiny" else 0.9)
+            return Recognition(model, 0.5 if model == "tiny" else 0.9,
+                               verified=verified_by_decoder[-1])
 
         ns = load_definitions(
             "_speculative_frames",
@@ -10212,12 +10217,19 @@ class ReleasePlanTests(unittest.TestCase):
                 "PARAKEET_HELPER": Path("missing"),
             },
         )
-        result = ns["_speculative_frames"](
-            [np.ones((100, 1), dtype=np.float32)], still_valid=lambda: True)
-        self.assertEqual(result.text, "large")
-        self.assertEqual(result.alternative, "tiny")
-        self.assertTrue(result.verified)
-        self.assertEqual(pool.calls, ["tiny", "large"])
+        # Escalating is not verifying: whether the accurate decode was
+        # confirmed is the decoder's answer, kept as it returned it.
+        for verified in (False, True):
+            with self.subTest(verified=verified):
+                pool.calls.clear()
+                verified_by_decoder.append(verified)
+                result = ns["_speculative_frames"](
+                    [np.ones((100, 1), dtype=np.float32)],
+                    still_valid=lambda: True)
+                self.assertEqual(result.text, "large")
+                self.assertEqual(result.alternative, "tiny")
+                self.assertIs(result.verified, verified)
+                self.assertEqual(pool.calls, ["tiny", "large"])
 
 
 class ConsequenceRuntimeProjectionTests(unittest.TestCase):

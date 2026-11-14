@@ -406,6 +406,17 @@ class FreshInstallDictationTests(unittest.TestCase):
                     "Ask Gwen to review it.", whisper=tiny, field=field)
                 self.assertEqual(field.text, expected)
 
+    def test_a_transcript_tiny_contradicted_is_not_recorded_as_verified(self):
+        # No large-v3-turbo on a default install, so nothing settles the
+        # disagreement: Parakeet's words are typed, unverified.
+        mac = booted()
+        field = mac.dictate_sentence(
+            "Ask Gwen to review it.",
+            whisper="Has went through the queue.", field=TextField())
+        self.assertEqual(field.text, "Ask Gwen to review it.")
+        self.assertIs(
+            transcript_records()[-1]["metrics"]["asr_verified"], False)
+
     def test_the_transcript_records_the_readback_of_its_own_dictation(self):
         mac = booted()
         mac.dictate_sentence(
