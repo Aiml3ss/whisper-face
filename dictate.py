@@ -63,14 +63,19 @@ New in v3.2 (always-on):
     startup, waits for the grant, and re-execs itself once trusted; warmup
     pre-opens the mic so that prompt appears immediately too. Install the
     LaunchAgent (com.berg.dictate) and it starts at login and auto-restarts.
-  * Spoken tone override: begin a dictation with "formal tone, ..."
-    "casual, ..." "technical: ..." "neutral, ..." or "verbatim, ..." to force
-    that style for just that dictation, overriding the per-app default. The
-    tone word is stripped from the pasted text; console shows e.g. llm/formal*.
+  * Spoken tone override: begin a dictation with a tone and the word
+    "tone", "style" or "mode" ("formal tone, ...", "casual style, ...",
+    "verbatim mode: ...") to force that style for just that dictation,
+    overriding the per-app default. A tone word on its own ("Casual, ...")
+    is ordinary speech. The cue is stripped from the pasted text; console
+    shows e.g. llm/formal*.
 
 New in v3.3:
-  * Snippets: say "insert <name>" / "paste my <name>" and the matching entry
-    from snippets.json pastes instead of the transcription. Unknown names
+  * Snippets: say "insert <name>" / "paste my <name>" as the whole
+    dictation and the matching entry from snippets.json pastes instead of
+    the transcription. Inside a longer sentence only "insert my <name>"
+    expands, and never when negated ("do not insert my email"). Unknown
+    names, a bare snippet name, and values still starting with "EDIT ME"
     fall through to normal dictation, so triggers can't misfire.
   * Learns from corrections: for ~10s after a paste, the focused text field is
     observed via Accessibility; if you change a word we pasted, the corrected
@@ -84,11 +89,14 @@ New in v3.3:
 New in v3.4 (iPhone):
   * OpenAI-compatible endpoint POST /v1/audio/transcriptions on PHONE_PORT,
     for the Diction iOS keyboard's Self-Hosted mode (or anything speaking
-    that API). Uploads run through the SAME pipeline as local dictation:
-    glossary-biased Whisper, snippets, spoken tone override, LLM cleanup,
-    and the transcript log (so phone vocabulary feeds learning too).
-    Desktop mode binds loopback only. Explicit --server-only mode binds the
-    trusted LAN and remains unauthenticated; audio decode needs ffmpeg.
+    that API). Uploads run through the local pipeline minus app context:
+    glossary-biased ASR, learned fixes, spoken tone override and cleanup.
+    Snippets are never expanded and nothing is written to the transcript
+    log, so a client can neither read saved text back nor feed learning.
+    Desktop mode binds loopback and answers only GET /health. Explicit
+    --server-only mode binds the trusted LAN and requires a bearer token
+    that is created at each start and printed once; browser requests are
+    refused. Audio decode needs ffmpeg.
   * --server-only: phone endpoint + models + learning loop with NO hotkey,
     HUD, mic, or TCC permission prompts. For a headless always-on Mac
     (e.g. a Mac mini serving the iPhone). Requires Apple Silicon (MLX).
