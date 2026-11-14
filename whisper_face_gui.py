@@ -8213,23 +8213,25 @@ if APPKIT_AVAILABLE:
 
         @objc.python_method
         def _confirm(self, title: str, message: str,
-                     primary: str) -> bool:
+                     primary: str, *, destructive: bool = True) -> bool:
             alert = NSAlert.alloc().init()
             alert.setMessageText_(title)
             alert.setInformativeText_(message)
             alert.addButtonWithTitle_(primary)
             alert.addButtonWithTitle_(self._l("settings.action.cancel"))
-            self._default_to_safe(alert, destructive=0, safe=1)
+            self._default_to_safe(
+                alert, destructive=0, safe=1, mark_destructive=destructive)
             return self._run_modal(alert) == 1000
 
         @objc.python_method
         def _default_to_safe(self, alert: Any, *, destructive: int,
-                             safe: int) -> None:
+                             safe: int, mark_destructive: bool = True) -> None:
             """Return picks the safe button; the destructive one needs a click."""
             buttons = alert.buttons()
             buttons[destructive].setKeyEquivalent_("")
             try:
-                buttons[destructive].setHasDestructiveAction_(True)
+                buttons[destructive].setHasDestructiveAction_(
+                    mark_destructive)
             except Exception:
                 pass
             buttons[safe].setKeyEquivalent_("\r")
@@ -8652,7 +8654,8 @@ if APPKIT_AVAILABLE:
                             self._l(
                                 "settings.dialog.voice_objects.compose.message",
                                 sequence=selected.sequence),
-                            self._l("settings.action.compose_email"))):
+                            self._l("settings.action.compose_email"),
+                            destructive=False)):
                     receipt = self.view_model.compose_voice_object_email(
                         selected)
                     result = NSAlert.alloc().init()
@@ -8678,7 +8681,8 @@ if APPKIT_AVAILABLE:
                             self._l(
                                 "settings.dialog.voice_objects.copy.message",
                                 sequence=selected.sequence),
-                            self._l("settings.action.copy_draft"))):
+                            self._l("settings.action.copy_draft"),
+                            destructive=False)):
                     receipt = self.view_model.copy_voice_object_draft(selected)
                     result = NSAlert.alloc().init()
                     result.setMessageText_(self._l(
@@ -8726,7 +8730,8 @@ if APPKIT_AVAILABLE:
                     self._l(
                         "settings.dialog.voice_objects.ack.message",
                         sequence=selected.sequence),
-                    self._l("settings.action.acknowledge")):
+                    self._l("settings.action.acknowledge"),
+                    destructive=False):
                 self.view_model.transition_voice_object_draft(
                     selected, target="acknowledged")
             elif response == 1002 and self._confirm(
@@ -10099,6 +10104,14 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             str(dialogs[0].buttons()[1].keyEquivalent()) == "\r"
             and str(dialogs[0].buttons()[0].keyEquivalent()) == "",
             "confirmations default to the safe button")
+        require(bool(dialogs[0].buttons()[0].hasDestructiveAction()),
+                "a deletion is marked destructive")
+        controller._confirm("Send?", "Opens Mail.", "Compose",
+                            destructive=False)
+        require(
+            str(dialogs[1].buttons()[1].keyEquivalent()) == "\r"
+            and not bool(dialogs[1].buttons()[0].hasDestructiveAction()),
+            "a confirmation that destroys nothing is not marked destructive")
         controller.modal_responder = None
         require(keyword_reads[0] == 0, "keyword inspection stays on demand")
         keyword_inspection = model.inspect_acoustic_keywords()
