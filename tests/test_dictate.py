@@ -5987,7 +5987,7 @@ class TranscriptRetentionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             ns, _ = self.namespace(
                 td, "learn_pass", "parse_texts", "parse_dictionary",
-                "merge_learned_state",
+                "merge_learned_state", "corrected_away_words",
                 assignments=(
                     "MINER_PROMPT", "LEARN_MIN_NEW", "PROMOTE_MIN_COUNT",
                     "AUTO_MARKER"),
@@ -6132,7 +6132,7 @@ class VocabularyMinerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             ns, _ = self.namespace(
                 td, "learn_pass", "parse_texts", "parse_dictionary",
-                "merge_learned_state", "term_occurs",
+                "merge_learned_state", "term_occurs", "corrected_away_words",
                 assignments=(
                     "MINER_PROMPT", "LEARN_MIN_NEW", "PROMOTE_MIN_COUNT",
                     "AUTO_MARKER"),
@@ -6440,7 +6440,8 @@ class LearningTests(unittest.TestCase):
         ns = load_definitions(
             "parse_dictionary", "load_learned", "save_learned",
             "personal_regression_lab", "write_auto_section",
-            "refresh_glossary", "apply_vocabulary_casing",
+            "refresh_glossary", "corrected_away_words", "term_occurs",
+            "apply_vocabulary_casing",
             "apply_learned_fixes", "learned_alternatives",
             "compiler_personal_priors", "compile_voice_evidence",
             "FocusSnapshot", "PasteReceipt", "make_paste_receipt",
@@ -6877,6 +6878,33 @@ class LearningTests(unittest.TestCase):
                 runtime.ns["apply_vocabulary_casing"](
                     "Their plan is fine. the end."),
                 "Their plan is fine. the end.")
+
+    def test_a_counted_term_the_user_corrected_away_is_not_promoted(self):
+        # The miner counted the misrecognition before the user corrected it.
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory, learned={"counts": {
+                "Gwen": 5, "Gwen Notes": 3, "Gwendolyn Park": 2}})
+            gloss = runtime.ns["GLOSS"]
+            mined = list(gloss["terms"])
+
+            for sentence in ("Run Gwen locally.", "Ask Gwen to rebase."):
+                runtime.dictate(sentence, [(3.0, "Gwen", "Qwen")])
+            corrected = list(gloss["terms"])
+            anchors = [item.text for item in gloss["anchor_pack"].candidates]
+            listed = (Path(directory) / "dictionary.txt").read_text(
+                encoding="utf-8")
+            runtime.ns["forget_gui_correction"]("gwen->qwen")
+            forgotten = list(gloss["terms"])
+
+        self.assertEqual(mined, ["Gwen", "Gwen Notes", "Gwendolyn Park"])
+        # Only the whole word is the misrecognition, not a name that begins
+        # with it.
+        self.assertEqual(corrected, ["Gwendolyn Park", "Qwen"])
+        self.assertEqual(anchors, corrected)
+        self.assertNotIn("Gwen\n", listed)
+        self.assertNotIn("Gwen Notes", listed)
+        # The counts are evidence, kept for when the correction is forgotten.
+        self.assertEqual(forgotten, mined)
 
     def test_reverting_a_learned_correction_demotes_it(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -10656,7 +10684,7 @@ class CustomVocabularyTests(unittest.TestCase):
         manual = [f"Term{i}" for i in range(70)]
         gloss = {"lock": threading.Lock()}
         ns = load_definitions(
-            "refresh_glossary",
+            "refresh_glossary", "corrected_away_words", "term_occurs",
             extra={
                 "parse_dictionary": lambda: (list(manual), set()),
                 "PersonalRegressionLab": PersonalRegressionLab,

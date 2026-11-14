@@ -6579,6 +6579,27 @@ def write_auto_section(promoted: list[str]):
         atomic_write_text(DICTIONARY_FILE, body)
 
 
+def corrected_away_words(state: dict) -> set[str]:
+    """Words the user corrected into a different word, casefolded.
+
+    Such a word is a misrecognition, however often it was transcribed. A
+    casing-only fix is not. The miner must not count it and the glossary must
+    not promote it, so both read this one set.
+    """
+    pairs = [
+        (key, fix.get("to")) for key, fix in state.get("fixes", {}).items()
+        if isinstance(fix, dict)
+    ] + [
+        (item.get("from"), item.get("to"))
+        for item in state.get("confusions", {}).values()
+        if isinstance(item, dict)
+    ]
+    return {
+        str(heard).casefold() for heard, preferred in pairs
+        if heard and str(heard).casefold() != str(preferred).casefold()
+    }
+
+
 def refresh_glossary():
     """Rebuild the active glossary: manual terms first, then learned terms by
     frequency, capped to the Whisper prompt budget."""
@@ -6588,10 +6609,16 @@ def refresh_glossary():
     learned_sorted = sorted(
         state["counts"].items(), key=lambda kv: -kv[1]
     )
+    # A count can predate the correction: the miner or an earlier correction
+    # counted the word before the user corrected it away. The count stays,
+    # for when that correction is forgotten, but promotes nothing meanwhile.
+    corrected_away = corrected_away_words(state)
     promoted = []
     for term, count in learned_sorted:
         if (count >= PROMOTE_MIN_COUNT and term.casefold() not in seen
-                and not PersonalRegressionLab.is_common_word(term)):
+                and not PersonalRegressionLab.is_common_word(term)
+                and not any(term_occurs(word, term)
+                            for word in corrected_away)):
             promoted.append(term)
             seen.add(term.casefold())
 
@@ -7095,19 +7122,7 @@ def learn_pass():
     new_texts = parse_texts(new_lines)
     blob = "\n".join(texts)[-6000:]
 
-    # A word the user corrected into something else is a misrecognition,
-    # however often it was transcribed. A casing-only fix is not.
-    corrected_away = {
-        str(fix_from).casefold()
-        for fix_from, fix_to in [
-            (key, fix.get("to")) for key, fix in state["fixes"].items()
-            if isinstance(fix, dict)
-        ] + [
-            (item.get("from"), item.get("to"))
-            for item in state["confusions"].values() if isinstance(item, dict)
-        ]
-        if fix_from and str(fix_from).casefold() != str(fix_to).casefold()
-    }
+    corrected_away = corrected_away_words(state)
 
     def built_on_corrected_word(term: str) -> bool:
         return any(term_occurs(word, term) for word in corrected_away)
