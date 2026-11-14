@@ -2,11 +2,36 @@
 
 A checksum answers "are these the bytes someone published?". It cannot answer
 "what produced them?". This document records what a Whisper Face download
-already proves, what build provenance adds, and what still is not covered.
+proves today, what the release workflow is designed to add, and what still is
+not covered.
 
-## Verifying a download
+## What published releases carry today
 
-Every published Mac release carries four files. Verify them in this order.
+Every release published so far (through v0.4.0) was built and uploaded by
+hand. The release workflow has not completed on any tag, so **no published
+release has a Developer ID signature, notarization, a stapled ticket, or a
+build-provenance attestation**. The launcher app inside the disk image is
+ad-hoc signed, and the disk image is not notarized.
+
+What a published release does carry is checksums: `SHA256SUMS` for the Mac
+assets, and, from v0.4.0, a separate `SHA256SUMS-windows` for the Windows zip
+(the Mac file is generated without it). So for a published release today, the
+only check available is the checksum:
+
+```sh
+shasum -a 256 -c SHA256SUMS            # Mac assets
+shasum -a 256 -c SHA256SUMS-windows    # Windows zip
+```
+
+That proves the bytes match the checksum file published beside them, and
+nothing about who produced either. The rest of this document describes the
+signed path the workflow is built for, which becomes available only once the
+production Apple Team ID is recorded and a tagged release completes in CI.
+
+## Verifying a download from the signed workflow
+
+A release published by the tagged release workflow would carry four files.
+Verify them in this order.
 
 ```sh
 # 1. The bytes are the published bytes.
@@ -45,10 +70,10 @@ gh attestation verify update-manifest.json --repo Aiml3ss/whisper-face
 |---|---|---|
 | `SHA256SUMS` | The file you have is byte-identical to the one whose digest was published alongside it. | Anything about who produced it. Whoever can replace the artifact can replace the checksum file next to it. |
 | `update-manifest.json` | The release names one full Git revision, the source URLs for it, and the previous version for rollback. | That the manifest itself was written by the project. It is not independently signed. |
-| Apple Developer ID signature | The disk image was signed by this project's Apple team identifier and has not been altered since. | That the contents match any particular source revision. Apple attests to the signer, not to the build. |
-| Apple notarization and stapling | Apple scanned the artifact and issued a ticket that travels with it. | That the artifact was built from reviewed source, or by CI at all. |
+| Apple Developer ID signature (not yet on any published release) | The disk image was signed by this project's Apple team identifier and has not been altered since. | That the contents match any particular source revision. Apple attests to the signer, not to the build. |
+| Apple notarization and stapling (not yet on any published release) | Apple scanned the artifact and issued a ticket that travels with it. | That the artifact was built from reviewed source, or by CI at all. |
 | Exact-source archive plus tree digest | The shipped source is a specific Git tree, and the source in the disk image and in the zip are identical. | That the compiled launcher inside the image was built from that tree. |
-| **Build provenance attestation** | A named GitHub Actions workflow, in this repository, at a specific commit, produced artifacts with these digests. | That the source at that commit is trustworthy, or that a human reviewed it. Provenance is about origin, not quality. |
+| **Build provenance attestation** (not yet on any published release) | A named GitHub Actions workflow, in this repository, at a specific commit, produced artifacts with these digests. | That the source at that commit is trustworthy, or that a human reviewed it. Provenance is about origin, not quality. |
 
 ## Why attestations rather than a project signing key
 
@@ -80,6 +105,11 @@ The trade-offs are real and worth stating:
 
 ## What is still open
 
+- No published release has gone through the signed, notarized, attested
+  workflow. Until one does, a downloader has only `SHA256SUMS`.
+- The menu updater (**Check for Updates…**) does not use releases at all: it
+  fetches the tip of the checkout's tracked branch and runs that revision's
+  installer, with no tag, signature, or provenance check.
 - The update manifest is not independently signed. A recipient who trusts the
   provenance of a *release* still has no signature over the *update metadata*
   that a future automatic updater would consume.

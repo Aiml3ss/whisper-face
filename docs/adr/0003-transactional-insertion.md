@@ -57,3 +57,20 @@ Residual risk: an opaque app can programmatically change its focused field
 without user input while keeping the same window. The compatibility adapter
 cannot observe that transition; it is intentionally narrower than the exact-AX
 contract and must not be generalized to arbitrary applications.
+
+## Amendment, 14 November 2026: readback timing
+
+The 20 ms bound in the Decision and Consequences above no longer holds, and
+has not since 23 July 2026, when Electron destinations were given a separate
+0.35 s window while native apps kept 20 ms. As of the November 2026 audit
+fixes, every app gets the same adaptive readback window: the readback returns
+on the first read that matches and otherwise polls for up to 0.4 s
+(`READBACK_TIMEOUT` in `dictate.py`). A matching readback still costs one read;
+a slow or non-matching destination can add up to 0.4 s before the receipt is
+settled. The per-surface constants are gone.
+
+Two related changes in the same fixes: Accessibility ranges are converted from
+UTF-16 units to code points at the boundary, so offsets past an emoji are
+correct, and each Insertion Receipt now carries the shape of its own readback
+(`readback_shape`) instead of the runtime reading it from shared state. The
+rest of this decision is unchanged.
