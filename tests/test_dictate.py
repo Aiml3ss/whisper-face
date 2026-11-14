@@ -5429,7 +5429,7 @@ class InsertionAdapterTests(unittest.TestCase):
                     (left is original_element and right is current_element),
                 "insertion_readback": lambda *_args, **_kwargs:
                     ReadbackResult.verified(),
-                "readback_timeout_for_frontmost": lambda: 0.02,
+                "READBACK_TIMEOUT": 0.02,
                 "paste": pasted.append,
                 "PIPELINE_STATE": pipeline,
                 "frontmost_bundle": lambda: "com.openai.codex",
@@ -5466,6 +5466,7 @@ class InsertionAdapterTests(unittest.TestCase):
     def test_readback_proves_the_exact_field_mutation(self):
         ns = load_definitions(
             "insertion_readback",
+            assignments={"READBACK_TIMEOUT"},
             extra={
                 "FocusSnapshot": object,
                 "ReadbackResult": ReadbackResult,
@@ -5482,6 +5483,77 @@ class InsertionAdapterTests(unittest.TestCase):
         )
 
         self.assertEqual(result.state, ReceiptState.VERIFIED)
+
+    def commit_with_lagging_value(self, lag):
+        """Commit into a field whose Accessibility value trails the paste.
+
+        Chromium browsers and Electron apps both publish late, and nothing
+        about the app is consulted: every destination gets the same window.
+        """
+        import unicodedata
+        now = [0.0]
+        field = {"text": "Hello", "pasted_at": None}
+
+        def paste(text):
+            field["pasted_at"] = now[0]
+            field["text"] = "Hello" + text
+
+        def ax_text(_element):
+            if (field["pasted_at"] is None or lag is None
+                    or now[0] < field["pasted_at"] + lag):
+                return "Hello"
+            return field["text"]
+
+        lease = InsertionLease.capture(
+            "utterance-1", "field-a", (5, 0), "Hello")
+        rec = SimpleNamespace(
+            insertion_lease=lease, insertion_receipt=None,
+            bundle_at_press="com.google.Chrome", language="en")
+        ns = load_definitions(
+            "commit_insertion", "insertion_capability_buckets",
+            "insertion_join_prefix", "unresolved_destination_id",
+            "insertion_readback", "classify_readback_conflict",
+            assignments={"READBACK_TIMEOUT"},
+            extra={
+                "INSERTION_COORDINATOR": InsertionCoordinator(),
+                "destination_observation": lambda *_args:
+                    DestinationObservation.capture(
+                        "field-a", (5, 0), "Hello"),
+                "ReadbackResult": ReadbackResult,
+                "unicodedata": unicodedata,
+                "_ax_text": ax_text,
+                "paste": paste,
+                "PIPELINE_STATE": {},
+                "frontmost_bundle": lambda: "com.google.Chrome",
+                "time": SimpleNamespace(
+                    monotonic=lambda: now[0],
+                    sleep=lambda delay: now.__setitem__(0, now[0] + delay)),
+            },
+        )
+        receipt = ns["commit_insertion"](
+            rec, "World.", "com.google.Chrome", SimpleNamespace(
+                element=object(), text="Hello", selection=(5, 0)))
+        return receipt, now[0]
+
+    def test_a_value_published_late_still_verifies_in_any_app(self):
+        receipt, waited = self.commit_with_lagging_value(0.15)
+
+        self.assertEqual(receipt.state, ReceiptState.VERIFIED)
+        # Returned as soon as the value matched, not at the end of the window.
+        self.assertLess(waited, 0.2)
+
+    def test_a_value_published_at_once_is_read_once(self):
+        receipt, waited = self.commit_with_lagging_value(0.0)
+
+        self.assertEqual(receipt.state, ReceiptState.VERIFIED)
+        self.assertEqual(waited, 0.0)
+
+    def test_a_value_that_never_matches_fails_within_the_window(self):
+        receipt, waited = self.commit_with_lagging_value(None)
+
+        self.assertEqual(receipt.state, ReceiptState.CONFLICT)
+        self.assertGreaterEqual(waited, 0.35)
+        self.assertLessEqual(waited, 0.45)
 
     def test_hidden_field_lease_still_binds_to_original_application(self):
         ns = load_definitions(
@@ -5550,7 +5622,7 @@ class InsertionAdapterTests(unittest.TestCase):
                         "field-a", (0, 0), "nearby"),
                 "insertion_readback": lambda *_args, **_kwargs:
                     ReadbackResult.verified(),
-                "readback_timeout_for_frontmost": lambda: 0.02,
+                "READBACK_TIMEOUT": 0.02,
                 "paste": lambda _text: None,
                 "PIPELINE_STATE": {},
                 "frontmost_bundle": lambda: "com.openai.codex",
@@ -5761,7 +5833,7 @@ class AccessibilityRangeTests(unittest.TestCase):
                 "_ax_elements_equal": lambda left, right: left is right,
                 "frontmost_window_destination": lambda _bundle: None,
                 "frontmost_bundle": lambda: self.BUNDLE,
-                "readback_timeout_for_frontmost": lambda: 0.0,
+                "READBACK_TIMEOUT": 0.0,
                 "paste": field["paste"],
                 "PIPELINE_STATE": {},
             },
@@ -7730,6 +7802,7 @@ class ReadbackEdgeWhitespaceTests(unittest.TestCase):
         from insertion_integrity import ReadbackResult
         return load_definitions(
             "insertion_readback", "classify_readback_conflict",
+            assignments={"READBACK_TIMEOUT"},
             extra={"ReadbackResult": ReadbackResult, "re": re,
                    "unicodedata": unicodedata},
         )
@@ -8566,7 +8639,7 @@ class UndoLastDictationTests(unittest.TestCase):
                     else None),
                 "focus_destination_matches": lambda *_a: True,
                 "opaque_focus_context": lambda _snapshot: "",
-                "readback_timeout_for_frontmost": lambda: 0.0,
+                "READBACK_TIMEOUT": 0.0,
                 "_ax_text": lambda _element: state["text"],
                 "print": lambda *_a, **_k: None,
                 "paste": paste,
@@ -8834,6 +8907,7 @@ class UndoLastDictationTests(unittest.TestCase):
         ns = load_definitions(
             "_ax_select_text_range", "code_points_to_utf16_range",
             "_ax_reported_range", "_coerce_range",
+            assignments={"READBACK_TIMEOUT"},
             extra={
                 "time": SimpleNamespace(
                     monotonic=lambda: now[0],

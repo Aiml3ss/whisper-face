@@ -8960,24 +8960,12 @@ def resolve_insertion_target(rec, timeout: float = 0.12, reader=None,
         sleeper(min(0.02, remaining))
 
 
-READBACK_TIMEOUT = 0.02
-# Chromium publishes its accessibility value well after the paste actually
-# lands, so the tight native window reads stale text, calls a good insertion a
-# conflict, and fails it closed into the Voice Outbox. Electron targets get
-# room to catch up; native fields still verify on the first read.
-READBACK_TIMEOUT_ELECTRON = 0.35
-
-
-def readback_timeout_for_frontmost() -> float:
-    """Pick the readback window for whichever app is receiving this paste."""
-    if not IS_MACOS:
-        return READBACK_TIMEOUT
-    try:
-        app = NSWorkspace.sharedWorkspace().frontmostApplication()
-    except Exception:
-        return READBACK_TIMEOUT             # unreadable app: keep the default
-    return (READBACK_TIMEOUT_ELECTRON if is_electron_app(app)
-            else READBACK_TIMEOUT)
+# Chromium, in browsers and Electron apps alike, publishes its accessibility
+# value tens to hundreds of milliseconds after the paste lands, and reading
+# stale text calls a good insertion a conflict. The readback returns on the
+# first matching read, so a native field still verifies at once; only a
+# field that never matches waits out the whole window, after the paste.
+READBACK_TIMEOUT = 0.4
 
 
 def classify_readback_conflict(observed: str | None, expected: str) -> str:
@@ -9006,7 +8994,7 @@ def classify_readback_conflict(observed: str | None, expected: str) -> str:
 
 
 def insertion_readback(snapshot: FocusSnapshot, inserted: str,
-                       timeout: float = 0.02, reader=None,
+                       timeout: float = READBACK_TIMEOUT, reader=None,
                        clock=None, sleeper=None) -> ReadbackResult:
     """Prove the exact field mutation after paste without ever retrying it."""
     if snapshot.text is None or snapshot.selection is None:
@@ -9155,7 +9143,7 @@ def commit_insertion(rec, text: str, bundle: str,
         if current is None or lease.opaque:
             return ReadbackResult.unverifiable()
         result = insertion_readback(
-            current, text, timeout=readback_timeout_for_frontmost())
+            current, text, timeout=READBACK_TIMEOUT)
         PIPELINE_STATE["last_readback_shape"] = result.detail or ""
         return result
 
@@ -9448,7 +9436,7 @@ def grapheme_count(text: str) -> int:
 
 
 def _ax_select_text_range(element, text: str, selection: tuple[int, int],
-                          expected: str, timeout: float = 0.4,
+                          expected: str, timeout: float = READBACK_TIMEOUT,
                           clock=None, sleeper=None) -> bool | None:
     """Select a code-point range of a field through Accessibility.
 
@@ -9584,7 +9572,7 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
                 selection=record.inserted_range,
             ),
             record.replaced,
-            timeout=readback_timeout_for_frontmost(),
+            timeout=READBACK_TIMEOUT,
         )
 
     receipt = coordinator.commit(undo_id, observation, perform, prove)
