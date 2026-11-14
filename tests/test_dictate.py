@@ -3116,6 +3116,97 @@ class MacAudioRecoveryNotificationTests(unittest.TestCase):
         self.assertEqual(portaudio.open_devices(), ["usb", "usb"])
         self.assertEqual(portaudio.reinitializations, 1)
 
+    def test_a_refresh_never_terminates_while_a_release_is_closing(self):
+        # PortAudio is not thread-safe and Pa_Terminate closes every open
+        # stream itself, so a terminate that overlaps a close on another
+        # thread disposes the same stream twice.
+        closing = threading.Event()
+        finish_close = threading.Event()
+        overlaps = []
+
+        class SlowClosePortAudio(FakePortAudio):
+            def InputStream(self, **kwargs):
+                stream = super().InputStream(**kwargs)
+                close = stream.close
+
+                def slow_close():
+                    closing.set()
+                    finish_close.wait(2.0)
+                    close()
+                stream.close = slow_close
+                return stream
+
+            def _terminate(self):
+                if closing.is_set() and not finish_close.is_set():
+                    overlaps.append("terminate during close")
+                super()._terminate()
+
+        portaudio = SlowClosePortAudio("built-in")
+        requests = []
+        ns = self.device_namespace(portaudio, requests, flight=False)
+        pool = ns["AUDIO_POOL"]
+        slot = pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+        portaudio.system_default = "usb"
+        ns["_invalidate_default_audio_inputs"]()      # deferred: take is live
+
+        releaser = threading.Thread(target=pool.release, args=(slot,))
+        releaser.start()
+        self.assertTrue(closing.wait(2.0))
+        # A second default-input notification, or a wake, lands mid-close.
+        refresher = threading.Thread(
+            target=ns["_invalidate_default_audio_inputs"])
+        refresher.start()
+        refresher.join(0.2)
+        finish_close.set()
+        releaser.join(2.0)
+        refresher.join(2.0)
+
+        self.assertEqual(overlaps, [])
+        self.assertEqual(portaudio.open_devices(), ["usb", "usb"])
+        self.assertEqual(portaudio.reinitializations, 1)
+
+    def test_a_failed_reinitialization_is_retried_after_a_keypress(self):
+        class FlakyPortAudio(FakePortAudio):
+            initialized = True
+            failures = 1
+
+            def InputStream(self, **kwargs):
+                if not self.initialized:
+                    raise RuntimeError("PortAudio not initialized")
+                return super().InputStream(**kwargs)
+
+            def _terminate(self):
+                super()._terminate()
+                self.initialized = False
+
+            def _initialize(self):
+                if self.failures:
+                    self.failures -= 1
+                    raise RuntimeError("Error initializing PortAudio")
+                super()._initialize()
+                self.initialized = True
+
+        portaudio = FlakyPortAudio("built-in")
+        requests = []
+        ns = self.device_namespace(portaudio, requests, flight=False)
+        pool = ns["AUDIO_POOL"]
+        pool.warm()
+        portaudio.system_default = "usb"
+        ns["_invalidate_default_audio_inputs"]()
+        self.assertEqual(pool.readiness(), "Unavailable")
+
+        # The keypress cannot open anything, so it asks the recovery worker
+        # to initialize PortAudio again.
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+        self.assertEqual(requests, ["refresh"])
+        ns["_invalidate_default_audio_inputs"]()
+
+        self.assertEqual(pool.readiness(), "Ready")
+        slot = pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+        self.assertEqual(slot.stream.device, "usb")
+        pool.release(slot)
+
     def test_a_live_flight_take_defers_the_refresh_to_its_detach(self):
         portaudio = FakePortAudio("built-in")
         requests = []

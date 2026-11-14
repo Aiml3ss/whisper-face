@@ -4497,11 +4497,14 @@ class AudioPool:
                 raise RuntimeError("microphone stream unavailable") from None
 
     def acquire(self, recorder):
-        stale_slots = []
         with self.init_lock:
             try:
                 self._warm_locked()
             except Exception:
+                # A failed PortAudio re-initialization leaves nothing that
+                # can open, and only a device refresh initializes it again.
+                if self.request_refresh is not None:
+                    self.request_refresh()
                 raise RuntimeError("microphone stream unavailable") from None
             with self.lock:
                 if self.recovery_pending:
@@ -4524,14 +4527,14 @@ class AudioPool:
                 with self.lock:
                     self.busy.discard(slot)
                     self.warm_error = type(error).__name__
-                stale_slots = self._invalidate_locked(reset_error=False)
-        self._close_slots(stale_slots)
+                # Closed under init_lock, so a device refresh can never
+                # terminate PortAudio while a close is still running.
+                self._close_slots(self._invalidate_locked(reset_error=False))
         raise RuntimeError("microphone stream unavailable") from None
 
     def release(self, slot, *, delivered_audio=True):
         if slot is None:
             return
-        stale_slots = []
         stop_error = None
         try:
             slot.stop()
@@ -4551,9 +4554,10 @@ class AudioPool:
                     should_recover = (
                         self.recovery_pending and not self.busy)
                 if should_recover:
-                    stale_slots = self._invalidate_locked(
-                        reset_error=failure is None)
-            self._close_slots(stale_slots)
+                    # Closed under init_lock, so a device refresh can never
+                    # terminate PortAudio while a close is still running.
+                    self._close_slots(self._invalidate_locked(
+                        reset_error=failure is None))
             if should_recover and not (
                     self.request_refresh and self.request_refresh()):
                 self.warm_async()
@@ -4614,8 +4618,7 @@ class AudioPool:
     def invalidate(self):
         """Forget stale default-device streams without cutting off a take."""
         with self.init_lock:
-            stale_slots = self._invalidate_locked()
-        self._close_slots(stale_slots)
+            self._close_slots(self._invalidate_locked())
 
     def close(self):
         with self.init_lock:
@@ -4625,7 +4628,7 @@ class AudioPool:
                 self.busy.clear()
                 self.recovery_pending = False
                 self.closed = True
-        self._close_slots(slots)
+            self._close_slots(slots)
 
 
 class _AudioObjectPropertyAddress(ctypes.Structure):
@@ -4858,7 +4861,8 @@ def refresh_default_audio_inputs(pool, flight, reinitialize) -> bool:
                     refreshed = True
                 except Exception:
                     # Opening below then fails and reports Unavailable; the
-                    # next device event or keypress retries.
+                    # next device event, or a keypress whose open fails and
+                    # requests a refresh, retries.
                     pass
             if flight_idle:
                 flight._restore_locked()
