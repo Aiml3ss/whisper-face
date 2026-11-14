@@ -28,7 +28,8 @@ LLM result is discarded and deterministic cleanup pastes instead.
   outside it survives. Only a closed set of transformations is provable —
   identical lexical content (punctuation/case/whitespace changes), removal
   of provable filler words, a typed "X, actually Y" self-correction (both
-  sides numbers, weekdays, months, or clock times, each a whole item),
+  sides numbers, weekdays, months, or clock times, each a whole item, and
+  not negated in its own clause),
   dropped new-line/new-paragraph markers, and proven list/enumeration
   variants, where lines that are not list items still have to be proven
   from the source (corrected November 2026).

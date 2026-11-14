@@ -35,6 +35,9 @@
     {"id": "correction-amount", "covers": "actually-correction", "spoken": "The total is 45 dollars, actually 54.", "expected": "The total is 54 dollars."},
     {"id": "correction-time", "covers": "actually-correction", "spoken": "Call me at 3 pm, actually 4 pm.", "expected": "Call me at 4 pm."},
     {"id": "correction-inside-range", "covers": "actually-correction", "spoken": "The shop is open from 9 to 5, actually 9 to 6.", "expected": "The shop is open from 9 to 5, actually 9 to 6."},
+    {"id": "correction-after-not", "covers": "actually-correction", "spoken": "It's not 5, actually 6.", "expected": "It's not 5, actually 6."},
+    {"id": "correction-after-leading-not", "covers": "actually-correction", "spoken": "Not Tuesday, actually Wednesday.", "expected": "Not Tuesday, actually Wednesday."},
+    {"id": "correction-after-cant", "covers": "actually-correction", "spoken": "We can't do Friday, actually Saturday works.", "expected": "We can't do Friday, actually Saturday works."},
 
     {"id": "snippet-email-word", "covers": "snippet-name", "spoken": "What is your email address?", "expected": "What is your email address?"},
     {"id": "snippet-email-subject", "covers": "snippet-name", "spoken": "My email is down again.", "expected": "My email is down again."},

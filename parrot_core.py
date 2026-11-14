@@ -122,6 +122,14 @@ CORRECTION_PARTS = tuple(
      re.compile(rf"(?<!\w)(?P<item>{item})(?!\w)", re.I))
     for item in (_WEEKDAY, _MONTH, _NUMBER)
 )
+# A negation ahead of X in its own clause makes Y the answer and X the thing
+# ruled out ("not Tuesday, actually Wednesday"). Replacing X would then keep
+# the negation and state the opposite of what was said.
+CORRECTION_NEGATION_RE = re.compile(
+    r"(?<![\w'’])(?:not|no|never|none|nor|neither|nobody|nothing|nowhere|"
+    r"without|cannot)(?![\w'’])|n['’]t(?!\w)",
+    re.I,
+)
 # Units a corrected number keeps when only the first number carried one
 # ("45 dollars, actually 54"). Singular, without dots or apostrophes.
 CORRECTION_UNITS = frozenset({
@@ -561,9 +569,11 @@ def find_self_correction(text: str, context_before: str = "",
     X and Y must each be a whole item. When either is one part of a range, a
     score, a size or a grouped number ("9 to 5, actually 9 to 6"), or Y
     repeats an earlier item of the sentence, how much the speaker restated
-    cannot be read from one side, so nothing is corrected. ``context_before``
-    and ``context_after`` are the source around ``text`` when it is a span
-    of something longer; they count for that test.
+    cannot be read from one side, so nothing is corrected. The same holds
+    when the clause leading up to X is negated ("not Tuesday, actually
+    Wednesday"): X is what the speaker ruled out, not a slip to replace.
+    ``context_before`` and ``context_after`` are the source around ``text``
+    when it is a span of something longer; they count for both tests.
     """
     for marker in CORRECTION_MARKER_RE.finditer(text):
         left, right = text[:marker.start()], text[marker.end():]
@@ -573,10 +583,13 @@ def find_self_correction(text: str, context_before: str = "",
             before = left_re.search(left) if after else None
             if before is None:
                 continue
+            earlier = context_before + left[:before.start()]
             if _is_part_of_a_longer_item(
-                    kind, parts, context_before + left[:before.start()],
-                    after.group("item"),
+                    kind, parts, earlier, after.group("item"),
                     right[after.end():] + context_after):
+                continue
+            clause = CLAUSE_BOUNDARY_RE.split(earlier)[-1]
+            if CORRECTION_NEGATION_RE.search(clause):
                 continue
             replacement = _corrected_item(kind, before, after)
             if replacement is not None:

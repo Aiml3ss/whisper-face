@@ -81,7 +81,8 @@ Qwen3.5-4B, and has no Parakeet.
 - **Typed self-correction.** "Tuesday, actually Wednesday" becomes
   "Wednesday" only when both sides are the same kind of item (numbers,
   weekdays, months, clock times) and each is a whole item. "I didn't actually
-  finish" and a correction inside a range, score, or grouped number stay as
+  finish", a correction inside a range, score, or grouped number, and a
+  correction after a negation ("not Tuesday, actually Wednesday") stay as
   spoken.
 - **Snippets.** Say "insert my email", alone or inside a sentence, and saved
   text arrives. A bare snippet name is never expanded, and an unfilled

@@ -281,6 +281,33 @@ class VoiceCompilerTests(unittest.TestCase):
                 self.assertFalse(result.edits[0].accepted)
                 self.assertEqual(result.text, source)
 
+    def test_self_correction_is_never_proved_on_a_negated_item(self):
+        # "not 5, actually 6" rules 5 out. Accepting "6" for the span would
+        # leave "not 6", the opposite of what was said.
+        for source, before, after in (
+            ("It's not 5, actually 6 people.", "5, actually 6", "6"),
+            ("Not Tuesday, actually Wednesday works.",
+             "Tuesday, actually Wednesday", "Wednesday"),
+            ("We can't do Friday, actually Saturday works.",
+             "Friday, actually Saturday", "Saturday"),
+            # Taking the negation into the span does not prove it either.
+            ("Monday, not Tuesday, actually Wednesday.",
+             "not Tuesday, actually Wednesday", "not Wednesday"),
+            ("Monday, not Tuesday, actually Wednesday.",
+             "not Tuesday, actually Wednesday", "Wednesday"),
+        ):
+            with self.subTest(source=source, before=before):
+                result = self.compiler.verify_edits(
+                    source, (EditProposal("self_correction", before, after),))
+                self.assertFalse(result.edits[0].accepted)
+                self.assertEqual(result.text, source)
+        source = "I can't make it. Let's meet Tuesday, actually Wednesday."
+        result = self.compiler.verify_edits(source, (EditProposal(
+            "self_correction", "Tuesday, actually Wednesday", "Wednesday"),))
+        self.assertTrue(result.edits[0].accepted)
+        self.assertEqual(
+            result.text, "I can't make it. Let's meet Wednesday.")
+
     def test_counted_enumeration_can_be_proved_as_a_list(self):
         source = ("Two things first ship the installer and second update "
                   "the docs")

@@ -51,8 +51,9 @@ metrics. It never touches I/O, the clipboard, or an application
 ## Examples
 
 - "Tuesday, actually Wednesday" → the typed self-correction is a provable
-  edit; just "Wednesday" survives. "I didn't actually finish" and "From 9
-  to 5, actually 6" are not corrections and stay as spoken.
+  edit; just "Wednesday" survives. "I didn't actually finish", "From 9
+  to 5, actually 6" and "Not Tuesday, actually Wednesday" are not
+  corrections and stay as spoken.
 - A context term from the focused document can replace a
   similar-sounding token only when it clears the anchor-aware
   threshold; every swap emits an inspectable Decision. App names, window

@@ -151,8 +151,9 @@ are never Supporter-only features.
   applied: "actually" replaces the item before it only when both sides are the
   same kind of thing (two numbers, weekdays, months, or clock times) and each
   is a whole item. "We meet Tuesday, actually Wednesday." becomes "We meet
-  Wednesday."; "I didn't actually finish the report." and "From 9 to 5,
-  actually 6" are left exactly as spoken. Safe edits are compiled
+  Wednesday."; "I didn't actually finish the report.", "From 9 to 5,
+  actually 6" and "Not Tuesday, actually Wednesday." are left exactly as
+  spoken. Safe edits are compiled
   deterministically; the optional local model (Qwen3.5-4B) is used only for
   semantic cleanup and the explicit writing modes. Its strict JSON edit plan
   is guarded against refusals, over-deletion, and truncation; nearby context
@@ -662,6 +663,7 @@ is in the [update and rollback guide](docs/distribution/update-and-rollback.md).
 | "We meet Tuesday, actually Wednesday." | "We meet Wednesday." |
 | "I didn't actually finish the report." | unchanged: "actually" here is not a correction |
 | "From 9 to 5, actually 6." | unchanged: part of a range is never corrected |
+| "Not Tuesday, actually Wednesday." | unchanged: a negated item is never corrected |
 | "two things: … and second …" / "here's a list of ideas …" | a dash list |
 | "new paragraph" | a real paragraph break |
 | "Hi team. The launch is Tuesday. Scratch that. Wednesday." | "Hi team. Wednesday." (on its own, it drops the previous sentence; inline, the current clause) |

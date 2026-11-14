@@ -207,6 +207,55 @@ class CleanupCompilerTests(unittest.TestCase):
                 self.assertNotIn("self_correction", plan.edit_kinds)
                 self.assertIsNone(find_self_correction(spoken))
 
+    def test_self_correction_leaves_a_negated_item_as_spoken(self):
+        # "Not Tuesday, actually Wednesday" names Wednesday as the answer.
+        # Replacing Tuesday would leave "Not Wednesday", the opposite.
+        for spoken in (
+            "Not Tuesday, actually Wednesday.",
+            "It's not 5, actually 6.",
+            "The meeting isn't at 3, actually 4.",
+            "The meeting isn’t at 3, actually 4.",
+            "Monday, not Tuesday, actually Wednesday.",
+            "We can't do Friday, actually Saturday works.",
+            "No one, actually two.",
+            "We cannot ship in March, actually April.",
+            "Never on Monday, actually Tuesday.",
+            "I have none on Friday, actually Saturday.",
+            "Neither 3 nor 4, actually 5.",
+            "Nothing ships Tuesday, actually Wednesday works.",
+            "Nobody is free at 3, actually 4.",
+            "Come without 45 dollars, actually 54.",
+            "NOT TUESDAY, ACTUALLY WEDNESDAY.",
+            "Don't call at 3 pm — actually, 4 pm.",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken)
+                self.assertNotIn("self_correction", plan.edit_kinds)
+                self.assertIsNone(find_self_correction(spoken))
+
+    def test_self_correction_reads_a_negation_in_its_own_clause_only(self):
+        for spoken, expected in (
+            ("Let's meet Tuesday, actually Wednesday.",
+             "Let's meet Wednesday."),
+            # The negation belongs to an earlier clause or sentence.
+            ("No, Tuesday, actually Wednesday.", "No, Wednesday."),
+            ("I can't make it. Let's meet Tuesday, actually Wednesday.",
+             "I can't make it. Let's meet Wednesday."),
+            ("Don't come at 3, come at 4, actually 5.",
+             "Don't come at 3, come at 5."),
+            # "No." the abbreviation, and words that only contain one.
+            ("Send No. 5, actually 6.", "Send No. 6."),
+            ("I know it is Tuesday, actually Wednesday.",
+             "I know it is Wednesday."),
+            ("Another note is due Monday, actually Tuesday.",
+             "Another note is due Tuesday."),
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, expected)
+                self.assertEqual(plan.edit_kinds, ["self_correction"])
+
     def test_self_correction_still_resolves_an_item_beside_other_items(self):
         for spoken, expected in (
             # A date and a time are two items, not one.
