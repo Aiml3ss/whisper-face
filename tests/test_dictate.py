@@ -5872,30 +5872,60 @@ class ElectronAccessibilityTests(unittest.TestCase):
 
 
 class PersonalPriorIntegrationTests(unittest.TestCase):
-    def test_unpromoted_case_does_not_disable_established_legacy_fix(self):
+    def test_only_a_mapping_the_lab_promoted_is_applied(self):
         lab = PersonalRegressionLab()
-        lab.record_correction("Gwen", "Qwen", app="com.openai.codex")
+        lab.record_correction("gwen", "qwen", app="com.openai.codex")
         ns = load_definitions(
-            "apply_learned_fixes",
+            "apply_learned_fixes", "compiler_personal_priors",
             extra={
                 "GLOSS": {
                     "lock": threading.Lock(),
-                    "fixes": {"gwen": "Qwen"},
-                    "confusions": {},
+                    # Counts the lab never promoted are not a second way in.
+                    "fixes": {"gwen": "qwen"},
+                    "confusions": {"gwen->qwen": {
+                        "from": "gwen", "to": "qwen", "n": 9,
+                        "apps": {"com.openai.codex": 9}}},
                     "regression": lab,
                 },
+                "PersonalPrior": __import__(
+                    "voice_compiler").PersonalPrior,
             },
         )
 
         self.assertEqual(
-            ns["apply_learned_fixes"](
-                "Use Gwen", "com.openai.codex"),
-            "Use Qwen",
-        )
+            ns["apply_learned_fixes"]("Use gwen", "com.openai.codex"),
+            "Use gwen")
         self.assertEqual(
-            ns["apply_learned_fixes"]("Use Gwen", "com.apple.Notes"),
-            "Use Qwen",
+            ns["compiler_personal_priors"]("com.openai.codex"), ())
+        lab.propose("gwen", "qwen", app="com.openai.codex")
+        self.assertEqual(
+            ns["apply_learned_fixes"](
+                "Gwen is up. Use gwen.", "com.openai.codex"),
+            "Qwen is up. Use qwen.")
+        self.assertEqual(
+            ns["apply_learned_fixes"]("Use gwen", "com.apple.Notes"),
+            "Use gwen")
+
+    def test_a_common_word_pair_is_never_offered_as_an_alternative(self):
+        ns = load_definitions(
+            "learned_alternatives",
+            extra={
+                "GLOSS": {
+                    "lock": threading.Lock(),
+                    "confusions": {
+                        "there->their": {
+                            "from": "there", "to": "their", "n": 2},
+                        "gwen->qwen": {"from": "Gwen", "to": "Qwen", "n": 1},
+                    },
+                },
+                "PersonalRegressionLab": PersonalRegressionLab,
+            },
         )
+
+        self.assertEqual(
+            ns["learned_alternatives"](
+                "Is there a Gwen over there?", "com.slack"),
+            ["Is there a Qwen over there?"])
 
     def test_regression_lab_app_prior_does_not_reach_other_apps(self):
         lab = PersonalRegressionLab()

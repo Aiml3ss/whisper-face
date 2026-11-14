@@ -6382,11 +6382,6 @@ def refresh_glossary():
         # Whisper to keep listing terms when the audio is silence.
         GLOSS["prompt"] = ("Common terms: " + ", ".join(terms) + ".") \
             if terms else None
-        # Mishearing fixes confirmed PROMOTE_MIN_COUNT+ times become
-        # deterministic post-ASR replacements.
-        GLOSS["fixes"] = {old: info["to"]
-                          for old, info in state["fixes"].items()
-                          if info.get("n", 0) >= PERSONAL_GLOBAL_MIN_COUNT}
         GLOSS["confusions"] = dict(state.get("confusions", {}))
         GLOSS["regression"] = personal_regression_lab(state)
 
@@ -7697,32 +7692,11 @@ def transcribe(audio: np.ndarray, prompt: str | None = None,
 
 
 def apply_learned_fixes(text: str, bundle: str = "") -> str:
-    """Deterministic mishearing repairs (e.g. Gwen -> Qwen), earned by the
-    user making the same correction PROMOTE_MIN_COUNT times."""
+    """Apply the corrections the Personal Regression Lab holds active here
+    (e.g. Gwen -> Qwen) to text that does not pass through the compiler."""
     with GLOSS["lock"]:
-        fixes = dict(GLOSS["fixes"])
-        confusions = dict(GLOSS["confusions"])
         regression = GLOSS["regression"]
-    gated = {
-        item.heard.casefold()
-        for item in (*regression.promoted, *regression.quarantined)
-        if item.app is None or item.app == (bundle or None)
-    }
-    text = regression.apply(text, app=bundle or None)
-    for old, new in fixes.items():
-        if old.casefold() in gated:
-            continue
-        text = re.sub(rf"\b{re.escape(old)}\b", new, text, flags=re.I)
-    for info in confusions.values():
-        old, new = info.get("from"), info.get("to")
-        if isinstance(old, str) and old.casefold() in gated:
-            continue
-        app_count = info.get("apps", {}).get(bundle, 0) if bundle else 0
-        if (isinstance(old, str) and isinstance(new, str)
-                and (info.get("n", 0) >= PERSONAL_GLOBAL_MIN_COUNT
-                     or app_count >= PERSONAL_APP_MIN_COUNT)):
-            text = re.sub(rf"\b{re.escape(old)}\b", new, text, flags=re.I)
-    return text
+    return regression.apply(text, app=bundle or None)
 
 
 # Whole-word matcher for vocabulary casing: an alphanumeric run, optionally
@@ -7768,6 +7742,8 @@ def learned_alternatives(text: str, bundle: str) -> list[str]:
         old, new = info.get("from"), info.get("to")
         if not isinstance(old, str) or not isinstance(new, str):
             continue
+        if PersonalRegressionLab.remaps_common_words(old, new):
+            continue
         if re.search(rf"\b{re.escape(old)}\b", text, re.I):
             candidate = re.sub(
                 rf"\b{re.escape(old)}\b", new, text, flags=re.I)
@@ -7777,51 +7753,16 @@ def learned_alternatives(text: str, bundle: str) -> list[str]:
 
 
 def compiler_personal_priors(bundle: str) -> tuple[PersonalPrior, ...]:
-    """Project local correction history into contextual compiler evidence."""
+    """Hand the compiler the mappings the Personal Regression Lab holds
+    active in this app. The lab is the only source: a correction that has
+    not been promoted, or was held back, changes nothing."""
     with GLOSS["lock"]:
-        fixes = dict(GLOSS["fixes"])
-        confusions = dict(GLOSS["confusions"])
         regression = GLOSS["regression"]
-    gated = {
-        item.heard.casefold()
-        for item in (*regression.promoted, *regression.quarantined)
-        if item.app is None or item.app == (bundle or None)
-    }
-    priors: dict[tuple[str, str], PersonalPrior] = {}
-    for mapping in regression.promoted:
-        if mapping.app and mapping.app != bundle:
-            continue
-        apps = ((mapping.app, 2),) if mapping.app else ()
-        priors[(mapping.heard.casefold(), mapping.preferred.casefold())] = \
-            PersonalPrior(
-                mapping.heard, mapping.preferred,
-                count=1 if mapping.app else 3,
-                apps=apps,
-            )
-    for heard, preferred in fixes.items():
-        if (isinstance(heard, str) and isinstance(preferred, str)
-                and heard.casefold() not in gated):
-            priors[(heard.casefold(), preferred.casefold())] = PersonalPrior(
-                heard, preferred, count=3)
-    for info in confusions.values():
-        heard, preferred = info.get("from"), info.get("to")
-        if not isinstance(heard, str) or not isinstance(preferred, str):
-            continue
-        if heard.casefold() in gated:
-            continue
-        apps = tuple(
-            (str(app), int(count))
-            for app, count in info.get("apps", {}).items()
-            if isinstance(count, int)
-        )
-        key = (heard.casefold(), preferred.casefold())
-        candidate = PersonalPrior(
-            heard, preferred, max(1, int(info.get("n", 1))), apps)
-        existing = priors.get(key)
-        if existing is None or candidate.count > existing.count \
-                or candidate.app_count(bundle) > existing.app_count(bundle):
-            priors[key] = candidate
-    return tuple(priors.values())
+    return tuple(
+        PersonalPrior(
+            mapping.heard, mapping.preferred,
+            apps=((mapping.app, 1),) if mapping.app else ())
+        for mapping in regression.active(app=bundle or None))
 
 
 def compile_voice_evidence(recognition: Recognition,
