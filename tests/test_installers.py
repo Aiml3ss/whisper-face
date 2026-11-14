@@ -1195,7 +1195,7 @@ class InstallerContractTests(unittest.TestCase):
         cases = (
             ("read-only image", True, f"/dev/disk9s1 on {image} "
              "(apfs, local, nodev, nosuid, read-only, noowners)",
-             "running from the disk image, which is read-only"),
+             "on a read-only volume, most likely the disk image"),
             ("read-only folder elsewhere", True, "/dev/disk3s5 on "
              "/System/Volumes/Data (apfs, local, journaled)",
              "checkout is not writable"),

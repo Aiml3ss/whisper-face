@@ -182,7 +182,7 @@ check_install_location() {
 
 confirm_writable_checkout() {
     if checkout_volume_is_read_only; then
-        fail "Whisper Face is running from the disk image, which is read-only. Drag the Whisper Face folder out of the disk image into a folder of your own, then open Install.command from there."
+        fail "Whisper Face is on a read-only volume, most likely the disk image it came in. Drag the Whisper Face folder out of it into a folder of your own, then open Install.command from there."
     fi
     if ! (
         umask 077
