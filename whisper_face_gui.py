@@ -8128,7 +8128,20 @@ if APPKIT_AVAILABLE:
             alert.setInformativeText_(message)
             alert.addButtonWithTitle_(primary)
             alert.addButtonWithTitle_(self._l("settings.action.cancel"))
+            self._default_to_safe(alert, destructive=0, safe=1)
             return self._run_modal(alert) == 1000
+
+        @objc.python_method
+        def _default_to_safe(self, alert: Any, *, destructive: int,
+                             safe: int) -> None:
+            """Return picks the safe button; the destructive one needs a click."""
+            buttons = alert.buttons()
+            buttons[destructive].setKeyEquivalent_("")
+            try:
+                buttons[destructive].setHasDestructiveAction_(True)
+            except Exception:
+                pass
+            buttons[safe].setKeyEquivalent_("\r")
 
         def settingsPaneChanged_(self, sender: Any) -> None:
             self.view_model.select_settings_pane(
@@ -8363,6 +8376,7 @@ if APPKIT_AVAILABLE:
             review.addButtonWithTitle_(
                 self._l("settings.action.forget_mapping"))
             review.addButtonWithTitle_(self._l("settings.action.done"))
+            self._default_to_safe(review, destructive=0, safe=1)
             if self._run_modal(review) == 1000:
                 self.view_model.forget_learned(selected.kind, selected.key)
                 self.render()
@@ -9965,6 +9979,17 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             "learned correction review explains the mapping")
         require(("forget_correction", "teh") in calls,
                 "learned correction can be forgotten")
+        require(
+            str(dialogs[1].buttons()[1].keyEquivalent()) == "\r"
+            and str(dialogs[1].buttons()[0].keyEquivalent()) == "",
+            "learned correction review defaults to Done")
+        dialogs.clear()
+        controller.modal_responder = review_then_forget
+        controller._confirm("Delete?", "Gone for good.", "Delete")
+        require(
+            str(dialogs[0].buttons()[1].keyEquivalent()) == "\r"
+            and str(dialogs[0].buttons()[0].keyEquivalent()) == "",
+            "confirmations default to the safe button")
         controller.modal_responder = None
         require(keyword_reads[0] == 0, "keyword inspection stays on demand")
         keyword_inspection = model.inspect_acoustic_keywords()
