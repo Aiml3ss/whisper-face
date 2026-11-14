@@ -432,6 +432,38 @@ class FreshInstallDictationTests(unittest.TestCase):
         field = mac.dictate_sentence("Back in business.", field=TextField())
         self.assertEqual(field.text, "Back in business.")
 
+    def test_replacing_a_listener_while_idle_leaves_the_status_alone(self):
+        # Recovery used to abandon a take even when none was active, which
+        # reset the menu-bar state and dismissed the HUD: a permission
+        # warning or a message the user was reading disappeared each time.
+        mac = booted()
+        desktop = mac.desktop
+        before = len(desktop.listeners)
+        marker = len(desktop.main_thread_calls)
+        dead = [listener for listener in desktop.listeners
+                if listener.running][-1]
+        dead.alive = False
+        self.assertTrue(
+            mac.wait_until(lambda: len(desktop.listeners) > before,
+                           3 * mac.dictate.HOTKEY_WATCHDOG_INTERVAL),
+            mac.log_tail())
+        dead.running = False
+        # The worker handles events in order, so the recovery event is done
+        # by the time this dictation's press sets the "rec" state.
+        field = mac.dictate_sentence("Still here.", field=TextField())
+        self.assertEqual(field.text, "Still here.")
+
+        calls = desktop.main_thread_calls[marker:]
+        recording = next(
+            index for index, (function, args) in enumerate(calls)
+            if getattr(function, "__name__", "") == "setState_"
+            and args == ("rec",))
+        touched = [
+            (function.__name__, args)
+            for function, args in calls[:recording]
+            if getattr(function, "__name__", "") in ("setState_", "dismiss")]
+        self.assertEqual(touched, [], mac.log_tail())
+
 
 class DefaultPathCorpusTests(unittest.TestCase):
     """benchmarks/default_path_sentences.json, typed as written."""

@@ -13379,12 +13379,15 @@ def main():
             with cocoa_pool():
                 try:
                     if ev == "listener_recovery":
-                        abandon_active_recording(
-                            caption="Hotkey reset — try again",
-                            log_message=(
-                                "! active dictation cancelled during hotkey "
-                                "recovery"),
-                        )
+                        # With no take there is nothing to cancel, and the
+                        # reset would wipe a status or HUD the user needs.
+                        if active["rec"] is not None:
+                            abandon_active_recording(
+                                caption="Hotkey reset — try again",
+                                log_message=(
+                                    "! active dictation cancelled during "
+                                    "hotkey recovery"),
+                            )
                         continue
                     if ev == "no_audio":
                         rec = active["rec"]
