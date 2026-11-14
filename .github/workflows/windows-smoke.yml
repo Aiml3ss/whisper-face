@@ -89,3 +89,66 @@ jobs:
         run: |
           $Source = Get-Content -Raw .\setup.ps1
           [void][scriptblock]::Create($Source)
+
+      # Parsing only proves the file is syntactically valid. Windows users run
+      # it under Windows PowerShell 5.1, where Set-StrictMode and native-command
+      # error handling both differ from pwsh, and until now not one line of it
+      # had ever been executed anywhere. Every invocation below changes nothing
+      # on the runner.
+      - name: Run the installer's no-change paths under Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          function Invoke-Installer([string[]]$InstallerArgs) {
+            # Relaxed on purpose: a native command that writes to stderr with
+            # its streams merged is a terminating error under "Stop", which
+            # would fail this step for output the installer meant to print.
+            $previous = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            try {
+              $text = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+                -File .\setup.ps1 @InstallerArgs 2>&1 | Out-String
+              return [pscustomobject]@{ Code = $LASTEXITCODE; Output = $text }
+            } finally {
+              $ErrorActionPreference = $previous
+            }
+          }
+
+          $help = Invoke-Installer @("--help")
+          if ($help.Code -ne 0) { throw "--help exited $($help.Code)" }
+          if ($help.Output -notmatch "Usage: ") { throw "--help printed no usage" }
+          Write-Host "ok: --help"
+
+          # A dry-run uninstall prints a plan and changes nothing, which makes
+          # it safe here and runs most of the script's runtime helpers.
+          $plan = Invoke-Installer @("--uninstall")
+          if ($plan.Code -ne 0) { throw "--uninstall exited $($plan.Code)" }
+          if ($plan.Output -notmatch "dry run") { throw "--uninstall changed something" }
+          if ($plan.Output -match "would remove.*scheduled task") {
+            throw "--uninstall plans to remove a task this runner never installed"
+          }
+          Write-Host "ok: --uninstall dry run"
+
+          function Assert-Rejected([string[]]$InstallerArgs) {
+            $rejected = Invoke-Installer $InstallerArgs
+            if ($rejected.Code -eq 0) {
+              throw "setup.ps1 $($InstallerArgs -join ' ') should have been rejected"
+            }
+          }
+          Assert-Rejected @("--nonsense")
+          Assert-Rejected @("--uninstall", "--verify")
+          Assert-Rejected @("--yes")
+          Write-Host "ok: bad arguments rejected"
+
+          # A failing run has to end with the banner naming the log, because
+          # that file is all a user has to send back after an install fails.
+          $verify = Invoke-Installer @("--verify")
+          if ($verify.Code -eq 0) { throw "--verify passed with nothing installed" }
+          if ($verify.Output -notmatch "Whisper Face setup failed") {
+            throw "a failing run printed no failure banner"
+          }
+          if (-not (Test-Path .\install.log)) { throw "no install.log was written" }
+          Write-Host "ok: failure banner and install.log"
+
+          # Every check above passed. This shell exits with $LASTEXITCODE, and
+          # the --verify run deliberately left it non-zero, so say so directly.
+          exit 0

@@ -119,6 +119,12 @@ fi
 
 fail() {
     echo "!! $*" >&2
+    # Guarded because fail() is reachable before the log is opened, and
+    # cleared to empty when opening it did not work.
+    if [ -n "${install_log:-}" ] && [ -f "${install_log:-}" ]; then
+        echo "!! Full log: $install_log" >&2
+        echo "!! Attach that file to a bug report; it holds every step." >&2
+    fi
     exit 1
 }
 
@@ -299,6 +305,34 @@ ollama_service_receipt="$service_receipt_dir/ollama-service.sha256"
 parakeet_helper="$DIR/.models/bin/parrot-asr-helper"
 dictate_log="$DIR/dictate.log"
 ollama_log="$DIR/ollama.log"
+install_log="$DIR/install.log"
+
+# --- Installer log ----------------------------------------------------------
+# A failed install used to leave nothing to read. Homebrew, a multi-gigabyte
+# model download, and the readiness waits emit far more output than a Terminal
+# window keeps, so by the time setup stopped, the line explaining it had
+# already scrolled away. Everything from here on is copied to install.log,
+# created 0600 because it records this machine's paths.
+#
+# Failing to open it is deliberately not fatal: the most likely reason is a
+# read-only checkout, and confirm_writable_checkout has a far better message
+# waiting a few steps later. An uninstall is excluded for the same reason the
+# Windows installer excludes it -- it prints a short plan that never scrolls,
+# and an open log would be one more file it then had to remove.
+start_install_log() {
+    [ ! -L "$install_log" ] || return 1
+    if [ -e "$install_log" ] && [ ! -f "$install_log" ]; then
+        return 1
+    fi
+    (umask 077 && : >> "$install_log") 2>/dev/null || return 1
+    chmod 600 "$install_log" 2>/dev/null || return 1
+}
+
+if [ "$UNINSTALL" -eq 0 ] && start_install_log; then
+    exec > >(tee -a "$install_log") 2>&1
+else
+    install_log=""
+fi
 
 # --- Uninstall --------------------------------------------------------------
 # Removal works from the explicit inventory below and never from a glob or a
@@ -516,7 +550,8 @@ uninstall_whisper_face() {
             "$DIR/acoustic_calibration_activation.json" \
             "$DIR/relisten_activation.json" \
             "$DIR/dictate.log" \
-            "$DIR/ollama.log"; do
+            "$DIR/ollama.log" \
+            "$DIR/install.log"; do
         remove_installed_path "$REMOVE_PERSONAL" "$personal_file" \
             "personal file"
     done

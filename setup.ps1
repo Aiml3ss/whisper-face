@@ -78,12 +78,39 @@ function Require-Winget {
     }
 }
 
+$script:WingetFailures = @()
+
 function Install-WingetPackage([string]$Id) {
     Require-Winget
     & winget install --id $Id --exact --source winget --silent `
         --accept-package-agreements --accept-source-agreements
-    if ($LASTEXITCODE -ne 0) { throw "winget could not install $Id" }
+    # winget answers "already installed" and "no applicable update" with a
+    # non-zero code. Both mean the tool is present, which is the only thing
+    # this installer needs, so the code alone must not end the run. Whether
+    # the executable is findable afterwards is what decides, and every caller
+    # is followed by the Get-InstalledTools probe that settles it.
+    if ($LASTEXITCODE -ne 0) {
+        $script:WingetFailures += ("{0} exited {1}" -f $Id, $LASTEXITCODE)
+        Write-Host ("== winget returned {0} for {1}; probing for the tool anyway" -f
+            $LASTEXITCODE, $Id)
+    }
     Refresh-ProcessPath
+}
+
+function Invoke-Native([string]$FilePath, [string[]]$CommandArguments) {
+    # Windows PowerShell turns a native command's stderr into an error record
+    # once that stream is redirected, and $ErrorActionPreference = "Stop" then
+    # makes it terminating. `ollama show` writes to stderr for a model that is
+    # merely absent -- the expected answer here, not a failure -- so the
+    # preference is relaxed for the call and the exit code is what is read.
+    $Previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $FilePath @CommandArguments 2>&1 | Out-Null
+        return $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $Previous
+    }
 }
 
 function Test-Endpoint([string]$Uri) {
@@ -188,6 +215,47 @@ $LauncherReceipt = Join-Path $LauncherDir "launch.sha256"
 $Log = Join-Path $Repo "dictate.log"
 $OllamaLog = Join-Path $Repo "ollama.log"
 $OllamaErrorLog = Join-Path $Repo "ollama-error.log"
+$InstallLog = Join-Path $Repo "install.log"
+
+# --- Installer log -----------------------------------------------------------
+# A failed install used to lose the one line that explained it. winget, a
+# 3.4 GB model pull, and up to 180 readiness dots emit far more output than a
+# console window keeps, so by the time setup stopped, the reason had scrolled
+# out of the buffer. Recording a transcript means the error survives on disk
+# and can be attached to a bug report. The transcript header names this
+# machine and account, so it is ACL-locked exactly like the runtime logs.
+# Not while uninstalling: an open transcript holds install.log against its own
+# removal, and an uninstall prints a short plan that never scrolls anyway.
+$script:TranscriptPath = ""
+if (-not $Uninstall) {
+    try {
+        Set-PrivateFile $InstallLog
+        Start-Transcript -LiteralPath $InstallLog -Append -Force | Out-Null
+        $script:TranscriptPath = $InstallLog
+    } catch {
+        Write-Host "== continuing without an install log: $($_.Exception.Message)"
+    }
+}
+
+# PowerShell prints a terminating error wherever the console happens to be,
+# which is what made the failure unreadable. Repeat it last, with the log path,
+# so the final thing on screen is the reason and where to read it again.
+trap {
+    Write-Host ""
+    Write-Host "!! ---------------------------------------------------------"
+    Write-Host "!! Whisper Face setup failed."
+    Write-Host ("!! {0}" -f $_.Exception.Message)
+    if ($null -ne $_.InvocationInfo) {
+        Write-Host ("!! setup.ps1 line {0}" -f $_.InvocationInfo.ScriptLineNumber)
+    }
+    if (-not [string]::IsNullOrEmpty($script:TranscriptPath)) {
+        Write-Host ("!! Full log: {0}" -f $script:TranscriptPath)
+        Write-Host "!! Attach that file to a bug report; it holds every step."
+    }
+    Write-Host "!! ---------------------------------------------------------"
+    Write-Host ""
+    break
+}
 
 # --- Uninstall ---------------------------------------------------------------
 # Removal works from the explicit inventory below and never from a wildcard.
@@ -313,8 +381,7 @@ function Remove-CleanupModel {
             "if qwen3.5:4b is installed, remove it with: ollama rm qwen3.5:4b"
         return
     }
-    & $OllamaExe show "qwen3.5:4b" *> $null
-    if ($LASTEXITCODE -ne 0) {
+    if ((Invoke-Native $OllamaExe @("show", "qwen3.5:4b")) -ne 0) {
         Write-UninstallLine "not present" "ollama model qwen3.5:4b" ""
         $script:UninstallAbsent++
         return
@@ -325,8 +392,7 @@ function Remove-CleanupModel {
         $script:UninstallPending++
         return
     }
-    & $OllamaExe rm "qwen3.5:4b" *> $null
-    if ($LASTEXITCODE -eq 0) {
+    if ((Invoke-Native $OllamaExe @("rm", "qwen3.5:4b")) -eq 0) {
         Write-UninstallLine "removed" "ollama model qwen3.5:4b" ""
         $script:UninstallRemoved++
     } else {
@@ -372,7 +438,7 @@ function Invoke-Uninstall {
         "demonstrations.json", "acoustic_keyword_memory.json",
         "delayed_cleanup_activation.json", "acoustic_keyword_activation.json",
         "acoustic_calibration_activation.json", "relisten_activation.json",
-        "dictate.log", "ollama.log", "ollama-error.log"
+        "dictate.log", "ollama.log", "ollama-error.log", "install.log"
     )) {
         Remove-InstalledPath $RemovePersonalData `
             (Join-Path $Repo $PersonalName) "personal file"
@@ -613,8 +679,9 @@ function Confirm-Installation {
     & $Uv run --locked --script (Join-Path $Repo "dictate.py") `
         --verify-ollama-model | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Qwen model manifest verification failed" }
-    & $Ollama show "qwen3.5:4b" *> $null
-    if ($LASTEXITCODE -ne 0) { throw "qwen3.5:4b is not installed" }
+    if ((Invoke-Native $Ollama @("show", "qwen3.5:4b")) -ne 0) {
+        throw "qwen3.5:4b is not installed"
+    }
     $ModelFiles = @(Get-ChildItem (Join-Path $Repo ".models") `
         -Filter "model.bin" -File -Recurse -ErrorAction SilentlyContinue)
     if ($ModelFiles.Count -lt 2) {
@@ -659,7 +726,15 @@ if (-not $Ollama) {
 }
 Get-InstalledTools
 if (-not $Uv -or -not $Ffmpeg -or -not $Ollama) {
-    throw "A dependency installed but was not found on PATH; restart Windows and rerun Install.cmd"
+    $Missing = @()
+    if (-not $Uv) { $Missing += "uv" }
+    if (-not $Ffmpeg) { $Missing += "ffmpeg" }
+    if (-not $Ollama) { $Missing += "ollama" }
+    $Detail = "not on PATH: " + ($Missing -join ", ")
+    if ($script:WingetFailures.Count -gt 0) {
+        $Detail += "; winget reported " + ($script:WingetFailures -join ", ")
+    }
+    throw "A dependency is missing after installation ($Detail). Restart Windows and rerun Install.cmd; if it persists, install the named tool by hand and rerun."
 }
 
 Write-Step "starting the local Ollama service"
@@ -682,8 +757,7 @@ for ($Attempt = 0; $Attempt -lt 60; $Attempt++) {
 }
 if (-not $OllamaReady) { throw "Ollama did not become ready; inspect ollama-error.log" }
 
-& $Ollama show "qwen3.5:4b" *> $null
-if ($LASTEXITCODE -ne 0) {
+if ((Invoke-Native $Ollama @("show", "qwen3.5:4b")) -ne 0) {
     Write-Step "downloading qwen3.5:4b (~3.4 GB)"
     & $Ollama pull "qwen3.5:4b"
     if ($LASTEXITCODE -ne 0) { throw "Ollama could not download qwen3.5:4b" }
