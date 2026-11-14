@@ -4187,10 +4187,13 @@ class FlightRecorder:
     """Opt-in continuous capture with a bounded, RAM-only audio deque."""
 
     def __init__(self, seconds=FLIGHT_BUFFER_SECONDS, stream_factory=None,
-                 restore_allowed=None):
+                 restore_allowed=None, request_refresh=None):
         self.max_samples = int(seconds * SAMPLE_RATE)
         self.stream_factory = stream_factory
         self.restore_allowed = restore_allowed or (lambda: True)
+        # Returns True when a device refresh will rebind this stream, so a
+        # deferred recovery is handed off instead of reopened here.
+        self.request_refresh = request_refresh
         self.frames = deque()
         self.total_samples = 0
         self.stream = None
@@ -4261,17 +4264,20 @@ class FlightRecorder:
                 if report:
                     print(f"! Flight Recorder stream close failed: {error}")
 
-    def _recover_locked(self):
-        """Replace an idle stale stream without exposing device details."""
+    def _suspend_locked(self) -> bool:
+        """Close an idle stale stream; defer while a take is attached."""
         with self.lock:
             if self.target is not None:
                 self.recovery_pending = True
-                return
+                return False
             stream, self.stream = self.stream, None
             self.frames.clear()
             self.total_samples = 0
             self.recovery_pending = False
         self._close_stream(stream)
+        return True
+
+    def _restore_locked(self):
         try:
             should_restore = bool(self.restore_allowed())
         except Exception:
@@ -4284,6 +4290,11 @@ class FlightRecorder:
             # A later native event can retry. Recovery never logs device
             # details or disrupts the rest of the audio path.
             pass
+
+    def _recover_locked(self):
+        """Replace an idle stale stream without exposing device details."""
+        if self._suspend_locked():
+            self._restore_locked()
 
     def enable(self):
         if self.is_enabled():
@@ -4321,7 +4332,8 @@ class FlightRecorder:
                     return
                 self.target = None
                 should_recover = self.recovery_pending
-            if should_recover:
+            if should_recover and not (
+                    self.request_refresh and self.request_refresh()):
                 self._recover_locked()
 
     def clear(self):
@@ -4338,8 +4350,11 @@ class FlightRecorder:
         return extract_recent_utterance(np.concatenate(frames).reshape(-1))
 
 
-FLIGHT = FlightRecorder(restore_allowed=lambda: (
-    bool(PREFERENCES.get("flight_recorder", False)) and not PAUSED["on"]))
+FLIGHT = FlightRecorder(
+    restore_allowed=lambda: (
+        bool(PREFERENCES.get("flight_recorder", False)) and not PAUSED["on"]),
+    request_refresh=lambda: _request_default_audio_refresh(),
+)
 
 
 def _capture_retrospective_flight_tap(recorder) -> np.ndarray:
@@ -4401,9 +4416,13 @@ class AudioPool:
     without leaving the microphone actively recording.
     """
 
-    def __init__(self, size: int = 2, stream_factory=None):
+    def __init__(self, size: int = 2, stream_factory=None,
+                 request_refresh=None):
         self.size = size
         self.stream_factory = stream_factory
+        # Returns True when a device refresh will reopen the pool, so a
+        # deferred recovery is handed off instead of reopened here.
+        self.request_refresh = request_refresh
         self.slots = []
         self.busy = set()
         self.lock = threading.Lock()
@@ -4528,7 +4547,8 @@ class AudioPool:
                     stale_slots = self._invalidate_locked(
                         reset_error=stop_error is None)
             self._close_slots(stale_slots)
-            if should_recover:
+            if should_recover and not (
+                    self.request_refresh and self.request_refresh()):
                 self.warm_async()
         if stop_error is not None:
             raise RuntimeError("microphone stream stop failed") from None
@@ -4708,6 +4728,13 @@ class MacAudioRecoveryNotifications:
             self.requested += 1
             self.event.set()
 
+    def request(self) -> bool:
+        """Queue a refresh from code that may hold an audio lock."""
+        if not self.started:
+            return False
+        self._signal()
+        return True
+
     def _run(self):
         while True:
             self.event.wait()
@@ -4790,20 +4817,66 @@ class MacAudioRecoveryNotifications:
         self.started = False
 
 
-AUDIO_POOL = AudioPool(size=2)
+AUDIO_POOL = AudioPool(
+    size=2, request_refresh=lambda: _request_default_audio_refresh())
+
+
+def _reinitialize_portaudio():
+    """Re-read PortAudio's device list and default input."""
+    try:
+        sd._terminate()
+    finally:
+        sd._initialize()
+
+
+def refresh_default_audio_inputs(pool, flight, reinitialize) -> bool:
+    """Rebind every stream to the input that is the default now.
+
+    PortAudio reads the device list and the default input once, in
+    Pa_Initialize, so reopening a stream alone binds the device that was the
+    default at launch. The library may only be re-initialized with no stream
+    open. A live take keeps its stream and defers the refresh; its release
+    asks for the refresh again. Returns whether PortAudio was re-initialized.
+    """
+    refreshed = False
+    with pool.init_lock:
+        with flight.init_lock:
+            pool._close_slots(pool._invalidate_locked())
+            flight_idle = flight._suspend_locked()
+            with pool.lock:
+                pool_idle = not pool.recovery_pending
+            if pool_idle and flight_idle:
+                try:
+                    reinitialize()
+                    refreshed = True
+                except Exception:
+                    # Opening below then fails and reports Unavailable; the
+                    # next device event or keypress retries.
+                    pass
+            if flight_idle:
+                flight._restore_locked()
+        if pool_idle:
+            try:
+                pool._warm_locked()
+            except Exception:
+                pass
+    return refreshed
 
 
 def _invalidate_default_audio_inputs():
-    """Refresh every stream bound to the prior macOS default input."""
-    try:
-        AUDIO_POOL.recover_default_device()
-    finally:
-        FLIGHT.invalidate()
+    """Rebind every stream to the current macOS default input."""
+    refresh_default_audio_inputs(
+        AUDIO_POOL, FLIGHT, _reinitialize_portaudio)
 
 
 AUDIO_RECOVERY = (
     MacAudioRecoveryNotifications(_invalidate_default_audio_inputs)
     if IS_MACOS else None)
+
+
+def _request_default_audio_refresh() -> bool:
+    """Hand a deferred refresh to the recovery worker when one is running."""
+    return AUDIO_RECOVERY is not None and AUDIO_RECOVERY.request()
 
 
 def _transcribe_frames(frames, prompt=None, language=None) -> Recognition:

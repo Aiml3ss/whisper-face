@@ -1625,6 +1625,39 @@ class FakeStream:
         self.closed = True
 
 
+class FakePortAudio:
+    """sounddevice over PortAudio on macOS, reduced to the device table.
+
+    Pa_Initialize snapshots the default input; Pa_GetDefaultInputDevice only
+    reads that snapshot. Terminating with a stream open would free it under
+    its Python owner, so the fake refuses.
+    """
+
+    def __init__(self, default):
+        self.system_default = default
+        self.cached_default = default
+        self.streams = []
+        self.reinitializations = 0
+
+    def InputStream(self, **kwargs):
+        stream = FakeStream(**kwargs)
+        stream.device = self.cached_default
+        self.streams.append(stream)
+        return stream
+
+    def open_devices(self):
+        return [stream.device for stream in self.streams if not stream.closed]
+
+    def _terminate(self):
+        if self.open_devices():
+            raise AssertionError("PortAudio terminated with a stream open")
+        self.cached_default = None
+
+    def _initialize(self):
+        self.cached_default = self.system_default
+        self.reinitializations += 1
+
+
 class ParakeetClientTests(unittest.TestCase):
     def test_native_helper_protocol_keeps_audio_in_memory(self):
         class FakeProcess:
@@ -2911,21 +2944,139 @@ class MacAudioRecoveryNotificationTests(unittest.TestCase):
         def removeObserver_(self, token):
             self.removed.append(token)
 
-    def test_runtime_invalidation_covers_pool_and_flight_recorder(self):
-        calls = []
+    @staticmethod
+    def device_namespace(portaudio, requests=None, *, flight=True):
+        """The production pool, Flight Recorder and recovery entry point."""
         ns = load_definitions(
+            "AudioSlot", "AudioPool", "FlightRecorder",
             "_invalidate_default_audio_inputs",
+            "refresh_default_audio_inputs", "_reinitialize_portaudio",
+            assignments={"SAMPLE_RATE", "FLIGHT_BUFFER_SECONDS"},
             extra={
-                "AUDIO_POOL": SimpleNamespace(
-                    recover_default_device=lambda: calls.append("pool")),
-                "FLIGHT": SimpleNamespace(
-                    invalidate=lambda: calls.append("flight")),
+                "sd": portaudio,
+                "deque": __import__("collections").deque,
+                "np": np,
+                "time": time,
             },
         )
+        hook = None if requests is None else (
+            lambda: requests.append("refresh") or True)
+        ns["AUDIO_POOL"] = ns["AudioPool"](size=2, request_refresh=hook)
+        # restore_allowed stands in for the stored Flight Recorder opt-in.
+        ns["FLIGHT"] = ns["FlightRecorder"](
+            restore_allowed=lambda: flight, request_refresh=hook)
+        return ns
 
+    def test_a_default_input_change_rebinds_every_stream(self):
+        portaudio = FakePortAudio("built-in")
+        ns = self.device_namespace(portaudio)
+        ns["AUDIO_POOL"].warm()
+        ns["FLIGHT"].enable()
+        self.assertEqual(portaudio.open_devices(), ["built-in"] * 3)
+
+        portaudio.system_default = "usb"
         ns["_invalidate_default_audio_inputs"]()
 
-        self.assertEqual(calls, ["pool", "flight"])
+        self.assertEqual(portaudio.open_devices(), ["usb"] * 3)
+        self.assertEqual(ns["AUDIO_POOL"].readiness(), "Ready")
+        self.assertTrue(ns["FLIGHT"].is_enabled())
+        self.assertEqual(portaudio.reinitializations, 1)
+
+    def test_a_removed_launch_device_does_not_leave_dictation_dead(self):
+        # Launched on AirPods; they go back in the case and the built-in
+        # microphone becomes the default. Opening the vanished device fails.
+        portaudio = FakePortAudio("airpods")
+        opened = portaudio.InputStream
+
+        def open_existing(**kwargs):
+            if portaudio.cached_default == "airpods" and (
+                    portaudio.system_default != "airpods"):
+                raise RuntimeError("private device detail")
+            return opened(**kwargs)
+
+        portaudio.InputStream = open_existing
+        ns = self.device_namespace(portaudio, flight=False)
+        ns["AUDIO_POOL"].warm()
+
+        portaudio.system_default = "built-in"
+        ns["_invalidate_default_audio_inputs"]()
+
+        self.assertEqual(ns["AUDIO_POOL"].readiness(), "Ready")
+        slot = ns["AUDIO_POOL"].acquire(
+            SimpleNamespace(_callback=lambda *_args: None))
+        self.assertEqual(slot.stream.device, "built-in")
+        ns["AUDIO_POOL"].release(slot)
+
+    def test_a_live_pool_take_defers_the_refresh_to_its_release(self):
+        portaudio = FakePortAudio("built-in")
+        requests = []
+        ns = self.device_namespace(portaudio, requests, flight=False)
+        pool = ns["AUDIO_POOL"]
+        slot = pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+
+        portaudio.system_default = "usb"
+        ns["_invalidate_default_audio_inputs"]()
+
+        # The take keeps recording on its stream; nothing was terminated.
+        self.assertFalse(slot.stream.closed)
+        self.assertEqual(portaudio.reinitializations, 0)
+        self.assertTrue(pool.recovery_pending)
+
+        pool.release(slot)
+        self.assertEqual(requests, ["refresh"])
+        self.assertEqual(portaudio.open_devices(), [])
+        ns["_invalidate_default_audio_inputs"]()
+
+        self.assertEqual(portaudio.open_devices(), ["usb", "usb"])
+        self.assertEqual(portaudio.reinitializations, 1)
+
+    def test_a_live_flight_take_defers_the_refresh_to_its_detach(self):
+        portaudio = FakePortAudio("built-in")
+        requests = []
+        ns = self.device_namespace(portaudio, requests)
+        flight = ns["FLIGHT"]
+        flight.enable()
+        recorder = SimpleNamespace(_callback=lambda *_args: None)
+        self.assertTrue(flight.attach(recorder))
+
+        portaudio.system_default = "usb"
+        ns["_invalidate_default_audio_inputs"]()
+        self.assertEqual(portaudio.reinitializations, 0)
+        # The idle pool reopens at once, still on the launch-time table.
+        self.assertEqual(portaudio.open_devices(), ["built-in"] * 3)
+
+        flight.detach(recorder)
+        # Detach hands the refresh to the recovery worker instead of
+        # reopening on PortAudio's stale table.
+        self.assertEqual(requests, ["refresh"])
+        ns["_invalidate_default_audio_inputs"]()
+
+        self.assertEqual(portaudio.open_devices(), ["usb"] * 3)
+        self.assertEqual(portaudio.reinitializations, 1)
+        self.assertTrue(flight.is_enabled())
+
+    def test_refresh_requests_reach_only_a_running_recovery_worker(self):
+        ns = load_definitions(
+            "MacAudioRecoveryNotifications",
+            extra={"IS_MACOS": True, "threading": threading, "time": time},
+        )
+        refreshes = []
+        recovery = ns["MacAudioRecoveryNotifications"](
+            lambda: refreshes.append(True),
+            core_audio=self.CoreAudio(),
+            workspace_center=self.WorkspaceCenter(),
+            wake_name="wake",
+        )
+        # Not started: the caller reopens locally rather than waiting on a
+        # worker that does not exist.
+        self.assertFalse(recovery.request())
+
+        recovery.start()
+        self.assertTrue(recovery.request())
+        self.assertTrue(recovery.wait_for_idle())
+        self.assertEqual(refreshes, [True])
+        recovery.close()
+        self.assertFalse(recovery.request())
 
     def test_default_device_and_wake_events_are_content_free_and_coalesced(self):
         core = self.CoreAudio()
