@@ -8087,7 +8087,7 @@ class ParakeetCrosscheckTests(unittest.TestCase):
                                      model_repo="turbo",
                                      crosscheck_text=None,
                                      _skip_parakeet=False,
-                                     language="en"):
+                                     language="en", _prepared=False):
             # Record the language rather than merely tolerating it. The
             # cross-check is only meaningful against Parakeet's English, and
             # the caller's `except Exception` would otherwise swallow a
@@ -8229,13 +8229,15 @@ class ParakeetCrosscheckTests(unittest.TestCase):
                     [repo for repo, _skip, _lang in calls], ["tiny-repo"])
 
     @staticmethod
-    def cascade(*, parakeet_text=None, scripted, cached, parakeet=None):
+    def cascade(*, parakeet_text=None, scripted, cached, parakeet=None,
+                audio=None, levels=None, definitions=(), overrides=None):
         """Run the production cascade against scripted model outputs.
 
         ``cached`` is the set of Whisper snapshots on disk and ``scripted``
         maps a snapshot to ``(text, confidence)``. Model selection, the
         cross-check, the escalation and the arbitration are all production
-        code; only the three recognizers are scripted.
+        code; only the three recognizers are scripted. ``levels`` collects
+        the peak level each recognizer was handed.
         """
         import math
         from parrot_core import (
@@ -8251,8 +8253,17 @@ class ParakeetCrosscheckTests(unittest.TestCase):
             def submit(self, fn, *args, **kwargs):
                 return SimpleNamespace(result=lambda: fn(*args, **kwargs))
 
+        def heard(name, samples):
+            if levels is not None:
+                levels[name] = round(float(np.max(np.abs(samples))), 4)
+
+        def parakeet_transcribe(samples):
+            heard("parakeet", samples)
+            return (parakeet_text, 0.05)
+
         def mlx_transcribe(_audio, *, path_or_hf_repo, **_kwargs):
             decodes.append(path_or_hf_repo)
+            heard(path_or_hf_repo, _audio)
             text, confidence = scripted[path_or_hf_repo]
             return {"text": f" {text}", "segments": [{
                 "text": text, "start": 0.0, "end": 2.0,
@@ -8266,7 +8277,7 @@ class ParakeetCrosscheckTests(unittest.TestCase):
         ns = load_definitions(
             "transcribe_detailed", "_parakeet_crosschecked",
             "_clean_native_processing_s", "crosscheck_agreement",
-            "asr_decode_target",
+            "asr_decode_target", *definitions,
             assignments={"ASR_DEGRADED_NOTICES",
                          "CROSSCHECK_MAJORITY_AGREEMENT"},
             extra={
@@ -8276,7 +8287,7 @@ class ParakeetCrosscheckTests(unittest.TestCase):
                 "IS_MACOS": True,
                 "PARAKEET_ENABLED": True,
                 "PARAKEET": parakeet or SimpleNamespace(
-                    transcribe=lambda _audio: (parakeet_text, 0.05)),
+                    transcribe=parakeet_transcribe),
                 "PARAKEET_IO_POOL": ImmediatePool(),
                 "PARAKEET_CROSSCHECK": True,
                 "PARAKEET_CROSSCHECK_MAX_SECONDS": 90.0,
@@ -8302,10 +8313,12 @@ class ParakeetCrosscheckTests(unittest.TestCase):
                 "WHISPER_LARGE_TURBO_PROFILE": SimpleNamespace(
                     provider_id="turbo"),
                 "print": lambda *args, **kwargs: None,
+                **(overrides or {}),
             },
         )
-        recognition = ns["transcribe_detailed"](
-            np.full(16_000 * 2, 0.3, dtype=np.float32), language="en")
+        if audio is None:
+            audio = np.full(16_000 * 2, 0.3, dtype=np.float32)
+        recognition = ns["transcribe_detailed"](audio, language="en")
         return recognition, decodes
 
     def test_default_install_never_lets_tiny_overrule_parakeet(self):
@@ -8441,6 +8454,29 @@ class ParakeetCrosscheckTests(unittest.TestCase):
         # No third decode came back, so nothing verified this transcript.
         self.assertFalse(recognition.verified)
         self.assertEqual(recognition.alternative, "one two three four")
+
+    def test_quiet_speech_gain_reaches_every_recognizer_once(self):
+        # A whisper-level take is lifted by the capped gain before decoding.
+        # The cross-check and the escalation decode the same prepared audio;
+        # preparing it again lifted it past the cap for Whisper alone.
+        levels = {}
+        self.cascade(
+            parakeet_text="Ping Priya about Qwen.",
+            scripted={
+                "tiny-repo": ("Being pre-about Gwen.", 0.71),
+                "turbo-repo": ("Ping Priya about Qwen.", 0.40),
+            },
+            cached={"tiny-repo", "turbo-repo"},
+            audio=np.full(16_000 * 2, 0.004, dtype=np.float32),
+            levels=levels,
+            definitions=("prepare_asr_audio",),
+            overrides={
+                "active_calibration_settings": lambda: None,
+                "CalibrationSettings": type("CalibrationSettings", (), {}),
+            })
+        self.assertEqual(
+            levels,
+            {"parakeet": 0.1, "tiny-repo": 0.1, "turbo-repo": 0.1})
 
     def test_low_confidence_escalation_loser_stays_inspectable(self):
         fallback = Recognition(

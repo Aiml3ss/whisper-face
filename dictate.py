@@ -7552,7 +7552,8 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
             # the two engines decode different languages.
             tiny_text = transcribe_detailed(
                 audio, prompt, verify=False,
-                model_repo=FAST_WHISPER_REPO, language="en").text
+                model_repo=FAST_WHISPER_REPO, language="en",
+                _prepared=True).text
         except Exception as error:
             print(f"! Tiny cross-check unavailable: {error}")
             tiny_text = None
@@ -7593,7 +7594,7 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
         try:
             fallback = transcribe_detailed(
                 audio, prompt, verify=False, model_repo=WHISPER_REPO,
-                _skip_parakeet=True, language="en")
+                _skip_parakeet=True, language="en", _prepared=True)
         except Exception as error:
             print(f"! Turbo escalation unavailable: {error}")
             return recognition
@@ -7622,11 +7623,15 @@ def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
                         model_repo: str = WHISPER_REPO,
                         crosscheck_text: str | None = None,
                         _skip_parakeet: bool = False,
-                        language: str | None = None) -> Recognition:
+                        language: str | None = None,
+                        _prepared: bool = False) -> Recognition:
     # Whispered/quiet speech: lift the level into the range Whisper decodes
     # confidently. Gain is capped so the noise floor of true near-silence
     # (which the energy gate already rejects) isn't blown up to fake speech.
-    audio = prepare_asr_audio(audio)
+    # The cross-check and the escalation re-enter with audio this call has
+    # already prepared; preparing it again would apply the gain past its cap.
+    if not _prepared:
+        audio = prepare_asr_audio(audio)
     if prompt is None:
         with GLOSS["lock"]:
             prompt = GLOSS["prompt"]
