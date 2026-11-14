@@ -6230,6 +6230,65 @@ class HotkeyListenerRecoveryTests(unittest.TestCase):
         self.assertEqual(cleanups, [])
         self.assertFalse(state["recovering"])
 
+    class ExitedListener(threading.Thread):
+        """pynput's AbstractListener shape: a thread whose ``running`` flag
+        is set in run() and cleared only by stop(). When the platform loop
+        returns by itself the flag stays set and the thread is gone."""
+
+        def __init__(self):
+            super().__init__(daemon=True)
+            self._running = False
+
+        @property
+        def running(self):
+            return self._running
+
+        def run(self):
+            self._running = True
+
+    def test_a_listener_thread_that_exited_is_replaced(self):
+        ns = load_definitions(
+            "restart_dead_hotkey_listener",
+            extra={"print": lambda *_args: None},
+        )
+        exited = self.ExitedListener()
+        exited.start()
+        exited.join(timeout=1.0)
+        self.assertTrue(exited.running)
+        self.assertFalse(exited.is_alive())
+        replacement = SimpleNamespace(running=True)
+        cleanups = []
+        state = {"l": exited, "make": lambda: replacement,
+                 "recovering": False}
+
+        self.assertTrue(ns["restart_dead_hotkey_listener"](
+            lambda: cleanups.append(True), state))
+
+        self.assertIs(state["l"], replacement)
+        self.assertEqual(cleanups, [True])
+
+    def test_a_running_listener_thread_is_left_alone(self):
+        ns = load_definitions("restart_dead_hotkey_listener")
+        release = threading.Event()
+
+        class Live(self.ExitedListener):
+            def run(self):
+                self._running = True
+                release.wait(timeout=5.0)
+
+        live = Live()
+        live.start()
+        try:
+            state = {"l": live,
+                     "make": lambda: self.fail("live listener replaced"),
+                     "recovering": False}
+            self.assertFalse(ns["restart_dead_hotkey_listener"](
+                lambda: self.fail("cleanup ran"), state))
+            self.assertIs(state["l"], live)
+        finally:
+            release.set()
+            live.join(timeout=1.0)
+
     def test_dead_listener_cleanup_runs_once_across_restart_retries(self):
         ns = load_definitions(
             "restart_dead_hotkey_listener",

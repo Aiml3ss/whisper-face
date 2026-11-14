@@ -6938,7 +6938,12 @@ def restart_dead_hotkey_listener(on_dead, listener_state=None) -> bool:
     """Replace one dead listener without losing retry state."""
     state = LISTENER if listener_state is None else listener_state
     listener = state.get("l")
-    if listener is None or getattr(listener, "running", False):
+    # pynput clears ``running`` only in stop(), after a callback raises. A
+    # listener thread whose run loop returned on its own still reads as
+    # running, so a thread that has exited counts as dead too.
+    is_alive = getattr(listener, "is_alive", None)
+    if listener is None or (getattr(listener, "running", False)
+                            and (not callable(is_alive) or is_alive())):
         state["recovering"] = False
         return False
     if not state.get("recovering", False):
