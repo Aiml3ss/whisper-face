@@ -1,8 +1,8 @@
 ---
 const steps = [
   { h: 'Hold your key', p: 'Press and hold your hotkey, then just start talking. No window to open, no button to find.' },
-  { h: 'It listens on-device', p: 'A warm cascade of local recognizers turns sound into text as you speak — nothing leaves the Mac.' },
-  { h: 'It tidies the text', p: 'Light cleanup fixes filler and formatting without changing what you meant.' },
+  { h: 'It listens on-device', p: 'Warm local recognizers turn sound into text, starting while you are still speaking. Nothing leaves the Mac.' },
+  { h: 'It tidies the text', p: 'A small set of written rules removes filler and fixes formatting. The optional cleanup model may only make edits it can prove.' },
   { h: 'It claims the spot', p: 'Whisper Face leases the field under your cursor and double-checks it is still the right one.' },
   { h: 'It types', p: 'One clean paste. If the field moved, the text waits safe in your Outbox instead.' },
 ];
@@ -12,7 +12,7 @@ const steps = [
   <div class="sec-head">
     <span class="kicker">How it works</span>
     <h2>From your mouth to your cursor.</h2>
-    <p>Five steps, all on your machine, in the time it takes to let go of a key.</p>
+    <p>Five steps, all on your machine.</p>
   </div>
 
   <ol class="steps">
@@ -20,7 +20,7 @@ const steps = [
       steps.map((s) => (
         <li class="step" data-jelly>
           <div class="num" />
-          <h4>{s.h}</h4>
+          <h3>{s.h}</h3>
           <p>{s.p}</p>
         </li>
       ))

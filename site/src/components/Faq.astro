@@ -10,23 +10,35 @@ const faqs = [
   },
   {
     q: 'Does my voice go to the cloud?',
-    a: 'No. Recognition runs on your Mac. You can turn off Wi-Fi and keep dictating. Nothing about what you say is uploaded.',
+    a: 'No. Recognition runs on your Mac. You can turn off Wi-Fi and keep dictating. Nothing about what you say is uploaded. A local history of your dictations (at most 500, none older than 30 days) stays in the install folder.',
   },
   {
     q: 'Which Macs does it run on?',
-    a: 'Modern Apple Silicon Macs. The installer checks your machine and models during setup and tells you if anything is missing.',
+    a: 'Apple Silicon Macs on macOS 14 or newer. Installing needs an administrator account and the Xcode Command Line Tools; the installer stops before downloading anything if they are missing.',
+  },
+  {
+    q: 'What does the installer put on my Mac?',
+    a: 'Homebrew (if you do not have it), uv, ffmpeg, a Python environment, the Parakeet and Whisper Tiny speech models (about 650 MB), a speech helper and a small launcher app it builds with your Swift tools, and a login service. The larger Whisper model and the Ollama cleanup model are added only if you ask (./setup.sh --models, about 5 GB). ./setup.sh --uninstall shows everything it would remove before removing anything.',
+  },
+  {
+    q: 'How much disk and time does it take?',
+    a: 'Allow about 5 GB free on a default install and 8 GB with the optional models. On a fresh Mac, which also needs the Command Line Tools, expect a few gigabytes of downloads and 15 to 45 minutes. These are estimates: we have not yet measured a clean-machine install or the memory it uses.',
+  },
+  {
+    q: 'Why does macOS warn me when I open it?',
+    a: 'The build is not signed with a Developer ID or notarized by Apple yet. On macOS 15 or later, open Install.command once, then choose Open Anyway in System Settings → Privacy & Security. On macOS 14, Control-click it and choose Open. You can check the download against the release’s SHA256SUMS first.',
   },
   {
     q: 'What about Windows or iPhone?',
-    a: 'Windows shares the same core pipeline and keeps one-click installer parity. A native iPhone product is a future workstream, not a setup promise today.',
+    a: 'Windows shares the core pipeline and has its own installer, but it is an unverified preview: neither the installer nor a full dictation has been run on real Windows hardware yet. A native iPhone product is a future workstream, not a setup promise today.',
   },
   {
     q: 'How accurate is it, honestly?',
-    a: 'It runs multiple local recognizers and protects names, numbers, code, and commands rather than smoothing them into something plausible. The repo includes a dated, neutral competitor evaluation instead of cherry-picked claims.',
+    a: 'We have not measured it against anything yet. What it does by design: names, numbers, code, and commands are protected from the optional cleanup model, and app names, window titles, and your dictionary can steer recognition but never replace a word. The repo includes a dated, neutral competitor evaluation protocol with no results in it yet.',
   },
   {
     q: 'Is it open source?',
-    a: 'Yes — source-available, with a separate commercial license option. The full license and third-party notices live in the repository.',
+    a: 'Yes — AGPL-3.0, with a separate commercial license option. The full license and third-party notices live in the repository.',
   },
 ];
 ---
