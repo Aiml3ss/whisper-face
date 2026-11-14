@@ -933,7 +933,7 @@ LEARN_IDLE = 180             # only mine after this much dictation inactivity
 PROMOTE_MIN_COUNT = 2        # seen in 2+ dictations -> goes in dictionary
 PERSONAL_APP_MIN_COUNT = 2   # same correction twice in one app
 PERSONAL_GLOBAL_MIN_COUNT = 3  # same correction three times overall
-TRANSCRIPT_KEEP = 500        # most dictations the history log ever holds
+TRANSCRIPT_KEEP = 500        # trim the log to this many lines after a pass
 
 # Keep-warm heartbeat: touch both models while idle so macOS never swaps
 # them out (a cold first dictation used to cost ~6s of page-in).
