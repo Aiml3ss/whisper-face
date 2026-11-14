@@ -51,10 +51,23 @@ download, not part of a default install — is only allowed to make edits it can
 prove: each one covers whole words with an exact source span, and if the
 declared edits do not reconstruct the model's own output, the entire result is
 discarded and you get the deterministic cleanup instead. That proof applies to
-ordinary dictation and code; Compose, Reply, and Edit are rewrites by design.
+ordinary dictation and code; Compose, Reply, and Edit are rewrites by design,
+and without the cleanup model they insert nothing ("Compose mode needs the
+cleanup model — nothing changed") rather than paste your instruction.
 The deterministic cleanup itself follows a short list of written rules, such
-as dropping "um" and applying "Tuesday, actually Wednesday" only between two
-items of the same kind.
+as dropping "um". One of them is opt-in and off by default: a correction on
+"actually" (on a Mac, Settings → Controls → “Actually” corrections). Turned
+on, "We meet Tuesday, actually Wednesday" is typed as "We meet Wednesday",
+only between two items of the same kind. It is off because no rule can tell a
+correction from a contrast: "I thought it was Tuesday, actually Wednesday"
+would be typed as "I thought it was Wednesday".
+
+**What is on your screen can fix a name, not change your words.** App names,
+window titles, and your dictionary steer the recognizer but never replace a
+word. Other on-screen text — a selection, the open document — can only repair
+a word the recognizer was unsure of and wrote as a name: a visible "Qwen"
+fixes "Gwen". It never replaces or introduces an ordinary word, so "Looks
+good." stays "Looks good." whatever you have selected.
 
 **Insertion is a transaction, not a paste.** Your text field is leased when
 you press the key and revalidated before exactly one paste attempt. If focus

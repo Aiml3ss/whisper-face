@@ -20,7 +20,7 @@ Listening, recognition, cleanup, and insertion all run on-device. There are no c
 
 ## What is read when you press the key
 
-To recognize the words in front of you, each press of the capture key reads, for that one dictation: the app's name, the focused field's text and selection, the window title, the open document (its last 6,000 characters) and up to 80 file names beside it, and the clipboard if it holds 800 characters or fewer. That context is not saved. Nothing is read from a password field, and a clipboard that a password manager marked as concealed or transient is skipped. In Reply and Edit modes the field text or selection is what gets rewritten, so the result is kept in your history like any other dictation.
+To recognize the words in front of you, each press of the capture key reads, for that one dictation: the app's name, the focused field's text and selection, the window title, the open document (its last 6,000 characters) and up to 80 file names beside it, and the clipboard if it holds 800 characters or fewer. That context is not saved. It steers the recognizer, and it can repair a name the recognizer was unsure of — a visible "Qwen" fixes "Gwen" — but it never replaces an ordinary word you said. Nothing is read from a password field, and a clipboard that a password manager marked as concealed or transient is skipped. In Reply and Edit modes the field text or selection is what gets rewritten, so the result is kept in your history like any other dictation.
 
 ## The clipboard
 

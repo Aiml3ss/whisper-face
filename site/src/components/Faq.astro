@@ -34,7 +34,15 @@ const faqs = [
   },
   {
     q: 'How accurate is it, honestly?',
-    a: 'We have not measured it against anything yet. What it does by design: names, numbers, code, and commands are protected from the optional cleanup model, and app names, window titles, and your dictionary can steer recognition but never replace a word. The repo includes a dated, neutral competitor evaluation protocol with no results in it yet.',
+    a: 'We have not measured it against anything yet. What it does by design: names, numbers, code, and commands are protected from the optional cleanup model, and app names, window titles, and your dictionary can steer recognition but never replace a word. Other text on screen can only repair a name the recognizer was unsure of (a visible "Qwen" fixes "Gwen"), never an ordinary word. The repo includes a dated, neutral competitor evaluation protocol with no results in it yet.',
+  },
+  {
+    q: 'Will it rewrite a sentence when I say "actually"?',
+    a: 'Not unless you turn that on. The correction is off by default; on a Mac the switch is Settings → Controls → “Actually” corrections. With it on, "We meet Tuesday, actually Wednesday" is typed as "We meet Wednesday" — it works between two numbers, days, months, or times. What it gets wrong is a contrast: "I thought it was Tuesday, actually Wednesday" would come out as "I thought it was Wednesday". Either way, saying "scratch that" takes back what you just said.',
+  },
+  {
+    q: 'What happens to Compose, Reply, and Edit without the cleanup model?',
+    a: 'Nothing is typed. Those three modes are rewrites done by the optional cleanup model, and what you say to them is an instruction, not text to paste. On a default install, which has no cleanup model, they leave your field and your selection as they were and show "Compose mode needs the cleanup model — nothing changed" (or Reply, or Edit). Ordinary dictation and code dictation do not need the model.',
   },
   {
     q: 'Is it open source?',

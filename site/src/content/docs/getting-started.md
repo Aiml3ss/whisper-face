@@ -13,7 +13,7 @@ Whisper Face installs in one flow and checks its own work along the way. Here is
 - The Xcode Command Line Tools with Swift 6 or newer. If they are missing, run `xcode-select --install` first; the installer stops before downloading anything without them.
 - About 5 GB free, or 8 GB with the optional models. The disk image is small; on a fresh Mac the installer and the Command Line Tools download a few gigabytes. Allow 15 to 45 minutes. These are estimates; no clean-machine install has been timed yet.
 
-A default install downloads two speech models: Parakeet Unified for English (about 565 MB) and Whisper Tiny (about 75 MB), which also recognizes the other ten languages. Two larger models are optional: Whisper large-v3-turbo (about 1.6 GB) improves recognition outside English and settles disagreements in English, and the Qwen3.5-4B cleanup model (about 3.4 GB, run by Ollama) adds semantic cleanup and the Compose, Reply, and Edit modes. Add them later with `./setup.sh --models`.
+A default install downloads two speech models: Parakeet Unified for English (about 565 MB) and Whisper Tiny (about 75 MB), which also recognizes the other ten languages. Two larger models are optional: Whisper large-v3-turbo (about 1.6 GB) improves recognition outside English and settles disagreements in English, and the Qwen3.5-4B cleanup model (about 3.4 GB, run by Ollama) adds semantic cleanup and the Compose, Reply, and Edit modes. Without it those three modes type nothing and say "Compose mode needs the cleanup model — nothing changed" (or Reply, or Edit); ordinary dictation does not need it. Add them later with `./setup.sh --models`.
 
 ## Install on a Mac
 
@@ -56,6 +56,8 @@ Put your cursor in any text field — an email, a chat box, your editor — then
 That is the whole loop: **hold, talk, release**.
 
 The default hotkey is **Right Option** on a Mac and **Right Alt** on Windows. On a Mac you can choose a different capture key, and an undo key, under **Settings → Controls**.
+
+What arrives is what you said, tidied: filler dropped, punctuation fixed, and "new line", "new paragraph", and "scratch that" obeyed. One more rule is yours to turn on. **Settings → Controls → “Actually” corrections** is off by default; with it on, "We meet Tuesday, actually Wednesday" is typed as "We meet Wednesday". It is off because it would also change a sentence that contrasts two things: "I thought it was Tuesday, actually Wednesday" would be typed as "I thought it was Wednesday".
 
 ## First run
 

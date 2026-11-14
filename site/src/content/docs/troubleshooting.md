@@ -23,6 +23,14 @@ On Windows the hotkey is **Right Alt**, not Right Option. On keyboard layouts wi
 
 A take ends on its own after ten minutes. If the microphone delivers nothing for two seconds, the take ends with “Listening failed — try again”. If it stops after hearing you (a headset disconnects, say), Whisper Face keeps what it heard and says the text may be incomplete.
 
+## Compose, Reply, or Edit typed nothing
+
+If the caption says “Compose mode needs the cleanup model — nothing changed” (or Reply, or Edit), the optional cleanup model is not installed. Those modes are rewrites done by that model, so without it they leave your text and your selection alone instead of pasting what you said to them. Add the model with `./setup.sh --models`, or use ordinary dictation. If the caption says the mode “got no rewrite from the cleanup model”, the model is installed but did not answer usefully that time; try again. In a language other than English the caption says the mode needs English.
+
+## “Actually” did not correct my sentence
+
+That is the default. "We meet Tuesday, actually Wednesday" is typed as you said it unless you turn on **Settings → Controls → “Actually” corrections** on a Mac. With it on, the sentence becomes "We meet Wednesday" — and "I thought it was Tuesday, actually Wednesday" becomes "I thought it was Wednesday", which is why it is off until you choose it. Saying "scratch that" takes back what you just said either way.
+
 ## Windows: the installer will not start
 
 Three things stop it, in order of how often:
