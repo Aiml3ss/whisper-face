@@ -943,7 +943,11 @@ start_ollama_service() {
         if [ -n "$holder" ]; then
             rm -f "$desired_ollama_plist"
             trap - EXIT
-            fail "port 11434 is in use by $holder. The cleanup model needs Whisper Face's own Ollama service there, and setup does not stop anyone else's. Quit that Ollama (for Homebrew: brew services stop ollama) and rerun, or install without the cleanup model."
+            # An earlier install's agent cannot bind there either, and
+            # KeepAlive would restart it forever. Unloading it also means a
+            # plain rerun installs without the cleanup model.
+            [ ! -f "$ollama_plist" ] || retire_ollama_service
+            fail "port 11434 is in use by $holder. The cleanup model needs Whisper Face's own Ollama service there, and setup does not stop anyone else's. Quit that Ollama (for Homebrew: brew services stop ollama) and rerun, or rerun ./setup.sh without --models or --with-all-models to install without the cleanup model."
         fi
         mv -f "$desired_ollama_plist" "$ollama_plist"
         if ! reload_agent com.berg.ollama "$ollama_plist"; then

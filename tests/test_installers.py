@@ -833,6 +833,24 @@ class InstallerContractTests(unittest.TestCase):
                 [path.name for path in Path(directory, "LaunchAgents").iterdir()],
                 [])
 
+        # An earlier install's agent cannot bind beside that Ollama either,
+        # and KeepAlive would restart it forever. It is this installer's own,
+        # so it is unloaded, and a rerun then installs without the model.
+        with tempfile.TemporaryDirectory() as directory:
+            variables, stubs = self.ollama_sandbox(directory, listener=4242)
+            variables["ollama_plist"].write_text("earlier", encoding="utf-8")
+            Path(directory, "loaded").touch()
+            result = run_setup_functions(
+                self.OLLAMA_FUNCTIONS, "start_ollama_service\n",
+                variables=variables, stubs=stubs)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("port 11434 is in use by process 4242 (ollama)",
+                          result.stderr)
+            self.assertIn("launchctl bootout", result.calls)
+            self.assertNotIn("launchctl bootstrap", result.calls)
+            self.assertFalse(Path(directory, "loaded").exists())
+            self.assertFalse(variables["ollama_plist"].exists())
+
     def test_an_ollama_service_that_never_becomes_ready_is_unloaded(self):
         # KeepAlive would otherwise restart it every ten seconds, at every
         # login, for as long as the plist stayed in ~/Library/LaunchAgents.
