@@ -6427,7 +6427,8 @@ def _trim_transcripts_locked() -> int:
     Returns how many entries were dropped from the log.
     """
     try:
-        lines = TRANSCRIPTS_FILE.read_text().splitlines()
+        # Runs on every append: a damaged byte must not stop the dictation.
+        lines = TRANSCRIPTS_FILE.read_text(errors="replace").splitlines()
     except OSError:
         return 0
     kept = retained_transcript_lines(lines, time.time())

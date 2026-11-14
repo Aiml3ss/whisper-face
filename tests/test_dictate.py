@@ -5244,6 +5244,20 @@ class TranscriptRetentionTests(unittest.TestCase):
         self.assertEqual(count, 101)
         self.assertEqual(writes, [])
 
+    def test_a_damaged_log_never_stops_a_dictation_from_being_recorded(self):
+        with tempfile.TemporaryDirectory() as td:
+            ns, _ = self.namespace(td)
+            log = ns["TRANSCRIPTS_FILE"]
+            self.write_log(log, [self.NOW - 60] * 3)
+            log.write_bytes(b'{"ts": \xff\xfe\n' + log.read_bytes())
+            ns["append_transcript"](
+                "after", "After.", "com.apple.TextEdit", "fast")
+            kept = self.entries(log)
+
+        # The unreadable line is dropped; every readable one is kept.
+        self.assertEqual([entry["clean"] for entry in kept], [
+            "Note number 0.", "Note number 1.", "Note number 2.", "After."])
+
     def test_the_mining_pass_ages_out_history_without_new_dictations(self):
         with tempfile.TemporaryDirectory() as td:
             ns, _ = self.namespace(td)
