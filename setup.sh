@@ -306,6 +306,7 @@ parakeet_helper="$DIR/.models/bin/parrot-asr-helper"
 dictate_log="$DIR/dictate.log"
 ollama_log="$DIR/ollama.log"
 install_log="$DIR/install.log"
+qwen_manifest="${OLLAMA_MODELS:-$HOME/.ollama/models}/manifests/registry.ollama.ai/library/qwen3.5/4b"
 
 # --- Installer log ----------------------------------------------------------
 # A failed install used to leave nothing to read. Homebrew, a multi-gigabyte
@@ -708,29 +709,17 @@ if [ "$macos_major" -lt 14 ]; then
     echo "!! macOS 14 or newer is recommended and supported by Homebrew."
 fi
 
-verify_install() {
-    step "verifying installation"
-    local uv_bin ollama_bin verify_ollama_plist verify_ollama_digest
-    local verify_cleanup verify_qwen
+verify_cleanup_service() {
+    # The Ollama service exists only to serve the optional cleanup model, so
+    # it is verified only where this installer set it up. Sets verify_qwen.
+    local ollama_bin verify_ollama_plist verify_ollama_digest verify_cleanup
     local escaped_verify_ollama escaped_verify_dir
-    uv_bin="$(command -v uv 2>/dev/null || true)"
+    verify_qwen=0
+    [ -f "$ollama_plist" ] || return 0
     ollama_bin="$(command -v ollama 2>/dev/null || true)"
-    [ -n "$uv_bin" ] || fail "uv is not installed"
-    command -v ffmpeg >/dev/null 2>&1 || fail "ffmpeg is not installed"
     [ -n "$ollama_bin" ] || fail "ollama is not installed"
-    command -v swift >/dev/null 2>&1 || fail "Swift toolchain is not installed"
-    command -v swiftc >/dev/null 2>&1 \
-        || fail "Swift compiler is not installed"
-    [ -x "$parakeet_helper" ] || fail "Parakeet ASR helper is missing"
-    "$parakeet_helper" --verify >/dev/null \
-        || fail "Parakeet Unified model/helper verification failed"
-    [ -f "$dictate_plist" ] || fail "dictation LaunchAgent is missing"
-    [ -f "$ollama_plist" ] || fail "Ollama LaunchAgent is missing"
-    for private_log in "$dictate_log" "$ollama_log"; do
-        private_log_is_valid "$private_log" \
-            || fail "private runtime log is missing or has unsafe permissions"
-    done
-    plutil -lint "$dictate_plist" "$ollama_plist" >/dev/null
+    plutil -lint "$ollama_plist" >/dev/null \
+        || fail "Ollama LaunchAgent is not a valid property list"
     escaped_verify_ollama="$(escape_sed_replacement "$ollama_bin")"
     escaped_verify_dir="$(escape_sed_replacement "$DIR")"
     verify_ollama_plist="$(mktemp \
@@ -752,6 +741,31 @@ verify_install() {
     fi
     rm -f "$verify_ollama_plist"
     trap - EXIT
+    agent_is_running com.berg.ollama || fail "Ollama LaunchAgent is not running"
+    if "$ollama_bin" show qwen3.5:4b >/dev/null 2>&1; then
+        verify_qwen=1
+    fi
+}
+
+verify_install() {
+    step "verifying installation"
+    local uv_bin
+    uv_bin="$(command -v uv 2>/dev/null || true)"
+    [ -n "$uv_bin" ] || fail "uv is not installed"
+    command -v ffmpeg >/dev/null 2>&1 || fail "ffmpeg is not installed"
+    command -v swift >/dev/null 2>&1 || fail "Swift toolchain is not installed"
+    command -v swiftc >/dev/null 2>&1 \
+        || fail "Swift compiler is not installed"
+    [ -x "$parakeet_helper" ] || fail "Parakeet ASR helper is missing"
+    "$parakeet_helper" --verify >/dev/null \
+        || fail "Parakeet Unified model/helper verification failed"
+    [ -f "$dictate_plist" ] || fail "dictation LaunchAgent is missing"
+    for private_log in "$dictate_log" "$ollama_log"; do
+        private_log_is_valid "$private_log" \
+            || fail "private runtime log is missing or has unsafe permissions"
+    done
+    plutil -lint "$dictate_plist" >/dev/null
+    verify_cleanup_service
     if [ "$MODE" = "full" ]; then
         python3 "$DIR/scripts/macos_launcher_app.py" verify \
             --app "$launcher_app" --checkout "$DIR" \
@@ -771,16 +785,11 @@ verify_install() {
         || fail "Parakeet Unified model revision verification failed"
     # qwen3.5:4b is an optional cleanup upgrade. Audit it when it is installed;
     # a minimal install without it is a supported configuration, not a failure.
-    verify_qwen=0
-    if "$ollama_bin" show qwen3.5:4b >/dev/null 2>&1; then
-        verify_qwen=1
-    fi
     if [ "$verify_qwen" -eq 1 ]; then
         "$uv_bin" run --locked --script "$DIR/dictate.py" \
             --verify-ollama-model >/dev/null \
             || fail "Qwen model manifest verification failed"
     fi
-    agent_is_running com.berg.ollama || fail "Ollama LaunchAgent is not running"
     agent_is_running com.berg.dictate \
         || fail "dictation LaunchAgent is not running"
     curl -fsS --max-time 3 http://127.0.0.1:8787/health >/dev/null \
@@ -791,6 +800,125 @@ verify_install() {
         echo "== verified: locked Python environment, Whisper + Parakeet models, services, and health"
         echo "== qwen3.5:4b is not installed; cleanup stays deterministic (add it with ./setup.sh --models)"
     fi
+}
+
+cleanup_model_wanted() {
+    # Asked for now, or set up by an earlier install whose model is still in
+    # Ollama's store. Anything else gets no Ollama service at all.
+    [ "$WITH_ALL_MODELS" -eq 1 ] && return 0
+    [ -f "$ollama_plist" ] && [ -f "$qwen_manifest" ]
+}
+
+required_brew_packages() {
+    if cleanup_model_wanted; then
+        echo "uv ffmpeg ollama"
+    else
+        echo "uv ffmpeg"
+    fi
+}
+
+ollama_port_holder() {
+    # Names whatever listens on Ollama's port when it is not this installer's
+    # agent. Prints nothing when the port is free or already ours.
+    local pids pid agent command_name
+    pids="$(lsof -nP -iTCP:11434 -sTCP:LISTEN -t 2>/dev/null \
+        | sort -u || true)"
+    [ -n "$pids" ] || return 0
+    agent="$(agent_pid com.berg.ollama || true)"
+    for pid in $pids; do
+        [ "$pid" != "$agent" ] || continue
+        command_name="$(ps -o comm= -p "$pid" 2>/dev/null || true)"
+        echo "process $pid (${command_name:-unknown})"
+        return 0
+    done
+}
+
+retire_ollama_service() {
+    # Unload and remove only the agent and receipt this installer creates,
+    # so a failed or abandoned setup leaves nothing restarting behind it.
+    launchctl bootout "gui/$(id -u)/com.berg.ollama" 2>/dev/null || true
+    for _ in $(seq 1 15); do
+        launchctl print "gui/$(id -u)/com.berg.ollama" >/dev/null 2>&1 \
+            || break
+        sleep 1
+    done
+    rm -f -- "$ollama_plist" "$ollama_service_receipt"
+}
+
+start_ollama_service() {
+    local escaped_ollama escaped_dir desired_ollama_plist
+    local desired_ollama_digest holder ollama_ready cleanup receipt_temporary
+    step "configuring the tuned local Ollama service"
+    [ -n "$OLLAMA" ] || fail "ollama is not installed"
+    escaped_ollama="$(escape_sed_replacement "$OLLAMA")"
+    escaped_dir="$(escape_sed_replacement "$DIR")"
+    desired_ollama_plist="${ollama_plist}.candidate.$$"
+    printf -v cleanup 'rm -f -- %q' "$desired_ollama_plist"
+    trap "$cleanup" EXIT
+    render_plist "$DIR/com.berg.ollama.plist.template" \
+        "$desired_ollama_plist" \
+        -e "s|__OLLAMA__|$escaped_ollama|g" \
+        -e "s|__DIR__|$escaped_dir|g"
+    desired_ollama_digest="$(shasum -a 256 "$desired_ollama_plist" \
+        | awk '{print $1}')"
+
+    # A warm update normally leaves Ollama's exact service definition
+    # running. Keep that process and its loaded model hot only when the
+    # freshly rendered plist is byte-identical, a prior successful reload
+    # receipt binds its digest, and the running launchd PID owns the healthy
+    # endpoint. Any missing evidence, drift, stopped agent, or failed health
+    # probe takes the replace/reload path.
+    if ollama_service_identity_is_valid "$desired_ollama_plist" \
+            "$ollama_plist" "$ollama_service_receipt" \
+            "$desired_ollama_digest"; then
+        rm -f "$desired_ollama_plist"
+        echo "== reusing healthy Ollama service (configuration unchanged)"
+    else
+        # Someone else's Ollama -- the desktop app, a Homebrew service, a
+        # terminal -- is never stopped. Loading beside it could only fail,
+        # and a KeepAlive agent that cannot bind restarts forever.
+        holder="$(ollama_port_holder)"
+        if [ -n "$holder" ]; then
+            rm -f "$desired_ollama_plist"
+            trap - EXIT
+            fail "port 11434 is in use by $holder. The cleanup model needs Whisper Face's own Ollama service there, and setup does not stop anyone else's. Quit that Ollama (for Homebrew: brew services stop ollama) and rerun, or install without the cleanup model."
+        fi
+        mv -f "$desired_ollama_plist" "$ollama_plist"
+        if ! reload_agent com.berg.ollama "$ollama_plist"; then
+            trap - EXIT
+            retire_ollama_service
+            fail "launchd could not load the Ollama service; it was removed again"
+        fi
+    fi
+    trap - EXIT
+
+    echo -n "== waiting for Ollama"
+    ollama_ready=0
+    for _ in $(seq 1 60); do
+        # Wait for the identity asserted below, not merely for the endpoint
+        # to answer. A reload leaves the previous process bound to 11434
+        # while the replacement starts, so a healthy /api/tags is not yet
+        # evidence that the launchd job owns the sole listener.
+        if ollama_process_identity_is_valid; then
+            ollama_ready=1
+            break
+        fi
+        echo -n "."
+        sleep 1
+    done
+    echo
+    if [ "$ollama_ready" -ne 1 ]; then
+        retire_ollama_service
+        fail "Ollama did not become ready; inspect $DIR/ollama.log. Its service was unloaded so it does not keep restarting."
+    fi
+
+    ollama_process_identity_is_valid \
+        || fail "Ollama service identity could not be verified"
+    install -d -m 700 "$service_receipt_dir"
+    receipt_temporary="${ollama_service_receipt}.tmp.$$"
+    printf '%s\n' "$desired_ollama_digest" > "$receipt_temporary"
+    chmod 600 "$receipt_temporary"
+    mv -f "$receipt_temporary" "$ollama_service_receipt"
 }
 
 # Adopt an already-installed Homebrew that is merely absent from PATH, before
@@ -865,8 +993,12 @@ if ! command -v brew >/dev/null 2>&1; then
 fi
 
 BREW="$(command -v brew)"
+cleanup_wanted=0
+if cleanup_model_wanted; then
+    cleanup_wanted=1
+fi
 missing_packages=()
-for package in uv ffmpeg ollama; do
+for package in $(required_brew_packages); do
     "$BREW" list --versions "$package" >/dev/null 2>&1 \
         || missing_packages+=("$package")
 done
@@ -876,7 +1008,7 @@ if [ "${#missing_packages[@]}" -gt 0 ]; then
 fi
 
 UV="$(command -v uv)"
-OLLAMA="$(command -v ollama)"
+OLLAMA="$(command -v ollama 2>/dev/null || true)"
 mkdir -p "$launch_dir"
 
 # --- Model inventory --------------------------------------------------------
@@ -911,14 +1043,15 @@ install_optional_models() {
         step "downloading Whisper large-v3-turbo (~1.6 GB)"
         "$UV" run --locked --script "$DIR/dictate.py" --preload-models
     fi
+    start_ollama_service
     if qwen_is_installed; then
         echo "== qwen3.5:4b already installed"
     else
-        curl -fsS --max-time 3 http://127.0.0.1:11434/api/tags \
-            >/dev/null 2>&1 \
-            || fail "Ollama is not running; run ./setup.sh first, then ./setup.sh --models"
         step "downloading qwen3.5:4b (~3.4 GB)"
-        "$OLLAMA" pull qwen3.5:4b
+        if ! "$OLLAMA" pull qwen3.5:4b; then
+            retire_ollama_service
+            fail "Ollama could not download qwen3.5:4b; its service was unloaded"
+        fi
     fi
     "$UV" run --locked --script "$DIR/dictate.py" --verify-ollama-model
     if agent_is_running com.berg.dictate; then
@@ -962,74 +1095,31 @@ step "verifying the pinned Parakeet Unified model and helper"
 "$parakeet_helper" --preload
 
 # --- Ollama service and cleanup model --------------------------------------
-step "configuring the tuned local Ollama service"
-escaped_ollama="$(escape_sed_replacement "$OLLAMA")"
-escaped_dir="$(escape_sed_replacement "$DIR")"
-desired_ollama_plist="${ollama_plist}.candidate.$$"
-trap 'rm -f "$desired_ollama_plist"' EXIT
-render_plist com.berg.ollama.plist.template "$desired_ollama_plist" \
-    -e "s|__OLLAMA__|$escaped_ollama|g" \
-    -e "s|__DIR__|$escaped_dir|g"
-desired_ollama_digest="$(shasum -a 256 "$desired_ollama_plist" \
-    | awk '{print $1}')"
-
-# A warm update normally leaves Ollama's exact service definition running.
-# Keep that process and its loaded model hot only when the freshly rendered
-# plist is byte-identical, a prior successful reload receipt binds its digest,
-# and the running launchd PID owns the healthy endpoint. Any missing evidence,
-# drift, stopped agent, or failed health probe takes the replace/reload path.
-if ollama_service_identity_is_valid "$desired_ollama_plist" \
-        "$ollama_plist" "$ollama_service_receipt" \
-        "$desired_ollama_digest"; then
-    rm -f "$desired_ollama_plist"
-    echo "== reusing healthy Ollama service (configuration unchanged)"
-else
-    "$BREW" services stop ollama >/dev/null 2>&1 || true
-    mv -f "$desired_ollama_plist" "$ollama_plist"
-    reload_agent com.berg.ollama "$ollama_plist"
-fi
-trap - EXIT
-
-echo -n "== waiting for Ollama"
-ollama_ready=0
-for _ in $(seq 1 60); do
-    # Wait for the identity the next line asserts, not merely for the endpoint
-    # to answer. A reload leaves the previous process bound to 11434 while the
-    # replacement starts, so a healthy /api/tags is not yet evidence that the
-    # launchd job owns the sole listener. Polling only the endpoint let the
-    # wait break during that window and hard-failed the install -- which, from
-    # the self-updater, meant a rollback. This check subsumes the health probe.
-    if ollama_process_identity_is_valid; then
-        ollama_ready=1
-        break
-    fi
-    echo -n "."
-    sleep 1
-done
-echo
-[ "$ollama_ready" -eq 1 ] \
-    || fail "Ollama did not become ready; inspect $DIR/ollama.log"
-
-ollama_process_identity_is_valid \
-    || fail "Ollama service identity could not be verified"
-install -d -m 700 "$service_receipt_dir"
-receipt_temporary="${ollama_service_receipt}.tmp.$$"
-printf '%s\n' "$desired_ollama_digest" > "$receipt_temporary"
-chmod 600 "$receipt_temporary"
-mv -f "$receipt_temporary" "$ollama_service_receipt"
-
 # The cleanup model only rewrites text the deterministic compiler refuses to
-# touch, so it is optional: an install without it cleans up deterministically.
+# touch, so it is optional, and so is the Ollama service that serves it: an
+# install without the model installs, loads, and verifies no Ollama at all.
 qwen_installed=0
-if qwen_is_installed; then
-    echo "== qwen3.5:4b already installed"
-    qwen_installed=1
-elif [ "$WITH_ALL_MODELS" -eq 1 ]; then
-    step "downloading qwen3.5:4b (~3.4 GB)"
-    "$OLLAMA" pull qwen3.5:4b
-    qwen_installed=1
+qwen_pulled_now=0
+if [ "$cleanup_wanted" -eq 1 ]; then
+    start_ollama_service
+    if qwen_is_installed; then
+        echo "== qwen3.5:4b already installed"
+        qwen_installed=1
+    else
+        step "downloading qwen3.5:4b (~3.4 GB)"
+        if ! "$OLLAMA" pull qwen3.5:4b; then
+            retire_ollama_service
+            fail "Ollama could not download qwen3.5:4b; its service was unloaded"
+        fi
+        qwen_installed=1
+        qwen_pulled_now=1
+    fi
 else
-    echo "== skipping qwen3.5:4b (~3.4 GB): semantic cleanup upgrade"
+    if [ -f "$ollama_plist" ]; then
+        step "unloading the Ollama service an earlier install left without a model"
+        retire_ollama_service
+    fi
+    echo "== skipping qwen3.5:4b (~3.4 GB) and the Ollama service it needs"
     skipped_models+=(
         "qwen3.5:4b (~3.4 GB) — semantic cleanup; deterministic cleanup runs without it")
 fi
@@ -1037,8 +1127,20 @@ fi
 # --- Reproducible Python environment and Whisper model cache ---------------
 step "installing the locked Python environment"
 "$UV" sync --locked --script "$DIR/dictate.py"
-if [ "$qwen_installed" -eq 1 ]; then
-    "$UV" run --locked --script "$DIR/dictate.py" --verify-ollama-model
+if [ "$qwen_installed" -eq 1 ] \
+        && ! "$UV" run --locked --script "$DIR/dictate.py" --verify-ollama-model; then
+    # qwen3.5:4b is pulled by a tag its publisher can move. A copy this run
+    # just fetched that no longer matches the audited manifest is removed,
+    # with its service, and the install carries on without the optional
+    # model. A copy that was already here is the user's to judge.
+    [ "$qwen_pulled_now" -eq 1 ] || fail "Qwen model manifest verification failed"
+    echo "!! qwen3.5:4b as published now differs from the audited model;"
+    echo "!! removing it and continuing with deterministic cleanup."
+    "$OLLAMA" rm qwen3.5:4b >/dev/null 2>&1 || true
+    retire_ollama_service
+    qwen_installed=0
+    skipped_models+=(
+        "qwen3.5:4b — its published manifest changed since it was audited")
 fi
 
 # Whisper Tiny is the fast preview pass every dictation runs; it is required.
@@ -1084,6 +1186,7 @@ done
 # --- Dictation LaunchAgent --------------------------------------------------
 step "installing the login LaunchAgent"
 escaped_uv="$(escape_sed_replacement "$UV")"
+escaped_dir="$(escape_sed_replacement "$DIR")"
 if [ "$MODE" = "server-only" ]; then
     extra_sed="s|__EXTRA_ARGS__|<string>--server-only</string>|"
     # Server-only stays raw uv and headless: no launcher, no TCC surface.

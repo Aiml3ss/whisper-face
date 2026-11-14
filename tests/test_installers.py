@@ -625,10 +625,8 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn('if [ "$MODELS_ONLY" -eq 1 ]; then', self.shell)
 
     def test_minimal_mac_install_is_a_supported_verified_configuration(self):
-        verify_start = self.shell.index("verify_install() {")
-        verify_end = self.shell.index(
-            'if [ "$VERIFY_ONLY" -eq 1 ]', verify_start)
-        verify = self.shell[verify_start:verify_end]
+        verify = (shell_function("verify_cleanup_service")
+                  + shell_function("verify_install"))
         # An absent optional cleanup model is a supported state, not a failure.
         self.assertNotIn('fail "qwen3.5:4b is not installed"', self.shell)
         self.assertIn(
@@ -645,7 +643,7 @@ class InstallerContractTests(unittest.TestCase):
             'step "installing the locked Python environment"'):]
         install_manifest = install.index("--verify-ollama-model")
         self.assertLess(
-            install.rindex('if [ "$qwen_installed" -eq 1 ]; then',
+            install.rindex('if [ "$qwen_installed" -eq 1 ]',
                            0, install_manifest),
             install_manifest)
 
@@ -678,16 +676,13 @@ class InstallerContractTests(unittest.TestCase):
     def test_warm_rerun_reuses_only_an_exact_healthy_ollama_service(self):
         # macOS renders the desired plist on every run and may retain the warm
         # process only when config, launchd state, and health all agree.
-        configuration_start = self.shell.index(
-            'step "configuring the tuned local Ollama service"')
-        branch_start = self.shell.index(
-            'if ollama_service_identity_is_valid ', configuration_start)
-        branch_end = self.shell.index('echo -n "== waiting for Ollama"')
-        branch = self.shell[branch_start:branch_end]
-        preamble = self.shell[configuration_start:branch_start]
+        service = shell_function("start_ollama_service")
+        branch_start = service.index('if ollama_service_identity_is_valid ')
+        branch_end = service.index('echo -n "== waiting for Ollama"')
+        branch = service[branch_start:branch_end]
         self.assertIn(
-            'render_plist com.berg.ollama.plist.template '
-            '"$desired_ollama_plist"', preamble)
+            'render_plist "$DIR/com.berg.ollama.plist.template"',
+            service[:branch_start])
         for required in (
             'ollama_service_identity_is_valid "$desired_ollama_plist"',
             '"$ollama_plist" "$ollama_service_receipt"',
@@ -698,21 +693,15 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn(required, branch)
         reuse = branch.index(
             "reusing healthy Ollama service (configuration unchanged)")
-        stop = branch.index('"$BREW" services stop ollama')
         reload = branch.index('reload_agent com.berg.ollama "$ollama_plist"')
-        self.assertLess(reuse, stop)
-        self.assertLess(stop, reload)
-        self.assertNotIn(
-            '"$BREW" services stop ollama', self.shell[:branch_start])
-        postamble = self.shell[branch_end:]
+        self.assertLess(reuse, reload)
         # The wait must poll the identity the next line asserts. A reload keeps
         # the previous process bound to 11434 while its replacement starts, so
         # two listeners briefly exist; ollama_listener_pid refuses a non-unique
         # result. Waiting on /api/tags alone broke out during that window and
         # hard-failed the install -- a rollback when run from the self-updater.
-        wait_end = self.shell.index(
-            'fail "Ollama did not become ready', branch_end)
-        wait = self.shell[branch_end:wait_end]
+        wait = service[branch_end:service.index(
+            'fail "Ollama did not become ready')]
         self.assertIn('if ollama_process_identity_is_valid; then', wait)
         self.assertNotIn('curl -fsS --max-time 1 http://127.0.0.1:11434', wait)
         self.assertIn('ollama-service.sha256', self.shell)
@@ -723,7 +712,7 @@ class InstallerContractTests(unittest.TestCase):
             'fail "Ollama service identity could not be verified"',
         ):
             with self.subTest(required=required):
-                self.assertIn(required, postamble)
+                self.assertIn(required, service[branch_end:])
 
         # Windows has a health-based warm-service path, but its detached Ollama
         # process is not owned by the Whisper Face scheduled task. Do not claim
@@ -739,10 +728,129 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn("--verify-ollama-model", installer)
                 self.assertIn("show", installer)
 
+    def ollama_sandbox(self, directory, *, listener="", healthy=False):
+        """Variables and stubs for running start_ollama_service offline."""
+        root = Path(directory)
+        (root / "LaunchAgents").mkdir()
+        (root / "com.berg.ollama.plist.template").write_bytes(
+            (ROOT / "com.berg.ollama.plist.template").read_bytes())
+        loaded = root / "loaded"
+        launchctl = (
+            f'echo "launchctl $*" >> "$STUB_LOG"\n'
+            f'case "$1" in\n'
+            f'  print) [ -e {loaded} ] || exit 113\n'
+            f'         printf "state = running\\n\\tpid = 77\\n" ;;\n'
+            f'  bootstrap) touch {loaded} ;;\n'
+            f'  bootout) rm -f {loaded} ;;\n'
+            f'esac\n')
+        variables = {
+            "DIR": root,
+            "VERIFY_ONLY": 0,
+            "OLLAMA": "/opt/fake/bin/ollama",
+            "ollama_plist": root / "LaunchAgents" / "com.berg.ollama.plist",
+            "service_receipt_dir": root / "state",
+            "ollama_service_receipt": root / "state" / "ollama-service.sha256",
+        }
+        stubs = {
+            "launchctl": launchctl,
+            "lsof": f'echo "lsof $*" >> "$STUB_LOG"; '
+                    f'[ -z "{listener}" ] || echo {listener}',
+            "ps": 'echo ollama',
+            "sleep": ':',
+            "curl": 'exit 0' if healthy else 'exit 7',
+            "brew": 'echo "brew $*" >> "$STUB_LOG"',
+        }
+        return variables, stubs
+
+    OLLAMA_FUNCTIONS = (
+        "fail", "step", "escape_sed_replacement", "render_plist",
+        "agent_is_running", "agent_pid", "ollama_listener_pid",
+        "valid_sha256_digest", "ollama_process_identity_is_valid",
+        "ollama_service_identity_is_valid", "reload_agent",
+        "ollama_port_holder", "retire_ollama_service", "start_ollama_service",
+    )
+
+    def test_a_default_install_brings_no_ollama(self):
+        # Ollama exists only to serve the optional cleanup model. A default
+        # install must not install, load, or verify it.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plist = root / "com.berg.ollama.plist"
+            manifest = root / "manifests" / "qwen3.5" / "4b"
+            cases = (
+                ("default install", 0, False, False, "uv ffmpeg"),
+                ("cleanup model requested", 1, False, False,
+                 "uv ffmpeg ollama"),
+                ("earlier opt-in, model present", 0, True, True,
+                 "uv ffmpeg ollama"),
+                ("earlier service, no model", 0, True, False, "uv ffmpeg"),
+            )
+            for name, requested, has_plist, has_model, packages in cases:
+                with self.subTest(case=name):
+                    plist.unlink(missing_ok=True)
+                    manifest.unlink(missing_ok=True)
+                    if has_plist:
+                        plist.write_text("x")
+                    if has_model:
+                        manifest.parent.mkdir(parents=True, exist_ok=True)
+                        manifest.write_text("x")
+                    result = run_setup_functions(
+                        ["cleanup_model_wanted", "required_brew_packages"],
+                        "required_brew_packages\n",
+                        variables={"WITH_ALL_MODELS": requested,
+                                   "ollama_plist": plist,
+                                   "qwen_manifest": manifest})
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), packages)
+            # Nor does --verify ask for it when no service was set up.
+            plist.unlink()
+            result = run_setup_functions(
+                ["fail", "verify_cleanup_service"],
+                'verify_cleanup_service\necho "verify_qwen=$verify_qwen"\n',
+                variables={"VERIFY_ONLY": 1, "ollama_plist": plist})
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(result.stdout.strip(), "verify_qwen=0")
+            self.assertNotIn("refused", result.stderr)
+
+    def test_setup_never_stops_or_fights_someone_elses_ollama(self):
+        with tempfile.TemporaryDirectory() as directory:
+            variables, stubs = self.ollama_sandbox(directory, listener=4242)
+            result = run_setup_functions(
+                self.OLLAMA_FUNCTIONS, "start_ollama_service\n",
+                variables=variables, stubs=stubs)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("port 11434 is in use by process 4242 (ollama)",
+                          result.stderr)
+            self.assertNotIn("brew services", result.calls)
+            self.assertNotIn("launchctl bootstrap", result.calls)
+            self.assertFalse(variables["ollama_plist"].exists())
+            self.assertEqual(
+                [path.name for path in Path(directory, "LaunchAgents").iterdir()],
+                [])
+
+    def test_an_ollama_service_that_never_becomes_ready_is_unloaded(self):
+        # KeepAlive would otherwise restart it every ten seconds, at every
+        # login, for as long as the plist stayed in ~/Library/LaunchAgents.
+        with tempfile.TemporaryDirectory() as directory:
+            variables, stubs = self.ollama_sandbox(directory)
+            result = run_setup_functions(
+                self.OLLAMA_FUNCTIONS, "start_ollama_service\n",
+                variables=variables, stubs=stubs)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("Ollama did not become ready", result.stderr)
+            calls = result.calls.splitlines()
+            bootstrap = calls.index(next(
+                call for call in calls if call.startswith("launchctl bootstrap")))
+            self.assertTrue(any(call.startswith("launchctl bootout")
+                                for call in calls[bootstrap:]))
+            self.assertFalse(Path(directory, "loaded").exists())
+            self.assertFalse(variables["ollama_plist"].exists())
+            self.assertFalse(variables["ollama_service_receipt"].exists())
+
     def test_runtime_logs_are_private_before_services_can_write_them(self):
         mac_provision = self.shell.index('provision_private_log "$dictate_log"')
         mac_ollama = self.shell.index(
-            'step "configuring the tuned local Ollama service"')
+            "# --- Ollama service and cleanup model")
         mac_dictation = self.shell.index('step "installing the login LaunchAgent"')
         self.assertLess(mac_provision, mac_ollama)
         self.assertLess(mac_provision, mac_dictation)
@@ -869,7 +977,7 @@ class InstallerContractTests(unittest.TestCase):
         mac_call = self.shell.index("confirm_writable_checkout\n", mac_probe)
         mac_homebrew = self.shell.index("installing Homebrew")
         mac_ollama = self.shell.index(
-            'step "configuring the tuned local Ollama service"')
+            "# --- Ollama service and cleanup model")
         self.assertLess(mac_call, mac_homebrew)
         self.assertLess(mac_call, mac_ollama)
         for required in (
@@ -969,10 +1077,8 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn(required, helpers)
 
     def test_mac_verify_reconstructs_identity_without_mutating_install(self):
-        verify_start = self.shell.index("verify_install()")
-        verify_end = self.shell.index(
-            'if [ "$VERIFY_ONLY" -eq 1 ]', verify_start)
-        verify = self.shell[verify_start:verify_end]
+        verify = (shell_function("verify_cleanup_service")
+                  + shell_function("verify_install"))
         for required in (
             'render_plist "$DIR/com.berg.ollama.plist.template"',
             "printf -v verify_cleanup 'rm -f -- %q'",
