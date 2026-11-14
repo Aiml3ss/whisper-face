@@ -366,6 +366,7 @@ class FreshInstallDictationTests(unittest.TestCase):
         desktop.heard = {"parakeet": "Lost key still types.",
                          "whisper": "Lost key still types."}
         finished = mac._finished_count
+        logged = len(mac.log.getvalue())
         desktop.press(mac.dictate.HOTKEY)
         self.assertTrue(mac.wait_until(desktop.live_streams, 5.0))
         desktop.speak(fake_platform.speech_audio())
@@ -375,6 +376,9 @@ class FreshInstallDictationTests(unittest.TestCase):
             mac.wait_until(lambda: mac._finished_count > finished, 5.0),
             mac.log_tail())
         self.assertEqual(field.text, "Lost key still types.")
+        # Ended by the key's state, not by the stalled-stream check.
+        self.assertIn("key release was not seen",
+                      mac.log.getvalue()[logged:])
         desktop.release(mac.dictate.HOTKEY)
 
     def test_a_microphone_that_stops_mid_take_keeps_what_was_heard(self):
@@ -385,6 +389,7 @@ class FreshInstallDictationTests(unittest.TestCase):
         desktop.heard = {"parakeet": "Keep what I said.",
                          "whisper": "Keep what I said."}
         finished = mac._finished_count
+        logged = len(mac.log.getvalue())
         desktop.press(mac.dictate.HOTKEY)
         self.assertTrue(mac.wait_until(desktop.live_streams, 5.0))
         desktop.speak(fake_platform.speech_audio())
@@ -395,6 +400,8 @@ class FreshInstallDictationTests(unittest.TestCase):
             mac.log_tail())
         desktop.release(mac.dictate.HOTKEY)
         self.assertEqual(field.text, "Keep what I said.")
+        self.assertIn("microphone stopped delivering audio",
+                      mac.log.getvalue()[logged:])
 
     def test_a_new_default_microphone_is_used_after_a_device_change(self):
         mac = booted()
