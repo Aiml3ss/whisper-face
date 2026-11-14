@@ -968,12 +968,14 @@ ENUM_RE = re.compile(
     r"(things|points|items|thoughts|questions|updates|ideas|issues)\b", re.I
 )
 # Spoken tone override: start a dictation with "formal tone, ..." /
-# "casual, ..." / "verbatim: ..." to force a style regardless of app. The
-# punctuation after the tone word is required — Whisper inserts it for the
-# natural pause, and it keeps "Formal education is..." from matching.
+# "casual style, ..." / "verbatim mode: ..." to force a style regardless of
+# app. The keyword is required: "Code, tests, and docs are updated" opens
+# with a tone word and a comma, and without the keyword it lost its first
+# word. The punctuation after the keyword is required too — a recognizer
+# writes it for the natural pause.
 TONE_OVERRIDE_RE = re.compile(
     r"^(formal|casual|code|technical|neutral|verbatim)"
-    r"(?:\s+(?:tone|style|mode))?\s*[,.:]\s+", re.I)
+    r"\s+(?:tone|style|mode)\s*[,.:]\s+", re.I)
 TONE_ALIASES = {"technical": "code", "neutral": "default"}
 
 # The cleanup model answering/refusing instead of cleaning (it happens on

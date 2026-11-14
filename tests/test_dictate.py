@@ -3645,6 +3645,38 @@ class CleanupGuardTests(unittest.TestCase):
             collapse("No no, that is wrong."),
             ("No no, that is wrong.", False))
 
+    def test_spoken_tone_override_needs_the_tone_keyword(self):
+        ns = load_definitions(
+            "extract_tone_override",
+            assignments={"TONE_OVERRIDE_RE", "TONE_ALIASES"})
+        extract = ns["extract_tone_override"]
+        for spoken, expected in (
+            ("Formal tone, please confirm the meeting.",
+             ("please confirm the meeting.", "formal")),
+            ("Casual style: see you at six.", ("see you at six.", "casual")),
+            ("Verbatim mode. Keep every word.",
+             ("Keep every word.", "verbatim")),
+            ("technical tone, restart the worker",
+             ("restart the worker", "code")),
+            ("Neutral tone, send the summary.",
+             ("send the summary.", "default")),
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(extract(spoken), expected)
+        # A sentence that merely opens with one of the tone words keeps it.
+        for spoken in (
+            "Code, tests, and docs are all updated.",
+            "Code: 4471 opens the side gate.",
+            "Casual, but not sloppy.",
+            "Technical, legal, and financial review is done.",
+            "Neutral. That is my position.",
+            "Verbatim: keep every word.",
+            "Formal education is expensive.",
+            "Formal tone.",
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(extract(spoken), (spoken, None))
+
     def test_simple_fillers_stay_on_the_fast_path(self):
         ns = load_definitions(
             "quick_clean", "needs_llm_cleanup",
