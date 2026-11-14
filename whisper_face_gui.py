@@ -14,6 +14,7 @@ import json
 import math
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -23,16 +24,20 @@ from whisper_face_theme import (
     LIGHT_PALETTE,
     MOTION_SPECS,
     SURFACE_SPECS,
+    contrast_ratio,
     palette_for_appearance,
 )
 
 
 APP_NAME = "Whisper Face"
 DEFAULTS_SUITE = "com.whisperface.app"
+# The palette's error coral is a fill colour: as text on the light surfaces
+# it reaches only 2.1-2.3:1, so light-mode error text uses this darker ink.
+ERROR_TEXT_ON_LIGHT = (0.702, 0.255, 0.180)   # ≈ #B3412E
 SECTIONS = ("Home", "Settings", "Advanced")
 # Keys and sounds get their own pane rather than crowding Personalize: at the
-# 880x600 minimum the character card plus six 44pt rows fills the pane
-# exactly, and shrinking the row rhythm or the character card to fit more
+# window minimum the character card plus six 44pt rows fills the pane, and
+# shrinking the row rhythm or the character card to fit more
 # would cost more than the extra segment does. A seventh row overflows into
 # the notice band, so anything new here has to displace something.
 SETTINGS_PANES = ("Personalize", "Controls", "Privacy")
@@ -215,6 +220,16 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "nav.home": "Home",
         "nav.settings": "Settings",
         "nav.advanced": "Advanced",
+        "menu.edit": "Edit",
+        "menu.edit.undo": "Undo",
+        "menu.edit.redo": "Redo",
+        "menu.edit.cut": "Cut",
+        "menu.edit.copy": "Copy",
+        "menu.edit.paste": "Paste",
+        "menu.edit.select_all": "Select All",
+        "menu.window": "Window",
+        "menu.window.close": "Close",
+        "menu.window.minimize": "Minimize",
         "nav.selected": "Selected",
         "app.face_chip.label": "Whisper Face mascot",
         "app.face_chip.help": "Gives the mascot a friendly wobble. Nothing else changes.",
@@ -302,6 +317,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "onboarding.status.try": "Try it now",
         "onboarding.status.warming": "Warming up",
         "onboarding.status.turn": "Your turn",
+        "onboarding.status.checking": "Checking",
         "onboarding.progress": "SETTING UP · {completed} OF {total} DONE",
         "onboarding.step.permissions": "Permissions",
         "onboarding.step.hotkey": "Your key",
@@ -310,7 +326,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "onboarding.step.summary": "{step}\n{status}",
         "onboarding.action.permissions": "Review Permissions",
         "onboarding.action.open_system_settings": "Open System Settings",
-        "onboarding.action.open_system_settings.help": "Open macOS System Settings so you can review Microphone, Accessibility, and Input Monitoring. Whisper Face does not change permissions.",
+        "onboarding.action.open_system_settings.help": "Open the Privacy & Security pane for the permission that is missing. Whisper Face does not change permissions.",
         "onboarding.action.hotkey": "Show Me How",
         "onboarding.action.models": "Check On Them",
         "onboarding.action.first_dictation": "Show Me How",
@@ -425,6 +441,20 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "models.unknown": "Unknown",
         "models.waiting.detail": "Leave this window open — each model appears as startup reports it",
         "models.guidance": "Models prepare locally and can finish in the background.",
+        "models.state.ready": "Ready",
+        "models.state.installed": "Installed",
+        "models.state.optional": "Optional",
+        "models.state.not_installed": "Missing",
+        "models.state.failed": "Needs repair",
+        "models.state.mismatch": "Wrong version",
+        "models.state.checking": "Checking",
+        "models.detail.ready": "Installed and answered on this Mac",
+        "models.detail.installed": "Installed · warms up on first use",
+        "models.detail.optional": "Not installed · add it with ./setup.sh --models",
+        "models.detail.not_installed": "Not installed · dictation needs it, run Install.command again",
+        "models.detail.failed": "Files are incomplete · run the installer again to repair",
+        "models.detail.mismatch": "A different version is installed · run the installer again to repair",
+        "models.detail.checking": "Checking the files on this Mac",
         "models.relisten.label": "Selective Re-listen",
         "models.relisten.status.off": "Off",
         "models.relisten.status.ready": "On · verifier ready",
@@ -455,7 +485,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "diagnostics.action.export_support.help": "Save a local, transcript-free support bundle. You choose the destination; Whisper Face never uploads it. The bundle contains only health, permission, build, model, and aggregate result metadata.",
         "diagnostics.action.verify": "Run Verification",
         "diagnostics.action.open_system_settings": "Open System Settings",
-        "diagnostics.action.open_system_settings.help": "Open macOS System Settings so you can review Microphone, Accessibility, and Input Monitoring. Whisper Face does not change permissions.",
+        "diagnostics.action.open_system_settings.help": "Open the Privacy & Security pane for the permission that is missing. Whisper Face does not change permissions.",
         "diagnostics.action.licenses": "License Notices",
         "diagnostics.action.source": "Exact Source",
         "diagnostics.verification.not_run": "Not run",
@@ -493,10 +523,12 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "issue.microphone.detail": "Open System Settings › Privacy & Security › Microphone and enable Whisper Face. Other settings remain available.",
         "issue.accessibility.title": "Safe insertion needs Accessibility permission",
         "issue.accessibility.detail": "Open System Settings › Privacy & Security › Accessibility. Until then, recoverable text stays in the Voice Outbox.",
-        "issue.models.title": "Local recognition models are still unavailable",
-        "issue.models.detail": "Keep Whisper Face open while models finish preparing, then run Verification if their status does not change.",
-        "issue.fallback.title": "A fallback model needs attention",
-        "issue.fallback.detail": "Dictation can continue with a ready engine. Check: {models}.",
+        "issue.input_monitoring.title": "Your key needs Input Monitoring permission",
+        "issue.input_monitoring.detail": "Open System Settings › Privacy & Security › Input Monitoring and enable Whisper Face.",
+        "issue.models.title": "A model dictation needs is missing",
+        "issue.models.detail": "Run Install.command again to restore {models}. Your settings stay.",
+        "issue.fallback.title": "An optional model needs repair",
+        "issue.fallback.detail": "Dictation still works. Run the installer again to repair {models}.",
         "settings.title": "Settings",
         "settings.subtitle": "Personal language, appearance, keys, sound, and privacy in one place.",
         "settings.pane.personalize": "Personalize",
@@ -506,8 +538,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.controls.hotkey.detail": "Hold {hotkey} to dictate",
         "settings.controls.hotkey.shared": "Hold {hotkey} to dictate · {modes} need the other {family} key",
         "settings.controls.undo": "Undo key",
-        "settings.controls.undo.detail": "Press {hotkey} to undo the last dictation",
-        "settings.controls.undo.unset": "Not set — undo stays in the menu bar",
+        "settings.controls.undo.detail": "Press {hotkey}, or use Undo Last Dictation in the menu bar",
+        "settings.controls.undo.unset": "Not set — use Undo Last Dictation in the menu bar",
         "settings.controls.sound": "Feedback sounds",
         "settings.controls.sound.system": "macOS",
         "settings.controls.sound.whisper": "Whisper Face",
@@ -515,13 +547,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.controls.sound.detail.system": "Borrowed macOS system sounds",
         "settings.controls.sound.detail.whisper": "Short first-party cues for start, finish, and trouble",
         "settings.controls.sound.detail.silent": "No sound at all",
-        "settings.controls.undo_now": "Undo last dictation",
-        "settings.controls.undo_now.ready": "Restores the destination's exact prior text",
-        "settings.controls.undo_now.none": "Nothing to undo yet",
         "settings.controls.action.change": "Change…",
-        "settings.controls.action.undo": "Undo",
-        "settings.accessibility.undo.label": "Undo last dictation",
-        "settings.accessibility.undo.help": "Put the destination back the way it was before the last insertion.",
         "settings.controls.action.preview": "Preview",
         "settings.dialog.hotkey.title": "Choose your capture key",
         "settings.dialog.hotkey.message": "Press the key you want to hold while dictating. Modifier keys and function keys only — an ordinary key would swallow your typing everywhere.",
@@ -555,9 +581,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.privacy.recent.browse": "Browse…",
         "settings.privacy.recent.browse.help": "List recent dictations by time, length, and app.",
         "settings.accessibility.recent.label": "Recent dictations",
-        "settings.accessibility.recent.help": "Show recent dictations so they can be revealed or inserted again.",
+        "settings.accessibility.recent.help": "Show recent dictations so their words can be revealed.",
         "settings.dialog.recent.title": "Recent dictations",
-        "settings.dialog.recent.message": "Metadata only. Reveal a dictation to see its words, or insert it again through the usual safe insertion.",
+        "settings.dialog.recent.message": "Metadata only. Reveal a dictation to see its words. To insert one again, click where it should go and use Recent Dictations in the menu bar.",
         "settings.dialog.recent.empty": "Nothing recorded yet.",
         "settings.dialog.recent.row": "{when} · {words} · {app}",
         "settings.dialog.recent.words": "{count} words",
@@ -568,11 +594,10 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "recent.age.days": "{count}d ago",
         "recent.app.unknown": "unknown app",
         "settings.dialog.recent.reveal": "Reveal Text…",
-        "settings.dialog.recent.insert": "Insert Again",
         "settings.dialog.recent.revealed.title": "Recent dictation",
         "settings.dialog.recent.revealed.gone": "That dictation is no longer in the local log.",
         "settings.accessibility.recent_list.label": "Recent dictations list",
-        "settings.accessibility.recent_list.help": "Choose one recent dictation to reveal or insert.",
+        "settings.accessibility.recent_list.help": "Choose one recent dictation to reveal.",
         "settings.notice.hotkey": "Capture key is now {hotkey}.",
         "settings.notice.undo_hotkey": "Undo key is now {hotkey}.",
         "settings.notice.undo_hotkey.cleared": "Undo key cleared.",
@@ -944,6 +969,9 @@ def localized_string(key: str, *, locale: str = "en", **values: Any) -> str:
     template = catalog.get(key, STRING_CATALOGS["en"].get(key))
     if template is None:
         raise KeyError(f"unknown localized string: {key}")
+    if "error" in values and "{error}." in template:
+        # Templates end the interpolated reason with their own period.
+        values = {**values, "error": str(values["error"]).rstrip(" .")}
     try:
         return template.format(**values)
     except (KeyError, ValueError) as error:
@@ -1183,7 +1211,7 @@ class GUIActions:
     pause: Callable[[], None] = _noop
     resume: Callable[[], None] = _noop
     open_log: Callable[[], None] = _noop
-    open_system_settings: Callable[[], None] = _noop
+    open_system_settings: Callable[[str], None] = _noop
     copy_support_snapshot: Callable[[str], None] = _noop
     open_source_and_license: Callable[[], None] = _noop
     open_local_license_notices: Callable[[], None] = _noop
@@ -1205,6 +1233,15 @@ class ModelStatus:
     role: str = ""
     status: str = localized_string("default.status.unknown")
     detail: str = ""
+    # Machine fields from the runtime; display copy above is derived from
+    # them, never the other way round.
+    install_state: str = "unknown"
+    required: bool = False
+    warm: bool = False
+
+
+MODEL_INSTALL_STATES = (
+    "installed", "not_installed", "failed", "mismatch", "checking", "unknown")
 
 
 @dataclass(frozen=True)
@@ -1634,6 +1671,9 @@ class GUIState:
     service_status: str = localized_string("default.status.unknown")
     microphone_status: str = localized_string("default.status.unknown")
     accessibility_status: str = localized_string("default.status.unknown")
+    input_monitoring_status: str = localized_string("default.status.unknown")
+    # Permissions the runtime reports as missing, in the order to fix them.
+    missing_permissions: tuple[str, ...] = field(default_factory=tuple)
     version: str = localized_string("default.build.development")
     models: tuple[ModelStatus, ...] = field(default_factory=tuple)
     model_wallet_advisory: str = localized_string(
@@ -1678,6 +1718,24 @@ def _support_status(value: object) -> str:
         "unavailable": "unavailable",
         "unknown": "unknown",
     }.get(normalized, "unknown")
+
+
+def _support_permission(value: str) -> str:
+    """Granted, unavailable (missing) or unknown, from the runtime's words."""
+    normalized = value.strip().casefold()
+    return {"granted": "granted", "needs attention": "unavailable"}.get(
+        normalized, "unknown")
+
+
+def _support_model_status(model: ModelStatus) -> str:
+    """Map the runtime's install fields onto the bundle's closed vocabulary."""
+    if model.install_state == "installed":
+        return "ready" if model.warm else "installed"
+    if model.install_state == "checking":
+        return "checking"
+    if model.install_state in MODEL_BROKEN_STATES:
+        return "unavailable"
+    return _support_status(model.status)
 
 
 def _support_model_family(value: object) -> str:
@@ -1804,7 +1862,7 @@ def support_snapshot_text(state: GUIState) -> str:
             "microphone_status": _support_status(state.microphone_status),
         },
         "permissions": {
-            "accessibility_status": _support_status(
+            "accessibility_status": _support_permission(
                 state.accessibility_status),
         },
         "build": (
@@ -1814,13 +1872,13 @@ def support_snapshot_text(state: GUIState) -> str:
         "models": [
             {
                 "family": _support_model_family(model.name),
-                "status": _support_status(model.status),
+                "status": _support_model_status(model),
             }
             for model in sorted(
                 state.models,
                 key=lambda model: (
                     _support_model_family(model.name),
-                    _support_status(model.status),
+                    _support_model_status(model),
                 ))
         ],
         "last_result": {
@@ -1870,12 +1928,33 @@ def _normalize_models(
         if isinstance(item, Mapping):
             name = _clean_text(item.get("name"), localized_string(
                 "default.model.name", locale=locale))
+            install_state = str(item.get("install_state", "unknown"))
+            if install_state not in MODEL_INSTALL_STATES:
+                install_state = "unknown"
+            required = item.get("required") is True
+            warm = install_state == "installed" and item.get("warm") is True
+            if install_state == "unknown":
+                status = _clean_text(item.get("status"), localized_string(
+                    "default.status.unknown", locale=locale))
+                detail = _clean_text(item.get("detail"), "")
+            else:
+                state_key = (
+                    "ready" if warm
+                    else "optional" if (
+                        install_state == "not_installed" and not required)
+                    else install_state)
+                status = localized_string(
+                    f"models.state.{state_key}", locale=locale)
+                detail = localized_string(
+                    f"models.detail.{state_key}", locale=locale)
             models.append(ModelStatus(
                 name=name,
                 role=_clean_text(item.get("role"), ""),
-                status=_clean_text(item.get("status"), localized_string(
-                    "default.status.unknown", locale=locale)),
-                detail=_clean_text(item.get("detail"), ""),
+                status=status,
+                detail=detail,
+                install_state=install_state,
+                required=required,
+                warm=warm,
             ))
         elif isinstance(item, str) and item.strip():
             models.append(ModelStatus(
@@ -2549,16 +2628,62 @@ def _status_contains(value: str, words: Sequence[str]) -> bool:
     return any(word in normalized for word in words)
 
 
-def _models_ready(models: Sequence[ModelStatus]) -> bool:
-    return any(_status_contains(model.status, ("ready", "running", "installed"))
-               or "warm path observed" in model.detail.casefold()
-               for model in models)
+MODEL_BROKEN_STATES = frozenset({"not_installed", "failed", "mismatch"})
+
+
+def _models_readiness(models: Sequence[ModelStatus]) -> str:
+    """Return ready, preparing or missing for the models dictation needs."""
+    required = [model for model in models if model.required]
+    if any(model.install_state in MODEL_BROKEN_STATES for model in required):
+        return "missing"
+    if required and all(
+            model.install_state == "installed" for model in required):
+        return "ready"
+    return "preparing"
+
+
+def model_pill_tone(model: ModelStatus) -> str:
+    """Green for installed, quiet for a choice or a check, amber for faults."""
+    if model.install_state == "installed":
+        return "good"
+    if model.install_state == "checking" or (
+            model.install_state == "not_installed" and not model.required):
+        return "neutral"
+    return "warn"
+
+
+PERMISSIONS = ("microphone", "accessibility", "input_monitoring")
+
+
+def _permission_states(
+    *, microphone_status: str, accessibility_status: str,
+    input_monitoring_status: str,
+) -> dict[str, str]:
+    """Read the runtime's exact permission words as granted/missing/checking.
+
+    The microphone reports Ready, Starting or Unavailable; the two event
+    permissions report Granted, Needs attention or Unknown. Anything else is
+    not evidence either way.
+    """
+    microphone = microphone_status.strip().casefold()
+    states = {
+        "microphone": (
+            "granted" if microphone == "ready"
+            else "missing" if microphone == "unavailable" else "checking"),
+    }
+    for key, value in (("accessibility", accessibility_status),
+                       ("input_monitoring", input_monitoring_status)):
+        normalized = value.strip().casefold()
+        states[key] = (
+            "granted" if normalized == "granted"
+            else "missing" if normalized == "needs attention"
+            else "checking")
+    return states
 
 
 def _build_onboarding_steps(
     *,
-    microphone_status: str,
-    accessibility_status: str,
+    permissions: Mapping[str, str],
     hotkey_label: str,
     hotkey_practiced: bool,
     models: Sequence[ModelStatus],
@@ -2568,18 +2693,19 @@ def _build_onboarding_steps(
     def copy(key: str, **values: Any) -> str:
         return localized_string(key, locale=locale, **values)
 
-    microphone_ready = _status_contains(
-        microphone_status, ("ready", "granted", "available"))
-    accessibility_ready = _status_contains(
-        accessibility_status, ("ready", "granted", "trusted"))
-    permissions_ready = microphone_ready and accessibility_ready
-    model_ready = _models_ready(models)
+    permissions_ready = all(
+        permissions.get(key) == "granted" for key in PERMISSIONS)
+    permissions_missing = any(
+        permissions.get(key) == "missing" for key in PERMISSIONS)
+    model_readiness = _models_readiness(models)
+    model_ready = model_readiness == "ready"
     return (
         OnboardingStep(
             "permissions", copy("onboarding.permissions.title"),
             copy("onboarding.permissions.detail"),
-            copy("onboarding.status.done") if permissions_ready else copy(
-                "onboarding.status.attention"),
+            copy("onboarding.status.done") if permissions_ready
+            else copy("onboarding.status.attention") if permissions_missing
+            else copy("onboarding.status.checking"),
             permissions_ready,
         ),
         OnboardingStep(
@@ -2592,8 +2718,10 @@ def _build_onboarding_steps(
         OnboardingStep(
             "models", copy("onboarding.models.title"),
             copy("onboarding.models.detail"),
-            copy("onboarding.status.done") if model_ready else copy(
-                "onboarding.status.warming"),
+            copy("onboarding.status.done") if model_ready
+            else copy("onboarding.status.attention")
+            if model_readiness == "missing"
+            else copy("onboarding.status.warming"),
             model_ready,
         ),
         OnboardingStep(
@@ -2611,6 +2739,7 @@ def onboarding_presentation(
     *,
     acknowledged: bool,
     locale: str = "en",
+    permission_missing: bool = True,
 ) -> OnboardingPresentation:
     """Build the active-step or explicit completion presentation."""
 
@@ -2635,15 +2764,18 @@ def onboarding_presentation(
             action_help=localized_string(
                 "onboarding.action.finish.help", locale=locale),
         )
+    # While permissions are still being checked there is nothing to grant.
+    open_settings = next_step.key == "permissions" and permission_missing
     action_key = {
-        "permissions": "onboarding.action.open_system_settings",
+        "permissions": ("onboarding.action.open_system_settings"
+                        if open_settings else "onboarding.action.continue"),
         "hotkey": "onboarding.action.hotkey",
         "models": "onboarding.action.models",
         "first_dictation": "onboarding.action.first_dictation",
     }.get(next_step.key, "onboarding.action.continue")
     help_key = (
         "onboarding.action.open_system_settings.help"
-        if next_step.key == "permissions"
+        if open_settings
         else "onboarding.action.help"
     )
     return OnboardingPresentation(
@@ -2664,8 +2796,7 @@ def onboarding_presentation(
 def _build_degraded_issues(
     *,
     service_status: str,
-    microphone_status: str,
-    accessibility_status: str,
+    permissions: Mapping[str, str],
     models: Sequence[ModelStatus],
     locale: str = "en",
 ) -> tuple[DegradedIssue, ...]:
@@ -2678,24 +2809,26 @@ def _build_degraded_issues(
         issues.append(DegradedIssue(
             "service", copy("issue.service.title"),
             copy("issue.service.detail")))
-    if _status_contains(microphone_status, (
-            "needs attention", "denied", "missing", "failed", "unavailable")):
-        issues.append(DegradedIssue(
-            "microphone", copy("issue.microphone.title"),
-            copy("issue.microphone.detail")))
-    if _status_contains(accessibility_status, (
-            "needs attention", "denied", "not granted", "failed", "unavailable")):
-        issues.append(DegradedIssue(
-            "accessibility", copy("issue.accessibility.title"),
-            copy("issue.accessibility.detail")))
-    if models and not _models_ready(models):
+    for key in PERMISSIONS:
+        if permissions.get(key) == "missing":
+            issues.append(DegradedIssue(
+                key, copy(f"issue.{key}.title"),
+                copy(f"issue.{key}.detail")))
+    missing = [
+        model.name for model in models
+        if model.required and model.install_state in MODEL_BROKEN_STATES]
+    if missing:
         issues.append(DegradedIssue(
             "models", copy("issue.models.title"),
-            copy("issue.models.detail"),
+            copy("issue.models.detail", models=", ".join(missing)),
         ))
-    elif models:
-        unavailable = [model.name for model in models if _status_contains(
-            model.status, ("failed", "missing", "unavailable"))]
+    else:
+        # An optional model that was never installed is a choice, not a
+        # fault; only a damaged optional install is worth a warning.
+        unavailable = [
+            model.name for model in models
+            if not model.required
+            and model.install_state in {"failed", "mismatch"}]
         if unavailable:
             issues.append(DegradedIssue(
                 "fallback", copy("issue.fallback.title"),
@@ -3050,6 +3183,7 @@ def _status_presentation(
     outbox_count: int,
     service_status: str,
     degraded_issues: Sequence[DegradedIssue],
+    models_preparing: bool = False,
     locale: str = "en",
 ) -> tuple[str, str, str]:
     def copy(key: str, **values: Any) -> str:
@@ -3080,7 +3214,8 @@ def _status_presentation(
         return (
             "degraded", copy("overview.status.degraded.title"),
             errors[0].detail)
-    if _status_contains(service_status, ("starting", "warming", "unknown")):
+    if models_preparing or _status_contains(
+            service_status, ("starting", "warming", "unknown")):
         return (
             "starting", copy("overview.status.starting.title"),
             copy("overview.status.starting.detail"))
@@ -3188,6 +3323,12 @@ def normalize_snapshot(
         source.get("microphone_status"), unknown_status)
     accessibility_status = _clean_text(
         source.get("accessibility_status"), unknown_status)
+    input_monitoring_status = _clean_text(
+        source.get("input_monitoring_status"), unknown_status)
+    permissions = _permission_states(
+        microphone_status=microphone_status,
+        accessibility_status=accessibility_status,
+        input_monitoring_status=input_monitoring_status)
     models = _normalize_models(source.get("models"), locale=locale)
     model_wallet_advisory = _model_wallet_advisory_copy(
         source.get("model_wallet_shadow"), locale=locale)
@@ -3202,8 +3343,7 @@ def normalize_snapshot(
         or successful_dictation
         or _status_contains(capture_state, ("listen", "record", "captur")))
     onboarding_steps = _build_onboarding_steps(
-        microphone_status=microphone_status,
-        accessibility_status=accessibility_status,
+        permissions=permissions,
         hotkey_label=hotkey_label,
         hotkey_practiced=hotkey_practiced,
         models=models,
@@ -3212,8 +3352,7 @@ def normalize_snapshot(
     )
     degraded_issues = _build_degraded_issues(
         service_status=service_status,
-        microphone_status=microphone_status,
-        accessibility_status=accessibility_status,
+        permissions=permissions,
         models=models,
         locale=locale,
     )
@@ -3224,6 +3363,8 @@ def normalize_snapshot(
         outbox_count=outbox_count,
         service_status=service_status,
         degraded_issues=degraded_issues,
+        models_preparing=(
+            bool(models) and _models_readiness(models) == "preparing"),
         locale=locale,
     )
     normalized_latency = max(0.0, latency) if latency is not None else None
@@ -3264,6 +3405,9 @@ def normalize_snapshot(
         service_status=service_status,
         microphone_status=microphone_status,
         accessibility_status=accessibility_status,
+        input_monitoring_status=input_monitoring_status,
+        missing_permissions=tuple(
+            key for key in PERMISSIONS if permissions[key] == "missing"),
         version=_clean_text(
             source.get("version"), localized_string(
                 "default.build.development", locale=locale)),
@@ -3313,12 +3457,22 @@ def normalize_snapshot(
     )
 
 
+# How long a success or info notice outlives the status refresh. Errors have
+# no lifetime: they stay until the next user action replaces them.
+NOTICE_LIFETIME_SECONDS = 8.0
+
+
 class WhisperFaceViewModel:
     """Pure state/actions seam between the runtime and the native window."""
 
-    def __init__(self, actions: GUIActions, *, locale: str = "en"):
+    def __init__(self, actions: GUIActions, *, locale: str = "en",
+                 clock: Callable[[], float] = time.monotonic):
         self.actions = actions
         self.locale = resolve_locale(locale)
+        self._clock = clock
+        self._notice_issued_at = clock()
+        self._status_error_notice = ""
+        self._issue_notice = ("", "")
         self.state = GUIState()
         self._onboarding_acknowledged = False
         self._hotkey_practiced = False
@@ -3328,6 +3482,29 @@ class WhisperFaceViewModel:
         self._inspected_demonstration_ids: set[str] = set()
         self._revealed_demonstration_ids: set[str] = set()
         self.refresh()
+
+    @property
+    def state(self) -> GUIState:
+        return self._state
+
+    @state.setter
+    def state(self, value: GUIState) -> None:
+        # Every write goes through here, so a new notice is stamped wherever
+        # it was set, including by the window controller.
+        previous = self.__dict__.get("_state")
+        if previous is None or (value.notice, value.notice_level) != (
+                previous.notice, previous.notice_level):
+            self._notice_issued_at = self._clock()
+        self._state = value
+
+    def _surviving_notice(self) -> tuple[str, str]:
+        notice, level = self.state.notice, self.state.notice_level
+        if not notice or notice == self._status_error_notice:
+            return "", "info"
+        if (level != "error" and self._clock() - self._notice_issued_at
+                >= NOTICE_LIFETIME_SECONDS):
+            return "", "info"
+        return notice, level
 
     def localized(self, key: str, **values: Any) -> str:
         return localized_string(key, locale=self.locale, **values)
@@ -3351,19 +3528,31 @@ class WhisperFaceViewModel:
                         ("listen", "record", "captur"))):
                 self._hotkey_practiced = True
             snapshot["hotkey_practiced"] = self._hotkey_practiced
+            notice, notice_level = self._surviving_notice()
             self.state = normalize_snapshot(
                 snapshot,
                 section=self.state.section,
                 verification=self.state.verification,
+                notice=notice,
+                notice_level=notice_level,
                 onboarding_acknowledged=self._onboarding_acknowledged,
                 settings_pane=self.state.settings_pane,
                 settings=self.state.settings,
                 locale=self.locale,
             )
+            self._status_error_notice = ""
+            # An issue's own notice is only true while that issue is reported.
+            issue_key, issue_detail = self._issue_notice
+            if issue_detail and self.state.notice == issue_detail and (
+                    issue_key not in {
+                        issue.key for issue in self.state.degraded_issues}):
+                self.state = replace(self.state, notice="", notice_level="info")
+                self._issue_notice = ("", "")
         except Exception as error:
+            self._status_error_notice = self.localized(
+                "overview.notice.status.error", error=error)
             self.state = replace(
-                self.state, notice=self.localized(
-                    "overview.notice.status.error", error=error),
+                self.state, notice=self._status_error_notice,
                 notice_level="error")
         return self.state
 
@@ -3661,6 +3850,7 @@ class WhisperFaceViewModel:
         self.state = replace(
             self.state, section=issue.route, notice=issue.detail,
             notice_level="error" if issue.severity == "error" else "info")
+        self._issue_notice = (issue.key, issue.detail)
         return self.state
 
     def choose_face(self, face: str) -> GUIState:
@@ -4554,16 +4744,16 @@ class WhisperFaceViewModel:
         return self.state
 
     def permission_recovery_needed(self) -> bool:
-        """True only while the evidence-backed permission step is incomplete."""
-        return bool(self.state.onboarding_steps) and not bool(
-            self.state.onboarding_steps[0].complete)
+        """True only while the runtime reports a permission as missing."""
+        return bool(self.state.missing_permissions)
 
     def open_system_settings(self) -> GUIState:
-        """Open the user-controlled macOS permission surface without guessing a grant."""
+        """Open the pane of the first missing permission; never grant one."""
         if not self.permission_recovery_needed():
             return self.state
         try:
-            self.actions.open_system_settings()
+            self.actions.open_system_settings(
+                self.state.missing_permissions[0])
             self.state = replace(
                 self.state,
                 notice=self.localized(
@@ -4765,14 +4955,17 @@ try:  # The view-model above remains usable in headless test environments.
         NSBoxCustom,
         NSButton,
         NSColor,
+        NSColorSpace,
         NSControlStateValueOff,
         NSControlStateValueOn,
+        NSAppearance,
         NSAppearanceNameAqua,
         NSAppearanceNameDarkAqua,
         NSEvent,
         NSEventMaskFlagsChanged,
         NSEventMaskKeyDown,
         NSEventModifierFlagCommand,
+        NSEventModifierFlagShift,
         NSFont,
         NSFontAttributeName,
         NSFontDescriptorSystemDesignRounded,
@@ -4788,6 +4981,8 @@ try:  # The view-model above remains usable in headless test environments.
         NSLayoutConstraint,
         NSLineBorder,
         NSMakeRect,
+        NSMenu,
+        NSMenuItem,
         NSNoBorder,
         NSNoTitle,
         NSProgressIndicator,
@@ -4863,8 +5058,13 @@ if APPKIT_AVAILABLE:
 
     # The notice band reserves one 11pt line; a two-line failure message
     # grows upward into the column's bottom padding rather than pushing the
-    # page and clipping its last row at the 880x600 minimum.
+    # page and clipping its last row at the window minimum.
     NOTICE_LINE_HEIGHT = 16.0
+    # Advanced is the tallest page (536pt) and sits under 104pt of chrome;
+    # 8pt more leaves room for a two-line notice. The native smoke fails if
+    # any page's content falls below its page at this minimum.
+    WINDOW_MIN_SIZE = (880.0, 648.0)
+    WINDOW_DEFAULT_SIZE = (1000.0, 680.0)
     NOTICE_WRAPPED_HEIGHT = 28.0
 
     # Mirrored from GUIState by render() so jelly springs on native controls
@@ -5241,6 +5441,10 @@ if APPKIT_AVAILABLE:
         palette = palette_for_appearance(dark)
         return _theme_color(palette.accent if dark else AMBER_TEXT_ON_LIGHT)
 
+    def _error_text_color(dark: bool) -> Any:
+        palette = palette_for_appearance(dark)
+        return _theme_color(palette.error if dark else ERROR_TEXT_ON_LIGHT)
+
     def _accessible(view: Any, label: str, help_text: str = "") -> Any:
         """Apply explicit VoiceOver copy without depending on visual text."""
         try:
@@ -5376,6 +5580,8 @@ if APPKIT_AVAILABLE:
             self.themed: dict[str, list[Any]] = {}
             self.timer = None
             self.defaults = None
+            # Set only by the native smoke: answers dialogs without a modal.
+            self.modal_responder: Callable[[Any], int] | None = None
             self._face_images: dict[tuple[str, bool], Any] = {}
             self._onboarding_stage: str | None = None
             self._onboarding_presentation: OnboardingPresentation | None = None
@@ -5464,14 +5670,21 @@ if APPKIT_AVAILABLE:
         @objc.python_method
         def _set_pill_tone(self, pill: Any, tone: str, dark: bool) -> None:
             palette = palette_for_appearance(dark)
-            fill = palette.brand if tone == "good" else palette.accent
+            fill = (palette.brand if tone == "good"
+                    else palette.ink_soft if tone == "neutral"
+                    else palette.accent)
             text_color = (
                 _brand_text_color(dark) if tone == "good"
+                else _theme_color(palette.ink_soft) if tone == "neutral"
                 else _amber_text_color(dark))
+            # A quiet pill draws grey ink on a grey tint; at the 16% light
+            # tint that pair falls just under AA, 12% clears it.
+            alpha = (0.30 if dark
+                     else 0.12 if tone == "neutral" else 0.16)
             layer = pill.layer()
             if layer is not None:
                 layer.setBackgroundColor_(
-                    _theme_color(fill, 0.30 if dark else 0.16).CGColor())
+                    _theme_color(fill, alpha).CGColor())
             pill.setTextColor_(text_color)
 
         @objc.python_method
@@ -5960,12 +6173,17 @@ if APPKIT_AVAILABLE:
                      NSWindowStyleMaskMiniaturizable |
                      NSWindowStyleMaskResizable)
             self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-                NSMakeRect(0, 0, 1000, 640), style,
+                NSMakeRect(0, 0, *WINDOW_DEFAULT_SIZE), style,
                 NSBackingStoreBuffered, False)
+            # The controller is a plain NSObject, not an NSWindowController,
+            # so AppKit would free the window on close while self.window
+            # still points at it; the next open would message freed memory.
+            self.window.setReleasedWhenClosed_(False)
             self.window.setTitle_(APP_NAME)
             self.window.setDelegate_(self)
-            self.window.setContentMinSize_((880.0, 600.0))
+            self.window.setContentMinSize_(WINDOW_MIN_SIZE)
             self.window.center()
+            self._install_main_menu()
             root = self.window.contentView()
             root.setWantsLayer_(True)
 
@@ -6757,8 +6975,8 @@ if APPKIT_AVAILABLE:
             personalize_key_views: list[Any] = list(picker.chips)
             # Language leads the list: it decides which recognizer runs, so
             # it outranks every personalization below it. It shares the same
-            # grouped card and 44pt rhythm as the rest — at the 880x600
-            # minimum this pane has room for exactly six rows, which is why
+            # grouped card and 44pt rhythm as the rest — at the window
+            # minimum this pane has room for six rows, which is why
             # "Voice modes" (a reference table about the capture key) now
             # sits in Controls beside the key it describes.
             rows = (
@@ -6832,13 +7050,6 @@ if APPKIT_AVAILABLE:
                  "changeUndoHotkey:", "settings.controls.action.change",
                  "settings.accessibility.undo_hotkey.label",
                  "settings.accessibility.undo_hotkey.help"),
-                # The same action the menu bar and the bound key run. It is
-                # here as well so undo is discoverable before anyone knows a
-                # key exists for it.
-                ("undo", "settings.controls.undo_now", "undoLastDictation:",
-                 "settings.controls.action.undo",
-                 "settings.accessibility.undo.label",
-                 "settings.accessibility.undo.help"),
                 # Voice modes are six modifier combinations of the capture
                 # key, so they belong beside the key rather than under
                 # Personalize, where they were only ever a reference table.
@@ -7404,7 +7615,7 @@ if APPKIT_AVAILABLE:
                 "processing": _amber_text_color(dark),
                 "starting": _amber_text_color(dark),
                 "recovery": _amber_text_color(dark),
-                "degraded": _theme_color(phase_palette.error),
+                "degraded": _error_text_color(dark),
                 "paused": _theme_color(phase_palette.ink_soft),
             }
             self.dynamic["overview_phase"].setTextColor_(
@@ -7488,6 +7699,7 @@ if APPKIT_AVAILABLE:
                 state.onboarding_steps,
                 acknowledged=state.onboarding_acknowledged,
                 locale=self.view_model.locale,
+                permission_missing=bool(state.missing_permissions),
             )
             self._onboarding_presentation = presentation
             self.dynamic["onboarding_card"].setHidden_(
@@ -7669,9 +7881,6 @@ if APPKIT_AVAILABLE:
                             hotkey=state.undo_hotkey_label)
                     if state.undo_hotkey_label
                     else self._l("settings.controls.undo.unset")),
-                "undo": (self._l("settings.controls.undo_now.ready")
-                         if state.undo_available
-                         else self._l("settings.controls.undo_now.none")),
             }
             for key, value in setting_summaries.items():
                 set_accessible_text(
@@ -7724,9 +7933,6 @@ if APPKIT_AVAILABLE:
                 label=self._l("settings.accessibility.recent.label"))
             self.dynamic["recent_dictations_browse"].setEnabled_(
                 state.recent_dictations)
-            # Undo offers itself only while there is something to restore.
-            self.dynamic["settings_undo_button"].setEnabled_(
-                state.undo_available)
             self.dynamic["settings_tones_button"].setEnabled_(
                 bool(settings.app_tones))
             self.dynamic["settings_snippets_button"].setEnabled_(True)
@@ -7783,11 +7989,7 @@ if APPKIT_AVAILABLE:
                         " · ".join(part for part in (model.role, model.detail) if part))
                     status_label.setStringValue_(model.status)
                     self._set_pill_tone(
-                        status_label,
-                        "good" if _status_contains(
-                            model.status, ("ready", "running", "installed"))
-                        else "warn",
-                        dark)
+                        status_label, model_pill_tone(model), dark)
                     self._fit_pill(status_label)
                     sync_accessibility(
                         name, model.name,
@@ -7903,7 +8105,7 @@ if APPKIT_AVAILABLE:
                 )
             notice_palette = palette_for_appearance(dark)
             notice_color = (
-                _theme_color(notice_palette.error)
+                _error_text_color(dark)
                 if state.notice_level == "error"
                 else _brand_text_color(dark)
                 if state.notice_level == "success"
@@ -7950,20 +8152,94 @@ if APPKIT_AVAILABLE:
             scroll.setBorderType_(1)
             editor = NSTextView.alloc().initWithFrame_(
                 NSMakeRect(0, 0, frame.size.width, frame.size.height))
+            # Editors hold exact strings (vocabulary the spell checker does
+            # not know, code and shell snippets), so nothing rewrites them.
+            editor.setRichText_(False)
+            editor.setAutomaticQuoteSubstitutionEnabled_(False)
+            editor.setAutomaticDashSubstitutionEnabled_(False)
+            editor.setAutomaticTextReplacementEnabled_(False)
+            editor.setAutomaticSpellingCorrectionEnabled_(False)
+            editor.setAllowsUndo_(True)
             editor.setString_(value)
             _accessible(editor, label, help_text)
             scroll.setDocumentView_(editor)
             return scroll, editor
 
         @objc.python_method
+        def _install_main_menu(self) -> None:
+            """Give the window the standard Edit and Window key equivalents.
+
+            The runtime is an accessory app, so this menu is never drawn, but
+            AppKit still routes Cmd-W, Cmd-M and the edit shortcuts through
+            it; without one they do nothing in the window and its editors.
+            """
+            app = NSApplication.sharedApplication()
+            if app.mainMenu() is not None:
+                return
+            main = NSMenu.alloc().initWithTitle_(APP_NAME)
+            command = NSEventModifierFlagCommand
+            for title_key, entries in (
+                ("menu.edit", (
+                    ("menu.edit.undo", "undo:", "z", command),
+                    ("menu.edit.redo", "redo:", "z",
+                     command | NSEventModifierFlagShift),
+                    ("menu.edit.cut", "cut:", "x", command),
+                    ("menu.edit.copy", "copy:", "c", command),
+                    ("menu.edit.paste", "paste:", "v", command),
+                    ("menu.edit.select_all", "selectAll:", "a", command),
+                )),
+                ("menu.window", (
+                    ("menu.window.close", "performClose:", "w", command),
+                    ("menu.window.minimize", "performMiniaturize:", "m",
+                     command),
+                )),
+            ):
+                submenu = NSMenu.alloc().initWithTitle_(self._l(title_key))
+                for item_key, action, key, mask in entries:
+                    item = NSMenuItem.alloc() \
+                        .initWithTitle_action_keyEquivalent_(
+                            self._l(item_key), action, key)
+                    item.setKeyEquivalentModifierMask_(mask)
+                    submenu.addItem_(item)
+                holder = NSMenuItem.alloc() \
+                    .initWithTitle_action_keyEquivalent_(
+                        self._l(title_key), None, "")
+                holder.setSubmenu_(submenu)
+                main.addItem_(holder)
+            app.setMainMenu_(main)
+
+        @objc.python_method
+        def _run_modal(self, alert: Any) -> int:
+            """Run one dialog; the native smoke answers through a responder."""
+            responder = getattr(self, "modal_responder", None)
+            if responder is not None:
+                return int(responder(alert))
+            return int(alert.runModal())
+
+        @objc.python_method
         def _confirm(self, title: str, message: str,
-                     primary: str) -> bool:
+                     primary: str, *, destructive: bool = True) -> bool:
             alert = NSAlert.alloc().init()
             alert.setMessageText_(title)
             alert.setInformativeText_(message)
             alert.addButtonWithTitle_(primary)
             alert.addButtonWithTitle_(self._l("settings.action.cancel"))
-            return alert.runModal() == 1000
+            self._default_to_safe(
+                alert, destructive=0, safe=1, mark_destructive=destructive)
+            return self._run_modal(alert) == 1000
+
+        @objc.python_method
+        def _default_to_safe(self, alert: Any, *, destructive: int,
+                             safe: int, mark_destructive: bool = True) -> None:
+            """Return picks the safe button; the destructive one needs a click."""
+            buttons = alert.buttons()
+            buttons[destructive].setKeyEquivalent_("")
+            try:
+                buttons[destructive].setHasDestructiveAction_(
+                    mark_destructive)
+            except Exception:
+                pass
+            buttons[safe].setKeyEquivalent_("\r")
 
         def settingsPaneChanged_(self, sender: Any) -> None:
             self.view_model.select_settings_pane(
@@ -8012,7 +8288,7 @@ if APPKIT_AVAILABLE:
             alert.setAccessoryView_(form)
             alert.addButtonWithTitle_(self._l("settings.action.save"))
             alert.addButtonWithTitle_(self._l("settings.action.cancel"))
-            if alert.runModal() == 1000:
+            if self._run_modal(alert) == 1000:
                 selected = tones[app_popup.indexOfSelectedItem()]
                 self.view_model.set_app_tone(
                     selected.bundle,
@@ -8033,39 +8309,55 @@ if APPKIT_AVAILABLE:
 
         @objc.python_method
         def _edit_snippet(self, snippet: SnippetSetting | None) -> None:
-            alert = NSAlert.alloc().init()
-            alert.setMessageText_(self._l(
-                "settings.dialog.snippet.edit" if snippet else
-                "settings.dialog.snippet.add"))
-            form = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 500, 200))
-            form.addSubview_(_label(
-                self._l("settings.dialog.snippet.name"),
-                NSMakeRect(0, 177, 500, 18), size=11, color=_SECONDARY))
-            name = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 145, 500, 28))
-            name.setStringValue_(snippet.name if snippet else "")
-            name.setEditable_(snippet is None)
-            _accessible(
-                name,
-                self._l("settings.dialog.snippet.name"),
-                self._l("settings.dialog.snippet.name.help"))
-            form.addSubview_(name)
-            form.addSubview_(_label(
-                self._l("settings.dialog.snippet.value"),
-                NSMakeRect(0, 120, 500, 18), size=11, color=_SECONDARY))
-            scroll, editor = self._text_editor(
-                NSMakeRect(0, 0, 500, 116), snippet.text if snippet else "",
-                label=self._l("settings.dialog.snippet.value"),
-                help_text=self._l(
-                    "settings.dialog.snippet.value.help"))
-            form.addSubview_(scroll)
-            alert.setAccessoryView_(form)
-            alert.addButtonWithTitle_(self._l("settings.action.save"))
-            alert.addButtonWithTitle_(self._l("settings.action.cancel"))
-            if alert.runModal() == 1000:
-                self.view_model.save_snippet(
-                    str(name.stringValue()), str(editor.string()),
+            typed_name = snippet.name if snippet else ""
+            typed_text = snippet.text if snippet else ""
+            error = ""
+            # A refused save reopens the editor with what was typed and the
+            # reason, so nothing the user wrote is lost to a closed dialog.
+            while True:
+                alert = NSAlert.alloc().init()
+                alert.setMessageText_(self._l(
+                    "settings.dialog.snippet.edit" if snippet else
+                    "settings.dialog.snippet.add"))
+                if error:
+                    alert.setInformativeText_(error)
+                form = NSView.alloc().initWithFrame_(
+                    NSMakeRect(0, 0, 500, 200))
+                form.addSubview_(_label(
+                    self._l("settings.dialog.snippet.name"),
+                    NSMakeRect(0, 177, 500, 18), size=11, color=_SECONDARY))
+                name = NSTextField.alloc().initWithFrame_(
+                    NSMakeRect(0, 145, 500, 28))
+                name.setStringValue_(typed_name)
+                name.setEditable_(snippet is None)
+                _accessible(
+                    name,
+                    self._l("settings.dialog.snippet.name"),
+                    self._l("settings.dialog.snippet.name.help"))
+                form.addSubview_(name)
+                form.addSubview_(_label(
+                    self._l("settings.dialog.snippet.value"),
+                    NSMakeRect(0, 120, 500, 18), size=11, color=_SECONDARY))
+                scroll, editor = self._text_editor(
+                    NSMakeRect(0, 0, 500, 116), typed_text,
+                    label=self._l("settings.dialog.snippet.value"),
+                    help_text=self._l(
+                        "settings.dialog.snippet.value.help"))
+                form.addSubview_(scroll)
+                alert.setAccessoryView_(form)
+                alert.addButtonWithTitle_(self._l("settings.action.save"))
+                alert.addButtonWithTitle_(self._l("settings.action.cancel"))
+                if self._run_modal(alert) != 1000:
+                    return
+                typed_name = str(name.stringValue())
+                typed_text = str(editor.string())
+                state = self.view_model.save_snippet(
+                    typed_name, typed_text,
                     expected_original=(snippet.text if snippet else None))
                 self.render()
+                if state.notice_level != "error":
+                    return
+                error = state.notice
 
         def editSnippets_(self, _sender: Any) -> None:
             snippets = self.view_model.state.settings.snippets
@@ -8086,7 +8378,7 @@ if APPKIT_AVAILABLE:
             alert.addButtonWithTitle_(self._l("settings.action.add"))
             alert.addButtonWithTitle_(self._l("settings.action.delete"))
             alert.addButtonWithTitle_(self._l("settings.action.cancel"))
-            response = alert.runModal()
+            response = self._run_modal(alert)
             selected = (snippets[chooser.indexOfSelectedItem()]
                         if snippets else None)
             if response == 1000 and selected is not None:
@@ -8103,40 +8395,50 @@ if APPKIT_AVAILABLE:
 
         def editVocabulary_(self, _sender: Any) -> None:
             settings = self.view_model.state.settings
-            alert = NSAlert.alloc().init()
-            alert.setMessageText_(self._l(
-                "settings.dialog.vocabulary.title"))
-            alert.setInformativeText_(self._l(
-                "settings.dialog.vocabulary.message"))
-            form = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 520, 220))
-            form.addSubview_(_label(
-                self._l("settings.dialog.vocabulary.terms"),
-                NSMakeRect(0, 198, 250, 18), size=11, color=_SECONDARY))
-            form.addSubview_(_label(
-                self._l("settings.dialog.vocabulary.bans"),
-                NSMakeRect(270, 198, 250, 18), size=11, color=_SECONDARY))
-            term_scroll, term_editor = self._text_editor(
-                NSMakeRect(0, 0, 250, 194),
-                "\n".join(settings.manual_vocabulary),
-                label=self._l("settings.dialog.vocabulary.terms"),
-                help_text=self._l(
-                    "settings.dialog.vocabulary.terms.help"))
-            ban_scroll, ban_editor = self._text_editor(
-                NSMakeRect(270, 0, 250, 194),
-                "\n".join(settings.banned_vocabulary),
-                label=self._l("settings.dialog.vocabulary.bans"),
-                help_text=self._l(
-                    "settings.dialog.vocabulary.bans.help"))
-            form.addSubview_(term_scroll)
-            form.addSubview_(ban_scroll)
-            alert.setAccessoryView_(form)
-            alert.addButtonWithTitle_(self._l("settings.action.save"))
-            alert.addButtonWithTitle_(self._l("settings.action.cancel"))
-            if alert.runModal() == 1000:
-                self.view_model.save_vocabulary(
-                    str(term_editor.string()).splitlines(),
-                    str(ban_editor.string()).splitlines())
+            typed_terms = "\n".join(settings.manual_vocabulary)
+            typed_bans = "\n".join(settings.banned_vocabulary)
+            error = ""
+            # A refused save reopens the editor with both lists as typed.
+            while True:
+                alert = NSAlert.alloc().init()
+                alert.setMessageText_(self._l(
+                    "settings.dialog.vocabulary.title"))
+                alert.setInformativeText_(error or self._l(
+                    "settings.dialog.vocabulary.message"))
+                form = NSView.alloc().initWithFrame_(
+                    NSMakeRect(0, 0, 520, 220))
+                form.addSubview_(_label(
+                    self._l("settings.dialog.vocabulary.terms"),
+                    NSMakeRect(0, 198, 250, 18), size=11, color=_SECONDARY))
+                form.addSubview_(_label(
+                    self._l("settings.dialog.vocabulary.bans"),
+                    NSMakeRect(270, 198, 250, 18), size=11,
+                    color=_SECONDARY))
+                term_scroll, term_editor = self._text_editor(
+                    NSMakeRect(0, 0, 250, 194), typed_terms,
+                    label=self._l("settings.dialog.vocabulary.terms"),
+                    help_text=self._l(
+                        "settings.dialog.vocabulary.terms.help"))
+                ban_scroll, ban_editor = self._text_editor(
+                    NSMakeRect(270, 0, 250, 194), typed_bans,
+                    label=self._l("settings.dialog.vocabulary.bans"),
+                    help_text=self._l(
+                        "settings.dialog.vocabulary.bans.help"))
+                form.addSubview_(term_scroll)
+                form.addSubview_(ban_scroll)
+                alert.setAccessoryView_(form)
+                alert.addButtonWithTitle_(self._l("settings.action.save"))
+                alert.addButtonWithTitle_(self._l("settings.action.cancel"))
+                if self._run_modal(alert) != 1000:
+                    return
+                typed_terms = str(term_editor.string())
+                typed_bans = str(ban_editor.string())
+                state = self.view_model.save_vocabulary(
+                    typed_terms.splitlines(), typed_bans.splitlines())
                 self.render()
+                if state.notice_level != "error":
+                    return
+                error = state.notice
 
         def reviewCorrections_(self, _sender: Any) -> None:
             corrections = self.view_model.state.settings.corrections
@@ -8161,18 +8463,19 @@ if APPKIT_AVAILABLE:
             alert.setAccessoryView_(chooser)
             alert.addButtonWithTitle_(self._l("settings.action.review"))
             alert.addButtonWithTitle_(self._l("settings.action.done"))
-            if alert.runModal() != 1000:
+            if self._run_modal(alert) != 1000:
                 return
             selected = corrections[chooser.indexOfSelectedItem()]
             review = NSAlert.alloc().init()
             review.setMessageText_(
                 f"{selected.source} → {selected.target}")
             review.setInformativeText_(correction_review_text(
-                selected, locale=self.locale))
+                selected, locale=self.view_model.locale))
             review.addButtonWithTitle_(
                 self._l("settings.action.forget_mapping"))
             review.addButtonWithTitle_(self._l("settings.action.done"))
-            if review.runModal() == 1000:
+            self._default_to_safe(review, destructive=0, safe=1)
+            if self._run_modal(review) == 1000:
                 self.view_model.forget_learned(selected.kind, selected.key)
                 self.render()
 
@@ -8234,7 +8537,7 @@ if APPKIT_AVAILABLE:
             if candidates:
                 alert.addButtonWithTitle_(self._l("settings.action.forget"))
             alert.addButtonWithTitle_(self._l("settings.action.forget_all"))
-            response = alert.runModal()
+            response = self._run_modal(alert)
             if response == 1001:
                 self.view_model.export_acoustic_keywords()
             elif candidates and response == 1002:
@@ -8299,7 +8602,7 @@ if APPKIT_AVAILABLE:
                 alert.addButtonWithTitle_(self._l(
                     "settings.action.purge_finished"))
             alert.addButtonWithTitle_(self._l("settings.action.done"))
-            response = alert.runModal()
+            response = self._run_modal(alert)
             if not drafts:
                 return
             selected = drafts[chooser.indexOfSelectedItem()]
@@ -8348,7 +8651,7 @@ if APPKIT_AVAILABLE:
                         self._l("settings.action.copy_draft"),
                         self._l(
                             "settings.accessibility.voice_objects.copy"))
-                detail_response = detail.runModal()
+                detail_response = self._run_modal(detail)
                 if (can_compose and detail_response == 1001
                         and self._confirm(
                             self._l(
@@ -8356,7 +8659,8 @@ if APPKIT_AVAILABLE:
                             self._l(
                                 "settings.dialog.voice_objects.compose.message",
                                 sequence=selected.sequence),
-                            self._l("settings.action.compose_email"))):
+                            self._l("settings.action.compose_email"),
+                            destructive=False)):
                     receipt = self.view_model.compose_voice_object_email(
                         selected)
                     result = NSAlert.alloc().init()
@@ -8372,7 +8676,7 @@ if APPKIT_AVAILABLE:
                             "point_and_speak.result.no")))
                     result.addButtonWithTitle_(self._l(
                         "settings.action.done"))
-                    result.runModal()
+                    self._run_modal(result)
                 elif (can_copy and detail_response == 1001
                         and self._confirm(
                             self._l(
@@ -8382,7 +8686,8 @@ if APPKIT_AVAILABLE:
                             self._l(
                                 "settings.dialog.voice_objects.copy.message",
                                 sequence=selected.sequence),
-                            self._l("settings.action.copy_draft"))):
+                            self._l("settings.action.copy_draft"),
+                            destructive=False)):
                     receipt = self.view_model.copy_voice_object_draft(selected)
                     result = NSAlert.alloc().init()
                     result.setMessageText_(self._l(
@@ -8406,7 +8711,7 @@ if APPKIT_AVAILABLE:
                             self._l(
                                 "settings.accessibility.voice_objects."
                                 "clear_clipboard"))
-                    result_response = result.runModal()
+                    result_response = self._run_modal(result)
                     if receipt.state == "copied" and result_response == 1001:
                         clear_receipt = (
                             self.view_model
@@ -8424,13 +8729,14 @@ if APPKIT_AVAILABLE:
                                 "point_and_speak.result.no")))
                         clear_result.addButtonWithTitle_(self._l(
                             "settings.action.done"))
-                        clear_result.runModal()
+                        self._run_modal(clear_result)
             elif response == 1001 and self._confirm(
                     self._l("settings.dialog.voice_objects.ack.title"),
                     self._l(
                         "settings.dialog.voice_objects.ack.message",
                         sequence=selected.sequence),
-                    self._l("settings.action.acknowledge")):
+                    self._l("settings.action.acknowledge"),
+                    destructive=False):
                 self.view_model.transition_voice_object_draft(
                     selected, target="acknowledged")
             elif response == 1002 and self._confirm(
@@ -8502,10 +8808,6 @@ if APPKIT_AVAILABLE:
         def recentDictationsChanged_(self, sender: Any) -> None:
             enabled = sender.state() == NSControlStateValueOn
             self.view_model.set_recent_dictations(enabled)
-            self.render()
-
-        def undoLastDictation_(self, _sender: Any) -> None:
-            self.view_model.undo_last_dictation()
             self.render()
 
         @objc.python_method
@@ -8585,7 +8887,7 @@ if APPKIT_AVAILABLE:
                     label=self._l(
                         "settings.accessibility.capture_field.label"))
             try:
-                response = alert.runModal()
+                response = self._run_modal(alert)
             finally:
                 if monitor is not None:
                     try:
@@ -8628,9 +8930,17 @@ if APPKIT_AVAILABLE:
             if entries:
                 chooser = NSPopUpButton.alloc().initWithFrame_pullsDown_(
                     NSMakeRect(0, 0, 460, 26), False)
+                # Rows are metadata, so two can read the same, and
+                # addItemWithTitle: drops duplicates. Each item carries its
+                # entry id instead.
                 for entry in entries:
-                    chooser.addItemWithTitle_(recent_dictation_row(
-                        entry, locale=self.view_model.locale))
+                    item = NSMenuItem.alloc() \
+                        .initWithTitle_action_keyEquivalent_(
+                            recent_dictation_row(
+                                entry, locale=self.view_model.locale),
+                            None, "")
+                    item.setRepresentedObject_(str(entry.get("id") or ""))
+                    chooser.menu().addItem_(item)
                 _accessible(
                     chooser,
                     self._l("settings.accessibility.recent_list.label"),
@@ -8638,14 +8948,11 @@ if APPKIT_AVAILABLE:
                 alert.setAccessoryView_(chooser)
                 alert.addButtonWithTitle_(
                     self._l("settings.dialog.recent.reveal"))
-                alert.addButtonWithTitle_(
-                    self._l("settings.dialog.recent.insert"))
             alert.addButtonWithTitle_(self._l("settings.action.done"))
-            response = alert.runModal()
-            if chooser is None:
+            response = self._run_modal(alert)
+            if chooser is None or chooser.selectedItem() is None:
                 return
-            selected = entries[chooser.indexOfSelectedItem()]
-            entry_id = str(selected.get("id") or "")
+            entry_id = str(chooser.selectedItem().representedObject() or "")
             if response == 1000:
                 revealed = self.view_model.reveal_recent_dictation(entry_id)
                 detail = NSAlert.alloc().init()
@@ -8655,9 +8962,7 @@ if APPKIT_AVAILABLE:
                     revealed or self._l(
                         "settings.dialog.recent.revealed.gone"))
                 detail.addButtonWithTitle_(self._l("settings.action.done"))
-                detail.runModal()
-            elif response == 1001:
-                self.view_model.insert_recent_dictation(entry_id)
+                self._run_modal(detail)
             self.render()
 
         def viewModes_(self, _sender: Any) -> None:
@@ -8686,7 +8991,7 @@ if APPKIT_AVAILABLE:
             editor.setEditable_(False)
             alert.setAccessoryView_(scroll)
             alert.addButtonWithTitle_(self._l("settings.action.done"))
-            alert.runModal()
+            self._run_modal(alert)
 
         def inspectResultEvidence_(self, _sender: Any) -> None:
             try:
@@ -8709,7 +9014,7 @@ if APPKIT_AVAILABLE:
             editor.setEditable_(False)
             alert.setAccessoryView_(scroll)
             alert.addButtonWithTitle_(self._l("settings.action.done"))
-            alert.runModal()
+            self._run_modal(alert)
 
         def playRetainedSpan_(self, _sender: Any) -> None:
             self.view_model.play_retained_span()
@@ -8871,9 +9176,10 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         "flight_recorder": False,
         "capture_state": "Ready",
         "active_engine": "Smoke ASR",
-        "service_status": "Not started",
-        "microphone_status": "Not requested",
-        "accessibility_status": "Not requested",
+        "service_status": "Running",
+        "microphone_status": "Unavailable",
+        "accessibility_status": "Needs attention",
+        "input_monitoring_status": "Needs attention",
         "hotkey": "alt_r",
         "hotkey_label": "Right Option",
         "hotkey_shared_modes": [],
@@ -8883,10 +9189,16 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         "sounds": "system",
         "language": LANGUAGE_DEFAULT,
         "recent_dictations": False,
+        # Shaped like runtime_status_snapshot before the first readiness
+        # receipt: nothing inspected yet.
         "models": [{
-            "name": "Smoke ASR",
-            "role": "Construction fixture",
-            "status": "Not loaded",
+            "name": "Parakeet Unified 0.6B",
+            "role": "Primary recognition",
+            "install_state": "checking",
+            "required": True,
+            "warm": False,
+            "status": "UNAVAILABLE",
+            "detail": "Exact pinned files not resolved",
         }],
         "last_context_firewall": {
             "mode": "shadow-only",
@@ -8998,8 +9310,8 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         keyword_reads[0] += 1
         return dict(private_keyword_export)
 
-    def open_system_settings() -> None:
-        calls.append(("open_system_settings",))
+    def open_system_settings(pane: str) -> None:
+        calls.append(("open_system_settings", pane))
 
     # The runtime owns the guard rules; the smoke fixture mirrors the shape it
     # returns so the window is exercised against a real verdict, not a stub.
@@ -9061,10 +9373,17 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         set_sound_theme=set_sound_theme,
         preview_sound=lambda cue: calls.append(("preview_sound", cue)) or True,
         set_recent_dictations=set_recent_dictations,
+        # Two entries share one metadata row, as two short dictations into
+        # the same app within a minute do.
         recent_dictations=lambda: (
             {"id": "smoke-1", "at": 0.0, "age_seconds": 90.0,
-             "words": 4, "app": "Mail"},),
-        reveal_recent_dictation=lambda entry_id: None,
+             "words": 4, "app": "Mail"},
+            {"id": "smoke-2", "at": 0.0, "age_seconds": 90.0,
+             "words": 1, "app": "Slack"},
+            {"id": "smoke-3", "at": 0.0, "age_seconds": 90.0,
+             "words": 1, "app": "Slack"}),
+        reveal_recent_dictation=lambda entry_id: calls.append(
+            ("reveal_recent", entry_id)) and None,
         insert_recent_dictation=lambda entry_id: {
             "inserted": False, "reason": "unavailable"},
         undo_last_dictation=lambda: {
@@ -9242,12 +9561,30 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                     "diagnostics.accessibility.open_system_settings"),
             "permission recovery accessibility")
         controller.continueSetup_(None)
-        require(("open_system_settings",) in calls, "permission recovery")
+        require(
+            ("open_system_settings", "microphone") in calls,
+            "permission recovery opens the missing permission's pane")
         require(model.state.section == "Home", "permission recovery route")
+        require(
+            str(controller.dynamic["onboarding_action"].title()) ==
+            localized_string("onboarding.action.open_system_settings"),
+            "a missing permission offers System Settings")
+        runtime.update(
+            microphone_status="Starting",
+            accessibility_status="Granted",
+            input_monitoring_status="Granted",
+        )
+        model.refresh()
+        controller.render()
+        require(
+            str(controller.dynamic["onboarding_action"].title()) ==
+            localized_string("onboarding.action.continue"),
+            "a permission still being checked offers no System Settings")
         runtime.update(
             service_status="Running",
             microphone_status="Ready",
             accessibility_status="Granted",
+            input_monitoring_status="Granted",
         )
         model.refresh()
         controller.render()
@@ -9273,7 +9610,8 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                  if not step.complete).key == "models",
             "model readiness")
         runtime["capture_state"] = "Ready"
-        runtime["models"][0]["status"] = "Running"
+        runtime["models"][0].update(
+            install_state="installed", warm=True, status="RESOLVED")
         model.refresh()
         require(
             next(step for step in model.state.onboarding_steps
@@ -9483,13 +9821,22 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             not bool(controller.dynamic[
                 "recent_dictations_browse"].isEnabled()),
             "recent dictations stay unbrowsable while off")
+
+        def window_actions(view: Any) -> set[str]:
+            found = set()
+            if view.respondsToSelector_("action") and view.action():
+                found.add(str(view.action()))
+            for child in view.subviews():
+                found |= window_actions(child)
+            return found
+
+        # Undo and re-insert act on the frontmost app's focused field. From a
+        # window that is itself frontmost they can only act on the window,
+        # so they live in the menu bar and on the bound key instead.
         require(
-            not bool(controller.dynamic["settings_undo_button"].isEnabled()),
-            "undo offers nothing while there is nothing to undo")
-        require(
-            str(controller.dynamic["settings_undo_detail"].stringValue()) ==
-            localized_string("settings.controls.undo_now.none"),
-            "undo summary reports an empty slot")
+            not window_actions(controller.window.contentView()) & {
+                "undoLastDictation:", "insertRecentDictation:"},
+            "no window control acts on the frontmost app")
         for pane_name in SETTINGS_PANES:
             require(
                 len(controller.dynamic["settings_key_views"][pane_name]) >= 2,
@@ -9535,7 +9882,29 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             bool(controller.dynamic["recent_dictations_browse"].isEnabled()),
             "recent dictations become browsable once enabled")
         require(
-            len(model.recent_dictations()) == 1, "recent metadata reaches UI")
+            len(model.recent_dictations()) == 3, "recent metadata reaches UI")
+        recent_dialogs: list[Any] = []
+
+        def reveal_last_row(alert: Any) -> int:
+            recent_dialogs.append(alert)
+            if len(recent_dialogs) == 1:
+                alert.accessoryView().selectItemAtIndex_(2)
+            return 1000
+
+        controller.modal_responder = reveal_last_row
+        controller.browseRecentDictations_(None)
+        controller.modal_responder = None
+        require(
+            int(recent_dialogs[0].accessoryView().numberOfItems()) == 3,
+            "every recent dictation is listed, even with equal rows")
+        require(
+            ("reveal_recent", "smoke-3") in calls,
+            "recent dictation acts on the selected entry")
+        require(
+            localized_string("settings.dialog.recent.reveal") in [
+                str(button.title()) for button in recent_dialogs[0].buttons()]
+            and len(recent_dialogs[0].buttons()) == 2,
+            "recent dictations offer reveal only")
         require(
             recent_dictation_row(model.recent_dictations()[0])
             == "1 min ago · 4 words · Mail", "recent row is metadata only")
@@ -9643,6 +10012,24 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             accessible_value(editor, "accessibilityLabel") ==
             localized_string("settings.dialog.snippet.value"),
             "editor accessibility")
+        require(
+            not bool(editor.isRichText())
+            and not bool(editor.isAutomaticQuoteSubstitutionEnabled())
+            and not bool(editor.isAutomaticDashSubstitutionEnabled())
+            and not bool(editor.isAutomaticTextReplacementEnabled())
+            and not bool(editor.isAutomaticSpellingCorrectionEnabled())
+            and bool(editor.allowsUndo()),
+            "editors keep exactly what was typed")
+        menu_keys = {
+            (str(item.keyEquivalent()), str(item.action()))
+            for top in NSApplication.sharedApplication().mainMenu().itemArray()
+            if top.submenu() is not None
+            for item in top.submenu().itemArray()}
+        require(
+            {("w", "performClose:"), ("m", "performMiniaturize:"),
+             ("z", "undo:"), ("x", "cut:"), ("c", "copy:"),
+             ("v", "paste:"), ("a", "selectAll:")} <= menu_keys,
+            "window and edit shortcuts have a main menu to route through")
 
         model.set_app_tone("com.example.mail", "casual")
         model.save_snippet(
@@ -9651,6 +10038,101 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         model.save_vocabulary(["Qwen", "Parakeet"], ["Gwen"])
         model.forget_learned("correction", "gwen")
         model.forget_learned("snippet", "gwen")
+
+        def accessory_editors(alert: Any) -> tuple[list[Any], list[Any]]:
+            views = list(alert.accessoryView().subviews())
+            return (
+                [view for view in views if view.isKindOfClass_(NSTextField)
+                 and bool(view.isEditable())],
+                [view.documentView() for view in views
+                 if view.isKindOfClass_(NSScrollView)],
+            )
+
+        dialogs: list[Any] = []
+
+        def reject_then_cancel(fill: Callable[[Any], None]) -> Any:
+            def respond(alert: Any) -> int:
+                dialogs.append(alert)
+                if len(dialogs) == 1:
+                    fill(alert)
+                    return 1000
+                return 1001
+            return respond
+
+        def type_reserved_term(alert: Any) -> None:
+            accessory_editors(alert)[1][0].setString_("-reserved\nQwen")
+
+        controller.modal_responder = reject_then_cancel(type_reserved_term)
+        controller.editVocabulary_(None)
+        require(len(dialogs) == 2, "rejected vocabulary reopens the editor")
+        require(
+            str(accessory_editors(dialogs[1])[1][0].string()) ==
+            "-reserved\nQwen", "rejected vocabulary keeps the typed terms")
+        require(
+            "reserved" in str(dialogs[1].informativeText()),
+            "rejected vocabulary names the reason in the editor")
+        require(
+            not any(call[0] == "vocabulary" and "-reserved" in call[1]
+                    for call in calls),
+            "rejected vocabulary never reaches the runtime")
+        model.refresh()
+        require(
+            model.state.notice_level == "error",
+            "rejection notice survives the status refresh")
+
+        def type_long_name(alert: Any) -> None:
+            fields, editors = accessory_editors(alert)
+            fields[0].setStringValue_("n" * 81)
+            editors[0].setString_("Typed text")
+
+        dialogs.clear()
+        controller.modal_responder = reject_then_cancel(type_long_name)
+        controller._edit_snippet(None)
+        fields, editors = accessory_editors(dialogs[-1])
+        require(
+            len(dialogs) == 2 and str(fields[0].stringValue()) == "n" * 81
+            and str(editors[0].string()) == "Typed text",
+            "rejected snippet keeps what was typed")
+
+        private_settings["corrections"] = [{
+            "key": "teh", "source": "teh", "target": "the", "count": 3,
+            "kind": "correction"}]
+        model.load_settings()
+        dialogs.clear()
+
+        def review_then_forget(alert: Any) -> int:
+            dialogs.append(alert)
+            return 1000
+
+        controller.modal_responder = review_then_forget
+        controller.reviewCorrections_(None)
+        require(len(dialogs) == 2, "learned correction review opens")
+        require(
+            str(dialogs[1].messageText()) == "teh → the"
+            and bool(str(dialogs[1].informativeText())),
+            "learned correction review explains the mapping")
+        require(("forget_correction", "teh") in calls,
+                "learned correction can be forgotten")
+        require(
+            str(dialogs[1].buttons()[1].keyEquivalent()) == "\r"
+            and str(dialogs[1].buttons()[0].keyEquivalent()) == "",
+            "learned correction review defaults to Done")
+        dialogs.clear()
+        controller.modal_responder = review_then_forget
+        controller._confirm("Delete?", "Gone for good.", "Delete")
+        require(
+            str(dialogs[0].buttons()[1].keyEquivalent()) == "\r"
+            and str(dialogs[0].buttons()[0].keyEquivalent()) == "",
+            "confirmations default to the safe button")
+        require(bool(dialogs[0].buttons()[0].hasDestructiveAction()),
+                "a deletion is marked destructive")
+        controller._confirm("Send?", "Opens Mail.", "Compose",
+                            destructive=False)
+        require(
+            str(dialogs[1].buttons()[1].keyEquivalent()) == "\r"
+            and not bool(dialogs[1].buttons()[0].hasDestructiveAction()),
+            "a confirmation that destroys nothing is not marked destructive")
+        controller.modal_responder = None
         require(keyword_reads[0] == 0, "keyword inspection stays on demand")
         keyword_inspection = model.inspect_acoustic_keywords()
         require(keyword_reads[0] == 1, "explicit keyword inspection")
@@ -9687,6 +10169,100 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         }
         require(expected_calls.issubset(set(calls)), "model actions")
         require(not bool(controller.window.isVisible()), "window activation")
+        def visible_leaves(view: Any) -> list[Any]:
+            children = [child for child in view.subviews()
+                        if not bool(child.isHidden())]
+            if not children:
+                return [view]
+            return [leaf for child in children
+                    for leaf in visible_leaves(child)]
+
+        # At the window minimum every page's content stays clear of a
+        # two-line failure notice in the band below it.
+        controller.window.setContentSize_(controller.window.contentMinSize())
+        model.state = replace(
+            model.state, notice=localized_string(
+                "operation.snippet.save_failed",
+                error=localized_string("validation.snippet.name")),
+            notice_level="error")
+        controller.render()
+        root_view = controller.window.contentView()
+        for page_name, page in controller.pages.items():
+            was_hidden = bool(page.isHidden())
+            page.setHidden_(False)
+            root_view.layoutSubtreeIfNeeded()
+            notice_frame = root_view.convertRect_fromView_(
+                controller.dynamic["notice"].bounds(),
+                controller.dynamic["notice"])
+            lowest = min(
+                root_view.convertRect_fromView_(leaf.bounds(), leaf).origin.y
+                for leaf in visible_leaves(page))
+            page.setHidden_(was_hidden)
+            require(
+                lowest >= notice_frame.origin.y + notice_frame.size.height,
+                f"{page_name} fits at the window minimum")
+        controller.window.setContentSize_(WINDOW_DEFAULT_SIZE)
+
+        # In light appearance, read the colours the window actually draws: a
+        # default install's optional model is quiet, not amber, and error
+        # text (the failure notice still shown, the degraded phase) is AA.
+        def drawn_rgb(color: Any) -> tuple[float, float, float]:
+            rgb = color.colorUsingColorSpace_(
+                NSColorSpace.genericRGBColorSpace())
+            return (float(rgb.redComponent()), float(rgb.greenComponent()),
+                    float(rgb.blueComponent()))
+
+        controller.window.setAppearance_(
+            NSAppearance.appearanceNamed_(NSAppearanceNameAqua))
+        runtime["models"] = [
+            {"name": "Parakeet Unified 0.6B", "role": "Primary recognition",
+             "install_state": "installed", "required": True, "warm": True,
+             "status": "RESOLVED", "detail": "Exact pinned files resolved"},
+            {"name": "Whisper large-v3-turbo", "role": "Optional recognition",
+             "install_state": "not_installed", "required": False,
+             "warm": False, "status": "UNAVAILABLE",
+             "detail": "Exact pinned files not resolved"},
+        ]
+        runtime["microphone_status"] = "Unavailable"
+        model.refresh()
+        controller.render()
+        light = palette_for_appearance(False)
+        optional_index = next(
+            index for index, row in enumerate(model.state.models)
+            if row.install_state == "not_installed" and not row.required)
+        optional_pill = controller.dynamic["model_rows"][optional_index][3]
+        require(
+            all(abs(drawn - expected) < 0.01 for drawn, expected in zip(
+                drawn_rgb(optional_pill.textColor()), light.ink_soft)),
+            "an optional model that was never installed draws a quiet pill")
+        tint = NSColor.colorWithCGColor_(
+            optional_pill.layer().backgroundColor())
+        tint_rgb, tint_alpha = drawn_rgb(tint), float(tint.alphaComponent())
+        # Model rows sit on a card, so the tint lies over the card surface.
+        require(
+            contrast_ratio(light.ink_soft, tuple(
+                t * tint_alpha + under * (1 - tint_alpha)
+                for t, under in zip(tint_rgb, light.surface))) >= 4.5,
+            "the quiet pill's text meets AA in light appearance")
+        require(model.state.notice_level == "error", "light error notice")
+        require(model.state.status_phase == "degraded", "light degraded phase")
+        for key in ("notice", "overview_phase"):
+            drawn = drawn_rgb(controller.dynamic[key].textColor())
+            require(
+                min(contrast_ratio(drawn, light.bg),
+                    contrast_ratio(drawn, light.surface)) >= 4.5,
+                f"{key} error text meets AA in light appearance")
+        controller.window.setAppearance_(None)
+
+        # Close, then do what the next "Open Whisper Face" does short of
+        # ordering the window on screen.
+        require(
+            not bool(controller.window.isReleasedWhenClosed()),
+            "closing keeps the window")
+        controller.window.close()
+        require(not bool(controller.window.isVisible()), "closed window hidden")
+        model.refresh()
+        controller.render()
         return {
             "sections": len(SECTIONS),
             "sidebar_rows": len(controller.sidebar_rows),

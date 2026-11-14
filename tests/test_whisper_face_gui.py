@@ -62,6 +62,21 @@ from whisper_face_gui import (
 )
 import whisper_face_gui as gui_module
 
+# Model rows in the shape runtime_status_snapshot emits them.
+READY_MODEL = {
+    "name": "Parakeet Unified 0.6B", "role": "Primary recognition",
+    "install_state": "installed", "required": True, "warm": True,
+    "status": "RESOLVED",
+    "detail": "Exact pinned files resolved · Warm path observed · Runtime "
+              "readiness not attested · Capability bounds unavailable",
+}
+PREPARING_MODEL = {
+    **READY_MODEL, "install_state": "checking", "warm": False,
+    "status": "UNAVAILABLE",
+    "detail": "Exact pinned files not resolved · Runtime readiness not "
+              "attested · Capability bounds unavailable",
+}
+
 
 class SnapshotTests(unittest.TestCase):
     @staticmethod
@@ -586,8 +601,9 @@ class SnapshotTests(unittest.TestCase):
             "service_status": "Running",
             "microphone_status": "Ready",
             "accessibility_status": "Granted",
+            "input_monitoring_status": "Granted",
             "hotkey_label": "Right Option",
-            "models": [{"name": "Parakeet", "status": "Running"}],
+            "models": [READY_MODEL],
         }
         listening = normalize_snapshot({
             **common, "capture_state": "Listening",
@@ -770,10 +786,11 @@ class SnapshotTests(unittest.TestCase):
             "service_status": "Running",
             "microphone_status": "Ready",
             "accessibility_status": "Granted",
+            "input_monitoring_status": "Granted",
             "version": "Local checkout",
             "models": [
                 {"name": "Whisper", "status": "Installed"},
-                {"name": "Parakeet", "status": "Running"},
+                READY_MODEL,
             ],
             "active_engine": "Parakeet",
             "last_latency_ms": 123.4,
@@ -807,7 +824,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(payload["kind"], "whisper-face/support-snapshot")
         self.assertEqual(payload["models"], [
-            {"family": "parakeet", "status": "running"},
+            {"family": "parakeet", "status": "ready"},
             {"family": "whisper", "status": "installed"},
         ])
         self.assertEqual(payload["last_result"]["cleanup_edits_count"], 2)
@@ -859,8 +876,9 @@ class SnapshotTests(unittest.TestCase):
             "service_status": "Running",
             "microphone_status": "Ready",
             "accessibility_status": "Granted",
+            "input_monitoring_status": "Granted",
             "hotkey_label": "Right Option",
-            "models": [{"name": "Parakeet", "status": "Running"}],
+            "models": [READY_MODEL],
             "last_word_count": 7,
         })
         self.assertTrue(state.onboarding_complete)
@@ -872,9 +890,9 @@ class SnapshotTests(unittest.TestCase):
 
         first_run = normalize_snapshot({
             "service_status": "Starting",
-            "microphone_status": "Needs attention",
+            "microphone_status": "Unavailable",
             "accessibility_status": "Needs attention",
-            "models": [{"name": "Parakeet", "status": "Preparing"}],
+            "models": [PREPARING_MODEL],
         })
         self.assertFalse(first_run.onboarding_complete)
         self.assertEqual(first_run.onboarding_steps[0].key, "permissions")
@@ -886,7 +904,7 @@ class SnapshotTests(unittest.TestCase):
             "microphone_status": "Not requested",
             "accessibility_status": "Not requested",
             "capture_state": "Ready",
-            "models": [{"name": "Parakeet", "status": "Preparing"}],
+            "models": [PREPARING_MODEL],
         }
         model = WhisperFaceViewModel(GUIActions(
             status_snapshot=lambda: dict(runtime)), locale="en-US")
@@ -898,7 +916,8 @@ class SnapshotTests(unittest.TestCase):
         )
 
         runtime.update(
-            microphone_status="Ready", accessibility_status="Granted")
+            microphone_status="Ready", accessibility_status="Granted",
+            input_monitoring_status="Granted")
         self.assertEqual(
             next(step for step in model.refresh().onboarding_steps
                  if not step.complete).key,
@@ -911,7 +930,7 @@ class SnapshotTests(unittest.TestCase):
             "models",
         )
         runtime["capture_state"] = "Ready"
-        runtime["models"] = [{"name": "Parakeet", "status": "Running"}]
+        runtime["models"] = [READY_MODEL]
         self.assertEqual(
             next(step for step in model.refresh().onboarding_steps
                  if not step.complete).key,
@@ -922,7 +941,7 @@ class SnapshotTests(unittest.TestCase):
 
     def test_first_run_presentation_keeps_completion_visible_until_acknowledged(self):
         first_run = normalize_snapshot({
-            "microphone_status": "Needs attention",
+            "microphone_status": "Unavailable",
             "accessibility_status": "Needs attention",
         })
         active = onboarding_presentation(
@@ -936,8 +955,9 @@ class SnapshotTests(unittest.TestCase):
         complete = normalize_snapshot({
             "microphone_status": "Ready",
             "accessibility_status": "Granted",
+            "input_monitoring_status": "Granted",
             "hotkey_practiced": True,
-            "models": [{"name": "Parakeet", "status": "Running"}],
+            "models": [READY_MODEL],
             "last_word_count": 5,
         })
         celebration = onboarding_presentation(
@@ -950,13 +970,27 @@ class SnapshotTests(unittest.TestCase):
         self.assertFalse(onboarding_presentation(
             complete.onboarding_steps, acknowledged=True).visible)
 
+    def test_a_permission_still_being_checked_offers_no_system_settings(self):
+        starting = normalize_snapshot({
+            "microphone_status": "Starting",
+            "accessibility_status": "Granted",
+            "input_monitoring_status": "Granted",
+        })
+        self.assertEqual(starting.missing_permissions, ())
+        presentation = onboarding_presentation(
+            starting.onboarding_steps, acknowledged=False,
+            permission_missing=bool(starting.missing_permissions))
+        self.assertEqual(presentation.current_key, "permissions")
+        self.assertEqual(presentation.action_title, "Keep Going")
+
     def test_onboarding_copy_explains_observed_practice_and_recovery(self):
         state = normalize_snapshot({
             "service_status": "Running",
             "microphone_status": "Ready",
             "accessibility_status": "Granted",
+            "input_monitoring_status": "Granted",
             "hotkey_label": "Right Option",
-            "models": [{"name": "Parakeet", "status": "Running"}],
+            "models": [READY_MODEL],
         })
         hotkey = next(
             step for step in state.onboarding_steps if step.key == "hotkey")
@@ -974,7 +1008,8 @@ class SnapshotTests(unittest.TestCase):
             "service_status": "Running",
             "microphone_status": "Ready",
             "accessibility_status": "Granted",
-            "models": [{"name": "Parakeet", "status": "Running"}],
+            "input_monitoring_status": "Granted",
+            "models": [READY_MODEL],
         }
         listening = normalize_snapshot({**common, "capture_state": "Listening"})
         self.assertEqual(listening.status_phase, "recording")
@@ -1004,20 +1039,32 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(microphone_failed.degraded_issues[0].key, "microphone")
         self.assertNotIn("not blocked", microphone_failed.status_title.casefold())
 
+    def test_error_text_meets_aa_on_light_surfaces(self):
+        from whisper_face_theme import LIGHT_PALETTE, contrast_ratio
+
+        for surface in (LIGHT_PALETTE.bg, LIGHT_PALETTE.surface):
+            self.assertGreaterEqual(
+                contrast_ratio(gui_module.ERROR_TEXT_ON_LIGHT, surface), 4.5)
+
     def test_ready_fallback_remains_usable_while_warning_is_explained(self):
         state = normalize_snapshot({
             "service_status": "Running",
             "microphone_status": "Ready",
             "accessibility_status": "Granted",
+            "input_monitoring_status": "Granted",
             "models": [
-                {"name": "Parakeet", "status": "Running"},
-                {"name": "Whisper fallback", "status": "Unavailable"},
+                READY_MODEL,
+                {**READY_MODEL, "name": "Whisper large-v3-turbo",
+                 "required": False, "install_state": "mismatch",
+                 "warm": False, "status": "UNAVAILABLE"},
             ],
         })
         self.assertEqual(state.status_phase, "ready")
         self.assertEqual(len(state.degraded_issues), 1)
         self.assertEqual(state.degraded_issues[0].severity, "warning")
-        self.assertIn("continue", state.degraded_issues[0].detail)
+        self.assertIn("still works", state.degraded_issues[0].detail)
+        self.assertIn(
+            "Whisper large-v3-turbo", state.degraded_issues[0].detail)
 
     def test_result_inspector_is_evidence_only_and_honors_reduced_motion(self):
         self.assertIsNone(normalize_snapshot({
@@ -2386,6 +2433,74 @@ class ViewModelTests(unittest.TestCase):
             localized_string(
                 "overview.notice.status.error", error="service restarting"))
 
+    def test_a_rejected_save_stays_on_screen_through_status_refreshes(self):
+        now = [100.0]
+        model = WhisperFaceViewModel(
+            GUIActions(status_snapshot=lambda: {"capture_state": "Ready"}),
+            clock=lambda: now[0])
+        rejected = model.save_snippet("x" * 81, "Kind regards")
+        self.assertEqual(rejected.notice_level, "error")
+        self.assertNotIn("..", rejected.notice)
+
+        for _tick in range(5):
+            now[0] += 2.0
+            state = model.refresh()
+
+        self.assertEqual(state.notice, rejected.notice)
+        self.assertEqual(state.notice_level, "error")
+        self.assertEqual(model.select_section("Home").notice, "")
+
+    def test_a_reviewed_issue_notice_clears_once_the_issue_recovers(self):
+        now = [100.0]
+        runtime = {"service_status": "Running",
+                   "microphone_status": "Unavailable",
+                   "accessibility_status": "Granted",
+                   "input_monitoring_status": "Granted",
+                   "capture_state": "Ready"}
+        model = WhisperFaceViewModel(
+            GUIActions(status_snapshot=lambda: dict(runtime)),
+            clock=lambda: now[0])
+        reviewed = model.show_issue()
+        self.assertEqual(reviewed.notice_level, "error")
+        self.assertTrue(reviewed.notice)
+
+        now[0] += 2.0
+        self.assertEqual(model.refresh().notice, reviewed.notice)
+
+        runtime["microphone_status"] = "Ready"
+        now[0] += 2.0
+        state = model.refresh()
+
+        self.assertEqual(state.degraded_issues, ())
+        self.assertEqual(state.notice, "")
+
+    def test_a_success_notice_outlives_a_refresh_then_expires(self):
+        now = [100.0]
+        model = WhisperFaceViewModel(
+            GUIActions(status_snapshot=lambda: {},
+                       save_snippet=lambda *_args: None),
+            clock=lambda: now[0])
+        saved = model.save_snippet("signature", "Kind regards").notice
+        self.assertTrue(saved)
+
+        now[0] += 2.0
+        self.assertEqual(model.refresh().notice, saved)
+        now[0] += 8.0
+        self.assertEqual(model.refresh().notice, "")
+
+    def test_a_status_error_clears_once_status_reads_again(self):
+        failing = [True]
+
+        def status():
+            if failing[0]:
+                raise RuntimeError("service restarting")
+            return {}
+
+        model = WhisperFaceViewModel(GUIActions(status_snapshot=status))
+        self.assertIn("service restarting", model.state.notice)
+        failing[0] = False
+        self.assertEqual(model.refresh().notice, "")
+
     def test_facade_creation_does_not_show_a_window(self):
         gui = create_gui(self.actions)
         self.assertIs(gui.view_model.actions, self.actions)
@@ -2486,9 +2601,9 @@ class ViewModelTests(unittest.TestCase):
     def test_onboarding_and_degraded_guidance_routes_without_blocking(self):
         runtime = {
             "service_status": "Running",
-            "microphone_status": "Needs attention",
+            "microphone_status": "Unavailable",
             "accessibility_status": "Needs attention",
-            "models": [{"name": "Parakeet", "status": "Preparing"}],
+            "models": [PREPARING_MODEL],
         }
         model = WhisperFaceViewModel(GUIActions(
             status_snapshot=lambda: runtime))
@@ -2505,34 +2620,77 @@ class ViewModelTests(unittest.TestCase):
     def test_permission_recovery_opens_only_while_permission_evidence_is_incomplete(self):
         runtime = {
             "service_status": "Running",
-            "microphone_status": "Needs attention",
+            "microphone_status": "Unavailable",
             "accessibility_status": "Needs attention",
         }
         opened: list[str] = []
         model = WhisperFaceViewModel(GUIActions(
             status_snapshot=lambda: dict(runtime),
-            open_system_settings=lambda: opened.append("opened")))
+            open_system_settings=opened.append))
 
         self.assertTrue(model.permission_recovery_needed())
         state = model.open_system_settings()
-        self.assertEqual(opened, ["opened"])
+        self.assertEqual(opened, ["microphone"])
         self.assertEqual(state.notice_level, "info")
         self.assertIn("Return here", state.notice)
 
         runtime.update(
-            microphone_status="Ready", accessibility_status="Granted")
+            microphone_status="Ready", accessibility_status="Granted",
+            input_monitoring_status="Granted")
         model.refresh()
         self.assertFalse(model.permission_recovery_needed())
         model.open_system_settings()
-        self.assertEqual(opened, ["opened"])
+        self.assertEqual(opened, ["microphone"])
+
+    def test_missing_input_monitoring_is_named_and_opens_its_own_pane(self):
+        opened: list[str] = []
+        model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {
+                "service_status": "Running",
+                "microphone_status": "Ready",
+                "accessibility_status": "Granted",
+                "input_monitoring_status": "Needs attention",
+            },
+            open_system_settings=opened.append))
+
+        self.assertEqual(
+            [issue.key for issue in model.state.degraded_issues],
+            ["input_monitoring"])
+        self.assertIn("Input Monitoring", model.state.degraded_issues[0].title)
+        self.assertNotIn(
+            "Accessibility", model.state.degraded_issues[0].detail)
+        model.open_system_settings()
+        self.assertEqual(opened, ["input_monitoring"])
+
+    def test_microphone_permission_reads_exact_runtime_states(self):
+        granted = {
+            "service_status": "Running",
+            "accessibility_status": "Granted",
+            "input_monitoring_status": "Granted",
+        }
+        failed = normalize_snapshot({
+            **granted, "microphone_status": "Unavailable"})
+        self.assertFalse(failed.onboarding_steps[0].complete)
+        self.assertEqual(failed.onboarding_steps[0].status, "Needs attention")
+        self.assertEqual(failed.missing_permissions, ("microphone",))
+
+        starting = normalize_snapshot({
+            **granted, "microphone_status": "Starting"})
+        self.assertFalse(starting.onboarding_steps[0].complete)
+        self.assertEqual(starting.onboarding_steps[0].status, "Checking")
+        self.assertEqual(starting.missing_permissions, ())
+        self.assertEqual(starting.degraded_issues, ())
+
+        ready = normalize_snapshot({**granted, "microphone_status": "Ready"})
+        self.assertTrue(ready.onboarding_steps[0].complete)
 
     def test_permission_recovery_keeps_failure_local_and_content_free(self):
-        def fail_to_open() -> None:
+        def fail_to_open(_pane: str) -> None:
             raise RuntimeError("settings unavailable")
 
         model = WhisperFaceViewModel(GUIActions(
             status_snapshot=lambda: {
-                "microphone_status": "Needs attention",
+                "microphone_status": "Unavailable",
                 "accessibility_status": "Needs attention",
             },
             open_system_settings=fail_to_open))
@@ -2609,8 +2767,8 @@ class BoundKeyCopyTests(unittest.TestCase):
             "service_status": "Running",
             "microphone_status": "Ready",
             "accessibility_status": "Granted",
-            "models": [{"name": "Parakeet", "role": "primary",
-                        "status": "Ready"}],
+            "input_monitoring_status": "Granted",
+            "models": [READY_MODEL],
         })
         self.assertEqual(state.hotkey_label, "F13")
         self.assertIn("F13", state.status_detail)

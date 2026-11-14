@@ -493,13 +493,24 @@ if IS_MACOS:
     from whisper_face_gui import GUIActions, create_gui  # noqa: E402
 
 
-def open_mac_system_settings() -> None:
-    """Open the user-controlled macOS settings app without changing TCC."""
+def open_mac_system_settings(pane: str | None = None) -> None:
+    """Open the user-controlled macOS settings app without changing TCC.
+
+    A known permission opens its own Privacy & Security pane; anything else
+    opens System Settings itself.
+    """
 
     if not IS_MACOS:
         raise RuntimeError("System Settings recovery is available only on macOS")
+    anchor = {
+        "microphone": "Privacy_Microphone",
+        "accessibility": "Privacy_Accessibility",
+        "input_monitoring": "Privacy_ListenEvent",
+    }.get(pane or "")
     subprocess.run(
-        ["open", "-a", "System Settings"],
+        ["open", "x-apple.systempreferences:"
+         f"com.apple.preference.security?{anchor}"]
+        if anchor else ["open", "-a", "System Settings"],
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -5835,11 +5846,15 @@ def runtime_status_snapshot() -> dict:
         from Quartz import (
             CGPreflightListenEventAccess, CGPreflightPostEventAccess,
         )
-        trusted = bool(
-            CGPreflightListenEventAccess() and CGPreflightPostEventAccess())
-        accessibility = "Granted" if trusted else "Needs attention"
+        # Input Monitoring lets the capture key be heard; Accessibility lets
+        # the words be typed. macOS grants them separately, and each has its
+        # own pane, so each is reported on its own.
+        input_monitoring = (
+            "Granted" if CGPreflightListenEventAccess() else "Needs attention")
+        accessibility = (
+            "Granted" if CGPreflightPostEventAccess() else "Needs attention")
     except Exception:
-        accessibility = "Unknown"
+        input_monitoring = accessibility = "Unknown"
     helper_ready = PARAKEET_ENABLED and PARAKEET_HELPER.is_file()
     try:
         helper_running = bool(
@@ -5945,6 +5960,7 @@ def runtime_status_snapshot() -> dict:
         "service_status": "Running" if bar is not None else "Starting",
         "microphone_status": AUDIO_POOL.readiness(),
         "accessibility_status": accessibility,
+        "input_monitoring_status": input_monitoring,
         "version": "Local checkout",
         "model_wallet_shadow": model_wallet_shadow,
         "models": model_status_rows_from_shadow(model_wallet_shadow),
@@ -6133,6 +6149,19 @@ def model_status_rows_from_shadow(snapshot: dict) -> list[dict]:
         QWEN_CLEANUP_PROFILE.provider_id: (
             "qwen3.5:4b", "Selective cleanup"),
     }
+    # A default install downloads only the models its recognition route needs;
+    # the others are opt-in upgrades, so their absence is not a fault.
+    required = (
+        {PARAKEET_PROFILE.provider_id, WHISPER_TINY_PROFILE.provider_id}
+        if PARAKEET_ENABLED else
+        {WHISPER_TINY_PROFILE.provider_id,
+         WHISPER_LARGE_TURBO_PROFILE.provider_id})
+    install_states = {
+        "resolved": "installed",
+        "not_installed": "not_installed",
+        "load_failed": "failed",
+        "revision_mismatch": "mismatch",
+    }
     pins = snapshot.get("pins", ()) if isinstance(snapshot, dict) else ()
     by_id = {
         item.get("provider_id"): item for item in pins
@@ -6147,6 +6176,12 @@ def model_status_rows_from_shadow(snapshot: dict) -> list[dict]:
         rows.append({
             "name": name,
             "role": role,
+            # Until the first readiness receipt exists nothing has been
+            # inspected yet, which is "checking", not "missing".
+            "install_state": install_states.get(
+                pin.get("resolution_state"), "checking"),
+            "required": profile.provider_id in required,
+            "warm": warm,
             "status": "RESOLVED" if resolved else "UNAVAILABLE",
             "detail": (
                 "Exact pinned files resolved · Warm path observed · Runtime "

@@ -660,6 +660,238 @@ class ResultEvidenceRuntimeTests(unittest.TestCase):
         self.assertNotIn("private_stage", snapshot["timings_ms"])
 
 
+class RuntimeStatusWindowContractTests(unittest.TestCase):
+    """The real status producer, fed straight into the window's normalizer."""
+
+    def snapshot(self, *, installed=None, warm=None, receipt=True,
+                 input_monitoring=True, post_events=True,
+                 microphone="Ready"):
+        from model_wallet import (
+            CURRENT_PROVIDER_PROFILES, Capability, MAX_LATENCY_BOUND_MS,
+            ModelRequest, PARAKEET_PROFILE, QWEN_CLEANUP_PROFILE,
+            ReadinessState, WHISPER_LARGE_TURBO_PROFILE,
+            WHISPER_TINY_PROFILE,
+        )
+        from model_wallet_shadow import RuntimeModelEvidence, \
+            assess_model_wallet
+        from types import ModuleType, SimpleNamespace
+
+        default = (PARAKEET_PROFILE.provider_id,
+                   WHISPER_TINY_PROFILE.provider_id)
+        installed = default if installed is None else installed
+        warm = installed if warm is None else warm
+        evidence = SimpleNamespace(providers=tuple(
+            SimpleNamespace(
+                provider_id=profile.provider_id,
+                state=(ReadinessState.RESOLVED
+                       if profile.provider_id in installed
+                       else ReadinessState.NOT_INSTALLED),
+                revision_verified=profile.provider_id in installed,
+            )
+            for profile in CURRENT_PROVIDER_PROFILES
+        )) if receipt else None
+        quartz = ModuleType("Quartz")
+        quartz.CGPreflightListenEventAccess = lambda: input_monitoring
+        quartz.CGPreflightPostEventAccess = lambda: post_events
+        lab = SimpleNamespace(cases=(), quarantined=())
+        ns = load_definitions(
+            "runtime_status_snapshot",
+            "model_wallet_shadow_status_snapshot",
+            "model_status_rows_from_shadow",
+            extra={
+                "STATUS": {"bar": SimpleNamespace(state="idle")},
+                "usage_metrics": lambda: (120, 2.5),
+                "load_learned": lambda: {},
+                "personal_regression_lab": lambda _learned: lab,
+                "PARAKEET_ENABLED": True,
+                "PARAKEET_HELPER": Path(__file__),
+                "PARAKEET": SimpleNamespace(process=None),
+                "PIPELINE_STATE": {
+                    "last_asr_engine": "parakeet-unified",
+                    "last_release_s": 0.4,
+                    "last_word_count": None,
+                    "last_confidence": 0.93,
+                    "last_mode": "capture",
+                    "last_compiler_decisions": 0,
+                    "last_protected_anchors": 0,
+                    "last_stable_prefix_words": 0,
+                    "last_alternatives": [],
+                    "last_cleanup_edits": [],
+                    "last_proof_edits_accepted": 0,
+                    "last_proof_edits_rejected": 0,
+                    "last_context_influence": "",
+                    "last_delayed_cleanup_outcome": None,
+                    "last_delayed_cleanup_applied": 0,
+                    "last_delayed_cleanup_rejected": 0,
+                    "last_delayed_cleanup_apply_ms": None,
+                },
+                "FLIGHT": SimpleNamespace(is_enabled=lambda: False),
+                "PAUSED": {"on": False},
+                "PREFERENCES": {
+                    "flight_recorder": False, "sounds": "system",
+                    "recent_dictations": False},
+                "INSERTION_COORDINATOR": SimpleNamespace(
+                    recoverable=lambda: []),
+                "acoustic_keyword_memory_status_snapshot": lambda: {},
+                "acoustic_calibration_status_snapshot": lambda: {},
+                "acoustic_time_machine_status_snapshot": lambda: {
+                    "enabled": False, "retained_spans": 0},
+                "selective_relisten_status_snapshot": lambda: {
+                    "requested": False, "evidence_ready": False,
+                    "status": "receipt-missing"},
+                "voice_object_inbox_status": lambda: {
+                    "enabled": False, "queued_count": 0, "status": "Off"},
+                "risky_action_confirmation_status_snapshot": lambda: {
+                    "risk": "none", "state": "idle", "reason": "idle"},
+                "current_face": lambda: "parrot",
+                "HOTKEY_NAME": "alt_r",
+                "UNDO_HOTKEY_NAME": "",
+                "hotkey_label_for": lambda name: (
+                    "Right Option" if name else ""),
+                "hotkey_shared_modes": lambda _name: (),
+                "normalize_sound_theme": lambda value: value,
+                "undoable_insertion_status": lambda: {"available": False},
+                "consequence_state_snapshot": lambda: {},
+                "context_firewall_state_snapshot": lambda: {},
+                "delayed_cleanup_activation_status": lambda: {},
+                "MEASUREMENT_MODE": SimpleNamespace(
+                    status_snapshot=lambda: {"active": False}),
+                "mac_prefers_reduced_motion": lambda: False,
+                "AUDIO_POOL": SimpleNamespace(readiness=lambda: microphone),
+                "MODEL_READINESS_CACHE": {
+                    "receipt": evidence, "lock": threading.Lock()},
+                "MODEL_WARM_PATHS": {
+                    "providers": set(warm), "lock": threading.Lock()},
+                "CURRENT_PROVIDER_PROFILES": CURRENT_PROVIDER_PROFILES,
+                "PARAKEET_PROFILE": PARAKEET_PROFILE,
+                "WHISPER_TINY_PROFILE": WHISPER_TINY_PROFILE,
+                "WHISPER_LARGE_TURBO_PROFILE": WHISPER_LARGE_TURBO_PROFILE,
+                "QWEN_CLEANUP_PROFILE": QWEN_CLEANUP_PROFILE,
+                "RuntimeModelEvidence": RuntimeModelEvidence,
+                "ReadinessState": ReadinessState,
+                "Capability": Capability,
+                "ModelRequest": ModelRequest,
+                "MAX_LATENCY_BOUND_MS": MAX_LATENCY_BOUND_MS,
+                "assess_model_wallet": assess_model_wallet,
+            },
+        )
+        previous = sys.modules.get("Quartz")
+        sys.modules["Quartz"] = quartz
+        try:
+            return ns["runtime_status_snapshot"]()
+        finally:
+            if previous is None:
+                sys.modules.pop("Quartz", None)
+            else:
+                sys.modules["Quartz"] = previous
+
+    def window(self, snapshot):
+        from whisper_face_gui import normalize_snapshot
+        return normalize_snapshot(snapshot)
+
+    def test_default_install_shows_no_warning_for_optional_models(self):
+        state = self.window(self.snapshot())
+
+        self.assertEqual(state.degraded_issues, ())
+        self.assertEqual(state.status_phase, "ready")
+        self.assertTrue(next(
+            step for step in state.onboarding_steps
+            if step.key == "models").complete)
+        from whisper_face_gui import model_pill_tone
+        self.assertEqual(
+            [model_pill_tone(model) for model in state.models],
+            ["good", "good", "neutral", "neutral"])
+        self.assertEqual(
+            [model.status for model in state.models],
+            ["Ready", "Ready", "Optional", "Optional"])
+
+    def test_warm_up_reads_as_starting_not_as_a_fault(self):
+        state = self.window(self.snapshot(receipt=False, warm=()))
+
+        self.assertEqual(state.degraded_issues, ())
+        self.assertEqual(state.status_phase, "starting")
+        models = next(
+            step for step in state.onboarding_steps if step.key == "models")
+        self.assertFalse(models.complete)
+        self.assertEqual(models.status, "Warming up")
+
+    def test_full_install_is_all_green(self):
+        from model_wallet import CURRENT_PROVIDER_PROFILES
+        from whisper_face_gui import model_pill_tone
+
+        everything = tuple(
+            profile.provider_id for profile in CURRENT_PROVIDER_PROFILES)
+        state = self.window(self.snapshot(installed=everything))
+
+        self.assertEqual(state.degraded_issues, ())
+        self.assertEqual(
+            {model_pill_tone(model) for model in state.models}, {"good"})
+
+    def test_a_missing_required_model_is_an_error_naming_it(self):
+        from model_wallet import WHISPER_TINY_PROFILE
+
+        state = self.window(self.snapshot(
+            installed=(WHISPER_TINY_PROFILE.provider_id,)))
+
+        self.assertEqual(
+            [(issue.key, issue.severity) for issue in state.degraded_issues],
+            [("models", "error")])
+        self.assertIn("Parakeet Unified 0.6B", state.degraded_issues[0].detail)
+        self.assertEqual(state.status_phase, "degraded")
+
+    def test_missing_input_monitoring_is_not_reported_as_accessibility(self):
+        state = self.window(self.snapshot(input_monitoring=False))
+
+        self.assertEqual(
+            [issue.key for issue in state.degraded_issues],
+            ["input_monitoring"])
+        self.assertEqual(state.missing_permissions, ("input_monitoring",))
+        self.assertEqual(state.accessibility_status, "Granted")
+
+    def test_a_failed_microphone_is_missing_and_a_starting_one_is_not(self):
+        failed = self.window(self.snapshot(microphone="Unavailable"))
+        starting = self.window(self.snapshot(microphone="Starting"))
+
+        self.assertEqual(failed.missing_permissions, ("microphone",))
+        self.assertFalse(failed.onboarding_steps[0].complete)
+        self.assertEqual(starting.missing_permissions, ())
+        self.assertEqual(starting.degraded_issues, ())
+
+    def test_each_permission_opens_its_own_settings_pane(self):
+        from types import SimpleNamespace
+
+        commands = []
+        ns = load_definitions(
+            "open_mac_system_settings",
+            extra={"IS_MACOS": True, "subprocess": SimpleNamespace(
+                DEVNULL=None,
+                run=lambda command, **_kwargs: commands.append(command))},
+        )
+        for pane in ("microphone", "accessibility", "input_monitoring",
+                     "something else"):
+            ns["open_mac_system_settings"](pane)
+
+        self.assertEqual(commands, [
+            ["open", "x-apple.systempreferences:"
+             "com.apple.preference.security?Privacy_Microphone"],
+            ["open", "x-apple.systempreferences:"
+             "com.apple.preference.security?Privacy_Accessibility"],
+            ["open", "x-apple.systempreferences:"
+             "com.apple.preference.security?Privacy_ListenEvent"],
+            ["open", "-a", "System Settings"],
+        ])
+
+    def test_support_snapshot_names_healthy_models(self):
+        from whisper_face_gui import support_snapshot_text
+
+        payload = json.loads(support_snapshot_text(
+            self.window(self.snapshot())))
+
+        self.assertEqual(
+            sorted(model["status"] for model in payload["models"]),
+            ["ready", "ready", "unavailable", "unavailable"])
+
+
 class ControlPreferenceRuntimeTests(unittest.TestCase):
     """A1/A3/D1: the window's control setters persist through preferences."""
 
