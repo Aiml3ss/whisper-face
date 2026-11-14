@@ -6994,8 +6994,13 @@ class ReleasePlanTests(unittest.TestCase):
             "[dropped] ASR gave nothing",
         )])
 
-    def _release(self, mode, language, spoken, selected="Hallo zusammen"):
-        """Drive finish_and_process from a decoded take to its insertion."""
+    def _release(self, mode, language, spoken, selected="Hallo zusammen",
+                 field=None, recognition=None):
+        """Drive finish_and_process from a decoded take to its insertion.
+
+        ``field`` is the text already before the cursor. ``recognition``
+        replaces the default confident decode of ``spoken``.
+        """
         pasted = []
         problems = []
 
@@ -7012,8 +7017,12 @@ class ReleasePlanTests(unittest.TestCase):
             "extract_tone_override",
             "needs_llm_cleanup",
             "quick_clean",
+            "is_hallucination",
+            "weak_whisper_evidence",
+            "strip_context_echo",
             assignments={
-                "TONE", "TONE_OVERRIDE_RE", "TONE_ALIASES", "CONT_END"},
+                "TONE", "TONE_OVERRIDE_RE", "TONE_ALIASES", "CONT_END",
+            } | CleanupGuardTests.HALLUCINATION_GUARD,
             extra={
                 "np": np,
                 "time": SimpleNamespace(
@@ -7032,11 +7041,10 @@ class ReleasePlanTests(unittest.TestCase):
                 "GATE_PEAK_RMS": 0.002,
                 "peak_rms": lambda _audio: 0.1,
                 "audio_gate_measurements": lambda _audio: (1.0, 0.1),
-                "assemble_raw": lambda *_args: Recognition(
+                "assemble_raw": lambda *_args: recognition or Recognition(
                     spoken, confidence=0.86, engine="turbo",
                     audio_duration=1.0),
                 "Recognition": Recognition,
-                "is_hallucination": lambda *_args: False,
                 "looks_like_prompt_echo": lambda _text: False,
                 "consume_risky_action_confirmation_voice":
                     lambda _text: False,
@@ -7058,7 +7066,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "_load_snippet_map": lambda: {},
                 "_mask_snippets_inline": lambda text, _snippets: (text, {}),
                 "is_verbatim_app": lambda _bundle: False,
-                "cursor_context": lambda: None,
+                "cursor_context": lambda: field,
                 "tone_for": lambda _bundle: "default",
                 "apply_vocabulary_casing": lambda text: text,
                 "focused_snapshot": lambda: SimpleNamespace(),
@@ -7128,6 +7136,36 @@ class ReleasePlanTests(unittest.TestCase):
         pasted, _problems = self._release(
             "capture", "de", "wir treffen uns morgen")
         self.assertEqual(pasted, ["wir treffen uns morgen"])
+
+    def test_a_field_tail_is_stripped_from_the_paste_only_as_whole_words(self):
+        # The field ends in "to", which is also how "Tomorrow" starts. The
+        # old prefix strip pasted "morrow works for me."
+        pasted, _problems = self._release(
+            "capture", "en", "Tomorrow works for me.", field="to")
+        self.assertEqual(len(pasted), 1)
+        self.assertEqual(pasted[0].casefold(), " tomorrow works for me.")
+        # A real repeat of the field's own tail is still removed.
+        pasted, _problems = self._release(
+            "capture", "en", "See you at six thirty.", field="see you at")
+        self.assertEqual(pasted, [" six thirty."])
+
+    def test_a_short_reply_is_dropped_only_on_a_weak_whisper_decode(self):
+        pasted, _problems = self._release(
+            "capture", "en", "Thank you.", recognition=Recognition(
+                "Thank you.", confidence=0.93, engine="parakeet-unified",
+                audio_duration=1.2))
+        self.assertEqual(pasted, ["Thank you."])
+        # The same words from Whisper, unsure of itself, are its filler for
+        # silence. The take is refused with the cue and nothing is pasted.
+        pasted, problems = self._release(
+            "capture", "en", "Thank you.", recognition=Recognition(
+                "Thank you.", confidence=0.34, engine="turbo",
+                audio_duration=3.0))
+        self.assertEqual(pasted, [])
+        self.assertEqual(problems, [(
+            "I couldn't understand that — try again",
+            "[dropped] ASR hallucination detected",
+        )])
 
     def test_failed_chunk_downgrades_surviving_word_timing(self):
         class Future:
