@@ -5177,8 +5177,9 @@ class LearningTests(unittest.TestCase):
                 "bank details": "GB29 NWBK 6016 1331 9268 19",
             })
             self.assertEqual(runtime.state()["snippet_edits"]["email"], {
-                "from": "john@example.com", "to": "jon@example.com",
-                "n": 0, "app": "com.google.Chrome", "pending": True,
+                "suggested": {
+                    "from": "john@example.com", "to": "jon@example.com",
+                    "app": "com.google.Chrome"},
             })
 
             # The user accepts one suggestion by name and dismisses the other.
@@ -5215,6 +5216,46 @@ class LearningTests(unittest.TestCase):
             self.assertEqual(
                 runtime.snippets(), {"email": "j.doe@example.com"})
             self.assertEqual(runtime.state()["snippet_edits"], {})
+
+    def test_a_snippet_suggestion_keeps_the_record_of_an_applied_edit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+            ns = runtime.ns
+            snippets = Path(directory) / "snippets.json"
+            snippets.write_text(json.dumps({"email": "john@example.com"}))
+            ns["suggest_snippet_edit"](
+                "email", "john@example.com", "jon@example.com", "com.slack")
+            self.assertTrue(ns["apply_pending_snippet_edit"]("email"))
+            applied = {"from": "john@example.com", "to": "jon@example.com",
+                       "n": 1, "app": "com.slack"}
+
+            # A later observation waits beside the applied edit's record.
+            ns["suggest_snippet_edit"](
+                "email", "jon@example.com", "evil@example.net", "com.slack")
+            self.assertEqual(runtime.state()["snippet_edits"]["email"], {
+                **applied, "suggested": {
+                    "from": "jon@example.com", "to": "evil@example.net",
+                    "app": "com.slack"}})
+            # While snippets.json cannot be read the suggestion cannot be
+            # judged stale, so it is neither applied nor dropped.
+            snippets.write_text("{", encoding="utf-8")
+            self.assertFalse(ns["apply_pending_snippet_edit"]("email"))
+            self.assertIn(
+                "suggested", runtime.state()["snippet_edits"]["email"])
+            snippets.write_text(json.dumps({"email": "jon@example.com"}))
+
+            # Forget still undoes the applied edit, and the suggestion goes
+            # with it.
+            self.assertTrue(ns["forget_snippet_edit"]("email"))
+            self.assertEqual(runtime.snippets(), {"email": "john@example.com"})
+            self.assertEqual(runtime.state()["snippet_edits"], {})
+            # Forgetting a suggestion for a snippet that is gone creates
+            # nothing.
+            ns["suggest_snippet_edit"](
+                "email", "john@example.com", "jon@example.com", "com.slack")
+            snippets.write_text("{}", encoding="utf-8")
+            self.assertTrue(ns["forget_snippet_edit"]("email"))
+            self.assertEqual(runtime.snippets(), {})
 
     def test_snippet_edit_is_persisted_and_exposed_as_learning(self):
         ns = load_definitions(

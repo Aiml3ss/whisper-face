@@ -5449,8 +5449,7 @@ def gui_settings_snapshot() -> dict:
                 "key": name, "source": f"Snippet: {name}",
                 "target": target, "count": safe_count(info.get("n")),
                 "kind": "snippet",
-                "global_decision": (
-                    "pending" if info.get("pending") else "saved"),
+                "global_decision": "saved",
                 "app_scopes": [],
             })
     corrections.sort(key=lambda item: (-item["count"], item["source"].casefold()))
@@ -8387,8 +8386,10 @@ def suggest_snippet_edit(name: str, old: str, new: str, bundle: str) -> bool:
 
     The destination application can produce the edit as easily as the user
     can (an input mask, a page that reformats its own field), so an
-    observation never rewrites a saved snippet. It waits in ``snippet_edits``
-    until ``apply_pending_snippet_edit`` or ``forget_snippet_edit``.
+    observation never rewrites a saved snippet. It waits under ``suggested``
+    in the snippet's ``snippet_edits`` record, beside the record of any edit
+    that was applied, until ``apply_pending_snippet_edit`` or
+    ``forget_snippet_edit``.
     """
     if not new.strip() or new == old or len(new) > 4000:
         return False
@@ -8403,14 +8404,11 @@ def suggest_snippet_edit(name: str, old: str, new: str, bundle: str) -> bool:
             return False
         with LEARN_LOCK:
             state = load_learned()
-            prior = state["snippet_edits"].get(name, {})
-            state["snippet_edits"][name] = {
-                "from": old,
-                "to": new,
-                "n": int(prior.get("n", 0)),
-                "app": bundle,
-                "pending": True,
-            }
+            record = state["snippet_edits"].get(name)
+            if not isinstance(record, dict):
+                record = {}
+            record["suggested"] = {"from": old, "to": new, "app": bundle}
+            state["snippet_edits"][name] = record
             save_learned(state)
     print("[learn] snippet edit suggested")
     return True
@@ -8420,12 +8418,19 @@ def apply_pending_snippet_edit(name: str) -> bool:
     """Apply the pending suggested edit of one snippet, by snippet name.
 
     A suggestion made against text the snippet no longer has is dropped
-    instead of applied.
+    instead of applied. One that cannot be checked because snippets.json is
+    unreadable right now is kept.
     """
     with LEARN_LOCK:
-        info = load_learned()["snippet_edits"].get(name)
-    if not isinstance(info, dict) or not info.get("pending"):
+        record = load_learned()["snippet_edits"].get(name)
+    info = record.get("suggested") if isinstance(record, dict) else None
+    if not isinstance(info, dict):
         return False
+    with SNIPPETS_LOCK:
+        try:
+            json.loads(SNIPPETS_FILE.read_text())
+        except Exception:
+            return False
     old, new = info.get("from"), info.get("to")
     if (isinstance(old, str) and isinstance(new, str)
             and save_snippet_edit(name, old, new, str(info.get("app", "")))):
@@ -8433,8 +8438,10 @@ def apply_pending_snippet_edit(name: str) -> bool:
     with LEARN_LOCK:
         state = load_learned()
         current = state["snippet_edits"].get(name)
-        if isinstance(current, dict) and current.get("pending"):
-            state["snippet_edits"].pop(name)
+        if isinstance(current, dict) and "suggested" in current:
+            current.pop("suggested")
+            if not current:
+                state["snippet_edits"].pop(name)
             save_learned(state)
     return False
 
@@ -8452,7 +8459,8 @@ def forget_snippet_edit(name: str) -> bool:
             except Exception:
                 snippets = None
             if isinstance(snippets, dict) \
-                    and snippets.get(name) == info.get("to"):
+                    and isinstance(info.get("to"), str) \
+                    and snippets.get(name) == info["to"]:
                 snippets[name] = str(info.get("from", ""))
                 atomic_write_text(
                     SNIPPETS_FILE, json.dumps(snippets, indent=2) + "\n")

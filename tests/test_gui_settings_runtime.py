@@ -384,8 +384,9 @@ class SettingsSnapshotTests(unittest.TestCase):
                         "gwen": {"from": "Gwen", "to": "Qwen", "n": "bad"}},
                     "snippet_edits": {
                         "signature": {"to": "Cheers", "n": 2},
-                        "address": {"to": "7623 Opal Ridge Lane", "n": 0,
-                                    "pending": True}},
+                        "address": {"suggested": {
+                            "from": "7623 Opal Ridge Lane",
+                            "to": "1 Attacker Way", "app": "com.example"}}},
                 },
             )
             snapshot = ns["gui_settings_snapshot"]()
@@ -402,12 +403,53 @@ class SettingsSnapshotTests(unittest.TestCase):
             self.assertEqual(
                 snapshot["corrections"][1]["global_decision"], "learning")
             self.assertEqual(snapshot["corrections"][1]["app_scopes"], [])
-            # An observed snippet edit the user has not applied is not
-            # reported as saved.
+            # An observed snippet edit the user has not applied is not in
+            # use, so nothing reports it as the snippet's saved text.
             self.assertEqual(
                 [(row["key"], row["global_decision"])
                  for row in snapshot["corrections"] if row["kind"] == "snippet"],
-                [("signature", "saved"), ("address", "pending")])
+                [("signature", "saved")])
+            self.assertNotIn("Attacker", json.dumps(snapshot))
+
+    def test_an_observed_snippet_edit_is_not_shown_as_the_saved_snippet(self):
+        from whisper_face_gui import normalize_settings
+
+        saved = "GB29 NWBK 6016 1331 9268 19"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "snippets.json").write_text(
+                json.dumps({"bank details": saved}))
+            ns = settings_namespace(
+                "gui_settings_snapshot", "load_learned", "save_learned",
+                "suggest_snippet_edit")
+            ns.update(
+                GUI_TONES={"auto", "formal", "default"},
+                APP_TONES={"map": {}, "lock": threading.Lock()},
+                recent_dictation_apps=lambda: [],
+                app_display_name=lambda bundle: bundle,
+                SNIPPETS_FILE=root / "snippets.json",
+                SNIPPETS_LOCK=threading.Lock(),
+                DICTIONARY_LOCK=threading.RLock(),
+                parse_dictionary=lambda: ([], set()),
+                LEARNED_FILE=root / "learned.json",
+                LEARN_LOCK=threading.Lock(),
+                personal_regression_lab=lambda _state: PersonalRegressionLab(),
+                PERSONAL_APP_MIN_COUNT=2,
+                PERSONAL_GLOBAL_MIN_COUNT=3,
+                print=lambda *_args, **_kwargs: None,
+            )
+            # A page rewrote the pasted bank details in its own field.
+            self.assertTrue(ns["suggest_snippet_edit"](
+                "bank details", saved, "GB33 EVIL 0000 0000 0000 00",
+                "com.google.Chrome"))
+            snapshot = ns["gui_settings_snapshot"]()
+
+        self.assertEqual(
+            snapshot["snippets"], [{"name": "bank details", "text": saved}])
+        self.assertEqual(snapshot["corrections"], [])
+        # The window is given nothing it could present as the snippet's
+        # replacement.
+        self.assertEqual(list(normalize_settings(snapshot).corrections), [])
 
     def test_snapshot_projects_scope_decisions_without_private_cases(self):
         lab = PersonalRegressionLab()
