@@ -7787,6 +7787,95 @@ class AcousticTimeMachineRuntimeTests(unittest.TestCase):
         self.assertEqual(state["span_ids"], [])
 
 
+class RecognitionContextPrivacyTests(unittest.TestCase):
+    """Context capture leaves secrets alone."""
+
+    @staticmethod
+    def mac(*, clipboard_types=(), role="AXTextArea", subrole=None):
+        from voice_compiler import ContextObservation, ContextRouter
+
+        clipboard = "Quixotrel"
+        snapshot = SimpleNamespace(
+            element="focused-field", text="Draft for Zorblax Dynamics",
+            selection=(0, 0), selected_text="", window_title="Notes",
+            document=None)
+        pasteboard = SimpleNamespace(
+            types=lambda: ["public.utf8-plain-text", *clipboard_types],
+            stringForType_=lambda kind: clipboard)
+        return load_definitions(
+            "capture_recognition_context", "pasteboard_is_private",
+            assignments=("PASTEBOARD_MARKER_TYPES",),
+            extra={
+                "IS_WINDOWS": False,
+                "focused_snapshot": lambda: snapshot,
+                "NSWorkspace": SimpleNamespace(sharedWorkspace=lambda:
+                    SimpleNamespace(frontmostApplication=lambda:
+                        SimpleNamespace(localizedName=lambda: "Notes"))),
+                "NSPasteboard": SimpleNamespace(
+                    generalPasteboard=lambda: pasteboard),
+                "NSPasteboardTypeString": "public.utf8-plain-text",
+                "_ax_attribute": lambda element, attribute: {
+                    "AXRole": role, "AXSubrole": subrole}.get(attribute),
+                "ContextObservation": ContextObservation,
+                "CONTEXT_ROUTER": ContextRouter(),
+                "urllib": __import__("urllib.parse"),
+                "Path": Path,
+            },
+        )["capture_recognition_context"]
+
+    def test_an_ordinary_clipboard_and_field_are_used(self):
+        _, words, _ = self.mac()()
+        self.assertIn("Quixotrel", words)
+        self.assertIn("Zorblax", words)
+
+    def test_a_concealed_or_transient_clipboard_is_never_read(self):
+        for marker in ("org.nspasteboard.ConcealedType",
+                       "org.nspasteboard.TransientType"):
+            with self.subTest(marker=marker):
+                _, words, pack = self.mac(clipboard_types=(marker,))()
+                self.assertNotIn("Quixotrel", words)
+                self.assertNotIn(
+                    "Quixotrel", [c.text for c in pack.candidates])
+                self.assertIn("Zorblax", words)
+
+    def test_a_secure_text_field_yields_no_context_at_all(self):
+        snapshot, words, pack = self.mac(
+            role="AXTextField", subrole="AXSecureTextField")()
+        self.assertEqual(words, [])
+        # Only the application's own name, which is not the user's secret.
+        self.assertEqual({c.source for c in pack.candidates}, {"app"})
+        # The insertion lease still needs to know where focus is.
+        self.assertEqual(snapshot.element, "focused-field")
+
+    def test_windows_skips_a_clipboard_marked_private(self):
+        from voice_compiler import ContextObservation, ContextRouter
+
+        for available, expected in ((set(), True), ({"private"}, False)):
+            with self.subTest(marked=bool(available)):
+                ns = load_definitions(
+                    "capture_recognition_context",
+                    "windows_clipboard_is_private",
+                    assignments=("WINDOWS_PRIVATE_CLIPBOARD_FORMATS",),
+                    extra={
+                        "IS_WINDOWS": True,
+                        "windows_foreground_title": lambda: "Vault",
+                        "pyperclip": SimpleNamespace(
+                            paste=lambda: "Quixotrel"),
+                        "win32clipboard": SimpleNamespace(
+                            RegisterClipboardFormat=lambda name: (
+                                "private" if name ==
+                                "ExcludeClipboardContentFromMonitorProcessing"
+                                else name),
+                            IsClipboardFormatAvailable=lambda kind:
+                                kind in available),
+                        "ContextObservation": ContextObservation,
+                        "CONTEXT_ROUTER": ContextRouter(),
+                    },
+                )
+                _, words, _ = ns["capture_recognition_context"]()
+                self.assertEqual("Quixotrel" in words, expected)
+
+
 class ContextFirewallRuntimeProjectionTests(unittest.TestCase):
     def _namespace(self):
         pipeline = {}

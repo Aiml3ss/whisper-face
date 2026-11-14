@@ -9244,15 +9244,41 @@ def focused_text() -> str | None:
     return snapshot.text if snapshot else None
 
 
+# Password managers and other privacy-aware apps mark what they copy with
+# these formats; such a clipboard is never read as context.
+WINDOWS_PRIVATE_CLIPBOARD_FORMATS = (
+    "ExcludeClipboardContentFromMonitorProcessing",
+    "CanIncludeInClipboardHistory",
+    "Clipboard Viewer Ignore",
+)
+
+
+def windows_clipboard_is_private() -> bool:
+    return any(
+        win32clipboard.IsClipboardFormatAvailable(
+            win32clipboard.RegisterClipboardFormat(name))
+        for name in WINDOWS_PRIVATE_CLIPBOARD_FORMATS)
+
+
+def pasteboard_is_private(pb) -> bool:
+    kinds = {str(kind) for kind in (pb.types() or [])}
+    return any(marker in kinds for marker in PASTEBOARD_MARKER_TYPES)
+
+
 def capture_recognition_context(bundle: str = "") \
         -> tuple[FocusSnapshot | None, list[str], ContextPack]:
-    """Build an ephemeral vocabulary from what the user can currently see."""
+    """Build an ephemeral vocabulary from what the user can currently see.
+
+    Nothing is read from a secure text field or from a clipboard its owner
+    marked concealed or transient.
+    """
     if IS_WINDOWS:
         title = windows_foreground_title()
         clipboard = None
         try:
-            candidate = pyperclip.paste()
-            clipboard = candidate if len(candidate) <= 800 else None
+            if not windows_clipboard_is_private():
+                candidate = pyperclip.paste()
+                clipboard = candidate if len(candidate) <= 800 else None
         except Exception:
             pass
         observation = ContextObservation(
@@ -9263,10 +9289,17 @@ def capture_recognition_context(bundle: str = "") \
     snapshot = focused_snapshot()
     app = NSWorkspace.sharedWorkspace().frontmostApplication()
     app_name = str(app.localizedName()) if app is not None else None
+    if snapshot is not None and "AXSecureTextField" in {
+            _ax_attribute(snapshot.element, "AXRole"),
+            _ax_attribute(snapshot.element, "AXSubrole")}:
+        pack = CONTEXT_ROUTER.collect(
+            ContextObservation(app=app_name or "", bundle=bundle))
+        return snapshot, [], pack
     clipboard = None
     try:
-        clipboard = NSPasteboard.generalPasteboard().stringForType_(
-            NSPasteboardTypeString)
+        pb = NSPasteboard.generalPasteboard()
+        if not pasteboard_is_private(pb):
+            clipboard = pb.stringForType_(NSPasteboardTypeString)
         if clipboard and len(clipboard) > 800:
             clipboard = None
     except Exception:
