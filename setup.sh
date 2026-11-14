@@ -735,10 +735,31 @@ done
 command -v lsof >/dev/null 2>&1 \
     || fail "lsof was not found on PATH; it is required to bind a service to its listening process"
 
-macos_major="$(sw_vers -productVersion | cut -d. -f1)"
-if [ "$macos_major" -lt 14 ]; then
-    echo "!! macOS 14 or newer is recommended and supported by Homebrew."
-fi
+require_supported_macos() {
+    # A hard floor, not a recommendation: the locked mlx, mlx-metal and torch
+    # wheels, the speech helper, and the launcher all target macOS 14.
+    local macos_major
+    macos_major="$(sw_vers -productVersion | cut -d. -f1)"
+    [ "${macos_major:-0}" -ge 14 ] \
+        || fail "macOS 14 (Sonoma) or newer is required; this Mac runs $(sw_vers -productVersion)"
+}
+
+require_build_tools() {
+    # /usr/bin/swift and swiftc exist on every Mac as shims, installed or
+    # not, so `command -v` proves nothing. Ask for the real compiler before
+    # any model is downloaded, not when the helper build fails after them.
+    local swift_major
+    xcode-select -p >/dev/null 2>&1 \
+        || fail "the Xcode Command Line Tools are not installed; run xcode-select --install, then rerun Install.command"
+    xcrun --find swiftc >/dev/null 2>&1 \
+        || fail "the Swift compiler is unavailable; reinstall the Command Line Tools (xcode-select --install), then rerun Install.command"
+    swift_major="$(xcrun swift --version 2>/dev/null \
+        | sed -n 's/.*Swift version \([0-9][0-9]*\).*/\1/p' | head -n 1)"
+    [ "${swift_major:-0}" -ge 6 ] \
+        || fail "Swift 6 or newer is required to build the speech helper (found ${swift_major:-none}); update the Command Line Tools, then rerun Install.command"
+}
+
+require_supported_macos
 
 verify_cleanup_service() {
     # The Ollama service exists only to serve the optional cleanup model, so
@@ -1075,6 +1096,7 @@ fi
 UV="$(command -v uv)"
 OLLAMA="$(command -v ollama 2>/dev/null || true)"
 mkdir -p "$launch_dir"
+require_build_tools
 
 # --- Model inventory --------------------------------------------------------
 # Probe the caches before announcing any size. Hugging Face and Ollama both

@@ -1075,6 +1075,42 @@ class InstallerContractTests(unittest.TestCase):
                 if read_only:
                     self.assertNotIn("free disk space", result.stderr)
 
+    def test_missing_build_tools_and_old_macos_fail_before_any_download(self):
+        # /usr/bin/swift and swiftc are shims on every Mac, so the old
+        # `command -v` check could not fail; a missing toolchain surfaced
+        # only when `swift build` ran, after the models had downloaded.
+        swift_six = ('[ "$1" = "--find" ] && { echo /usr/bin/swiftc; exit 0; }\n'
+                     'echo "Apple Swift version 6.1.2 (swiftlang-6.1.2)"')
+        cases = (
+            ("no Command Line Tools", "exit 2", swift_six, "14.6",
+             "Command Line Tools are not installed"),
+            ("Swift 5 toolchain", "echo /Library/Developer/CommandLineTools",
+             '[ "$1" = "--find" ] && exit 0\n'
+             'echo "Apple Swift version 5.10 (swiftlang-5.10)"', "14.6",
+             "Swift 6 or newer is required"),
+            ("macOS 13", "echo /Library/Developer/CommandLineTools",
+             swift_six, "13.6.1", "macOS 14 (Sonoma) or newer is required"),
+        )
+        for name, xcode_select, xcrun, macos, expected in cases:
+            with self.subTest(case=name):
+                result = run_setup_functions(
+                    ["fail", "require_supported_macos", "require_build_tools"],
+                    "require_supported_macos\nrequire_build_tools\n"
+                    'echo "preflight passed"\n',
+                    variables={"VERIFY_ONLY": 0},
+                    stubs={"xcode-select": xcode_select, "xcrun": xcrun,
+                           "sw_vers": f"echo {macos}"})
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(expected, result.stderr)
+                self.assertNotIn("preflight passed", result.stdout)
+        passing = run_setup_functions(
+            ["fail", "require_supported_macos", "require_build_tools"],
+            'require_supported_macos\nrequire_build_tools\necho ok\n',
+            variables={"VERIFY_ONLY": 0},
+            stubs={"xcode-select": "echo /Library/Developer/CommandLineTools",
+                   "xcrun": swift_six, "sw_vers": "echo 15.4"})
+        self.assertEqual(passing.returncode, 0, passing.stderr)
+
     def test_mac_installer_adopts_an_installed_homebrew_missing_from_path(self):
         # The self-updater runs this installer from a detached launchd job, and
         # launchd hands such a job the minimal PATH rather than the login one.
