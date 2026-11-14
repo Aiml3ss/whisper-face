@@ -139,15 +139,17 @@ jobs:
           Assert-Rejected @("--yes")
           Write-Host "ok: bad arguments rejected"
 
-          # A failing run has to end with the banner naming the log, because
-          # that file is all a user has to send back after an install fails.
+          # A failing run has to end with the banner, last, so the reason is
+          # the final thing on screen. --verify promises to change nothing, so
+          # it must not leave an install.log behind either.
+          Remove-Item -LiteralPath .\install.log -Force -ErrorAction SilentlyContinue
           $verify = Invoke-Installer @("--verify")
           if ($verify.Code -eq 0) { throw "--verify passed with nothing installed" }
           if ($verify.Output -notmatch "Whisper Face setup failed") {
             throw "a failing run printed no failure banner"
           }
-          if (-not (Test-Path .\install.log)) { throw "no install.log was written" }
-          Write-Host "ok: failure banner and install.log"
+          if (Test-Path .\install.log) { throw "--verify wrote install.log" }
+          Write-Host "ok: failure banner, and --verify changed nothing"
 
           # Every check above passed. This shell exits with $LASTEXITCODE, and
           # the --verify run deliberately left it non-zero, so say so directly.

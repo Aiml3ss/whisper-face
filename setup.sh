@@ -118,12 +118,12 @@ elif [ "$ASSUME_YES" -eq 1 ] || [ "$REMOVE_MODELS" -eq 1 ] \
 fi
 
 fail() {
-    echo "!! $*" >&2
-    # Guarded because fail() is reachable before the log is opened, and
-    # cleared to empty when opening it did not work.
-    if [ -n "${install_log:-}" ] && [ -f "${install_log:-}" ]; then
-        echo "!! Full log: $install_log" >&2
-        echo "!! Attach that file to a bug report; it holds every step." >&2
+    # The in-app Verify button shows the last line --verify writes to standard
+    # output, so in that mode the reason has to be that line.
+    if [ "$VERIFY_ONLY" -eq 1 ]; then
+        echo "!! $*"
+    else
+        echo "!! $*" >&2
     fi
     exit 1
 }
@@ -318,7 +318,8 @@ install_log="$DIR/install.log"
 # read-only checkout, and confirm_writable_checkout has a far better message
 # waiting a few steps later. An uninstall is excluded for the same reason the
 # Windows installer excludes it -- it prints a short plan that never scrolls,
-# and an open log would be one more file it then had to remove.
+# and an open log would be one more file it then had to remove. --verify is
+# excluded because it promises to change nothing.
 start_install_log() {
     [ ! -L "$install_log" ] || return 1
     if [ -e "$install_log" ] && [ ! -f "$install_log" ]; then
@@ -328,10 +329,30 @@ start_install_log() {
     chmod 600 "$install_log" 2>/dev/null || return 1
 }
 
-if [ "$UNINSTALL" -eq 0 ] && start_install_log; then
-    exec > >(tee -a "$install_log") 2>&1
-else
-    install_log=""
+run_with_install_log() {
+    # Rerun this installer as a child whose combined output a plain pipeline
+    # copies into the log. bash 3.2 cannot wait for a process substitution,
+    # so with `exec > >(tee ...)` the failure reason reached the screen after
+    # Install.command's closing lines instead of before them.
+    local status
+    set +e
+    WHISPER_FACE_INSTALL_LOG="$install_log" "$DIR/setup.sh" "$@" 2>&1 \
+        | tee -a "$install_log"
+    status="${PIPESTATUS[0]}"
+    set -e
+    if [ "$status" -ne 0 ]; then
+        echo "!! Whisper Face setup failed (exit status $status)."
+        echo "!! Full log: $install_log"
+        echo "!! Attach that file to a bug report; it holds every step."
+    fi
+    return "$status"
+}
+
+if [ -z "${WHISPER_FACE_INSTALL_LOG:-}" ] && [ "$UNINSTALL" -eq 0 ] \
+        && [ "$VERIFY_ONLY" -eq 0 ] && start_install_log; then
+    install_status=0
+    run_with_install_log "$@" || install_status=$?
+    exit "$install_status"
 fi
 
 # --- Uninstall --------------------------------------------------------------

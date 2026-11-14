@@ -4,7 +4,10 @@
 # ///
 
 import ast
+import os
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -39,6 +42,68 @@ PERSONAL_FILES = (
 # Tools Whisper Face installs alongside itself but does not own. Someone else
 # on this machine may depend on any of them.
 SHARED_TOOLS = ("brew", "uv", "ffmpeg", "ollama")
+
+# Tools a setup.sh function could reach that would change this machine or go
+# to the network. Every one is shadowed by a stub that refuses, unless a test
+# supplies its own, so a forgotten stub fails the test instead of the Mac.
+REFUSED_TOOLS = (
+    "brew", "uv", "ollama", "launchctl", "curl", "swift", "swiftc",
+    "codesign", "open", "python3", "lsof",
+)
+
+
+def shell_function(name: str) -> str:
+    """The source of one top-level setup.sh function, by name."""
+    source = (ROOT / "setup.sh").read_text(encoding="utf-8")
+    match = re.search(
+        rf"(?ms)^{re.escape(name)}\(\) \{{\n.*?^\}}\n", source)
+    if match is None:
+        raise AssertionError(f"setup.sh defines no {name}() function")
+    return match.group(0)
+
+
+def run_setup_functions(names, script, *, variables=None, stubs=None,
+                        cwd=None):
+    """Run named setup.sh functions in isolation; never the installer.
+
+    ``variables`` become shell variables ahead of the functions, the way the
+    installer's own top level sets them. ``stubs`` maps a command name to a
+    bash body that replaces that command on PATH.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        bin_dir = Path(directory) / "bin"
+        bin_dir.mkdir()
+        bodies = {tool: 'echo "refused: $0 $*" >&2; exit 97'
+                  for tool in REFUSED_TOOLS}
+        bodies.update(stubs or {})
+        for tool, body in bodies.items():
+            stub = bin_dir / tool
+            stub.write_text(f"#!/bin/bash\n{body}\n", encoding="utf-8")
+            stub.chmod(0o755)
+        assignments = "".join(
+            f"{key}={_shell_quote(value)}\n"
+            for key, value in (variables or {}).items())
+        program = (
+            "set -euo pipefail\n" + assignments
+            + "".join(shell_function(name) for name in names) + script)
+        environment = {
+            "HOME": directory,
+            "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin",
+            "LANG": "C",
+            "STUB_LOG": str(Path(directory) / "calls.log"),
+        }
+        result = subprocess.run(
+            ["/bin/bash", "-c", program], cwd=cwd or directory,
+            env=environment, text=True, capture_output=True, timeout=60,
+            stdin=subprocess.DEVNULL)
+        calls_path = Path(directory) / "calls.log"
+        result.calls = (calls_path.read_text(encoding="utf-8")
+                        if calls_path.exists() else "")
+        return result
+
+
+def _shell_quote(value) -> str:
+    return "'" + str(value).replace("'", "'\\''") + "'"
 
 
 class InstallerContractTests(unittest.TestCase):
@@ -561,7 +626,8 @@ class InstallerContractTests(unittest.TestCase):
 
     def test_minimal_mac_install_is_a_supported_verified_configuration(self):
         verify_start = self.shell.index("verify_install() {")
-        verify_end = self.shell.index('if [ "$VERIFY_ONLY" -eq 1 ]')
+        verify_end = self.shell.index(
+            'if [ "$VERIFY_ONLY" -eq 1 ]', verify_start)
         verify = self.shell[verify_start:verify_end]
         # An absent optional cleanup model is a supported state, not a failure.
         self.assertNotIn('fail "qwen3.5:4b is not installed"', self.shell)
@@ -708,6 +774,95 @@ class InstallerContractTests(unittest.TestCase):
         ):
             with self.subTest(required=required):
                 self.assertIn(required, self.powershell)
+
+    def test_install_log_records_the_run_and_the_reason_comes_first(self):
+        # The log is written by rerunning setup.sh behind a plain pipeline.
+        # Under the earlier `exec > >(tee ...)`, bash 3.2 could not wait for
+        # the tee, so the reason arrived after Install.command's trailer.
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            child = checkout / "setup.sh"
+            child.write_text(
+                "#!/bin/bash\n"
+                'echo "== a step"\n'
+                'echo "logged-by=${WHISPER_FACE_INSTALL_LOG:-}"\n'
+                'echo "arguments=$*"\n'
+                'sleep 0.2\n'
+                'echo "!! the reason it stopped" >&2\n'
+                "exit 3\n", encoding="utf-8")
+            child.chmod(0o755)
+            log = checkout / "install.log"
+            for attempt in range(5):
+                with self.subTest(attempt=attempt):
+                    log.unlink(missing_ok=True)
+                    result = run_setup_functions(
+                        ["start_install_log", "run_with_install_log"],
+                        'start_install_log\n'
+                        'status=0\n'
+                        'run_with_install_log --with-all-models '
+                        '|| status=$?\n'
+                        'echo "trailer status=$status"\n',
+                        variables={"DIR": checkout, "install_log": log})
+                    output = result.stdout
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    reason = output.index("!! the reason it stopped")
+                    banner = output.index("!! Full log: " + str(log))
+                    trailer = output.index("trailer status=3")
+                    self.assertLess(reason, banner)
+                    self.assertLess(banner, trailer)
+                    recorded = log.read_text(encoding="utf-8")
+                    self.assertIn("== a step", recorded)
+                    self.assertIn("!! the reason it stopped", recorded)
+                    self.assertIn(f"logged-by={log}", recorded)
+                    self.assertIn("arguments=--with-all-models", recorded)
+                    self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+
+    def test_a_failed_verify_reports_its_reason_where_the_app_reads_it(self):
+        # verify_mac_installation shows the last line --verify prints on
+        # standard output; before, that was "== verifying installation".
+        verify = run_setup_functions(
+            ["fail"], 'echo "== verifying installation"\n'
+                      'fail "Parakeet ASR helper is missing"\n',
+            variables={"VERIFY_ONLY": 1})
+        self.assertEqual(verify.returncode, 1)
+        self.assertEqual(verify.stdout.strip().splitlines()[-1],
+                         "!! Parakeet ASR helper is missing")
+        # An install keeps reasons on standard error, as before.
+        install = run_setup_functions(
+            ["fail"], 'fail "no room"\n', variables={"VERIFY_ONLY": 0})
+        self.assertEqual(install.returncode, 1)
+        self.assertEqual(install.stdout, "")
+        self.assertIn("!! no room", install.stderr)
+
+    def test_install_command_names_the_log_only_when_this_run_wrote_it(self):
+        # A copy of the shim drives a stand-in setup.sh, so nothing installs.
+        for writes_log, expected in (
+            (False, "Setup stopped before it could open a log"),
+            (True, "The whole run, including the error above, was recorded"),
+        ):
+            with self.subTest(writes_log=writes_log), \
+                    tempfile.TemporaryDirectory() as directory:
+                folder = Path(directory)
+                shim = folder / "Install.command"
+                shim.write_bytes((ROOT / "Install.command").read_bytes())
+                shim.chmod(0o755)
+                stand_in = folder / "setup.sh"
+                stand_in.write_text(
+                    "#!/bin/bash\n"
+                    + ('echo "this run" >> install.log\n' if writes_log
+                       else "")
+                    + 'echo "!! --nonsense is not an option" >&2\n'
+                    "exit 2\n", encoding="utf-8")
+                stand_in.chmod(0o755)
+                # A log left behind by an earlier, unrelated run.
+                (folder / "install.log").write_text(
+                    "an earlier run\n", encoding="utf-8")
+                result = subprocess.run(
+                    [str(shim), "--nonsense"], cwd=folder, text=True,
+                    capture_output=True, stdin=subprocess.DEVNULL,
+                    timeout=30)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(expected, result.stdout)
 
     def test_installers_fail_before_side_effects_for_read_only_checkouts(self):
         mac_probe = self.shell.index("confirm_writable_checkout()")

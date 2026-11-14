@@ -1,6 +1,16 @@
 #!/bin/bash
 set -u
 cd "$(dirname "$0")"
+# Size before the run, so a log left by an earlier run is never presented as
+# the record of this one.
+install_log_size() {
+    if [ -f install.log ]; then
+        wc -c < install.log | tr -d '[:space:]'
+    else
+        echo none
+    fi
+}
+log_before="$(install_log_size)"
 ./setup.sh "$@"
 status=$?
 echo
@@ -8,7 +18,7 @@ if [ "$status" -eq 0 ]; then
     echo "Whisper Face installation finished."
 else
     echo "Installation failed with exit code $status."
-    if [ -f "install.log" ]; then
+    if [ "$(install_log_size)" != "$log_before" ]; then
         echo "The whole run, including the error above, was recorded here:"
         echo "  $(pwd)/install.log"
         echo "Attach that file to a bug report; it holds every step that ran."

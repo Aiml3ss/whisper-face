@@ -225,15 +225,30 @@ $InstallLog = Join-Path $Repo "install.log"
 # and can be attached to a bug report. The transcript header names this
 # machine and account, so it is ACL-locked exactly like the runtime logs.
 # Not while uninstalling: an open transcript holds install.log against its own
-# removal, and an uninstall prints a short plan that never scrolls anyway.
+# removal, and an uninstall prints a short plan that never scrolls anyway. Not
+# for --verify either, which promises to change nothing.
 $script:TranscriptPath = ""
-if (-not $Uninstall) {
+$script:TranscriptActive = $false
+if (-not $Uninstall -and -not $VerifyOnly) {
     try {
         Set-PrivateFile $InstallLog
         Start-Transcript -LiteralPath $InstallLog -Append -Force | Out-Null
         $script:TranscriptPath = $InstallLog
+        $script:TranscriptActive = $true
     } catch {
         Write-Host "== continuing without an install log: $($_.Exception.Message)"
+    }
+}
+
+function Stop-InstallLog {
+    # A transcript outlives the script that started it. Run from an open
+    # PowerShell window, it would go on recording that window's later
+    # commands into the file users are asked to attach to a bug report.
+    # Only the recording stops; $script:TranscriptPath still names the file
+    # for the failure banner, whichever of the two runs first.
+    if ($script:TranscriptActive) {
+        $script:TranscriptActive = $false
+        try { Stop-Transcript | Out-Null } catch { }
     }
 }
 
@@ -256,6 +271,12 @@ trap {
     Write-Host ""
     break
 }
+
+# Everything below runs inside this try so that the finally at the end of the
+# file stops the transcript on every way out: an exit, a failure (after the
+# trap above has printed its banner), or Ctrl+C. The body is deliberately not
+# indented; try does not open a new scope, so nothing below changes meaning.
+try {
 
 # --- Uninstall ---------------------------------------------------------------
 # Removal works from the explicit inventory below and never from a wildcard.
@@ -860,3 +881,7 @@ if ($Mode -eq "full") {
     Write-Host "== server-only installation is ready."
 }
 Write-Host "== Logs: $Log"
+
+} finally {
+    Stop-InstallLog
+}
