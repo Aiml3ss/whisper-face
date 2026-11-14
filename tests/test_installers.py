@@ -639,10 +639,14 @@ class InstallerContractTests(unittest.TestCase):
         self.assertLess(guard, manifest)
         self.assertIn("cleanup stays deterministic", verify)
         # Installing the model keeps its manifest audit mandatory.
-        self.assertIn('fail "Qwen model manifest verification failed"', verify)
+        self.assertIn(
+            'fail "Qwen model manifest verification failed; rerun ./setup.sh',
+            verify)
+        self.assertIn("--verify-ollama-model",
+                      shell_function("qwen_matches_audit"))
         install = self.shell[self.shell.index(
             'step "installing the locked Python environment"'):]
-        install_manifest = install.index("--verify-ollama-model")
+        install_manifest = install.index("qwen_matches_audit")
         self.assertLess(
             install.rindex('if [ "$qwen_installed" -eq 1 ]',
                            0, install_manifest),
@@ -847,6 +851,74 @@ class InstallerContractTests(unittest.TestCase):
             self.assertFalse(Path(directory, "loaded").exists())
             self.assertFalse(variables["ollama_plist"].exists())
             self.assertFalse(variables["ollama_service_receipt"].exists())
+
+    def test_a_republished_cleanup_model_is_set_aside_by_models(self):
+        # ./setup.sh --models pulls qwen3.5:4b by a tag its publisher can
+        # move. A copy that fails the manifest audit must not leave a loaded
+        # agent, its plist, or the model behind: plist plus model reads as an
+        # opt-in, and every later setup, update and --verify would then fail.
+        cases = (
+            ("pulled by this run", False, True),
+            ("already in the store", True, False),
+        )
+        for name, already_present, removed in cases:
+            with self.subTest(case=name), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                variables, stubs = self.ollama_sandbox(directory, healthy=True)
+                loaded = root / "loaded"
+                store = root / "store" / "qwen3.5-4b"
+                store.parent.mkdir()
+                if already_present:
+                    store.write_text("republished manifest")
+                ollama = root / "fake-ollama"
+                ollama.write_text(
+                    "#!/bin/bash\n"
+                    'echo "ollama $*" >> "$STUB_LOG"\n'
+                    'case "$1" in\n'
+                    f'  show) [ -e {store} ] ;;\n'
+                    f'  pull) echo republished > {store} ;;\n'
+                    # ollama rm talks to the service, so it needs it loaded.
+                    f'  rm) [ -e {loaded} ] && rm -f {store} ;;\n'
+                    "esac\n")
+                ollama.chmod(0o755)
+                variables["OLLAMA"] = ollama
+                variables["UV"] = "uv"
+                stubs["uv"] = (
+                    'echo "uv $*" >> "$STUB_LOG"\n'
+                    'case "$*" in\n'
+                    '  *--verify-ollama-model*)\n'
+                    '    echo "RuntimeError: qwen3.5:4b manifest drift" >&2\n'
+                    '    exit 1 ;;\n'
+                    "esac\n")
+                # The launchd job (pid 77) is the only listener once loaded.
+                stubs["lsof"] = f'[ -e {loaded} ] && echo 77; exit 0'
+                result = run_setup_functions(
+                    self.OLLAMA_FUNCTIONS + (
+                        "model_state", "qwen_is_installed",
+                        "qwen_matches_audit", "install_optional_models"),
+                    'refresh_model_inventory() { :; }\n'
+                    'install_optional_models\n',
+                    variables={**variables,
+                               "model_inventory": "whisper-large=present"},
+                    stubs=stubs)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("!! qwen3.5:4b does not match the audited model",
+                              result.stdout)
+                self.assertIn("qwen3.5:4b was skipped", result.stdout)
+                self.assertNotIn("optional models are installed", result.stdout)
+                self.assertFalse(loaded.exists(), "Ollama agent left loaded")
+                self.assertFalse(variables["ollama_plist"].exists())
+                self.assertFalse(variables["ollama_service_receipt"].exists())
+                self.assertEqual(not store.exists(), removed, result.calls)
+                # So the next setup no longer reads it as an opt-in.
+                after = run_setup_functions(
+                    ["cleanup_model_wanted"],
+                    "cleanup_model_wanted && echo wanted || echo skipped\n",
+                    variables={"WITH_ALL_MODELS": 0,
+                               "ollama_plist": variables["ollama_plist"],
+                               "qwen_manifest": store})
+                self.assertEqual(after.stdout.strip(), "skipped")
 
     def test_runtime_logs_are_private_before_services_can_write_them(self):
         mac_provision = self.shell.index('provision_private_log "$dictate_log"')

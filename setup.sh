@@ -840,7 +840,7 @@ verify_install() {
     if [ "$verify_qwen" -eq 1 ]; then
         "$uv_bin" run --locked --script "$DIR/dictate.py" \
             --verify-ollama-model >/dev/null \
-            || fail "Qwen model manifest verification failed"
+            || fail "Qwen model manifest verification failed; rerun ./setup.sh to set the unaudited model aside"
     fi
     agent_is_running com.berg.dictate \
         || fail "dictation LaunchAgent is not running"
@@ -1120,8 +1120,31 @@ qwen_is_installed() {
     "$OLLAMA" show qwen3.5:4b >/dev/null 2>&1
 }
 
+qwen_matches_audit() {
+    # $1 = 1 when this run pulled the copy. qwen3.5:4b is pulled by a tag its
+    # publisher can move. A copy that differs from the audited manifest is
+    # never served: its service is unloaded and its plist removed, so no later
+    # run or update reads it as an opt-in and fails on it. A copy this run
+    # fetched is removed; one that was already here is left to its owner.
+    if "$UV" run --locked --script "$DIR/dictate.py" --verify-ollama-model; then
+        return 0
+    fi
+    echo "!! qwen3.5:4b does not match the audited model, so it is not used."
+    if [ "$1" -eq 1 ]; then
+        # ollama rm needs the service, so it goes before the service does.
+        "$OLLAMA" rm qwen3.5:4b >/dev/null 2>&1 || true
+        echo "!! The copy just downloaded was removed."
+    else
+        echo "!! It was left in Ollama's store; remove it with: ollama rm qwen3.5:4b"
+    fi
+    retire_ollama_service
+    echo "!! Its Ollama service was unloaded; cleanup stays deterministic."
+    return 1
+}
+
 install_optional_models() {
     # Fetch only the opt-in quality models into an existing installation.
+    local qwen_pulled_now=0 qwen_audited=1
     step "checking which optional models are already installed"
     refresh_model_inventory
     if [ "$(model_state whisper-large)" = "present" ]; then
@@ -1139,15 +1162,20 @@ install_optional_models() {
             retire_ollama_service
             fail "Ollama could not download qwen3.5:4b; its service was unloaded"
         fi
+        qwen_pulled_now=1
     fi
-    "$UV" run --locked --script "$DIR/dictate.py" --verify-ollama-model
+    qwen_matches_audit "$qwen_pulled_now" || qwen_audited=0
     if agent_is_running com.berg.dictate; then
         step "restarting Whisper Face so it loads the new models"
         launchctl kickstart -k "gui/$(id -u)/com.berg.dictate" >/dev/null 2>&1 \
             || echo "!! could not restart Whisper Face; rerun ./setup.sh"
     fi
     echo
-    echo "== optional models are installed"
+    if [ "$qwen_audited" -eq 1 ]; then
+        echo "== optional models are installed"
+    else
+        echo "== Whisper large-v3-turbo is installed; qwen3.5:4b was skipped"
+    fi
 }
 
 if [ "$MODELS_ONLY" -eq 1 ]; then
@@ -1214,17 +1242,7 @@ fi
 # --- Reproducible Python environment and Whisper model cache ---------------
 step "installing the locked Python environment"
 "$UV" sync --locked --script "$DIR/dictate.py"
-if [ "$qwen_installed" -eq 1 ] \
-        && ! "$UV" run --locked --script "$DIR/dictate.py" --verify-ollama-model; then
-    # qwen3.5:4b is pulled by a tag its publisher can move. A copy this run
-    # just fetched that no longer matches the audited manifest is removed,
-    # with its service, and the install carries on without the optional
-    # model. A copy that was already here is the user's to judge.
-    [ "$qwen_pulled_now" -eq 1 ] || fail "Qwen model manifest verification failed"
-    echo "!! qwen3.5:4b as published now differs from the audited model;"
-    echo "!! removing it and continuing with deterministic cleanup."
-    "$OLLAMA" rm qwen3.5:4b >/dev/null 2>&1 || true
-    retire_ollama_service
+if [ "$qwen_installed" -eq 1 ] && ! qwen_matches_audit "$qwen_pulled_now"; then
     qwen_installed=0
     skipped_models+=(
         "qwen3.5:4b — its published manifest changed since it was audited")
