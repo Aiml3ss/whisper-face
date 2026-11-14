@@ -1459,6 +1459,31 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIsNone(redirection.search(unquoted))
         self.assertIn('if ((Invoke-Native $Ollama @("show", "qwen3.5:4b"))',
                       self.powershell)
+        # A command that cannot start sets no exit code, so each wrapper
+        # clears it first rather than returning the previous command's 0.
+        for start in sorted(wrappers):
+            line = lines[start]
+            if not line.startswith("function Invoke-Native"):
+                continue
+            body = lines[start:next(index for index in range(start, len(lines))
+                                    if lines[index] == "}")]
+            reset = next(index for index, text in enumerate(body)
+                         if text.strip() == "$global:LASTEXITCODE = -1")
+            call = next(index for index, text in enumerate(body)
+                        if native_call.search(text.split("#", 1)[0]))
+            with self.subTest(wrapper=line):
+                self.assertLess(reset, call)
+
+        # The failure trap covers the whole script, argument errors included,
+        # and strict mode throws on an unset variable inside it, which would
+        # replace the reason. Everything it reads is set before any throw.
+        trap = self.powershell[self.powershell.index("\ntrap {"):]
+        trap = trap[:trap.index("\n}\n")]
+        first_throw = self.powershell.index("throw ")
+        for variable in sorted(set(re.findall(r"\$script:\w+", trap))):
+            with self.subTest(trap_reads=variable):
+                self.assertLess(
+                    self.powershell.index(f"{variable} = "), first_throw)
 
     def test_windows_login_task_keeps_running_on_battery_and_restarts(self):
         # Static, because no PowerShell runs here. Task Scheduler defaults

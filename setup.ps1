@@ -19,6 +19,11 @@ $Uninstall = $false
 $AssumeYes = $false
 $RemoveModels = $false
 $RemovePersonalData = $false
+# Set before anything can throw: the failure trap below covers the whole
+# script, argument errors included, and strict mode refuses to read an unset
+# variable, which would replace the real reason with its own.
+$script:TranscriptPath = ""
+$script:TranscriptActive = $false
 
 foreach ($Argument in $Args) {
     switch ($Argument) {
@@ -115,6 +120,9 @@ function Invoke-Native([string]$FilePath, [string[]]$CommandArguments) {
     # absent, which is the expected answer during a first install.
     $Previous = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
+    # A command that cannot start sets no exit code; never report the last
+    # command's success for it.
+    $global:LASTEXITCODE = -1
     try {
         & $FilePath @CommandArguments 2>&1 | Out-Null
         return $LASTEXITCODE
@@ -130,6 +138,9 @@ function Invoke-NativeStep([string]$FilePath, [string[]]$CommandArguments,
     # error is never redirected.
     $Previous = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
+    # A command that cannot start sets no exit code; never report the last
+    # command's success for it.
+    $global:LASTEXITCODE = -1
     try {
         if ($HideOutput) {
             & $FilePath @CommandArguments | Out-Null
@@ -256,8 +267,6 @@ $InstallLog = Join-Path $Repo "install.log"
 # Not while uninstalling: an open transcript holds install.log against its own
 # removal, and an uninstall prints a short plan that never scrolls anyway. Not
 # for --verify either, which promises to change nothing.
-$script:TranscriptPath = ""
-$script:TranscriptActive = $false
 if (-not $Uninstall -and -not $VerifyOnly) {
     try {
         Set-PrivateFile $InstallLog
