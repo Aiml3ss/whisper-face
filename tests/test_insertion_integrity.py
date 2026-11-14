@@ -306,6 +306,28 @@ class InsertionIntegrityTests(unittest.TestCase):
         self.assertFalse(coordinator.acknowledge("utterance-1"))
         self.assertEqual(coordinator.recoverable(), ())
 
+    def test_blank_text_is_never_offered_for_recovery(self):
+        drifted = DestinationObservation.capture(
+            "pid:99/field:1", (12, 0), "before|after")
+        for text, current, readback in (
+                ("", drifted, ReadbackResult.verified),
+                ("  \n", drifted, ReadbackResult.verified),
+                ("", self.current, ReadbackResult.unverifiable),
+                (" ", self.current, ReadbackResult.conflict)):
+            with self.subTest(text=text, readback=readback.__name__):
+                coordinator = self.staged(text)
+                receipt = coordinator.commit(
+                    "utterance-1", current, lambda _text: None, readback)
+
+                self.assertNotEqual(receipt.state, ReceiptState.VERIFIED)
+                self.assertEqual(coordinator.recoverable(), ())
+                self.assertEqual(coordinator.recoverable_count(), 0)
+                # The receipt survives for dedupe; the attempt is still once.
+                self.assertEqual(coordinator.receipt("utterance-1"), receipt)
+                self.assertIs(coordinator.commit(
+                    "utterance-1", self.current, lambda _text: None,
+                    ReadbackResult.verified), receipt)
+
     def test_opaque_lease_checks_destination_without_readable_text(self):
         lease = InsertionLease.capture_opaque(
             "opaque-1", "com.example:field", "Composer")
