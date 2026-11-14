@@ -32,17 +32,23 @@ allowlisted **command** mode.
 - **Tones**: casual in chat apps (no trailing period), formal in Mail,
   technical in editors, verbatim in terminals — resolved override first
   (now set in the window, formerly the menu), then per-app sets, then
-  default. A spoken override ("Formal tone, …") applies once and requires
-  punctuation after the tone word so "Formal education is…" cannot match.
+  default. A spoken override ("Formal tone, …", "casual style, …",
+  "verbatim mode: …") applies once and requires the word tone, style, or
+  mode plus punctuation, so "Formal education is…" cannot match.
 - **Snippets**: "insert my email" pastes saved text. Whole-utterance
-  snippets paste directly; inline triggers are masked to sentinel
-  characters through cleanup ([[cleanup-pipeline]]). Editing the exact
-  pasted placeholder within ten seconds saves the replacement
-  ([[personalization]]).
+  snippets paste directly; inside a sentence only the cue "insert my
+  <name>" expands, and its expansion is masked to sentinel characters
+  through cleanup ([[cleanup-pipeline]]). A bare snippet name never
+  expands and an `EDIT ME` placeholder is never inserted. Editing a pasted
+  snippet in place records only a pending suggestion; the saved snippet
+  does not change ([[personalization]]).
 - **Spoken structure**: "new line" / "new paragraph" / "scratch that";
   explicit list lead-ins become dash lists.
+- **Language**: Compose, Reply, and Edit need the optional cleanup model
+  and English; in any other language they refuse with "<Mode> mode needs
+  English — nothing changed".
 - **Flight Recorder**: default-off, 20-second RAM-only ring buffer; tap
-  Right Option afterwards to paste the latest utterance. A hold consumes
+  the capture key afterwards to paste the latest utterance. A hold consumes
   and clears the buffer, and a tap selects only speech that ended before
   key-down so the start cue is never captured. Audio never touches disk.
 - Voice Object command diversion ([[voice-objects]]) and the

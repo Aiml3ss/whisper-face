@@ -22,6 +22,22 @@ correction evidence. A Personal Prior activates after two matching
 observations in one app or three globally (ADR-0004) — and only if it
 survives the Personal Regression Lab.
 
+*Corrected November 2026.* An edit counts only once it has stayed
+unchanged for five polls (about a second) and is still what the range
+holds when observation ends; an emptied field (a sent message) ends the
+watch, and a paste sent unedited counts as evidence *against* a
+candidate. No mapping joins two common English words (about 700, compared
+without apostrophes), adds or removes a negation, or maps one number to
+another. Only lab-promoted mappings apply, as exact whole-token
+replacements, never inside an email address, @handle, or URL; the legacy
+fixes/confusions tables no longer apply anything. One correction adds one
+to the target's dictionary count and two promote it; common words are
+never auto-promoted. Forget removes the mapping's count, history, and lab
+evidence in every scope. An observed edit of a pasted snippet is stored
+only as a pending suggestion (`snippet_edits[name]["suggested"]`) and
+never rewrites the saved snippet; the window does not show suggestions
+yet. Correction learning is Mac-only.
+
 ## Key Properties
 
 - **Personal Regression Lab** (`personal_regression.py`): a bounded
@@ -37,12 +53,12 @@ survives the Personal Regression Lab.
   priors. Any error or regression quarantines and the activation
   callback never runs; zero improvements is insufficient evidence; case
   text is repr-suppressed so it cannot leak through tracebacks.
-- **Gated legacy paths**: promoted-or-quarantined heard-terms suppress
-  the old ungated fixes/confusions, so a quarantine decision also blocks
-  the legacy path.
+- **Gated legacy paths**: since November 2026 the old fixes/confusions
+  tables apply nothing; only mappings the lab holds active are applied.
+  On load, promotions are restored with a conflict check rather than by
+  replaying the shadow gate.
 - **Inspectable and forgettable**: every learned mapping is listed under
-  **Learned corrections** and can be forgotten; snippets learned from
-  placeholder edits appear the same way. Since 2026-07-26 that row lives
+  **Learned corrections** and can be forgotten. Since 2026-07-26 that row lives
   on Settings → Personalize in [[app-window]] rather than in
   [[menu-bar]], alongside Snippets, Vocabulary and Pronunciation
   keywords; a row with nothing yet shows an invitation ("Fix the same

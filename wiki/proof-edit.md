@@ -23,11 +23,15 @@ LLM result is discarded and deterministic cleanup pastes instead.
 ## Key Properties
 
 - Validated by `VoiceCompiler.verify_edits`: each edit's span must
-  locate exactly in the current text, and only a closed set of
-  transformations is provable — identical lexical content
-  (punctuation/case/whitespace changes), removal of provable filler
-  words, an explicit "X, actually Y" self-correction, dropped
-  new-line/new-paragraph markers, and proven list/enumeration variants.
+  locate exactly in the current text at a whole-token boundary, and the
+  edit is re-checked against the whole text so every anchor and number
+  outside it survives. Only a closed set of transformations is provable —
+  identical lexical content (punctuation/case/whitespace changes), removal
+  of provable filler words, a typed "X, actually Y" self-correction (both
+  sides numbers, weekdays, months, or clock times, each a whole item),
+  dropped new-line/new-paragraph markers, and proven list/enumeration
+  variants, where lines that are not list items still have to be proven
+  from the source (corrected November 2026).
 - Fixed rejection reasons include: protected anchor removed, edit span
   not bounded (>240 chars), excessive expansion, whole-message rewrite,
   unproved lexical transformation.

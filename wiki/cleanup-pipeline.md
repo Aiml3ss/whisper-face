@@ -42,9 +42,11 @@ through validated [[proof-edit]]s.
   their broad-rewrite contract by design ([[voice-modes]]).
 - **Spoken structure**: "new line" / "new paragraph" / "scratch that"
   work; explicit list lead-ins become dash lists.
-- **Snippet masking**: inline snippet triggers are masked to
-  private-use-area sentinels before cleanup and restored after, so
-  boilerplate is never reflowed and the model never sees expansions.
+- **Snippet masking**: inline snippets fire only on the spoken cue
+  "insert my <name>" (never on a bare snippet name, and never for a value
+  still starting with `EDIT ME`). The expansion is masked to private-use-area
+  sentinels before cleanup and restored after, so boilerplate is never
+  reflowed and the model never sees expansions (corrected November 2026).
 - A standalone proof-recovery mediator and a latency lab exist for
   benchmarking prompts and models, with no runtime authority
   ([[benchmarks]]).

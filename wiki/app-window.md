@@ -50,18 +50,31 @@ gone. Closing the window does not stop dictation.
   sounds can be switched between macOS, the first-party set, and
   silent, and **Voice modes** — whose View dialog lists the six
   capture-key shortcuts ([[voice-modes]]) — lives here beside the key
-  it describes. Personalize has room for exactly six 44 pt rows at
-  880×600, which is why the modes reference moved rather than squeezed.
+  it describes. Personalize has room for exactly six 44 pt rows at the
+  minimum size, which is why the modes reference moved rather than
+  squeezed. A capture key equal to the undo key is refused.
 - **Settings → Privacy** = exactly three switches: Voice Object Commands
   (with an Inspect button, [[voice-objects]]), Flight Recorder, and
   Acoustic Time Machine.
 - **Advanced** = Models and Diagnostics merged: the Selective Re-listen
-  toggle and status, four model rows with readiness pills, the wallet
+  toggle and status, four model rows with readiness pills (Ready /
+  Installed / Optional / Missing / Needs repair / Wrong version /
+  Checking — an optional model that was never installed raises no
+  warning, November 2026), the wallet
   shadow advisory ([[model-wallet]]), a 2×3 status card (Service,
   Microphone, Accessibility, Personal Regression Lab, Motion, Build),
   then Open Log, Copy Support Snapshot, Run Verification (⌘R), Export
   Support Bundle…, Open System Settings, License Notices, Exact Source
-  ([[governance]]) and the license footnote.
+  ([[governance]]) and the license footnote. Open System Settings appears
+  only while a permission is reported missing and opens that
+  permission's own Privacy & Security pane.
+- **No undo or re-insert in the window** (November 2026): the window has
+  no Undo Last Dictation button, and the recent-dictations dialog is
+  reveal-only. Undo and Insert Again live in the [[menu-bar]] and on the
+  undo key, where the destination app is still frontmost.
+- **Notices**: a Review Setup notice clears by itself once the issue it
+  describes is no longer reported; other error notices stay until the
+  next action, and success/info notices last about 8 s.
 
 ## The evidence inspector carries the whole trust surface
 
@@ -97,7 +110,9 @@ and Drop-to-Target view-model layers are covered in
 
 ## Shape, keyboard, and proof
 
-- Resizable, opens at 1000×640, minimum 880×600; since the chibi-clay
+- Resizable, opens at 1000×680, minimum 880×648 (1000×640 / 880×600
+  before November 2026); closing it keeps it alive, and a minimal
+  Edit/Window main menu gives Cmd-W, Cmd-M and the Edit shortcuts; since the chibi-clay
   rebuild the sidebar is gone — a 64pt top bar carries the face chip,
   the `LOCAL FIRST` badge, Home/Settings pills and an Advanced tool
   button, with a `BUILD {version}` tag in the lower corner; Home leads
@@ -120,7 +135,7 @@ and Drop-to-Target view-model layers are covered in
   window front, and writes nine views (Home, both Settings panes,
   Advanced, and the five first-run stages) in both appearances — 18 PNGs
   — into the gitignored `.probe-renders/`. `--size WIDTHxHEIGHT` lets the
-  880×600 minimum be reviewed directly.
+  880×648 minimum be reviewed directly.
 
 ## Related Concepts
 

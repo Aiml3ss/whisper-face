@@ -33,9 +33,11 @@ speech is recognized *while you talk* through rolling chunk cuts, so a
   still valid. Each chunk keeps exact start/end samples so word timings
   stay anchored across silence gaps.
 - **Routing**: on Mac, the Parakeet helper is tried first. Helper
-  failure of any kind falls back faithfully to Whisper Turbo and lazily
-  restarts the helper next call. If Turbo's snapshot is absent, the
-  runtime degrades to Tiny with a printed notice.
+  failure falls back faithfully to Whisper (Turbo when installed, else
+  Tiny with a printed notice). A helper that had started restarts lazily
+  on the next call; one that fails to start or cannot be spawned is
+  logged once and retried only after a backoff of 30 s, doubling to a
+  300 s cap (November 2026). Turbo is not part of a default install.
 - **Cross-checked confidence** (#126): Parakeet exposes no calibrated
   confidence, so its result is cross-checked against Tiny's hypothesis
   and token agreement maps linearly onto 0.45–0.93. The interesting
@@ -44,7 +46,13 @@ speech is recognized *while you talk* through rolling chunk cuts, so a
   below ≈0.52, and a single Turbo escalation fires only for agreement
   below 0.35 on audio of 12 s or less — with the loser retained as an
   inspectable alternative. The fixed prior remains only for runs where
-  no cross-check text exists.
+  no cross-check text exists. Since November 2026 the escalation runs
+  only when Turbo is installed and is a two-of-three vote on the words
+  (more than half the tokens matching), not a confidence comparison:
+  Turbo's text wins only when it agrees with Tiny and not Parakeet, and
+  Tiny's text is never delivered. Without Turbo, Parakeet's text is
+  delivered unverified with Tiny's as the alternative. The quiet-speech
+  gain is applied once per cascade.
 - **English-only by proof, not hope** (#135): Parakeet Unified is an
   English-only checkpoint that answers `ok` for *any* audio — fed Dutch
   or Korean it returns a phonetic English transliteration rather than
