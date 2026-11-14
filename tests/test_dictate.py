@@ -46,9 +46,11 @@ sys.path.insert(0, str(ROOT))
 from parrot_core import (  # noqa: E402
     Recognition,
     RecognitionWord,
+    can_reuse_speculation,
     compile_cleanup,
     infer_revised_insertion,
     mode_from_modifiers,
+    should_start_speculation,
 )
 from voice_compiler import (  # noqa: E402
     ContextCandidate,
@@ -2835,6 +2837,90 @@ class AudioPoolTests(unittest.TestCase):
         self.assertEqual(pool.readiness(), "Ready")
         self.assertEqual(len(streams), 2)
         pool.release(slot)
+
+    def recorder_namespace(self, factory, clock):
+        ns = load_definitions(
+            "AudioSlot", "AudioPool", "CapturedAudio", "Recorder",
+            assignments={"SAMPLE_RATE", "CAPTURE_BLOCK_SECONDS",
+                         "NO_AUDIO_SECONDS", "CHUNK_MIN_SECONDS",
+                         "CHUNK_CUT_SILENCE", "SPECULATIVE_MIN_SECONDS",
+                         "SPECULATIVE_SILENCE"},
+            extra={
+                "np": np,
+                "LEVELS": [],
+                "calibrated_vad_threshold": lambda: 0.008,
+                "should_start_speculation": should_start_speculation,
+                "can_reuse_speculation": can_reuse_speculation,
+                "time": SimpleNamespace(
+                    perf_counter=lambda: clock["now"],
+                    time_ns=time.time_ns),
+                "ContextPack": SimpleNamespace,
+                "FLIGHT": SimpleNamespace(attach=lambda _recorder: False),
+                "print": lambda *_args: None,
+            },
+        )
+        ns["AUDIO_POOL"] = ns["AudioPool"](size=1, stream_factory=factory)
+        ns["AUDIO_POOL"].warm()
+        return ns
+
+    def test_a_stream_that_delivers_nothing_is_detected_and_replaced(self):
+        streams = []
+        clock = {"now": 100.0}
+
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        ns = self.recorder_namespace(factory, clock)
+        pool = ns["AUDIO_POOL"]
+        recorder = ns["Recorder"]()
+        recorder.start(100.0)
+        dead = streams[0]
+
+        clock["now"] = 100.0 + ns["NO_AUDIO_SECONDS"] - 0.01
+        self.assertFalse(recorder.delivered_no_audio(clock["now"]))
+        clock["now"] = 100.0 + ns["NO_AUDIO_SECONDS"]
+        self.assertTrue(recorder.delivered_no_audio(clock["now"]))
+
+        self.assertEqual(len(recorder.stop()), 0)
+
+        # The silent stream is never handed to the next take.
+        self.assertTrue(dead.closed)
+        self.assertTrue(pool.wait_for_recovery())
+        replacement = ns["Recorder"]()
+        replacement.start(clock["now"])
+        self.assertIsNot(replacement.slot.stream, dead)
+        replacement.stop()
+
+    def test_a_stream_that_delivers_audio_is_kept(self):
+        streams = []
+        clock = {"now": 100.0}
+
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        ns = self.recorder_namespace(factory, clock)
+        pool = ns["AUDIO_POOL"]
+        recorder = ns["Recorder"]()
+        recorder.start(100.0)
+        streams[0].callback(
+            np.full((160, 1), 0.01, dtype=np.float32), 160, None, None)
+        clock["now"] = 110.0
+
+        self.assertFalse(recorder.delivered_no_audio(clock["now"]))
+        self.assertEqual(len(recorder.stop()), 160)
+        self.assertEqual(pool.readiness(), "Ready")
+        self.assertFalse(streams[0].closed)
+        # Too short to judge: a quick tap that heard nothing is not a fault.
+        tap = ns["Recorder"]()
+        tap.start(110.0)
+        clock["now"] = 110.3
+        tap.stop()
+        self.assertEqual(pool.readiness(), "Ready")
+        self.assertEqual(len(streams), 1)
 
     def test_stop_failure_never_reuses_slot_and_preserves_other_active_take(self):
         class FailingStopStream(FakeStream):

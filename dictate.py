@@ -4325,12 +4325,15 @@ class FlightRecorder:
                 self.target = recorder
                 return True
 
-    def detach(self, recorder):
+    def detach(self, recorder, *, delivered_audio=True):
         with self.init_lock:
             with self.lock:
                 if self.target is not recorder:
                     return
                 self.target = None
+                if not delivered_audio:
+                    # The take heard nothing from a running stream.
+                    self.recovery_pending = True
                 should_recover = self.recovery_pending
             if should_recover and not (
                     self.request_refresh and self.request_refresh()):
@@ -4525,7 +4528,7 @@ class AudioPool:
         self._close_slots(stale_slots)
         raise RuntimeError("microphone stream unavailable") from None
 
-    def release(self, slot):
+    def release(self, slot, *, delivered_audio=True):
         if slot is None:
             return
         stale_slots = []
@@ -4535,17 +4538,21 @@ class AudioPool:
         except Exception as error:
             stop_error = type(error).__name__
         finally:
+            failure = stop_error or (None if delivered_audio else "NoAudio")
             with self.init_lock:
                 with self.lock:
                     self.busy.discard(slot)
-                    if stop_error is not None:
-                        self.warm_error = stop_error
+                    if failure is not None:
+                        # A stream that started and then delivered nothing
+                        # is as stale as one that failed to stop: never
+                        # hand it to the next take.
+                        self.warm_error = failure
                         self.recovery_pending = True
                     should_recover = (
                         self.recovery_pending and not self.busy)
                 if should_recover:
                     stale_slots = self._invalidate_locked(
-                        reset_error=stop_error is None)
+                        reset_error=failure is None)
             self._close_slots(stale_slots)
             if should_recover and not (
                     self.request_refresh and self.request_refresh()):
@@ -5006,6 +5013,11 @@ class CapturedAudio:
         return np.concatenate(frames)
 
 
+# A started stream that has delivered no frame for this long is dead: a
+# warm stream's first callback normally arrives within tens of milliseconds.
+NO_AUDIO_SECONDS = 2.0
+
+
 class Recorder:
     def __init__(self):
         self.frames = CapturedAudio()
@@ -5181,13 +5193,23 @@ class Recorder:
         """Audio so far, without stopping the stream."""
         return self.frames.array()
 
+    def delivered_no_audio(self, now: float) -> bool:
+        """Whether this take's running stream has produced no audio at all."""
+        return bool(
+            self.recording
+            and self.capture_ready_at is not None
+            and self.total_samples == 0
+            and now - self.capture_ready_at >= NO_AUDIO_SECONDS
+        )
+
     def stop(self) -> np.ndarray:
+        delivered_audio = not self.delivered_no_audio(time.perf_counter())
         self.recording = False
         if self.captured_via_flight:
-            FLIGHT.detach(self)
+            FLIGHT.detach(self, delivered_audio=delivered_audio)
         if self.slot is not None:
             slot, self.slot = self.slot, None
-            AUDIO_POOL.release(slot)
+            AUDIO_POOL.release(slot, delivered_audio=delivered_audio)
         if self.audio_status:
             print(f"! audio callback status: {'; '.join(self.audio_status)}")
         audio = self.frames.array()
@@ -12410,6 +12432,18 @@ def main():
                                 "recovery"),
                         )
                         continue
+                    if ev == "no_audio":
+                        rec = active["rec"]
+                        if rec is not None and rec.delivered_no_audio(
+                                time.perf_counter()):
+                            abandon_active_recording(
+                                rec,
+                                caption="Listening failed — try again",
+                                log_message=(
+                                    "! microphone delivered no audio — "
+                                    "reopening it"),
+                            )
+                        continue
                     if (ev == "press" and active["rec"] is None
                             and not PAUSED["on"]):
                         LAST_USE["t"] = time.time()
@@ -12563,6 +12597,9 @@ def main():
             queue_hotkey_listener_recovery(key_down, modifiers, events)
 
     def supervise_hold():
+        rec = active.get("rec")
+        if rec is not None and rec.delivered_no_audio(time.perf_counter()):
+            events.put(("no_audio", time.perf_counter(), frozenset()))
         return supervise_hotkey_latch(
             key_down, key_lock, events, modifiers,
             lambda: physical_key_is_down(HOTKEY), time.perf_counter())
