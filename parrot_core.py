@@ -26,9 +26,13 @@ STOP_WORDS = {
 TOKEN_RE = re.compile(r"(?<![\w])([A-Za-z][A-Za-z0-9_+.-]{2,})(?![\w])")
 # A filler that a recognizer wrote as its own sentence ("Um.") takes its
 # terminator with it; otherwise the terminator is all that would be pasted.
+# "Uh-oh", "uh huh" and "mm-hmm" are words: a filler sound joined to
+# another by a hyphen, or forming one of those pairs, is never dropped.
 SIMPLE_FILLER_RE = re.compile(
     r"(?:^|(?<=[.!?…]\s))(?P<own>um+|uh+|erm|hmm)[.!?…]+(?=\s|$)|"
-    r"(?:,\s*)?\b(?P<word>um+|uh+|erm|hmm)\b(?:\s*,)?", re.I | re.M)
+    r"(?:,\s*)?(?<![\w-])"
+    r"(?P<word>um+|uh+(?![ \t]+(?:huh|oh)\b)|erm|(?<!\bmm[ \t])hmm)"
+    r"(?![\w-])(?:\s*,)?", re.I | re.M)
 DISCOURSE_FILLER_RE = re.compile(
     r"^[ \t]*(?:you know|I mean|basically|kind of|sort of)\b\s*,|"
     r",\s*(?:you know|I mean|basically|kind of|sort of)\b\s*,",

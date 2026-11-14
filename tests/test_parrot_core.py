@@ -440,6 +440,32 @@ class CleanupCompilerTests(unittest.TestCase):
             compile_cleanup("Um, so we ship Friday.").text,
             "so we ship Friday.")
 
+    def test_a_filler_sound_inside_an_interjection_is_part_of_the_word(self):
+        # "Uh-oh" and "uh huh" are words that mean something. Dropping the
+        # filler-shaped half pasted "-oh, the build broke." and "Huh."
+        for spoken in (
+            "Uh-oh, the build broke.",
+            "Uh oh, the build broke.",
+            "Mm-hmm, sure.",
+            "Mm hmm, sure.",
+            "Uh-huh.",
+            "Uh huh.",
+            "She said uh-huh and left.",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken)
+                self.assertEqual(plan.edits, [])
+        for spoken, expected in (
+            ("It is, uh, ready.", "It is ready."),
+            ("Uh, oh well, ship it.", "oh well, ship it."),
+            ("Hmm, let me think.", "let me think."),
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, expected)
+                self.assertEqual(plan.edit_kinds, ["remove_filler"])
+
     def test_scratch_that_removes_only_the_latest_clause(self):
         plan = compile_cleanup(
             "Keep this sentence. remove this part scratch that use this instead")

@@ -110,6 +110,8 @@
     {"id": "filler-alone", "covers": "fillers", "field": "Draft: ", "spoken": "Um.", "expected": "Draft: "},
     {"id": "filler-pair-alone", "covers": "fillers", "field": "Draft: ", "spoken": "Um, uh.", "expected": "Draft: "},
     {"id": "filler-before-word", "covers": "fillers", "spoken": "Uh, okay.", "expected": "Okay."},
-    {"id": "filler-capital-um", "covers": "fillers", "spoken": "The UM campus is closed today.", "expected": "The UM campus is closed today."}
+    {"id": "filler-capital-um", "covers": "fillers", "spoken": "The UM campus is closed today.", "expected": "The UM campus is closed today."},
+    {"id": "filler-inside-uh-oh", "covers": "fillers", "spoken": "Uh-oh, the build broke.", "expected": "Uh-oh, the build broke."},
+    {"id": "filler-inside-mm-hmm", "covers": "fillers", "spoken": "Mm-hmm, sure.", "expected": "Mm-hmm, sure."}
   ]
 }
