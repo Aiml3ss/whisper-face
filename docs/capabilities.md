@@ -85,7 +85,8 @@ Qwen3.5-4B, and has no Parakeet.
   correction after a negation ("not Tuesday, actually Wednesday") stay as
   spoken.
 - **Snippets.** Say "insert my email", alone or inside a sentence, and saved
-  text arrives. A bare snippet name is never expanded, and an unfilled
+  text arrives. A bare snippet name is never expanded, nor is a negated cue
+  ("do not insert my email"), and an unfilled
   `EDIT ME` placeholder is never inserted. On Mac, editing a pasted snippet in
   place records only a pending suggestion; the saved snippet does not change,
   and the window does not show suggestions yet.

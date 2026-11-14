@@ -43,8 +43,9 @@ through validated [[proof-edit]]s.
 - **Spoken structure**: "new line" / "new paragraph" / "scratch that"
   work; explicit list lead-ins become dash lists.
 - **Snippet masking**: inline snippets fire only on the spoken cue
-  "insert my <name>" (never on a bare snippet name, and never for a value
-  still starting with `EDIT ME`). The expansion is masked to private-use-area
+  "insert my <name>" (never on a bare snippet name, never when the cue is
+  negated as in "do not insert my email", and never for a value still
+  starting with `EDIT ME`). The expansion is masked to private-use-area
   sentinels before cleanup and restored after, so boilerplate is never
   reflowed and the model never sees expansions (corrected November 2026).
 - A standalone proof-recovery mediator and a latency lab exist for

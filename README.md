@@ -333,8 +333,9 @@ are never Supporter-only features.
 - **Snippets** — say "insert my email" and your saved text pastes instead.
   The cue also works inside a longer sentence: with a filled snippet, "Please
   insert my email here." becomes "Please <your saved text> here." A bare
-  snippet name ("send it to my email") is never expanded, and a snippet whose
-  value still starts with `EDIT ME` is never inserted. On Mac, if you edit a
+  snippet name ("send it to my email") is never expanded, nor is a negated
+  cue ("Do not insert my email here."), and a snippet whose value still
+  starts with `EDIT ME` is never inserted. On Mac, if you edit a
   pasted snippet in place within ten seconds, the edit is kept only as a
   pending suggestion in `learned.json`; the saved snippet does not change, and
   the window does not show suggestions yet.

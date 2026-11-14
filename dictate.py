@@ -8852,6 +8852,8 @@ def _compile_snippet_pattern(snippets: dict[str, str]):
     longest-first so "email signature" wins over "email", and the boundaries
     are stricter than \\b so "address" never fires inside "addresses".
     Unfilled placeholders and names with no word characters are left out.
+    A negation directly on the cue ("do not insert my email") asks for the
+    opposite, so it is talk about inserting and never a trigger.
     """
     triggers = sorted(
         (name for name, text in snippets.items()
@@ -8860,7 +8862,9 @@ def _compile_snippet_pattern(snippets: dict[str, str]):
     if not triggers:
         return None
     alternation = "|".join(re.escape(trigger) for trigger in triggers)
-    return re.compile(rf"(?<!\w)insert\s+my\s+({alternation})(?!\w)", re.I)
+    return re.compile(
+        r"(?<!\w)(?<!\bnot\s)(?<!\bnever\s)(?<!\bcannot\s)(?<!n['’]t\s)"
+        rf"insert\s+my\s+({alternation})(?!\w)", re.I)
 
 
 def expand_snippets_inline(raw: str, snippets: dict[str, str] | None = None) -> str:

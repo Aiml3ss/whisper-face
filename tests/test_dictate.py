@@ -6309,6 +6309,30 @@ class InlineSnippetExpansionTests(unittest.TestCase):
             "You can reach me at andrew@example.com, or call.",
         )
 
+    def test_a_negated_cue_is_talk_about_inserting_not_a_request(self):
+        # "Do not insert my email here" asks for the opposite. Expanding it
+        # would put private text into a sentence that says to keep it out.
+        for spoken in (
+            "Do not insert my email here.",
+            "Never insert my address in public posts.",
+            "Please don't insert my email in that form.",
+            "Please don’t insert my signature yet.",
+            "You cannot insert my address there.",
+            "NEVER INSERT MY EMAIL.",
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(
+                    self._dictate(spoken, json.dumps(self.PERSONAL)), spoken)
+        # A negation that is not directly on the cue leaves it a request.
+        self.assertEqual(
+            self._dictate("I'm not there, so insert my email instead.",
+                          json.dumps(self.PERSONAL)),
+            "I'm not there, so andrew@example.com instead.")
+        self.assertEqual(
+            self._dictate("Add a knot, then insert my email.",
+                          json.dumps(self.PERSONAL)),
+            "Add a knot, then andrew@example.com.")
+
     def test_the_cue_is_case_insensitive(self):
         expand = self._expander({"email": "andrew@example.com"})
         self.assertEqual(
