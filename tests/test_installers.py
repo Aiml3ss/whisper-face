@@ -1065,6 +1065,42 @@ class InstallerContractTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, self.powershell)
 
+    def test_windows_runs_every_native_command_through_the_exit_code_wrappers(self):
+        # Static, because no PowerShell runs here: under Windows PowerShell
+        # 5.1 with $ErrorActionPreference = "Stop", a native command whose
+        # stderr is redirected ends the install on its first line of output.
+        # `ollama show` for an absent model did exactly that on every first
+        # install. Only the two wrappers relax the preference and read the
+        # exit code, so a native call anywhere else is a defect.
+        lines = self.powershell.splitlines()
+        wrappers = set()
+        in_launcher = False
+        for start, line in enumerate(lines):
+            if line.startswith(("function Invoke-Native(",
+                                "function Invoke-NativeStep(")):
+                end = next(index for index in range(start, len(lines))
+                           if lines[index] == "}")
+                wrappers.update(range(start, end + 1))
+        self.assertGreater(len(wrappers), 10)
+        native_call = re.compile(r"(^|[\s(=])&\s+[$'\"\w]")
+        redirection = re.compile(r"(\*|\b2)>")
+        for number, line in enumerate(lines):
+            # The generated launcher is text written to launch.ps1, which runs
+            # without "Stop"; it is not executed by this script.
+            if line.endswith('@"'):
+                in_launcher = True
+            elif line.startswith('"@'):
+                in_launcher = False
+            code = line.split("#", 1)[0]
+            if in_launcher or number in wrappers:
+                continue
+            with self.subTest(line=number + 1, text=line.strip()):
+                self.assertIsNone(native_call.search(code))
+                unquoted = re.sub(r"'[^']*'|\"[^\"]*\"", "''", code)
+                self.assertIsNone(redirection.search(unquoted))
+        self.assertIn('if ((Invoke-Native $Ollama @("show", "qwen3.5:4b"))',
+                      self.powershell)
+
     def test_windows_verify_binds_login_task_to_its_current_checkout(self):
         helper_start = self.powershell.index("function Confirm-TaskLauncherBinding")
         helper_end = self.powershell.index("function Confirm-Installation", helper_start)
@@ -1106,9 +1142,7 @@ class InstallerContractTests(unittest.TestCase):
         for required in (
             "$LauncherDigest = Get-LauncherDigest $Launcher",
             "Set-Content -Path $LauncherReceipt -Value $LauncherDigest",
-            '& icacls $LauncherReceipt /inheritance:r /grant:r '
-            '"${env:USERNAME}:(F)" /Q',
-            'throw "could not apply the private Windows launcher receipt ACL"',
+            "Set-PrivateFile $LauncherReceipt",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, task)

@@ -82,31 +82,54 @@ $script:WingetFailures = @()
 
 function Install-WingetPackage([string]$Id) {
     Require-Winget
-    & winget install --id $Id --exact --source winget --silent `
-        --accept-package-agreements --accept-source-agreements
+    $WingetExit = Invoke-NativeStep "winget" @(
+        "install", "--id", $Id, "--exact", "--source", "winget", "--silent",
+        "--accept-package-agreements", "--accept-source-agreements")
     # winget answers "already installed" and "no applicable update" with a
     # non-zero code. Both mean the tool is present, which is the only thing
     # this installer needs, so the code alone must not end the run. Whether
     # the executable is findable afterwards is what decides, and every caller
     # is followed by the Get-InstalledTools probe that settles it.
-    if ($LASTEXITCODE -ne 0) {
-        $script:WingetFailures += ("{0} exited {1}" -f $Id, $LASTEXITCODE)
+    if ($WingetExit -ne 0) {
+        $script:WingetFailures += ("{0} exited {1}" -f $Id, $WingetExit)
         Write-Host ("== winget returned {0} for {1}; probing for the tool anyway" -f
-            $LASTEXITCODE, $Id)
+            $WingetExit, $Id)
     }
     Refresh-ProcessPath
 }
 
+# Every native command in this file runs through one of the two functions
+# below and is judged by its exit code alone. Windows PowerShell 5.1 turns a
+# native command's stderr into error records whenever that stream is
+# redirected -- by this script, a transcript, or a host without a console --
+# and $ErrorActionPreference = "Stop" makes the first one terminating. uv,
+# winget, and ollama all write routine progress and expected answers there.
 function Invoke-Native([string]$FilePath, [string[]]$CommandArguments) {
-    # Windows PowerShell turns a native command's stderr into an error record
-    # once that stream is redirected, and $ErrorActionPreference = "Stop" then
-    # makes it terminating. `ollama show` writes to stderr for a model that is
-    # merely absent -- the expected answer here, not a failure -- so the
-    # preference is relaxed for the call and the exit code is what is read.
+    # Silent probe: `ollama show` writes to stderr for a model that is merely
+    # absent, which is the expected answer during a first install.
     $Previous = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
         & $FilePath @CommandArguments 2>&1 | Out-Null
+        return $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $Previous
+    }
+}
+
+function Invoke-NativeStep([string]$FilePath, [string[]]$CommandArguments,
+        [switch]$HideOutput) {
+    # A visible step. Standard output goes to the host, which also puts it in
+    # the transcript, instead of into this function's return value; standard
+    # error is never redirected.
+    $Previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        if ($HideOutput) {
+            & $FilePath @CommandArguments | Out-Null
+        } else {
+            & $FilePath @CommandArguments | Out-Host
+        }
         return $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $Previous
@@ -693,13 +716,19 @@ function Confirm-Installation {
     if ($Task.State -ne "Running") {
         throw "Windows login task is not running (state: $($Task.State))"
     }
-    & $Uv lock --check --script (Join-Path $Repo "dictate.py") | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "dictate.py.lock does not match dictate.py" }
-    & $Uv sync --locked --script (Join-Path $Repo "dictate.py") --check | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "locked Python environment is incomplete" }
-    & $Uv run --locked --script (Join-Path $Repo "dictate.py") `
-        --verify-ollama-model | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Qwen model manifest verification failed" }
+    $DictateScript = Join-Path $Repo "dictate.py"
+    if ((Invoke-NativeStep $Uv @("lock", "--check", "--script", $DictateScript) `
+            -HideOutput) -ne 0) {
+        throw "dictate.py.lock does not match dictate.py"
+    }
+    if ((Invoke-NativeStep $Uv @("sync", "--locked", "--script", $DictateScript,
+            "--check") -HideOutput) -ne 0) {
+        throw "locked Python environment is incomplete"
+    }
+    if ((Invoke-NativeStep $Uv @("run", "--locked", "--script", $DictateScript,
+            "--verify-ollama-model") -HideOutput) -ne 0) {
+        throw "Qwen model manifest verification failed"
+    }
     if ((Invoke-Native $Ollama @("show", "qwen3.5:4b")) -ne 0) {
         throw "qwen3.5:4b is not installed"
     }
@@ -780,21 +809,27 @@ if (-not $OllamaReady) { throw "Ollama did not become ready; inspect ollama-erro
 
 if ((Invoke-Native $Ollama @("show", "qwen3.5:4b")) -ne 0) {
     Write-Step "downloading qwen3.5:4b (~3.4 GB)"
-    & $Ollama pull "qwen3.5:4b"
-    if ($LASTEXITCODE -ne 0) { throw "Ollama could not download qwen3.5:4b" }
+    if ((Invoke-NativeStep $Ollama @("pull", "qwen3.5:4b")) -ne 0) {
+        throw "Ollama could not download qwen3.5:4b"
+    }
 } else {
     Write-Host "== qwen3.5:4b already present"
 }
 
 Write-Step "installing the locked Windows Python environment"
-& $Uv sync --locked --script (Join-Path $Repo "dictate.py")
-if ($LASTEXITCODE -ne 0) { throw "uv could not install the locked environment" }
-& $Uv run --locked --script (Join-Path $Repo "dictate.py") `
-    --verify-ollama-model
-if ($LASTEXITCODE -ne 0) { throw "Qwen model manifest verification failed" }
+$DictateScript = Join-Path $Repo "dictate.py"
+if ((Invoke-NativeStep $Uv @("sync", "--locked", "--script", $DictateScript)) -ne 0) {
+    throw "uv could not install the locked environment"
+}
+if ((Invoke-NativeStep $Uv @("run", "--locked", "--script", $DictateScript,
+        "--verify-ollama-model")) -ne 0) {
+    throw "Qwen model manifest verification failed"
+}
 Write-Step "downloading Whisper Tiny and large-v3-turbo"
-& $Uv run --locked --script (Join-Path $Repo "dictate.py") --preload-models
-if ($LASTEXITCODE -ne 0) { throw "Whisper model preload failed" }
+if ((Invoke-NativeStep $Uv @("run", "--locked", "--script", $DictateScript,
+        "--preload-models")) -ne 0) {
+    throw "Whisper model preload failed"
+}
 
 Write-Step "creating private per-machine files (existing files are preserved)"
 $PrivateTemplates = @{
@@ -809,17 +844,21 @@ foreach ($DestinationName in $PrivateTemplates.Keys) {
     if (-not (Test-Path $Destination)) {
         Copy-Item (Join-Path $Repo $PrivateTemplates[$DestinationName]) $Destination
     }
-    & icacls $Destination /inheritance:r /grant:r "${env:USERNAME}:(F)" /Q | Out-Null
+    Set-PrivateFile $Destination
 }
+# The same list the Mac installer locks down, transcripts and learned terms
+# included. Set-PrivateFile grants by SID and verifies the result, where the
+# bare-username icacls call it replaces could fail without anyone noticing.
 foreach ($PrivateStateName in @(
+    "transcripts.jsonl", "learned.json",
     "voice_inbox.json", "demonstrations.json",
     "delayed_cleanup_activation.json",
     "acoustic_keyword_activation.json", "acoustic_calibration_activation.json",
     "relisten_activation.json"
 )) {
     $PrivateState = Join-Path $Repo $PrivateStateName
-    if (Test-Path $PrivateState) {
-        & icacls $PrivateState /inheritance:r /grant:r "${env:USERNAME}:(F)" /Q | Out-Null
+    if (Test-Path -LiteralPath $PrivateState) {
+        Set-PrivateFile $PrivateState
     }
 }
 Write-Step "installing the Windows login task"
@@ -836,10 +875,7 @@ Set-Location '$($Repo.Replace("'", "''"))'
 Set-Content -Path $Launcher -Value $LauncherBody -Encoding UTF8
 $LauncherDigest = Get-LauncherDigest $Launcher
 Set-Content -Path $LauncherReceipt -Value $LauncherDigest -Encoding ascii -NoNewline
-& icacls $LauncherReceipt /inheritance:r /grant:r "${env:USERNAME}:(F)" /Q | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    throw "could not apply the private Windows launcher receipt ACL"
-}
+Set-PrivateFile $LauncherReceipt
 
 foreach ($ExistingName in @($TaskName, $LegacyTaskName)) {
     $ExistingTask = Get-ScheduledTask -TaskName $ExistingName -ErrorAction SilentlyContinue

@@ -232,7 +232,7 @@ class AcousticKeywordMemoryInstallerContractTests(unittest.TestCase):
         self.assertIn('[ -f "$destination" ] || install -m 600', shell)
         self.assertIn('chmod 600 "$destination"', shell)
         self.assertIn('if (-not (Test-Path $Destination))', powershell)
-        self.assertIn("icacls $Destination /inheritance:r /grant:r", powershell)
+        self.assertIn("Set-PrivateFile $Destination", powershell)
         self.assertIn("acoustic_keyword_memory.json", gitignore.splitlines())
 
 
