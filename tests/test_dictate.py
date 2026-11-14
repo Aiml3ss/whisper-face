@@ -8371,13 +8371,12 @@ class ParakeetCrosscheckTests(unittest.TestCase):
         )
         voice, compiled = ns["compile_voice_evidence"](recognition)
         self.assertEqual(compiled.text, "Ping Priya about Qwen.")
+        primary, alternative = voice.hypotheses
         self.assertEqual(
-            [(hypothesis.text, hypothesis.engine.split(":")[0])
-             for hypothesis in voice.hypotheses],
-            [("Ping Priya about Qwen.", "parakeet-unified"),
-             ("Being pre-about Gwen.", "parakeet-unified")])
-        self.assertGreater(
-            voice.hypotheses[0].confidence, voice.hypotheses[1].confidence)
+            (primary.text, primary.engine),
+            ("Ping Priya about Qwen.", "parakeet-unified"))
+        self.assertEqual(alternative.text, "Being pre-about Gwen.")
+        self.assertGreater(primary.confidence, alternative.confidence)
 
     def test_full_install_escalates_to_the_real_turbo_and_takes_the_vote(self):
         recognition, decodes = self.cascade(
