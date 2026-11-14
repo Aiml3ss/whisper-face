@@ -4332,7 +4332,7 @@ class FlightRecorder:
                     return
                 self.target = None
                 if not delivered_audio:
-                    # The take heard nothing from a running stream.
+                    # The take's stream stopped delivering audio.
                     self.recovery_pending = True
                 should_recover = self.recovery_pending
             if should_recover and not (
@@ -4546,9 +4546,9 @@ class AudioPool:
                 with self.lock:
                     self.busy.discard(slot)
                     if failure is not None:
-                        # A stream that started and then delivered nothing
-                        # is as stale as one that failed to stop: never
-                        # hand it to the next take.
+                        # A stream that stopped delivering audio is as
+                        # stale as one that failed to stop: never hand it
+                        # to the next take.
                         self.warm_error = failure
                         self.recovery_pending = True
                     should_recover = (
@@ -5018,7 +5018,7 @@ class CapturedAudio:
 
 
 # A started stream that has delivered no frame for this long is dead: a
-# warm stream's first callback normally arrives within tens of milliseconds.
+# warm stream calls back every few tens of milliseconds.
 NO_AUDIO_SECONDS = 2.0
 
 
@@ -5029,6 +5029,7 @@ class Recorder:
         self.recording = False
         self.press_at = None
         self.capture_ready_at = None
+        self.last_frame_at = None
         self.released_at = None
         self.audio_status = []
         self.captured_via_flight = False
@@ -5076,6 +5077,7 @@ class Recorder:
         self.source = "hold"
         self.uncertain = False
         self.feedback_seconds = 0.0
+        self.last_frame_at = None
         self.press_at = press_at or time.perf_counter()
         self.utterance_id = f"{time.time_ns():x}-{id(self):x}"
         self.insertion_lease = None
@@ -5110,6 +5112,7 @@ class Recorder:
     def _callback(self, indata, frames, time_info, status):
         if not self.recording:
             return
+        self.last_frame_at = time.perf_counter()
         if status and len(self.audio_status) < 3:
             self.audio_status.append(str(status))
         self.frames.append(indata)
@@ -5200,17 +5203,18 @@ class Recorder:
         """Audio so far, without stopping the stream."""
         return self.frames.array()
 
-    def delivered_no_audio(self, now: float) -> bool:
-        """Whether this take's running stream has produced no audio at all."""
-        return bool(
-            self.recording
-            and self.capture_ready_at is not None
-            and self.total_samples == 0
-            and now - self.capture_ready_at >= NO_AUDIO_SECONDS
-        )
+    def audio_stalled(self, now: float) -> bool:
+        """Whether this take's running stream has stopped delivering audio,
+        whether it never started or stopped partway through."""
+        if not self.recording or self.capture_ready_at is None:
+            return False
+        latest = self.capture_ready_at
+        if self.last_frame_at is not None:
+            latest = max(latest, self.last_frame_at)
+        return now - latest >= NO_AUDIO_SECONDS
 
     def stop(self) -> np.ndarray:
-        delivered_audio = not self.delivered_no_audio(time.perf_counter())
+        delivered_audio = not self.audio_stalled(time.perf_counter())
         self.recording = False
         if self.captured_via_flight:
             FLIGHT.detach(self, delivered_audio=delivered_audio)
@@ -5229,6 +5233,17 @@ class Recorder:
         if self.captured_via_flight and self.source == "hold":
             FLIGHT.clear()                   # never let a hold paste twice
         return audio
+
+
+def stalled_take_action(rec, now: float) -> str | None:
+    """How to end a take whose microphone stopped delivering audio.
+
+    A take that heard nothing is abandoned. A take that heard speech first
+    finishes like a release, so the words spoken before the stall are kept.
+    """
+    if rec is None or not rec.audio_stalled(now):
+        return None
+    return "abandon" if rec.total_samples == 0 else "finish"
 
 
 # ------------------------- glossary & learning -------------------------
@@ -12452,8 +12467,9 @@ def main():
                         continue
                     if ev == "no_audio":
                         rec = active["rec"]
-                        if rec is not None and rec.delivered_no_audio(
-                                time.perf_counter()):
+                        now = time.perf_counter()
+                        action = stalled_take_action(rec, now)
+                        if action == "abandon":
                             abandon_active_recording(
                                 rec,
                                 caption="Listening failed — try again",
@@ -12461,7 +12477,13 @@ def main():
                                     "! microphone delivered no audio — "
                                     "reopening it"),
                             )
-                        continue
+                        if action != "finish":
+                            continue
+                        print("! microphone stopped delivering audio — "
+                              "finishing the take with what was heard")
+                        CAPTION["text"] = (
+                            "Microphone stopped — text may be incomplete")
+                        ev, event_at = "release", now
                     if (ev == "press" and active["rec"] is None
                             and not PAUSED["on"]):
                         LAST_USE["t"] = time.time()
@@ -12615,9 +12637,9 @@ def main():
             queue_hotkey_listener_recovery(key_down, modifiers, events)
 
     def supervise_hold():
-        rec = active.get("rec")
-        if rec is not None and rec.delivered_no_audio(time.perf_counter()):
-            events.put(("no_audio", time.perf_counter(), frozenset()))
+        now = time.perf_counter()
+        if stalled_take_action(active.get("rec"), now) is not None:
+            events.put(("no_audio", now, frozenset()))
         return supervise_hotkey_latch(
             key_down, key_lock, events, modifiers,
             lambda: physical_key_is_down(HOTKEY), time.perf_counter())

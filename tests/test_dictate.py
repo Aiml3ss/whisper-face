@@ -2841,6 +2841,7 @@ class AudioPoolTests(unittest.TestCase):
     def recorder_namespace(self, factory, clock):
         ns = load_definitions(
             "AudioSlot", "AudioPool", "CapturedAudio", "Recorder",
+            "stalled_take_action",
             assignments={"SAMPLE_RATE", "CAPTURE_BLOCK_SECONDS",
                          "NO_AUDIO_SECONDS", "CHUNK_MIN_SECONDS",
                          "CHUNK_CUT_SILENCE", "SPECULATIVE_MIN_SECONDS",
@@ -2879,13 +2880,51 @@ class AudioPoolTests(unittest.TestCase):
         dead = streams[0]
 
         clock["now"] = 100.0 + ns["NO_AUDIO_SECONDS"] - 0.01
-        self.assertFalse(recorder.delivered_no_audio(clock["now"]))
+        self.assertIsNone(ns["stalled_take_action"](recorder, clock["now"]))
         clock["now"] = 100.0 + ns["NO_AUDIO_SECONDS"]
-        self.assertTrue(recorder.delivered_no_audio(clock["now"]))
+        self.assertEqual(
+            ns["stalled_take_action"](recorder, clock["now"]), "abandon")
 
         self.assertEqual(len(recorder.stop()), 0)
 
         # The silent stream is never handed to the next take.
+        self.assertTrue(dead.closed)
+        self.assertTrue(pool.wait_for_recovery())
+        replacement = ns["Recorder"]()
+        replacement.start(clock["now"])
+        self.assertIsNot(replacement.slot.stream, dead)
+        replacement.stop()
+
+    def test_a_stream_that_stops_mid_take_keeps_its_audio_and_is_replaced(self):
+        # The microphone is unplugged, or its Bluetooth link drops, after
+        # the speaker has started: callbacks simply stop.
+        streams = []
+        clock = {"now": 100.0}
+
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        ns = self.recorder_namespace(factory, clock)
+        pool = ns["AUDIO_POOL"]
+        recorder = ns["Recorder"]()
+        recorder.start(100.0)
+        dead = streams[0]
+        for _ in range(50):
+            clock["now"] += 0.01
+            dead.callback(
+                np.full((160, 1), 0.02, dtype=np.float32), 160, None, None)
+        stalled_at = clock["now"]
+
+        clock["now"] = stalled_at + ns["NO_AUDIO_SECONDS"] - 0.01
+        self.assertIsNone(ns["stalled_take_action"](recorder, clock["now"]))
+        clock["now"] = stalled_at + ns["NO_AUDIO_SECONDS"]
+        # Speech was heard, so the take finishes rather than being dropped.
+        self.assertEqual(
+            ns["stalled_take_action"](recorder, clock["now"]), "finish")
+
+        self.assertEqual(len(recorder.stop()), 8_000)
         self.assertTrue(dead.closed)
         self.assertTrue(pool.wait_for_recovery())
         replacement = ns["Recorder"]()
@@ -2906,12 +2945,15 @@ class AudioPoolTests(unittest.TestCase):
         pool = ns["AUDIO_POOL"]
         recorder = ns["Recorder"]()
         recorder.start(100.0)
-        streams[0].callback(
-            np.full((160, 1), 0.01, dtype=np.float32), 160, None, None)
-        clock["now"] = 110.0
+        # Ten seconds of 0.1 s blocks, as a live stream delivers them.
+        for _ in range(100):
+            clock["now"] += 0.1
+            streams[0].callback(
+                np.full((1600, 1), 0.01, dtype=np.float32), 1600, None, None)
+            self.assertIsNone(
+                ns["stalled_take_action"](recorder, clock["now"]))
 
-        self.assertFalse(recorder.delivered_no_audio(clock["now"]))
-        self.assertEqual(len(recorder.stop()), 160)
+        self.assertEqual(len(recorder.stop()), 160_000)
         self.assertEqual(pool.readiness(), "Ready")
         self.assertFalse(streams[0].closed)
         # Too short to judge: a quick tap that heard nothing is not a fault.
@@ -7024,6 +7066,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "CHUNK_PREP_POOL": prep_pool,
                 "_transcribe_frames": object(),
                 "_caption_add": lambda *_args: None,
+                "time": time,
             },
         )
         recorder = ns["Recorder"]()
