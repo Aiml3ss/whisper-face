@@ -325,9 +325,20 @@ class FreshInstallDictationTests(unittest.TestCase):
             self.assertEqual(typed(spoken), "Let's meet Wednesday.")
             self.assertEqual(dictate.PIPELINE_STATE["last_cleanup_edits"],
                              ["self_correction"])
-            # The adverb is still the speaker's word.
-            self.assertEqual(typed("I didn't actually finish the report."),
-                             "I didn't actually finish the report.")
+            # Turned on, the rule is the one wave 1 shipped: it corrects
+            # between two like items and nowhere else.
+            for sentence, expected in (
+                ("The total is 45 dollars, actually 54.",
+                 "The total is 54 dollars."),
+                ("Call me at 3 pm, actually 4 pm.", "Call me at 4 pm."),
+                ("I didn't actually finish the report.",
+                 "I didn't actually finish the report."),
+                ("It's not 5, actually 6.", "It's not 5, actually 6."),
+                ("The shop is open from 9 to 5, actually 9 to 6.",
+                 "The shop is open from 9 to 5, actually 9 to 6."),
+            ):
+                with self.subTest(spoken=sentence):
+                    self.assertEqual(typed(sentence), expected)
         finally:
             self.assertIs(dictate.set_self_correction(False), False)
         self.assertIs(json.loads(
