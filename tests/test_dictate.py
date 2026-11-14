@@ -13,6 +13,7 @@ import ast
 import contextlib
 import copy
 import ctypes
+import enum
 import functools
 import hashlib
 import io
@@ -8139,6 +8140,7 @@ class HotkeyBindingTests(unittest.TestCase):
         return load_definitions(
             "normalize_hotkey", "hotkey_label_for", "hotkey_shared_modes",
             "hotkey_binding_decision", "modifier_pressed_by",
+            "hotkey_matches",
             assignments={"HOTKEY_CHOICES", "HOTKEY_DEFAULT",
                          "HOTKEY_MODIFIER_FAMILY",
                          "HOTKEY_MODES_BY_MODIFIER"},
@@ -8251,6 +8253,192 @@ class HotkeyBindingTests(unittest.TestCase):
         self.assertEqual(contributes("cmd_r", "shift_r", families), "command")
         self.assertIsNone(contributes("alt_r", "alt_r", families))
         self.assertIsNone(contributes("f13", "alt_r", families))
+
+    class _Win32KeyCode:
+        """pynput 1.8.2 ``keyboard._base.KeyCode`` equality, with the
+        ``_flags``/``_scan`` platform extensions ``keyboard._win32`` adds.
+
+        pynput itself is not a test dependency; this keeps exactly the
+        comparison its enum members use.
+        """
+
+        _PLATFORM_EXTENSIONS = ("_flags", "_scan")
+
+        def __init__(self, vk=None, char=None, _flags=None, _scan=None):
+            self.vk, self.char, self.is_dead = vk, char, False
+            self._flags, self._scan = _flags, _scan
+
+        def __repr__(self):
+            return repr(self.char) if self.char is not None else (
+                "<%d>" % self.vk)
+
+        def __eq__(self, other):
+            if not isinstance(other, self.__class__):
+                return False
+            if self.char is not None and other.char is not None:
+                return (self.char == other.char
+                        and self.is_dead == other.is_dead)
+            return self.vk == other.vk and all(
+                getattr(self, name) == getattr(other, name)
+                for name in self._PLATFORM_EXTENSIONS)
+
+        def __hash__(self):
+            return hash(repr(self))
+
+    def win32_keyboard(self):
+        """The Windows Key table as pynput 1.8.2 defines and delivers it."""
+        code = self._Win32KeyCode
+        extended = 1   # KEYBDINPUT.EXTENDEDKEY, as KeyCode._from_ext sets
+        key = enum.Enum("Key", [
+            ("alt", code(0x12)),
+            ("alt_l", code(0xA4)),
+            ("alt_r", code(0xA5, _flags=extended)),
+            ("alt_gr", code(0xA5)),
+            ("cmd", code(0x5B)),
+            ("cmd_l", code(0x5B)),
+            ("cmd_r", code(0x5C)),
+            ("ctrl", code(0x11)),
+            ("ctrl_l", code(0xA2)),
+            ("ctrl_r", code(0xA3, _flags=extended)),
+            ("shift", code(0xA0)),
+            ("shift_l", code(0xA0)),
+            ("shift_r", code(0xA1)),
+            ("f13", code(0x7C)),
+        ])
+        # keyboard._win32.Listener._SPECIAL_KEYS: the later member wins.
+        delivered = {member.value.vk: member for member in key}
+        return SimpleNamespace(Key=key), delivered
+
+    def win32_namespace(self, keyboard):
+        return load_definitions(
+            "normalize_hotkey", "hotkey_key_object", "hotkey_matches",
+            "modifier_pressed_by", "windows_hotkey_event_filter",
+            assignments={"HOTKEY_CHOICES", "HOTKEY_DEFAULT",
+                         "WINDOWS_VK_LCONTROL",
+                         "WINDOWS_ALTGR_SYNTHETIC_CTRL_SCAN"},
+            extra={"IS_MACOS": False, "IS_WINDOWS": True,
+                   "keyboard": keyboard},
+        )
+
+    def test_windows_right_alt_starts_the_default_capture_key(self):
+        keyboard, delivered = self.win32_keyboard()
+        ns = self.win32_namespace(keyboard)
+        bound = ns["hotkey_key_object"]("alt_r")
+        right_alt = delivered[0xA5]
+
+        # The library shape behind the defect: Right Alt is delivered as a
+        # member that is not equal to the one the default binding names.
+        self.assertIs(right_alt, keyboard.Key.alt_gr)
+        self.assertNotEqual(right_alt, bound)
+
+        self.assertTrue(ns["hotkey_matches"](right_alt, bound))
+        for other in (0xA4, 0xA2, 0xA3, 0xA0, 0xA1, 0x5B, 0x7C):
+            with self.subTest(vk=hex(other)):
+                self.assertFalse(ns["hotkey_matches"](delivered[other], bound))
+        self.assertFalse(ns["hotkey_matches"](right_alt, None))
+        # Every other bindable Windows key is still matched by itself only.
+        for name in ("alt_l", "ctrl_r", "ctrl_l", "shift_r", "cmd_r", "f13"):
+            with self.subTest(name=name):
+                key = ns["hotkey_key_object"](name)
+                self.assertTrue(ns["hotkey_matches"](
+                    delivered[key.value.vk], key))
+                self.assertFalse(ns["hotkey_matches"](right_alt, key))
+
+    def test_altgr_layouts_start_capture_not_reply(self):
+        keyboard, delivered = self.win32_keyboard()
+        ns = self.win32_namespace(keyboard)
+        Key = keyboard.Key
+
+        class KBDLLHOOKSTRUCT(ctypes.Structure):
+            _fields_ = [
+                ("vkCode", ctypes.c_uint32),
+                ("scanCode", ctypes.c_uint32),
+                ("flags", ctypes.c_uint32),
+                ("time", ctypes.c_uint32),
+                ("dwExtraInfo", ctypes.c_void_p),
+            ]
+
+        families = (
+            ("shift", {Key.shift, Key.shift_l, Key.shift_r}),
+            ("command", {Key.cmd, Key.cmd_l, Key.cmd_r}),
+            ("control", {Key.ctrl, Key.ctrl_l, Key.ctrl_r}),
+        )
+        bound = ns["hotkey_key_object"]("alt_r")
+        # German, French and Spanish layouts: Right Alt is AltGr, and Windows
+        # sends a synthetic Left Ctrl (scan 0x21D) first.
+        events = (KBDLLHOOKSTRUCT(0xA2, 0x21D), KBDLLHOOKSTRUCT(0xA5, 0x38))
+        modifiers = set()
+        started = []
+        for data in events:
+            if ns["windows_hotkey_event_filter"](0x0104, data) is False:
+                continue
+            key = delivered[data.vkCode]
+            modifier = ns["modifier_pressed_by"](key, bound, families)
+            if modifier is not None:
+                modifiers.add(modifier)
+            if ns["hotkey_matches"](key, bound):
+                started.append(mode_from_modifiers(
+                    "shift" in modifiers, "command" in modifiers,
+                    "control" in modifiers))
+
+        self.assertEqual(started, ["capture"])
+        # A real Left Ctrl (scan 0x1D) still reaches the listener, so Reply
+        # stays reachable by holding it on purpose.
+        self.assertTrue(ns["windows_hotkey_event_filter"](
+            0x0100, KBDLLHOOKSTRUCT(0xA2, 0x1D)))
+
+    def settings_namespace(self, path):
+        return load_definitions(
+            "set_hotkey", "set_undo_hotkey", "apply_hotkey_bindings",
+            "normalize_hotkey", "hotkey_key_object", "save_preferences",
+            "normalize_sound_theme", "hotkey_binding_decision",
+            "hotkey_label_for", "hotkey_shared_modes",
+            assignments={
+                "PREFERENCES", "HOTKEY_CHOICES", "HOTKEY_DEFAULT",
+                "HOTKEY_MODIFIER_FAMILY", "HOTKEY_MODES_BY_MODIFIER",
+                "SOUND_THEMES", "SOUND_THEME_DEFAULT",
+            },
+            extra={
+                "IS_MACOS": True,
+                "PREFERENCES_FILE": path,
+                "keyboard": SimpleNamespace(Key=SimpleNamespace(
+                    alt_r="alt_r", f13="f13", f14="f14")),
+                "current_face": lambda: "parrot",
+                "print": lambda *_a, **_k: None,
+                "atomic_write_text": lambda target, value:
+                    target.write_text(value, encoding="utf-8"),
+            },
+        )
+
+    def test_the_capture_key_cannot_take_the_undo_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "preferences.json"
+            ns = self.settings_namespace(path)
+            self.assertTrue(ns["set_undo_hotkey"]("f14")["accepted"])
+
+            verdict = ns["set_hotkey"]("f14")
+
+            self.assertFalse(verdict["accepted"])
+            self.assertEqual(verdict["reason"], "conflicts_with_undo")
+            stored = json.loads(path.read_text())
+            self.assertEqual(
+                (stored["hotkey"], stored["undo_hotkey"]), ("alt_r", "f14"))
+            self.assertEqual(ns["HOTKEY"], "alt_r")
+            self.assertEqual(ns["UNDO_HOTKEY"], "f14")
+            # Any other key is still accepted.
+            self.assertTrue(ns["set_hotkey"]("f13")["accepted"])
+
+    def test_a_stored_undo_key_equal_to_the_capture_key_is_dropped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "preferences.json"
+            ns = self.settings_namespace(path)
+            ns["PREFERENCES"].update(hotkey="f14", undo_hotkey="f14")
+
+            self.assertEqual(ns["apply_hotkey_bindings"](), ("f14", ""))
+
+            self.assertEqual(ns["HOTKEY"], "f14")
+            self.assertIsNone(ns["UNDO_HOTKEY"])
+            self.assertEqual(ns["PREFERENCES"]["undo_hotkey"], "")
 
 
 class RecentDictationTests(unittest.TestCase):

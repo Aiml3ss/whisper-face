@@ -607,6 +607,40 @@ def hotkey_key_object(name: object):
     return getattr(keyboard.Key, normalize_hotkey(name), keyboard.Key.alt_r)
 
 
+def hotkey_matches(key, hotkey) -> bool:
+    """Whether a delivered key is the bound key.
+
+    pynput on Windows defines Right Alt twice, as ``Key.alt_r`` (extended
+    flag) and ``Key.alt_gr``, and delivers ``alt_gr`` for VK_RMENU. The two
+    are distinct members with one virtual-key code, so special keys are
+    matched by that code. On macOS the two names are one member.
+    """
+    if key is None or hotkey is None:
+        return False
+    if key == hotkey:
+        return True
+    if type(key) is not type(hotkey):
+        return False
+    key_vk = getattr(getattr(key, "value", None), "vk", None)
+    return key_vk is not None and key_vk == getattr(
+        getattr(hotkey, "value", None), "vk", None)
+
+
+# AltGr layouts make Windows send a synthetic Left Ctrl, scan code 0x21D,
+# ahead of Right Alt. Delivered, it would select Reply mode on every take.
+WINDOWS_VK_LCONTROL = 0xA2
+WINDOWS_ALTGR_SYNTHETIC_CTRL_SCAN = 0x21D
+
+
+def windows_hotkey_event_filter(_msg, data) -> bool:
+    """pynput ``win32_event_filter``: drop AltGr's synthetic Left Ctrl."""
+    return not (
+        getattr(data, "vkCode", None) == WINDOWS_VK_LCONTROL
+        and getattr(data, "scanCode", None)
+        == WINDOWS_ALTGR_SYNTHETIC_CTRL_SCAN
+    )
+
+
 def modifier_pressed_by(key, hotkey, families) -> str | None:
     """Name the voice-mode modifier a key press contributes, if any.
 
@@ -615,7 +649,7 @@ def modifier_pressed_by(key, hotkey, families) -> str | None:
     somebody bound a Shift, Command, or Control key, because every press
     would arrive already carrying that modifier.
     """
-    if hotkey is not None and key == hotkey:
+    if hotkey_matches(key, hotkey):
         return None
     for modifier, keys in families:
         if key in keys:
@@ -1971,6 +2005,12 @@ def apply_hotkey_bindings() -> tuple[str, str]:
     HOTKEY = hotkey_key_object(HOTKEY_NAME)
     UNDO_HOTKEY_NAME = normalize_hotkey(
         PREFERENCES["undo_hotkey"], default="")
+    if UNDO_HOTKEY_NAME == HOTKEY_NAME:
+        # A hand-edited or older preferences file can name one key for both.
+        # Capture wins; the undo binding is dropped rather than letting each
+        # press delete the previous dictation.
+        UNDO_HOTKEY_NAME = ""
+        PREFERENCES["undo_hotkey"] = ""
     UNDO_HOTKEY = (hotkey_key_object(UNDO_HOTKEY_NAME)
                    if UNDO_HOTKEY_NAME else None)
     return HOTKEY_NAME, UNDO_HOTKEY_NAME
@@ -1981,6 +2021,12 @@ def set_hotkey(name: str) -> dict:
     decision = hotkey_binding_decision(name)
     if not decision["accepted"]:
         return decision
+    if decision["name"] == normalize_hotkey(
+            PREFERENCES["undo_hotkey"], default=""):
+        # The mirror of set_undo_hotkey's guard: one key cannot both start a
+        # dictation and undo the previous one.
+        return {"accepted": False, "reason": "conflicts_with_undo",
+                "name": "", "label": "", "shared_modes": ()}
     PREFERENCES["hotkey"] = decision["name"]
     apply_hotkey_bindings()
     save_preferences()
@@ -12308,11 +12354,10 @@ def main():
         modifier = modifier_pressed_by(key, HOTKEY, modifier_families)
         if modifier is not None:
             modifiers.add(modifier)
-        if key == HOTKEY and not key_down["on"]:
+        if hotkey_matches(key, HOTKEY) and not key_down["on"]:
             key_down["on"] = True
             events.put(("press", time.perf_counter(), frozenset(modifiers)))
-        if (UNDO_HOTKEY is not None and key == UNDO_HOTKEY
-                and not undo_down["on"]):
+        if hotkey_matches(key, UNDO_HOTKEY) and not undo_down["on"]:
             # Latched, so holding the key repeats nothing. Undo runs off the
             # dictation path entirely — it never opens a stream — so its own
             # thread cannot delay or reorder a capture.
@@ -12321,17 +12366,19 @@ def main():
                 target=undo_last_dictation, daemon=True).start()
 
     def on_release(key):
-        if key == HOTKEY and key_down["on"]:
+        if hotkey_matches(key, HOTKEY) and key_down["on"]:
             key_down["on"] = False
             events.put(("release", time.perf_counter(), frozenset(modifiers)))
-        if UNDO_HOTKEY is not None and key == UNDO_HOTKEY:
+        if hotkey_matches(key, UNDO_HOTKEY):
             undo_down["on"] = False
         modifier = modifier_pressed_by(key, HOTKEY, modifier_families)
         if modifier is not None:
             modifiers.discard(modifier)
 
     def make_listener():
-        lst = keyboard.Listener(on_press=on_press, on_release=on_release)
+        lst = keyboard.Listener(
+            on_press=on_press, on_release=on_release,
+            win32_event_filter=windows_hotkey_event_filter)
         lst.start()
         return lst
 
