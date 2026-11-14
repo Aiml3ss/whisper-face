@@ -5362,6 +5362,26 @@ class VocabularyMinerTests(unittest.TestCase):
         # A casing-only fix does not ban the word it fixes toward.
         self.assertEqual(counts["Qwen"], 2)
 
+    def test_a_term_built_on_a_corrected_away_word_is_never_counted(self):
+        learned = {
+            "counts": {"Gwen Notes": 1},
+            "fixes": {"gwen": {"to": "Qwen", "n": 1}},
+            "confusions": {},
+        }
+        texts = ["Gwen 3.5 runs locally.", "Ask Gwen 3.5 for a summary.",
+                 "Gwen's notes are ready.", "Send Gwen's summary.",
+                 "Open Gwen Notes now.", "Gwendolyn Park signed."] * 2
+
+        counts = self.mine(
+            texts, ["Gwen 3.5", "Gwen's", "Gwendolyn Park"], learned)
+
+        self.assertNotIn("Gwen 3.5", counts)
+        self.assertNotIn("Gwen's", counts)
+        # A held term containing the word stops growing toward promotion.
+        self.assertEqual(counts["Gwen Notes"], 1)
+        # Only the whole word is banned, not names that begin with it.
+        self.assertEqual(counts["Gwendolyn Park"], 2)
+
 
 class InlineSnippetExpansionTests(unittest.TestCase):
     """Inline (embedded-trigger) snippet expansion. Additive to the

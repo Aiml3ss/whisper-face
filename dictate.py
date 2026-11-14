@@ -6844,11 +6844,14 @@ def learn_pass():
         if fix_from and str(fix_from).casefold() != str(fix_to).casefold()
     }
 
+    def built_on_corrected_word(term: str) -> bool:
+        return any(term_occurs(word, term) for word in corrected_away)
+
     # Terms below the promotion threshold keep accumulating against the new
     # dictations; without this they'd freeze at their discovery count and
     # could never be promoted.
     for term, count in state["counts"].items():
-        if count < PROMOTE_MIN_COUNT and term.casefold() not in corrected_away:
+        if count < PROMOTE_MIN_COUNT and not built_on_corrected_word(term):
             hits = sum(1 for t in new_texts if term_occurs(term, t))
             if hits:
                 state["counts"][term] = count + hits
@@ -6874,7 +6877,8 @@ def learn_pass():
         if not isinstance(cand, str):
             continue
         cand = cand.strip()
-        if not (2 <= len(cand) <= 40) or cand.casefold() in known:
+        if not (2 <= len(cand) <= 40) or cand.casefold() in known \
+                or built_on_corrected_word(cand):
             continue
         # how many dictations actually contain it
         count = sum(1 for t in texts if term_occurs(cand, t))
