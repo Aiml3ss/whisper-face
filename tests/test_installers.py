@@ -997,6 +997,21 @@ class InstallerContractTests(unittest.TestCase):
                     self.assertIn(f"logged-by={log}", recorded)
                     self.assertIn("arguments=--with-all-models", recorded)
                     self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+                    # The self-updater reads stderr first for its rollback
+                    # reason; the child's merged stderr leaves only this.
+                    self.assertEqual(result.stderr.strip(),
+                                     "!! the reason it stopped")
+
+            # A reason an earlier run left in the log is never repeated.
+            log.write_text("!! an earlier run's reason\n", encoding="utf-8")
+            child.write_text("#!/bin/bash\necho '== a step'\nexit 4\n",
+                             encoding="utf-8")
+            result = run_setup_functions(
+                ["start_install_log", "run_with_install_log"],
+                'start_install_log\nrun_with_install_log || true\n',
+                variables={"DIR": checkout, "install_log": log})
+            self.assertIn("exit status 4", result.stdout)
+            self.assertEqual(result.stderr, "")
 
     def test_a_failed_verify_reports_its_reason_where_the_app_reads_it(self):
         # verify_mac_installation shows the last line --verify prints on

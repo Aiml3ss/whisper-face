@@ -366,7 +366,8 @@ run_with_install_log() {
     # copies into the log. bash 3.2 cannot wait for a process substitution,
     # so with `exec > >(tee ...)` the failure reason reached the screen after
     # Install.command's closing lines instead of before them.
-    local status
+    local status log_offset reason
+    log_offset="$(wc -c < "$install_log" | tr -d '[:space:]')"
     set +e
     WHISPER_FACE_INSTALL_LOG="$install_log" "$DIR/setup.sh" "$@" 2>&1 \
         | tee -a "$install_log"
@@ -376,6 +377,12 @@ run_with_install_log() {
         echo "!! Whisper Face setup failed (exit status $status)."
         echo "!! Full log: $install_log"
         echo "!! Attach that file to a bug report; it holds every step."
+        # The child's stderr now arrives on stdout behind this banner and
+        # Install.command's trailer. The self-updater reports a rollback from
+        # stderr first, so give it this run's reason there, and only this run's.
+        reason="$(tail -c "+$((log_offset + 1))" "$install_log" \
+            | grep '^!! ' | tail -n 1 || true)"
+        [ -z "$reason" ] || echo "$reason" >&2
     fi
     return "$status"
 }
