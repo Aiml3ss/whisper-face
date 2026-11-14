@@ -340,6 +340,50 @@ class FreshInstallDictationTests(unittest.TestCase):
             "Restart " + "Unraid " * 40 + "tonight.", field=TextField())
         self.assertEqual(field.text, "Restart Unraid Unraid tonight.")
 
+    def test_edit_without_the_cleanup_model_leaves_the_selection_alone(self):
+        # A default install has no rewrite model. What was dictated is an
+        # instruction about the selection, never text to put in its place.
+        mac = booted()
+        text = "Please send the report by Friday."
+        field = TextField(text)
+        field.selection = (len("Please send "), len("the report"))
+        pastes = len(mac.desktop.pastes)
+        heard = len(mac.desktop.sounds())
+        records = len(transcript_records())
+        mac.dictate_sentence(
+            "Make this more formal.", field=field, modifiers=(Key.cmd,))
+        self.assertEqual(field.text, text)
+        self.assertEqual(field.selection,
+                         (len("Please send "), len("the report")))
+        self.assertEqual(len(mac.desktop.pastes), pastes)
+        self.assertEqual(
+            mac.dictate.CAPTION["text"],
+            "Edit mode needs the cleanup model — nothing changed")
+        self.assertEqual(mac.desktop.sounds()[heard:], ["Tink", "Funk"])
+        self.assertEqual(len(transcript_records()), records)
+        self.assertEqual(mac.desktop.network, [])
+
+    def test_compose_and_reply_without_the_cleanup_model_type_nothing(self):
+        mac = booted()
+        for mode, key, spoken in (
+            ("Compose", Key.shift,
+             "Write a short note declining the meeting."),
+            ("Reply", Key.ctrl, "Tell her I agree with the plan."),
+        ):
+            with self.subTest(mode=mode):
+                field = TextField("Can we meet on Thursday? ")
+                pastes = len(mac.desktop.pastes)
+                mac.dictate_sentence(spoken, field=field, modifiers=(key,))
+                self.assertEqual(field.text, "Can we meet on Thursday? ")
+                self.assertEqual(len(mac.desktop.pastes), pastes)
+                self.assertEqual(
+                    mac.dictate.CAPTION["text"],
+                    f"{mode} mode needs the cleanup model — nothing changed")
+        # Plain dictation is unaffected, straight afterwards.
+        field = mac.dictate_sentence(
+            "Thursday works for me.", field=TextField())
+        self.assertEqual(field.text, "Thursday works for me.")
+
     def test_a_filled_snippet_expands_only_when_asked_for(self):
         mac = booted()
         template = json.loads(

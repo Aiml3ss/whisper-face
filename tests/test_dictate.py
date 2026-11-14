@@ -5041,6 +5041,66 @@ class CleanupGuardTests(unittest.TestCase):
         self.assertFalse(any("second private dictation" in line
                              for line in lines))
 
+    def test_a_rewrite_that_did_not_happen_returns_nothing_to_insert(self):
+        # Capture can fall back to the dictation. In compose, reply and
+        # edit the dictation is an instruction, and neither it nor the
+        # selection it is about is a rewrite.
+        def not_installed(*_args, **_kwargs):
+            raise RuntimeError("the cleanup model is not installed")
+
+        def refusing(*_args, **_kwargs):
+            return json.dumps({
+                "text": "I cannot help with that.", "edits": [],
+            }), "stop"
+
+        def truncated(*_args, **_kwargs):
+            return json.dumps({"text": "Dear", "edits": []}), "length"
+
+        open_breaker = CleanupCircuitBreaker(cooldown_seconds=60)
+        open_breaker.acquire()
+        open_breaker.record_transport_failure()
+        for name, chat, breaker in (
+            ("not installed", not_installed, None),
+            ("refusal", refusing, None),
+            ("truncated", truncated, None),
+            ("cooling down", not_installed, open_breaker),
+        ):
+            lines = []
+            ns = load_definitions(
+                "_guard_cleaned_output", "llm_clean_with_edits",
+                assignments={
+                    "BASE_PROMPT", "FEW_SHOT", "LLM_CLEANUP_TIMEOUT",
+                    "LLM_CLEANUP_TOTAL_DEADLINES", "CLEANUP_RESPONSE_SCHEMA",
+                    "MODE_INSTRUCTIONS", "REFUSAL_RE", "STRUCTURED_OUTPUT",
+                },
+                extra={
+                    "CleanupEdit": object,
+                    "LLM_CLEANUP_BREAKER":
+                        breaker or CleanupCircuitBreaker(cooldown_seconds=60),
+                    "ollama_chat": chat,
+                    "quick_clean": lambda text: f"fallback:{text}",
+                    "STRUCTURED_FEW_SHOT": [],
+                    "print": lines.append,
+                },
+            )
+            for mode in ("edit", "compose", "reply"):
+                with self.subTest(failure=name, mode=mode):
+                    del lines[:]
+                    self.assertEqual(
+                        ns["llm_clean_with_edits"](
+                            "make this more formal", "neutral", mode,
+                            "Hi all"),
+                        (None, []))
+                    self.assertTrue(lines)
+                    self.assertTrue(all(
+                        line.endswith("nothing to insert")
+                        for line in lines), lines)
+            with self.subTest(failure=name, mode="capture"):
+                self.assertEqual(
+                    ns["llm_clean_with_edits"](
+                        "please clean this dictation", "neutral"),
+                    ("fallback:please clean this dictation", []))
+
     def test_guard_rejection_releases_without_resetting_the_cooldown(self):
         breaker = CleanupCircuitBreaker(cooldown_seconds=60)
 
@@ -9968,11 +10028,14 @@ class ReleasePlanTests(unittest.TestCase):
         )])
 
     def _release(self, mode, language, spoken, selected="Hallo zusammen",
-                 field=None, recognition=None):
+                 field=None, recognition=None, rewrite=None,
+                 model_installed=False):
         """Drive finish_and_process from a decoded take to its insertion.
 
         ``field`` is the text already before the cursor. ``recognition``
-        replaces the default confident decode of ``spoken``.
+        replaces the default confident decode of ``spoken``. ``rewrite``
+        stands in for the cleanup model call, on an install where the model
+        is or is not on disk.
         """
         pasted = []
         problems = []
@@ -10084,6 +10147,9 @@ class ReleasePlanTests(unittest.TestCase):
             cut_samples=8_000,
             chunks=[],
         )
+        if rewrite is not None:
+            ns["llm_clean_with_edits"] = rewrite
+            ns["cleanup_model_installed"] = lambda: model_installed
         ns["finish_and_process"](recorder, SimpleNamespace(), {})
         return pasted, problems
 
@@ -10104,6 +10170,39 @@ class ReleasePlanTests(unittest.TestCase):
                 self.assertIn("nothing changed", caption)
                 self.assertIn(mode.capitalize(), caption)
                 self.assertNotIn(spoken, log)
+
+    def test_rewrite_modes_insert_only_what_the_model_rewrote(self):
+        # In English the model is asked. When it cannot answer, the spoken
+        # instruction is all there is, and it is never the thing to insert.
+        for mode, spoken in (
+            ("edit", "Make this more formal."),
+            ("reply", "Tell her I agree with the plan."),
+            ("compose", "Write a short note declining the meeting."),
+        ):
+            for installed, reason in (
+                (False, "needs the cleanup model"),
+                (True, "got no rewrite from the cleanup model"),
+            ):
+                with self.subTest(mode=mode, installed=installed):
+                    pasted, problems = self._release(
+                        mode, "en", spoken, selected="Hi all",
+                        rewrite=lambda *_args: (None, []),
+                        model_installed=installed)
+                    self.assertEqual(pasted, [])
+                    self.assertEqual(len(problems), 1)
+                    caption, log = problems[0]
+                    self.assertEqual(
+                        caption,
+                        f"{mode.capitalize()} mode {reason} — "
+                        "nothing changed")
+                    self.assertNotIn(spoken, log)
+                    self.assertNotIn("Hi all", log)
+            with self.subTest(mode=mode, rewritten=True):
+                pasted, _problems = self._release(
+                    mode, "en", spoken, selected="Hi all",
+                    rewrite=lambda *_args: ("Good morning, everyone.", []),
+                    model_installed=True)
+                self.assertEqual(pasted, ["Good morning, everyone."])
 
     def test_plain_dictation_in_another_language_is_still_inserted(self):
         pasted, _problems = self._release(
