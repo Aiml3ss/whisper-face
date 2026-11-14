@@ -31,11 +31,22 @@ dictionary.txt
 dictate.log
 ollama.log
 ollama-error.log
+install.log
 .dictate.lock
 .models/
 .windows/
 __pycache__/
 .build/
+# release artifacts (scripts/package_macos.sh, scripts/package_windows.sh)
+/dist/
+# Receipts the packagers write into every release bundle. Ignored so that a
+# downloaded install's checkout is clean and its updater can run.
+/PACKAGE-CONTENTS.json
+/RELEASE-METADATA.json
+# Finder writes these into any folder it opens.
+.DS_Store
+# Wrangler's account cache and local state, wherever wrangler was run from.
+.wrangler/
 # Local ASR corpora and generated bakeoff hypotheses are never repository data.
 benchmarks/asr-local/
 # Local design-linter cache.

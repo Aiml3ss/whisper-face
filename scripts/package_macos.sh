@@ -147,6 +147,17 @@ git -C "$BUNDLE_DIR" fetch -q --depth 1 "$REPO_DIR" "$FULL_REVISION"
 git -C "$BUNDLE_DIR" update-ref refs/heads/packaged-release "$FULL_REVISION"
 git -C "$BUNDLE_DIR" symbolic-ref HEAD refs/heads/packaged-release
 git -C "$BUNDLE_DIR" read-tree "$FULL_REVISION"
+# .gitattributes keeps development-only trees out of the archive. Mark those
+# index entries skip-worktree so the shipped checkout reads as clean to the
+# package verifier and to the in-app updater.
+git -C "$BUNDLE_DIR" ls-files -z \
+    | git -C "$BUNDLE_DIR" check-attr -z --stdin export-ignore \
+    | python3 -c 'import sys
+fields = sys.stdin.buffer.read().split(b"\0")
+for index in range(0, len(fields) - 2, 3):
+    if fields[index + 2] == b"set":
+        sys.stdout.buffer.write(fields[index] + b"\0")' \
+    | git -C "$BUNDLE_DIR" update-index -z --skip-worktree --stdin
 rm -f "$BUNDLE_DIR/.git/FETCH_HEAD"
 git -C "$BUNDLE_DIR" remote add origin \
     "https://github.com/Aiml3ss/whisper-face.git"
@@ -168,20 +179,9 @@ if not identity.startswith("Developer ID Application: ") or not identity.endswit
     raise SystemExit("signing identity is not the pinned Developer ID Application identity")
 PY
 fi
-python3 "$SCRIPT_DIR/release_manifest.py" source-metadata \
-    --version "$VERSION" \
-    --revision "$FULL_REVISION" \
-    --output "$BUNDLE_DIR/RELEASE-METADATA.json"
-python3 "$SCRIPT_DIR/verify_macos_package.py" stamp \
-    --root "$BUNDLE_DIR" \
-    --version "$VERSION" \
-    --revision "$FULL_REVISION" \
-    --source-date-epoch "$SOURCE_DATE_EPOCH"
-
-echo "== creating source archive"
-rm -f "$ZIP_PATH" "$DMG_PATH" "$MANIFEST_PATH" "$CHECKSUM_PATH"
-ditto -c -k --norsrc --keepParent "$BUNDLE_DIR" "$ZIP_PATH"
-
+# Built before the bundle's metadata is written, because that metadata
+# records the finished launcher's digest: setup.sh accepts the app
+# shipped beside the folder only when the two match.
 echo "== compiling generic launcher from the selected revision"
 python3 "$BUNDLE_DIR/scripts/macos_launcher_app.py" build \
     --app "$LAUNCHER_APP"
@@ -196,6 +196,24 @@ else
     python3 "$BUNDLE_DIR/scripts/macos_launcher_app.py" verify \
         --app "$LAUNCHER_APP"
 fi
+
+LAUNCHER_DIGEST="$(python3 "$BUNDLE_DIR/scripts/macos_launcher_app.py" digest \
+    --app "$LAUNCHER_APP")"
+
+python3 "$SCRIPT_DIR/release_manifest.py" source-metadata \
+    --version "$VERSION" \
+    --revision "$FULL_REVISION" \
+    --launcher-bundle-sha256 "$LAUNCHER_DIGEST" \
+    --output "$BUNDLE_DIR/RELEASE-METADATA.json"
+python3 "$SCRIPT_DIR/verify_macos_package.py" stamp \
+    --root "$BUNDLE_DIR" \
+    --version "$VERSION" \
+    --revision "$FULL_REVISION" \
+    --source-date-epoch "$SOURCE_DATE_EPOCH"
+
+echo "== creating source archive"
+rm -f "$ZIP_PATH" "$DMG_PATH" "$MANIFEST_PATH" "$CHECKSUM_PATH"
+ditto -c -k --norsrc --keepParent "$BUNDLE_DIR" "$ZIP_PATH"
 
 echo "== creating macOS disk image"
 hdiutil create -quiet -fs APFS -format UDZO \

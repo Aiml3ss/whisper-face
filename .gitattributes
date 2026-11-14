@@ -9,3 +9,20 @@
 # `git archive` applies this attribute, so the Windows release bundle ships the
 # entry point with the line endings Windows expects.
 /Install.cmd text eol=crlf
+# Development-only trees never ship in a release archive: window-render
+# probe baselines, research notes, the wiki tool's working state, Cloudflare
+# cache, and agent tool state. Each tree is named twice: the directory so the
+# archive has no empty folder, and its contents so `git check-attr` reports
+# each file, which the packagers mark skip-worktree in the bundle's checkout.
+/.probe-* export-ignore
+/.probe-*/** export-ignore
+/.raw export-ignore
+/.raw/** export-ignore
+/wiki/.llm-wiki export-ignore
+/wiki/.llm-wiki/** export-ignore
+/.wrangler export-ignore
+/.wrangler/** export-ignore
+/.claude export-ignore
+/.claude/** export-ignore
+/.impeccable export-ignore
+/.impeccable/** export-ignore

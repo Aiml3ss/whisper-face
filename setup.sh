@@ -45,6 +45,12 @@ for system_path in /usr/bin /bin /usr/sbin /sbin; do
 done
 export PATH
 
+# Every uv call here, and the login service, runs on this one interpreter.
+# Left to itself uv takes the newest CPython it can find or download, and the
+# lock has no wheels for mlx or torch on one newer than dictate.py allows.
+PYTHON_VERSION="3.12"
+export UV_PYTHON="$PYTHON_VERSION"
+
 MODE="full"
 VERIFY_ONLY=0
 # A default install downloads only what dictation needs to work at all:
@@ -118,7 +124,13 @@ elif [ "$ASSUME_YES" -eq 1 ] || [ "$REMOVE_MODELS" -eq 1 ] \
 fi
 
 fail() {
-    echo "!! $*" >&2
+    # The in-app Verify button shows the last line --verify writes to standard
+    # output, so in that mode the reason has to be that line.
+    if [ "$VERIFY_ONLY" -eq 1 ]; then
+        echo "!! $*"
+    else
+        echo "!! $*" >&2
+    fi
     exit 1
 }
 
@@ -146,7 +158,32 @@ provision_private_log() {
         || fail "private runtime log permissions could not be verified: $path"
 }
 
+checkout_volume_is_read_only() {
+    # A mounted disk image is read-only. Every field after the fifth is the
+    # mount point, which for an image is "/Volumes/Whisper Face <version>".
+    local mount_point
+    mount_point="$(df -P "$DIR" 2>/dev/null | awk 'NR == 2 {
+        for (i = 6; i <= NF; i++) printf "%s%s", $i, (i < NF ? " " : "")
+    }')"
+    [ -n "$mount_point" ] || return 1
+    mount | grep -F " on $mount_point (" | grep -q "read-only"
+}
+
+check_install_location() {
+    # Writability first: a disk image has only a few megabytes free, and
+    # "not enough space" sent people hunting for gigabytes they already had.
+    local available_kb
+    confirm_writable_checkout
+    available_kb="$(df -Pk "$DIR" | awk 'NR == 2 {print $4}')"
+    if [ "${available_kb:-0}" -lt "$required_kb" ]; then
+        fail "at least $required_gb GB of free disk space is required"
+    fi
+}
+
 confirm_writable_checkout() {
+    if checkout_volume_is_read_only; then
+        fail "Whisper Face is on a read-only volume, most likely the disk image it came in. Drag the Whisper Face folder out of it into a folder of your own, then open Install.command from there."
+    fi
     if ! (
         umask 077
         proof="$(mktemp "$DIR/.whisper-face-write.XXXXXXXX")" || exit 1
@@ -299,6 +336,67 @@ ollama_service_receipt="$service_receipt_dir/ollama-service.sha256"
 parakeet_helper="$DIR/.models/bin/parrot-asr-helper"
 dictate_log="$DIR/dictate.log"
 ollama_log="$DIR/ollama.log"
+install_log="$DIR/install.log"
+# Whisper Face's Ollama service sets no OLLAMA_MODELS, so its models live in
+# Ollama's default store. A value exported in the user's shell names another
+# Ollama's store, and the manifest check dictate.py runs would read it too.
+unset OLLAMA_MODELS
+qwen_manifest="$HOME/.ollama/models/manifests/registry.ollama.ai/library/qwen3.5/4b"
+
+# --- Installer log ----------------------------------------------------------
+# A failed install used to leave nothing to read. Homebrew, a multi-gigabyte
+# model download, and the readiness waits emit far more output than a Terminal
+# window keeps, so by the time setup stopped, the line explaining it had
+# already scrolled away. Everything from here on is copied to install.log,
+# created 0600 because it records this machine's paths.
+#
+# Failing to open it is deliberately not fatal: the most likely reason is a
+# read-only checkout, and confirm_writable_checkout has a far better message
+# waiting a few steps later. An uninstall is excluded for the same reason the
+# Windows installer excludes it -- it prints a short plan that never scrolls,
+# and an open log would be one more file it then had to remove. --verify is
+# excluded because it promises to change nothing.
+start_install_log() {
+    [ ! -L "$install_log" ] || return 1
+    if [ -e "$install_log" ] && [ ! -f "$install_log" ]; then
+        return 1
+    fi
+    (umask 077 && : >> "$install_log") 2>/dev/null || return 1
+    chmod 600 "$install_log" 2>/dev/null || return 1
+}
+
+run_with_install_log() {
+    # Rerun this installer as a child whose combined output a plain pipeline
+    # copies into the log. bash 3.2 cannot wait for a process substitution,
+    # so with `exec > >(tee ...)` the failure reason reached the screen after
+    # Install.command's closing lines instead of before them.
+    local status log_offset reason
+    log_offset="$(wc -c < "$install_log" | tr -d '[:space:]')"
+    set +e
+    WHISPER_FACE_INSTALL_LOG="$install_log" "$DIR/setup.sh" "$@" 2>&1 \
+        | tee -a "$install_log"
+    status="${PIPESTATUS[0]}"
+    set -e
+    if [ "$status" -ne 0 ]; then
+        echo "!! Whisper Face setup failed (exit status $status)."
+        echo "!! Full log: $install_log"
+        echo "!! Attach that file to a bug report; it holds every step."
+        # The child's stderr now arrives on stdout behind this banner and
+        # Install.command's trailer. The self-updater reports a rollback from
+        # stderr first, so give it this run's reason there, and only this run's.
+        reason="$(tail -c "+$((log_offset + 1))" "$install_log" \
+            | grep '^!! ' | tail -n 1 || true)"
+        [ -z "$reason" ] || echo "$reason" >&2
+    fi
+    return "$status"
+}
+
+if [ -z "${WHISPER_FACE_INSTALL_LOG:-}" ] && [ "$UNINSTALL" -eq 0 ] \
+        && [ "$VERIFY_ONLY" -eq 0 ] && start_install_log; then
+    install_status=0
+    run_with_install_log "$@" || install_status=$?
+    exit "$install_status"
+fi
 
 # --- Uninstall --------------------------------------------------------------
 # Removal works from the explicit inventory below and never from a glob or a
@@ -516,7 +614,8 @@ uninstall_whisper_face() {
             "$DIR/acoustic_calibration_activation.json" \
             "$DIR/relisten_activation.json" \
             "$DIR/dictate.log" \
-            "$DIR/ollama.log"; do
+            "$DIR/ollama.log" \
+            "$DIR/install.log"; do
         remove_installed_path "$REMOVE_PERSONAL" "$personal_file" \
             "personal file"
     done
@@ -647,34 +746,43 @@ done
 command -v lsof >/dev/null 2>&1 \
     || fail "lsof was not found on PATH; it is required to bind a service to its listening process"
 
-macos_major="$(sw_vers -productVersion | cut -d. -f1)"
-if [ "$macos_major" -lt 14 ]; then
-    echo "!! macOS 14 or newer is recommended and supported by Homebrew."
-fi
+require_supported_macos() {
+    # A hard floor, not a recommendation: the locked mlx, mlx-metal and torch
+    # wheels, the speech helper, and the launcher all target macOS 14.
+    local macos_major
+    macos_major="$(sw_vers -productVersion | cut -d. -f1)"
+    [ "${macos_major:-0}" -ge 14 ] \
+        || fail "macOS 14 (Sonoma) or newer is required; this Mac runs $(sw_vers -productVersion)"
+}
 
-verify_install() {
-    step "verifying installation"
-    local uv_bin ollama_bin verify_ollama_plist verify_ollama_digest
-    local verify_cleanup verify_qwen
+require_build_tools() {
+    # /usr/bin/swift and swiftc exist on every Mac as shims, installed or
+    # not, so `command -v` proves nothing. Ask for the real compiler before
+    # any model is downloaded, not when the helper build fails after them.
+    local swift_major
+    xcode-select -p >/dev/null 2>&1 \
+        || fail "the Xcode Command Line Tools are not installed; run xcode-select --install, then rerun Install.command"
+    xcrun --find swiftc >/dev/null 2>&1 \
+        || fail "the Swift compiler is unavailable; reinstall the Command Line Tools (xcode-select --install), then rerun Install.command"
+    swift_major="$(xcrun swift --version 2>/dev/null \
+        | sed -n 's/.*Swift version \([0-9][0-9]*\).*/\1/p' | head -n 1)"
+    [ "${swift_major:-0}" -ge 6 ] \
+        || fail "Swift 6 or newer is required to build the speech helper (found ${swift_major:-none}); update the Command Line Tools, then rerun Install.command"
+}
+
+require_supported_macos
+
+verify_cleanup_service() {
+    # The Ollama service exists only to serve the optional cleanup model, so
+    # it is verified only where this installer set it up. Sets verify_qwen.
+    local ollama_bin verify_ollama_plist verify_ollama_digest verify_cleanup
     local escaped_verify_ollama escaped_verify_dir
-    uv_bin="$(command -v uv 2>/dev/null || true)"
+    verify_qwen=0
+    [ -f "$ollama_plist" ] || return 0
     ollama_bin="$(command -v ollama 2>/dev/null || true)"
-    [ -n "$uv_bin" ] || fail "uv is not installed"
-    command -v ffmpeg >/dev/null 2>&1 || fail "ffmpeg is not installed"
     [ -n "$ollama_bin" ] || fail "ollama is not installed"
-    command -v swift >/dev/null 2>&1 || fail "Swift toolchain is not installed"
-    command -v swiftc >/dev/null 2>&1 \
-        || fail "Swift compiler is not installed"
-    [ -x "$parakeet_helper" ] || fail "Parakeet ASR helper is missing"
-    "$parakeet_helper" --verify >/dev/null \
-        || fail "Parakeet Unified model/helper verification failed"
-    [ -f "$dictate_plist" ] || fail "dictation LaunchAgent is missing"
-    [ -f "$ollama_plist" ] || fail "Ollama LaunchAgent is missing"
-    for private_log in "$dictate_log" "$ollama_log"; do
-        private_log_is_valid "$private_log" \
-            || fail "private runtime log is missing or has unsafe permissions"
-    done
-    plutil -lint "$dictate_plist" "$ollama_plist" >/dev/null
+    plutil -lint "$ollama_plist" >/dev/null \
+        || fail "Ollama LaunchAgent is not a valid property list"
     escaped_verify_ollama="$(escape_sed_replacement "$ollama_bin")"
     escaped_verify_dir="$(escape_sed_replacement "$DIR")"
     verify_ollama_plist="$(mktemp \
@@ -696,6 +804,32 @@ verify_install() {
     fi
     rm -f "$verify_ollama_plist"
     trap - EXIT
+    agent_is_running com.berg.ollama || fail "Ollama LaunchAgent is not running"
+    if "$ollama_bin" show qwen3.5:4b >/dev/null 2>&1; then
+        verify_qwen=1
+    fi
+}
+
+verify_install() {
+    step "verifying installation"
+    local uv_bin
+    uv_bin="$(command -v uv 2>/dev/null || true)"
+    [ -n "$uv_bin" ] || fail "uv is not installed"
+    command -v ffmpeg >/dev/null 2>&1 || fail "ffmpeg is not installed"
+    command -v swift >/dev/null 2>&1 || fail "Swift toolchain is not installed"
+    command -v swiftc >/dev/null 2>&1 \
+        || fail "Swift compiler is not installed"
+    [ -x "$parakeet_helper" ] || fail "Parakeet ASR helper is missing"
+    "$parakeet_helper" --verify >/dev/null \
+        || fail "Parakeet Unified model/helper verification failed"
+    [ -f "$dictate_plist" ] || fail "dictation LaunchAgent is missing"
+    for private_log in "$dictate_log" "$ollama_log"; do
+        private_log_is_valid "$private_log" \
+            || fail "private runtime log is missing or has unsafe permissions"
+    done
+    plutil -lint "$dictate_plist" >/dev/null \
+        || fail "dictation LaunchAgent is not a valid property list"
+    verify_cleanup_service
     if [ "$MODE" = "full" ]; then
         python3 "$DIR/scripts/macos_launcher_app.py" verify \
             --app "$launcher_app" --checkout "$DIR" \
@@ -703,8 +837,10 @@ verify_install() {
             --installed-runtime >/dev/null \
             || fail "Whisper Face launcher app is missing or stale"
     fi
-    "$uv_bin" lock --check --script "$DIR/dictate.py" >/dev/null
-    "$uv_bin" sync --locked --script "$DIR/dictate.py" --check >/dev/null
+    "$uv_bin" lock --check --script "$DIR/dictate.py" >/dev/null \
+        || fail "the Python lock does not match dictate.py; rerun ./setup.sh"
+    "$uv_bin" sync --locked --script "$DIR/dictate.py" --check >/dev/null \
+        || fail "the locked Python environment is incomplete; rerun ./setup.sh"
     if [ "$MODE" = "full" ]; then
         run_with_timeout 30 "$uv_bin" run --locked \
             --script "$DIR/dictate.py" --native-gui-smoke-test >/dev/null \
@@ -715,16 +851,11 @@ verify_install() {
         || fail "Parakeet Unified model revision verification failed"
     # qwen3.5:4b is an optional cleanup upgrade. Audit it when it is installed;
     # a minimal install without it is a supported configuration, not a failure.
-    verify_qwen=0
-    if "$ollama_bin" show qwen3.5:4b >/dev/null 2>&1; then
-        verify_qwen=1
-    fi
     if [ "$verify_qwen" -eq 1 ]; then
         "$uv_bin" run --locked --script "$DIR/dictate.py" \
             --verify-ollama-model >/dev/null \
-            || fail "Qwen model manifest verification failed"
+            || fail "Qwen model manifest verification failed; rerun ./setup.sh to set the unaudited model aside"
     fi
-    agent_is_running com.berg.ollama || fail "Ollama LaunchAgent is not running"
     agent_is_running com.berg.dictate \
         || fail "dictation LaunchAgent is not running"
     curl -fsS --max-time 3 http://127.0.0.1:8787/health >/dev/null \
@@ -735,6 +866,168 @@ verify_install() {
         echo "== verified: locked Python environment, Whisper + Parakeet models, services, and health"
         echo "== qwen3.5:4b is not installed; cleanup stays deterministic (add it with ./setup.sh --models)"
     fi
+}
+
+cleanup_model_wanted() {
+    # Asked for now, or set up by an earlier install whose model is still in
+    # Ollama's store. Anything else gets no Ollama service at all.
+    [ "$WITH_ALL_MODELS" -eq 1 ] && return 0
+    [ -f "$ollama_plist" ] && [ -f "$qwen_manifest" ]
+}
+
+required_brew_packages() {
+    if cleanup_model_wanted; then
+        echo "uv ffmpeg ollama"
+    else
+        echo "uv ffmpeg"
+    fi
+}
+
+ollama_port_holder() {
+    # Names whatever listens on Ollama's port when it is not this installer's
+    # agent. Prints nothing when the port is free or already ours.
+    local pids pid agent command_name
+    pids="$(lsof -nP -iTCP:11434 -sTCP:LISTEN -t 2>/dev/null \
+        | sort -u || true)"
+    [ -n "$pids" ] || return 0
+    agent="$(agent_pid com.berg.ollama || true)"
+    for pid in $pids; do
+        [ "$pid" != "$agent" ] || continue
+        command_name="$(ps -o comm= -p "$pid" 2>/dev/null || true)"
+        echo "process $pid (${command_name:-unknown})"
+        return 0
+    done
+}
+
+retire_ollama_service() {
+    # Unload and remove only the agent and receipt this installer creates,
+    # so a failed or abandoned setup leaves nothing restarting behind it.
+    launchctl bootout "gui/$(id -u)/com.berg.ollama" 2>/dev/null || true
+    for _ in $(seq 1 15); do
+        launchctl print "gui/$(id -u)/com.berg.ollama" >/dev/null 2>&1 \
+            || break
+        sleep 1
+    done
+    rm -f -- "$ollama_plist" "$ollama_service_receipt"
+}
+
+start_ollama_service() {
+    local escaped_ollama escaped_dir desired_ollama_plist
+    local desired_ollama_digest holder ollama_ready cleanup receipt_temporary
+    step "configuring the tuned local Ollama service"
+    [ -n "$OLLAMA" ] || fail "ollama is not installed"
+    escaped_ollama="$(escape_sed_replacement "$OLLAMA")"
+    escaped_dir="$(escape_sed_replacement "$DIR")"
+    desired_ollama_plist="${ollama_plist}.candidate.$$"
+    printf -v cleanup 'rm -f -- %q' "$desired_ollama_plist"
+    trap "$cleanup" EXIT
+    render_plist "$DIR/com.berg.ollama.plist.template" \
+        "$desired_ollama_plist" \
+        -e "s|__OLLAMA__|$escaped_ollama|g" \
+        -e "s|__DIR__|$escaped_dir|g"
+    desired_ollama_digest="$(shasum -a 256 "$desired_ollama_plist" \
+        | awk '{print $1}')"
+
+    # A warm update normally leaves Ollama's exact service definition
+    # running. Keep that process and its loaded model hot only when the
+    # freshly rendered plist is byte-identical, a prior successful reload
+    # receipt binds its digest, and the running launchd PID owns the healthy
+    # endpoint. Any missing evidence, drift, stopped agent, or failed health
+    # probe takes the replace/reload path.
+    if ollama_service_identity_is_valid "$desired_ollama_plist" \
+            "$ollama_plist" "$ollama_service_receipt" \
+            "$desired_ollama_digest"; then
+        rm -f "$desired_ollama_plist"
+        echo "== reusing healthy Ollama service (configuration unchanged)"
+    else
+        # Someone else's Ollama -- the desktop app, a Homebrew service, a
+        # terminal -- is never stopped. Loading beside it could only fail,
+        # and a KeepAlive agent that cannot bind restarts forever.
+        holder="$(ollama_port_holder)"
+        if [ -n "$holder" ]; then
+            rm -f "$desired_ollama_plist"
+            trap - EXIT
+            # An earlier install's agent cannot bind there either, and
+            # KeepAlive would restart it forever. Unloading it also means a
+            # plain rerun installs without the cleanup model.
+            [ ! -f "$ollama_plist" ] || retire_ollama_service
+            fail "port 11434 is in use by $holder. The cleanup model needs Whisper Face's own Ollama service there, and setup does not stop anyone else's. Quit that Ollama (for Homebrew: brew services stop ollama) and rerun, or rerun ./setup.sh without --models or --with-all-models to install without the cleanup model."
+        fi
+        mv -f "$desired_ollama_plist" "$ollama_plist"
+        if ! reload_agent com.berg.ollama "$ollama_plist"; then
+            trap - EXIT
+            retire_ollama_service
+            fail "launchd could not load the Ollama service; it was removed again"
+        fi
+    fi
+    trap - EXIT
+
+    echo -n "== waiting for Ollama"
+    ollama_ready=0
+    for _ in $(seq 1 60); do
+        # Wait for the identity asserted below, not merely for the endpoint
+        # to answer. A reload leaves the previous process bound to 11434
+        # while the replacement starts, so a healthy /api/tags is not yet
+        # evidence that the launchd job owns the sole listener.
+        if ollama_process_identity_is_valid; then
+            ollama_ready=1
+            break
+        fi
+        echo -n "."
+        sleep 1
+    done
+    echo
+    if [ "$ollama_ready" -ne 1 ]; then
+        retire_ollama_service
+        fail "Ollama did not become ready; inspect $DIR/ollama.log. Its service was unloaded so it does not keep restarting."
+    fi
+
+    ollama_process_identity_is_valid \
+        || fail "Ollama service identity could not be verified"
+    install -d -m 700 "$service_receipt_dir"
+    receipt_temporary="${ollama_service_receipt}.tmp.$$"
+    printf '%s\n' "$desired_ollama_digest" > "$receipt_temporary"
+    chmod 600 "$receipt_temporary"
+    mv -f "$receipt_temporary" "$ollama_service_receipt"
+}
+
+print_install_outcome() {
+    # $1 = ready | permissions. An install is complete only when the service
+    # is ready and verified. Until macOS grants Input Monitoring and
+    # Accessibility, no hotkey listener exists and nothing has been verified.
+    local skipped_model
+    echo
+    if [ "$1" = "ready" ]; then
+        echo "== installation complete"
+        if [ "$MODE" = "full" ]; then
+            echo "== Hold Right Option, speak, and release to paste."
+            echo "== Flight Recorder defaults off on a fresh install; an existing"
+            echo "== preference is preserved. Toggle it from the Whisper Face menu."
+            echo "== Launcher: $launcher_app"
+        else
+            echo "== server-only installation is ready."
+        fi
+    else
+        echo "== Not finished yet: Whisper Face is installed, but it cannot hear"
+        echo "== the hotkey or type for you until macOS grants three permissions."
+        echo "== Open System Settings -> Privacy & Security and turn on"
+        echo "== \"Whisper Face\" under each of these:"
+        echo "==   Input Monitoring  so it notices you holding Right Option"
+        echo "==   Accessibility     so it can paste where you are typing"
+        echo "==   Microphone        so it can hear you (macOS asks the first"
+        echo "==                     time you dictate; choose Allow)"
+        echo "== It starts listening by itself once the first two are on. Then"
+        echo "== hold Right Option, speak, and release. To check everything:"
+        echo "==   ./setup.sh --verify"
+    fi
+    if [ "${#skipped_models[@]}" -gt 0 ]; then
+        echo "== These optional models were skipped to keep the install small:"
+        for skipped_model in "${skipped_models[@]}"; do
+            echo "==   $skipped_model"
+        done
+        echo "== Dictation works without them. Add them with: ./setup.sh --models"
+    fi
+    echo "== Logs: $DIR/dictate.log"
 }
 
 # Adopt an already-installed Homebrew that is merely absent from PATH, before
@@ -784,12 +1077,7 @@ if [ "$WITH_ALL_MODELS" -eq 1 ]; then
     required_kb=8388608
     required_gb=8
 fi
-available_kb="$(df -Pk "$DIR" | awk 'NR == 2 {print $4}')"
-if [ "${available_kb:-0}" -lt "$required_kb" ]; then
-    fail "at least $required_gb GB of free disk space is required"
-fi
-
-confirm_writable_checkout
+check_install_location
 
 # Create and lock logs before either service can create them with a default
 # mode. Existing logs are retained; rerunning setup repairs their mode.
@@ -809,8 +1097,12 @@ if ! command -v brew >/dev/null 2>&1; then
 fi
 
 BREW="$(command -v brew)"
+cleanup_wanted=0
+if cleanup_model_wanted; then
+    cleanup_wanted=1
+fi
 missing_packages=()
-for package in uv ffmpeg ollama; do
+for package in $(required_brew_packages); do
     "$BREW" list --versions "$package" >/dev/null 2>&1 \
         || missing_packages+=("$package")
 done
@@ -820,8 +1112,9 @@ if [ "${#missing_packages[@]}" -gt 0 ]; then
 fi
 
 UV="$(command -v uv)"
-OLLAMA="$(command -v ollama)"
+OLLAMA="$(command -v ollama 2>/dev/null || true)"
 mkdir -p "$launch_dir"
+require_build_tools
 
 # --- Model inventory --------------------------------------------------------
 # Probe the caches before announcing any size. Hugging Face and Ollama both
@@ -845,8 +1138,31 @@ qwen_is_installed() {
     "$OLLAMA" show qwen3.5:4b >/dev/null 2>&1
 }
 
+qwen_matches_audit() {
+    # $1 = 1 when this run pulled the copy. qwen3.5:4b is pulled by a tag its
+    # publisher can move. A copy that differs from the audited manifest is
+    # never served: its service is unloaded and its plist removed, so no later
+    # run or update reads it as an opt-in and fails on it. A copy this run
+    # fetched is removed; one that was already here is left to its owner.
+    if "$UV" run --locked --script "$DIR/dictate.py" --verify-ollama-model; then
+        return 0
+    fi
+    echo "!! qwen3.5:4b does not match the audited model, so it is not used."
+    if [ "$1" -eq 1 ]; then
+        # ollama rm needs the service, so it goes before the service does.
+        "$OLLAMA" rm qwen3.5:4b >/dev/null 2>&1 || true
+        echo "!! The copy just downloaded was removed."
+    else
+        echo "!! It was left in Ollama's store; remove it with: ollama rm qwen3.5:4b"
+    fi
+    retire_ollama_service
+    echo "!! Its Ollama service was unloaded; cleanup stays deterministic."
+    return 1
+}
+
 install_optional_models() {
     # Fetch only the opt-in quality models into an existing installation.
+    local qwen_pulled_now=0 qwen_audited=1
     step "checking which optional models are already installed"
     refresh_model_inventory
     if [ "$(model_state whisper-large)" = "present" ]; then
@@ -855,23 +1171,29 @@ install_optional_models() {
         step "downloading Whisper large-v3-turbo (~1.6 GB)"
         "$UV" run --locked --script "$DIR/dictate.py" --preload-models
     fi
+    start_ollama_service
     if qwen_is_installed; then
         echo "== qwen3.5:4b already installed"
     else
-        curl -fsS --max-time 3 http://127.0.0.1:11434/api/tags \
-            >/dev/null 2>&1 \
-            || fail "Ollama is not running; run ./setup.sh first, then ./setup.sh --models"
         step "downloading qwen3.5:4b (~3.4 GB)"
-        "$OLLAMA" pull qwen3.5:4b
+        if ! "$OLLAMA" pull qwen3.5:4b; then
+            retire_ollama_service
+            fail "Ollama could not download qwen3.5:4b; its service was unloaded"
+        fi
+        qwen_pulled_now=1
     fi
-    "$UV" run --locked --script "$DIR/dictate.py" --verify-ollama-model
+    qwen_matches_audit "$qwen_pulled_now" || qwen_audited=0
     if agent_is_running com.berg.dictate; then
         step "restarting Whisper Face so it loads the new models"
         launchctl kickstart -k "gui/$(id -u)/com.berg.dictate" >/dev/null 2>&1 \
             || echo "!! could not restart Whisper Face; rerun ./setup.sh"
     fi
     echo
-    echo "== optional models are installed"
+    if [ "$qwen_audited" -eq 1 ]; then
+        echo "== optional models are installed"
+    else
+        echo "== Whisper large-v3-turbo is installed; qwen3.5:4b was skipped"
+    fi
 }
 
 if [ "$MODELS_ONLY" -eq 1 ]; then
@@ -906,74 +1228,31 @@ step "verifying the pinned Parakeet Unified model and helper"
 "$parakeet_helper" --preload
 
 # --- Ollama service and cleanup model --------------------------------------
-step "configuring the tuned local Ollama service"
-escaped_ollama="$(escape_sed_replacement "$OLLAMA")"
-escaped_dir="$(escape_sed_replacement "$DIR")"
-desired_ollama_plist="${ollama_plist}.candidate.$$"
-trap 'rm -f "$desired_ollama_plist"' EXIT
-render_plist com.berg.ollama.plist.template "$desired_ollama_plist" \
-    -e "s|__OLLAMA__|$escaped_ollama|g" \
-    -e "s|__DIR__|$escaped_dir|g"
-desired_ollama_digest="$(shasum -a 256 "$desired_ollama_plist" \
-    | awk '{print $1}')"
-
-# A warm update normally leaves Ollama's exact service definition running.
-# Keep that process and its loaded model hot only when the freshly rendered
-# plist is byte-identical, a prior successful reload receipt binds its digest,
-# and the running launchd PID owns the healthy endpoint. Any missing evidence,
-# drift, stopped agent, or failed health probe takes the replace/reload path.
-if ollama_service_identity_is_valid "$desired_ollama_plist" \
-        "$ollama_plist" "$ollama_service_receipt" \
-        "$desired_ollama_digest"; then
-    rm -f "$desired_ollama_plist"
-    echo "== reusing healthy Ollama service (configuration unchanged)"
-else
-    "$BREW" services stop ollama >/dev/null 2>&1 || true
-    mv -f "$desired_ollama_plist" "$ollama_plist"
-    reload_agent com.berg.ollama "$ollama_plist"
-fi
-trap - EXIT
-
-echo -n "== waiting for Ollama"
-ollama_ready=0
-for _ in $(seq 1 60); do
-    # Wait for the identity the next line asserts, not merely for the endpoint
-    # to answer. A reload leaves the previous process bound to 11434 while the
-    # replacement starts, so a healthy /api/tags is not yet evidence that the
-    # launchd job owns the sole listener. Polling only the endpoint let the
-    # wait break during that window and hard-failed the install -- which, from
-    # the self-updater, meant a rollback. This check subsumes the health probe.
-    if ollama_process_identity_is_valid; then
-        ollama_ready=1
-        break
-    fi
-    echo -n "."
-    sleep 1
-done
-echo
-[ "$ollama_ready" -eq 1 ] \
-    || fail "Ollama did not become ready; inspect $DIR/ollama.log"
-
-ollama_process_identity_is_valid \
-    || fail "Ollama service identity could not be verified"
-install -d -m 700 "$service_receipt_dir"
-receipt_temporary="${ollama_service_receipt}.tmp.$$"
-printf '%s\n' "$desired_ollama_digest" > "$receipt_temporary"
-chmod 600 "$receipt_temporary"
-mv -f "$receipt_temporary" "$ollama_service_receipt"
-
 # The cleanup model only rewrites text the deterministic compiler refuses to
-# touch, so it is optional: an install without it cleans up deterministically.
+# touch, so it is optional, and so is the Ollama service that serves it: an
+# install without the model installs, loads, and verifies no Ollama at all.
 qwen_installed=0
-if qwen_is_installed; then
-    echo "== qwen3.5:4b already installed"
-    qwen_installed=1
-elif [ "$WITH_ALL_MODELS" -eq 1 ]; then
-    step "downloading qwen3.5:4b (~3.4 GB)"
-    "$OLLAMA" pull qwen3.5:4b
-    qwen_installed=1
+qwen_pulled_now=0
+if [ "$cleanup_wanted" -eq 1 ]; then
+    start_ollama_service
+    if qwen_is_installed; then
+        echo "== qwen3.5:4b already installed"
+        qwen_installed=1
+    else
+        step "downloading qwen3.5:4b (~3.4 GB)"
+        if ! "$OLLAMA" pull qwen3.5:4b; then
+            retire_ollama_service
+            fail "Ollama could not download qwen3.5:4b; its service was unloaded"
+        fi
+        qwen_installed=1
+        qwen_pulled_now=1
+    fi
 else
-    echo "== skipping qwen3.5:4b (~3.4 GB): semantic cleanup upgrade"
+    if [ -f "$ollama_plist" ]; then
+        step "unloading the Ollama service an earlier install left without a model"
+        retire_ollama_service
+    fi
+    echo "== skipping qwen3.5:4b (~3.4 GB) and the Ollama service it needs"
     skipped_models+=(
         "qwen3.5:4b (~3.4 GB) — semantic cleanup; deterministic cleanup runs without it")
 fi
@@ -981,8 +1260,10 @@ fi
 # --- Reproducible Python environment and Whisper model cache ---------------
 step "installing the locked Python environment"
 "$UV" sync --locked --script "$DIR/dictate.py"
-if [ "$qwen_installed" -eq 1 ]; then
-    "$UV" run --locked --script "$DIR/dictate.py" --verify-ollama-model
+if [ "$qwen_installed" -eq 1 ] && ! qwen_matches_audit "$qwen_pulled_now"; then
+    qwen_installed=0
+    skipped_models+=(
+        "qwen3.5:4b — its published manifest changed since it was audited")
 fi
 
 # Whisper Tiny is the fast preview pass every dictation runs; it is required.
@@ -1028,6 +1309,7 @@ done
 # --- Dictation LaunchAgent --------------------------------------------------
 step "installing the login LaunchAgent"
 escaped_uv="$(escape_sed_replacement "$UV")"
+escaped_dir="$(escape_sed_replacement "$DIR")"
 if [ "$MODE" = "server-only" ]; then
     extra_sed="s|__EXTRA_ARGS__|<string>--server-only</string>|"
     # Server-only stays raw uv and headless: no launcher, no TCC surface.
@@ -1048,6 +1330,7 @@ render_plist com.berg.dictate.plist.template "$dictate_plist" \
     -e "$launcher_prefix_sed" \
     -e "s|__UV__|$escaped_uv|g" \
     -e "s|__DIR__|$escaped_dir|g" \
+    -e "s|__PYTHON__|$PYTHON_VERSION|g" \
     -e "$extra_sed"
 
 if [ "$MODE" = "full" ]; then
@@ -1061,7 +1344,8 @@ if [ "$MODE" = "full" ]; then
             && [ "$packaged_launcher_app" != "$launcher_app" ]; then
         launcher_install_args+=(--source-app "$packaged_launcher_app")
     fi
-    python3 "$DIR/scripts/macos_launcher_app.py" "${launcher_install_args[@]}"
+    python3 "$DIR/scripts/macos_launcher_app.py" "${launcher_install_args[@]}" \
+        || fail "the Whisper Face launcher app could not be installed; its reason is above"
 fi
 
 log_start=1
@@ -1095,30 +1379,9 @@ if [ "$ready" -eq 1 ]; then
     curl -fsS --max-time 3 http://127.0.0.1:8787/health >/dev/null \
         || fail "dictation process launched but its health check failed"
     verify_install
+    print_install_outcome ready
 elif [ "$permissions_needed" -eq 1 ] && [ "$MODE" = "full" ]; then
-    echo "== software and models are installed; macOS permissions remain:"
-    echo "== System Settings -> Privacy & Security -> enable Whisper Face under"
-    echo "==   Input Monitoring, Accessibility, and Microphone."
-    echo "== The LaunchAgent rechecks automatically; then run ./setup.sh --verify"
+    print_install_outcome permissions
 else
     fail "dictation service did not become ready; inspect $DIR/dictate.log"
 fi
-
-echo
-echo "== installation complete"
-if [ "$MODE" = "full" ]; then
-    echo "== Hold Right Option, speak, and release to paste."
-    echo "== Flight Recorder defaults off on a fresh install; an existing"
-    echo "== preference is preserved. Toggle it from the Whisper Face menu."
-    echo "== Launcher: $launcher_app"
-else
-    echo "== server-only installation is ready."
-fi
-if [ "${#skipped_models[@]}" -gt 0 ]; then
-    echo "== These optional models were skipped to keep the install small:"
-    for skipped_model in "${skipped_models[@]}"; do
-        echo "==   $skipped_model"
-    done
-    echo "== Dictation works without them. Add them with: ./setup.sh --models"
-fi
-echo "== Logs: $DIR/dictate.log"

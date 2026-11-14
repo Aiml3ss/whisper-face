@@ -4,7 +4,11 @@
 # ///
 
 import ast
+import os
+import plistlib
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -33,11 +37,74 @@ PERSONAL_FILES = (
     "relisten_activation.json",
     "dictate.log",
     "ollama.log",
+    "install.log",
 )
 
 # Tools Whisper Face installs alongside itself but does not own. Someone else
 # on this machine may depend on any of them.
 SHARED_TOOLS = ("brew", "uv", "ffmpeg", "ollama")
+
+# Tools a setup.sh function could reach that would change this machine or go
+# to the network. Every one is shadowed by a stub that refuses, unless a test
+# supplies its own, so a forgotten stub fails the test instead of the Mac.
+REFUSED_TOOLS = (
+    "brew", "uv", "ollama", "launchctl", "curl", "swift", "swiftc",
+    "codesign", "open", "python3", "lsof",
+)
+
+
+def shell_function(name: str) -> str:
+    """The source of one top-level setup.sh function, by name."""
+    source = (ROOT / "setup.sh").read_text(encoding="utf-8")
+    match = re.search(
+        rf"(?ms)^{re.escape(name)}\(\) \{{\n.*?^\}}\n", source)
+    if match is None:
+        raise AssertionError(f"setup.sh defines no {name}() function")
+    return match.group(0)
+
+
+def run_setup_functions(names, script, *, variables=None, stubs=None,
+                        cwd=None):
+    """Run named setup.sh functions in isolation; never the installer.
+
+    ``variables`` become shell variables ahead of the functions, the way the
+    installer's own top level sets them. ``stubs`` maps a command name to a
+    bash body that replaces that command on PATH.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        bin_dir = Path(directory) / "bin"
+        bin_dir.mkdir()
+        bodies = {tool: 'echo "refused: $0 $*" >&2; exit 97'
+                  for tool in REFUSED_TOOLS}
+        bodies.update(stubs or {})
+        for tool, body in bodies.items():
+            stub = bin_dir / tool
+            stub.write_text(f"#!/bin/bash\n{body}\n", encoding="utf-8")
+            stub.chmod(0o755)
+        assignments = "".join(
+            f"{key}={_shell_quote(value)}\n"
+            for key, value in (variables or {}).items())
+        program = (
+            "set -euo pipefail\n" + assignments
+            + "".join(shell_function(name) for name in names) + script)
+        environment = {
+            "HOME": directory,
+            "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin",
+            "LANG": "C",
+            "STUB_LOG": str(Path(directory) / "calls.log"),
+        }
+        result = subprocess.run(
+            ["/bin/bash", "-c", program], cwd=cwd or directory,
+            env=environment, text=True, capture_output=True, timeout=60,
+            stdin=subprocess.DEVNULL)
+        calls_path = Path(directory) / "calls.log"
+        result.calls = (calls_path.read_text(encoding="utf-8")
+                        if calls_path.exists() else "")
+        return result
+
+
+def _shell_quote(value) -> str:
+    return "'" + str(value).replace("'", "'\\''") + "'"
 
 
 class InstallerContractTests(unittest.TestCase):
@@ -559,9 +626,8 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn('if [ "$MODELS_ONLY" -eq 1 ]; then', self.shell)
 
     def test_minimal_mac_install_is_a_supported_verified_configuration(self):
-        verify_start = self.shell.index("verify_install() {")
-        verify_end = self.shell.index('if [ "$VERIFY_ONLY" -eq 1 ]')
-        verify = self.shell[verify_start:verify_end]
+        verify = (shell_function("verify_cleanup_service")
+                  + shell_function("verify_install"))
         # An absent optional cleanup model is a supported state, not a failure.
         self.assertNotIn('fail "qwen3.5:4b is not installed"', self.shell)
         self.assertIn(
@@ -573,12 +639,16 @@ class InstallerContractTests(unittest.TestCase):
         self.assertLess(guard, manifest)
         self.assertIn("cleanup stays deterministic", verify)
         # Installing the model keeps its manifest audit mandatory.
-        self.assertIn('fail "Qwen model manifest verification failed"', verify)
+        self.assertIn(
+            'fail "Qwen model manifest verification failed; rerun ./setup.sh',
+            verify)
+        self.assertIn("--verify-ollama-model",
+                      shell_function("qwen_matches_audit"))
         install = self.shell[self.shell.index(
             'step "installing the locked Python environment"'):]
-        install_manifest = install.index("--verify-ollama-model")
+        install_manifest = install.index("qwen_matches_audit")
         self.assertLess(
-            install.rindex('if [ "$qwen_installed" -eq 1 ]; then',
+            install.rindex('if [ "$qwen_installed" -eq 1 ]',
                            0, install_manifest),
             install_manifest)
 
@@ -611,16 +681,13 @@ class InstallerContractTests(unittest.TestCase):
     def test_warm_rerun_reuses_only_an_exact_healthy_ollama_service(self):
         # macOS renders the desired plist on every run and may retain the warm
         # process only when config, launchd state, and health all agree.
-        configuration_start = self.shell.index(
-            'step "configuring the tuned local Ollama service"')
-        branch_start = self.shell.index(
-            'if ollama_service_identity_is_valid ', configuration_start)
-        branch_end = self.shell.index('echo -n "== waiting for Ollama"')
-        branch = self.shell[branch_start:branch_end]
-        preamble = self.shell[configuration_start:branch_start]
+        service = shell_function("start_ollama_service")
+        branch_start = service.index('if ollama_service_identity_is_valid ')
+        branch_end = service.index('echo -n "== waiting for Ollama"')
+        branch = service[branch_start:branch_end]
         self.assertIn(
-            'render_plist com.berg.ollama.plist.template '
-            '"$desired_ollama_plist"', preamble)
+            'render_plist "$DIR/com.berg.ollama.plist.template"',
+            service[:branch_start])
         for required in (
             'ollama_service_identity_is_valid "$desired_ollama_plist"',
             '"$ollama_plist" "$ollama_service_receipt"',
@@ -631,21 +698,15 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn(required, branch)
         reuse = branch.index(
             "reusing healthy Ollama service (configuration unchanged)")
-        stop = branch.index('"$BREW" services stop ollama')
         reload = branch.index('reload_agent com.berg.ollama "$ollama_plist"')
-        self.assertLess(reuse, stop)
-        self.assertLess(stop, reload)
-        self.assertNotIn(
-            '"$BREW" services stop ollama', self.shell[:branch_start])
-        postamble = self.shell[branch_end:]
+        self.assertLess(reuse, reload)
         # The wait must poll the identity the next line asserts. A reload keeps
         # the previous process bound to 11434 while its replacement starts, so
         # two listeners briefly exist; ollama_listener_pid refuses a non-unique
         # result. Waiting on /api/tags alone broke out during that window and
         # hard-failed the install -- a rollback when run from the self-updater.
-        wait_end = self.shell.index(
-            'fail "Ollama did not become ready', branch_end)
-        wait = self.shell[branch_end:wait_end]
+        wait = service[branch_end:service.index(
+            'fail "Ollama did not become ready')]
         self.assertIn('if ollama_process_identity_is_valid; then', wait)
         self.assertNotIn('curl -fsS --max-time 1 http://127.0.0.1:11434', wait)
         self.assertIn('ollama-service.sha256', self.shell)
@@ -656,7 +717,7 @@ class InstallerContractTests(unittest.TestCase):
             'fail "Ollama service identity could not be verified"',
         ):
             with self.subTest(required=required):
-                self.assertIn(required, postamble)
+                self.assertIn(required, service[branch_end:])
 
         # Windows has a health-based warm-service path, but its detached Ollama
         # process is not owned by the Whisper Face scheduled task. Do not claim
@@ -672,10 +733,241 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn("--verify-ollama-model", installer)
                 self.assertIn("show", installer)
 
+    def ollama_sandbox(self, directory, *, listener="", healthy=False):
+        """Variables and stubs for running start_ollama_service offline."""
+        root = Path(directory)
+        (root / "LaunchAgents").mkdir()
+        (root / "com.berg.ollama.plist.template").write_bytes(
+            (ROOT / "com.berg.ollama.plist.template").read_bytes())
+        loaded = root / "loaded"
+        launchctl = (
+            f'echo "launchctl $*" >> "$STUB_LOG"\n'
+            f'case "$1" in\n'
+            f'  print) [ -e {loaded} ] || exit 113\n'
+            f'         printf "state = running\\n\\tpid = 77\\n" ;;\n'
+            f'  bootstrap) touch {loaded} ;;\n'
+            f'  bootout) rm -f {loaded} ;;\n'
+            f'esac\n')
+        variables = {
+            "DIR": root,
+            "VERIFY_ONLY": 0,
+            "OLLAMA": "/opt/fake/bin/ollama",
+            "ollama_plist": root / "LaunchAgents" / "com.berg.ollama.plist",
+            "service_receipt_dir": root / "state",
+            "ollama_service_receipt": root / "state" / "ollama-service.sha256",
+        }
+        stubs = {
+            "launchctl": launchctl,
+            "lsof": f'echo "lsof $*" >> "$STUB_LOG"; '
+                    f'[ -z "{listener}" ] || echo {listener}',
+            "ps": 'echo ollama',
+            "sleep": ':',
+            "curl": 'exit 0' if healthy else 'exit 7',
+            "brew": 'echo "brew $*" >> "$STUB_LOG"',
+        }
+        return variables, stubs
+
+    OLLAMA_FUNCTIONS = (
+        "fail", "step", "escape_sed_replacement", "render_plist",
+        "agent_is_running", "agent_pid", "ollama_listener_pid",
+        "valid_sha256_digest", "ollama_process_identity_is_valid",
+        "ollama_service_identity_is_valid", "reload_agent",
+        "ollama_port_holder", "retire_ollama_service", "start_ollama_service",
+    )
+
+    def test_a_default_install_brings_no_ollama(self):
+        # Ollama exists only to serve the optional cleanup model. A default
+        # install must not install, load, or verify it.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plist = root / "com.berg.ollama.plist"
+            manifest = root / "manifests" / "qwen3.5" / "4b"
+            cases = (
+                ("default install", 0, False, False, "uv ffmpeg"),
+                ("cleanup model requested", 1, False, False,
+                 "uv ffmpeg ollama"),
+                ("earlier opt-in, model present", 0, True, True,
+                 "uv ffmpeg ollama"),
+                ("earlier service, no model", 0, True, False, "uv ffmpeg"),
+            )
+            for name, requested, has_plist, has_model, packages in cases:
+                with self.subTest(case=name):
+                    plist.unlink(missing_ok=True)
+                    manifest.unlink(missing_ok=True)
+                    if has_plist:
+                        plist.write_text("x")
+                    if has_model:
+                        manifest.parent.mkdir(parents=True, exist_ok=True)
+                        manifest.write_text("x")
+                    result = run_setup_functions(
+                        ["cleanup_model_wanted", "required_brew_packages"],
+                        "required_brew_packages\n",
+                        variables={"WITH_ALL_MODELS": requested,
+                                   "ollama_plist": plist,
+                                   "qwen_manifest": manifest})
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), packages)
+            # Nor does --verify ask for it when no service was set up.
+            plist.unlink()
+            result = run_setup_functions(
+                ["fail", "verify_cleanup_service"],
+                'verify_cleanup_service\necho "verify_qwen=$verify_qwen"\n',
+                variables={"VERIFY_ONLY": 1, "ollama_plist": plist})
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(result.stdout.strip(), "verify_qwen=0")
+            self.assertNotIn("refused", result.stderr)
+
+    def test_the_cleanup_model_is_looked_for_where_the_service_keeps_it(self):
+        # com.berg.ollama.plist sets no OLLAMA_MODELS, so the service stores
+        # models in Ollama's default place. A value exported in the user's
+        # shell made a rerun miss the installed model, read the service as
+        # one "left without a model", and unload a working cleanup service.
+        start = self.shell.index("\nlaunch_dir=") + 1
+        end = self.shell.index("\n", self.shell.index("\nqwen_manifest=") + 1)
+        paths = self.shell[start:end] + "\n"
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                ["/bin/bash", "-c",
+                 "set -euo pipefail\nDIR=/checkout\n" + paths
+                 + 'echo "$qwen_manifest"\n'
+                 + 'env | grep -c "^OLLAMA_MODELS=" || true\n'],
+                env={"HOME": directory, "PATH": "/usr/bin:/bin",
+                     "OLLAMA_MODELS": "/Volumes/Other/ollama-models"},
+                text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest, exported = result.stdout.split()
+            self.assertEqual(
+                manifest,
+                f"{directory}/.ollama/models/manifests/registry.ollama.ai/"
+                "library/qwen3.5/4b")
+            # Nor does the manifest check dictate.py runs read another store.
+            self.assertEqual(exported, "0")
+
+    def test_setup_never_stops_or_fights_someone_elses_ollama(self):
+        with tempfile.TemporaryDirectory() as directory:
+            variables, stubs = self.ollama_sandbox(directory, listener=4242)
+            result = run_setup_functions(
+                self.OLLAMA_FUNCTIONS, "start_ollama_service\n",
+                variables=variables, stubs=stubs)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("port 11434 is in use by process 4242 (ollama)",
+                          result.stderr)
+            self.assertNotIn("brew services", result.calls)
+            self.assertNotIn("launchctl bootstrap", result.calls)
+            self.assertFalse(variables["ollama_plist"].exists())
+            self.assertEqual(
+                [path.name for path in Path(directory, "LaunchAgents").iterdir()],
+                [])
+
+        # An earlier install's agent cannot bind beside that Ollama either,
+        # and KeepAlive would restart it forever. It is this installer's own,
+        # so it is unloaded, and a rerun then installs without the model.
+        with tempfile.TemporaryDirectory() as directory:
+            variables, stubs = self.ollama_sandbox(directory, listener=4242)
+            variables["ollama_plist"].write_text("earlier", encoding="utf-8")
+            Path(directory, "loaded").touch()
+            result = run_setup_functions(
+                self.OLLAMA_FUNCTIONS, "start_ollama_service\n",
+                variables=variables, stubs=stubs)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("port 11434 is in use by process 4242 (ollama)",
+                          result.stderr)
+            self.assertIn("launchctl bootout", result.calls)
+            self.assertNotIn("launchctl bootstrap", result.calls)
+            self.assertFalse(Path(directory, "loaded").exists())
+            self.assertFalse(variables["ollama_plist"].exists())
+
+    def test_an_ollama_service_that_never_becomes_ready_is_unloaded(self):
+        # KeepAlive would otherwise restart it every ten seconds, at every
+        # login, for as long as the plist stayed in ~/Library/LaunchAgents.
+        with tempfile.TemporaryDirectory() as directory:
+            variables, stubs = self.ollama_sandbox(directory)
+            result = run_setup_functions(
+                self.OLLAMA_FUNCTIONS, "start_ollama_service\n",
+                variables=variables, stubs=stubs)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("Ollama did not become ready", result.stderr)
+            calls = result.calls.splitlines()
+            bootstrap = calls.index(next(
+                call for call in calls if call.startswith("launchctl bootstrap")))
+            self.assertTrue(any(call.startswith("launchctl bootout")
+                                for call in calls[bootstrap:]))
+            self.assertFalse(Path(directory, "loaded").exists())
+            self.assertFalse(variables["ollama_plist"].exists())
+            self.assertFalse(variables["ollama_service_receipt"].exists())
+
+    def test_a_republished_cleanup_model_is_set_aside_by_models(self):
+        # ./setup.sh --models pulls qwen3.5:4b by a tag its publisher can
+        # move. A copy that fails the manifest audit must not leave a loaded
+        # agent, its plist, or the model behind: plist plus model reads as an
+        # opt-in, and every later setup, update and --verify would then fail.
+        cases = (
+            ("pulled by this run", False, True),
+            ("already in the store", True, False),
+        )
+        for name, already_present, removed in cases:
+            with self.subTest(case=name), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                variables, stubs = self.ollama_sandbox(directory, healthy=True)
+                loaded = root / "loaded"
+                store = root / "store" / "qwen3.5-4b"
+                store.parent.mkdir()
+                if already_present:
+                    store.write_text("republished manifest")
+                ollama = root / "fake-ollama"
+                ollama.write_text(
+                    "#!/bin/bash\n"
+                    'echo "ollama $*" >> "$STUB_LOG"\n'
+                    'case "$1" in\n'
+                    f'  show) [ -e {store} ] ;;\n'
+                    f'  pull) echo republished > {store} ;;\n'
+                    # ollama rm talks to the service, so it needs it loaded.
+                    f'  rm) [ -e {loaded} ] && rm -f {store} ;;\n'
+                    "esac\n")
+                ollama.chmod(0o755)
+                variables["OLLAMA"] = ollama
+                variables["UV"] = "uv"
+                stubs["uv"] = (
+                    'echo "uv $*" >> "$STUB_LOG"\n'
+                    'case "$*" in\n'
+                    '  *--verify-ollama-model*)\n'
+                    '    echo "RuntimeError: qwen3.5:4b manifest drift" >&2\n'
+                    '    exit 1 ;;\n'
+                    "esac\n")
+                # The launchd job (pid 77) is the only listener once loaded.
+                stubs["lsof"] = f'[ -e {loaded} ] && echo 77; exit 0'
+                result = run_setup_functions(
+                    self.OLLAMA_FUNCTIONS + (
+                        "model_state", "qwen_is_installed",
+                        "qwen_matches_audit", "install_optional_models"),
+                    'refresh_model_inventory() { :; }\n'
+                    'install_optional_models\n',
+                    variables={**variables,
+                               "model_inventory": "whisper-large=present"},
+                    stubs=stubs)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("!! qwen3.5:4b does not match the audited model",
+                              result.stdout)
+                self.assertIn("qwen3.5:4b was skipped", result.stdout)
+                self.assertNotIn("optional models are installed", result.stdout)
+                self.assertFalse(loaded.exists(), "Ollama agent left loaded")
+                self.assertFalse(variables["ollama_plist"].exists())
+                self.assertFalse(variables["ollama_service_receipt"].exists())
+                self.assertEqual(not store.exists(), removed, result.calls)
+                # So the next setup no longer reads it as an opt-in.
+                after = run_setup_functions(
+                    ["cleanup_model_wanted"],
+                    "cleanup_model_wanted && echo wanted || echo skipped\n",
+                    variables={"WITH_ALL_MODELS": 0,
+                               "ollama_plist": variables["ollama_plist"],
+                               "qwen_manifest": store})
+                self.assertEqual(after.stdout.strip(), "skipped")
+
     def test_runtime_logs_are_private_before_services_can_write_them(self):
         mac_provision = self.shell.index('provision_private_log "$dictate_log"')
         mac_ollama = self.shell.index(
-            'step "configuring the tuned local Ollama service"')
+            "# --- Ollama service and cleanup model")
         mac_dictation = self.shell.index('step "installing the login LaunchAgent"')
         self.assertLess(mac_provision, mac_ollama)
         self.assertLess(mac_provision, mac_dictation)
@@ -708,12 +1000,186 @@ class InstallerContractTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, self.powershell)
 
+    def test_install_log_records_the_run_and_the_reason_comes_first(self):
+        # The log is written by rerunning setup.sh behind a plain pipeline.
+        # Under the earlier `exec > >(tee ...)`, bash 3.2 could not wait for
+        # the tee, so the reason arrived after Install.command's trailer.
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            child = checkout / "setup.sh"
+            child.write_text(
+                "#!/bin/bash\n"
+                'echo "== a step"\n'
+                'echo "logged-by=${WHISPER_FACE_INSTALL_LOG:-}"\n'
+                'echo "arguments=$*"\n'
+                'sleep 0.2\n'
+                'echo "!! the reason it stopped" >&2\n'
+                "exit 3\n", encoding="utf-8")
+            child.chmod(0o755)
+            log = checkout / "install.log"
+            for attempt in range(5):
+                with self.subTest(attempt=attempt):
+                    log.unlink(missing_ok=True)
+                    result = run_setup_functions(
+                        ["start_install_log", "run_with_install_log"],
+                        'start_install_log\n'
+                        'status=0\n'
+                        'run_with_install_log --with-all-models '
+                        '|| status=$?\n'
+                        'echo "trailer status=$status"\n',
+                        variables={"DIR": checkout, "install_log": log})
+                    output = result.stdout
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    reason = output.index("!! the reason it stopped")
+                    banner = output.index("!! Full log: " + str(log))
+                    trailer = output.index("trailer status=3")
+                    self.assertLess(reason, banner)
+                    self.assertLess(banner, trailer)
+                    recorded = log.read_text(encoding="utf-8")
+                    self.assertIn("== a step", recorded)
+                    self.assertIn("!! the reason it stopped", recorded)
+                    self.assertIn(f"logged-by={log}", recorded)
+                    self.assertIn("arguments=--with-all-models", recorded)
+                    self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+                    # The self-updater reads stderr first for its rollback
+                    # reason; the child's merged stderr leaves only this.
+                    self.assertEqual(result.stderr.strip(),
+                                     "!! the reason it stopped")
+
+            # A reason an earlier run left in the log is never repeated.
+            log.write_text("!! an earlier run's reason\n", encoding="utf-8")
+            child.write_text("#!/bin/bash\necho '== a step'\nexit 4\n",
+                             encoding="utf-8")
+            result = run_setup_functions(
+                ["start_install_log", "run_with_install_log"],
+                'start_install_log\nrun_with_install_log || true\n',
+                variables={"DIR": checkout, "install_log": log})
+            self.assertIn("exit status 4", result.stdout)
+            self.assertEqual(result.stderr, "")
+
+    def test_a_failed_verify_reports_its_reason_where_the_app_reads_it(self):
+        # verify_mac_installation shows the last line --verify prints on
+        # standard output; before, that was "== verifying installation".
+        verify = run_setup_functions(
+            ["fail"], 'echo "== verifying installation"\n'
+                      'fail "Parakeet ASR helper is missing"\n',
+            variables={"VERIFY_ONLY": 1})
+        self.assertEqual(verify.returncode, 1)
+        self.assertEqual(verify.stdout.strip().splitlines()[-1],
+                         "!! Parakeet ASR helper is missing")
+        # An install keeps reasons on standard error, as before.
+        install = run_setup_functions(
+            ["fail"], 'fail "no room"\n', variables={"VERIFY_ONLY": 0})
+        self.assertEqual(install.returncode, 1)
+        self.assertEqual(install.stdout, "")
+        self.assertIn("!! no room", install.stderr)
+
+        # Every check verify_install makes names itself when it fails, so the
+        # app never shows "== verifying installation" as the reason.
+        checks = {
+            "plutil": ("plutil", "exit 1",
+                       "!! dictation LaunchAgent is not a valid property list"),
+            "uv lock --check": ("uv", 'case "$*" in lock*) exit 1;; esac',
+                                "!! the Python lock does not match dictate.py"),
+            "uv sync --check": ("uv", 'case "$*" in sync*) exit 1;; esac',
+                                "!! the locked Python environment is incomplete"),
+        }
+        for name, (tool, body, reason) in checks.items():
+            with self.subTest(check=name), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                helper = root / "parrot-asr-helper"
+                helper.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+                helper.chmod(0o755)
+                logs = (root / "dictate.log", root / "ollama.log")
+                for log in logs:
+                    log.write_text("", encoding="utf-8")
+                    log.chmod(0o600)
+                (root / "com.berg.dictate.plist").write_text(
+                    "x", encoding="utf-8")
+                stubs = {"uv": "exit 0", "ffmpeg": "exit 0", "swift": "exit 0",
+                         "swiftc": "exit 0", "plutil": "exit 0"}
+                stubs[tool] = body
+                result = run_setup_functions(
+                    ["fail", "step", "private_log_is_valid",
+                     "verify_cleanup_service", "verify_install"],
+                    "verify_install\n",
+                    variables={
+                        "VERIFY_ONLY": 1, "MODE": "server", "DIR": root,
+                        "parakeet_helper": helper,
+                        "dictate_plist": root / "com.berg.dictate.plist",
+                        "dictate_log": logs[0], "ollama_log": logs[1],
+                        "ollama_plist": root / "com.berg.ollama.plist",
+                    },
+                    stubs=stubs)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertTrue(
+                    result.stdout.strip().splitlines()[-1].startswith(reason),
+                    result.stdout)
+
+    def test_install_command_names_the_log_only_when_this_run_wrote_it(self):
+        # A copy of the shim drives a stand-in setup.sh, so nothing installs.
+        for writes_log, expected in (
+            (False, "Setup stopped before it could open a log"),
+            (True, "The whole run, including the error above, was recorded"),
+        ):
+            with self.subTest(writes_log=writes_log), \
+                    tempfile.TemporaryDirectory() as directory:
+                folder = Path(directory)
+                shim = folder / "Install.command"
+                shim.write_bytes((ROOT / "Install.command").read_bytes())
+                shim.chmod(0o755)
+                stand_in = folder / "setup.sh"
+                stand_in.write_text(
+                    "#!/bin/bash\n"
+                    + ('echo "this run" >> install.log\n' if writes_log
+                       else "")
+                    + 'echo "!! --nonsense is not an option" >&2\n'
+                    "exit 2\n", encoding="utf-8")
+                stand_in.chmod(0o755)
+                # A log left behind by an earlier, unrelated run.
+                (folder / "install.log").write_text(
+                    "an earlier run\n", encoding="utf-8")
+                result = subprocess.run(
+                    [str(shim), "--nonsense"], cwd=folder, text=True,
+                    capture_output=True, stdin=subprocess.DEVNULL,
+                    timeout=30)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(expected, result.stdout)
+
+    def test_an_install_waiting_for_permissions_is_not_called_complete(self):
+        # On a first install macOS has granted nothing, so the service stops
+        # at "Waiting for permissions" with no hotkey listener and nothing
+        # verified. Printing "installation complete" and "Hold Right Option"
+        # there sent people to press a key that did nothing.
+        def outcome(state):
+            return run_setup_functions(
+                ["print_install_outcome"],
+                f"skipped_models=()\nprint_install_outcome {state}\n",
+                variables={"MODE": "full", "DIR": "/checkout",
+                           "launcher_app": "/Apps/Whisper Face.app"})
+
+        waiting = outcome("permissions")
+        self.assertEqual(waiting.returncode, 0, waiting.stderr)
+        self.assertNotIn("installation complete", waiting.stdout)
+        self.assertNotIn("release to paste", waiting.stdout)
+        self.assertIn("Not finished yet", waiting.stdout)
+        for permission in ("Input Monitoring", "Accessibility", "Microphone"):
+            with self.subTest(permission=permission):
+                self.assertIn(permission, waiting.stdout)
+        self.assertIn("./setup.sh --verify", waiting.stdout)
+
+        ready = outcome("ready")
+        self.assertEqual(ready.returncode, 0, ready.stderr)
+        self.assertIn("== installation complete", ready.stdout)
+        self.assertIn("Hold Right Option, speak, and release to paste.",
+                      ready.stdout)
+
     def test_installers_fail_before_side_effects_for_read_only_checkouts(self):
-        mac_probe = self.shell.index("confirm_writable_checkout()")
-        mac_call = self.shell.index("confirm_writable_checkout\n", mac_probe)
+        mac_call = self.shell.index("\ncheck_install_location\n")
         mac_homebrew = self.shell.index("installing Homebrew")
         mac_ollama = self.shell.index(
-            'step "configuring the tuned local Ollama service"')
+            "# --- Ollama service and cleanup model")
         self.assertLess(mac_call, mac_homebrew)
         self.assertLess(mac_call, mac_ollama)
         for required in (
@@ -741,6 +1207,83 @@ class InstallerContractTests(unittest.TestCase):
         ):
             with self.subTest(required=required):
                 self.assertIn(required, self.powershell)
+
+    def test_running_from_the_disk_image_says_so_instead_of_disk_space(self):
+        # A mounted image has a few megabytes free, so checking space first
+        # told people with hundreds of gigabytes free that they needed 5 GB.
+        functions = ["fail", "checkout_volume_is_read_only",
+                     "confirm_writable_checkout", "check_install_location"]
+        image = "/Volumes/Whisper Face 1.2.3"
+        df = ("cat <<'DF'\n"
+              "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+              f"/dev/disk9s1 38176 25416 12128 68% {image}\n"
+              "DF")
+        cases = (
+            ("read-only image", True, f"/dev/disk9s1 on {image} "
+             "(apfs, local, nodev, nosuid, read-only, noowners)",
+             "on a read-only volume, most likely the disk image"),
+            ("read-only folder elsewhere", True, "/dev/disk3s5 on "
+             "/System/Volumes/Data (apfs, local, journaled)",
+             "checkout is not writable"),
+            ("writable but full", False, "/dev/disk3s5 on "
+             "/System/Volumes/Data (apfs, local, journaled)",
+             "at least 5 GB of free disk space is required"),
+        )
+        for name, read_only, mounts, expected in cases:
+            with self.subTest(case=name), \
+                    tempfile.TemporaryDirectory() as directory:
+                checkout = Path(directory) / "Whisper Face 1.2.3"
+                checkout.mkdir()
+                if read_only:
+                    checkout.chmod(0o555)
+                try:
+                    result = run_setup_functions(
+                        functions, "check_install_location\n",
+                        variables={"DIR": checkout, "VERIFY_ONLY": 0,
+                                   "required_kb": 5242880, "required_gb": 5},
+                        stubs={"df": df, "mount": f"echo '{mounts}'"})
+                finally:
+                    checkout.chmod(0o755)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(expected, result.stderr)
+                if read_only:
+                    self.assertNotIn("free disk space", result.stderr)
+
+    def test_missing_build_tools_and_old_macos_fail_before_any_download(self):
+        # /usr/bin/swift and swiftc are shims on every Mac, so the old
+        # `command -v` check could not fail; a missing toolchain surfaced
+        # only when `swift build` ran, after the models had downloaded.
+        swift_six = ('[ "$1" = "--find" ] && { echo /usr/bin/swiftc; exit 0; }\n'
+                     'echo "Apple Swift version 6.1.2 (swiftlang-6.1.2)"')
+        cases = (
+            ("no Command Line Tools", "exit 2", swift_six, "14.6",
+             "Command Line Tools are not installed"),
+            ("Swift 5 toolchain", "echo /Library/Developer/CommandLineTools",
+             '[ "$1" = "--find" ] && exit 0\n'
+             'echo "Apple Swift version 5.10 (swiftlang-5.10)"', "14.6",
+             "Swift 6 or newer is required"),
+            ("macOS 13", "echo /Library/Developer/CommandLineTools",
+             swift_six, "13.6.1", "macOS 14 (Sonoma) or newer is required"),
+        )
+        for name, xcode_select, xcrun, macos, expected in cases:
+            with self.subTest(case=name):
+                result = run_setup_functions(
+                    ["fail", "require_supported_macos", "require_build_tools"],
+                    "require_supported_macos\nrequire_build_tools\n"
+                    'echo "preflight passed"\n',
+                    variables={"VERIFY_ONLY": 0},
+                    stubs={"xcode-select": xcode_select, "xcrun": xcrun,
+                           "sw_vers": f"echo {macos}"})
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(expected, result.stderr)
+                self.assertNotIn("preflight passed", result.stdout)
+        passing = run_setup_functions(
+            ["fail", "require_supported_macos", "require_build_tools"],
+            'require_supported_macos\nrequire_build_tools\necho ok\n',
+            variables={"VERIFY_ONLY": 0},
+            stubs={"xcode-select": "echo /Library/Developer/CommandLineTools",
+                   "xcrun": swift_six, "sw_vers": "echo 15.4"})
+        self.assertEqual(passing.returncode, 0, passing.stderr)
 
     def test_mac_installer_adopts_an_installed_homebrew_missing_from_path(self):
         # The self-updater runs this installer from a detached launchd job, and
@@ -813,10 +1356,8 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn(required, helpers)
 
     def test_mac_verify_reconstructs_identity_without_mutating_install(self):
-        verify_start = self.shell.index("verify_install()")
-        verify_end = self.shell.index(
-            'if [ "$VERIFY_ONLY" -eq 1 ]', verify_start)
-        verify = self.shell[verify_start:verify_end]
+        verify = (shell_function("verify_cleanup_service")
+                  + shell_function("verify_install"))
         for required in (
             'render_plist "$DIR/com.berg.ollama.plist.template"',
             "printf -v verify_cleanup 'rm -f -- %q'",
@@ -909,6 +1450,89 @@ class InstallerContractTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, self.powershell)
 
+    def test_windows_runs_every_native_command_through_the_exit_code_wrappers(self):
+        # Static, because no PowerShell runs here: under Windows PowerShell
+        # 5.1 with $ErrorActionPreference = "Stop", a native command whose
+        # stderr is redirected ends the install on its first line of output.
+        # `ollama show` for an absent model did exactly that on every first
+        # install. Only the two wrappers relax the preference and read the
+        # exit code, so a native call anywhere else is a defect.
+        lines = self.powershell.splitlines()
+        wrappers = set()
+        in_launcher = False
+        for start, line in enumerate(lines):
+            if line.startswith(("function Invoke-Native(",
+                                "function Invoke-NativeStep(")):
+                end = next(index for index in range(start, len(lines))
+                           if lines[index] == "}")
+                wrappers.update(range(start, end + 1))
+        self.assertGreater(len(wrappers), 10)
+        native_call = re.compile(r"(^|[\s(=])&\s+[$'\"\w]")
+        redirection = re.compile(r"(\*|\b2)>")
+        for number, line in enumerate(lines):
+            # The generated launcher is text written to launch.ps1, which runs
+            # without "Stop"; it is not executed by this script.
+            if line.endswith('@"'):
+                in_launcher = True
+            elif line.startswith('"@'):
+                in_launcher = False
+            code = line.split("#", 1)[0]
+            if in_launcher or number in wrappers:
+                continue
+            with self.subTest(line=number + 1, text=line.strip()):
+                self.assertIsNone(native_call.search(code))
+                unquoted = re.sub(r"'[^']*'|\"[^\"]*\"", "''", code)
+                self.assertIsNone(redirection.search(unquoted))
+        self.assertIn('if ((Invoke-Native $Ollama @("show", "qwen3.5:4b"))',
+                      self.powershell)
+        # A command that cannot start sets no exit code, so each wrapper
+        # clears it first rather than returning the previous command's 0.
+        for start in sorted(wrappers):
+            line = lines[start]
+            if not line.startswith("function Invoke-Native"):
+                continue
+            body = lines[start:next(index for index in range(start, len(lines))
+                                    if lines[index] == "}")]
+            reset = next(index for index, text in enumerate(body)
+                         if text.strip() == "$global:LASTEXITCODE = -1")
+            call = next(index for index, text in enumerate(body)
+                        if native_call.search(text.split("#", 1)[0]))
+            with self.subTest(wrapper=line):
+                self.assertLess(reset, call)
+
+        # The failure trap covers the whole script, argument errors included,
+        # and strict mode throws on an unset variable inside it, which would
+        # replace the reason. Everything it reads is set before any throw.
+        trap = self.powershell[self.powershell.index("\ntrap {"):]
+        trap = trap[:trap.index("\n}\n")]
+        first_throw = self.powershell.index("throw ")
+        for variable in sorted(set(re.findall(r"\$script:\w+", trap))):
+            with self.subTest(trap_reads=variable):
+                self.assertLess(
+                    self.powershell.index(f"{variable} = "), first_throw)
+
+    def test_windows_login_task_keeps_running_on_battery_and_restarts(self):
+        # Static, because no PowerShell runs here. Task Scheduler defaults
+        # stop a task when a laptop is unplugged, never start it on battery,
+        # and run it at below-normal priority; and a launcher that drops
+        # uv's exit code makes every crash look like success, so the restart
+        # policy never fires.
+        settings_start = self.powershell.index(
+            "$Settings = New-ScheduledTaskSettingsSet")
+        settings = self.powershell[settings_start:self.powershell.index(
+            "Register-ScheduledTask", settings_start)]
+        for option in ("-AllowStartIfOnBatteries",
+                       "-DontStopIfGoingOnBatteries", "-Priority 4",
+                       "-RestartCount 3"):
+            with self.subTest(option=option):
+                self.assertIn(option, settings)
+        launcher = self.powershell[
+            self.powershell.index('$LauncherBody = @"'):]
+        launcher = launcher[:launcher.index('"@')]
+        lines = [line for line in launcher.splitlines() if line.strip()]
+        self.assertEqual(lines[-1], "exit `$LASTEXITCODE")
+        self.assertIn('`$env:PYTHONUTF8 = "1"', launcher)
+
     def test_windows_verify_binds_login_task_to_its_current_checkout(self):
         helper_start = self.powershell.index("function Confirm-TaskLauncherBinding")
         helper_end = self.powershell.index("function Confirm-Installation", helper_start)
@@ -950,9 +1574,7 @@ class InstallerContractTests(unittest.TestCase):
         for required in (
             "$LauncherDigest = Get-LauncherDigest $Launcher",
             "Set-Content -Path $LauncherReceipt -Value $LauncherDigest",
-            '& icacls $LauncherReceipt /inheritance:r /grant:r '
-            '"${env:USERNAME}:(F)" /Q',
-            'throw "could not apply the private Windows launcher receipt ACL"',
+            "Set-PrivateFile $LauncherReceipt",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, task)
@@ -1216,6 +1838,57 @@ class InstallerContractTests(unittest.TestCase):
                 )
         for package in ("mlx-whisper", "faster-whisper", "pywin32"):
             self.assertIn(f'name = "{package.lower()}"', self.lock.lower())
+
+    def test_every_uv_call_runs_on_one_python_the_lock_supports(self):
+        # uv otherwise picks the newest CPython it can find or download, and
+        # the lock has no mlx, torch, ctranslate2, or onnxruntime wheels for
+        # 3.15; every fresh install would stop at its first uv call.
+        def satisfies(version, specifier):
+            for clause in specifier.replace(" ", "").split(","):
+                operator, bound = re.match(r"(>=|<=|<|>|==)(.+)", clause).groups()
+                left = tuple(int(part) for part in version.split("."))
+                right = tuple(int(part) for part in bound.split("."))
+                width = max(len(left), len(right))
+                left += (0,) * (width - len(left))
+                right += (0,) * (width - len(right))
+                if not {">=": left >= right, "<=": left <= right,
+                        "<": left < right, ">": left > right,
+                        "==": left == right}[operator]:
+                    return False
+            return True
+
+        declared = re.search(
+            r'(?m)^# requires-python = "([^"]+)"$', self.script).group(1)
+        locked = re.search(
+            r'(?m)^requires-python = "([^"]+)"$', self.lock).group(1)
+        self.assertEqual(declared.replace(" ", ""), locked.replace(" ", ""))
+        self.assertFalse(satisfies("3.15", declared))
+        self.assertTrue(satisfies("3.14", declared))
+
+        mac = re.search(r'(?m)^PYTHON_VERSION="([0-9.]+)"$', self.shell)
+        windows = re.search(r'(?m)^\$PythonVersion = "([0-9.]+)"$',
+                            self.powershell)
+        self.assertIsNotNone(mac)
+        self.assertIsNotNone(windows)
+        self.assertEqual(mac.group(1), windows.group(1))
+        self.assertTrue(satisfies(mac.group(1), declared))
+        self.assertIn('export UV_PYTHON="$PYTHON_VERSION"', self.shell)
+        self.assertIn("$env:UV_PYTHON = $PythonVersion", self.powershell)
+
+        # The login service must ask for the same interpreter, or it builds
+        # a second environment on whatever Python is first on its PATH.
+        template = (ROOT / "com.berg.dictate.plist.template").read_text(
+            encoding="utf-8")
+        rendered = re.sub(r"(?m)^.*__(LAUNCHER_PREFIX|EXTRA_ARGS)__.*\n", "",
+                          template)
+        rendered = (rendered.replace("__UV__", "/opt/homebrew/bin/uv")
+                    .replace("__DIR__", "/checkout")
+                    .replace("__PYTHON__", mac.group(1)))
+        service = plistlib.loads(rendered.encode("utf-8"))
+        self.assertEqual(service["EnvironmentVariables"]["UV_PYTHON"],
+                         mac.group(1))
+        self.assertIn('-e "s|__PYTHON__|$PYTHON_VERSION|g"', self.shell)
+        self.assertIn('`$env:UV_PYTHON = "$PythonVersion"', self.powershell)
 
     def test_windows_runtime_uses_equivalent_models_and_native_service(self):
         self.assertIn('else "turbo"', self.script)

@@ -501,9 +501,18 @@ class WindowsPackagerTests(unittest.TestCase):
                 ".evidence", "transcripts.jsonl", "dictionary.txt",
                 "preferences.json", "learned.json", "dictate.log",
                 "__pycache__", ".DS_Store", ".windows",
+                # Development-only trees .gitattributes keeps out of archives.
+                ".probe-min", ".probe-baseline", ".probe-baseline-chibi",
+                ".raw", ".llm-wiki", ".wrangler",
             ):
                 with self.subTest(forbidden=forbidden):
                     self.assertNotIn(forbidden, names)
+            # Leaving those trees out must not make the shipped checkout look
+            # edited: the updater refuses a checkout with any status output.
+            status = subprocess.run(
+                ["git", "-C", str(root), "status", "--porcelain"],
+                text=True, capture_output=True, check=True).stdout
+            self.assertEqual(status, "")
 
     def test_the_tree_digest_is_deterministic_across_builds(self):
         with tempfile.TemporaryDirectory() as directory:

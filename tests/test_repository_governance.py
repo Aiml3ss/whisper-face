@@ -8,6 +8,9 @@ import hashlib
 import json
 import re
 import subprocess
+import sys
+import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -15,6 +18,27 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 LAST_MIT_COMMIT = "8f317df7ac5bb687ac8fbbfcd23abc1385be396d"
 AGPL_SHA256 = "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0"
+WORKFLOWS = ROOT / ".github" / "workflows"
+PULL_REQUEST_EVENTS = {"pull_request", "pull_request_target"}
+HOSTED_RUNNER = re.compile(r"(ubuntu|macos|windows)-(latest|\d+(\.\d+)?)")
+
+
+def workflow_triggers(source: str) -> set[str]:
+    """The event names under a workflow's top-level ``on:`` key."""
+    lines = source.splitlines()
+    start = lines.index("on:")
+    triggers = set()
+    for line in lines[start + 1:]:
+        if line and not line.startswith(" "):
+            break
+        match = re.match(r"^  ([a-z_]+):", line)
+        if match:
+            triggers.add(match.group(1))
+    return triggers
+
+
+def workflow_runners(source: str) -> list[str]:
+    return re.findall(r"(?m)^\s+runs-on:\s*(.+?)\s*$", source)
 
 
 class RepositoryGovernanceTests(unittest.TestCase):
@@ -105,6 +129,103 @@ class RepositoryGovernanceTests(unittest.TestCase):
         self.assertIn("CONTRIBUTOR_ID", workflow)
         self.assertIn("github_id", workflow)
         self.assertIn("must not merge", process)
+
+    def test_no_pull_request_job_runs_on_a_self_hosted_runner(self):
+        # A persistent runner that takes pull-request jobs runs a returning
+        # contributor's code on the owner's machine, and a required check
+        # pinned to one blocks every merge when that machine goes away.
+        checked = 0
+        for path in sorted(WORKFLOWS.glob("*.y*ml")):
+            source = path.read_text(encoding="utf-8")
+            if not workflow_triggers(source) & PULL_REQUEST_EVENTS:
+                continue
+            for runner in workflow_runners(source):
+                checked += 1
+                with self.subTest(workflow=path.name, runner=runner):
+                    self.assertNotIn("self-hosted", runner)
+                    self.assertRegex(runner, HOSTED_RUNNER)
+        self.assertGreaterEqual(checked, 4)
+
+    def test_cla_check_runs_the_base_copy_and_never_pull_request_code(self):
+        source = self.read(".github/workflows/cla-check.yml")
+        # The base branch's copy of this file decides; a pull request cannot
+        # rewrite the check it is meant to pass.
+        self.assertEqual(workflow_triggers(source), {"pull_request_target"})
+        refs = re.findall(r"(?m)^\s+ref:\s*(.+?)\s*$", source)
+        self.assertEqual(refs, ["${{ github.event.pull_request.base.sha }}"])
+        for forbidden in ("pull_request.head", "github.head_ref",
+                          "refs/pull/", "merge_commit_sha", "uv run",
+                          "tests/", ": write"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, source)
+        self.assertIn("persist-credentials: false", source)
+
+    def test_pull_requests_run_the_full_release_gate_on_a_hosted_mac(self):
+        source = self.read(".github/workflows/macos-gate.yml")
+        self.assertIn("pull_request", workflow_triggers(source))
+        self.assertTrue(all(runner.startswith("macos-")
+                            for runner in workflow_runners(source)))
+        # Execute the job's own script with every command recorded rather
+        # than run: it must run exactly the AGENTS.md gate, in order.
+        program = textwrap.dedent(
+            source.split("python3 - <<'PY'\n", 1)[1].split("PY\n", 1)[0])
+        agents = self.read("AGENTS.md")
+        block = agents.split("```sh", 1)[1].split("```", 1)[0]
+        expected = [line.strip() for line in block.splitlines()
+                    if line.strip()]
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "AGENTS.md").write_text(
+                agents, encoding="utf-8")
+            harness = (
+                "import json, subprocess, sys\n"
+                "calls = []\n"
+                "class Done:\n    returncode = 0\n"
+                "subprocess.run = lambda command, shell: "
+                "(calls.append(command), Done)[1]\n"
+                "try:\n"
+                f"    exec(compile({program!r}, 'gate', 'exec'))\n"
+                "finally:\n"
+                "    print(json.dumps(calls))\n")
+            result = subprocess.run(
+                [sys.executable, "-c", harness], cwd=directory,
+                text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        ran = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertEqual(ran, expected)
+        self.assertGreater(len(ran), 50)
+
+    def test_release_archives_and_the_index_carry_no_development_state(self):
+        # A release bundle's working tree is `git archive` output. Without
+        # export rules it held ~11.5 MB of unused render baselines, the wiki
+        # tool's state, and a Cloudflare account cache. The bundle's shallow
+        # .git still holds those blobs, so this keeps them out of the
+        # installed folder, not out of the download.
+        tracked = subprocess.run(
+            ["git", "ls-files"], cwd=ROOT, text=True, capture_output=True,
+            check=True).stdout.splitlines()
+        self.assertEqual(
+            [path for path in tracked if path.startswith(".wrangler/")], [])
+        for path in (".DS_Store", "site/.DS_Store", ".wrangler/cache/x.json",
+                     "site/.wrangler/state", "PACKAGE-CONTENTS.json",
+                     "RELEASE-METADATA.json"):
+            with self.subTest(ignored=path):
+                ignored = subprocess.run(
+                    ["git", "check-ignore", "-q", "--no-index", path],
+                    cwd=ROOT)
+                self.assertEqual(ignored.returncode, 0)
+        archive = subprocess.run(
+            ["git", "archive", "--worktree-attributes", "HEAD"],
+            cwd=ROOT, capture_output=True, check=True).stdout
+        listing = subprocess.run(
+            ["tar", "-t"], input=archive, capture_output=True,
+            check=True).stdout.decode("utf-8").splitlines()
+        self.assertIn("dictate.py", listing)
+        for prefix in (".probe-", ".raw/", "wiki/.llm-wiki/", ".wrangler/",
+                       ".claude/", ".impeccable/"):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(
+                    [entry for entry in listing if entry.startswith(prefix)],
+                    [])
 
     def test_readme_explains_license_and_historical_boundary(self):
         readme = self.read("README.md")

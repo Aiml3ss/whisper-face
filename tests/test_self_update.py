@@ -6,9 +6,9 @@
 """Offline coverage for the git-based, opt-in self-updater.
 
 Every case injects a fake ``subprocess.run``-style runner, so nothing here
-touches the network, git, or the filesystem. The checkout path is a plain
-sentinel: the fake matches on ``git -C <checkout> ...`` argv and never reads
-``cwd``.
+touches the network, and only the packaged-bundle case runs real git, in a
+temporary directory. Elsewhere the checkout path is a plain sentinel: the fake
+matches on ``git -C <checkout> ...`` argv and never reads ``cwd``.
 """
 
 import json
@@ -194,6 +194,67 @@ class CheckForUpdateTests(unittest.TestCase):
         self.assertEqual(report["error"], "local changes present")
         # A dirty tree must not reach the network.
         self.assertFalse(any("fetch" in c for c in runner.calls))
+
+    def test_a_packaged_bundle_is_not_mistaken_for_local_changes(self):
+        # Stage a bundle the way scripts/package_macos.sh does: an archive of
+        # one revision, its shallow Git metadata, and the two receipts the
+        # packager writes beside it. Finder adds a .DS_Store once the folder
+        # is opened. None of that is a local change to the source.
+        def git(*arguments, cwd):
+            subprocess.run(["git", *arguments], cwd=cwd, check=True,
+                           capture_output=True)
+
+        def offline(command, **kwargs):
+            if "fetch" in command:
+                return subprocess.CompletedProcess(command, 1, "", "offline")
+            return subprocess.run(command, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source"
+            source.mkdir()
+            (source / ".gitignore").write_bytes(
+                (ROOT / ".gitignore").read_bytes())
+            (source / "dictate.py").write_text("print('hi')\n")
+            git("init", "-q", cwd=source)
+            git("add", ".", cwd=source)
+            git("-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                "-c", "commit.gpgsign=false", "commit", "-q", "-m", "r",
+                cwd=source)
+            revision = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=source, text=True,
+                capture_output=True, check=True).stdout.strip()
+            bundle = Path(directory) / "Whisper Face 1.0.0"
+            bundle.mkdir()
+            archive = subprocess.run(
+                ["git", "archive", revision], cwd=source,
+                capture_output=True, check=True).stdout
+            subprocess.run(["tar", "-x", "-C", str(bundle)], input=archive,
+                           check=True)
+            git("init", "-q", cwd=bundle)
+            git("fetch", "-q", "--depth", "1", str(source), revision,
+                cwd=bundle)
+            git("update-ref", "refs/heads/packaged-release", revision,
+                cwd=bundle)
+            git("symbolic-ref", "HEAD", "refs/heads/packaged-release",
+                cwd=bundle)
+            git("read-tree", revision, cwd=bundle)
+            git("remote", "add", "origin",
+                "https://example.invalid/whisper-face.git", cwd=bundle)
+            for name in ("PACKAGE-CONTENTS.json", "RELEASE-METADATA.json",
+                         ".DS_Store"):
+                (bundle / name).write_text("{}\n")
+
+            report = self_update.check_for_update(
+                bundle, runner=offline, install_receipt=NO_RECEIPT)
+            # Past the dirty check and on to the (blocked) network.
+            self.assertEqual(report["current"], revision)
+            self.assertEqual(report["error"], "could not fetch from 'origin'")
+
+            # A real edit to tracked source is still refused.
+            (bundle / "dictate.py").write_text("print('edited')\n")
+            report = self_update.check_for_update(
+                bundle, runner=offline, install_receipt=NO_RECEIPT)
+            self.assertEqual(report["error"], "local changes present")
 
     def test_missing_repo_returns_clean_error(self):
         runner = FakeRunner(head="")  # rev-parse HEAD fails -> not a repo

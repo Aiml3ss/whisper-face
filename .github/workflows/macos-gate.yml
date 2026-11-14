@@ -1,0 +1,48 @@
+name: macOS release gate
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos-release-gate:
+    # The full release gate, including the macOS-only suites, on a hosted Mac
+    # for every pull request. The command list is read from AGENTS.md at run
+    # time rather than copied here, so this job cannot drift from it.
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # The governance suite replays history from the MIT boundary commit.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Run every release gate command listed in AGENTS.md
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          text = Path("AGENTS.md").read_text(encoding="utf-8")
+          marker = "Run the repository release gates before declaring completion:"
+          block = text.split(marker, 1)[1].split("```sh", 1)[1].split("```", 1)[0]
+          commands = [line.strip() for line in block.splitlines() if line.strip()]
+          if len(commands) < 50:
+              sys.exit(f"found only {len(commands)} gate commands in AGENTS.md")
+          failed = []
+          for command in commands:
+              print(f"::group::{command}", flush=True)
+              status = subprocess.run(command, shell=True).returncode
+              print("::endgroup::", flush=True)
+              if status:
+                  print(f"::error title=Release gate failed::{command} exited {status}",
+                        flush=True)
+                  failed.append(command)
+          print(f"{len(commands) - len(failed)} of {len(commands)} gate commands passed")
+          sys.exit(1 if failed else 0)
+          PY

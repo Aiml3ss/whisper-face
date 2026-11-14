@@ -338,7 +338,7 @@ def create_source_metadata(args: argparse.Namespace) -> dict:
     revision = _require_revision(args.revision)
     version = _require_semver(args.version)
     repository = _require_https(args.repository, "repository")
-    return {
+    metadata = {
         "license": "AGPL-3.0-only",
         "product": PRODUCT,
         "schema_version": SCHEMA_VERSION,
@@ -347,6 +347,14 @@ def create_source_metadata(args: argparse.Namespace) -> dict:
         "source_tree": f"{repository}/tree/{revision}",
         "version": version,
     }
+    launcher = getattr(args, "launcher_bundle_sha256", None)
+    if launcher is not None:
+        # The installer accepts the launcher app shipped beside a bundle only
+        # when its digest matches this record (scripts/macos_launcher_app.py).
+        if not re.fullmatch(r"[0-9a-f]{64}", launcher):
+            raise ManifestError("launcher bundle digest must be lowercase SHA-256")
+        metadata["launcher_bundle_sha256"] = launcher
+    return metadata
 
 
 def create_checksums(args: argparse.Namespace) -> None:
@@ -406,6 +414,7 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--version", required=True)
     source.add_argument("--revision", required=True)
     source.add_argument("--repository", default=DEFAULT_REPOSITORY)
+    source.add_argument("--launcher-bundle-sha256")
     source.add_argument("--output", required=True)
 
     checksums = commands.add_parser("checksums", help="write SHA256SUMS")
