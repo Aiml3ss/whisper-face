@@ -8,7 +8,8 @@ boundaries are treated as product failures, not merely bugs.
 
 Security fixes are made on the `main` branch and the newest published release.
 Older builds may not receive backports. The exact source revision for a running
-build is available from **Diagnostics -> Exact Source** and from `GET /source`.
+build is shown in the Mac window under **Advanced -> Exact Source**, and a
+`--server-only` install also serves it at `GET /source`.
 
 ## Privately report a vulnerability
 
@@ -45,11 +46,16 @@ Project Owner can make that commitment.
 - capture continuing after the UI says it stopped;
 - audio, transcript, context, correction, or clipboard data leaving the device
   unexpectedly;
-- unauthenticated access to the transcription endpoint outside its intended
-  trusted network;
+- reaching the `--server-only` transcription endpoint without its bearer
+  token, from a browser, or from outside its intended trusted network, or
+  reaching anything but `GET /health` on the desktop listener;
+- another process acting with Whisper Face's privacy grants (Microphone,
+  Accessibility, Input Monitoring) without a prompt (a known, open risk;
+  see the threat model);
 - focus/selection confusion, duplicate insertion, or insertion into the wrong
   application;
-- update, installer, model, or dependency supply-chain compromise;
+- update, installer, model, or dependency supply-chain compromise, including
+  the menu updater installing an unreviewed branch tip (a known, open risk);
 - release checksum, signature, notarization, or source-revision mismatch;
 - local private files created with permissions broader than the current user.
 
