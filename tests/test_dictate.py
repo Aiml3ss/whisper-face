@@ -10,6 +10,7 @@ logic can run in under a second without loading either model.
 """
 
 import ast
+import builtins
 import contextlib
 import copy
 import ctypes
@@ -4745,7 +4746,7 @@ class LearningTests(unittest.TestCase):
                 "PERSONAL_GLOBAL_MIN_COUNT", "ANCHOR_MAX_TERMS",
                 "CORRECTION_DELAY", "CORRECTION_POLL_INTERVAL",
                 "CORRECTION_MAX_LEARN", "CORRECTION_STABLE_POLLS",
-                "VOCAB_WORD_RE",
+                "VOCAB_WORD_RE", "MIN_SECONDS", "GATE_PEAK_RMS", "CONT_END",
             },
             extra={
                 "Path": Path,
@@ -4757,6 +4758,7 @@ class LearningTests(unittest.TestCase):
                     lambda path, value: path.write_text(value),
                 "time": SimpleNamespace(
                     monotonic=lambda: clock[0],
+                    perf_counter=lambda: clock[0],
                     sleep=lambda seconds: clock.__setitem__(
                         0, clock[0] + seconds),
                     time=lambda: 1000.0 + clock[0],
@@ -4835,9 +4837,104 @@ class LearningTests(unittest.TestCase):
                 Recognition(text, confidence=0.9, engine=engine),
                 bundle=bundle)[1].text
 
+        class Delivered(BaseException):
+            """Ends a pipeline run where the learner is handed its receipt."""
+
+        def pipeline(text, edits=(), *, before="", bundle="com.slack"):
+            """Run ``finish_and_process`` itself on recognized ``text`` with
+            the focused field holding ``before``, then the learner it
+            starts, over the scripted (seconds, old, new) edits. Returns the
+            receipt the pipeline handed to the learner."""
+            element = object()
+            handed = []
+
+            class Thread:
+                def __init__(self, target=None, args=(), **_kwargs):
+                    handed.append((target, args))
+
+                def start(self):
+                    raise Delivered()
+
+            class Threading:
+                def __getattr__(self, name):
+                    return getattr(threading, name)
+
+            fake_threading = Threading()
+            fake_threading.Thread = Thread
+
+            def stopped(_rec, _hud, _caption, log, **_kwargs):
+                raise AssertionError(f"pipeline stopped early: {log}")
+
+            rec = SimpleNamespace(
+                released_at=clock[0], stop=lambda: np.zeros(
+                    16_000, dtype=np.float32),
+                cut_samples=0, chunks=[], speculative_future=None,
+                speculative_invalid=False, speculative_start=0,
+                speculative_end=0, prompt=None, language="en",
+                process_ticket=None, mode="capture", bundle_at_press=bundle,
+                context_terms=(), context_pack=None, focus_at_press=None,
+                utterance_id=f"utterance-{clock[0]}", insertion_lease=None,
+                insertion_receipt=None, recording=False, uncertain=False)
+            fakes = {
+                "threading": fake_threading,
+                "report_dictation_problem": stopped,
+                "peak_rms": lambda _audio: 0.0,
+                "audio_gate_measurements": lambda _audio: (1.0, 0.1),
+                "assemble_raw": lambda *_args: Recognition(
+                    text, confidence=0.9, engine="parakeet-unified"),
+                "DICTATION_PROCESS_ORDER": SimpleNamespace(
+                    wait=lambda _ticket: None),
+                "collapse_repeats": lambda raw: (raw, False),
+                "runtime_consequence_evidence": lambda *_a, **_k: 0.0,
+                "runtime_context_firewall_evidence": lambda *_a: 0.0,
+                "CAPTION": {},
+                "PIPELINE_STATE": {"last_consequence_route": "standard"},
+                "_mask_snippets_inline": lambda raw, _snippets: (raw, {}),
+                "extract_tone_override": lambda raw: (raw, None),
+                "compile_cleanup": lambda raw, _language: SimpleNamespace(
+                    text=raw, edits=[]),
+                "cursor_context": lambda: before,
+                "TONE": {"default": ""},
+                "tone_for": lambda _bundle: "default",
+                "quick_clean": lambda value, **_kwargs: value,
+                "focused_snapshot": lambda: ns["FocusSnapshot"](
+                    element=element, text=before,
+                    selection=(len(before), 0)),
+                "LAST_USE": {},
+            }
+            # Every other collaborator of the pipeline is inert here: it is
+            # called, returns nothing, and so takes no branch of its own.
+            pipeline_node = next(
+                node for node in TREE.body
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "finish_and_process")
+            for node in ast.walk(pipeline_node):
+                if isinstance(node, ast.Name) and node.id not in ns \
+                        and node.id not in fakes \
+                        and not hasattr(builtins, node.id):
+                    fakes[node.id] = lambda *_args, **_kwargs: None
+            saved = {name: ns[name] for name in fakes if name in ns}
+            ns.update(fakes)
+            try:
+                ns["finish_and_process"](rec, SimpleNamespace(), {})
+            except Delivered:
+                pass
+            finally:
+                for name in fakes:
+                    ns.pop(name)
+                ns.update(saved)
+            target, (receipt,) = handed[0]
+            current = before + rec.committed_text
+            field["timeline"] = [(clock[0], current)]
+            for delay, old, new in edits:
+                current = current.replace(old, new, 1)
+                field["timeline"].append((clock[0] + delay, current))
+            target(receipt)
+            return receipt
+
         return SimpleNamespace(
             ns=ns, clock=clock, field=field, observed=observed,
-            dictate=dictate, compiled=compiled,
+            dictate=dictate, compiled=compiled, pipeline=pipeline,
             state=lambda: ns["load_learned"](),
             snippets=lambda: json.loads(
                 (root / "snippets.json").read_text(encoding="utf-8")),
@@ -4862,6 +4959,27 @@ class LearningTests(unittest.TestCase):
         self.assertEqual(runtime.observed, [
             (" Ask Gwen about it.", " Ask Qwen about it."),
             (untouched.pasted, untouched.pasted),
+        ])
+
+    def test_the_pipeline_hands_the_learner_the_text_it_committed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+
+            receipt = runtime.pipeline(
+                "Ask Gwen about it.", [(3.0, "Gwen", "Qwen")],
+                before="First sentence.")
+            untouched = runtime.pipeline(
+                "Then ship it.", before="First sentence. Ask Qwen about it.")
+
+            state = runtime.state()
+        # finish_and_process builds the learner's receipt only once the
+        # commit has decided what is inserted, joining space included.
+        self.assertEqual(receipt.pasted, " Ask Gwen about it.")
+        self.assertEqual(untouched.pasted, " Then ship it.")
+        self.assertEqual(list(state["confusions"]), ["gwen->qwen"])
+        self.assertEqual(runtime.observed, [
+            (" Ask Gwen about it.", " Ask Qwen about it."),
+            (" Then ship it.", " Then ship it."),
         ])
 
     def test_a_correction_typed_key_by_key_is_learned_whole(self):
