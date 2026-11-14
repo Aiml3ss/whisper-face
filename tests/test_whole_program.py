@@ -18,6 +18,7 @@ Whisper Tiny, no large-v3-turbo, no cleanup model).
 
 import json
 import sys
+import tempfile
 import time
 import traceback
 import unittest
@@ -459,6 +460,99 @@ class FreshInstallDictationTests(unittest.TestCase):
             "Ask Gwen to review the Qwen model.",
             whisper="Has went through the queue mode.", field=TextField())
         self.assertEqual(field.text, "Ask Gwen to review the Qwen model.")
+
+    def test_on_screen_context_never_replaces_an_ordinary_word(self):
+        # Tiny disagreeing is what lowers Parakeet's confidence on a default
+        # install and opens the context gate. Each sentence is dictated with
+        # its screen text in every place the runtime reads context from.
+        mac = booted()
+        desktop = mac.desktop
+        rows = (
+            ("Looks good.", "Open Code now"),
+            ("Not yet.", "Nate"),
+            ("Who is on call today?", "AI"),
+            ("Keep an eye on it.", "We now route triage through AI."),
+            ("Looks fine.", "Finn"),
+            ("Code review is at noon.", "Git"),
+        )
+        tinies = {
+            "Looks good.": ("Look good.", "Has went through the queue."),
+            "Not yet.": ("Nah yet.", "Has went through the queue."),
+            "Who is on call today?": ("Hu is on call to day?",
+                                      "Has went through the queue."),
+            "Keep an eye on it.": ("Has went through the queue.",),
+            "Looks fine.": ("Look fine.",),
+            "Code review is at noon.": ("Has went through the queue.",),
+        }
+
+        def selection(screen, _directory):
+            field = TextField(screen)
+            field.selection = (0, len(screen))
+            return field, ""
+
+        def focused_field(screen, _directory):
+            return TextField(screen), screen + " "
+
+        def clipboard(screen, _directory):
+            desktop.pasteboard.copy_text(screen)
+            return TextField(), ""
+
+        def document(screen, directory):
+            path = directory / "notes.md"
+            path.write_text(screen + "\n", encoding="utf-8")
+            field = TextField(bundle="com.microsoft.VSCode")
+            field.document = path.as_uri()
+            return field, ""
+
+        def repository(screen, directory):
+            path = directory / "notes.md"
+            path.write_text("", encoding="utf-8")
+            for name in screen.split():
+                (directory / name).mkdir()
+            field = TextField(bundle="com.microsoft.VSCode")
+            field.document = path.as_uri()
+            return field, ""
+
+        sources = {"selection": selection, "field": focused_field,
+                   "clipboard": clipboard, "document": document,
+                   "repository": repository}
+        try:
+            for spoken, screen in rows:
+                for tiny in tinies[spoken]:
+                    for source, place in sources.items():
+                        with tempfile.TemporaryDirectory() as directory, \
+                                self.subTest(spoken=spoken, tiny=tiny,
+                                             source=source):
+                            desktop.pasteboard.copy_text("")
+                            field, before = place(screen, Path(directory))
+                            mac.dictate_sentence(
+                                spoken, whisper=tiny, field=field)
+                            self.assertEqual(field.text, before + spoken)
+        finally:
+            desktop.pasteboard.copy_text("")
+
+    def test_on_screen_context_repairs_a_name_only_when_unsure(self):
+        mac = booted()
+        for tiny, expected in (
+                ("As when two view it.", "Ask Qwen to review it."),
+                ("Ask Gwen to review it.", "Ask Gwen to review it.")):
+            with self.subTest(tiny=tiny):
+                field = TextField("Qwen")
+                field.selection = (0, len("Qwen"))
+                mac.dictate_sentence(
+                    "Ask Gwen to review it.", whisper=tiny, field=field)
+                self.assertEqual(field.text, expected)
+
+    def test_a_transcript_tiny_contradicted_is_not_recorded_as_verified(self):
+        # No large-v3-turbo on a default install, so nothing settles the
+        # disagreement: Parakeet's words are typed, unverified.
+        mac = booted()
+        field = mac.dictate_sentence(
+            "Ask Gwen to review it.",
+            whisper="Has went through the queue.", field=TextField())
+        self.assertEqual(field.text, "Ask Gwen to review it.")
+        self.assertIs(
+            transcript_records()[-1]["metrics"]["asr_verified"], False)
 
     def test_the_transcript_records_the_readback_of_its_own_dictation(self):
         mac = booted()

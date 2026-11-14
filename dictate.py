@@ -5017,7 +5017,6 @@ def _speculative_frames(frames, prompt=None, still_valid=None,
     accurate = ASR_POOL.submit(
         transcribe_detailed, segment, prompt, True, WHISPER_REPO,
         crosscheck_text=fast.text or None, language=language).result()
-    accurate.verified = True
     if fast.text and fast.text != accurate.text:
         accurate.alternative = fast.text
     return accurate
