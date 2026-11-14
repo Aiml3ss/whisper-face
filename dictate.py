@@ -10944,8 +10944,9 @@ def apply_spoken_edit_command(recognized_raw: str, rec, bundle: str) -> bool:
             return True
         # Select exactly the inserted characters, then paste over the selection
         # so the substitution is atomic: no interval exists where the text is
-        # deleted but its replacement is not yet in place.
-        for _ in range(len(inserted)):
+        # deleted but its replacement is not yet in place. Shift+Left steps
+        # over whole characters, so the count is of those, not code points.
+        for _ in range(grapheme_count(inserted)):
             _press_edit_chord(keyboard.Key.shift, keyboard.Key.left)
         paste(transformed)
         LAST_INSERTION["text"] = transformed
