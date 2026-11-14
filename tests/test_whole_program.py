@@ -205,6 +205,26 @@ class FreshInstallDictationTests(unittest.TestCase):
         self.assertEqual(
             mac.dictate.PIPELINE_STATE["last_insertion_state"], "verified")
 
+    def test_a_dictation_into_the_middle_of_text_follows_the_caret(self):
+        mac = booted()
+        field = TextField("Thanks 👍🏽 and bye", caret=len("Thanks 👍🏽 "))
+        mac.dictate_sentence("See you soon.", field=field)
+        self.assertTrue(field.text.startswith("Thanks 👍🏽 See you soon."),
+                        field.text)
+        self.assertTrue(field.text.endswith("and bye"), field.text)
+        self.assertEqual(
+            mac.dictate.PIPELINE_STATE["last_insertion_state"], "verified")
+
+    @unittest.expectedFailure
+    def test_a_dictation_into_the_middle_of_text_is_spaced_after(self):
+        # Insertion review (non-blocking point 7): only the separator before
+        # the insertion point is decided, so a sentence dictated in front of
+        # existing words runs into them ("soon.and bye").
+        mac = booted()
+        field = TextField("Thanks 👍🏽 and bye", caret=len("Thanks 👍🏽 "))
+        mac.dictate_sentence("See you soon.", field=field)
+        self.assertEqual(field.text, "Thanks 👍🏽 See you soon. and bye")
+
     def test_whisper_tiny_never_overrules_parakeet(self):
         # A default install has no large-v3-turbo, so nothing can break a
         # tie between Parakeet and the Tiny cross-check: Parakeet stands.
