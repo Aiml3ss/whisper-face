@@ -9906,6 +9906,31 @@ def looks_like_prompt_echo(text: str) -> bool:
     return hits / len(words) >= 0.8
 
 
+def strip_context_echo(text: str, context_tail: str) -> str:
+    """Drop a leading repeat of the field's own tail from a continuation.
+
+    Cleanup is told what the field already ends with and sometimes repeats
+    it. Only a whole-word repeat with new words after it counts as that: a
+    field holding "to" is also the start of "Tomorrow", and cutting there
+    pastes "morrow".
+    """
+    tail = context_tail[-40:]
+    if (len(context_tail) > 40 and context_tail[-41].isalnum()
+            and tail[:1].isalnum()):
+        # The 40-character window opened inside a word; start at the next.
+        parts = tail.split(None, 1)
+        tail = parts[1] if len(parts) > 1 else ""
+    tail = tail.lower()
+    if not tail or not text.lower().startswith(tail):
+        return text
+    rest = text[len(tail):]
+    if rest[:1].isalnum() or rest[:1] in ("_", "'", "’", "-"):
+        return text
+    if not any(char.isalnum() for char in rest):
+        return text
+    return rest.lstrip()
+
+
 def quick_clean(text: str, verbatim: bool = False,
                 continuing: bool = False,
                 language: str = LANGUAGE_DEFAULT) -> str:
@@ -10096,9 +10121,7 @@ def build_delayed_cleanup_proposal(
         text = strip_casual_period(text)
     text = apply_vocabulary_casing(text)
     if continuing and text:
-        tail40 = context_tail[-40:].lower()
-        if tail40 and text.lower().startswith(tail40):
-            text = text[len(tail40):].lstrip()
+        text = strip_context_echo(text, context_tail)
         if (context_text and not context_text[-1].isspace()
                 and text[:1] not in ",.;:!?…"):
             text = " " + text
@@ -11508,9 +11531,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             PIPELINE_STATE["last_alternatives"] = list(
                 dict.fromkeys(cleaned_alternatives))[:3]
         if continuing and text:
-            tail40 = stripped_ctx[-40:].lower()
-            if tail40 and text.lower().startswith(tail40):
-                text = text[len(tail40):].lstrip()      # model echoed context
+            text = strip_context_echo(text, stripped_ctx)
             if (not ctx[-1].isspace() and text[:1] not in ",.;:!?…。、！？"
                     and language_uses_spaces(rec.language)):
                 text = " " + text                       # joining needs a space

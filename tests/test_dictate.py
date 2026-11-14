@@ -3677,6 +3677,42 @@ class CleanupGuardTests(unittest.TestCase):
             with self.subTest(spoken=spoken):
                 self.assertEqual(extract(spoken), (spoken, None))
 
+    def test_context_echo_is_stripped_only_as_whole_words(self):
+        strip = load_definitions("strip_context_echo")["strip_context_echo"]
+        # The field's short text is also the start of the next word.
+        for field, text in (
+            ("to", "Tomorrow works for me"),
+            ("ok", "Okay, see you then"),
+            ("no", "Nobody told me"),
+            ("I", "It works now"),
+            ("a", "Another thing"),
+            ("I", "I'm on my way"),
+            ("re", "re-send the invoice"),
+        ):
+            with self.subTest(field=field, text=text):
+                self.assertEqual(strip(text, field), text)
+        # Repeating the field is not an echo when nothing follows it.
+        self.assertEqual(strip("Ok.", "ok"), "Ok.")
+        # A real echo of the field's tail, followed by the new words.
+        self.assertEqual(
+            strip("see you at six thirty", "see you at"), "six thirty")
+        self.assertEqual(
+            strip("See you at, six thirty", "see you at"), ", six thirty")
+        long_field = (
+            "Thanks for the update on the quarterly migration plan and")
+        self.assertEqual(
+            long_field[-40:], "date on the quarterly migration plan and")
+        self.assertEqual(
+            strip("on the quarterly migration plan and the budget",
+                  long_field),
+            "the budget")
+        # The 40-character window opens inside "update". "date" is a word,
+        # but the field never said it.
+        dated = "date on the quarterly migration plan and the budget"
+        self.assertEqual(strip(dated, long_field), dated)
+        self.assertEqual(strip("six thirty", "see you at"), "six thirty")
+        self.assertEqual(strip("six thirty", ""), "six thirty")
+
     def test_simple_fillers_stay_on_the_fast_path(self):
         ns = load_definitions(
             "quick_clean", "needs_llm_cleanup",
@@ -7850,6 +7886,41 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
         self.assertIsNone(
             namespace["build_delayed_cleanup_proposal"](
                 "raw github", "tone", voice_ir, **kwargs))
+
+    def test_delayed_proposal_keeps_a_word_that_starts_with_the_field(self):
+        class Compiler:
+            def verify_edits(self, original, proposals, candidates, *, mode):
+                return SimpleNamespace(text="tomorrow works for me")
+
+        namespace = load_definitions(
+            "build_delayed_cleanup_proposal",
+            "strip_context_echo",
+            extra={
+                "VOICE_COMPILER": Compiler(),
+                "EditProposal": lambda kind, before, after:
+                    SimpleNamespace(
+                        kind=kind, before=before, after=after),
+                "llm_clean_with_edits": lambda *_args: (
+                    "tomorrow works for me", ()),
+                "quick_clean": lambda text, **_kwargs: text,
+                "strip_casual_period": lambda text: text,
+                "apply_vocabulary_casing": lambda text: text,
+                "_restore_snippet_sentinels": lambda text, _restore: text,
+            },
+        )
+        voice_ir = SimpleNamespace(
+            context=SimpleNamespace(candidates=()))
+
+        def propose(field):
+            return namespace["build_delayed_cleanup_proposal"](
+                "tomorrow works for me", "tone", voice_ir,
+                continuing=True, context_tail=field, context_text=field,
+                tone_key="default", snippet_restore={})
+
+        # The field holds "to": a prefix of the first word, not an echo.
+        self.assertEqual(propose("to"), " tomorrow works for me")
+        # The model repeated the field before continuing it.
+        self.assertEqual(propose("tomorrow"), " works for me")
 
     def test_finish_schedules_only_after_verified_commit(self):
         source = (ROOT / "dictate.py").read_text(encoding="utf-8")
