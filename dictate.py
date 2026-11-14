@@ -9445,10 +9445,11 @@ def _ax_select_text_range(element, text: str, selection: tuple[int, int],
 
     True only once the field reports exactly that range holding ``expected``.
     None when the field does not take a selection this way, which leaves the
-    caret untouched for keyboard selection. False when a request was made
-    but never confirmed: the selection may then be anywhere, so nothing may
-    be deleted from it. Chromium applies the request asynchronously, so the
-    confirmation is polled for, like a readback.
+    caret untouched for keyboard selection. False when the range does not
+    fit the text, or a request was made but never confirmed: the selection
+    may then be anywhere, so nothing may be deleted from it. Chromium applies
+    the request asynchronously, so the confirmation is polled for, like a
+    readback.
     """
     target = code_points_to_utf16_range(text, selection)
     if target is None:
