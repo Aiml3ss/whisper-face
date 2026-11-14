@@ -321,6 +321,16 @@ class InsertionCoordinator:
             self._remember_tombstone_locked(entry.receipt)
             return True
 
+    @staticmethod
+    def validate(lease: InsertionLease,
+                 current: DestinationObservation) -> ReceiptReason | None:
+        """Why ``current`` no longer matches ``lease``, or None if it does.
+
+        The exact check ``commit`` makes, for a caller that has to refuse
+        before it stages anything.
+        """
+        return InsertionCoordinator._validate(lease, current)
+
     def _remember_tombstone_locked(self, receipt: InsertionReceipt) -> None:
         self._tombstones[receipt.utterance_id] = receipt
         self._tombstones.move_to_end(receipt.utterance_id)

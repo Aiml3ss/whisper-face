@@ -8532,7 +8532,7 @@ class UndoLastDictationTests(unittest.TestCase):
             "utterance_was_undone", "build_undoable_insertion",
             "bounded_focus_text", "destination_observation",
             "insertion_readback", "classify_readback_conflict",
-            "FocusSnapshot",
+            "FocusSnapshot", "grapheme_count", "_grapheme_attaches",
             extra={
                 "dataclass": dataclass,
                 "time": time,
@@ -8543,6 +8543,10 @@ class UndoLastDictationTests(unittest.TestCase):
                 "ReadbackResult": ReadbackResult,
                 "ReceiptState": ReceiptState,
                 "INSERTION_COORDINATOR": InsertionCoordinator(),
+                "UNDO_COORDINATOR": InsertionCoordinator(),
+                # A field that does not take a selection through
+                # Accessibility, so undo selects with the keyboard.
+                "_ax_select_text_range": lambda *_args: None,
                 "UNDOABLE_INSERTION": {"record": None,
                                        "lock": threading.RLock()},
                 "UNDONE_UTTERANCES": __import__("collections").deque(
@@ -8681,13 +8685,208 @@ class UndoLastDictationTests(unittest.TestCase):
             snapshot_reader=lambda: self._snapshot(ns))
         self.assertTrue(first["undone"])
 
-        # Re-arming the same utterance cannot produce a second undo: the
-        # coordinator already holds a terminal entry for that id.
+        # Re-arming the same utterance cannot produce a second undo, even
+        # against a field that looks exactly as it did after the insertion:
+        # the coordinator already holds a terminal entry for that id.
+        ns["_state"]["text"] = self.BEFORE + self.INSERTED
+        keys_before = list(ns["_state"]["keys"])
         ns["record_undoable_insertion"](self._record(ns))
         second = ns["undo_last_dictation"](
-            snapshot_reader=lambda: self._snapshot(ns, text=self.BEFORE))
+            snapshot_reader=lambda: self._snapshot(ns))
         self.assertFalse(second["undone"])
         self.assertEqual(second["reason"], "already_undone")
+        self.assertEqual(ns["_state"]["keys"], keys_before)
+
+    def test_a_refusal_before_any_keystroke_keeps_the_undo(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._record(ns))
+        refused = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns, caret=(3, 0)))
+
+        self.assertEqual(refused["reason"], "selection_drift")
+        self.assertTrue(ns["undoable_insertion_status"]()["available"])
+        # The caret is back where the dictation left it: the same undo runs.
+        retried = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns))
+        self.assertTrue(retried["undone"])
+        self.assertEqual(ns["_state"]["text"], self.BEFORE)
+
+    def test_a_refused_undo_never_reaches_the_voice_outbox(self):
+        for name, kwargs in (
+                ("focus", {"bundle_reader": lambda: "com.other.app"}),
+                ("caret", {"caret": (3, 0)}),
+                ("unreadable", {"unreadable": True})):
+            with self.subTest(name):
+                ns = self.namespace()
+                ns["record_undoable_insertion"](self._record(ns))
+                caret = kwargs.get("caret")
+                reader = (lambda: None) if kwargs.get("unreadable") \
+                    else (lambda: self._snapshot(ns, caret=caret))
+                result = ns["undo_last_dictation"](
+                    snapshot_reader=reader,
+                    bundle_reader=kwargs.get("bundle_reader"))
+
+                self.assertFalse(result["undone"])
+                self.assertEqual(ns["INSERTION_COORDINATOR"].recoverable(), ())
+                self.assertEqual(ns["UNDO_COORDINATOR"].recoverable(), ())
+                self.assertEqual(ns["_state"]["keys"], [])
+
+    def test_undo_selects_through_accessibility_when_the_field_allows_it(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._record(ns))
+        requests = []
+
+        def select(element, text, selection, expected):
+            requests.append((element, text, selection, expected))
+            return True
+
+        result = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns), selector=select)
+
+        self.assertTrue(result["undone"])
+        self.assertEqual(requests, [(
+            ns["_element"], self.BEFORE + self.INSERTED,
+            (len(self.BEFORE), len(self.INSERTED)), self.INSERTED)])
+        self.assertEqual(ns["_state"]["keys"], [("backspace",)])
+        self.assertEqual(ns["_state"]["text"], self.BEFORE)
+
+    def test_an_unconfirmed_selection_deletes_nothing(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._record(ns))
+        result = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns),
+            selector=lambda *_args: False)
+
+        self.assertFalse(result["undone"])
+        self.assertEqual(ns["_state"]["keys"], [])
+        self.assertEqual(ns["_state"]["text"], self.BEFORE + self.INSERTED)
+        self.assertEqual(ns["INSERTION_COORDINATOR"].recoverable(), ())
+        self.assertEqual(ns["UNDO_COORDINATOR"].recoverable(), ())
+
+    def test_keyboard_selection_never_reaches_the_users_own_text(self):
+        # What the user sees as one character each: a heart with its
+        # presentation selector, a flag, a skin-toned ZWJ profession, an
+        # accented letter written with a combining mark.
+        user = "Dear Sam, "
+        inserted = ["t", "h", "a", "n", "k", "s", " ", "❤️", " ",
+                    "\U0001F1FA\U0001F1F8", " ",
+                    "\U0001F469\U0001F3FD‍\U0001F4BB", " ",
+                    "é", "!"]
+        field = {"characters": list(user) + inserted, "anchor": None}
+        ns = self.namespace()
+        ns["_state"]["text"] = "".join(field["characters"])
+
+        def press(*keys):
+            names = tuple(getattr(key, "name", key) for key in keys)
+            ns["_state"]["keys"].append(names)
+            end = len(field["characters"])
+            if names == ("shift", "left"):
+                # The system extends a selection by one whole character.
+                field["anchor"] = max(0, (end if field["anchor"] is None
+                                          else field["anchor"]) - 1)
+            elif names == ("backspace",):
+                del field["characters"][field["anchor"]:]
+                field["anchor"] = None
+            ns["_state"]["text"] = "".join(field["characters"])
+
+        record = ns["UndoableInsertion"](
+            element=ns["_element"], bundle="com.apple.mail",
+            destination_id="com.apple.mail:mail:field-1",
+            utterance_id="utterance-emoji", inserted="".join(inserted),
+            before=user, selection=(len(user), 0))
+        ns["record_undoable_insertion"](record)
+        result = ns["undo_last_dictation"](
+            snapshot_reader=lambda: ns["FocusSnapshot"](
+                element=ns["_element"], text=ns["_state"]["text"],
+                selection=record.caret),
+            presser=press)
+
+        self.assertTrue(result["undone"])
+        self.assertEqual(ns["_state"]["text"], user)
+        self.assertEqual(ns["_state"]["keys"].count(("shift", "left")),
+                         len(inserted))
+
+    def _accessibility_selection(self, text, caret, *, settable, applies):
+        state = {"range": (len(text[:caret].encode("utf-16-le")) // 2, 0),
+                 "selected": "", "writes": []}
+
+        def set_value(_element, _attribute, value):
+            state["writes"].append(value)
+            if applies:
+                start, length = value
+                encoded = text.encode("utf-16-le")
+                state["range"] = value
+                state["selected"] = encoded[
+                    2 * start:2 * (start + length)].decode("utf-16-le")
+            return 0
+
+        services = SimpleNamespace(
+            AXUIElementIsAttributeSettable=lambda *_args: (0, settable),
+            AXUIElementSetAttributeValue=set_value,
+            AXValueCreate=lambda _kind, value: value,
+            AXValueGetType=lambda _value: None,
+            AXValueGetValue=lambda *_args: None,
+            kAXSelectedTextAttribute="AXSelectedText",
+            kAXSelectedTextRangeAttribute="AXSelectedTextRange",
+            kAXValueCFRangeType=4,
+        )
+        now = [0.0]
+        ns = load_definitions(
+            "_ax_select_text_range", "code_points_to_utf16_range",
+            "_ax_reported_range", "_coerce_range",
+            extra={
+                "time": SimpleNamespace(
+                    monotonic=lambda: now[0],
+                    sleep=lambda delay: now.__setitem__(0, now[0] + delay)),
+                "_ax_attribute": lambda _element, attribute: (
+                    state["range"] if attribute == "AXSelectedTextRange"
+                    else state["selected"]),
+            },
+        )
+        with mock.patch.dict(sys.modules, {"ApplicationServices": services}):
+            result = ns["_ax_select_text_range"](
+                object(), text, (5, 7), "thanks!")
+        return result, state["writes"]
+
+    def test_accessibility_selection_is_written_in_utf16_and_confirmed(self):
+        text = "Ok \U0001F44D thanks!"
+        result, writes = self._accessibility_selection(
+            text, len(text), settable=True, applies=True)
+
+        self.assertIs(result, True)
+        self.assertEqual(writes, [(6, 7)])
+
+    def test_a_field_without_settable_selection_leaves_the_keyboard(self):
+        text = "Ok \U0001F44D thanks!"
+        result, writes = self._accessibility_selection(
+            text, len(text), settable=False, applies=False)
+
+        self.assertIsNone(result)
+        self.assertEqual(writes, [])
+
+    def test_a_selection_request_the_field_ignores_is_not_confirmed(self):
+        text = "Ok \U0001F44D thanks!"
+        result, writes = self._accessibility_selection(
+            text, len(text), settable=True, applies=False)
+
+        self.assertIs(result, False)
+        self.assertEqual(writes, [(6, 7)])
+
+    def test_whole_characters_are_counted_as_the_caret_moves(self):
+        count = self.namespace()["grapheme_count"]
+        for text, expected in (
+                ("thanks", 6),
+                ("\U0001F44D\U0001F3FD", 1),
+                ("\U0001F468‍\U0001F469‍\U0001F467", 1),
+                ("\U0001F1FA\U0001F1F8\U0001F1EC\U0001F1E7", 2),
+                ("1️⃣", 1),
+                ("é", 1),
+                ("\r\n", 1),
+                ("각", 1),
+                ("क्ष", 1),
+                ("", 0)):
+            with self.subTest(text=text):
+                self.assertEqual(count(text), expected)
 
     def test_nothing_to_undo_is_a_refusal_not_a_crash(self):
         ns = self.namespace()

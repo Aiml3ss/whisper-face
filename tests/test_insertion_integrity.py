@@ -98,6 +98,24 @@ class InsertionIntegrityTests(unittest.TestCase):
             fingerprint_surrounding("before|after"),
         )
 
+    def test_validation_alone_gives_commits_answer_without_staging(self):
+        coordinator = InsertionCoordinator()
+        for current, expected in (
+                (self.current, None),
+                (DestinationObservation.capture(
+                    "pid:99/field:1", (12, 0), "before|after"),
+                 ReceiptReason.FOCUS_DRIFT),
+                (DestinationObservation.capture(
+                    "pid:42/field:7", (13, 0), "before|after"),
+                 ReceiptReason.SELECTION_DRIFT),
+                (DestinationObservation.capture(None, None, None),
+                 ReceiptReason.TARGET_UNREADABLE)):
+            with self.subTest(expected=expected):
+                self.assertEqual(
+                    coordinator.validate(self.lease, current), expected)
+        self.assertEqual(coordinator.recoverable_count(), 0)
+        coordinator.stage(self.lease, "Ship it")
+
     def test_an_unreadable_target_is_unverifiable_and_never_pasted(self):
         current = DestinationObservation.capture(None, None, None)
         pasted = []
