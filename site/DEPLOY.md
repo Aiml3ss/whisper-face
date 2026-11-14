@@ -45,7 +45,13 @@ TXT  _dmarc   "v=DMARC1; p=reject; rua=mailto:you@example.com"
 
 ## Analytics (cookieless)
 
-Cloudflare Web Analytics is wired but off. To enable: dashboard → **Web Analytics** → add `whisperface.com` → copy the beacon token → paste it into `CF_ANALYTICS_TOKEN` in `src/layouts/Base.astro`, rebuild, redeploy. No cookies, no banner needed.
+The repository's own beacon is off (`CF_ANALYTICS_TOKEN` is empty). Production
+is not: as observed on 14 November 2026, the Cloudflare dashboard injects a Web
+Analytics beacon with its own token, and a Cloudflare-managed robots.txt that
+blocks several crawlers replaces `public/robots.txt`. Both are dashboard
+settings the source cannot see; the site's privacy page says the beacon was on.
+Turning either off, or keeping it, is an owner decision made in the dashboard.
+To use the repository's beacon instead: dashboard → **Web Analytics** → add `whisperface.com` → copy the beacon token → paste it into `CF_ANALYTICS_TOKEN` in `src/layouts/Base.astro`, rebuild, redeploy. No cookies, no banner needed.
 
 ## Before going live
 

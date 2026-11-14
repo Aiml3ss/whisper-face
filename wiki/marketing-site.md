@@ -31,12 +31,14 @@ pages, and a small blog.
   workflow, which also sidesteps the Actions budget ([[governance]]).
   Manual path: `npx wrangler pages deploy dist`.
 - **Headers**: immutable 1-year caching for hashed assets plus
-  nosniff / strict referrer / same-origin frame headers. Cloudflare Web
-  Analytics is wired but off (empty token, cookieless).
-- **Third-party**: Jelly UI from its CDN with an SRI hash pin recorded
-  in THIRD_PARTY_NOTICES.md. The theme toggle is a real `jelly-button`
-  wearing the site's clothes, with a `:not(:defined)` fallback if the CDN
-  fails.
+  nosniff / strict referrer / same-origin frame headers. The source's
+  Cloudflare Web Analytics token is empty, but production (observed
+  2026-11-14) has a dashboard-injected beacon and a Cloudflare-managed
+  robots.txt — see site/DEPLOY.md.
+- **Third-party**: none at runtime since November 2026. The Jelly UI CDN
+  script (whose SRI pin started blocking it once upstream changed) was
+  removed; the theme toggle is a native `<button>` with `aria-pressed`, and
+  below 860px the header links fold into a `<details>` menu.
 - **Downloads**: a single constant, `site/src/data/release.ts`, holds the
   current version, tag, DMG URL and size; every download link on the site
   reads from it, and an `unsigned` flag drives an honest Gatekeeper

@@ -1,28 +1,50 @@
 ---
 import Face from './Face.astro';
+
+const links = [
+  { href: '/#faces', label: 'Faces' },
+  { href: '/#how', label: 'How it works' },
+  { href: '/#privacy', label: 'Privacy' },
+  { href: '/docs', label: 'Docs' },
+  { href: '/blog', label: 'Blog' },
+];
 ---
 
 <header class="nav">
   <div class="wrap">
     <a class="brand" data-jelly href="/">
-      <span class="mark"><Face animal="parrot" variant="mark" /></span>Whisper&nbsp;Face
+      <span class="mark"><Face animal="parrot" variant="mark" /></span><span class="brand-name">Whisper&nbsp;Face</span>
     </a>
-    <nav class="nav-links">
-      <a data-jelly href="/#faces">Faces</a>
-      <a data-jelly href="/#how">How it works</a>
-      <a data-jelly href="/#privacy">Privacy</a>
-      <a data-jelly href="/docs">Docs</a>
-      <a data-jelly href="/blog">Blog</a>
+    <nav class="nav-links" aria-label="Site">
+      {links.map((l) => <a data-jelly href={l.href}>{l.label}</a>)}
     </nav>
+    <details class="nav-menu">
+      <summary>
+        Menu
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M4 6l4 4 4-4"></path>
+        </svg>
+      </summary>
+      <nav aria-label="Site">
+        <ul class="nav-menu-list">
+          {links.map((l) => <li><a href={l.href}>{l.label}</a></li>)}
+        </ul>
+      </nav>
+    </details>
     <div class="nav-right">
-      <jelly-button
+      <button
+        type="button"
         class="theme-toggle"
         data-theme-toggle
-        label="Toggle light and dark theme"
-        size="small"
-        shape="square"
-        variant="graphite"
-      >◐</jelly-button>
+        data-jelly
+        aria-label="Dark theme"
+        aria-pressed="false"
+      >
+        <svg viewBox="0 0 20 20" aria-hidden="true">
+          <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="2"></circle>
+          <path d="M10 2.5a7.5 7.5 0 0 1 0 15z" fill="currentColor"></path>
+        </svg>
+      </button>
       <a class="btn btn-ghost btn-sm" data-jelly href="https://github.com/Aiml3ss/whisper-face" aria-label="Star Whisper Face on GitHub">★ Star</a>
       <a class="btn btn-primary btn-sm" data-jelly href="/#install">Download</a>
     </div>
