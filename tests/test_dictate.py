@@ -3975,13 +3975,39 @@ class CleanupGuardTests(unittest.TestCase):
                 "CAPTION": caption,
                 "compile_voice_evidence": lambda *_args, **_kwargs: (
                     None, SimpleNamespace(stable_prefix="stable words")),
-                "is_hallucination": lambda _text, _language="en": False,
+                "is_hallucination": lambda *_args: False,
             },
         )
         future = SimpleNamespace(result=lambda: Recognition(
             "stable words provisional tail"))
         ns["_caption_add"](future)
         self.assertEqual(caption["text"], "stable words")
+
+    def test_live_caption_follows_the_silent_audio_rule_of_final_text(self):
+        def caption_after(recognition):
+            caption = {"text": "Listening"}
+            ns = load_definitions(
+                "_caption_add", "is_hallucination", "weak_whisper_evidence",
+                assignments=CleanupGuardTests.HALLUCINATION_GUARD,
+                extra={
+                    "Recognition": Recognition,
+                    "CAPTION": caption,
+                    "compile_voice_evidence": lambda result, *_args, **_kw: (
+                        None, SimpleNamespace(stable_prefix=result.text)),
+                    "join_recognized_parts":
+                        lambda parts, _language: " ".join(filter(None, parts)),
+                },
+            )
+            ns["_caption_add"](SimpleNamespace(result=lambda: recognition))
+            return caption["text"]
+
+        # Whisper filling a pause must not flash in the caption either.
+        self.assertEqual(caption_after(Recognition(
+            "Thank you.", confidence=0.31, engine="tiny",
+            audio_duration=3.0)), "Listening")
+        self.assertEqual(caption_after(Recognition(
+            "Thank you.", confidence=0.93, engine="parakeet-unified",
+            audio_duration=1.2)), "Thank you.")
 
     def test_active_context_is_compiled_before_cleanup(self):
         ns = load_definitions(

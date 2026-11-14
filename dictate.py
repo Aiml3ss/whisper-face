@@ -2795,7 +2795,8 @@ def _caption_add(fut, context_terms=(), bundle="", context_pack=None,
             t = str(result or "").strip()
     except Exception:
         return
-    if t and not is_hallucination(t, language):
+    evidence = result if isinstance(result, Recognition) else None
+    if t and not is_hallucination(t, language, evidence):
         current = CAPTION["text"]
         if current == "Listening" or current.endswith(" mode"):
             current = ""
