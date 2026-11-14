@@ -57,6 +57,7 @@ from parrot_core import (  # noqa: E402
 from voice_compiler import (  # noqa: E402
     ContextCandidate,
     ContextPack,
+    EditProposal,
     RecognitionHypothesis,
     VoiceCompiler,
     VoiceIR,
@@ -2744,6 +2745,7 @@ class FacePreferenceTests(unittest.TestCase):
                 "undo_hotkey": "",
                 "sounds": "system",
                 "recent_dictations": False,
+                "self_correction": False,
                 "language": "en",
             })
 
@@ -2794,6 +2796,75 @@ class FacePreferenceTests(unittest.TestCase):
             self.assertEqual(ns["PREFERENCES"]["undo_hotkey"], "")
             self.assertEqual(ns["PREFERENCES"]["sounds"], "system")
             self.assertFalse(ns["PREFERENCES"]["recent_dictations"])
+
+    def test_self_correction_is_off_unless_the_file_says_true(self):
+        with tempfile.TemporaryDirectory() as directory:
+            preferences = Path(directory) / "preferences.json"
+            ns = load_definitions(
+                "normalize_face", "current_face", "load_preferences",
+                "save_preferences", "normalize_hotkey",
+                "normalize_sound_theme", "set_self_correction",
+                "quick_clean", "needs_llm_cleanup", "phone_clean",
+                "collapse_repeats", "extract_tone_override",
+                assignments={
+                    "FACE_CHOICES", "DEFAULT_FACE", "PREFERENCES",
+                    "HOTKEY_CHOICES", "HOTKEY_DEFAULT",
+                    "SOUND_THEMES", "SOUND_THEME_DEFAULT",
+                    "TONE", "TONE_OVERRIDE_RE", "TONE_ALIASES",
+                },
+                extra={
+                    "PREFERENCES_FILE": preferences,
+                    "IS_MACOS": True,
+                    "ACOUSTIC_TIME_MACHINE": AcousticTimeMachine(),
+                    "json": json,
+                    "apply_hotkey_bindings": lambda: None,
+                    "atomic_write_text": lambda path, value:
+                        path.write_text(value, encoding="utf-8"),
+                    "compile_cleanup": compile_cleanup,
+                    "NUMBER_WORDS": NUMBER_WORDS,
+                    "is_hallucination": lambda *_args: False,
+                    "looks_like_prompt_echo": lambda _raw: False,
+                    "apply_learned_fixes": lambda raw: raw,
+                    "apply_vocabulary_casing": lambda text: text,
+                },
+            )
+            spoken = "I thought it was Tuesday, actually Wednesday."
+            self.assertFalse(ns["PREFERENCES"]["self_correction"])
+            # An install from before the key existed, and every value that
+            # is not the JSON literal true.
+            for stored in ({}, {"self_correction": "true"},
+                           {"self_correction": 1},
+                           {"self_correction": None},
+                           {"self_correction": False}):
+                with self.subTest(stored=stored):
+                    ns["PREFERENCES"]["self_correction"] = True
+                    preferences.write_text(
+                        json.dumps(stored), encoding="utf-8")
+                    ns["load_preferences"]()
+                    self.assertIs(
+                        ns["PREFERENCES"]["self_correction"], False)
+                    self.assertEqual(ns["quick_clean"](spoken), spoken)
+                    self.assertEqual(ns["phone_clean"](spoken), spoken)
+
+            self.assertIs(ns["set_self_correction"](True), True)
+            self.assertIs(json.loads(preferences.read_text(
+                encoding="utf-8"))["self_correction"], True)
+            self.assertEqual(
+                ns["quick_clean"](spoken), "I thought it was Wednesday.")
+            self.assertEqual(
+                ns["quick_clean"]("Let's meet Tuesday, actually Wednesday"),
+                "Let's meet Wednesday.")
+            self.assertEqual(
+                ns["phone_clean"](spoken), "I thought it was Wednesday.")
+            ns["PREFERENCES"]["self_correction"] = False
+            ns["load_preferences"]()
+            self.assertIs(ns["PREFERENCES"]["self_correction"], True)
+
+            self.assertIs(ns["set_self_correction"](False), False)
+            self.assertIs(json.loads(preferences.read_text(
+                encoding="utf-8"))["self_correction"], False)
+            self.assertEqual(ns["quick_clean"](spoken), spoken)
+            self.assertEqual(ns["phone_clean"](spoken), spoken)
 
     def test_privacy_preferences_are_mac_only_and_default_off(self):
         for is_macos, acoustic, voice_objects, expected in (
@@ -4757,10 +4828,33 @@ class CleanupGuardTests(unittest.TestCase):
             "Dial 555 555 555 and wait.",
             "w w w dot example dot com",
             "The grade was A A A plus.",
+            "The code is " + "7 " * 12 + "and then pound.",
+            "Type " + "five " * 9 + "and stop.",
+            "Press " + "x " * 10 + "to clear it.",
         ):
             with self.subTest(spoken=spoken):
                 self.assertEqual(
                     ns["collapse_repeats"](spoken), (spoken, False))
+
+    def test_repeat_collapse_keeps_a_word_said_a_few_times(self):
+        ns = load_definitions(
+            "collapse_repeats", extra={"NUMBER_WORDS": NUMBER_WORDS})
+        for spoken in (
+            # As the real recognizer wrote them.
+            "That was very, very, very good",
+            "no, no, that's wrong.",
+            "really really good work.",
+            "It was a long, long time ago.",
+            # Emphasis, with and without the commas a pause leaves.
+            "No, no, no, that's wrong.",
+            "Really really really good work.",
+            "No no no no, stop.",
+            "No, no, no, no, no. Stop.",
+            "Blah blah blah, he kept talking.",
+            "Ha ha ha ha ha ha ha, very funny.",
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(ns["collapse_repeats"](spoken)[0], spoken)
 
     def test_repeat_collapse_still_removes_a_decode_loop(self):
         ns = load_definitions(
@@ -4769,9 +4863,89 @@ class CleanupGuardTests(unittest.TestCase):
         self.assertEqual(
             collapse("Restart " + "Unraid " * 40 + "tonight."),
             ("Restart Unraid Unraid tonight.", True))
+        # A loop on a glossary term echoes the prompt's commas. The cut
+        # keeps the run's own last mark.
+        self.assertEqual(
+            collapse("Common terms: " + "Unraid, " * 30 + "Unraid."),
+            ("Common terms: Unraid, Unraid.", True))
+        self.assertEqual(
+            collapse("Very, very, very, very, very, very, very, very good."),
+            ("Very, very good.", True))
+        self.assertEqual(
+            collapse("Ha ha ha ha ha ha ha ha, very funny."),
+            ("Ha ha, very funny.", True))
+        # Seven is still a person; eight is a decoder.
+        seven = "Okay " * 7 + "then."
+        self.assertEqual(collapse(seven)[0], seven)
+        self.assertEqual(
+            collapse("Okay " * 8 + "then."), ("Okay Okay then.", True))
         self.assertEqual(
             collapse("No no, that is wrong."),
             ("No no, that is wrong.", False))
+
+    def test_a_short_repeat_is_kept_and_still_reported_as_a_loop(self):
+        # The flag is what the glossary-echo guard keys on, so it follows
+        # the repetition and not what was cut: a run of three or more that
+        # makes up 40% of the words, as before the run was kept whole.
+        ns = load_definitions(
+            "collapse_repeats", extra={"NUMBER_WORDS": NUMBER_WORDS})
+        collapse = ns["collapse_repeats"]
+        for spoken, looped in (
+            ("Unraid, Unraid, Unraid, Unraid.", True),
+            ("Unraid Unraid Unraid Unraid Unraid Unraid Unraid", True),
+            ("Okay " * 7 + "then.", True),
+            ("No, no, no, no, no. Stop.", True),
+            # Three of one word alone were never enough.
+            ("Unraid, Unraid, Unraid.", False),
+            ("Unraid, Proxmox.", False),
+            # Emphasis inside a sentence, as the real recognizer wrote it.
+            ("That was very, very, very good", False),
+            ("No, no, no, that's wrong.", False),
+            ("Really really really good work.", False),
+            ("Blah blah blah, he kept talking.", False),
+            # Numbers and letters repeat in speech and never count.
+            ("5 5 5 5 5 5", False),
+            ("five five five five five", False),
+            ("w w w w", False),
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(collapse(spoken), (spoken, looped))
+
+    def test_a_short_glossary_echo_is_dropped_on_the_phone_path(self):
+        # Whisper decoding near-silence reads the glossary prompt back,
+        # often as one term a few times over.
+        ns = load_definitions(
+            "collapse_repeats", "looks_like_prompt_echo", "phone_clean",
+            "quick_clean", "needs_llm_cleanup", "extract_tone_override",
+            assignments={"TONE", "TONE_OVERRIDE_RE", "TONE_ALIASES"},
+            extra={
+                "GLOSS": {"lock": threading.Lock(),
+                          "terms": ["Unraid", "Proxmox"]},
+                "compile_cleanup": compile_cleanup,
+                "NUMBER_WORDS": NUMBER_WORDS,
+                "is_hallucination": lambda *_args: False,
+                "apply_learned_fixes": lambda raw: raw,
+                "apply_vocabulary_casing": lambda text: text,
+            },
+        )
+        clean = ns["phone_clean"]
+        for echoed in (
+            "Unraid, Unraid, Unraid, Unraid.",
+            "Unraid Unraid Unraid Unraid Unraid Unraid Unraid",
+            "Unraid, " * 30 + "Unraid.",
+        ):
+            with self.subTest(echoed=echoed):
+                self.assertEqual(clean(echoed), "")
+        # The same terms in a sentence, and emphasis that is not a
+        # glossary term, are speech.
+        for spoken in (
+            "Move Unraid to Proxmox tonight.",
+            "Unraid, Proxmox.",
+            "That was very, very, very good.",
+            "No no no no, don't send that.",
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(clean(spoken), spoken)
 
     def test_spoken_tone_override_needs_the_tone_keyword(self):
         ns = load_definitions(
@@ -5043,6 +5217,66 @@ class CleanupGuardTests(unittest.TestCase):
         self.assertTrue(any("bypassed (cooldown)" in line for line in lines))
         self.assertFalse(any("second private dictation" in line
                              for line in lines))
+
+    def test_a_rewrite_that_did_not_happen_returns_nothing_to_insert(self):
+        # Capture can fall back to the dictation. In compose, reply and
+        # edit the dictation is an instruction, and neither it nor the
+        # selection it is about is a rewrite.
+        def not_installed(*_args, **_kwargs):
+            raise RuntimeError("the cleanup model is not installed")
+
+        def refusing(*_args, **_kwargs):
+            return json.dumps({
+                "text": "I cannot help with that.", "edits": [],
+            }), "stop"
+
+        def truncated(*_args, **_kwargs):
+            return json.dumps({"text": "Dear", "edits": []}), "length"
+
+        open_breaker = CleanupCircuitBreaker(cooldown_seconds=60)
+        open_breaker.acquire()
+        open_breaker.record_transport_failure()
+        for name, chat, breaker in (
+            ("not installed", not_installed, None),
+            ("refusal", refusing, None),
+            ("truncated", truncated, None),
+            ("cooling down", not_installed, open_breaker),
+        ):
+            lines = []
+            ns = load_definitions(
+                "_guard_cleaned_output", "llm_clean_with_edits",
+                assignments={
+                    "BASE_PROMPT", "FEW_SHOT", "LLM_CLEANUP_TIMEOUT",
+                    "LLM_CLEANUP_TOTAL_DEADLINES", "CLEANUP_RESPONSE_SCHEMA",
+                    "MODE_INSTRUCTIONS", "REFUSAL_RE", "STRUCTURED_OUTPUT",
+                },
+                extra={
+                    "CleanupEdit": object,
+                    "LLM_CLEANUP_BREAKER":
+                        breaker or CleanupCircuitBreaker(cooldown_seconds=60),
+                    "ollama_chat": chat,
+                    "quick_clean": lambda text: f"fallback:{text}",
+                    "STRUCTURED_FEW_SHOT": [],
+                    "print": lines.append,
+                },
+            )
+            for mode in ("edit", "compose", "reply"):
+                with self.subTest(failure=name, mode=mode):
+                    del lines[:]
+                    self.assertEqual(
+                        ns["llm_clean_with_edits"](
+                            "make this more formal", "neutral", mode,
+                            "Hi all"),
+                        (None, []))
+                    self.assertTrue(lines)
+                    self.assertTrue(all(
+                        line.endswith("nothing to insert")
+                        for line in lines), lines)
+            with self.subTest(failure=name, mode="capture"):
+                self.assertEqual(
+                    ns["llm_clean_with_edits"](
+                        "please clean this dictation", "neutral"),
+                    ("fallback:please clean this dictation", []))
 
     def test_guard_rejection_releases_without_resetting_the_cooldown(self):
         breaker = CleanupCircuitBreaker(cooldown_seconds=60)
@@ -6722,7 +6956,7 @@ class LearningTests(unittest.TestCase):
                 "PIPELINE_STATE": {"last_consequence_route": "standard"},
                 "_mask_snippets_inline": lambda raw, _snippets: (raw, {}),
                 "extract_tone_override": lambda raw: (raw, None),
-                "compile_cleanup": lambda raw, _language: SimpleNamespace(
+                "compile_cleanup": lambda raw, *_options: SimpleNamespace(
                     text=raw, edits=[]),
                 "cursor_context": lambda: before,
                 "TONE": {"default": ""},
@@ -9971,11 +10205,14 @@ class ReleasePlanTests(unittest.TestCase):
         )])
 
     def _release(self, mode, language, spoken, selected="Hallo zusammen",
-                 field=None, recognition=None):
+                 field=None, recognition=None, rewrite=None,
+                 model_installed=False):
         """Drive finish_and_process from a decoded take to its insertion.
 
         ``field`` is the text already before the cursor. ``recognition``
-        replaces the default confident decode of ``spoken``.
+        replaces the default confident decode of ``spoken``. ``rewrite``
+        stands in for the cleanup model call, on an install where the model
+        is or is not on disk.
         """
         pasted = []
         problems = []
@@ -10087,6 +10324,9 @@ class ReleasePlanTests(unittest.TestCase):
             cut_samples=8_000,
             chunks=[],
         )
+        if rewrite is not None:
+            ns["llm_clean_with_edits"] = rewrite
+            ns["cleanup_model_installed"] = lambda: model_installed
         ns["finish_and_process"](recorder, SimpleNamespace(), {})
         return pasted, problems
 
@@ -10107,6 +10347,39 @@ class ReleasePlanTests(unittest.TestCase):
                 self.assertIn("nothing changed", caption)
                 self.assertIn(mode.capitalize(), caption)
                 self.assertNotIn(spoken, log)
+
+    def test_rewrite_modes_insert_only_what_the_model_rewrote(self):
+        # In English the model is asked. When it cannot answer, the spoken
+        # instruction is all there is, and it is never the thing to insert.
+        for mode, spoken in (
+            ("edit", "Make this more formal."),
+            ("reply", "Tell her I agree with the plan."),
+            ("compose", "Write a short note declining the meeting."),
+        ):
+            for installed, reason in (
+                (False, "needs the cleanup model"),
+                (True, "got no rewrite from the cleanup model"),
+            ):
+                with self.subTest(mode=mode, installed=installed):
+                    pasted, problems = self._release(
+                        mode, "en", spoken, selected="Hi all",
+                        rewrite=lambda *_args: (None, []),
+                        model_installed=installed)
+                    self.assertEqual(pasted, [])
+                    self.assertEqual(len(problems), 1)
+                    caption, log = problems[0]
+                    self.assertEqual(
+                        caption,
+                        f"{mode.capitalize()} mode {reason} — "
+                        "nothing changed")
+                    self.assertNotIn(spoken, log)
+                    self.assertNotIn("Hi all", log)
+            with self.subTest(mode=mode, rewritten=True):
+                pasted, _problems = self._release(
+                    mode, "en", spoken, selected="Hi all",
+                    rewrite=lambda *_args: ("Good morning, everyone.", []),
+                    model_installed=True)
+                self.assertEqual(pasted, ["Good morning, everyone."])
 
     def test_plain_dictation_in_another_language_is_still_inserted(self):
         pasted, _problems = self._release(
@@ -11092,7 +11365,8 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
             proof_text = "clean github"
 
             def verify_edits(
-                    self, original, proposals, candidates, *, mode):
+                    self, original, proposals, candidates, *, mode,
+                    self_correction):
                 verified.append(
                     (original, tuple(proposals), candidates, mode))
                 return SimpleNamespace(text=self.proof_text)
@@ -11141,9 +11415,42 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
             namespace["build_delayed_cleanup_proposal"](
                 "raw github", "tone", voice_ir, **kwargs))
 
+    def test_delayed_proposal_corrects_only_for_a_user_who_asked(self):
+        compiled = "The invoice says 400, actually 450."
+        namespace = load_definitions(
+            "build_delayed_cleanup_proposal",
+            extra={
+                "VOICE_COMPILER": VoiceCompiler(),
+                "EditProposal": EditProposal,
+                "llm_clean_with_edits": lambda *_args: (
+                    "The invoice says 450.",
+                    (SimpleNamespace(
+                        kind="self_correction",
+                        before="400, actually 450", after="450"),),
+                ),
+                "quick_clean": lambda text, **_kwargs: text,
+                "strip_casual_period": lambda text: text,
+                "apply_vocabulary_casing": lambda text: text,
+                "_restore_snippet_sentinels": lambda text, _restore: text,
+            },
+        )
+        voice_ir = SimpleNamespace(context=SimpleNamespace(candidates=()))
+
+        def propose():
+            return namespace["build_delayed_cleanup_proposal"](
+                compiled, "tone", voice_ir, continuing=False,
+                context_tail="", context_text=None, tone_key="default",
+                snippet_restore={})
+
+        self.assertIs(namespace["PREFERENCES"]["self_correction"], False)
+        self.assertIsNone(propose())
+        namespace["PREFERENCES"]["self_correction"] = True
+        self.assertEqual(propose(), "The invoice says 450.")
+
     def test_delayed_proposal_keeps_a_word_that_starts_with_the_field(self):
         class Compiler:
-            def verify_edits(self, original, proposals, candidates, *, mode):
+            def verify_edits(self, original, proposals, candidates, *, mode,
+                             self_correction):
                 return SimpleNamespace(text="tomorrow works for me")
 
         namespace = load_definitions(

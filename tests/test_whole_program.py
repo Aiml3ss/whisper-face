@@ -300,6 +300,137 @@ class FreshInstallDictationTests(unittest.TestCase):
         mac.dictate_sentence("See you soon.", field=field)
         self.assertEqual(field.text, "Thanks 👍🏽 See you soon. and bye")
 
+    def test_actually_corrects_only_after_the_user_turns_it_on(self):
+        mac = booted()
+        dictate = mac.dictate
+        spoken = "Let's meet Tuesday, actually Wednesday."
+
+        def typed(sentence):
+            return mac.dictate_sentence(sentence, field=TextField()).text
+
+        # A fresh install starts from the shipped template, which says off.
+        self.assertIs(json.loads(
+            (ROOT / "preferences.template.json").read_text())[
+                "self_correction"], False)
+        self.assertIs(dictate.gui_settings_snapshot()["self_correction"],
+                      False)
+        self.assertEqual(typed(spoken), spoken)
+        self.assertIs(dictate.set_self_correction(True), True)
+        try:
+            self.assertIs(
+                dictate.gui_settings_snapshot()["self_correction"], True)
+            self.assertIs(json.loads(
+                dictate.PREFERENCES_FILE.read_text())["self_correction"],
+                True)
+            self.assertEqual(typed(spoken), "Let's meet Wednesday.")
+            self.assertEqual(dictate.PIPELINE_STATE["last_cleanup_edits"],
+                             ["self_correction"])
+            # Turned on, the rule is the one wave 1 shipped: it corrects
+            # between two like items and nowhere else.
+            for sentence, expected in (
+                ("The total is 45 dollars, actually 54.",
+                 "The total is 54 dollars."),
+                ("Call me at 3 pm, actually 4 pm.", "Call me at 4 pm."),
+                ("I didn't actually finish the report.",
+                 "I didn't actually finish the report."),
+                ("It's not 5, actually 6.", "It's not 5, actually 6."),
+                ("The shop is open from 9 to 5, actually 9 to 6.",
+                 "The shop is open from 9 to 5, actually 9 to 6."),
+            ):
+                with self.subTest(spoken=sentence):
+                    self.assertEqual(typed(sentence), expected)
+        finally:
+            self.assertIs(dictate.set_self_correction(False), False)
+        self.assertIs(json.loads(
+            dictate.PREFERENCES_FILE.read_text())["self_correction"], False)
+        self.assertEqual(typed(spoken), spoken)
+
+    def test_a_recognizer_stuck_on_one_word_is_cut_short(self):
+        mac = booted()
+        field = mac.dictate_sentence(
+            "Restart " + "Unraid " * 40 + "tonight.", field=TextField())
+        self.assertEqual(field.text, "Restart Unraid Unraid tonight.")
+
+    def test_a_short_echo_of_the_glossary_prompt_is_not_typed(self):
+        # A recognizer primed with the user's terms reads them back when
+        # it hears no speech, often as one term a few times over. That is
+        # too short to cut as a loop and is still not dictation.
+        mac = booted()
+        dictate = mac.dictate
+        with dictate.GLOSS["lock"]:
+            terms = dictate.GLOSS["terms"]
+            dictate.GLOSS["terms"] = ["Unraid", "Proxmox"]
+        try:
+            for echoed in (
+                "Unraid, Unraid, Unraid, Unraid.",
+                "Unraid Unraid Unraid Unraid Unraid Unraid Unraid",
+            ):
+                with self.subTest(echoed=echoed):
+                    field = TextField("Notes: ")
+                    pastes = len(mac.desktop.pastes)
+                    mac.dictate_sentence(echoed, field=field)
+                    self.assertEqual(field.text, "Notes: ")
+                    self.assertEqual(len(mac.desktop.pastes), pastes)
+                    self.assertEqual(
+                        dictate.CAPTION["text"],
+                        "That didn't sound like dictation — try again")
+            # The same terms in a sentence, and a word said three times
+            # for emphasis, are dictation.
+            for spoken in (
+                "Move Unraid to Proxmox tonight.",
+                "That was very, very, very good.",
+            ):
+                with self.subTest(spoken=spoken):
+                    field = mac.dictate_sentence(spoken, field=TextField())
+                    self.assertEqual(field.text, spoken)
+        finally:
+            with dictate.GLOSS["lock"]:
+                dictate.GLOSS["terms"] = terms
+
+    def test_edit_without_the_cleanup_model_leaves_the_selection_alone(self):
+        # A default install has no rewrite model. What was dictated is an
+        # instruction about the selection, never text to put in its place.
+        mac = booted()
+        text = "Please send the report by Friday."
+        field = TextField(text)
+        field.selection = (len("Please send "), len("the report"))
+        pastes = len(mac.desktop.pastes)
+        heard = len(mac.desktop.sounds())
+        records = len(transcript_records())
+        mac.dictate_sentence(
+            "Make this more formal.", field=field, modifiers=(Key.cmd,))
+        self.assertEqual(field.text, text)
+        self.assertEqual(field.selection,
+                         (len("Please send "), len("the report")))
+        self.assertEqual(len(mac.desktop.pastes), pastes)
+        self.assertEqual(
+            mac.dictate.CAPTION["text"],
+            "Edit mode needs the cleanup model — nothing changed")
+        self.assertEqual(mac.desktop.sounds()[heard:], ["Tink", "Funk"])
+        self.assertEqual(len(transcript_records()), records)
+        self.assertEqual(mac.desktop.network, [])
+
+    def test_compose_and_reply_without_the_cleanup_model_type_nothing(self):
+        mac = booted()
+        for mode, key, spoken in (
+            ("Compose", Key.shift,
+             "Write a short note declining the meeting."),
+            ("Reply", Key.ctrl, "Tell her I agree with the plan."),
+        ):
+            with self.subTest(mode=mode):
+                field = TextField("Can we meet on Thursday? ")
+                pastes = len(mac.desktop.pastes)
+                mac.dictate_sentence(spoken, field=field, modifiers=(key,))
+                self.assertEqual(field.text, "Can we meet on Thursday? ")
+                self.assertEqual(len(mac.desktop.pastes), pastes)
+                self.assertEqual(
+                    mac.dictate.CAPTION["text"],
+                    f"{mode} mode needs the cleanup model — nothing changed")
+        # Plain dictation is unaffected, straight afterwards.
+        field = mac.dictate_sentence(
+            "Thursday works for me.", field=TextField())
+        self.assertEqual(field.text, "Thursday works for me.")
+
     def test_a_filled_snippet_expands_only_when_asked_for(self):
         mac = booted()
         template = json.loads(
@@ -473,9 +604,9 @@ class DefaultPathCorpusTests(unittest.TestCase):
         self.assertGreaterEqual(len(cases), 60)
         self.assertEqual(len({case["id"] for case in cases}), len(cases))
         covers = {case["covers"] for case in cases}
-        for kind in ("actually-adverb", "snippet-name", "sign-off", "numbers",
-                     "scratch-that", "new-line", "tone-word-opening",
-                     "repeats", "emoji"):
+        for kind in ("actually-adverb", "actually-contrast", "snippet-name",
+                     "sign-off", "numbers", "scratch-that", "new-line",
+                     "tone-word-opening", "repeats", "emoji"):
             with self.subTest(covers=kind):
                 self.assertIn(kind, covers)
         adverbs = [case for case in cases if case["covers"] == "actually-adverb"]
@@ -484,6 +615,13 @@ class DefaultPathCorpusTests(unittest.TestCase):
         # A rule that deletes words needs more must-not-fire cases than
         # must-fire ones.
         self.assertGreater(len(adverbs), len(corrections))
+        # The correction is opt-in, so on a fresh install every sentence
+        # with "actually" in it is typed as spoken.
+        for case in cases:
+            if "actually" in case["spoken"].casefold():
+                with self.subTest(case=case["id"]):
+                    self.assertIn(case["spoken"].rstrip("."),
+                                  case["expected"])
         snippets = json.loads(
             (ROOT / "snippets.template.json").read_text(encoding="utf-8"))
         spoken = " ".join(case["spoken"].casefold() for case in cases)

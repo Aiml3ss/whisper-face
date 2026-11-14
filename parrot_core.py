@@ -47,7 +47,8 @@ STRUCTURE_RE = re.compile(r"\bnew[ \t]+(line|paragraph)\b", re.I)
 STRUCTURE_LITERAL_BEFORE = frozenset({
     "a", "an", "the", "this", "that", "another", "each", "every", "one",
     "per", "brand", "whole", "our", "my", "your", "his", "her", "their",
-    "its",
+    "its", "these", "those", "some", "several", "many", "few", "both",
+    "any", "no", "more", "other", "all", "most", "of", "dozen", "couple",
 })
 STRUCTURE_LITERAL_AFTER = frozenset({
     "of", "item", "items", "character", "characters", "break", "breaks",
@@ -453,6 +454,18 @@ def _adjacent_word(text: str, *, before: bool) -> str:
     return match.group(1).casefold() if match else ""
 
 
+def _ends_with_count(head: str) -> bool:
+    """Whether a spelled or written whole number is the last thing in ``head``.
+
+    A count makes the phrase after it a noun ("two new line cooks", "12 new
+    line staff"). It also ends the line before an unpaused command ("Room 4
+    new line guests arrive"), and nothing tells the two apart, so the words
+    stay. A price, a clock time and a phone number are not counts.
+    """
+    return bool(_adjacent_word(head, before=True) in NUMBER_WORDS
+                or re.search(r"(?:^|\s)\d+(?:,\d+)*[ \t]+$", head))
+
+
 def _expand_spoken_structure(text: str) -> str:
     """Turn spoken "new line" / "new paragraph" into line breaks.
 
@@ -464,10 +477,11 @@ def _expand_spoken_structure(text: str) -> str:
     cursor = 0
     for match in STRUCTURE_RE.finditer(text):
         head, tail = text[cursor:match.start()], text[match.end():]
+        after_word = _adjacent_word(tail, before=False)
         if (_adjacent_word(head, before=True) in STRUCTURE_LITERAL_BEFORE
-                or _adjacent_word(tail, before=False)
-                in STRUCTURE_LITERAL_AFTER
-                or tail[:1] in ("-", "_", "/")):
+                or after_word in STRUCTURE_LITERAL_AFTER
+                or tail[:1] in ("-", "_", "/")
+                or _ends_with_count(head)):
             continue
         lead = re.search(r"(?:[ \t]*[,;—–]|[ \t]+-)?[ \t]*$", head)
         trail = re.match(r"[ \t]*(?:[.,;:!?]+|[—–])?[ \t]*", tail)
@@ -649,7 +663,8 @@ def _resolve_scratch_that(text: str) -> tuple[str, bool]:
     return (left[:cut].rstrip() + " " + right).strip(), False
 
 
-def compile_cleanup(raw: str, language: str = "en") -> CleanupPlan:
+def compile_cleanup(raw: str, language: str = "en",
+                    self_correction: bool = False) -> CleanupPlan:
     """Compile safe spoken transformations into explicit, reversible edits.
 
     Every rule below is English by construction: the filler and
@@ -658,6 +673,11 @@ def compile_cleanup(raw: str, language: str = "en") -> CleanupPlan:
     Applied to another language they cannot help and can silently delete
     real words, so a non-English utterance gets whitespace normalization and
     nothing else.
+
+    ``self_correction`` turns on the "X, actually Y" rule. It is off unless
+    the user asked for it: a speaker says the same words to contrast two
+    things ("I thought it was Tuesday, actually Wednesday"), and no rule can
+    tell that from a slip being taken back.
     """
     code = str(language or "en").strip().casefold()
     if code != "en":
@@ -692,7 +712,7 @@ def compile_cleanup(raw: str, language: str = "en") -> CleanupPlan:
         if text != before:
             edits.append(CleanupEdit(kind, before, text))
 
-    while True:
+    while self_correction:
         correction = find_self_correction(text)
         if correction is None:
             break
@@ -831,14 +851,15 @@ CODE_PHRASES = (
 )
 
 
-def compile_code_dictation(raw: str, language: str = "en") -> CleanupPlan:
+def compile_code_dictation(raw: str, language: str = "en",
+                           self_correction: bool = False) -> CleanupPlan:
     """Compile spoken code punctuation while preserving ordinary identifiers.
 
     CODE_PHRASES are English names for ASCII glyphs, and the spacing rules
     below are Latin code conventions, so a non-English utterance keeps
     ``compile_cleanup``'s language-safe result untouched.
     """
-    plan = compile_cleanup(raw, language)
+    plan = compile_cleanup(raw, language, self_correction)
     if str(language or "en").strip().casefold() != "en":
         return plan
     text = plan.text

@@ -223,6 +223,36 @@ class VoiceCompilerTests(unittest.TestCase):
                 )
                 self.assertFalse(result.edits[0].accepted)
 
+    def test_self_correction_is_not_proved_unless_the_user_asked_for_it(self):
+        # The speaker may be contrasting two things, so by default the model
+        # cannot take the first one out either.
+        for source, before, after in (
+            ("I thought it was Tuesday, actually Wednesday.",
+             "Tuesday, actually Wednesday", "Wednesday"),
+            ("The invoice says 400, actually 450",
+             "400, actually 450", "450"),
+            ("We expected 20, actually 12 showed up.",
+             "20, actually 12", "12"),
+            ("Let's meet Tuesday, actually Wednesday",
+             "Tuesday, actually Wednesday", "Wednesday"),
+        ):
+            with self.subTest(source=source):
+                proposals = (EditProposal("self_correction", before, after),)
+                result = self.compiler.verify_edits(source, proposals)
+                self.assertFalse(result.edits[0].accepted)
+                self.assertEqual(result.text, source)
+                asked = self.compiler.verify_edits(
+                    source, proposals, self_correction=True)
+                self.assertTrue(asked.edits[0].accepted)
+                self.assertEqual(
+                    asked.text, source.replace(before, after))
+        # Edits that need no correction rule are proved either way.
+        result = self.compiler.verify_edits(
+            "Um, the invoice says 400, actually 450",
+            (EditProposal("remove_filler", "Um, the", "The"),))
+        self.assertTrue(result.edits[0].accepted)
+        self.assertEqual(result.text, "The invoice says 400, actually 450")
+
     def test_actually_is_not_blanket_permission_to_delete_content(self):
         for before, after in (
             ("i actually know you mean well", "know you mean well"),
@@ -230,7 +260,8 @@ class VoiceCompilerTests(unittest.TestCase):
         ):
             with self.subTest(before=before):
                 result = self.compiler.verify_edits(
-                    before, (EditProposal("self_correction", before, after),))
+                    before, (EditProposal("self_correction", before, after),),
+                    self_correction=True)
                 self.assertFalse(result.edits[0].accepted)
 
     def test_self_correction_is_proved_only_between_items_of_one_kind(self):
@@ -245,7 +276,8 @@ class VoiceCompilerTests(unittest.TestCase):
             with self.subTest(before=before):
                 result = self.compiler.verify_edits(
                     f"The payment was {before} today",
-                    (EditProposal("self_correction", before, after),))
+                    (EditProposal("self_correction", before, after),),
+                    self_correction=True)
                 self.assertFalse(result.edits[0].accepted)
         for before, after in (
             ("Tuesday, actually Wednesday", "Wednesday"),
@@ -256,7 +288,8 @@ class VoiceCompilerTests(unittest.TestCase):
             with self.subTest(before=before):
                 result = self.compiler.verify_edits(
                     f"Move it to {before} please",
-                    (EditProposal("self_correction", before, after),))
+                    (EditProposal("self_correction", before, after),),
+                    self_correction=True)
                 self.assertTrue(result.edits[0].accepted)
                 self.assertEqual(result.text, f"Move it to {after} please")
 
@@ -277,7 +310,8 @@ class VoiceCompilerTests(unittest.TestCase):
         ):
             with self.subTest(before=before):
                 result = self.compiler.verify_edits(
-                    source, (EditProposal("self_correction", before, after),))
+                    source, (EditProposal("self_correction", before, after),),
+                    self_correction=True)
                 self.assertFalse(result.edits[0].accepted)
                 self.assertEqual(result.text, source)
 
@@ -298,12 +332,14 @@ class VoiceCompilerTests(unittest.TestCase):
         ):
             with self.subTest(source=source, before=before):
                 result = self.compiler.verify_edits(
-                    source, (EditProposal("self_correction", before, after),))
+                    source, (EditProposal("self_correction", before, after),),
+                    self_correction=True)
                 self.assertFalse(result.edits[0].accepted)
                 self.assertEqual(result.text, source)
         source = "I can't make it. Let's meet Tuesday, actually Wednesday."
         result = self.compiler.verify_edits(source, (EditProposal(
-            "self_correction", "Tuesday, actually Wednesday", "Wednesday"),))
+            "self_correction", "Tuesday, actually Wednesday", "Wednesday"),),
+            self_correction=True)
         self.assertTrue(result.edits[0].accepted)
         self.assertEqual(
             result.text, "I can't make it. Let's meet Wednesday.")

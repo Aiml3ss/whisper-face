@@ -8,5 +8,6 @@
   "undo_hotkey": "",
   "sounds": "system",
   "recent_dictations": false,
+  "self_correction": false,
   "language": "en"
 }

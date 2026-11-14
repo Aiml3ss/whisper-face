@@ -178,6 +178,15 @@ CLEANUP_CORPORA = (
 )
 
 
+# The cleanup is measured twice: as a default install runs it, and with the
+# opt-in "X, actually Y" correction turned on, so the rule stays pinned while
+# it is off by default.
+CLEANUP_VARIANTS = (
+    ("default_cleanup", False),
+    ("self_correction_cleanup", True),
+)
+
+
 def collect_default_cleanup() -> dict[str, Any]:
     """Run ``parrot_core.compile_cleanup`` over every corpus sentence.
 
@@ -190,29 +199,30 @@ def collect_default_cleanup() -> dict[str, Any]:
     from parrot_core import compile_cleanup
 
     metrics: dict[str, Any] = {
-        "default_cleanup.cases": 0,
-        "default_cleanup.changed": 0,
-        "default_cleanup.emptied": 0,
-        "default_cleanup.needs_semantic_cleanup": 0,
+        f"{variant}.{name}": 0
+        for variant, _self_correction in CLEANUP_VARIANTS
+        for name in ("cases", "changed", "emptied", "needs_semantic_cleanup")
     }
     for relative, key, field in CLEANUP_CORPORA:
         cases = json.loads(
             (HERE / relative).read_text(encoding="utf-8"))[key]
         for case in cases:
             text = case[field]
-            plan = compile_cleanup(text, "en")
-            if not isinstance(plan.text, str):
-                raise RuntimeError(
-                    f"{relative} {case.get('id')}: cleanup returned "
-                    f"{type(plan.text).__name__}, not text")
-            metrics["default_cleanup.cases"] += 1
-            metrics["default_cleanup.changed"] += plan.text != text.strip()
-            metrics["default_cleanup.emptied"] += not plan.text
-            metrics["default_cleanup.needs_semantic_cleanup"] += bool(
-                plan.needs_semantic_cleanup)
-            for kind in plan.edit_kinds:
-                name = f"default_cleanup.edits.{kind}"
-                metrics[name] = metrics.get(name, 0) + 1
+            for variant, self_correction in CLEANUP_VARIANTS:
+                plan = compile_cleanup(
+                    text, "en", self_correction=self_correction)
+                if not isinstance(plan.text, str):
+                    raise RuntimeError(
+                        f"{relative} {case.get('id')}: cleanup returned "
+                        f"{type(plan.text).__name__}, not text")
+                metrics[f"{variant}.cases"] += 1
+                metrics[f"{variant}.changed"] += plan.text != text.strip()
+                metrics[f"{variant}.emptied"] += not plan.text
+                metrics[f"{variant}.needs_semantic_cleanup"] += bool(
+                    plan.needs_semantic_cleanup)
+                for kind in plan.edit_kinds:
+                    name = f"{variant}.edits.{kind}"
+                    metrics[name] = metrics.get(name, 0) + 1
     return metrics
 
 

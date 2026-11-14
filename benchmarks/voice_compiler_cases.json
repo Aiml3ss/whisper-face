@@ -79,6 +79,7 @@
       "id": "bounded-self-correction",
       "category": "corrections",
       "operation": "verify_edits",
+      "self_correction": true,
       "source": "Ship Tuesday actually Wednesday",
       "proposals": [
         {

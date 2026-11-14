@@ -1515,6 +1515,7 @@ PREFERENCES = {
     "undo_hotkey": "",
     "sounds": SOUND_THEME_DEFAULT,
     "recent_dictations": False,
+    "self_correction": False,
     "language": LANGUAGE_DEFAULT,
 }
 ACOUSTIC_TIME_MACHINE = AcousticTimeMachine()
@@ -1967,6 +1968,10 @@ def load_preferences():
     PREFERENCES["sounds"] = normalize_sound_theme(loaded.get("sounds"))
     PREFERENCES["recent_dictations"] = bool(
         loaded.get("recent_dictations") is True)
+    # "X, actually Y" replaces X only for a user who asked for it. Any other
+    # value, and a file written before the key existed, leaves it off.
+    PREFERENCES["self_correction"] = bool(
+        loaded.get("self_correction") is True)
     # Cross-platform: both mlx-whisper and faster-whisper take the same bare
     # ISO 639-1 code, so one preference drives Mac and Windows alike.
     PREFERENCES["language"] = normalize_language(loaded.get("language"))
@@ -2045,6 +2050,7 @@ def save_preferences():
             PREFERENCES["undo_hotkey"], default=""),
         "sounds": normalize_sound_theme(PREFERENCES["sounds"]),
         "recent_dictations": bool(PREFERENCES["recent_dictations"]),
+        "self_correction": bool(PREFERENCES["self_correction"]),
         "language": normalize_language(PREFERENCES["language"]),
     }
     atomic_write_text(
@@ -2159,6 +2165,13 @@ def set_recent_dictations_enabled(enabled: bool) -> bool:
     PREFERENCES["recent_dictations"] = bool(enabled)
     save_preferences()
     return PREFERENCES["recent_dictations"]
+
+
+def set_self_correction(enabled: bool) -> bool:
+    """Persist the off-by-default "X, actually Y" correction opt-in."""
+    PREFERENCES["self_correction"] = bool(enabled)
+    save_preferences()
+    return PREFERENCES["self_correction"]
 
 
 def set_voice_object_commands_enabled(enabled: bool) -> None:
@@ -5693,6 +5706,7 @@ def gui_settings_snapshot() -> dict:
         "manual_vocabulary": manual,
         "banned_vocabulary": sorted(banned),
         "corrections": corrections,
+        "self_correction": bool(PREFERENCES["self_correction"]),
     }
 
 
@@ -10775,10 +10789,19 @@ def audio_gate_measurements(audio: np.ndarray) -> tuple[float, float]:
 
 
 def collapse_repeats(text: str) -> tuple[str, bool]:
-    """Collapse runs of one token repeated 3+ times — the signature of an ASR
-    decode loop, never of real speech ("no no" survives, "Unraid" x40 does
-    not). Returns (text, looped) where looped means a substantial run was
-    removed.
+    """Collapse a long run of one repeated token to two of it — the
+    signature of an ASR decode loop ("Unraid" x40). Returns (text, looped).
+
+    A word said a few times is speech, with or without the commas a pause
+    leaves ("very, very, very good", "no no no no"), and is kept whole. A
+    stuck decoder repeats until the segment ends, so only a run of eight
+    or more is cut. A shorter loop is left in: extra words are visible
+    and easy to delete, and a dropped word is neither.
+
+    ``looped`` says repetition dominates the transcript, whether or not
+    anything was cut: runs of three or more, counted as two each, would
+    leave at most 60% of the words. The glossary-echo guard drops a
+    transcript on it, and an echo is often one term four or five times.
 
     Whitespace tokenization means this cannot see inside a Japanese or
     Chinese transcript, which arrives as a single token. It fails closed
@@ -10787,18 +10810,30 @@ def collapse_repeats(text: str) -> tuple[str, bool]:
 
     Digits, number words and single characters are never collapsed: a zip
     code ("1 0 0 0 1"), a phone number ("five five five") and a spelled
-    address ("w w w") repeat a token three times in real speech.
+    address ("w w w") repeat a token in real speech.
     """
+    loop_min_run = 8
     words = text.split()
-    out, prev, run = [], None, 0
-    for w in words:
-        key = w.strip(",.;:!?…\"'。、！？「」").casefold()
-        run = run + 1 if key == prev else 1
-        prev = key
-        if (run <= 2 or len(key) <= 1 or key in NUMBER_WORDS
-                or any(char.isdigit() for char in key)):
-            out.append(w)
-    return " ".join(out), bool(words) and len(out) <= 0.6 * len(words)
+    keys = [w.strip(",.;:!?…\"'。、！？「」").casefold() for w in words]
+    out = []
+    remaining = 0
+    start = 0
+    while start < len(words):
+        key = keys[start]
+        end = start + 1
+        while end < len(words) and keys[end] == key:
+            end += 1
+        run = end - start
+        repeatable = (len(key) > 1 and key not in NUMBER_WORDS
+                      and not any(char.isdigit() for char in key))
+        if repeatable and run >= loop_min_run:
+            # The last token carries the mark that ends the run.
+            out.extend((words[start], words[end - 1]))
+        else:
+            out.extend(words[start:end])
+        remaining += min(run, 2) if repeatable else run
+        start = end
+    return " ".join(out), bool(words) and remaining <= 0.6 * len(words)
 
 
 def looks_like_prompt_echo(text: str) -> bool:
@@ -10848,7 +10883,7 @@ def quick_clean(text: str, verbatim: bool = False,
     if verbatim or not t:
         return t
     language = str(language or "").strip().casefold() or LANGUAGE_DEFAULT
-    t = compile_cleanup(t, language).text
+    t = compile_cleanup(t, language, PREFERENCES["self_correction"]).text
     if not t:
         return ""
     if language != "en":
@@ -10882,7 +10917,8 @@ def needs_llm_cleanup(raw: str, tone_override: str | None,
     language = str(language or "").strip().casefold() or LANGUAGE_DEFAULT
     if language != "en":
         return False
-    plan = plan or compile_cleanup(raw, language)
+    plan = plan or compile_cleanup(
+        raw, language, PREFERENCES["self_correction"])
     return bool(not verbatim and (
         mode in {"compose", "reply", "edit"}
         or
@@ -10937,7 +10973,13 @@ def _guard_cleaned_output(text: str, out: str, done: str,
 
 def llm_clean_with_edits(text: str, tone: str, mode: str = "capture",
                          context: str | None = None) \
-        -> tuple[str, list[CleanupEdit]]:
+        -> tuple[str | None, list[CleanupEdit]]:
+    """Ask the cleanup model; returns (text, edits).
+
+    When the model cannot be used, capture and code get the deterministic
+    cleanup of ``text``. Compose, reply and edit get None: there the
+    dictation is an instruction, and inserting it is never the fallback.
+    """
     instruction = MODE_INSTRUCTIONS.get(mode, MODE_INSTRUCTIONS["capture"])
     system = BASE_PROMPT + "\n" + tone + "\n" + instruction \
         + "\n" + STRUCTURED_OUTPUT
@@ -10948,8 +10990,10 @@ def llm_clean_with_edits(text: str, tone: str, mode: str = "capture",
         user = json.dumps({"nearby_context": context or "", "dictation": text})
     few_shot = STRUCTURED_FEW_SHOT if mode in {"capture", "code"} else []
     words = len(text.split()) + len((context or "").split())
-    fallback = (context if mode == "edit" and context is not None
-                else quick_clean(text))
+    rewriting = mode not in {"capture", "code"}
+    fallback = None if rewriting else quick_clean(text)
+    instead = "nothing to insert" if rewriting \
+        else "pasting deterministic cleanup"
     if mode in {"capture", "code"}:
         num_predict = max(160, int(words * 4.0) + 64)
     else:
@@ -10960,7 +11004,7 @@ def llm_clean_with_edits(text: str, tone: str, mode: str = "capture",
     admission = LLM_CLEANUP_BREAKER.acquire()
     if not admission.allowed:
         print(f"! LLM cleanup bypassed ({admission.state.value}); "
-              "pasting deterministic cleanup")
+              f"{instead}")
         return fallback, []
     try:
         reply, done = ollama_chat(
@@ -10987,7 +11031,7 @@ def llm_clean_with_edits(text: str, tone: str, mode: str = "capture",
         out = str(out).strip('"').strip()
     except Exception as e:
         LLM_CLEANUP_BREAKER.record_transport_failure()
-        print(f"! LLM cleanup failed ({e}); pasting quick-cleaned text")
+        print(f"! LLM cleanup failed ({e}); {instead}")
         return fallback, []
 
     reject = _guard_cleaned_output(text, out, done, mode)
@@ -10996,7 +11040,7 @@ def llm_clean_with_edits(text: str, tone: str, mode: str = "capture",
         # recording success) keeps a guard rejection from resetting the
         # doubled cooldown a flaky transport has already earned.
         LLM_CLEANUP_BREAKER.release()
-        print(f"! LLM output rejected ({reject}); pasting quick-cleaned text")
+        print(f"! LLM output rejected ({reject}); {instead}")
         return fallback, []
     LLM_CLEANUP_BREAKER.record_success()
     return out, edits
@@ -11027,6 +11071,7 @@ def build_delayed_cleanup_proposal(
          for edit in semantic_edits),
         voice_ir.context.candidates,
         mode="capture",
+        self_correction=PREFERENCES["self_correction"],
     )
     if proof.text != candidate:
         return None
@@ -12490,8 +12535,10 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             # Verbatim is a hard contract: retain acoustic text rather than a
             # context/personal compiler substitution.
             raw, tone_override = extract_tone_override(recognized_raw)
-        plan = compile_code_dictation(raw, rec.language) \
-            if rec.mode == "code" else compile_cleanup(raw, rec.language)
+        self_correction = PREFERENCES["self_correction"]
+        plan = compile_code_dictation(raw, rec.language, self_correction) \
+            if rec.mode == "code" else compile_cleanup(
+                raw, rec.language, self_correction)
         compiled = plan.text
         verbatim = ((is_verbatim_app(bundle) or tone_override == "verbatim")
                     and rec.mode in {"capture", "code"})
@@ -12559,6 +12606,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                      for edit in semantic_edits),
                     voice_ir.context.candidates,
                     mode=rec.mode,
+                    self_correction=self_correction,
                 )
                 proof_edits = proof.edits
                 proof_reconstruction_match = proof.text == candidate
@@ -12576,6 +12624,25 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                     text = compiled if rec.mode == "code" else quick_clean(
                         compiled, verbatim=verbatim, continuing=continuing,
                         language=rec.language)
+            elif candidate is None:
+                # The rewrite did not happen: no cleanup model (a default
+                # install has none), or one that did not give a usable
+                # answer. What was dictated is an instruction or a brief,
+                # and pasting it would replace the very selection it was
+                # about.
+                missing = not cleanup_model_installed()
+                report_dictation_problem(
+                    rec,
+                    hud,
+                    f"{rec.mode.capitalize()} mode "
+                    + ("needs the cleanup model" if missing
+                       else "got no rewrite from the cleanup model")
+                    + " — nothing changed",
+                    f"[{rec.mode}] cleanup model "
+                    + ("not installed" if missing else "gave no rewrite")
+                    + "; nothing changed",
+                )
+                return
             else:
                 # Compose/reply/edit retain their explicit broad-rewrite
                 # contracts; proof edits constrain ordinary capture only.
@@ -12583,10 +12650,9 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         elif rec.mode == "code":
             text = compiled
         elif rec.mode in {"edit", "compose", "reply"}:
-            # Reached only when the rewrite model was not asked, which today
-            # means a language it does not handle. What was dictated is then
-            # still an instruction or a brief, and pasting it would replace
-            # the very selection it was about.
+            # Reached only when the rewrite model was not asked, which means
+            # a language it does not handle. The dictation is an instruction
+            # here too, so nothing is pasted.
             report_dictation_problem(
                 rec,
                 hud,

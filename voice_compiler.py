@@ -1346,8 +1346,14 @@ class VoiceCompiler:
     def verify_edits(self, source: str,
                      proposals: Iterable[EditProposal],
                      context: Iterable[ContextCandidate] = (),
-                     mode: str = "capture") -> ProofResult:
-        """Apply independently validated bounded edits to capture text."""
+                     mode: str = "capture",
+                     self_correction: bool = False) -> ProofResult:
+        """Apply independently validated bounded edits to capture text.
+
+        ``self_correction`` is the user's opt-in to the "X, actually Y"
+        rule, the same one ``compile_cleanup`` takes. Without it no edit is
+        accepted as a self-correction.
+        """
         current = source
         proofs: list[ProofEdit] = []
         global_anchors = protected_anchors(source, context)
@@ -1356,7 +1362,8 @@ class VoiceCompiler:
             after = proposal.after
             start, end = self._locate_edit(current, before, mode)
             reason = self._validate_edit(
-                current, proposal, start, end, global_anchors, mode)
+                current, proposal, start, end, global_anchors, mode,
+                self_correction)
             if reason == "accepted":
                 reason = self._validate_in_context(
                     current, proposal, start, end, global_anchors, mode)
@@ -1438,7 +1445,8 @@ class VoiceCompiler:
 
     def _validate_edit(self, source: str, proposal: EditProposal,
                        start: int, end: int,
-                       global_anchors: Sequence[str], mode: str) -> str:
+                       global_anchors: Sequence[str], mode: str,
+                       self_correction: bool = False) -> str:
         if not proposal.before or start < 0:
             return "source span not found"
         if len(proposal.before) > 240:
@@ -1449,10 +1457,12 @@ class VoiceCompiler:
         before_words = _proof_words(proposal.before, preserve_formatting)
         after_words = _proof_words(proposal.after, preserve_formatting)
         # The model may claim a self-correction only where the deterministic
-        # pass would have made the same one: both sides of "actually" are the
-        # same kind of item. Any other "actually" is the speaker's adverb.
+        # pass would have made the same one: the user turned the rule on, and
+        # both sides of "actually" are the same kind of item. Any other
+        # "actually" is the speaker's adverb.
         correction = find_self_correction(
-            proposal.before, source[:start], source[end:])
+            proposal.before, source[:start], source[end:]) \
+            if self_correction else None
         explicit_correction = False
         if correction is not None:
             corrected_from, corrected_to, replacement = correction
