@@ -5700,6 +5700,160 @@ class InsertionAdapterTests(unittest.TestCase):
             ns["copy_support_snapshot"]("  ")
 
 
+class AccessibilityRangeTests(unittest.TestCase):
+    """Accessibility counts UTF-16 units; the field text counts code points."""
+
+    BUNDLE = "com.apple.Notes"
+    APPLICATION_SERVICES = SimpleNamespace(
+        AXValueGetType=lambda _value: None,
+        AXValueGetValue=lambda *_args: None,
+        kAXSelectedTextRangeAttribute="AXSelectedTextRange",
+        kAXSelectedTextAttribute="AXSelectedText",
+        kAXValueCFRangeType=4,
+    )
+
+    @staticmethod
+    def utf16_units(text):
+        return len(text.encode("utf-16-le")) // 2
+
+    def field(self, text, caret):
+        """A field that reports its caret the way macOS does, in UTF-16."""
+        field = {"text": text, "caret": caret, "element": object()}
+
+        def ax_attribute(_element, attribute):
+            if attribute == "AXSelectedTextRange":
+                return (self.utf16_units(field["text"][:field["caret"]]), 0)
+            return None
+
+        def paste(inserted):
+            # The application inserts at its real caret, which is where the
+            # user sees it, whatever unit Accessibility reports it in.
+            field["text"] = (field["text"][:field["caret"]] + inserted
+                             + field["text"][field["caret"]:])
+            field["caret"] += len(inserted)
+
+        field["ax_attribute"] = ax_attribute
+        field["paste"] = paste
+        return field
+
+    def namespace(self, field, coordinator=None):
+        import unicodedata
+        return load_definitions(
+            "_ax_selection", "_ax_reported_range", "_coerce_range",
+            "utf16_range_to_code_points", "FocusSnapshot",
+            "bounded_focus_text", "focus_destination_id",
+            "focus_destination_matches", "opaque_focus_context",
+            "capture_insertion_lease", "unresolved_destination_id",
+            "destination_observation", "commit_insertion",
+            "insertion_capability_buckets", "insertion_join_prefix",
+            "insertion_readback", "classify_readback_conflict",
+            extra={
+                "dataclass": dataclass,
+                "time": time,
+                "unicodedata": unicodedata,
+                "InsertionLease": InsertionLease,
+                "DestinationObservation": DestinationObservation,
+                "INSERTION_COORDINATOR": coordinator or InsertionCoordinator(),
+                "ReadbackResult": ReadbackResult,
+                "ReceiptState": ReceiptState,
+                "_ax_attribute": field["ax_attribute"],
+                "_ax_text": lambda _element: field["text"],
+                "_ax_elements_equal": lambda left, right: left is right,
+                "frontmost_window_destination": lambda _bundle: None,
+                "frontmost_bundle": lambda: self.BUNDLE,
+                "readback_timeout_for_frontmost": lambda: 0.0,
+                "paste": field["paste"],
+                "PIPELINE_STATE": {},
+            },
+        )
+
+    def snapshot(self, ns, field):
+        with mock.patch.dict(sys.modules, {
+                "ApplicationServices": self.APPLICATION_SERVICES}):
+            selection = ns["_ax_selection"](field["element"], field["text"])
+        return ns["FocusSnapshot"](
+            element=field["element"], text=field["text"], selection=selection)
+
+    def dictate(self, text, caret, words):
+        """Lease at press, then commit at release, as the runtime does."""
+        field = self.field(text, caret)
+        ns = self.namespace(field)
+        at_press = self.snapshot(ns, field)
+        lease = ns["capture_insertion_lease"](
+            at_press, self.BUNDLE, "utterance-1")
+        rec = SimpleNamespace(
+            insertion_lease=lease, insertion_receipt=None,
+            focus_at_press=at_press, bundle_at_press=self.BUNDLE,
+            language="en")
+        receipt = ns["commit_insertion"](
+            rec, words, self.BUNDLE, self.snapshot(ns, field))
+        return lease, receipt, field["text"]
+
+    def test_an_emoji_before_a_trailing_caret_still_verifies(self):
+        lease, receipt, result = self.dictate(
+            "Sounds good \U0001F44D", len("Sounds good \U0001F44D"),
+            "See you soon.")
+
+        self.assertFalse(lease.opaque)
+        self.assertEqual(receipt.state, ReceiptState.VERIFIED)
+        self.assertEqual(result, "Sounds good \U0001F44D See you soon.")
+
+    def test_a_caret_mid_text_after_an_emoji_joins_and_verifies(self):
+        text = "\U0001F389 Great news, the build is green."
+        caret = text.index(" the build")
+        lease, receipt, result = self.dictate(text, caret, "Ship it.")
+
+        self.assertFalse(lease.opaque)
+        self.assertEqual(receipt.state, ReceiptState.VERIFIED)
+        # The character left of the caret is the comma, so one space joins.
+        self.assertEqual(
+            result,
+            "\U0001F389 Great news, Ship it. the build is green.")
+
+    def test_a_joined_emoji_sequence_before_the_caret_verifies(self):
+        family = "\U0001F468‍\U0001F469‍\U0001F467"
+        text = f"Family photo {family} and \U0001F44D\U0001F3FD"
+        lease, receipt, result = self.dictate(text, len(text), "Lovely.")
+
+        self.assertFalse(lease.opaque)
+        self.assertEqual(receipt.state, ReceiptState.VERIFIED)
+        self.assertEqual(result, text + " Lovely.")
+
+    def test_a_field_without_emoji_still_verifies(self):
+        lease, receipt, result = self.dictate(
+            "Sounds good.", len("Sounds good."), "See you soon.")
+
+        self.assertFalse(lease.opaque)
+        self.assertEqual(receipt.state, ReceiptState.VERIFIED)
+        self.assertEqual(result, "Sounds good. See you soon.")
+
+    def test_a_selection_over_an_emoji_covers_one_code_point(self):
+        field = self.field("Ok \U0001F44D!", 3)
+        ns = self.namespace(field)
+        convert = ns["utf16_range_to_code_points"]
+
+        self.assertEqual(convert("Ok \U0001F44D!", (3, 2)), (3, 1))
+        self.assertEqual(convert("Ok \U0001F44D!", (5, 1)), (4, 1))
+
+    def test_a_range_that_does_not_fit_the_text_is_withheld(self):
+        field = self.field("Ok \U0001F44D!", 3)
+        ns = self.namespace(field)
+        convert = ns["utf16_range_to_code_points"]
+
+        # Inside the surrogate pair, and past the end of the text: neither
+        # describes this text, so nothing downstream may slice with it.
+        self.assertIsNone(convert("Ok \U0001F44D!", (4, 0)))
+        self.assertIsNone(convert("Ok \U0001F44D!", (7, 0)))
+        field["ax_attribute"] = lambda _element, attribute: (
+            (9, 0) if attribute == "AXSelectedTextRange" else None)
+        ns["_ax_attribute"] = field["ax_attribute"]
+        snapshot = self.snapshot(ns, field)
+        self.assertIsNone(snapshot.selection)
+        lease = ns["capture_insertion_lease"](
+            snapshot, self.BUNDLE, "utterance-1")
+        self.assertTrue(lease.opaque)
+
+
 class ElectronAccessibilityTests(unittest.TestCase):
     def _classifier(self):
         return load_definitions(

@@ -8568,7 +8568,33 @@ def _coerce_range(value) -> tuple[int, int] | None:
     return (int(match.group(1)), int(match.group(2))) if match else None
 
 
-def _ax_selection(element, text: str | None) -> tuple[int, int] | None:
+def utf16_range_to_code_points(text: str, utf16_range: tuple[int, int]) \
+        -> tuple[int, int] | None:
+    """Translate an Accessibility range into (start, length) indices of text.
+
+    Accessibility counts UTF-16 code units, as NSString does, while the bridged
+    value is a Python string indexed by code point: every character outside
+    the Basic Multilingual Plane, which is most emoji, is two units there and
+    one here. A range that runs past the text or splits a surrogate pair does
+    not describe this text, so it converts to None.
+    """
+    location, length = utf16_range
+    encoded = text.encode("utf-16-le", "surrogatepass")
+    end = location + length
+    if location < 0 or length < 0 or 2 * end > len(encoded):
+        return None
+    if len(encoded) == 2 * len(text):
+        return location, length
+    try:
+        start = len(encoded[:2 * location].decode("utf-16-le"))
+        stop = len(encoded[:2 * end].decode("utf-16-le"))
+    except UnicodeDecodeError:
+        return None
+    return start, stop - start
+
+
+def _ax_reported_range(element) -> tuple[int, int] | None:
+    """AXSelectedTextRange exactly as reported: UTF-16 code units."""
     try:
         from ApplicationServices import (
             AXValueGetType,
@@ -8588,6 +8614,19 @@ def _ax_selection(element, text: str | None) -> tuple[int, int] | None:
             return _coerce_range(extracted)
     except Exception:
         pass
+    return None
+
+
+def _ax_selection(element, text: str | None) -> tuple[int, int] | None:
+    """The field's selection as (start, length) code-point indices of text."""
+    reported = _ax_reported_range(element)
+    if reported is not None:
+        # The lease, the join prefix, the readback and undo all slice text
+        # with this range, so it changes units here and nowhere else. A range
+        # that does not fit the text is withheld rather than guessed at.
+        if text is None:
+            return reported
+        return utf16_range_to_code_points(text, reported)
     # When a field exposes only selected text, locate a unique occurrence.
     try:
         from ApplicationServices import kAXSelectedTextAttribute
