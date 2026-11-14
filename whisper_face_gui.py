@@ -14,6 +14,7 @@ import json
 import math
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -958,6 +959,9 @@ def localized_string(key: str, *, locale: str = "en", **values: Any) -> str:
     template = catalog.get(key, STRING_CATALOGS["en"].get(key))
     if template is None:
         raise KeyError(f"unknown localized string: {key}")
+    if "error" in values and "{error}." in template:
+        # Templates end the interpolated reason with their own period.
+        values = {**values, "error": str(values["error"]).rstrip(" .")}
     try:
         return template.format(**values)
     except (KeyError, ValueError) as error:
@@ -3400,12 +3404,21 @@ def normalize_snapshot(
     )
 
 
+# How long a success or info notice outlives the status refresh. Errors have
+# no lifetime: they stay until the next user action replaces them.
+NOTICE_LIFETIME_SECONDS = 8.0
+
+
 class WhisperFaceViewModel:
     """Pure state/actions seam between the runtime and the native window."""
 
-    def __init__(self, actions: GUIActions, *, locale: str = "en"):
+    def __init__(self, actions: GUIActions, *, locale: str = "en",
+                 clock: Callable[[], float] = time.monotonic):
         self.actions = actions
         self.locale = resolve_locale(locale)
+        self._clock = clock
+        self._notice_issued_at = clock()
+        self._status_error_notice = ""
         self.state = GUIState()
         self._onboarding_acknowledged = False
         self._hotkey_practiced = False
@@ -3415,6 +3428,29 @@ class WhisperFaceViewModel:
         self._inspected_demonstration_ids: set[str] = set()
         self._revealed_demonstration_ids: set[str] = set()
         self.refresh()
+
+    @property
+    def state(self) -> GUIState:
+        return self._state
+
+    @state.setter
+    def state(self, value: GUIState) -> None:
+        # Every write goes through here, so a new notice is stamped wherever
+        # it was set, including by the window controller.
+        previous = self.__dict__.get("_state")
+        if previous is None or (value.notice, value.notice_level) != (
+                previous.notice, previous.notice_level):
+            self._notice_issued_at = self._clock()
+        self._state = value
+
+    def _surviving_notice(self) -> tuple[str, str]:
+        notice, level = self.state.notice, self.state.notice_level
+        if not notice or notice == self._status_error_notice:
+            return "", "info"
+        if (level != "error" and self._clock() - self._notice_issued_at
+                >= NOTICE_LIFETIME_SECONDS):
+            return "", "info"
+        return notice, level
 
     def localized(self, key: str, **values: Any) -> str:
         return localized_string(key, locale=self.locale, **values)
@@ -3438,19 +3474,24 @@ class WhisperFaceViewModel:
                         ("listen", "record", "captur"))):
                 self._hotkey_practiced = True
             snapshot["hotkey_practiced"] = self._hotkey_practiced
+            notice, notice_level = self._surviving_notice()
             self.state = normalize_snapshot(
                 snapshot,
                 section=self.state.section,
                 verification=self.state.verification,
+                notice=notice,
+                notice_level=notice_level,
                 onboarding_acknowledged=self._onboarding_acknowledged,
                 settings_pane=self.state.settings_pane,
                 settings=self.state.settings,
                 locale=self.locale,
             )
+            self._status_error_notice = ""
         except Exception as error:
+            self._status_error_notice = self.localized(
+                "overview.notice.status.error", error=error)
             self.state = replace(
-                self.state, notice=self.localized(
-                    "overview.notice.status.error", error=error),
+                self.state, notice=self._status_error_notice,
                 notice_level="error")
         return self.state
 
@@ -5463,6 +5504,8 @@ if APPKIT_AVAILABLE:
             self.themed: dict[str, list[Any]] = {}
             self.timer = None
             self.defaults = None
+            # Set only by the native smoke: answers dialogs without a modal.
+            self.modal_responder: Callable[[Any], int] | None = None
             self._face_images: dict[tuple[str, bool], Any] = {}
             self._onboarding_stage: str | None = None
             self._onboarding_presentation: OnboardingPresentation | None = None
@@ -8042,6 +8085,14 @@ if APPKIT_AVAILABLE:
             return scroll, editor
 
         @objc.python_method
+        def _run_modal(self, alert: Any) -> int:
+            """Run one dialog; the native smoke answers through a responder."""
+            responder = getattr(self, "modal_responder", None)
+            if responder is not None:
+                return int(responder(alert))
+            return int(alert.runModal())
+
+        @objc.python_method
         def _confirm(self, title: str, message: str,
                      primary: str) -> bool:
             alert = NSAlert.alloc().init()
@@ -8049,7 +8100,7 @@ if APPKIT_AVAILABLE:
             alert.setInformativeText_(message)
             alert.addButtonWithTitle_(primary)
             alert.addButtonWithTitle_(self._l("settings.action.cancel"))
-            return alert.runModal() == 1000
+            return self._run_modal(alert) == 1000
 
         def settingsPaneChanged_(self, sender: Any) -> None:
             self.view_model.select_settings_pane(
@@ -8098,7 +8149,7 @@ if APPKIT_AVAILABLE:
             alert.setAccessoryView_(form)
             alert.addButtonWithTitle_(self._l("settings.action.save"))
             alert.addButtonWithTitle_(self._l("settings.action.cancel"))
-            if alert.runModal() == 1000:
+            if self._run_modal(alert) == 1000:
                 selected = tones[app_popup.indexOfSelectedItem()]
                 self.view_model.set_app_tone(
                     selected.bundle,
@@ -8119,39 +8170,55 @@ if APPKIT_AVAILABLE:
 
         @objc.python_method
         def _edit_snippet(self, snippet: SnippetSetting | None) -> None:
-            alert = NSAlert.alloc().init()
-            alert.setMessageText_(self._l(
-                "settings.dialog.snippet.edit" if snippet else
-                "settings.dialog.snippet.add"))
-            form = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 500, 200))
-            form.addSubview_(_label(
-                self._l("settings.dialog.snippet.name"),
-                NSMakeRect(0, 177, 500, 18), size=11, color=_SECONDARY))
-            name = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 145, 500, 28))
-            name.setStringValue_(snippet.name if snippet else "")
-            name.setEditable_(snippet is None)
-            _accessible(
-                name,
-                self._l("settings.dialog.snippet.name"),
-                self._l("settings.dialog.snippet.name.help"))
-            form.addSubview_(name)
-            form.addSubview_(_label(
-                self._l("settings.dialog.snippet.value"),
-                NSMakeRect(0, 120, 500, 18), size=11, color=_SECONDARY))
-            scroll, editor = self._text_editor(
-                NSMakeRect(0, 0, 500, 116), snippet.text if snippet else "",
-                label=self._l("settings.dialog.snippet.value"),
-                help_text=self._l(
-                    "settings.dialog.snippet.value.help"))
-            form.addSubview_(scroll)
-            alert.setAccessoryView_(form)
-            alert.addButtonWithTitle_(self._l("settings.action.save"))
-            alert.addButtonWithTitle_(self._l("settings.action.cancel"))
-            if alert.runModal() == 1000:
-                self.view_model.save_snippet(
-                    str(name.stringValue()), str(editor.string()),
+            typed_name = snippet.name if snippet else ""
+            typed_text = snippet.text if snippet else ""
+            error = ""
+            # A refused save reopens the editor with what was typed and the
+            # reason, so nothing the user wrote is lost to a closed dialog.
+            while True:
+                alert = NSAlert.alloc().init()
+                alert.setMessageText_(self._l(
+                    "settings.dialog.snippet.edit" if snippet else
+                    "settings.dialog.snippet.add"))
+                if error:
+                    alert.setInformativeText_(error)
+                form = NSView.alloc().initWithFrame_(
+                    NSMakeRect(0, 0, 500, 200))
+                form.addSubview_(_label(
+                    self._l("settings.dialog.snippet.name"),
+                    NSMakeRect(0, 177, 500, 18), size=11, color=_SECONDARY))
+                name = NSTextField.alloc().initWithFrame_(
+                    NSMakeRect(0, 145, 500, 28))
+                name.setStringValue_(typed_name)
+                name.setEditable_(snippet is None)
+                _accessible(
+                    name,
+                    self._l("settings.dialog.snippet.name"),
+                    self._l("settings.dialog.snippet.name.help"))
+                form.addSubview_(name)
+                form.addSubview_(_label(
+                    self._l("settings.dialog.snippet.value"),
+                    NSMakeRect(0, 120, 500, 18), size=11, color=_SECONDARY))
+                scroll, editor = self._text_editor(
+                    NSMakeRect(0, 0, 500, 116), typed_text,
+                    label=self._l("settings.dialog.snippet.value"),
+                    help_text=self._l(
+                        "settings.dialog.snippet.value.help"))
+                form.addSubview_(scroll)
+                alert.setAccessoryView_(form)
+                alert.addButtonWithTitle_(self._l("settings.action.save"))
+                alert.addButtonWithTitle_(self._l("settings.action.cancel"))
+                if self._run_modal(alert) != 1000:
+                    return
+                typed_name = str(name.stringValue())
+                typed_text = str(editor.string())
+                state = self.view_model.save_snippet(
+                    typed_name, typed_text,
                     expected_original=(snippet.text if snippet else None))
                 self.render()
+                if state.notice_level != "error":
+                    return
+                error = state.notice
 
         def editSnippets_(self, _sender: Any) -> None:
             snippets = self.view_model.state.settings.snippets
@@ -8172,7 +8239,7 @@ if APPKIT_AVAILABLE:
             alert.addButtonWithTitle_(self._l("settings.action.add"))
             alert.addButtonWithTitle_(self._l("settings.action.delete"))
             alert.addButtonWithTitle_(self._l("settings.action.cancel"))
-            response = alert.runModal()
+            response = self._run_modal(alert)
             selected = (snippets[chooser.indexOfSelectedItem()]
                         if snippets else None)
             if response == 1000 and selected is not None:
@@ -8189,40 +8256,50 @@ if APPKIT_AVAILABLE:
 
         def editVocabulary_(self, _sender: Any) -> None:
             settings = self.view_model.state.settings
-            alert = NSAlert.alloc().init()
-            alert.setMessageText_(self._l(
-                "settings.dialog.vocabulary.title"))
-            alert.setInformativeText_(self._l(
-                "settings.dialog.vocabulary.message"))
-            form = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 520, 220))
-            form.addSubview_(_label(
-                self._l("settings.dialog.vocabulary.terms"),
-                NSMakeRect(0, 198, 250, 18), size=11, color=_SECONDARY))
-            form.addSubview_(_label(
-                self._l("settings.dialog.vocabulary.bans"),
-                NSMakeRect(270, 198, 250, 18), size=11, color=_SECONDARY))
-            term_scroll, term_editor = self._text_editor(
-                NSMakeRect(0, 0, 250, 194),
-                "\n".join(settings.manual_vocabulary),
-                label=self._l("settings.dialog.vocabulary.terms"),
-                help_text=self._l(
-                    "settings.dialog.vocabulary.terms.help"))
-            ban_scroll, ban_editor = self._text_editor(
-                NSMakeRect(270, 0, 250, 194),
-                "\n".join(settings.banned_vocabulary),
-                label=self._l("settings.dialog.vocabulary.bans"),
-                help_text=self._l(
-                    "settings.dialog.vocabulary.bans.help"))
-            form.addSubview_(term_scroll)
-            form.addSubview_(ban_scroll)
-            alert.setAccessoryView_(form)
-            alert.addButtonWithTitle_(self._l("settings.action.save"))
-            alert.addButtonWithTitle_(self._l("settings.action.cancel"))
-            if alert.runModal() == 1000:
-                self.view_model.save_vocabulary(
-                    str(term_editor.string()).splitlines(),
-                    str(ban_editor.string()).splitlines())
+            typed_terms = "\n".join(settings.manual_vocabulary)
+            typed_bans = "\n".join(settings.banned_vocabulary)
+            error = ""
+            # A refused save reopens the editor with both lists as typed.
+            while True:
+                alert = NSAlert.alloc().init()
+                alert.setMessageText_(self._l(
+                    "settings.dialog.vocabulary.title"))
+                alert.setInformativeText_(error or self._l(
+                    "settings.dialog.vocabulary.message"))
+                form = NSView.alloc().initWithFrame_(
+                    NSMakeRect(0, 0, 520, 220))
+                form.addSubview_(_label(
+                    self._l("settings.dialog.vocabulary.terms"),
+                    NSMakeRect(0, 198, 250, 18), size=11, color=_SECONDARY))
+                form.addSubview_(_label(
+                    self._l("settings.dialog.vocabulary.bans"),
+                    NSMakeRect(270, 198, 250, 18), size=11,
+                    color=_SECONDARY))
+                term_scroll, term_editor = self._text_editor(
+                    NSMakeRect(0, 0, 250, 194), typed_terms,
+                    label=self._l("settings.dialog.vocabulary.terms"),
+                    help_text=self._l(
+                        "settings.dialog.vocabulary.terms.help"))
+                ban_scroll, ban_editor = self._text_editor(
+                    NSMakeRect(270, 0, 250, 194), typed_bans,
+                    label=self._l("settings.dialog.vocabulary.bans"),
+                    help_text=self._l(
+                        "settings.dialog.vocabulary.bans.help"))
+                form.addSubview_(term_scroll)
+                form.addSubview_(ban_scroll)
+                alert.setAccessoryView_(form)
+                alert.addButtonWithTitle_(self._l("settings.action.save"))
+                alert.addButtonWithTitle_(self._l("settings.action.cancel"))
+                if self._run_modal(alert) != 1000:
+                    return
+                typed_terms = str(term_editor.string())
+                typed_bans = str(ban_editor.string())
+                state = self.view_model.save_vocabulary(
+                    typed_terms.splitlines(), typed_bans.splitlines())
                 self.render()
+                if state.notice_level != "error":
+                    return
+                error = state.notice
 
         def reviewCorrections_(self, _sender: Any) -> None:
             corrections = self.view_model.state.settings.corrections
@@ -8247,18 +8324,18 @@ if APPKIT_AVAILABLE:
             alert.setAccessoryView_(chooser)
             alert.addButtonWithTitle_(self._l("settings.action.review"))
             alert.addButtonWithTitle_(self._l("settings.action.done"))
-            if alert.runModal() != 1000:
+            if self._run_modal(alert) != 1000:
                 return
             selected = corrections[chooser.indexOfSelectedItem()]
             review = NSAlert.alloc().init()
             review.setMessageText_(
                 f"{selected.source} → {selected.target}")
             review.setInformativeText_(correction_review_text(
-                selected, locale=self.locale))
+                selected, locale=self.view_model.locale))
             review.addButtonWithTitle_(
                 self._l("settings.action.forget_mapping"))
             review.addButtonWithTitle_(self._l("settings.action.done"))
-            if review.runModal() == 1000:
+            if self._run_modal(review) == 1000:
                 self.view_model.forget_learned(selected.kind, selected.key)
                 self.render()
 
@@ -8320,7 +8397,7 @@ if APPKIT_AVAILABLE:
             if candidates:
                 alert.addButtonWithTitle_(self._l("settings.action.forget"))
             alert.addButtonWithTitle_(self._l("settings.action.forget_all"))
-            response = alert.runModal()
+            response = self._run_modal(alert)
             if response == 1001:
                 self.view_model.export_acoustic_keywords()
             elif candidates and response == 1002:
@@ -8385,7 +8462,7 @@ if APPKIT_AVAILABLE:
                 alert.addButtonWithTitle_(self._l(
                     "settings.action.purge_finished"))
             alert.addButtonWithTitle_(self._l("settings.action.done"))
-            response = alert.runModal()
+            response = self._run_modal(alert)
             if not drafts:
                 return
             selected = drafts[chooser.indexOfSelectedItem()]
@@ -8434,7 +8511,7 @@ if APPKIT_AVAILABLE:
                         self._l("settings.action.copy_draft"),
                         self._l(
                             "settings.accessibility.voice_objects.copy"))
-                detail_response = detail.runModal()
+                detail_response = self._run_modal(detail)
                 if (can_compose and detail_response == 1001
                         and self._confirm(
                             self._l(
@@ -8458,7 +8535,7 @@ if APPKIT_AVAILABLE:
                             "point_and_speak.result.no")))
                     result.addButtonWithTitle_(self._l(
                         "settings.action.done"))
-                    result.runModal()
+                    self._run_modal(result)
                 elif (can_copy and detail_response == 1001
                         and self._confirm(
                             self._l(
@@ -8492,7 +8569,7 @@ if APPKIT_AVAILABLE:
                             self._l(
                                 "settings.accessibility.voice_objects."
                                 "clear_clipboard"))
-                    result_response = result.runModal()
+                    result_response = self._run_modal(result)
                     if receipt.state == "copied" and result_response == 1001:
                         clear_receipt = (
                             self.view_model
@@ -8510,7 +8587,7 @@ if APPKIT_AVAILABLE:
                                 "point_and_speak.result.no")))
                         clear_result.addButtonWithTitle_(self._l(
                             "settings.action.done"))
-                        clear_result.runModal()
+                        self._run_modal(clear_result)
             elif response == 1001 and self._confirm(
                     self._l("settings.dialog.voice_objects.ack.title"),
                     self._l(
@@ -8671,7 +8748,7 @@ if APPKIT_AVAILABLE:
                     label=self._l(
                         "settings.accessibility.capture_field.label"))
             try:
-                response = alert.runModal()
+                response = self._run_modal(alert)
             finally:
                 if monitor is not None:
                     try:
@@ -8727,7 +8804,7 @@ if APPKIT_AVAILABLE:
                 alert.addButtonWithTitle_(
                     self._l("settings.dialog.recent.insert"))
             alert.addButtonWithTitle_(self._l("settings.action.done"))
-            response = alert.runModal()
+            response = self._run_modal(alert)
             if chooser is None:
                 return
             selected = entries[chooser.indexOfSelectedItem()]
@@ -8741,7 +8818,7 @@ if APPKIT_AVAILABLE:
                     revealed or self._l(
                         "settings.dialog.recent.revealed.gone"))
                 detail.addButtonWithTitle_(self._l("settings.action.done"))
-                detail.runModal()
+                self._run_modal(detail)
             elif response == 1001:
                 self.view_model.insert_recent_dictation(entry_id)
             self.render()
@@ -8772,7 +8849,7 @@ if APPKIT_AVAILABLE:
             editor.setEditable_(False)
             alert.setAccessoryView_(scroll)
             alert.addButtonWithTitle_(self._l("settings.action.done"))
-            alert.runModal()
+            self._run_modal(alert)
 
         def inspectResultEvidence_(self, _sender: Any) -> None:
             try:
@@ -8795,7 +8872,7 @@ if APPKIT_AVAILABLE:
             editor.setEditable_(False)
             alert.setAccessoryView_(scroll)
             alert.addButtonWithTitle_(self._l("settings.action.done"))
-            alert.runModal()
+            self._run_modal(alert)
 
         def playRetainedSpan_(self, _sender: Any) -> None:
             self.view_model.play_retained_span()
@@ -9744,6 +9821,82 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         model.save_vocabulary(["Qwen", "Parakeet"], ["Gwen"])
         model.forget_learned("correction", "gwen")
         model.forget_learned("snippet", "gwen")
+
+        def accessory_editors(alert: Any) -> tuple[list[Any], list[Any]]:
+            views = list(alert.accessoryView().subviews())
+            return (
+                [view for view in views if view.isKindOfClass_(NSTextField)
+                 and bool(view.isEditable())],
+                [view.documentView() for view in views
+                 if view.isKindOfClass_(NSScrollView)],
+            )
+
+        dialogs: list[Any] = []
+
+        def reject_then_cancel(fill: Callable[[Any], None]) -> Any:
+            def respond(alert: Any) -> int:
+                dialogs.append(alert)
+                if len(dialogs) == 1:
+                    fill(alert)
+                    return 1000
+                return 1001
+            return respond
+
+        def type_reserved_term(alert: Any) -> None:
+            accessory_editors(alert)[1][0].setString_("-reserved\nQwen")
+
+        controller.modal_responder = reject_then_cancel(type_reserved_term)
+        controller.editVocabulary_(None)
+        require(len(dialogs) == 2, "rejected vocabulary reopens the editor")
+        require(
+            str(accessory_editors(dialogs[1])[1][0].string()) ==
+            "-reserved\nQwen", "rejected vocabulary keeps the typed terms")
+        require(
+            "reserved" in str(dialogs[1].informativeText()),
+            "rejected vocabulary names the reason in the editor")
+        require(
+            not any(call[0] == "vocabulary" and "-reserved" in call[1]
+                    for call in calls),
+            "rejected vocabulary never reaches the runtime")
+        model.refresh()
+        require(
+            model.state.notice_level == "error",
+            "rejection notice survives the status refresh")
+
+        def type_long_name(alert: Any) -> None:
+            fields, editors = accessory_editors(alert)
+            fields[0].setStringValue_("n" * 81)
+            editors[0].setString_("Typed text")
+
+        dialogs.clear()
+        controller.modal_responder = reject_then_cancel(type_long_name)
+        controller._edit_snippet(None)
+        fields, editors = accessory_editors(dialogs[-1])
+        require(
+            len(dialogs) == 2 and str(fields[0].stringValue()) == "n" * 81
+            and str(editors[0].string()) == "Typed text",
+            "rejected snippet keeps what was typed")
+
+        private_settings["corrections"] = [{
+            "key": "teh", "source": "teh", "target": "the", "count": 3,
+            "kind": "correction"}]
+        model.load_settings()
+        dialogs.clear()
+
+        def review_then_forget(alert: Any) -> int:
+            dialogs.append(alert)
+            return 1000
+
+        controller.modal_responder = review_then_forget
+        controller.reviewCorrections_(None)
+        require(len(dialogs) == 2, "learned correction review opens")
+        require(
+            str(dialogs[1].messageText()) == "teh → the"
+            and bool(str(dialogs[1].informativeText())),
+            "learned correction review explains the mapping")
+        require(("forget_correction", "teh") in calls,
+                "learned correction can be forgotten")
+        controller.modal_responder = None
         require(keyword_reads[0] == 0, "keyword inspection stays on demand")
         keyword_inspection = model.inspect_acoustic_keywords()
         require(keyword_reads[0] == 1, "explicit keyword inspection")

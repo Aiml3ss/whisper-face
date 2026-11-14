@@ -2405,6 +2405,50 @@ class ViewModelTests(unittest.TestCase):
             localized_string(
                 "overview.notice.status.error", error="service restarting"))
 
+    def test_a_rejected_save_stays_on_screen_through_status_refreshes(self):
+        now = [100.0]
+        model = WhisperFaceViewModel(
+            GUIActions(status_snapshot=lambda: {"capture_state": "Ready"}),
+            clock=lambda: now[0])
+        rejected = model.save_snippet("x" * 81, "Kind regards")
+        self.assertEqual(rejected.notice_level, "error")
+        self.assertNotIn("..", rejected.notice)
+
+        for _tick in range(5):
+            now[0] += 2.0
+            state = model.refresh()
+
+        self.assertEqual(state.notice, rejected.notice)
+        self.assertEqual(state.notice_level, "error")
+        self.assertEqual(model.select_section("Home").notice, "")
+
+    def test_a_success_notice_outlives_a_refresh_then_expires(self):
+        now = [100.0]
+        model = WhisperFaceViewModel(
+            GUIActions(status_snapshot=lambda: {},
+                       save_snippet=lambda *_args: None),
+            clock=lambda: now[0])
+        saved = model.save_snippet("signature", "Kind regards").notice
+        self.assertTrue(saved)
+
+        now[0] += 2.0
+        self.assertEqual(model.refresh().notice, saved)
+        now[0] += 8.0
+        self.assertEqual(model.refresh().notice, "")
+
+    def test_a_status_error_clears_once_status_reads_again(self):
+        failing = [True]
+
+        def status():
+            if failing[0]:
+                raise RuntimeError("service restarting")
+            return {}
+
+        model = WhisperFaceViewModel(GUIActions(status_snapshot=status))
+        self.assertIn("service restarting", model.state.notice)
+        failing[0] = False
+        self.assertEqual(model.refresh().notice, "")
+
     def test_facade_creation_does_not_show_a_window(self):
         gui = create_gui(self.actions)
         self.assertIs(gui.view_model.actions, self.actions)
