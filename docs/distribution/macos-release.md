@@ -64,14 +64,21 @@ never constructs a second settings GUI; the checkout-backed menu-bar service
 continues to own its UI.
 Rerunning the installer replaces only an app owned by this launcher contract.
 For a DMG install it copies and digest-checks the packaged app without rewriting
-it, preserving its Developer ID signature; for a source checkout it reproducibly
-builds an unsigned app. `./setup.sh --verify` checks the app structure and
+it, preserving any Developer ID signature; for a source checkout it builds an
+unsigned (ad-hoc) app locally. A working ad-hoc app already in place is kept
+rather than swapped for another ad-hoc app, because its code hash is its
+privacy identity and swapping it would cost the user every permission grant. `./setup.sh --verify` checks the app structure and
 signature when present, exact receipt digest and checkout/revision binding, and
 then executes no-action `--verify` mode without kickstarting `launchd`.
 
-App acceptance is fail closed. An unsigned sibling is accepted only when its
-Mach-O is byte-identical to recompiling the exact Swift source contract in the
-checkout. A signed sibling must satisfy an Apple Developer ID Application
+App acceptance is fail closed, but a rejected sibling no longer stops the
+install. An ad-hoc signed sibling is accepted only when its bundle digest
+equals the `launcher_bundle_sha256` recorded in the release's
+`RELEASE-METADATA.json`; it is never recompiled for a byte comparison, because
+`swiftc` output carries the builder's toolchain and SDK versions and no other
+Mac reproduces it. A sibling that is unparseable, unsigned, carries no
+recorded digest, or does not match is set aside with a message, and the
+launcher is built locally instead. A Developer ID signed sibling must satisfy an Apple Developer ID Application
 designated requirement for bundle ID `com.berg.whisper-face.launcher` and the
 exact ten-character Team ID pinned in
 `config/macos-signing-policy.json`; an arbitrary valid or ad-hoc signature is
@@ -197,7 +204,8 @@ publication; it has no Apple credentials.
    does and does not prove is set out in
    [release provenance](../security/release-provenance.md).
 6. Install from the extracted source and run `./setup.sh --verify`.
-7. Confirm Diagnostics -> Exact Source and `GET /source` name the tagged
+7. Confirm Advanced -> Exact Source (and, for a `--server-only` install,
+   `GET /source`) name the tagged
    revision. Do not announce availability before all checks pass.
 
 ## Rollback

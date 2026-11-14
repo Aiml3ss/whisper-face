@@ -167,8 +167,8 @@ would remove without removing anything:
 ```
 
 **`git` is not part of the Windows install.** `setup.ps1` installs `uv`,
-`ffmpeg`, and Ollama, and nothing else. The runtime's `/source` endpoint and
-Diagnostics -> Exact Source read the revision by running `git rev-parse HEAD`
+`ffmpeg`, and Ollama, and nothing else. The runtime's `/source` endpoint
+(served only in `--server-only` mode) reads the revision by running `git rev-parse HEAD`
 in the checkout, falling back to the `WHISPER_FACE_SOURCE_REVISION`
 environment variable. The bundle carries the shallow Git metadata that makes
 that possible, but a machine with no `git.exe` on `PATH` still cannot run the
@@ -185,12 +185,15 @@ dictation is unaffected.
 3. Build the bundle from the approved full revision and verify it with the four
    commands above.
 4. Publish `WhisperFace-VERSION-windows-x64.zip`, `update-manifest.json`, and
-   `SHA256SUMS` alongside the Mac assets. Keep the Windows `update-manifest.json`
+   `SHA256SUMS` alongside the Mac assets, renaming the Windows checksum file to
+   `SHA256SUMS-windows` (as v0.4.0 did) so it does not replace the Mac
+   `SHA256SUMS`, which does not list the zip. Keep the Windows `update-manifest.json`
    distinct from the Mac one; `scripts/release_manifest.py` refuses to describe
    both platforms' install paths in a single manifest, because a manifest names
    exactly one entry point.
 5. On a Windows machine, download the published ZIP, compare its SHA-256 against
-   `SHA256SUMS`, extract it, and run `Install.cmd`.
+   `SHA256SUMS-windows`, extract it to a folder that OneDrive does not sync,
+   and run `Install.cmd`.
 6. Run `.\setup.ps1 --verify`, then confirm dictation works after a login.
 7. Do not announce availability before a real Windows install has succeeded.
    Nothing in this repository can verify the Windows install path from macOS.
@@ -198,8 +201,9 @@ dictation is unaffected.
 ## Rollback
 
 The Windows manifest carries the same `rollback` block as the Mac one. There is
-no automatic updater for Windows: `scripts/safe_update_advisor.py` and
-`self_update.py` verify Apple trust and refuse anything else, so a Windows
+no updater for Windows: the tray has no Check for Updates, and
+`scripts/safe_update_advisor.py` verifies Apple trust and refuses anything
+else, so a Windows
 rollback is a manual download of the previous bundle after checking its digest
 against that release's manifest.
 

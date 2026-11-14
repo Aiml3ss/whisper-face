@@ -15,7 +15,7 @@ ad-hoc signed, and the disk image is not notarized.
 
 What a published release does carry is checksums: `SHA256SUMS` for the Mac
 assets, and, from v0.4.0, a separate `SHA256SUMS-windows` for the Windows zip
-(the Mac file is generated without it). So for a published release today, the
+(the Mac file is not built to include it). So for a published release today, the
 only check available is the checksum:
 
 ```sh
