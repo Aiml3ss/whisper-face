@@ -4360,7 +4360,8 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_transcript_log_keeps_performance_metrics(self):
         ns = load_definitions(
-            "append_transcript", "transcript_app_identity",
+            *TranscriptRetentionTests.NAMES,
+            assignments=TranscriptRetentionTests.ASSIGNMENTS,
             extra={"hashlib": hashlib, "os": os, "time": time},
         )
         with tempfile.TemporaryDirectory() as td:
@@ -4382,7 +4383,8 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_a_windows_window_title_never_reaches_transcript_history(self):
         ns = load_definitions(
-            "append_transcript", "transcript_app_identity",
+            *TranscriptRetentionTests.NAMES,
+            assignments=TranscriptRetentionTests.ASSIGNMENTS,
             extra={"hashlib": hashlib, "os": os, "time": time},
         )
         with tempfile.TemporaryDirectory() as td:
@@ -4449,7 +4451,8 @@ class ConfigurationTests(unittest.TestCase):
 
         portable_os = OsWithoutFchmod()
         ns = load_definitions(
-            "append_transcript", "transcript_app_identity",
+            *TranscriptRetentionTests.NAMES,
+            assignments=TranscriptRetentionTests.ASSIGNMENTS,
             extra={"hashlib": hashlib, "os": portable_os, "time": time},
         )
         with tempfile.TemporaryDirectory() as td:
@@ -4468,8 +4471,8 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_paste_outcome_updates_only_its_receipted_record(self):
         ns = load_definitions(
-            "append_transcript", "transcript_app_identity",
-            "record_paste_outcome",
+            *TranscriptRetentionTests.NAMES, "record_paste_outcome",
+            assignments=TranscriptRetentionTests.ASSIGNMENTS,
             extra={
                 "hashlib": hashlib,
                 "os": os,
@@ -4583,6 +4586,192 @@ class ConfigurationTests(unittest.TestCase):
         )
         self.assertTrue(metadata["license_policy"].endswith("LICENSE_POLICY.md"))
         self.assertIn("without warranty", metadata["warranty"].lower())
+
+
+class TranscriptRetentionTests(unittest.TestCase):
+    """The history log stays bounded whether or not the miner ever runs."""
+
+    NOW = 1_800_000_000.0
+    DAY = 24 * 3600.0
+    NAMES = (
+        "append_transcript", "transcript_app_identity",
+        "_transcript_entry_time", "retained_transcript_lines",
+        "_trim_transcripts_locked", "_rebase_learned_processed",
+        "prune_transcripts", "clear_transcript_history",
+        "load_learned", "save_learned",
+    )
+    ASSIGNMENTS = (
+        "TRANSCRIPT_KEEP", "TRANSCRIPT_MAX_AGE", "TRANSCRIPT_TRIM_SLACK",
+        "TRANSCRIPT_AGE_SLACK",
+    )
+
+    def namespace(self, folder, *names, assignments=(), extra=None):
+        writes = []
+
+        def atomic_write_text(path, value, mode=0o600):
+            writes.append(path.name)
+            path.write_text(value)
+
+        ns = load_definitions(
+            *self.NAMES, *names,
+            assignments=self.ASSIGNMENTS + tuple(assignments),
+            extra={
+                "hashlib": hashlib,
+                "os": os,
+                "Path": Path,
+                "time": SimpleNamespace(time=lambda: self.NOW),
+                "atomic_write_text": atomic_write_text,
+                **(extra or {}),
+            },
+        )
+        ns.update({
+            "TRANSCRIPTS_FILE": Path(folder) / "transcripts.jsonl",
+            "LEARNED_FILE": Path(folder) / "learned.json",
+            "TRANSCRIPTS_LOCK": threading.Lock(),
+            "LEARN_LOCK": threading.Lock(),
+            "USAGE_CACHE": {
+                "at": 5.0, "value": (0, 0.0), "lock": threading.Lock()},
+        })
+        return ns, writes
+
+    @staticmethod
+    def write_log(path, timestamps):
+        path.write_text("".join(
+            json.dumps({
+                "ts": ts, "app": "com.apple.TextEdit",
+                "raw": f"note number {index}",
+                "clean": f"Note number {index}.",
+                "path": "fast", "language": "en",
+            }) + "\n"
+            for index, ts in enumerate(timestamps)))
+
+    @staticmethod
+    def entries(path):
+        return [json.loads(line) for line in path.read_text().splitlines()]
+
+    def test_a_failing_miner_still_leaves_the_log_bounded(self):
+        # The default install has no cleanup model, so every mining pass
+        # fails. Retention must not depend on it succeeding.
+        with tempfile.TemporaryDirectory() as td:
+            ns, _ = self.namespace(
+                td, "learn_pass", "parse_texts", "parse_dictionary",
+                "merge_learned_state",
+                assignments=(
+                    "MINER_PROMPT", "LEARN_MIN_NEW", "PROMOTE_MIN_COUNT",
+                    "AUTO_MARKER"),
+                extra={
+                    "ollama_chat": mock.Mock(side_effect=ConnectionError(
+                        "connection refused")),
+                    "refresh_glossary": lambda: [],
+                    "DICTIONARY_FILE": Path(td) / "dictionary.txt",
+                    "DICTIONARY_LOCK": threading.Lock(),
+                },
+            )
+            log = ns["TRANSCRIPTS_FILE"]
+            self.write_log(log, [
+                self.NOW - 3600 + index for index in range(2000)])
+            with contextlib.redirect_stdout(io.StringIO()):
+                ns["learn_pass"]()
+            kept = self.entries(log)
+
+        self.assertLessEqual(len(kept), ns["TRANSCRIPT_KEEP"])
+        self.assertEqual(kept[-1]["clean"], "Note number 1999.")
+
+    def test_appending_alone_never_lets_the_log_exceed_its_cap(self):
+        with tempfile.TemporaryDirectory() as td:
+            ns, writes = self.namespace(td)
+            log = ns["TRANSCRIPTS_FILE"]
+            keep = ns["TRANSCRIPT_KEEP"]
+            self.write_log(log, [self.NOW - 60] * keep)
+            sizes = []
+            for index in range(250):
+                ns["append_transcript"](
+                    f"extra {index}", f"Extra {index}.",
+                    "com.apple.TextEdit", "fast")
+                sizes.append(len(log.read_text().splitlines()))
+            kept = self.entries(log)
+
+        self.assertLessEqual(max(sizes), keep)
+        self.assertEqual(kept[-1]["clean"], "Extra 249.")
+        # Headroom per trim: the file is rewritten a few times, not per paste.
+        self.assertLessEqual(len(writes), 3)
+
+    def test_appending_drops_dictations_older_than_thirty_days(self):
+        with tempfile.TemporaryDirectory() as td:
+            ns, _ = self.namespace(td)
+            log = ns["TRANSCRIPTS_FILE"]
+            self.write_log(log, [
+                self.NOW - 40 * self.DAY,
+                self.NOW - 31 * self.DAY,
+                self.NOW - 10 * self.DAY,
+            ])
+            ns["append_transcript"](
+                "today", "Today.", "com.apple.TextEdit", "fast")
+            kept = [entry["clean"] for entry in self.entries(log)]
+
+        self.assertEqual(kept, ["Note number 2.", "Today."])
+
+    def test_a_log_within_its_bounds_is_appended_without_a_rewrite(self):
+        with tempfile.TemporaryDirectory() as td:
+            ns, writes = self.namespace(td)
+            log = ns["TRANSCRIPTS_FILE"]
+            self.write_log(log, [self.NOW - 29 * self.DAY] + [self.NOW] * 99)
+            ns["append_transcript"](
+                "fine", "Fine.", "com.apple.TextEdit", "fast")
+            count = len(log.read_text().splitlines())
+
+        self.assertEqual(count, 101)
+        self.assertEqual(writes, [])
+
+    def test_the_mining_pass_ages_out_history_without_new_dictations(self):
+        with tempfile.TemporaryDirectory() as td:
+            ns, _ = self.namespace(td)
+            log = ns["TRANSCRIPTS_FILE"]
+            self.write_log(log, [self.NOW - 45 * self.DAY] * 3)
+            ns["prune_transcripts"]()
+            remaining = log.read_text()
+
+        self.assertEqual(remaining, "")
+
+    def test_trimming_keeps_the_miner_on_the_same_dictation(self):
+        with tempfile.TemporaryDirectory() as td:
+            ns, _ = self.namespace(td)
+            log = ns["TRANSCRIPTS_FILE"]
+            keep = ns["TRANSCRIPT_KEEP"]
+            self.write_log(log, [self.NOW - 60] * keep)
+            ns["LEARNED_FILE"].write_text(json.dumps({"processed": keep}))
+            ns["append_transcript"](
+                "new", "New.", "com.apple.TextEdit", "fast")
+            lines = log.read_text().splitlines()
+            processed = json.loads(ns["LEARNED_FILE"].read_text())["processed"]
+
+        # Every older dictation was mined; only the one just added is new.
+        self.assertEqual(processed, len(lines) - 1)
+        self.assertEqual(json.loads(lines[processed])["clean"], "New.")
+
+    def test_clearing_history_erases_the_log_and_resets_the_miner(self):
+        with tempfile.TemporaryDirectory() as td:
+            ns, _ = self.namespace(td)
+            log = ns["TRANSCRIPTS_FILE"]
+            self.write_log(log, [self.NOW] * 12)
+            ns["LEARNED_FILE"].write_text(json.dumps({
+                "processed": 12, "counts": {"Qwen": 2}}))
+            ns["clear_transcript_history"]()
+            existed = log.exists()
+            learned = json.loads(ns["LEARNED_FILE"].read_text())
+            cache_at = ns["USAGE_CACHE"]["at"]
+            ns["append_transcript"](
+                "after", "After.", "com.apple.TextEdit", "fast")
+            after = [entry["clean"] for entry in self.entries(log)]
+            mode = stat.S_IMODE(log.stat().st_mode)
+
+        self.assertFalse(existed)
+        self.assertEqual(learned["processed"], 0)
+        self.assertEqual(learned["counts"], {"Qwen": 2})
+        self.assertEqual(cache_at, 0.0)
+        self.assertEqual(after, ["After."])
+        if os.name == "posix":
+            self.assertEqual(mode, 0o600)
 
 
 class InlineSnippetExpansionTests(unittest.TestCase):

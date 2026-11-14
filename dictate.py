@@ -926,7 +926,7 @@ LEARN_IDLE = 180             # only mine after this much dictation inactivity
 PROMOTE_MIN_COUNT = 2        # seen in 2+ dictations -> goes in dictionary
 PERSONAL_APP_MIN_COUNT = 2   # same correction twice in one app
 PERSONAL_GLOBAL_MIN_COUNT = 3  # same correction three times overall
-TRANSCRIPT_KEEP = 500        # trim the log to this many lines after a pass
+TRANSCRIPT_KEEP = 500        # most dictations the history log ever holds
 
 # Keep-warm heartbeat: touch both models while idle so macOS never swaps
 # them out (a cold first dictation used to cost ~6s of page-in).
@@ -6385,6 +6385,90 @@ def transcript_app_identity(bundle: str) -> str:
     return f"windows:{digest}"
 
 
+TRANSCRIPT_MAX_AGE = 30 * 24 * 3600   # no dictation is kept longer than this
+# Each trim frees this much headroom below both limits, so the log is
+# rewritten about once per hundred dictations or once a day, not per paste.
+TRANSCRIPT_TRIM_SLACK = 100
+TRANSCRIPT_AGE_SLACK = 24 * 3600
+
+
+def _transcript_entry_time(line: str) -> float | None:
+    try:
+        return float(json.loads(line)["ts"])
+    except (TypeError, ValueError, KeyError, IndexError):
+        return None
+
+
+def retained_transcript_lines(lines: list[str], now: float) -> list[str] | None:
+    """The lines a retention pass keeps, or None while the log is in bounds."""
+    if not lines:
+        return None
+    oldest = _transcript_entry_time(lines[0])
+    if (len(lines) <= TRANSCRIPT_KEEP and oldest is not None
+            and oldest >= now - TRANSCRIPT_MAX_AGE):
+        return None
+    cutoff = now - TRANSCRIPT_MAX_AGE + TRANSCRIPT_AGE_SLACK
+    kept = [line for line in lines
+            if (at := _transcript_entry_time(line)) is not None
+            and at >= cutoff]
+    return kept[-(TRANSCRIPT_KEEP - TRANSCRIPT_TRIM_SLACK):]
+
+
+def _trim_transcripts_locked() -> int:
+    """Apply the count and age limits; the caller holds TRANSCRIPTS_LOCK.
+
+    Returns how many entries were dropped from the log.
+    """
+    try:
+        lines = TRANSCRIPTS_FILE.read_text().splitlines()
+    except OSError:
+        return 0
+    kept = retained_transcript_lines(lines, time.time())
+    if kept is None:
+        return 0
+    try:
+        atomic_write_text(
+            TRANSCRIPTS_FILE, "".join(line + "\n" for line in kept))
+    except OSError as e:
+        print(f"! transcript retention failed: {e}")
+        return 0
+    return len(lines) - len(kept)
+
+
+def _rebase_learned_processed(dropped: int):
+    """Keep the miner's position on the same dictation after a trim."""
+    if dropped <= 0:
+        return
+    with LEARN_LOCK:
+        state = load_learned()
+        processed = state.get("processed", 0)
+        if processed:
+            state["processed"] = max(0, processed - dropped)
+            save_learned(state)
+
+
+def prune_transcripts():
+    """Enforce retention without waiting for a dictation or the miner."""
+    with TRANSCRIPTS_LOCK:
+        dropped = _trim_transcripts_locked()
+    _rebase_learned_processed(dropped)
+    if dropped:
+        with USAGE_CACHE["lock"]:
+            USAGE_CACHE["at"] = 0.0
+
+
+def clear_transcript_history():
+    """Erase every kept dictation; the next one starts a new log."""
+    with TRANSCRIPTS_LOCK:
+        try:
+            TRANSCRIPTS_FILE.unlink()
+        except FileNotFoundError:
+            pass
+    _rebase_learned_processed(sys.maxsize)
+    with USAGE_CACHE["lock"]:
+        USAGE_CACHE["at"] = 0.0
+
+
 def append_transcript(raw: str, cleaned: str, bundle: str, path: str,
                       metrics: dict | None = None,
                       event_id: str | None = None,
@@ -6416,6 +6500,8 @@ def append_transcript(raw: str, cleaned: str, bundle: str, path: str,
             # If permission setup or fdopen fails, do not leak the raw handle.
             if fd is not None:
                 os.close(fd)
+        dropped = _trim_transcripts_locked()
+    _rebase_learned_processed(dropped)
     with USAGE_CACHE["lock"]:
         USAGE_CACHE["at"] = 0.0
 
@@ -6459,7 +6545,7 @@ def recent_dictation_metadata(limit: int = RECENT_DICTATION_LIMIT, *,
     app. The text itself only leaves this file through an explicit reveal or
     an explicit re-insertion, so nothing here can end up in a menu title.
 
-    The log is re-read on every call rather than cached, because ``learn_pass``
+    The log is re-read on every call rather than cached, because retention
     rewrites ``transcripts.jsonl`` in place: a retained handle or line offset
     would eventually describe a file that no longer exists.
     """
@@ -6691,6 +6777,7 @@ def parse_texts(lines: list[str]) -> list[str]:
 
 def learn_pass():
     """Mine recent transcripts for new vocabulary and promote frequent terms."""
+    prune_transcripts()
     if not TRANSCRIPTS_FILE.exists():
         return
     lines = TRANSCRIPTS_FILE.read_text().splitlines()
@@ -6751,16 +6838,18 @@ def learn_pass():
             state["counts"][cand] = state["counts"].get(cand, 0) + count
             added.append((cand, state["counts"][cand]))
 
-    # Mark everything mined as processed, then trim the log so it stores only
-    # what the learning loop can still use. Dictations appended while the
-    # miner ran stay unprocessed; re-read under the lock so they survive.
+    # Mark everything mined as processed. Appends during the miner call may
+    # have trimmed the log, so locate the last mined entry by its timestamp
+    # rather than by its old line number.
     with TRANSCRIPTS_LOCK:
-        fresh = TRANSCRIPTS_FILE.read_text().splitlines()
-        unprocessed = max(0, len(fresh) - len(lines))
-        if len(fresh) > TRANSCRIPT_KEEP + 100:
-            fresh = fresh[-TRANSCRIPT_KEEP:]
-            atomic_write_text(TRANSCRIPTS_FILE, "\n".join(fresh) + "\n")
-        state["processed"] = max(0, len(fresh) - unprocessed)
+        try:
+            fresh = TRANSCRIPTS_FILE.read_text().splitlines()
+        except OSError:
+            fresh = []
+    marker = _transcript_entry_time(lines[-1])
+    state["processed"] = next(
+        (index + 1 for index in range(len(fresh) - 1, -1, -1)
+         if _transcript_entry_time(fresh[index]) == marker), 0)
     with LEARN_LOCK:
         state = merge_learned_state(base_state, state, load_learned())
         save_learned(state)
