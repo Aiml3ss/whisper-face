@@ -367,6 +367,31 @@ class ReadbackConflictShapeTests(unittest.TestCase):
             with self.subTest(shape=shape):
                 self.assertEqual(ReadbackResult.conflict(shape).detail, shape)
 
+    def test_the_receipt_carries_the_shape_of_its_own_readback(self):
+        lease = InsertionLease.capture(
+            "utterance-1", "pid:42/field:7", (12, 0), "before|after")
+        matching = DestinationObservation.capture(
+            "pid:42/field:7", (12, 0), "before|after")
+        drifted = DestinationObservation.capture(
+            "pid:42/field:7", (3, 0), "before|after")
+        for current, readback, shape in (
+                (matching, lambda: ReadbackResult.conflict(
+                    "observed-is-prefix"), "observed-is-prefix"),
+                (matching, ReadbackResult.verified_edge_whitespace,
+                 "trailing-whitespace"),
+                (matching, ReadbackResult.verified, ""),
+                (matching, ReadbackResult.unverifiable, ""),
+                (drifted, lambda: ReadbackResult.conflict("divergent"), "")):
+            with self.subTest(shape=shape, current=current.selection):
+                coordinator = InsertionCoordinator()
+                coordinator.stage(lease, "Ship it")
+                receipt = coordinator.commit(
+                    "utterance-1", current, lambda _text: None, readback)
+
+                self.assertEqual(receipt.readback_shape, shape)
+                self.assertEqual(
+                    coordinator.receipt("utterance-1").readback_shape, shape)
+
 
 class EdgeWhitespaceVerificationTests(unittest.TestCase):
     """Edge whitespace proves delivery; nothing weaker may reach VERIFIED."""

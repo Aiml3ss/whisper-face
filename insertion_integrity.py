@@ -172,6 +172,9 @@ class InsertionReceipt:
     state: ReceiptState
     reason: ReceiptReason
     paste_attempted: bool
+    # The readback's shape for this utterance alone, so a record written
+    # later can never pick up another utterance's. Empty when none ran.
+    readback_shape: str = ""
 
 
 @dataclass(frozen=True)
@@ -268,7 +271,7 @@ class InsertionCoordinator:
             if not isinstance(proof, ReadbackResult):
                 raise TypeError("readback must return ReadbackResult")
             receipt = InsertionReceipt(
-                utterance_id, proof.state, proof.reason, True)
+                utterance_id, proof.state, proof.reason, True, proof.detail)
         except Exception:
             # Delivery may precede failure. Retrying risks duplication, so
             # the unresolved entry remains recoverable.

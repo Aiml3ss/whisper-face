@@ -1298,7 +1298,6 @@ PIPELINE_STATE = {
     "last_alternatives": [],
     "last_cleanup_edits": [],
     "last_mode": "capture",
-    "last_readback_shape": "",
     "last_compiler_decisions": 0,
     "last_compiler_details": [],
     "last_protected_anchors": 0,
@@ -9105,9 +9104,6 @@ def commit_insertion(rec, text: str, bundle: str,
     """Commit through a lease when possible, otherwise preserve old behavior."""
     lease = getattr(rec, "insertion_lease", None)
     rec.insertion_capabilities = None
-    # Only a readback that runs for this utterance may name a shape; an
-    # opaque, refused or lease-less commit must not inherit the last one.
-    PIPELINE_STATE["last_readback_shape"] = ""
     # Join to whatever is already there before anything downstream sees the
     # text, so the staged string, the paste, the readback expectation, and
     # the observed range all agree on exactly one string.
@@ -9137,7 +9133,7 @@ def commit_insertion(rec, text: str, bundle: str,
         rec, lease, current, paste_available=True)
 
     def readback():
-        """Read back, and file the conflict shape so a repeat is diagnosable.
+        """Read back; the receipt carries the result's conflict shape.
 
         The shape is a category from READBACK_CONFLICT_SHAPES, never text, so
         one app failing every paste is finally identifiable from the private
@@ -9145,10 +9141,7 @@ def commit_insertion(rec, text: str, bundle: str,
         """
         if current is None or lease.opaque:
             return ReadbackResult.unverifiable()
-        result = insertion_readback(
-            current, text, timeout=READBACK_TIMEOUT)
-        PIPELINE_STATE["last_readback_shape"] = result.detail or ""
-        return result
+        return insertion_readback(current, text, timeout=READBACK_TIMEOUT)
 
     current_bundle = frontmost_bundle()
     receipt = INSERTION_COORDINATOR.commit(
@@ -11894,7 +11887,9 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 if integrity_receipt is not None else "unsupported_field"),
             # How the destination differed, as a category only. Empty unless
             # a readback conflict happened.
-            "readback_shape": PIPELINE_STATE["last_readback_shape"],
+            "readback_shape": (
+                integrity_receipt.readback_shape
+                if integrity_receipt is not None else ""),
             "paste_attempted": attempted,
             "insertion_verified": verified,
             # The capability half of a compatibility observation. Absent

@@ -5687,20 +5687,18 @@ class InsertionAdapterTests(unittest.TestCase):
         self.assertEqual(rec.insertion_capabilities["paste"], "unavailable")
 
     def test_a_readback_shape_never_outlives_its_utterance(self):
-        pipeline = {"last_readback_shape": ""}
         ns = self.capability_namespace(
             InsertionCoordinator(),
             insertion_readback=lambda *_args, **_kwargs:
                 ReadbackResult.conflict("divergent"),
-            PIPELINE_STATE=pipeline,
         )
         readable = SimpleNamespace(
             insertion_lease=InsertionLease.capture(
                 "utterance-1", "field-a", (0, 0), "nearby"),
             insertion_receipt=None, bundle_at_press="com.openai.codex")
-        ns["commit_insertion"](
+        first = ns["commit_insertion"](
             readable, "Ship it", "com.openai.codex", object())
-        self.assertEqual(pipeline["last_readback_shape"], "divergent")
+        self.assertEqual(first.readback_shape, "divergent")
 
         # Refused before the paste: no readback ran, so there is no shape.
         drifted = SimpleNamespace(
@@ -5710,12 +5708,21 @@ class InsertionAdapterTests(unittest.TestCase):
         receipt = ns["commit_insertion"](
             drifted, "Ship it", "com.apple.Terminal", None)
         self.assertFalse(receipt.paste_attempted)
-        self.assertEqual(pipeline["last_readback_shape"], "")
+        self.assertEqual(receipt.readback_shape, "")
 
-        pipeline["last_readback_shape"] = "divergent"
+        # A re-insert from the menu commits outside the release order, so it
+        # can land between a dictation's readback and its transcript record.
+        repaste = SimpleNamespace(
+            insertion_lease=InsertionLease.capture_opaque(
+                "repaste:1", "field-a", "nearby"),
+            insertion_receipt=None, bundle_at_press="com.openai.codex")
+        ns["commit_insertion"](repaste, "Ship it", "com.openai.codex", None)
+        self.assertEqual(readable.insertion_receipt.readback_shape,
+                         "divergent")
+
         legacy = SimpleNamespace(insertion_lease=None, insertion_receipt=None)
-        ns["commit_insertion"](legacy, "Ship it", "com.openai.codex", None)
-        self.assertEqual(pipeline["last_readback_shape"], "")
+        self.assertIsNone(ns["commit_insertion"](
+            legacy, "Ship it", "com.openai.codex", None))
 
     def test_the_legacy_path_reports_no_capabilities_at_all(self):
         rec = SimpleNamespace(insertion_lease=None, insertion_receipt=None)
