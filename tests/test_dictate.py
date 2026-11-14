@@ -7213,8 +7213,9 @@ class CustomVocabularyTests(unittest.TestCase):
             "refresh_glossary",
             extra={
                 "parse_dictionary": lambda: (list(manual), set()),
+                "PersonalRegressionLab": PersonalRegressionLab,
                 "load_learned": lambda: {
-                    "counts": {}, "fixes": {}, "confusions": {}},
+                    "counts": {"swift": 3}, "fixes": {}, "confusions": {}},
                 "write_auto_section": lambda _promoted: None,
                 "personal_regression_lab": lambda _state: object(),
                 "ContextPack": ContextPack,
@@ -7240,10 +7241,14 @@ class CustomVocabularyTests(unittest.TestCase):
 
         self.assertEqual(len(gloss["terms"]), 60)   # prompt cap unchanged
         anchor_texts = {c.text for c in gloss["anchor_pack"].candidates}
-        self.assertEqual(len(anchor_texts), 70)
+        self.assertEqual(len(anchor_texts), 71)
         for term in manual:
             self.assertIn(term, anchor_texts)
             self.assertEqual(gloss["vocabulary"][term.casefold()], term)
+        # A learned term is protected, but only a term the user wrote sets
+        # casing: nobody chose the case a learned term was first seen in.
+        self.assertIn("swift", anchor_texts)
+        self.assertEqual(len(gloss["vocabulary"]), 70)
         # A term beyond the 60-term prompt cap is still protected and normalized.
         self.assertNotIn("Term65", gloss["terms"])
         self.assertIn("Term65", anchor_texts)
@@ -7269,6 +7274,12 @@ class CustomVocabularyTests(unittest.TestCase):
         self.assertEqual(casing("i pushed to GitHub"), "i pushed to GitHub")
         # An unlisted (or banned, hence absent) term is untouched.
         self.assertEqual(casing("switch to qwen now"), "switch to qwen now")
+        # Casing only raises letters. A lowercase term never takes the
+        # capital off a sentence start, and capitals are not lowered to fit.
+        gloss["vocabulary"].update({"kubectl": "kubectl", "iphone": "iPhone"})
+        self.assertEqual(
+            casing("Kubectl is installed. Github and GITHUB. Iphone, iphone."),
+            "Kubectl is installed. GitHub and GITHUB. Iphone, iPhone.")
 
 
 class DelayedCleanupRuntimeTests(unittest.TestCase):

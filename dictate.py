@@ -6354,14 +6354,16 @@ def refresh_glossary():
         chars += len(t) + 2
 
     # The full manual+promoted list (before the prompt truncation above) also
-    # feeds two additive protections that do not touch the prompt budget:
-    # listed terms become protected cleanup anchors, and their casing is
-    # normalized to what the user wrote. Bans are honored in both.
+    # feeds an additive protection that does not touch the prompt budget:
+    # listed terms become protected cleanup anchors. Casing is normalized only
+    # for terms the user wrote, because a learned term carries whatever case
+    # a correction or the miner happened to see. Bans are honored in both.
     vocab_terms = [t for t in manual + promoted if t.casefold() not in banned]
     anchor_pack = ContextPack(tuple(
         ContextCandidate(t, 3.5, "dictionary")
         for t in vocab_terms[:ANCHOR_MAX_TERMS]))
-    vocabulary = {t.casefold(): t for t in vocab_terms}
+    vocabulary = {t.casefold(): t for t in manual
+                  if t.casefold() not in banned}
     with ACOUSTIC_KEYWORD_MEMORY_LOCK:
         keyword_memory, keyword_storage_status = \
             _load_acoustic_keyword_memory()
@@ -7735,7 +7737,8 @@ def apply_vocabulary_casing(text: str) -> str:
     user wrote in the dictionary (e.g. "github" -> "GitHub"). Case-insensitive
     on the match, whole-word only so "github" inside "githubbed" is left alone,
     and a token already in canonical form is untouched. Additive: only a token
-    whose casefold equals a listed term is ever changed."""
+    whose casefold equals a listed term is ever changed, and only by raising
+    letters, so a capital the recognizer produced (a sentence start) stays."""
     if not text:
         return text
     with GLOSS["lock"]:
@@ -7747,6 +7750,9 @@ def apply_vocabulary_casing(text: str) -> str:
         word = match.group(0)
         canonical = vocabulary.get(word.casefold())
         if canonical is None or canonical == word:
+            return word
+        if any(have.isupper() and not want.isupper()
+               for have, want in zip(word, canonical)):
             return word
         return canonical
 
