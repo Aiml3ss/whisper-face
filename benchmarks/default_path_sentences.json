@@ -104,8 +104,11 @@
     {"id": "repeat-number-words", "covers": "repeats", "spoken": "Dial five five five, one two three four.", "expected": "Dial five five five, one two three four."},
     {"id": "repeat-letters", "covers": "repeats", "spoken": "Type w w w dot example dot com.", "expected": "Type w w w dot example dot com."},
     {"id": "repeat-twice", "covers": "repeats", "spoken": "No, no, that's not it.", "expected": "No, no, that's not it."},
-    {"id": "repeat-three-times", "covers": "repeats", "spoken": "That was very, very, very good.", "expected": "That was very, very, very good.", "known_failure": "collapse_repeats treats any word said three times as an ASR decode loop: the third 'very' is dropped and its comma stays ('very, very, good.')."},
-    {"id": "repeat-three-times-no", "covers": "repeats", "spoken": "No, no, no, that's wrong.", "expected": "No, no, no, that's wrong.", "known_failure": "collapse_repeats treats any word said three times as an ASR decode loop: the third 'no' is dropped."},
+    {"id": "repeat-three-times", "covers": "repeats", "spoken": "That was very, very, very good.", "expected": "That was very, very, very good."},
+    {"id": "repeat-three-times-no", "covers": "repeats", "spoken": "No, no, no, that's wrong.", "expected": "No, no, no, that's wrong."},
+    {"id": "repeat-three-times-unpunctuated", "covers": "repeats", "spoken": "That was very, very, very good", "expected": "That was very, very, very good."},
+    {"id": "repeat-three-times-bare", "covers": "repeats", "spoken": "It was a really really really long day.", "expected": "It was a really really really long day."},
+    {"id": "repeat-four-times", "covers": "repeats", "spoken": "No no no no, don't send that.", "expected": "No no no no, don't send that."},
 
     {"id": "emoji-before-caret", "covers": "emoji", "field": "Nice work 🎉", "spoken": "Ship it on Friday.", "expected": "Nice work 🎉 Ship it on Friday."},
     {"id": "emoji-skin-tone-before-caret", "covers": "emoji", "field": "Thanks 👍🏽 ", "spoken": "See you tomorrow.", "expected": "Thanks 👍🏽 See you tomorrow."},

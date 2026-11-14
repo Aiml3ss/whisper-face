@@ -10788,10 +10788,15 @@ def audio_gate_measurements(audio: np.ndarray) -> tuple[float, float]:
 
 
 def collapse_repeats(text: str) -> tuple[str, bool]:
-    """Collapse runs of one token repeated 3+ times — the signature of an ASR
-    decode loop, never of real speech ("no no" survives, "Unraid" x40 does
-    not). Returns (text, looped) where looped means a substantial run was
-    removed.
+    """Collapse a long run of one repeated token to two of it — the
+    signature of an ASR decode loop ("Unraid" x40). Returns (text, looped)
+    where looped means a substantial run was removed.
+
+    A word said a few times is speech, with or without the commas a pause
+    leaves ("very, very, very good", "no no no no"), and is kept whole. A
+    stuck decoder repeats until the segment ends, so only a run of eight
+    or more is a loop. A shorter loop is left in: extra words are visible
+    and easy to delete, and a dropped word is neither.
 
     Whitespace tokenization means this cannot see inside a Japanese or
     Chinese transcript, which arrives as a single token. It fails closed
@@ -10800,17 +10805,23 @@ def collapse_repeats(text: str) -> tuple[str, bool]:
 
     Digits, number words and single characters are never collapsed: a zip
     code ("1 0 0 0 1"), a phone number ("five five five") and a spelled
-    address ("w w w") repeat a token three times in real speech.
+    address ("w w w") repeat a token in real speech.
     """
+    loop_min_run = 8
     words = text.split()
-    out, prev, run = [], None, 0
-    for w in words:
-        key = w.strip(",.;:!?…\"'。、！？「」").casefold()
-        run = run + 1 if key == prev else 1
-        prev = key
-        if (run <= 2 or len(key) <= 1 or key in NUMBER_WORDS
-                or any(char.isdigit() for char in key)):
-            out.append(w)
+    keys = [w.strip(",.;:!?…\"'。、！？「」").casefold() for w in words]
+    out = []
+    start = 0
+    while start < len(words):
+        key = keys[start]
+        end = start + 1
+        while end < len(words) and keys[end] == key:
+            end += 1
+        is_loop = (end - start >= loop_min_run and len(key) > 1
+                   and key not in NUMBER_WORDS
+                   and not any(char.isdigit() for char in key))
+        out.extend(words[start:start + 2] if is_loop else words[start:end])
+        start = end
     return " ".join(out), bool(words) and len(out) <= 0.6 * len(words)
 
 

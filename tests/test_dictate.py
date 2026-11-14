@@ -4721,6 +4721,30 @@ class CleanupGuardTests(unittest.TestCase):
             "Dial 555 555 555 and wait.",
             "w w w dot example dot com",
             "The grade was A A A plus.",
+            "The code is " + "7 " * 12 + "and then pound.",
+            "Type " + "five " * 9 + "and stop.",
+            "Press " + "x " * 10 + "to clear it.",
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(
+                    ns["collapse_repeats"](spoken), (spoken, False))
+
+    def test_repeat_collapse_keeps_a_word_said_a_few_times(self):
+        ns = load_definitions(
+            "collapse_repeats", extra={"NUMBER_WORDS": NUMBER_WORDS})
+        for spoken in (
+            # As the real recognizer wrote them.
+            "That was very, very, very good",
+            "no, no, that's wrong.",
+            "really really good work.",
+            "It was a long, long time ago.",
+            # Emphasis, with and without the commas a pause leaves.
+            "No, no, no, that's wrong.",
+            "Really really really good work.",
+            "No no no no, stop.",
+            "No, no, no, no, no. Stop.",
+            "Blah blah blah, he kept talking.",
+            "Ha ha ha ha ha ha ha, very funny.",
         ):
             with self.subTest(spoken=spoken):
                 self.assertEqual(
@@ -4733,6 +4757,15 @@ class CleanupGuardTests(unittest.TestCase):
         self.assertEqual(
             collapse("Restart " + "Unraid " * 40 + "tonight."),
             ("Restart Unraid Unraid tonight.", True))
+        # A loop on a glossary term echoes the prompt's commas.
+        self.assertEqual(
+            collapse("Common terms: " + "Unraid, " * 30 + "Unraid."),
+            ("Common terms: Unraid, Unraid,", True))
+        # Seven is still a person; eight is a decoder.
+        seven = "Okay " * 7 + "then."
+        self.assertEqual(collapse(seven), (seven, False))
+        self.assertEqual(
+            collapse("Okay " * 8 + "then."), ("Okay Okay then.", True))
         self.assertEqual(
             collapse("No no, that is wrong."),
             ("No no, that is wrong.", False))

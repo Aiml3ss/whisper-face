@@ -334,6 +334,12 @@ class FreshInstallDictationTests(unittest.TestCase):
             dictate.PREFERENCES_FILE.read_text())["self_correction"], False)
         self.assertEqual(typed(spoken), spoken)
 
+    def test_a_recognizer_stuck_on_one_word_is_cut_short(self):
+        mac = booted()
+        field = mac.dictate_sentence(
+            "Restart " + "Unraid " * 40 + "tonight.", field=TextField())
+        self.assertEqual(field.text, "Restart Unraid Unraid tonight.")
+
     def test_a_filled_snippet_expands_only_when_asked_for(self):
         mac = booted()
         template = json.loads(

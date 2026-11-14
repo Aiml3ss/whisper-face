@@ -78,7 +78,7 @@
   {
    "path": "benchmarks/default_path_sentences.json",
    "case_key": "cases",
-   "cases": 107,
+   "cases": 110,
    "content": "synthetic-text",
    "requirement": "clone-only",
    "command": "uv run tests/test_whole_program.py",
