@@ -4986,19 +4986,29 @@ class LearningTests(unittest.TestCase):
                             [(3.0, "can", "can't")])
             runtime.dictate("We can make the release.",
                             [(3.0, "can", "can't")])
+            # The same choices spelled without the apostrophe, a negation
+            # flip and a change of tense are no more a mishearing.
+            for heard, typed in (
+                    ("can", "cant"), ("want", "won't"), ("got", "get"),
+                    ("site", "sight")):
+                runtime.dictate(f"I think {heard} it works.",
+                                [(3.0, f" {heard} ", f" {typed} ")])
+                runtime.dictate(f"Maybe {heard} we go.",
+                                [(3.0, f" {heard} ", f" {typed} ")])
 
             state = runtime.state()
             gloss = runtime.ns["GLOSS"]
             for engine in ("parakeet-unified", "tiny"):
-                with self.subTest(engine=engine):
-                    self.assertEqual(
-                        runtime.compiled(
-                            "Is there a problem over there?", engine=engine),
-                        "Is there a problem over there?")
-                    self.assertEqual(
-                        runtime.compiled(
-                            "Yes, we can ship it today.", engine=engine),
-                        "Yes, we can ship it today.")
+                for sentence in (
+                        "Is there a problem over there?",
+                        "Yes, we can ship it today.",
+                        "I want to ship it today.",
+                        "We got the build.",
+                        "The site is down."):
+                    with self.subTest(engine=engine, sentence=sentence):
+                        self.assertEqual(
+                            runtime.compiled(sentence, engine=engine),
+                            sentence)
             self.assertEqual(
                 runtime.ns["apply_vocabulary_casing"](
                     "Their plan is fine. Their team agreed."),

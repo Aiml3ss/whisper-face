@@ -204,7 +204,12 @@ class PersonalRegressionLabTests(unittest.TestCase):
         for heard, preferred in (
                 ("there", "their"), ("their", "there"), ("can", "can't"),
                 ("can\u2019t", "can"), ("to", "too"), ("Tuesday", "Thursday"),
-                ("15", "50")):
+                ("15", "50"),
+                # Contractions typed without their apostrophe, everyday
+                # verbs, and a negation against any word at all.
+                ("can", "cant"), ("want", "wont"), ("want", "won't"),
+                ("got", "get"), ("site", "sight"), ("its", "it's"),
+                ("Kant", "can't"), ("knot", "not"), ("isn't", "Izzy")):
             with self.subTest(heard=heard, preferred=preferred):
                 lab = PersonalRegressionLab()
                 lab.record_correction(heard, preferred, app="com.slack")
@@ -282,6 +287,12 @@ class PersonalRegressionLabTests(unittest.TestCase):
         self.assertEqual(lab.quarantined, (held,))
         self.assertTrue(lab.propose(
             "Mark", "Mary", app="com.slack", corrected=3, kept=2).promoted)
+        # Evidence that catches up with an active mapping takes it down.
+        self.assertFalse(lab.propose(
+            "Mark", "Mary", app="com.slack", corrected=3, kept=3).promoted)
+        self.assertEqual(lab.promoted, ())
+        self.assertEqual(
+            lab.apply("Call Mark.", app="com.slack"), "Call Mark.")
 
     def test_replacement_keeps_a_capital_the_recognizer_placed(self):
         lab = PersonalRegressionLab()
