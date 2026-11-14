@@ -6989,6 +6989,141 @@ class ReleasePlanTests(unittest.TestCase):
             "[dropped] ASR gave nothing",
         )])
 
+    def _release(self, mode, language, spoken, selected="Hallo zusammen"):
+        """Drive finish_and_process from a decoded take to its insertion."""
+        pasted = []
+        problems = []
+
+        def commit(_rec, text, _bundle, _target):
+            pasted.append(text)
+            raise RuntimeError("stop after the insertion call")
+
+        compiled = SimpleNamespace(
+            text=spoken, confidence=0.93, decisions=(), anchors=(),
+            stable_prefix="")
+        ns = load_definitions(
+            "finish_and_process",
+            "collapse_repeats",
+            "extract_tone_override",
+            "needs_llm_cleanup",
+            "quick_clean",
+            assignments={
+                "TONE", "TONE_OVERRIDE_RE", "TONE_ALIASES", "CONT_END"},
+            extra={
+                "np": np,
+                "time": SimpleNamespace(
+                    perf_counter=lambda: 10.0, time=lambda: 10.0,
+                    time_ns=lambda: 10),
+                "NUMBER_WORDS": NUMBER_WORDS,
+                "compile_cleanup": compile_cleanup,
+                "release_should_wait_for_tail": lambda _rec: False,
+                "can_reuse_speculation": lambda *_args: False,
+                "ASR_POOL": SimpleNamespace(
+                    submit=lambda *_args, **_kwargs: SimpleNamespace()),
+                "BoundedRecognitionFuture": lambda *_args: SimpleNamespace(),
+                "transcribe_detailed": object(),
+                "SAMPLE_RATE": 16_000,
+                "MIN_SECONDS": 0.25,
+                "GATE_PEAK_RMS": 0.002,
+                "peak_rms": lambda _audio: 0.1,
+                "audio_gate_measurements": lambda _audio: (1.0, 0.1),
+                "assemble_raw": lambda *_args: Recognition(
+                    spoken, confidence=0.86, engine="turbo",
+                    audio_duration=1.0),
+                "Recognition": Recognition,
+                "is_hallucination": lambda *_args: False,
+                "looks_like_prompt_echo": lambda _text: False,
+                "consume_risky_action_confirmation_voice":
+                    lambda _text: False,
+                "clear_retained_consequence_spans": lambda: None,
+                "compile_voice_evidence": lambda *_args, **_kwargs: (
+                    SimpleNamespace(
+                        context=SimpleNamespace(candidates=())),
+                    compiled),
+                "runtime_consequence_evidence":
+                    lambda *_args, **_kwargs: 0.0,
+                "active_consequence_verifier": lambda: None,
+                "runtime_context_firewall_evidence": lambda *_args: 0.0,
+                "learned_alternatives": lambda _text, _bundle: [],
+                "PIPELINE_STATE": {},
+                "CAPTION": {},
+                "queue_voice_object_command": lambda *_args: False,
+                "apply_spoken_edit_command": lambda *_args: False,
+                "match_snippet": lambda _text: None,
+                "_load_snippet_map": lambda: {},
+                "_mask_snippets_inline": lambda text, _snippets: (text, {}),
+                "is_verbatim_app": lambda _bundle: False,
+                "cursor_context": lambda: None,
+                "tone_for": lambda _bundle: "default",
+                "apply_vocabulary_casing": lambda text: text,
+                "focused_snapshot": lambda: SimpleNamespace(),
+                "make_paste_receipt": lambda *_args: SimpleNamespace(),
+                "commit_insertion": commit,
+                "play": lambda _sound: None,
+                "report_dictation_problem": (
+                    lambda _rec, _hud, caption, log, **_kwargs:
+                    problems.append((caption, log))),
+                "dictation_feedback_delay": lambda _rec: 0.0,
+                "schedule_dictation_feedback_dismissal":
+                    lambda _rec, _hud, _active: None,
+                "DICTATION_PROCESS_ORDER": SimpleNamespace(
+                    wait=lambda _ticket: None),
+                "print": lambda *_args: None,
+                "LAST_USE": {},
+                "AppHelper": SimpleNamespace(callAfter=lambda *_args: None),
+            },
+        )
+        recorder = SimpleNamespace(
+            released_at=1.0,
+            speculative_future=None,
+            speculative_invalid=False,
+            speculative_start=0,
+            speculative_end=0,
+            prompt=None,
+            language=language,
+            process_ticket=None,
+            recording=False,
+            uncertain=False,
+            mode=mode,
+            bundle_at_press="com.apple.TextEdit",
+            context_terms=(),
+            context_pack=None,
+            utterance_id="take-1",
+            insertion_lease=None,
+            insertion_receipt=None,
+            focus_at_press=SimpleNamespace(
+                selected_text=selected, text=selected,
+                selection=(0, len(selected))),
+            stop=lambda: np.ones(16_000, dtype=np.float32),
+            cut_samples=8_000,
+            chunks=[],
+        )
+        ns["finish_and_process"](recorder, SimpleNamespace(), {})
+        return pasted, problems
+
+    def test_rewrite_modes_never_paste_the_instruction_without_the_model(self):
+        # The cleanup model is English-only. In another language Edit used
+        # to fall through to plain cleanup and paste the spoken instruction
+        # over the text it was meant to change.
+        for mode, spoken in (
+            ("edit", "mach das formeller"),
+            ("reply", "sag ihr dass ich zustimme"),
+            ("compose", "kurze absage an das team"),
+        ):
+            with self.subTest(mode=mode):
+                pasted, problems = self._release(mode, "de", spoken)
+                self.assertEqual(pasted, [])
+                self.assertEqual(len(problems), 1)
+                caption, log = problems[0]
+                self.assertIn("nothing changed", caption)
+                self.assertIn(mode.capitalize(), caption)
+                self.assertNotIn(spoken, log)
+
+    def test_plain_dictation_in_another_language_is_still_inserted(self):
+        pasted, _problems = self._release(
+            "capture", "de", "wir treffen uns morgen")
+        self.assertEqual(pasted, ["wir treffen uns morgen"])
+
     def test_failed_chunk_downgrades_surviving_word_timing(self):
         class Future:
             def __init__(self, value=None, error=None):

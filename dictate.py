@@ -11502,6 +11502,20 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 text = candidate
         elif rec.mode == "code":
             text = compiled
+        elif rec.mode in {"edit", "compose", "reply"}:
+            # Reached only when the rewrite model was not asked, which today
+            # means a language it does not handle. What was dictated is then
+            # still an instruction or a brief, and pasting it would replace
+            # the very selection it was about.
+            report_dictation_problem(
+                rec,
+                hud,
+                f"{rec.mode.capitalize()} mode needs English — "
+                "nothing changed",
+                f"[{rec.mode}] rewrite model not available for this "
+                "language; nothing changed",
+            )
+            return
         else:
             text = quick_clean(
                 compiled, verbatim=verbatim, continuing=continuing,
