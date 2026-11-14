@@ -1510,6 +1510,12 @@ class VoiceCompiler:
                     continue
                 if prior.apps and not prior.app_count(voice.app_bundle):
                     continue
+                # A word inside an email address, a handle or a URL is part
+                # of an identifier, not the word the prior was learned for.
+                run = (re.search(r"\S*\Z", primary.text[:token.start]).group()
+                       + re.match(r"\S*", primary.text[token.start:]).group())
+                if "@" in run or "://" in run:
+                    break
                 preferred = prior.preferred
                 # A capital the recognizer placed, such as a sentence start,
                 # survives an all-lowercase preferred spelling.

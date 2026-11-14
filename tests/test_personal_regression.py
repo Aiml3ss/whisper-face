@@ -332,6 +332,17 @@ class PersonalRegressionLabTests(unittest.TestCase):
 
         self.assertEqual(lab.apply("Gwen and Qwen"), "Qwen and When")
 
+    def test_a_mapping_never_rewrites_inside_an_address(self):
+        lab = PersonalRegressionLab()
+        lab.record_correction("Gwen", "Qwen")
+        lab.propose("Gwen", "Qwen")
+
+        self.assertEqual(
+            lab.apply("Email gwen@example.com or gwen.lee@example.com, ping "
+                      "@gwen, read https://example.com/gwen, then ask Gwen."),
+            "Email gwen@example.com or gwen.lee@example.com, ping "
+            "@gwen, read https://example.com/gwen, then ask Qwen.")
+
     def test_stale_serialized_promotion_is_rechecked_and_quarantined(self):
         restored = PersonalRegressionLab.from_dict({
             "version": 1,

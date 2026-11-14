@@ -126,6 +126,24 @@ class VoiceCompilerTests(unittest.TestCase):
             [("Kubernetis", "Kubernetes", "personal-prior"),
              ("kubernetis", "kubernetes", "personal-prior")])
 
+    def test_personal_prior_never_rewrites_inside_an_address(self):
+        text = ("Email gwen@example.com or gwen.lee@example.com, ping "
+                "@gwen, read https://example.com/gwen, then ask Gwen.")
+        voice = VoiceIR(
+            hypotheses=(RecognitionHypothesis(
+                text, 0.9, "parakeet-unified"),),
+            personal_priors=(PersonalPrior("Gwen", "Qwen", count=3),),
+        )
+
+        result = self.compiler.compile(voice)
+
+        self.assertEqual(result.text, text[:-len("Gwen.")] + "Qwen.")
+        self.assertEqual(
+            [(decision.before, decision.after)
+             for decision in result.decisions
+             if decision.reason == "personal-prior"],
+            [("Gwen", "Qwen")])
+
     def test_proof_edits_accept_filler_but_protect_facts(self):
         source = "Um ship API v2 at 15:30 tomorrow"
         result = self.compiler.verify_edits(source, (

@@ -145,6 +145,14 @@ def _in_heard_case(found: str, mapping: "LearnedMapping") -> str:
     return preferred
 
 
+def _in_address(text: str, start: int, end: int) -> bool:
+    """Whether the span sits inside an email address, a handle or a URL."""
+    run = (re.search(r"\S*\Z", text[:start]).group()
+           + text[start:end]
+           + re.match(r"\S*", text[end:]).group())
+    return "@" in run or "://" in run
+
+
 def _valid_span(value: Any) -> bool:
     return isinstance(value, str) and 0 < len(value) <= MAX_SPAN_CHARS
 
@@ -442,13 +450,15 @@ class PersonalRegressionLab:
             rf"(?<!\w)(?:{'|'.join(re.escape(v) for v in alternatives)})(?!\w)",
             flags=re.IGNORECASE,
         )
+        def replacement(match: re.Match[str]) -> str:
+            if _in_address(text, match.start(), match.end()):
+                return match.group(0)
+            return _in_heard_case(
+                match.group(0), chosen[match.group(0).casefold()])
+
         # One substitution pass over the original text prevents mapping chains
         # such as Gwen->Qwen and Qwen->When from recursively changing Gwen.
-        return pattern.sub(
-            lambda match: _in_heard_case(
-                match.group(0), chosen[match.group(0).casefold()]),
-            text,
-        )
+        return pattern.sub(replacement, text)
 
     def apply(self, text: str, *, app: str | None = None) -> str:
         return self._apply_mappings(text, app=app)
