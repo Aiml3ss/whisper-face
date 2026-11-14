@@ -35,6 +35,7 @@ PERSONAL_FILES = (
     "acoustic_keyword_activation.json",
     "acoustic_calibration_activation.json",
     "relisten_activation.json",
+    "phone_token.txt",
     "dictate.log",
     "ollama.log",
     "install.log",

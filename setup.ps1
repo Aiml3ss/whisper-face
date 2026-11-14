@@ -497,6 +497,7 @@ function Invoke-Uninstall {
         "demonstrations.json", "acoustic_keyword_memory.json",
         "delayed_cleanup_activation.json", "acoustic_keyword_activation.json",
         "acoustic_calibration_activation.json", "relisten_activation.json",
+        "phone_token.txt",
         "dictate.log", "ollama.log", "ollama-error.log", "install.log"
     )) {
         Remove-InstalledPath $RemovePersonalData `

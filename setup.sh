@@ -613,6 +613,7 @@ uninstall_whisper_face() {
             "$DIR/acoustic_keyword_activation.json" \
             "$DIR/acoustic_calibration_activation.json" \
             "$DIR/relisten_activation.json" \
+            "$DIR/phone_token.txt" \
             "$DIR/dictate.log" \
             "$DIR/ollama.log" \
             "$DIR/install.log"; do
