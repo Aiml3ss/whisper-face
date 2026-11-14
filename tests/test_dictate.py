@@ -6210,6 +6210,119 @@ class HotkeyListenerRecoveryTests(unittest.TestCase):
         self.assertEqual(events.get_nowait(), (
             "listener_recovery", 12.5, frozenset()))
 
+    @staticmethod
+    def hold_namespace():
+        return load_definitions(
+            "latch_hotkey_press", "supervise_hotkey_latch",
+            assignments={"MAX_TAKE_SECONDS", "HOLD_KEY_UP_POLLS"},
+        )
+
+    @staticmethod
+    def drain(events):
+        drained = []
+        while not events.empty():
+            drained.append(events.get_nowait())
+        return drained
+
+    def test_a_lost_key_up_ends_the_take_through_a_release(self):
+        # Right Shift released while Left Shift is still held: pynput reads
+        # the family flag, so no release event ever arrives.
+        ns = self.hold_namespace()
+        latch, lock, events = {"on": False}, threading.Lock(), queue.Queue()
+        modifiers = {"shift"}
+        ns["latch_hotkey_press"](latch, 100.0)
+        readings = iter([True, True, False, False])
+        step = functools.partial(
+            ns["supervise_hotkey_latch"], latch, lock, events, modifiers,
+            lambda: next(readings))
+
+        outcomes = [step(now) for now in (100.25, 100.5, 100.75, 101.0)]
+
+        self.assertEqual(outcomes, [None, None, None, "key_up_lost"])
+        self.assertEqual(self.drain(events), [
+            ("release", 101.0, frozenset({"shift"}))])
+        self.assertFalse(latch["on"])
+        # The next real press is accepted again.
+        self.assertIsNone(step(101.25))
+
+    def test_an_unreadable_key_state_never_ends_a_hold_early(self):
+        # A remapped key or a missing permission reads "up" while held. With
+        # no "down" reading during the hold, only the cap applies.
+        ns = self.hold_namespace()
+        latch, lock, events = {"on": False}, threading.Lock(), queue.Queue()
+        ns["latch_hotkey_press"](latch, 0.0)
+        cap = ns["MAX_TAKE_SECONDS"]
+        for reading in (False, None):
+            with self.subTest(reading=reading):
+                for now in (0.25, 0.5, 60.0, cap - 0.01):
+                    self.assertIsNone(ns["supervise_hotkey_latch"](
+                        latch, lock, events, set(), lambda: reading, now))
+                self.assertTrue(latch["on"])
+                self.assertEqual(self.drain(events), [])
+
+    def test_the_take_cap_finishes_once_and_keeps_the_key_latched(self):
+        ns = self.hold_namespace()
+        latch, lock, events = {"on": False}, threading.Lock(), queue.Queue()
+        ns["latch_hotkey_press"](latch, 0.0)
+        cap = ns["MAX_TAKE_SECONDS"]
+        self.assertEqual(cap, 600.0)
+        held = functools.partial(
+            ns["supervise_hotkey_latch"], latch, lock, events, set(),
+            lambda: True)
+
+        self.assertEqual(held(cap), "take_limit")
+        self.assertIsNone(held(cap + 0.25))
+        self.assertIsNone(held(cap + 30.0))
+
+        self.assertEqual(self.drain(events), [("release", cap, frozenset())])
+        # Still latched: a held function key's auto-repeat cannot start a
+        # new take, and a later lost key-up only clears the latch.
+        self.assertTrue(latch["on"])
+        for now in (cap + 31.0, cap + 31.25):
+            ns["supervise_hotkey_latch"](
+                latch, lock, events, set(), lambda: False, now)
+        self.assertFalse(latch["on"])
+        self.assertEqual(self.drain(events), [])
+
+    def test_a_real_key_event_during_a_poll_wins(self):
+        ns = self.hold_namespace()
+        latch, lock, events = {"on": False}, threading.Lock(), queue.Queue()
+        ns["latch_hotkey_press"](latch, 0.0)
+        latch.update(confirmed=True, up_polls=1)
+
+        def released_then_pressed_again():
+            # The listener releases and re-presses while the poll reads.
+            with lock:
+                latch["on"] = False
+                ns["latch_hotkey_press"](latch, 0.2)
+            return False
+
+        self.assertIsNone(ns["supervise_hotkey_latch"](
+            latch, lock, events, set(), released_then_pressed_again, 0.25))
+        self.assertTrue(latch["on"])
+        self.assertEqual(latch["at"], 0.2)
+        self.assertEqual(self.drain(events), [])
+
+    def test_physical_key_state_reads_the_bound_key_code(self):
+        reads = []
+        quartz = types.ModuleType("Quartz")
+        quartz.kCGEventSourceStateHIDSystemState = 1
+        quartz.CGEventSourceKeyState = (
+            lambda source, vk: reads.append((source, vk)) or vk == 61)
+        ns = load_definitions(
+            "physical_key_is_down",
+            extra={"IS_MACOS": True, "IS_WINDOWS": False, "ctypes": ctypes})
+        right_option = SimpleNamespace(value=SimpleNamespace(vk=61))
+        with mock.patch.dict(sys.modules, {"Quartz": quartz}):
+            self.assertTrue(ns["physical_key_is_down"](right_option))
+            self.assertFalse(ns["physical_key_is_down"](
+                SimpleNamespace(value=SimpleNamespace(vk=60))))
+            quartz.CGEventSourceKeyState = mock.Mock(
+                side_effect=RuntimeError("no access"))
+            self.assertIsNone(ns["physical_key_is_down"](right_option))
+        self.assertEqual(reads, [(1, 61), (1, 60)])
+        self.assertIsNone(ns["physical_key_is_down"](None))
+
     def test_active_hotkey_recovery_surfaces_retry_feedback(self):
         source = (ROOT / "dictate.py").read_text(encoding="utf-8")
         main = next(

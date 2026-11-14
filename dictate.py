@@ -6949,6 +6949,96 @@ def hotkey_watchdog_loop(on_dead):
             print(f"! hotkey watchdog recovered from error: {e}")
 
 
+# A key-up can be lost: pynput reads a modifier's release from the
+# family-wide flag bit, so releasing Right Shift while Left Shift is held
+# reports nothing, and a disabled or dead event tap reports nothing at all.
+MAX_TAKE_SECONDS = 600.0
+HOLD_POLL_SECONDS = 0.25
+# Consecutive "up" readings before a latched key counts as released. The
+# real key-up event normally wins this race by a wide margin.
+HOLD_KEY_UP_POLLS = 2
+
+
+def physical_key_is_down(key) -> bool | None:
+    """The bound key's hardware state; None when it cannot be read."""
+    vk = getattr(getattr(key, "value", None), "vk", None)
+    if vk is None:
+        return None
+    try:
+        if IS_MACOS:
+            from Quartz import (
+                CGEventSourceKeyState,
+                kCGEventSourceStateHIDSystemState,
+            )
+            return bool(CGEventSourceKeyState(
+                kCGEventSourceStateHIDSystemState, vk))
+        if IS_WINDOWS:
+            return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
+    except Exception:
+        return None
+    return None
+
+
+def latch_hotkey_press(latch: dict, pressed_at: float):
+    """Start supervising one capture-key hold; the caller holds the lock."""
+    latch.update(on=True, at=pressed_at, confirmed=False, up_polls=0,
+                 capped=False)
+
+
+def supervise_hotkey_latch(latch: dict, lock, events, modifiers: set,
+                           key_is_down, now: float) -> str | None:
+    """End a hold whose key-up never arrived, or that ran past the cap.
+
+    Either way a ``release`` is queued, so the take finishes through the
+    normal release path. A key that reads "up" is trusted only after it
+    has once read "down" during this hold: a remapped key or a missing
+    permission can make the hardware state unreadable, and then only the
+    cap applies. The cap leaves the latch set, so a held function key's
+    auto-repeat cannot start a second take.
+    """
+    with lock:
+        if not latch.get("on"):
+            return None
+        pressed_at = latch["at"]
+    physical = key_is_down()
+    with lock:
+        if not latch.get("on") or latch["at"] != pressed_at:
+            return None
+        if physical is True:
+            latch["confirmed"] = True
+            latch["up_polls"] = 0
+        elif physical is False and latch["confirmed"]:
+            latch["up_polls"] += 1
+            if latch["up_polls"] >= HOLD_KEY_UP_POLLS:
+                latch["on"] = False
+                if latch["capped"]:
+                    return None          # the cap already finished the take
+                events.put(("release", now, frozenset(modifiers)))
+                return "key_up_lost"
+        if not latch["capped"] and now - pressed_at >= MAX_TAKE_SECONDS:
+            latch["capped"] = True
+            events.put(("release", now, frozenset(modifiers)))
+            return "take_limit"
+    return None
+
+
+def hold_supervisor_loop(step):
+    """Poll a held capture key independently of the event tap."""
+    while True:
+        time.sleep(HOLD_POLL_SECONDS)
+        try:
+            outcome = step()
+        except Exception as e:
+            print(f"! hold supervisor recovered from error: "
+                  f"{type(e).__name__}")
+            continue
+        if outcome == "key_up_lost":
+            print("[hotkey] key release was not seen — ending the take")
+        elif outcome == "take_limit":
+            print(f"[hotkey] take reached {MAX_TAKE_SECONDS / 60:.0f} "
+                  "minutes — finishing it")
+
+
 def keepwarm_loop():
     """Touch both models periodically while idle. Costs ~0.2s every few
     minutes; saves the several-second page-in stall on the first dictation
@@ -12410,6 +12500,9 @@ def main():
     threading.Thread(target=hotkey_worker, daemon=True).start()
 
     key_down = {"on": False}
+    # Serializes the latch between the listener and the hold supervisor, so
+    # one hold queues exactly one release.
+    key_lock = threading.Lock()
     undo_down = {"on": False}
     modifiers = set()
     shift_keys = {keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r}
@@ -12427,9 +12520,12 @@ def main():
         modifier = modifier_pressed_by(key, HOTKEY, modifier_families)
         if modifier is not None:
             modifiers.add(modifier)
-        if hotkey_matches(key, HOTKEY) and not key_down["on"]:
-            key_down["on"] = True
-            events.put(("press", time.perf_counter(), frozenset(modifiers)))
+        if hotkey_matches(key, HOTKEY):
+            with key_lock:
+                if not key_down["on"]:
+                    pressed_at = time.perf_counter()
+                    latch_hotkey_press(key_down, pressed_at)
+                    events.put(("press", pressed_at, frozenset(modifiers)))
         if hotkey_matches(key, UNDO_HOTKEY) and not undo_down["on"]:
             # Latched, so holding the key repeats nothing. Undo runs off the
             # dictation path entirely — it never opens a stream — so its own
@@ -12439,9 +12535,12 @@ def main():
                 target=undo_last_dictation, daemon=True).start()
 
     def on_release(key):
-        if hotkey_matches(key, HOTKEY) and key_down["on"]:
-            key_down["on"] = False
-            events.put(("release", time.perf_counter(), frozenset(modifiers)))
+        if hotkey_matches(key, HOTKEY):
+            with key_lock:
+                if key_down["on"]:
+                    key_down["on"] = False
+                    events.put((
+                        "release", time.perf_counter(), frozenset(modifiers)))
         if hotkey_matches(key, UNDO_HOTKEY):
             undo_down["on"] = False
         modifier = modifier_pressed_by(key, HOTKEY, modifier_families)
@@ -12460,7 +12559,13 @@ def main():
         # state before the replacement starts, then let the serialized worker
         # stop any orphaned capture ahead of the next real key event.
         undo_down["on"] = False
-        queue_hotkey_listener_recovery(key_down, modifiers, events)
+        with key_lock:
+            queue_hotkey_listener_recovery(key_down, modifiers, events)
+
+    def supervise_hold():
+        return supervise_hotkey_latch(
+            key_down, key_lock, events, modifiers,
+            lambda: physical_key_is_down(HOTKEY), time.perf_counter())
 
     LISTENER["make"] = make_listener
     LISTENER["l"] = make_listener()
@@ -12468,6 +12573,9 @@ def main():
         target=hotkey_watchdog_loop,
         args=(recover_listener_state,),
         daemon=True,
+    ).start()
+    threading.Thread(
+        target=hold_supervisor_loop, args=(supervise_hold,), daemon=True,
     ).start()
 
     AppHelper.runEventLoop(installInterrupt=True)
