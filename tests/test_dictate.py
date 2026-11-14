@@ -277,53 +277,149 @@ class PhoneEndpointBindingTests(unittest.TestCase):
                 with self.assertRaises(TypeError):
                     bind_host(invalid)
 
+    @staticmethod
+    def start_server(server_only, token_file, calls=None):
+        """Run phone_server once against a fake listener; return the
+        namespace and everything it printed."""
+        calls = [] if calls is None else calls
+
+        class FakeServer:
+            def __init__(self, address, handler):
+                calls.append(("bind", address, handler))
+
+            def serve_forever(self):
+                calls.append(("serve",))
+
+        namespace = load_definitions(
+            "phone_bind_host", "phone_server", "load_phone_token",
+            "atomic_write_text", "PhoneHandler", "phone_host_allowed",
+            "phone_token_matches", "parse_multipart",
+            assignments=("PHONE_MAX_BODY",),
+            extra={
+                "SERVER_ONLY": server_only,
+                "PHONE_PORT": 8787,
+                "PHONE_TOKEN": {"value": ""},
+                "PHONE_TOKEN_FILE": token_file,
+                "Path": Path,
+                "os": os,
+                "stat": stat,
+                "tempfile": tempfile,
+                "hashlib": hashlib,
+                "BaseHTTPRequestHandler": __import__(
+                    "http.server").server.BaseHTTPRequestHandler,
+                "ThreadingHTTPServer": FakeServer,
+                "lan_ip": lambda: "192.0.2.10",
+            },
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            namespace["phone_server"]()
+        return namespace, output.getvalue()
+
     def test_server_uses_localhost_for_desktop_and_lan_for_headless(self):
         for server_only, expected_bind, expected_display in (
                 (False, "127.0.0.1", "127.0.0.1"),
                 (True, "0.0.0.0", "192.0.2.10")):
-            with self.subTest(server_only=server_only):
+            with self.subTest(server_only=server_only), \
+                    tempfile.TemporaryDirectory() as directory:
                 calls = []
-
-                class FakeServer:
-                    def __init__(self, address, handler):
-                        calls.append(("bind", address, handler))
-
-                    def serve_forever(self):
-                        calls.append(("serve",))
-
-                namespace = load_definitions(
-                    "phone_bind_host", "phone_server",
-                    extra={
-                        "SERVER_ONLY": server_only,
-                        "PHONE_PORT": 8787,
-                        "PHONE_TOKEN": {"value": ""},
-                        "os": os,
-                        "PhoneHandler": object(),
-                        "ThreadingHTTPServer": FakeServer,
-                        "lan_ip": lambda: "192.0.2.10",
-                    },
-                )
-                output = io.StringIO()
-                original_stdout = sys.stdout
-                try:
-                    sys.stdout = output
-                    namespace["phone_server"]()
-                finally:
-                    sys.stdout = original_stdout
+                token_file = Path(directory) / "phone_token.txt"
+                namespace, output = self.start_server(
+                    server_only, token_file, calls)
 
                 self.assertEqual(
                     calls[0][1], (expected_bind, 8787))
                 self.assertEqual(calls[-1], ("serve",))
                 self.assertIn(
-                    f"http://{expected_display}:8787/", output.getvalue())
+                    f"http://{expected_display}:8787/", output)
                 token = namespace["PHONE_TOKEN"]["value"]
                 if server_only:
-                    # Created at start and shown once, so the operator can
-                    # give it to the phone.
                     self.assertRegex(token, r"^[0-9a-f]{64}$")
-                    self.assertEqual(output.getvalue().count(token), 1)
                 else:
                     self.assertEqual(token, "")
+                    self.assertFalse(token_file.exists())
+
+    def test_the_server_token_survives_a_restart_and_is_never_printed(self):
+        # Both installers run --server-only as a login service, so a token
+        # made fresh at every start unpaired the phone at every restart and
+        # left the secret in dictate.log.
+        with tempfile.TemporaryDirectory() as directory:
+            token_file = Path(directory) / "phone_token.txt"
+            first, first_output = self.start_server(True, token_file)
+            second, second_output = self.start_server(True, token_file)
+
+            token = first["PHONE_TOKEN"]["value"]
+            self.assertRegex(token, r"^[0-9a-f]{64}$")
+            self.assertEqual(second["PHONE_TOKEN"]["value"], token)
+            self.assertEqual(token_file.read_text(encoding="utf-8").strip(),
+                             token)
+            if os.name != "nt":
+                self.assertEqual(
+                    stat.S_IMODE(token_file.stat().st_mode), 0o600)
+            for output in (first_output, second_output):
+                self.assertNotIn(token, output)
+                self.assertIn(str(token_file), output)
+                self.assertIn("Delete", output)
+
+            # The restarted server serves the stored token and nothing else.
+            handler = second["PhoneHandler"]
+            refused = PhoneEndpointRequestTests.request(
+                "POST", "/v1/audio/transcriptions", body=b"RIFF-audio")
+            self.assertEqual(PhoneEndpointRequestTests.drive(
+                handler, refused)[0], 401)
+            handler.do_POST.__globals__.update({
+                "LAST_USE": {"t": 0.0},
+                "time": time,
+                "SAMPLE_RATE": 16000,
+                "decode_audio": lambda path: np.zeros(16000, np.float32),
+                "transcribe_detailed": lambda audio: Recognition(
+                    "Send the report.", confidence=0.93,
+                    engine="parakeet-unified", audio_duration=1.0),
+                "ASR_POOL": SimpleNamespace(
+                    submit=lambda fn, arg: SimpleNamespace(
+                        result=lambda: fn(arg))),
+                "phone_clean": lambda raw, *_evidence: raw,
+            })
+            status, body = PhoneEndpointRequestTests.drive(
+                handler, PhoneEndpointRequestTests.request(
+                    "POST", "/v1/audio/transcriptions", body=b"RIFF-audio",
+                    headers=(f"Authorization: Bearer {token}",)))
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body), {"text": "Send the report."})
+
+    def test_a_missing_empty_or_malformed_token_file_gets_a_new_token(self):
+        for content in (None, "", "\n", "not-a-token\n", "A" * 64,
+                        "a" * 63, "a" * 64 + " extra"):
+            with self.subTest(content=content), \
+                    tempfile.TemporaryDirectory() as directory:
+                token_file = Path(directory) / "phone_token.txt"
+                if content is not None:
+                    token_file.write_text(content, encoding="utf-8")
+                namespace, output = self.start_server(True, token_file)
+
+                token = namespace["PHONE_TOKEN"]["value"]
+                self.assertRegex(token, r"^[0-9a-f]{64}$")
+                self.assertEqual(
+                    token_file.read_text(encoding="utf-8").strip(), token)
+                self.assertNotIn(token, output)
+                if os.name != "nt":
+                    self.assertEqual(
+                        stat.S_IMODE(token_file.stat().st_mode), 0o600)
+
+    def test_a_token_that_cannot_be_saved_locks_the_endpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            blocked = Path(directory) / "file"
+            blocked.write_text("", encoding="utf-8")
+            namespace, output = self.start_server(
+                True, blocked / "phone_token.txt")
+
+            self.assertEqual(namespace["PHONE_TOKEN"]["value"], "")
+            self.assertIn("refused", output)
+            self.assertEqual(PhoneEndpointRequestTests.drive(
+                namespace["PhoneHandler"],
+                PhoneEndpointRequestTests.request(
+                    "POST", "/v1/audio/transcriptions", body=b"RIFF-audio",
+                    headers=("Authorization: Bearer ",)))[0], 401)
 
 
 class PhoneEndpointRequestTests(unittest.TestCase):

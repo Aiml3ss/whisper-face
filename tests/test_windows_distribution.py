@@ -343,7 +343,8 @@ class WindowsBundleToolTests(unittest.TestCase):
                     with self.assertRaises(self.module.BundleError):
                         self.module._check_bundle_contents(root)
                     (root / "moved").rename(root / name)
-            for personal in ("transcripts.jsonl", "dictionary.txt", "preferences.json"):
+            for personal in ("transcripts.jsonl", "dictionary.txt",
+                             "preferences.json", "phone_token.txt"):
                 with self.subTest(personal=personal):
                     leaked = root / personal
                     leaked.write_text("private", encoding="utf-8")

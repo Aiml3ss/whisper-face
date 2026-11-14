@@ -91,6 +91,13 @@ jobs:
 
       - name: Run repository release gates
         shell: bash
+        env:
+          # The interpreter an install runs on: setup.sh and setup.ps1 pin
+          # 3.12, and a fresh Mac has no other Python 3.12, so uv installs its
+          # own. Unpinned, uv took the runner's Homebrew framework Python,
+          # which the networkless worker's sandbox cannot start.
+          UV_PYTHON: "3.12"
+          UV_PYTHON_PREFERENCE: only-managed
         run: |
           uv lock --check --script dictate.py
           uv run tests/test_parrot_core.py

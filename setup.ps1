@@ -940,9 +940,10 @@ if ($Mode -eq "full") {
 } else {
     Write-Host "== server-only installation is ready."
     Write-Host "== A client must send the bearer token as"
-    Write-Host "== 'Authorization: Bearer <token>'. A new one is created at"
-    Write-Host "== every restart and written once to $Log"
-    Write-Host "== (the line starting 'Phone endpoint token')."
+    Write-Host "== 'Authorization: Bearer <token>'. It is kept in"
+    Write-Host "== $(Join-Path $Repo 'phone_token.txt')"
+    Write-Host "== and survives restarts. To replace it, delete that file and"
+    Write-Host "== restart the service."
 }
 Write-Host "== Logs: $Log"
 
