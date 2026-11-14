@@ -5258,6 +5258,74 @@ class TranscriptRetentionTests(unittest.TestCase):
             self.assertEqual(mode, 0o600)
 
 
+class VocabularyMinerTests(unittest.TestCase):
+    """What the miner may count toward the dictionary."""
+
+    NOW = TranscriptRetentionTests.NOW
+    NAMES = TranscriptRetentionTests.NAMES
+    ASSIGNMENTS = TranscriptRetentionTests.ASSIGNMENTS
+    namespace = TranscriptRetentionTests.namespace
+
+    def mine(self, texts, reply, learned):
+        with tempfile.TemporaryDirectory() as td:
+            ns, _ = self.namespace(
+                td, "learn_pass", "parse_texts", "parse_dictionary",
+                "merge_learned_state", "term_occurs",
+                assignments=(
+                    "MINER_PROMPT", "LEARN_MIN_NEW", "PROMOTE_MIN_COUNT",
+                    "AUTO_MARKER"),
+                extra={
+                    "ollama_chat": lambda *args, **kwargs: (
+                        json.dumps(reply), "stop"),
+                    "refresh_glossary": lambda: [],
+                    "DICTIONARY_FILE": Path(td) / "dictionary.txt",
+                    "DICTIONARY_LOCK": threading.Lock(),
+                },
+            )
+            ns["TRANSCRIPTS_FILE"].write_text("".join(
+                json.dumps({"ts": self.NOW - 60 + index, "app": "com.apple.Notes",
+                            "raw": text, "clean": text, "path": "fast",
+                            "language": "en"}) + "\n"
+                for index, text in enumerate(texts)))
+            ns["LEARNED_FILE"].write_text(json.dumps(learned))
+            with contextlib.redirect_stdout(io.StringIO()):
+                ns["learn_pass"]()
+            return json.loads(ns["LEARNED_FILE"].read_text())["counts"]
+
+    def test_terms_are_counted_as_whole_words_not_substrings(self):
+        texts = [
+            "We are going to ship it today.",
+            "That sounds good to me.",
+            "I sent it a week ago.",
+            "Zorblax signed the contract.",
+            "Ask Zorblax about the invoice.",
+        ] * 2
+        counts = self.mine(texts, ["Go", "Zorblax"], {"counts": {"Ago": 1}})
+
+        self.assertNotIn("Go", counts)
+        self.assertEqual(counts["Zorblax"], 4)
+        # "ago" is a word on its own, so a held term may still grow.
+        self.assertEqual(counts["Ago"], 3)
+
+    def test_a_term_the_user_corrected_away_is_never_counted(self):
+        texts = ["Gwen runs locally on the laptop.",
+                 "Ask Gwen to summarise the notes."] * 5
+        learned = {
+            "counts": {"Qwen": 2, "Gwenda": 1},
+            "fixes": {"gwen": {"to": "Qwen", "n": 1},
+                      "qwen": {"to": "Qwen", "n": 1}},
+            "confusions": {"gwenda->brenda": {
+                "from": "Gwenda", "to": "Brenda", "n": 1, "apps": {}}},
+        }
+        counts = self.mine(
+            texts + ["Gwenda called."] * 2, ["Gwen", "Qwen"], learned)
+
+        self.assertNotIn("Gwen", counts)
+        self.assertEqual(counts["Gwenda"], 1)
+        # A casing-only fix does not ban the word it fixes toward.
+        self.assertEqual(counts["Qwen"], 2)
+
+
 class InlineSnippetExpansionTests(unittest.TestCase):
     """Inline (embedded-trigger) snippet expansion. Additive to the
     whole-utterance command covered by ConfigurationTests; must never alter a

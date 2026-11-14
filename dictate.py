@@ -6799,6 +6799,12 @@ def parse_texts(lines: list[str]) -> list[str]:
     return texts
 
 
+def term_occurs(term: str, text: str) -> bool:
+    """Whether ``term`` appears in ``text`` as a whole word, in any case."""
+    return re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", text,
+                     re.IGNORECASE) is not None
+
+
 def learn_pass():
     """Mine recent transcripts for new vocabulary and promote frequent terms."""
     prune_transcripts()
@@ -6824,17 +6830,31 @@ def learn_pass():
     new_texts = parse_texts(new_lines)
     blob = "\n".join(texts)[-6000:]
 
+    # A word the user corrected into something else is a misrecognition,
+    # however often it was transcribed. A casing-only fix is not.
+    corrected_away = {
+        str(fix_from).casefold()
+        for fix_from, fix_to in [
+            (key, fix.get("to")) for key, fix in state["fixes"].items()
+            if isinstance(fix, dict)
+        ] + [
+            (item.get("from"), item.get("to"))
+            for item in state["confusions"].values() if isinstance(item, dict)
+        ]
+        if fix_from and str(fix_from).casefold() != str(fix_to).casefold()
+    }
+
     # Terms below the promotion threshold keep accumulating against the new
     # dictations; without this they'd freeze at their discovery count and
     # could never be promoted.
     for term, count in state["counts"].items():
-        if count < PROMOTE_MIN_COUNT:
-            hits = sum(1 for t in new_texts if term.lower() in t.lower())
+        if count < PROMOTE_MIN_COUNT and term.casefold() not in corrected_away:
+            hits = sum(1 for t in new_texts if term_occurs(term, t))
             if hits:
                 state["counts"][term] = count + hits
 
     manual, banned = parse_dictionary()
-    known = set(t.casefold() for t in manual) | banned \
+    known = set(t.casefold() for t in manual) | banned | corrected_away \
         | set(k.casefold() for k in state["counts"])
     known_str = ", ".join(sorted(manual + list(state["counts"])))[:1200]
 
@@ -6857,7 +6877,7 @@ def learn_pass():
         if not (2 <= len(cand) <= 40) or cand.casefold() in known:
             continue
         # how many dictations actually contain it
-        count = sum(1 for t in texts if cand.lower() in t.lower())
+        count = sum(1 for t in texts if term_occurs(cand, t))
         if count >= 1:
             state["counts"][cand] = state["counts"].get(cand, 0) + count
             added.append((cand, state["counts"][cand]))
