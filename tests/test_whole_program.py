@@ -340,12 +340,18 @@ class FreshInstallDictationTests(unittest.TestCase):
             ("Looks good.", "Open Code now"),
             ("Not yet.", "Nate"),
             ("Who is on call today?", "AI"),
+            ("Keep an eye on it.", "We now route triage through AI."),
+            ("Looks fine.", "Finn"),
+            ("Code review is at noon.", "Git"),
         )
         tinies = {
             "Looks good.": ("Look good.", "Has went through the queue."),
             "Not yet.": ("Nah yet.", "Has went through the queue."),
             "Who is on call today?": ("Hu is on call to day?",
                                       "Has went through the queue."),
+            "Keep an eye on it.": ("Has went through the queue.",),
+            "Looks fine.": ("Look fine.",),
+            "Code review is at noon.": ("Has went through the queue.",),
         }
 
         def selection(screen, _directory):

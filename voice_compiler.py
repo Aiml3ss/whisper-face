@@ -1558,6 +1558,19 @@ class VoiceCompiler:
             original = token.text
             if primary.confidence > CONTEXT_REWRITE_MAX_CONFIDENCE:
                 continue
+            # Only a word the recognizer itself wrote as a name or an
+            # identifier may be repaired from the screen. Its phonetic gate
+            # ignores vowels, so eye/AI, fine/Finn and code/Git all pass it;
+            # an ordinary word, lower case or capitalized only because it
+            # starts a sentence, stays as spoken.
+            previous = primary_tokens[index - 1].text if index else "."
+            written_as_name = (
+                (original[:1].isupper()
+                 and previous not in {".", "!", "?", ":", ";"})
+                or any(char.isdigit() or char == "_" for char in original)
+                or any(char.isupper() for char in original[1:]))
+            if not written_as_name:
+                continue
             for context in voice.context.candidates:
                 if len(TOKEN_RE.findall(context.text)) != 1:
                     continue

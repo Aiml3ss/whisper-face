@@ -627,17 +627,30 @@ class VoiceCompilerTests(unittest.TestCase):
                 ("Looks good.", "Look good.", "Open Code now"),
                 ("Not yet.", "Nah yet.", "Nate"),
                 ("Who is on call today?", "Hu is on call to day?", "AI"),
+                # Ordinary words the common-word list does not hold: the
+                # phonetic gate ignores vowels, so each sounds like the name.
+                ("Keep an eye on it.", "Has went through the queue.", "AI"),
+                ("Send me a note.", "Has went through the queue.", "Nate"),
+                ("Looks fine.", "Look fine.", "Finn"),
+                ("Ship it.", "Sip it.", "Chip"),
+                ("That's cool.", "That's coal.", "Cole"),
+                ("Code review is at noon.", "Has went through the queue.",
+                 "Git"),
+                ("Don't scratch that table.", "Has went through the queue.",
+                 "Stable"),
         ):
             for source, pack in self.screen_packs(screen).items():
                 for confidence in (0.70, 0.55, 0.40):
                     with self.subTest(parakeet=parakeet, source=source,
                                       confidence=confidence):
                         voice = self.parakeet_voice(parakeet, tiny)
+                        # Tiny stays 0.08 below Parakeet, as on the runtime.
                         voice = replace(
                             voice, context=pack, hypotheses=(
                                 replace(voice.hypotheses[0],
                                         confidence=confidence),
-                                voice.hypotheses[1]))
+                                replace(voice.hypotheses[1],
+                                        confidence=confidence - 0.08)))
                         result = self.compiler.compile(voice)
                         self.assertEqual(result.text, parakeet)
                         self.assertEqual(result.decisions, ())
@@ -653,8 +666,9 @@ class VoiceCompilerTests(unittest.TestCase):
                         context=pack)
                     result = self.compiler.compile(voice)
                     if source in {"field", "clipboard"}:
-                        # Weaker places to see a name: they cannot outvote
-                        # Parakeet's own word.
+                        # Field and clipboard text may replace a word only
+                        # when it is identifier-shaped (Qwen3_5, D55), and a
+                        # plain capitalized word such as Qwen is not.
                         expected = "Ask Gwen to review it."
                     self.assertEqual(result.text, expected)
 
