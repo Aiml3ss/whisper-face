@@ -10311,15 +10311,105 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         private_settings["corrections"] = [{
             "key": "teh", "source": "teh", "target": "the", "count": 3,
             "kind": "correction"}]
+        private_settings["snippets"] = [
+            {"name": "signature", "text": "Kind regards"}]
         model.load_settings()
         dialogs.clear()
 
+        # Keys cannot be pressed here, so the key-down monitor _run_modal
+        # installs is captured instead and handed stand-in key events while
+        # its dialog is up. Each button's action is pointed at a checkbox,
+        # which flips when that button is clicked and does nothing else.
+        key_monitors: list[dict[str, Any]] = []
+        key_outcomes: list[dict[str, Any]] = []
+
+        class RecordingKeyMonitors:
+            @staticmethod
+            def addLocalMonitorForEventsMatchingMask_handler_(
+                    mask: int, handler: Callable[[Any], Any]) -> Any:
+                token = object()
+                key_monitors.append({
+                    "token": token, "mask": mask, "handler": handler,
+                    "removed": False})
+                return token
+
+            @staticmethod
+            def removeMonitor_(token: Any) -> None:
+                for entry in key_monitors:
+                    if entry["token"] is token:
+                        entry["removed"] = True
+
+        class StandInKey:
+            def __init__(self, window: Any, key_code: int, characters: str,
+                         flags: int = 0) -> None:
+                self._window, self._key_code = window, key_code
+                self._characters, self._flags = characters, flags
+
+            def window(self) -> Any:
+                return self._window
+
+            def keyCode(self) -> int:
+                return self._key_code
+
+            def charactersIgnoringModifiers(self) -> str:
+                return self._characters
+
+            def modifierFlags(self) -> int:
+                return self._flags
+
+        def press_keys(alert: Any) -> None:
+            flags = []
+            for button in alert.buttons():
+                flag = NSButton.checkboxWithTitle_target_action_(
+                    "", None, None)
+                button.setTarget_(flag)
+                button.setAction_("performClick:")
+                flags.append(flag)
+            live = [entry for entry in key_monitors if not entry["removed"]]
+            outcome: dict[str, Any] = {
+                "title": str(alert.messageText()), "monitors": len(live),
+                "masks": [entry["mask"] for entry in live]}
+            for name, key_code, characters, modifiers in (
+                    ("escape", _ESCAPE_KEY_CODE, "\x1b", 0),
+                    ("command_period", 47, ".", _COMMAND_KEY_FLAG),
+                    ("return", 36, "\r", 0)):
+                for flag in flags:
+                    flag.setState_(NSControlStateValueOff)
+                event = StandInKey(
+                    alert.window(), key_code, characters, modifiers)
+                swallowed = any(
+                    entry["handler"](event) is not event for entry in live)
+                outcome[name] = (
+                    "swallowed" if swallowed else "passed",
+                    [index for index, flag in enumerate(flags)
+                     if int(flag.state()) == NSControlStateValueOn])
+            key_outcomes.append(outcome)
+
         def review_then_forget(alert: Any) -> int:
             dialogs.append(alert)
+            press_keys(alert)
             return 1000
 
-        controller.modal_responder = review_then_forget
-        controller.reviewCorrections_(None)
+        cancelled = {"escape": ("swallowed", [1]),
+                     "command_period": ("swallowed", [1]),
+                     "return": ("passed", [])}
+        appkit_keys = {"monitors": 0,
+                       "escape": ("passed", []),
+                       "command_period": ("passed", []),
+                       "return": ("passed", [])}
+
+        def keys_were(outcome: dict[str, Any],
+                      expected: dict[str, Any]) -> bool:
+            return all(outcome[name] == value
+                       for name, value in expected.items())
+
+        appkit_key_monitors = NSEvent
+        globals()["NSEvent"] = RecordingKeyMonitors
+        try:
+            controller.modal_responder = review_then_forget
+            controller.reviewCorrections_(None)
+        finally:
+            globals()["NSEvent"] = appkit_key_monitors
         require(len(dialogs) == 2, "learned correction review opens")
         require(
             str(dialogs[1].messageText()) == "teh → the"
@@ -10333,27 +10423,71 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             "learned correction review defaults to Done")
         require(alert_key_routes(dialogs[1]) == (1, 1),
                 "Return and Escape both leave a learned correction alone")
-        dialogs.clear()
-        controller.modal_responder = review_then_forget
-        controller._confirm("Delete?", "Gone for good.", "Delete")
+        require(keys_were(key_outcomes[0], appkit_keys),
+                "the learned correction chooser adds no key monitor")
         require(
-            str(dialogs[0].buttons()[1].keyEquivalent()) == "\r"
-            and str(dialogs[0].buttons()[0].keyEquivalent()) == "",
-            "confirmations default to the safe button")
-        require(bool(dialogs[0].buttons()[0].hasDestructiveAction()),
-                "a deletion is marked destructive")
-        require(alert_key_routes(dialogs[0]) == (1, 1)
-                and alert_escape_handler(dialogs[0]) is not None,
-                "Escape cancels a destructive confirmation")
-        for primary in ("Compose", "Acknowledge", "Copy Draft"):
-            controller._confirm("Sure?", "Nothing is lost.", primary,
-                                destructive=False)
-            dialog = dialogs[-1]
+            keys_were(key_outcomes[1], cancelled)
+            and key_outcomes[1]["masks"] == [NSEventMaskKeyDown],
+            "Escape picks Done in a learned correction review")
+        require(len(key_monitors) == 1 and key_monitors[0]["removed"],
+                "the learned correction review removes its key monitor")
+        dialogs.clear()
+        key_monitors.clear()
+        key_outcomes.clear()
+
+        def delete_then_cancel(alert: Any) -> int:
+            dialogs.append(alert)
+            press_keys(alert)
+            return 1002 if len(dialogs) == 1 else 1001
+
+        deletions_before = sum(call[0] == "delete_snippet" for call in calls)
+        globals()["NSEvent"] = RecordingKeyMonitors
+        try:
+            controller.modal_responder = delete_then_cancel
+            controller.editSnippets_(None)
+            controller.modal_responder = review_then_forget
+            controller._confirm("Delete?", "Gone for good.", "Delete")
+            for primary in ("Compose", "Acknowledge", "Copy Draft"):
+                controller._confirm("Sure?", "Nothing is lost.", primary,
+                                    destructive=False)
+        finally:
+            globals()["NSEvent"] = appkit_key_monitors
+        require(
+            len(dialogs) == 6
+            and str(dialogs[1].messageText()) == localized_string(
+                "settings.dialog.delete.title", locale=model.locale),
+            "deleting a snippet asks first")
+        require(keys_were(key_outcomes[0], appkit_keys),
+                "the snippet chooser adds no key monitor")
+        for dialog, outcome in ((dialogs[1], key_outcomes[1]),
+                                (dialogs[2], key_outcomes[2])):
+            require(
+                str(dialog.buttons()[1].keyEquivalent()) == "\r"
+                and str(dialog.buttons()[0].keyEquivalent()) == "",
+                f"{outcome['title']}: the safe button is the default")
+            require(bool(dialog.buttons()[0].hasDestructiveAction()),
+                    f"{outcome['title']}: the deletion is marked destructive")
+            require(
+                keys_were(outcome, cancelled)
+                and outcome["masks"] == [NSEventMaskKeyDown],
+                f"{outcome['title']}: Escape and Command-period cancel, "
+                "Return is left to the safe button")
+        require(
+            sum(call[0] == "delete_snippet" for call in calls)
+            == deletions_before,
+            "a cancelled snippet deletion deletes nothing")
+        for dialog, outcome in zip(dialogs[3:], key_outcomes[3:]):
+            primary = str(dialog.buttons()[0].title())
             require(
                 alert_key_routes(dialog) == (0, 1)
                 and str(dialog.buttons()[1].keyEquivalent()) == "\x1b"
-                and not bool(dialog.buttons()[0].hasDestructiveAction()),
+                and not bool(dialog.buttons()[0].hasDestructiveAction())
+                and keys_were(outcome, appkit_keys),
                 f"{primary}: Return confirms and Escape cancels")
+        require(
+            len(key_monitors) == 2
+            and all(entry["removed"] for entry in key_monitors),
+            "each destructive confirmation removes its key monitor")
         controller.modal_responder = None
         require(keyword_reads[0] == 0, "keyword inspection stays on demand")
         keyword_inspection = model.inspect_acoustic_keywords()
