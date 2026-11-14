@@ -13300,6 +13300,7 @@ def main():
             set_language=set_dictation_language,
             preview_sound=preview_sound_cue,
             set_recent_dictations=set_recent_dictations_enabled,
+            set_self_correction=set_self_correction,
             recent_dictations=recent_dictation_metadata,
             reveal_recent_dictation=reveal_recent_dictation,
             insert_recent_dictation=insert_recent_dictation,

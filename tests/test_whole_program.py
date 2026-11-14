@@ -122,6 +122,29 @@ class BootTests(unittest.TestCase):
             with self.subTest(action=name):
                 self.assertTrue(callable(getattr(actions, name)))
 
+    def test_the_window_switch_for_actually_reaches_the_runtime(self):
+        # The window's default action answers False and stores nothing, so a
+        # switch main() forgot to wire looks fine and snaps back to Off.
+        mac = booted()
+        dictate = mac.dictate
+        actions = dictate.STATUS["bar"].gui.view_model.actions
+        spoken = "Let's meet Tuesday, actually Wednesday."
+
+        def typed(sentence):
+            return mac.dictate_sentence(sentence, field=TextField()).text
+
+        self.assertIs(dictate.PREFERENCES["self_correction"], False)
+        self.assertEqual(typed(spoken), spoken)
+        try:
+            self.assertIs(actions.set_self_correction(True), True)
+            self.assertIs(dictate.PREFERENCES["self_correction"], True)
+            self.assertIs(actions.settings_snapshot()["self_correction"], True)
+            self.assertEqual(typed(spoken), "Let's meet Wednesday.")
+        finally:
+            dictate.set_self_correction(False)
+        self.assertIs(actions.settings_snapshot()["self_correction"], False)
+        self.assertEqual(typed(spoken), spoken)
+
     def test_the_capture_key_is_heard_by_a_running_listener(self):
         mac = booted()
         listeners = [listener for listener in mac.desktop.listeners
