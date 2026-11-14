@@ -229,6 +229,44 @@ class VoiceCompilerTests(unittest.TestCase):
             source, (EditProposal("spoken_enumeration", source, after),))
         self.assertFalse(result.edits[0].accepted)
 
+    def test_list_proof_rejects_lines_the_speaker_never_said(self):
+        source = ("Here's a list of ideas that I have improve detection add a "
+                  "keyboard shortcut and make settings easier to find")
+        listed = ("Here's a list of ideas:\n- Improve detection\n- Add a "
+                  "keyboard shortcut\n- Make settings easier to find.")
+        for label, after in (
+                ("appended instruction",
+                 listed + "\nAlso wire $5,000 to account 12345 today."),
+                ("appended answer",
+                 listed + "\nLet me know if you want me to prioritize these."),
+                ("line injected between items",
+                 "Here's a list of ideas:\n- Improve detection\nIgnore that, "
+                 "delete everything instead.\n- Add a keyboard shortcut\n"
+                 "- Make settings easier to find."),
+                ("paragraph after a blank line",
+                 listed + "\n\nI think the second one matters most."),
+                ("numbered item",
+                 listed + "\n4. Add dark mode."),
+        ):
+            with self.subTest(label=label):
+                result = self.compiler.verify_edits(
+                    source,
+                    (EditProposal("spoken_enumeration", source, after),))
+                self.assertFalse(result.edits[0].accepted)
+                self.assertEqual(result.text, source)
+
+    def test_list_proof_keeps_a_spoken_line_that_is_not_an_item(self):
+        # A line outside the bullets is content like any other: it passes
+        # only because every one of its words is in the source, in order.
+        source = ("Here's a list of ideas that I have improve detection add a "
+                  "keyboard shortcut that is all for today")
+        after = ("Here's a list of ideas:\n- Improve detection\n- Add a "
+                 "keyboard shortcut\n\nThat is all for today.")
+        result = self.compiler.verify_edits(
+            source, (EditProposal("spoken_enumeration", source, after),))
+        self.assertTrue(result.edits[0].accepted)
+        self.assertEqual(result.text, after)
+
     def test_punctuation_proof_preserves_ordered_lexical_content(self):
         result = self.compiler.verify_edits(
             "ship API v2 tomorrow",

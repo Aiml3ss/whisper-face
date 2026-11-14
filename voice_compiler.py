@@ -653,19 +653,28 @@ def _formatted_list_word_variants(text: str) -> tuple[list[str], ...]:
     )
     if first_item is None:
         return ()
-    item_lines = [line for line in lines[first_item:]
-                  if re.match(r"^\s*-\s+\S", line)]
-    if len(item_lines) < 2 or len(item_lines) > 8:
+    body = lines[first_item:]
+    items = sum(1 for line in body if re.match(r"^\s*-\s+\S", line))
+    if items < 2 or items > 8:
         return ()
     variants = [_proof_words("\n".join(lines[:first_item]))]
-    for index, line in enumerate(item_lines):
+    seen_item = False
+    for line in body:
+        if not re.match(r"^\s*-\s+\S", line):
+            # A line that is not an item is still candidate text. Its words
+            # stay in the stream, so they must be proved from the source like
+            # every other word.
+            extra = _proof_words(line)
+            variants = [words + extra for words in variants]
+            continue
         item_words = _proof_words(re.sub(r"^\s*-\s+", "", line))
         if not item_words:
             return ()
         expanded = [words + item_words for words in variants]
-        if index and item_words[0] != "and":
+        if seen_item and item_words[0] != "and":
             expanded.extend(words + ["and", *item_words] for words in variants)
         variants = expanded
+        seen_item = True
     return tuple(variants)
 
 
