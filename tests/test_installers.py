@@ -286,6 +286,31 @@ class InstallerContractTests(unittest.TestCase):
             f"Windows CI gates something absent from the full list: "
             f"{sorted(windows - canonical)}")
 
+    def test_hosted_mac_gates_run_on_the_python_an_install_uses(self):
+        # A hosted Mac has no uv-managed Python, so an unpinned `uv run`
+        # took Homebrew's newest framework Python. The networkless worker's
+        # sandbox cannot start that interpreter, and the gate failed on a
+        # runner while passing on every installed Mac.
+        mac = re.search(r'(?m)^PYTHON_VERSION="([^"]+)"$', self.shell)
+        windows = re.search(
+            r'(?m)^\$PythonVersion = "([^"]+)"$', self.powershell)
+        self.assertEqual(mac.group(1), windows.group(1))
+        for workflow, step in (
+                ("macos-gate.yml",
+                 "Run every release gate command listed in AGENTS.md"),
+                ("macos-release.yml", "Run repository release gates")):
+            with self.subTest(workflow=workflow):
+                source = (ROOT / ".github" / "workflows" / workflow
+                          ).read_text(encoding="utf-8")
+                block = source.split(f"- name: {step}\n", 1)[1]
+                block = block.split("\n      - ", 1)[0]
+                block = block.split("run: |", 1)[0]
+                environment = dict(re.findall(
+                    r"(?m)^\s+(UV_[A-Z_]+):\s*\"?([^\"\s#]+)\"?", block))
+                self.assertEqual(environment.get("UV_PYTHON"), mac.group(1))
+                self.assertEqual(
+                    environment.get("UV_PYTHON_PREFERENCE"), "only-managed")
+
     def test_every_test_file_is_gated_or_documented_as_an_exclusion(self):
         # A new test file must force a decision. Either it protects a shipping
         # contract and joins the gate list, or the reason it does not is
