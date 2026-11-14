@@ -29,7 +29,8 @@ LLM result is discarded and deterministic cleanup pastes instead.
   identical lexical content (punctuation/case/whitespace changes), removal
   of provable filler words, a typed "X, actually Y" self-correction (both
   sides numbers, weekdays, months, or clock times, each a whole item, and
-  not negated in its own clause),
+  not negated in its own clause; provable only when the user has turned
+  the `self_correction` preference on, which is off by default),
   dropped new-line/new-paragraph markers, and proven list/enumeration
   variants, where lines that are not list items still have to be proven
   from the source (corrected November 2026).

@@ -53,11 +53,16 @@ reruns are idempotent.
   plus a bounded native GUI smoke test on Mac. The documented platform
   asymmetry: Mac proves launchd-PID-to-listener identity; Windows
   cannot (Ollama is independently managed).
-- **Health endpoint** (port 8787): `/health` ok, `/source` the AGPL
-  source offer, `/license` the notices, and the OpenAI-compatible
-  transcription POST. Loopback unless an explicit `--server-only`
-  install (trusted-LAN, unauthenticated, documented as a trust
-  boundary).
+- **Health endpoint** (port 8787): desktop mode binds loopback and
+  answers only `GET /health`. An explicit `--server-only` install binds
+  reachable interfaces and adds `/source` (the AGPL source offer),
+  `/license` (the notices), and the OpenAI-compatible transcription
+  POST, which needs a bearer token. The token is created on the first
+  start, kept in `phone_token.txt` in the checkout, reused across
+  restarts, and never logged; both installers' server-only completion
+  message names the file, and `--uninstall --remove-personal-data`
+  removes it (corrected November 2026; trusted-LAN only, documented as
+  a trust boundary).
 - **Idempotency invariant**: generated services are replaced; private
   user files survive; satisfied steps skip; verification never skips.
 

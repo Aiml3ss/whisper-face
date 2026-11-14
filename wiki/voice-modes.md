@@ -43,10 +43,17 @@ allowlisted **command** mode.
   snippet in place records only a pending suggestion; the saved snippet
   does not change ([[personalization]]).
 - **Spoken structure**: "new line" / "new paragraph" / "scratch that";
-  explicit list lead-ins become dash lists.
-- **Language**: Compose, Reply, and Edit need the optional cleanup model
-  and English; in any other language they refuse with "<Mode> mode needs
-  English — nothing changed".
+  explicit list lead-ins become dash lists. Right after a count or
+  quantity "new line" stays as words ("We hired two new line cooks.");
+  see [[cleanup-pipeline]].
+- **Language and model**: Compose, Reply, and Edit need the optional
+  cleanup model and English; in any other language they refuse with
+  "<Mode> mode needs English — nothing changed". Without the cleanup
+  model (the default install) they insert nothing and the caption reads
+  "<Mode> mode needs the cleanup model — nothing changed"; the field and
+  any selection stay as they were. With the model installed, a rewrite
+  that fails or is rejected shows "<Mode> mode got no rewrite from the
+  cleanup model — nothing changed" (November 2026).
 - **Flight Recorder**: default-off, 20-second RAM-only ring buffer; tap
   the capture key afterwards to paste the latest utterance. A hold consumes
   and clears the buffer, and a tap selects only speech that ended before

@@ -26,7 +26,7 @@ product is a future workstream, not a current setup promise.
 | Product promise | What Whisper Face does |
 |---|---|
 | **Setup is part of the product** | `Install.command` provisions the app, locked dependencies, models, native helper, login services, and health checks in one repeatable flow. |
-| **Speech evidence stays authoritative** | Local recognizers produce hypotheses; app names, window titles, and dictionary terms can bias recognition but never replace a recognized word, other on-screen terms may replace one only above an anchor-aware threshold with a recorded decision, and the optional cleanup model may only make edits it can prove. Deterministic cleanup still applies a small set of written rules (fillers, spoken structure, typed self-corrections), described under [Daily use](#daily-use). |
+| **Speech evidence stays authoritative** | Local recognizers produce hypotheses; app names, window titles, and dictionary terms can bias recognition but never replace a recognized word. Other on-screen text can only repair a word the recognizer was unsure of and itself wrote as a name or identifier (a visible "Qwen" repairs "Gwen"); it never replaces or introduces an ordinary word, and each repair is a recorded decision. The optional cleanup model may only make edits it can prove. Deterministic cleanup still applies a small set of written rules (fillers, spoken structure, and a typed self-correction only if you turn it on), described under [Daily use](#daily-use). |
 | **Fast by architecture** | Models stay warm, long speech is recognized while you talk, installed model paths resolve offline, and routine cleanup stays deterministic unless the words truly require semantic work. |
 | **Insertion is a transaction** | The target is leased and revalidated before one paste attempt; destination drift goes to a recoverable Voice Outbox instead of the wrong field. |
 | **Personal without surveillance** | Corrections become scoped, inspectable local rules and regression cases—not a cloud transcript dossier. |
@@ -98,8 +98,9 @@ are never Supporter-only features.
   them, disabling wipes them, and no replay file is written.
 - **Hold-to-talk anywhere** — hold Right Option (Right Alt on Windows), speak,
   release; text pastes into whatever app has focus, with a frosted HUD
-  waveform while you talk. On Mac the capture key, an optional undo key, and
-  the feedback sounds are chosen under Settings → Controls. The microphone is
+  waveform while you talk. On Mac the capture key, an optional undo key, the
+  feedback sounds, and the “Actually” corrections switch are under
+  Settings → Controls. The microphone is
   pre-warmed at login and the start cue sounds only once capture is ready. A
   take ends at ten minutes, and a hold whose key-up was lost is ended by
   checking the key's physical state. A microphone that delivers nothing for
@@ -147,13 +148,20 @@ are never Supporter-only features.
   local files only at runtime; only the installer's preload downloads them.
 - **Structured cleanup with a safety net** — fillers removed ("um", "uh",
   "erm", "hmm", and "you know", "I mean", "basically", "kind of", "sort of"
-  when set off by commas), punctuation fixed, and a typed self-correction
-  applied: "actually" replaces the item before it only when both sides are the
-  same kind of thing (two numbers, weekdays, months, or clock times) and each
-  is a whole item. "We meet Tuesday, actually Wednesday." becomes "We meet
-  Wednesday."; "I didn't actually finish the report.", "From 9 to 5,
-  actually 6" and "Not Tuesday, actually Wednesday." are left exactly as
-  spoken. Safe edits are compiled
+  when set off by commas) and punctuation fixed. "Scratch that" is the way to
+  take words back. A typed self-correction on "actually" is **off by
+  default**: "We meet Tuesday, actually Wednesday." is typed as spoken. Turn
+  it on under Settings → Controls → **“Actually” corrections** (on Windows,
+  which has no settings window, set `"self_correction": true` in
+  `preferences.json` and restart). When on, "actually" replaces the item
+  before it only when both sides are the same kind of thing (two numbers,
+  weekdays, months, or clock times) and each is a whole item: "We meet
+  Tuesday, actually Wednesday." becomes "We meet Wednesday.", while "I didn't
+  actually finish the report.", "From 9 to 5, actually 6" and "Not Tuesday,
+  actually Wednesday." stay as spoken. It is off by default because a sentence
+  that contrasts two things has the same shape and is changed too: "I thought
+  it was Tuesday, actually Wednesday." becomes "I thought it was Wednesday."
+  Safe edits are compiled
   deterministically; the optional local model (Qwen3.5-4B) is used only for
   semantic cleanup and the explicit writing modes. Its strict JSON edit plan
   is guarded against refusals, over-deletion, and truncation; nearby context
@@ -201,8 +209,12 @@ are never Supporter-only features.
   selected-text editing, spoken-code compilation, or a small allowlist of
   reversible editing commands. Compose, Reply, and Edit are rewrites done by
   the optional cleanup model, in English only. Without that model (the
-  default install), Compose and Reply paste the deterministically cleaned
-  dictation and Edit leaves the selection as it was.
+  default install) all three insert nothing: what you said was an instruction
+  or a brief, not text to paste, so the field and any selection stay as they
+  were, and the caption reads "<Mode> mode needs the cleanup model — nothing
+  changed". If the model is installed but gives no usable rewrite, the caption
+  reads "<Mode> mode got no rewrite from the cleanup model — nothing changed",
+  and again nothing is inserted.
 - **Tone awareness** — casual in Slack/Messages (texting style: no trailing
   period), formal prose in Mail, technical in editors and AI chats, verbatim
   in terminals. Pick a tone per app under Settings → Personalize →
@@ -211,7 +223,13 @@ are never Supporter-only features.
   *"verbatim mode: …"*. A sentence that really opens that way ("Code style:
   use tabs") is read as an override too.
 - **Spoken structure** — "new line" / "new paragraph" work, and a noun use
-  ("a new line of products") stays literal. "Scratch that" spoken as its own
+  ("a new line of products") stays literal. So does the phrase right after a
+  count or quantity (a number, "dozen", "couple", "all", "most", "several",
+  "of"): "We hired two new line cooks." and "12 new line staff" keep their
+  words. The cost is that a command said without a pause right after a number
+  ("Step 1 new line step 2") is typed as words; pause before it, so the
+  recognizer writes a comma or a full stop, and it breaks the line.
+  "Scratch that" spoken as its own
   sentence drops the previous sentence; spoken inline it drops the current
   clause, and after a trailing-off pause written as "..." it counts as
   inline. Explicit list lead-ins ("two things", "here's a list", "here are
@@ -362,7 +380,8 @@ are never Supporter-only features.
   `--server-only` install serves the OpenAI-compatible
   `/v1/audio/transcriptions` endpoint (port 8787) for self-hosted clients such
   as [Diction](https://diction.one). It requires a bearer token that is
-  printed once at each start and changes on every restart, refuses requests
+  created once, kept in `phone_token.txt` in the checkout, and reused across
+  restarts; it is never printed or logged. It refuses requests
   from browsers, expands no snippets, and writes nothing to the transcript
   history. In ordinary desktop mode port 8787 answers only `GET /health` on
   loopback. Native iPhone work is deliberately deferred while the Mac
@@ -390,7 +409,7 @@ unless you ask for them:
 | Optional model | Size | What you lose without it |
 |---|---|---|
 | Whisper large-v3-turbo | ~1.6 GB | The tie-breaking vote when Parakeet and Tiny disagree, and the accurate Whisper fallback; without it, non-English dictation runs on Whisper Tiny alone |
-| Qwen3.5-4B (via Ollama) | ~3.4 GB | Semantic cleanup and the Compose, Reply, and Edit rewrites; the deterministic compiler still punctuates and cleans every dictation. Ollama itself is installed only with this model |
+| Qwen3.5-4B (via Ollama) | ~3.4 GB | Semantic cleanup and the Compose, Reply, and Edit rewrites, which then insert nothing; the deterministic compiler still punctuates and cleans every ordinary dictation. Ollama itself is installed only with this model |
 
 Install them up front with `./setup.sh --with-all-models`, or add them later
 with `./setup.sh --models`. Windows installs Whisper Tiny, Whisper
@@ -585,11 +604,18 @@ the old transcript history.
 ```
 
 No hotkey, no HUD, no permission prompts—just the compatibility endpoint.
-This explicit mode binds port 8787 to reachable interfaces. Each start creates
-a new bearer token and prints it once (to the terminal, or to `dictate.log`
-when it runs as the login service); a client must send it as
-`Authorization: Bearer <token>`, so a phone client has to be given the new
-token after every restart. Requests carrying a browser `Origin` header, or a
+This explicit mode binds port 8787 to reachable interfaces. The first start
+creates a bearer token and saves it in `phone_token.txt` in the checkout
+(owner-only, mode 600, on a Mac; on Windows it has the checkout folder's
+permissions). Later starts reuse it, so a paired phone client keeps working
+across restarts. The token is never printed and never written to
+`dictate.log`; the log says only where the file is. Read it from the file and
+have the client send it as `Authorization: Bearer <token>`. To rotate it,
+delete `phone_token.txt` and restart the service: a new token is created and
+the old one stops working. If the file cannot be written, every transcription
+request is refused and the log says so. The file is gitignored, and
+`--uninstall` keeps it with your other private files unless you add
+`--remove-personal-data`. Requests carrying a browser `Origin` header, or a
 `Host` that is not an IP address, `localhost`, or a `.local` name, are
 refused. Uploaded audio is written to a private temporary file while
 `ffmpeg` decodes it. Use only a trusted LAN and firewall, and never forward
@@ -628,7 +654,8 @@ until you add `--yes`:
   Ollama itself is asked to drop.
 - **Your personal files are kept unless you ask for them to go.** Your
   dictionary, snippets, tones, preferences, learned corrections, transcripts,
-  Voice Inbox drafts, demonstrations, activation receipts, and logs are your
+  Voice Inbox drafts, demonstrations, activation receipts, logs, and a
+  `--server-only` endpoint token are your
   words. No download restores them, so `--remove-personal-data` is the only
   thing that removes them, and the run tells you where they were left.
 
@@ -654,17 +681,19 @@ is in the [update and rollback guide](docs/distribution/update-and-rollback.md).
 |---|---|
 | (hold Right Option on Mac or Right Alt on Windows, talk, release) | cleaned text at your cursor |
 | (Flight Recorder enabled: talk, then tap Right Option) | your latest utterance |
-| Shift + Right Option | compose polished prose (needs the optional cleanup model; English only) |
-| Control + Right Option | reply using the current selection/context (needs the optional cleanup model; English only) |
-| Command + Right Option | edit the selected text (needs the optional cleanup model; English only) |
+| Shift + Right Option | compose polished prose (needs the optional cleanup model and English; without the model nothing is inserted) |
+| Control + Right Option | reply using the current selection/context (needs the optional cleanup model and English; without the model nothing is inserted) |
+| Command + Right Option | edit the selected text (needs the optional cleanup model and English; without the model the selection is left as it was) |
 | Shift + Control + Right Option | compile spoken code punctuation |
 | Command + Control + Right Option | run an allowlisted Mac command |
 | your undo key, if you set one (Mac) | the last dictation taken back out |
 | "Uh, I think, you know, it works." | "I think it works." |
-| "We meet Tuesday, actually Wednesday." | "We meet Wednesday." |
-| "I didn't actually finish the report." | unchanged: "actually" here is not a correction |
-| "From 9 to 5, actually 6." | unchanged: part of a range is never corrected |
-| "Not Tuesday, actually Wednesday." | unchanged: a negated item is never corrected |
+| "We meet Tuesday, actually Wednesday." | unchanged by default. With **“Actually” corrections** turned on (Settings → Controls): "We meet Wednesday." |
+| "I thought it was Tuesday, actually Wednesday." | unchanged by default. With the switch on it becomes "I thought it was Wednesday.", which is wrong: a contrast looks the same as a correction, and that is why the switch is off |
+| "I didn't actually finish the report." | unchanged, on or off: "actually" here is not a correction |
+| "From 9 to 5, actually 6." | unchanged, on or off: part of a range is never corrected |
+| "Not Tuesday, actually Wednesday." | unchanged, on or off: a negated item is never corrected |
+| "We hired two new line cooks." | unchanged: after a count, "new line" is words, not a command |
 | "two things: … and second …" / "here's a list of ideas …" | a dash list |
 | "new paragraph" | a real paragraph break |
 | "Hi team. The launch is Tuesday. Scratch that. Wednesday." | "Hi team. Wednesday." (on its own, it drops the previous sentence; inline, the current clause) |

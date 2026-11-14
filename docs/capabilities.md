@@ -41,8 +41,9 @@ Qwen3.5-4B, and has no Parakeet.
   nothing for two seconds ends the take, and one that stops after speech
   keeps what it heard.
 - **Rebindable keys and sounds (Mac).** The capture key, an optional undo key,
-  and the feedback sounds are chosen under Settings → Controls. A capture key
-  equal to the undo key is refused.
+  and the feedback sounds are chosen under Settings → Controls, which also
+  holds the “Actually” corrections switch. A capture key equal to the undo
+  key is refused.
 - **Eleven dictation languages.** English, Spanish, French, German, Italian,
   Portuguese, Dutch, Russian, Japanese, Korean, and Chinese. Parakeet is
   English-only, so the other ten are recognized by Whisper alone — Tiny on a
@@ -69,21 +70,39 @@ Qwen3.5-4B, and has no Parakeet.
   spoken-code compilation, or a small allowlist of reversible editing
   commands. Command mode cannot run shell commands; edit mode requires a
   selection. *Compose, Reply, and Edit need the optional cleanup model and
-  English*: without the model, Compose and Reply paste deterministic cleanup
-  and Edit leaves the selection unchanged.
+  English*. Without the model (the default install) none of them inserts
+  anything: the dictation is an instruction or a brief, not text to paste, so
+  the field and any selection stay as they were and the caption reads
+  "<Mode> mode needs the cleanup model — nothing changed". With the model
+  installed, a rewrite that fails or is rejected also inserts nothing
+  ("<Mode> mode got no rewrite from the cleanup model — nothing changed").
 - **Per-app tone.** Casual in chat, formal in mail, technical in editors,
   verbatim in terminals — configurable per app, or forced for one dictation by
   opening with the tone and "tone", "style", or "mode": "formal tone, …".
 - **Spoken structure.** "New line", "new paragraph", and explicit list
-  lead-ins become real formatting. "Scratch that" as its own sentence drops
+  lead-ins become real formatting. The phrase stays as words in a noun use
+  ("a new line of products") and right after a count or quantity: a number,
+  "dozen", "couple", "all", "most", "several", "of" ("We hired two new line
+  cooks.", "12 new line staff"). So a command said without a pause right
+  after a number ("Step 1 new line step 2") is typed as words; with a pause,
+  which the recognizer writes as a comma or a full stop, it breaks the line.
+  "Scratch that" as its own sentence drops
   the previous sentence; inline (or after a "..." pause) it drops the current
   clause.
-- **Typed self-correction.** "Tuesday, actually Wednesday" becomes
-  "Wednesday" only when both sides are the same kind of item (numbers,
-  weekdays, months, clock times) and each is a whole item. "I didn't actually
-  finish", a correction inside a range, score, or grouped number, and a
-  correction after a negation ("not Tuesday, actually Wednesday") stay as
-  spoken.
+- **Typed self-correction (off by default).** Out of the box "We meet
+  Tuesday, actually Wednesday." is typed as spoken; "scratch that" is the way
+  to take words back. The preference `self_correction` turns the rule on: the
+  “Actually” corrections switch under Settings → Controls on Mac, or
+  `"self_correction": true` in `preferences.json` on Windows, which has no
+  settings window. When on, "Tuesday, actually Wednesday" becomes "Wednesday"
+  only when both sides are the same kind of item (numbers, weekdays, months,
+  clock times) and each is a whole item. "I didn't actually finish", a
+  correction inside a range, score, or grouped number, and a correction after
+  a negation ("not Tuesday, actually Wednesday") stay as spoken. What it gets
+  wrong, and why it is opt-in: a sentence contrasting two things has the same
+  shape, so "I thought it was Tuesday, actually Wednesday." becomes "I thought
+  it was Wednesday." The same preference decides whether the cleanup model's
+  proof may claim a self-correction.
 - **Snippets.** Say "insert my email", alone or inside a sentence, and saved
   text arrives. A bare snippet name is never expanded, nor is a negated cue
   ("do not insert my email"), and an unfilled
@@ -101,14 +120,24 @@ Qwen3.5-4B, and has no Parakeet.
   edits do not reconstruct the model's own output, the whole result is
   discarded and deterministic cleanup is used instead. Compose, Reply, and
   Edit are rewrites by design and are not held to the proof. The deterministic
-  path applies only the written rules above (fillers, spoken structure, typed
-  self-correction, snippets on the explicit cue).
+  path applies only the written rules above (fillers, spoken structure,
+  snippets on the explicit cue, and the typed self-correction only when it is
+  turned on).
 - **Bounded context.** App names, window titles, and dictionary terms bias
-  the recognizer and protect words but never replace a recognized word. Terms
-  from the selection, the document, or the repository can still replace a
-  similar-sounding word when they clear an anchor-aware threshold, and each
-  such swap is recorded as an inspectable decision. Nothing is read from
-  secure text fields or private clipboards.
+  the recognizer and protect words but never replace a recognized word. Other
+  on-screen text (the selection, the open document, the repository, the
+  focused field, the clipboard) can only *repair a name*: the recognizer
+  must have been unsure of the word (confidence 0.70 or lower) and must
+  itself have written it as a name or identifier — capitalized in the middle
+  of a sentence, or containing a digit, an underscore, or an inner capital —
+  and the on-screen term must sound like it. So a visible "Qwen" repairs "Ask
+  Gwen to review it." What it cannot do: replace or introduce a common word
+  ("Looks good." stays, whatever is selected), touch a word the recognizer
+  wrote in lower case or one capitalized only because it starts a sentence,
+  or act when the recognizer was confident. From the focused field and the
+  clipboard only identifier-shaped terms (`Qwen3_5`, `D55`, `camelCase`) are
+  eligible. Each repair is recorded as an inspectable decision. Nothing is
+  read from secure text fields or private clipboards.
 - **Insertion is a transaction.** The destination is leased at key-down and
   revalidated before exactly one paste attempt. Drift in focus, selection, or
   surrounding text fails closed.

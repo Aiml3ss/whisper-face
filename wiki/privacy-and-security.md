@@ -69,8 +69,10 @@ anonymous.
 - **Port 8787** (corrected November 2026): desktop mode binds loopback and
   answers only `GET /health`; the transcription, source, and license
   routes exist only under explicit `--server-only`, where transcription
-  needs a per-start bearer token and browser-origin or rebinding requests
-  are refused. Open security work now names the menu updater (branch tip,
+  needs a bearer token and browser-origin or rebinding requests are
+  refused. The token is created once, kept in `phone_token.txt` in the
+  checkout (0600 on Mac), reused across restarts, and never printed or
+  logged; deleting the file and restarting rotates it. Open security work now names the menu updater (branch tip,
   no tag or signature check) and who can use the launcher's privacy grants, alongside
   capture sandboxing, independent manifest signing, and external review.
 - **Evidence sessions** ([[evidence-capture]]): everything the capture

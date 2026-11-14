@@ -31,7 +31,9 @@ cannot silently corrupt the parts that matter.
 - In span fusion, anchors raise the replacement threshold (up to a 0.30
   hard floor for anchors with no context/prior backing).
 - In [[proof-edit]] validation, removing an anchor rejects the edit
-  unless it is an explicit spoken self-correction.
+  unless it is an explicit spoken self-correction, which counts only
+  when the user has turned the `self_correction` preference on (off by
+  default).
 - In the [[context-firewall]], a changed token that overlaps an anchor
   (or a replacement that *introduces* a new anchor shape) marks the
   contextual influence as protected and quarantines the receipt.
@@ -43,8 +45,10 @@ cannot silently corrupt the parts that matter.
 - "email andrew at aiml3ss dot com about the 4pm" — the address and time
   survive any cleanup path.
 - A context term can still *correct* an anchor ("Gwen" → "Qwen") when
-  acoustic + context evidence clears the raised threshold, and the swap
-  is recorded as an inspectable Decision.
+  the recognizer was unsure, wrote the word as a name, and acoustic +
+  context evidence clears the raised threshold; the swap is recorded as
+  an inspectable Decision. Context never replaces an ordinary word
+  ([[voice-compiler]]).
 
 ## Related Concepts
 

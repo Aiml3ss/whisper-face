@@ -104,8 +104,14 @@ deletes them. Each install run writes a user-only `install.log` in the
 checkout. Logs can contain content-free timing, counts, closed event labels,
 and diagnostic details; routine logging does not intentionally interpolate
 transcript, draft, context, snippet, correction, or focused-app values. In
-`--server-only` mode, the bearer token printed at each start lands in
-`dictate.log` when the service runs at login. These files are not anonymous
+`--server-only` mode, the endpoint's bearer token is kept in `phone_token.txt`
+in the checkout: created on the first start, reused on later starts, written
+owner-only (mode 600) on a Mac, and protected on Windows only by the
+permissions of the checkout folder. It is never printed and never written to
+`dictate.log`, which records only the file's location. Deleting the file and
+restarting the service replaces the token. Anyone who can read that file can
+send audio to the endpoint; an uninstall removes it only with
+`--remove-personal-data`. These files are not anonymous
 simply because they remain local. A person or backup product with access to
 the installed folder may be able to read them.
 
@@ -160,8 +166,9 @@ and answers only an unauthenticated `GET /health` (the installers' readiness
 probe), which returns `ok` and nothing else. The experimental transcription
 endpoint, `GET /source`, and `GET /license` exist only in the explicit
 `--server-only` mode, which binds reachable network interfaces. There, a
-transcription request needs a bearer token that is created and printed once at
-each start; requests with a browser `Origin` header, or a `Host` that is not an
+transcription request needs a bearer token that is created once, stored in
+`phone_token.txt`, and reused across restarts until that file is deleted;
+requests with a browser `Origin` header, or a `Host` that is not an
 IP address, `localhost`, or a `.local` name, are refused; snippets are never
 expanded; and nothing is written to the transcript history. Use that mode only
 on a trusted network with a host firewall and do not forward the port to the

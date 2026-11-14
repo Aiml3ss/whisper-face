@@ -52,7 +52,10 @@ gone. Closing the window does not stop dictation.
   capture-key shortcuts ([[voice-modes]]) — lives here beside the key
   it describes. Personalize has room for exactly six 44 pt rows at the
   minimum size, which is why the modes reference moved rather than
-  squeezed. A capture key equal to the undo key is refused.
+  squeezed. A capture key equal to the undo key is refused. The pane also
+  holds the **“Actually” corrections** switch (November 2026), off by
+  default, which turns on the typed "X, actually Y" self-correction
+  ([[cleanup-pipeline]]); its detail text gives an example and the cost.
 - **Settings → Privacy** = exactly three switches: Voice Object Commands
   (with an Inspect button, [[voice-objects]]), Flight Recorder, and
   Acoustic Time Machine.

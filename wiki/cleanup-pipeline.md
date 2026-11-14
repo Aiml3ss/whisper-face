@@ -14,9 +14,10 @@ confidence: high
 
 ## Definition
 
-Cleanup turns raw recognition into presentable text: fillers and false
-starts removed, self-corrections applied, punctuation fixed, spoken
-structure honored. Safe edits are compiled deterministically
+Cleanup turns raw recognition into presentable text: fillers removed,
+punctuation fixed, spoken structure honored. The typed "X, actually Y"
+self-correction is off by default and applies only when the user turns
+it on. Safe edits are compiled deterministically
 (`compile_cleanup` / `compile_code_dictation` in `parrot_core.py`); the
 local LLM (pinned Qwen3.5-4B via Ollama) is used only for semantic
 cleanup and explicit writing modes, and its output is accepted only
@@ -41,7 +42,24 @@ through validated [[proof-edit]]s.
   result is discarded ([[proof-edit]]). Compose/reply/edit modes keep
   their broad-rewrite contract by design ([[voice-modes]]).
 - **Spoken structure**: "new line" / "new paragraph" / "scratch that"
-  work; explicit list lead-ins become dash lists.
+  work; explicit list lead-ins become dash lists. "New line" stays as
+  words in a noun use ("a new line of products") and right after a count
+  or quantity — a number, "dozen", "couple", "all", "most", "several",
+  "of" — so "We hired two new line cooks." is one line. An unpaused
+  command right after a number ("Step 1 new line step 2") is therefore
+  typed as words; with a pause (a comma or full stop in the recognizer's
+  text) it breaks the line (November 2026).
+- **Self-correction is opt-in** (November 2026): the preference
+  `self_correction` (default false; Settings → Controls → “Actually”
+  corrections) passes into `compile_cleanup`, `compile_code_dictation`
+  and `verify_edits`. On, "We meet Tuesday, actually Wednesday." becomes
+  "We meet Wednesday." between two numbers, weekdays, months or clock
+  times. It is off by default because a contrast has the same shape: "I
+  thought it was Tuesday, actually Wednesday." would become "I thought
+  it was Wednesday."
+- **A word said a few times is kept**: `collapse_repeats` cuts only a
+  run of eight or more of one word (a decode loop), so "very, very, very
+  good" is typed whole.
 - **Snippet masking**: inline snippets fire only on the spoken cue
   "insert my <name>" (never on a bare snippet name, never when the cue is
   negated as in "do not insert my email", and never for a value still
@@ -56,8 +74,9 @@ through validated [[proof-edit]]s.
 
 - "two things: ship it and second, write the notes" → a tidy dash list,
   deterministically.
-- Ollama down → breaker opens, every dictation still pastes with
-  deterministic cleanup; a probe closes the breaker later.
+- Ollama down → breaker opens, every ordinary dictation still pastes
+  with deterministic cleanup; a probe closes the breaker later. Compose,
+  Reply and Edit insert nothing in that case ([[voice-modes]]).
 
 ## Related Concepts
 

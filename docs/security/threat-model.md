@@ -77,7 +77,7 @@ application alone can prevent. They remain important deployment risks.
 | Borrowed privacy grants | launchd starts the runtime through the Whisper Face launcher, so macOS attributes Input Monitoring, Accessibility, and Microphone to Whisper Face. | **Open.** Those grants are not confined to the reviewed runtime. The launcher, and the user-writable checkout it starts, sit inside the same trust boundary as everything else running as the logged-in user, so software already running as that user can act with all three grants without a new prompt. |
 | Speech leaving the machine | `tests/test_network_egress.py` checks that no first-party module on the dictation path imports a network client, enumerates every socket call site in the runtime, drives a synthetic utterance through the compile path against an instrumented socket, `urllib`, and `http.client`, and runs the shipping cleanup client against a live loopback proxy. The cleanup client reaches only `127.0.0.1:11434`, ignores environment and system proxies, and sends nothing when the model is not installed. Windows loads models from local files only at runtime. | A dynamic check only covers the code a test executes; a structural check cannot see through `getattr`. Neither observes the operating system, the installed model processes, or a compromised dependency's own traffic. It is a tripwire, not a proof. |
 | Source/license mismatch | Artifact includes exact corresponding source and notices; manifest binds its full revision and source URLs. | A distributor can violate policy; recipients can compare the digest and source. |
-| Endpoint abuse | Desktop mode is loopback-only and answers only `GET /health`; any request with a browser `Origin` header or a `Host` that is not an IP address, `localhost`, or a `.local` name is refused. Explicit `--server-only` adds the transcription, source, and license routes; transcription needs a 64-hex bearer token created at each start, bodies are size-limited, snippets are never expanded, and nothing is logged to the transcript history. | The token is printed once and, under the login service, sits in `dictate.log`; it changes on every restart. Uploaded audio is written to a temporary file for `ffmpeg`, which has no format whitelist, and phone requests share the single recognition worker with live dictation. The endpoint is not safe to expose to the internet. |
+| Endpoint abuse | Desktop mode is loopback-only and answers only `GET /health`; any request with a browser `Origin` header or a `Host` that is not an IP address, `localhost`, or a `.local` name is refused. Explicit `--server-only` adds the transcription, source, and license routes; transcription needs a 64-hex bearer token, checked by comparing SHA-256 digests so the timing does not depend on the token. The token is created on the first start, stored in `phone_token.txt` in the checkout (owner-only, mode 600, on macOS), reused on every later start, and never printed or logged; deleting the file and restarting rotates it, and if it cannot be saved every transcription request is refused. Bodies are size-limited, snippets are never expanded, and nothing is logged to the transcript history. | The token is a long-lived secret in a file inside the checkout: any process running as the user can read it, on Windows it has only the permissions inherited from the checkout folder, a backup of the folder carries it, it does not expire, and an uninstall keeps it unless `--remove-personal-data` is given. Uploaded audio is written to a temporary file for `ffmpeg`, which has no format whitelist, and phone requests share the single recognition worker with live dictation. The endpoint is not safe to expose to the internet. |
 
 ## Security invariants
 
@@ -103,8 +103,8 @@ application alone can prevent. They remain important deployment risks.
   checkout cannot borrow them;
 - publish a release through the signed, notarized, attested workflow; none has
   been yet;
-- decode `--server-only` uploads without a temporary file, and give the phone
-  token a stored, rotatable form instead of a per-start value in the log;
+- decode `--server-only` uploads without a temporary file, and restrict
+  `phone_token.txt` to its owner on Windows;
 - sandbox model and capture work into least-privilege processes. The
   `macos_networkless_worker` foundation exists and proves the OS denies it IP
   networking, but no runtime path uses it yet;
@@ -126,6 +126,10 @@ application alone can prevent. They remain important deployment risks.
 - **Desktop loopback endpoint.** Desktop mode now serves only `GET /health`;
   the transcription route needs `--server-only` and a bearer token, and
   browser-origin and DNS-rebinding requests are refused.
+- **Server-only token out of the log.** The token used to be created at every
+  start and printed into `dictate.log`. It is now created once, kept in
+  `phone_token.txt` (mode 600 on macOS), reused across restarts, never
+  printed, and rotated by deleting the file and restarting.
 - **Automated privacy regression tests for network egress.**
   `tests/test_network_egress.py` enforces the structural and dynamic contracts
   described in the controls table above, and its own tripwire is tested so a
