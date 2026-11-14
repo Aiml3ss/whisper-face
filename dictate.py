@@ -699,10 +699,17 @@ ASR_MODEL_REVISIONS = {
 }
 PARAKEET_MODEL_REPO = "FluidInference/parakeet-unified-en-0.6b-coreml"
 PARAKEET_MODEL_REVISION = "4252711f6f060f9a2f91e5f081a806d7f45eebd8"
-OLLAMA_URL = "http://localhost:11434/api/chat"
+# 127.0.0.1, not localhost: Ollama listens on IPv4 only, and "localhost"
+# resolves to ::1 first, where any local process could answer instead.
+OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 OLLAMA_MODEL = "qwen3.5:4b"
 OLLAMA_MODEL_MANIFEST_SHA256 = (
     "2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd")
+# Every request to the local model goes through this one client. With
+# trust_env off, no proxy from the environment or the system settings (and no
+# .netrc credential) is ever applied, so dictated text cannot be relayed.
+LOCAL_MODEL_SESSION = requests.Session()
+LOCAL_MODEL_SESSION.trust_env = False
 PROJECT_SOURCE_URL = os.environ.get(
     "WHISPER_FACE_SOURCE_URL",
     "https://github.com/Aiml3ss/whisper-face",
@@ -6445,6 +6452,91 @@ def transcript_app_identity(bundle: str) -> str:
     return f"windows:{digest}"
 
 
+TRANSCRIPT_MAX_AGE = 30 * 24 * 3600   # no dictation is kept longer than this
+# Each trim frees this much headroom below both limits, so the log is
+# rewritten about once per hundred dictations or once a day, not per paste.
+TRANSCRIPT_TRIM_SLACK = 100
+TRANSCRIPT_AGE_SLACK = 24 * 3600
+
+
+def _transcript_entry_time(line: str) -> float | None:
+    try:
+        return float(json.loads(line)["ts"])
+    except (TypeError, ValueError, KeyError, IndexError):
+        return None
+
+
+def retained_transcript_lines(lines: list[str], now: float) -> list[str] | None:
+    """The lines a retention pass keeps, or None while the log is in bounds."""
+    if not lines:
+        return None
+    oldest = _transcript_entry_time(lines[0])
+    if (len(lines) <= TRANSCRIPT_KEEP and oldest is not None
+            and oldest >= now - TRANSCRIPT_MAX_AGE):
+        return None
+    cutoff = now - TRANSCRIPT_MAX_AGE + TRANSCRIPT_AGE_SLACK
+    kept = [line for line in lines
+            if (at := _transcript_entry_time(line)) is not None
+            and at >= cutoff]
+    return kept[-(TRANSCRIPT_KEEP - TRANSCRIPT_TRIM_SLACK):]
+
+
+def _trim_transcripts_locked() -> int:
+    """Apply the count and age limits; the caller holds TRANSCRIPTS_LOCK.
+
+    Returns how many entries were dropped from the log.
+    """
+    try:
+        # Runs on every append: a damaged byte must not stop the dictation.
+        lines = TRANSCRIPTS_FILE.read_text(errors="replace").splitlines()
+    except OSError:
+        return 0
+    kept = retained_transcript_lines(lines, time.time())
+    if kept is None:
+        return 0
+    try:
+        atomic_write_text(
+            TRANSCRIPTS_FILE, "".join(line + "\n" for line in kept))
+    except OSError as e:
+        print(f"! transcript retention failed: {e}")
+        return 0
+    return len(lines) - len(kept)
+
+
+def _rebase_learned_processed(dropped: int):
+    """Keep the miner's position on the same dictation after a trim."""
+    if dropped <= 0:
+        return
+    with LEARN_LOCK:
+        state = load_learned()
+        processed = state.get("processed", 0)
+        if processed:
+            state["processed"] = max(0, processed - dropped)
+            save_learned(state)
+
+
+def prune_transcripts():
+    """Enforce retention without waiting for a dictation or the miner."""
+    with TRANSCRIPTS_LOCK:
+        dropped = _trim_transcripts_locked()
+    _rebase_learned_processed(dropped)
+    if dropped:
+        with USAGE_CACHE["lock"]:
+            USAGE_CACHE["at"] = 0.0
+
+
+def clear_transcript_history():
+    """Erase every kept dictation; the next one starts a new log."""
+    with TRANSCRIPTS_LOCK:
+        try:
+            TRANSCRIPTS_FILE.unlink()
+        except FileNotFoundError:
+            pass
+    _rebase_learned_processed(sys.maxsize)
+    with USAGE_CACHE["lock"]:
+        USAGE_CACHE["at"] = 0.0
+
+
 def append_transcript(raw: str, cleaned: str, bundle: str, path: str,
                       metrics: dict | None = None,
                       event_id: str | None = None,
@@ -6476,6 +6568,8 @@ def append_transcript(raw: str, cleaned: str, bundle: str, path: str,
             # If permission setup or fdopen fails, do not leak the raw handle.
             if fd is not None:
                 os.close(fd)
+        dropped = _trim_transcripts_locked()
+    _rebase_learned_processed(dropped)
     with USAGE_CACHE["lock"]:
         USAGE_CACHE["at"] = 0.0
 
@@ -6519,7 +6613,7 @@ def recent_dictation_metadata(limit: int = RECENT_DICTATION_LIMIT, *,
     app. The text itself only leaves this file through an explicit reveal or
     an explicit re-insertion, so nothing here can end up in a menu title.
 
-    The log is re-read on every call rather than cached, because ``learn_pass``
+    The log is re-read on every call rather than cached, because retention
     rewrites ``transcripts.jsonl`` in place: a retained handle or line offset
     would eventually describe a file that no longer exists.
     """
@@ -6657,6 +6751,19 @@ def insert_recent_dictation(entry_id: str) -> dict:
     return {"inserted": bool(verified), "reason": reason}
 
 
+def cleanup_model_installed() -> bool:
+    """Whether the cleanup model is on disk, from a local file check only.
+
+    A default install has no cleanup model; asking Ollama anyway would put the
+    dictation on the wire for nothing.
+    """
+    models_root = Path(os.environ.get(
+        "OLLAMA_MODELS", str(Path.home() / ".ollama" / "models")))
+    name, _, tag = OLLAMA_MODEL.partition(":")
+    return (models_root / "manifests" / "registry.ollama.ai" / "library"
+            / name / (tag or "latest")).is_file()
+
+
 def ollama_chat(system: str | None, user: str, num_predict: int = 512,
                 few_shot: list | None = None,
                 timeout: tuple = (2, 15),
@@ -6671,7 +6778,11 @@ def ollama_chat(system: str | None, user: str, num_predict: int = 512,
     rejects the schema). ``total_deadline`` switches to streaming: the read
     timeout then bounds the gap between chunks instead of the whole reply,
     and the deadline bounds the whole reply.
+
+    Raises before sending anything when the cleanup model is not installed.
     """
+    if not cleanup_model_installed():
+        raise RuntimeError(f"{OLLAMA_MODEL} is not installed")
     messages = ([{"role": "system", "content": system}] if system else [])
     messages += few_shot or []
     messages.append({"role": "user", "content": user})
@@ -6696,7 +6807,7 @@ def ollama_chat(system: str | None, user: str, num_predict: int = 512,
         payload["format"] = "json"
 
     def post(current: dict):
-        return requests.post(
+        return LOCAL_MODEL_SESSION.post(
             OLLAMA_URL, json=current, timeout=timeout, stream=streaming)
 
     r = post(payload)
@@ -6749,8 +6860,15 @@ def parse_texts(lines: list[str]) -> list[str]:
     return texts
 
 
+def term_occurs(term: str, text: str) -> bool:
+    """Whether ``term`` appears in ``text`` as a whole word, in any case."""
+    return re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", text,
+                     re.IGNORECASE) is not None
+
+
 def learn_pass():
     """Mine recent transcripts for new vocabulary and promote frequent terms."""
+    prune_transcripts()
     if not TRANSCRIPTS_FILE.exists():
         return
     lines = TRANSCRIPTS_FILE.read_text().splitlines()
@@ -6773,17 +6891,34 @@ def learn_pass():
     new_texts = parse_texts(new_lines)
     blob = "\n".join(texts)[-6000:]
 
+    # A word the user corrected into something else is a misrecognition,
+    # however often it was transcribed. A casing-only fix is not.
+    corrected_away = {
+        str(fix_from).casefold()
+        for fix_from, fix_to in [
+            (key, fix.get("to")) for key, fix in state["fixes"].items()
+            if isinstance(fix, dict)
+        ] + [
+            (item.get("from"), item.get("to"))
+            for item in state["confusions"].values() if isinstance(item, dict)
+        ]
+        if fix_from and str(fix_from).casefold() != str(fix_to).casefold()
+    }
+
+    def built_on_corrected_word(term: str) -> bool:
+        return any(term_occurs(word, term) for word in corrected_away)
+
     # Terms below the promotion threshold keep accumulating against the new
     # dictations; without this they'd freeze at their discovery count and
     # could never be promoted.
     for term, count in state["counts"].items():
-        if count < PROMOTE_MIN_COUNT:
-            hits = sum(1 for t in new_texts if term.lower() in t.lower())
+        if count < PROMOTE_MIN_COUNT and not built_on_corrected_word(term):
+            hits = sum(1 for t in new_texts if term_occurs(term, t))
             if hits:
                 state["counts"][term] = count + hits
 
     manual, banned = parse_dictionary()
-    known = set(t.casefold() for t in manual) | banned \
+    known = set(t.casefold() for t in manual) | banned | corrected_away \
         | set(k.casefold() for k in state["counts"])
     known_str = ", ".join(sorted(manual + list(state["counts"])))[:1200]
 
@@ -6803,24 +6938,27 @@ def learn_pass():
         if not isinstance(cand, str):
             continue
         cand = cand.strip()
-        if not (2 <= len(cand) <= 40) or cand.casefold() in known:
+        if not (2 <= len(cand) <= 40) or cand.casefold() in known \
+                or built_on_corrected_word(cand):
             continue
         # how many dictations actually contain it
-        count = sum(1 for t in texts if cand.lower() in t.lower())
+        count = sum(1 for t in texts if term_occurs(cand, t))
         if count >= 1:
             state["counts"][cand] = state["counts"].get(cand, 0) + count
             added.append((cand, state["counts"][cand]))
 
-    # Mark everything mined as processed, then trim the log so it stores only
-    # what the learning loop can still use. Dictations appended while the
-    # miner ran stay unprocessed; re-read under the lock so they survive.
+    # Mark everything mined as processed. Appends during the miner call may
+    # have trimmed the log, so locate the last mined entry by its timestamp
+    # rather than by its old line number.
     with TRANSCRIPTS_LOCK:
-        fresh = TRANSCRIPTS_FILE.read_text().splitlines()
-        unprocessed = max(0, len(fresh) - len(lines))
-        if len(fresh) > TRANSCRIPT_KEEP + 100:
-            fresh = fresh[-TRANSCRIPT_KEEP:]
-            atomic_write_text(TRANSCRIPTS_FILE, "\n".join(fresh) + "\n")
-        state["processed"] = max(0, len(fresh) - unprocessed)
+        try:
+            fresh = TRANSCRIPTS_FILE.read_text().splitlines()
+        except OSError:
+            fresh = []
+    marker = _transcript_entry_time(lines[-1])
+    state["processed"] = next(
+        (index + 1 for index in range(len(fresh) - 1, -1, -1)
+         if _transcript_entry_time(fresh[index]) == marker), 0)
     with LEARN_LOCK:
         state = merge_learned_state(base_state, state, load_learned())
         save_learned(state)
@@ -7516,8 +7654,12 @@ def asr_decode_target(model_repo: str, *, available=None,
     return FAST_WHISPER_REPO
 
 
-def windows_whisper_model(model_repo: str):
-    """Load the Windows CTranslate2 model once, preferring an NVIDIA GPU."""
+def windows_whisper_model(model_repo: str, *, local_files_only: bool = True):
+    """Load the Windows CTranslate2 model once, preferring an NVIDIA GPU.
+
+    Like the macOS path, runtime loading never contacts the model hub; only
+    the installer's preload opts into downloading.
+    """
     if model_repo in WINDOWS_ASR_MODELS:
         return WINDOWS_ASR_MODELS[model_repo]
     from faster_whisper.utils import download_model
@@ -7525,6 +7667,7 @@ def windows_whisper_model(model_repo: str):
         model_repo,
         cache_dir=str(HERE / ".models"),
         revision=ASR_MODEL_REVISIONS.get(model_repo),
+        local_files_only=local_files_only,
     )
     options = []
     if ctranslate2.get_cuda_device_count() > 0:
@@ -9328,15 +9471,41 @@ def focused_text() -> str | None:
     return snapshot.text if snapshot else None
 
 
+# Password managers and other privacy-aware apps mark what they copy with
+# these formats; such a clipboard is never read as context.
+WINDOWS_PRIVATE_CLIPBOARD_FORMATS = (
+    "ExcludeClipboardContentFromMonitorProcessing",
+    "CanIncludeInClipboardHistory",
+    "Clipboard Viewer Ignore",
+)
+
+
+def windows_clipboard_is_private() -> bool:
+    return any(
+        win32clipboard.IsClipboardFormatAvailable(
+            win32clipboard.RegisterClipboardFormat(name))
+        for name in WINDOWS_PRIVATE_CLIPBOARD_FORMATS)
+
+
+def pasteboard_is_private(pb) -> bool:
+    kinds = {str(kind) for kind in (pb.types() or [])}
+    return any(marker in kinds for marker in PASTEBOARD_MARKER_TYPES)
+
+
 def capture_recognition_context(bundle: str = "") \
         -> tuple[FocusSnapshot | None, list[str], ContextPack]:
-    """Build an ephemeral vocabulary from what the user can currently see."""
+    """Build an ephemeral vocabulary from what the user can currently see.
+
+    Nothing is read from a secure text field or from a clipboard its owner
+    marked concealed or transient.
+    """
     if IS_WINDOWS:
         title = windows_foreground_title()
         clipboard = None
         try:
-            candidate = pyperclip.paste()
-            clipboard = candidate if len(candidate) <= 800 else None
+            if not windows_clipboard_is_private():
+                candidate = pyperclip.paste()
+                clipboard = candidate if len(candidate) <= 800 else None
         except Exception:
             pass
         observation = ContextObservation(
@@ -9347,10 +9516,17 @@ def capture_recognition_context(bundle: str = "") \
     snapshot = focused_snapshot()
     app = NSWorkspace.sharedWorkspace().frontmostApplication()
     app_name = str(app.localizedName()) if app is not None else None
+    if snapshot is not None and "AXSecureTextField" in {
+            _ax_attribute(snapshot.element, "AXRole"),
+            _ax_attribute(snapshot.element, "AXSubrole")}:
+        pack = CONTEXT_ROUTER.collect(
+            ContextObservation(app=app_name or "", bundle=bundle))
+        return snapshot, [], pack
     clipboard = None
     try:
-        clipboard = NSPasteboard.generalPasteboard().stringForType_(
-            NSPasteboardTypeString)
+        pb = NSPasteboard.generalPasteboard()
+        if not pasteboard_is_private(pb):
+            clipboard = pb.stringForType_(NSPasteboardTypeString)
         if clipboard and len(clipboard) > 800:
             clipboard = None
     except Exception:
@@ -10662,15 +10838,22 @@ def parse_multipart(content_type: str, body: bytes) -> dict:
     return parts
 
 
+PHONE_MAX_BODY = 25 * 1024 * 1024    # the transcription API's own ceiling
+PHONE_MAX_AUDIO_SECONDS = 600        # longer uploads are cut, not decoded
+PHONE_DECODE_TIMEOUT = 60
+PHONE_TOKEN = {"value": ""}          # bearer token, set at --server-only start
+
+
 def decode_audio(path: str) -> np.ndarray:
     """Any container -> 16k mono float32 via ffmpeg. Deliberately avoids
     mlx_whisper.audio.load_audio: that touches MLX, and any MLX call outside
     the single ASR_POOL thread aborts the process (Metal is one-thread-only
     for us)."""
     p = subprocess.run(
-        ["ffmpeg", "-nostdin", "-i", path, "-f", "s16le", "-ac", "1",
+        ["ffmpeg", "-nostdin", "-i", path,
+         "-t", str(PHONE_MAX_AUDIO_SECONDS), "-f", "s16le", "-ac", "1",
          "-ar", str(SAMPLE_RATE), "pipe:1"],
-        capture_output=True)
+        capture_output=True, timeout=PHONE_DECODE_TIMEOUT)
     if p.returncode != 0:
         raise RuntimeError("ffmpeg failed: " + p.stderr.decode()[-200:])
     return np.frombuffer(p.stdout, np.int16).astype(np.float32) / 32768.0
@@ -10688,41 +10871,27 @@ def lan_ip() -> str:
 
 
 def phone_clean(raw: str) -> str:
-    """The local pipeline, minus app context: snippets, tone override,
-    quick/LLM routing, transcript logging."""
+    """The local pipeline for network audio, minus app context: tone
+    override and quick/LLM routing.
+
+    Snippets are never expanded and nothing is logged: whoever holds the
+    token must not be able to read a saved snippet back or write into the
+    history the vocabulary miner learns from.
+    """
     language = current_language()
     raw, looped = collapse_repeats(raw)
     if not raw or is_hallucination(raw, language) \
             or (looks_like_prompt_echo(raw) and looped):
         return ""
     raw = apply_learned_fixes(raw)
-    hit = match_snippet(raw)
-    if hit is not None:
-        return hit[1]
-    # Inline snippet expansion, parity with the desktop pipeline. This path has
-    # no proof-checked LLM reconstruction, so when a trigger fires we shield it
-    # behind a sentinel and force the deterministic no-LLM route — the sentinel
-    # is never handed to the model — then restore the exact expansion after
-    # cleanup. With no trigger the mapping is empty and this path is unchanged.
-    masked, snippet_restore = _mask_snippets_inline(raw, _load_snippet_map())
-    if snippet_restore:
-        raw = masked
     raw, tone_override = extract_tone_override(raw)
     verbatim = tone_override == "verbatim"
     needs_llm = needs_llm_cleanup(
-        raw, tone_override, verbatim, language=language) \
-        and not snippet_restore
+        raw, tone_override, verbatim, language=language)
     tone_key = tone_override if tone_override in TONE else "default"
     text = llm_clean(raw, TONE[tone_key]) if needs_llm \
         else quick_clean(raw, verbatim=verbatim, language=language)
-    text = apply_vocabulary_casing(text)   # user's canonical term casing
-    if snippet_restore:
-        text = _restore_snippet_sentinels(text, snippet_restore)
-        raw = _restore_snippet_sentinels(raw, snippet_restore)
-    if text:
-        append_transcript(raw, text, "ios.diction", "phone",
-                          language=language)
-    return text
+    return apply_vocabulary_casing(text)   # user's canonical term casing
 
 
 def source_metadata() -> dict[str, str]:
@@ -10942,7 +11111,31 @@ def local_license_notice() -> str:
     return "\n".join(sections)
 
 
+def phone_host_allowed(host: str) -> bool:
+    """Accept an address or a local name; a DNS-rebinding page sends its own
+    domain as the Host."""
+    host = (host or "").strip().lower()
+    if host.startswith("["):
+        name = host[1:host.find("]")] if "]" in host else ""
+        return bool(re.fullmatch(r"[0-9a-f:.]+", name))
+    name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    return bool(re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", name)) \
+        or name == "localhost" or name.endswith(".local")
+
+
+def phone_token_matches(authorization: str) -> bool:
+    expected = PHONE_TOKEN["value"]
+    scheme, _, supplied = (authorization or "").partition(" ")
+    if not expected or scheme.lower() != "bearer":
+        return False
+    # Comparing digests keeps the comparison time independent of the token.
+    return hashlib.sha256(supplied.strip().encode()).digest() \
+        == hashlib.sha256(expected.encode()).digest()
+
+
 class PhoneHandler(BaseHTTPRequestHandler):
+    timeout = 30                            # a stalled client is dropped
+
     def log_message(self, *args):
         pass                                # our own log lines are enough
 
@@ -10953,16 +11146,27 @@ class PhoneHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _refuse_browser(self) -> bool:
+        """Browsers send Origin; the phone app and the installers do not."""
+        if self.headers.get("Origin") is None \
+                and phone_host_allowed(self.headers.get("Host", "")):
+            return False
+        self._reply(403, b"forbidden", "text/plain")
+        return True
+
     def do_GET(self):
-        if self.path in ("/", "/health"):
+        # The desktop listener exists only for the installers' health probe.
+        if self._refuse_browser():
+            return
+        if self.path == "/health":
             self._reply(200, b"ok", "text/plain")
-        elif self.path == "/source":
+        elif SERVER_ONLY and self.path == "/source":
             self._reply(
                 200,
                 json.dumps(source_metadata(), sort_keys=True).encode(),
                 "application/json",
             )
-        elif self.path == "/license":
+        elif SERVER_ONLY and self.path == "/license":
             self._reply(
                 200,
                 local_license_notice().encode(),
@@ -10972,13 +11176,28 @@ class PhoneHandler(BaseHTTPRequestHandler):
             self._reply(404, b"not found", "text/plain")
 
     def do_POST(self):
-        if not self.path.startswith("/v1/audio/transcriptions"):
+        if not SERVER_ONLY \
+                or not self.path.startswith("/v1/audio/transcriptions"):
             self._reply(404, b"not found", "text/plain")
+            return
+        if self._refuse_browser():
+            return
+        if not phone_token_matches(self.headers.get("Authorization", "")):
+            self._reply(401, b'{"error":"unauthorized"}', "application/json")
+            return
+        length = self.headers.get("Content-Length", "").strip()
+        if not length.isdigit():
+            self._reply(411, b'{"error":"length required"}',
+                        "application/json")
+            return
+        if int(length) > PHONE_MAX_BODY:
+            self._reply(413, b'{"error":"audio too large"}',
+                        "application/json")
             return
         try:
             LAST_USE["t"] = time.time()
             t0 = time.time()
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            body = self.rfile.read(int(length))
             ctype = self.headers.get("Content-Type", "")
             fmt = b"json"
             if "multipart/form-data" in ctype:
@@ -11008,8 +11227,8 @@ class PhoneHandler(BaseHTTPRequestHandler):
                 self._reply(200, json.dumps({"text": text}).encode(),
                             "application/json")
         except Exception as e:
-            print(f"! phone request failed: {e}")
-            self._reply(500, json.dumps({"error": str(e)}).encode(),
+            print(f"! phone request failed: {type(e).__name__}")
+            self._reply(500, b'{"error":"transcription failed"}',
                         "application/json")
 
 
@@ -11028,8 +11247,14 @@ def phone_server():
         print(f"! phone endpoint disabled: {e}")
         return
     display_host = lan_ip() if SERVER_ONLY else bind_host
-    print(f"Phone endpoint: http://{display_host}:{PHONE_PORT}"
-          f"/v1/audio/transcriptions")
+    if SERVER_ONLY:
+        PHONE_TOKEN["value"] = os.urandom(32).hex()
+        print(f"Phone endpoint: http://{display_host}:{PHONE_PORT}"
+              f"/v1/audio/transcriptions")
+        print("Phone endpoint token, shown once; send it as "
+              f"'Authorization: Bearer <token>': {PHONE_TOKEN['value']}")
+    else:
+        print(f"Health endpoint: http://{display_host}:{PHONE_PORT}/health")
     srv.serve_forever()
 
 
@@ -11101,49 +11326,134 @@ def restore_windows_clipboard(items: list):
             pass
 
 
-def paste(text: str):
-    if IS_WINDOWS:
-        try:
-            saved = snapshot_windows_clipboard()
-        except Exception:
-            saved = []
-        pyperclip.copy(text)
-        time.sleep(0.05)
-        with kb.pressed(keyboard.Key.ctrl):
-            kb.press("v")
-            kb.release("v")
-        if saved:
-            def restore():
-                try:
-                    if pyperclip.paste() == text:
-                        restore_windows_clipboard(saved)
-                except Exception:
-                    pass
-            threading.Timer(1.0, restore).start()
-        return
-    pb = NSPasteboard.generalPasteboard()
-    try:
-        saved = snapshot_pasteboard(pb)
-    except Exception:
-        saved = []
-    pb.clearContents()
-    pb.setString_forType_(text, NSPasteboardTypeString)
-    our_change = pb.changeCount()
-    time.sleep(0.05)
-    with kb.pressed(keyboard.Key.cmd):
-        kb.press("v")
-        kb.release("v")
-    if not saved:
-        return                      # empty before -> leave the text in place
+# Clipboard managers that follow the nspasteboard.org convention neither
+# record nor show an item carrying these types.
+PASTEBOARD_MARKER_TYPES = (
+    "org.nspasteboard.TransientType",
+    "org.nspasteboard.ConcealedType",
+)
+PASTEBOARD_CURRENT_HOST_ONLY = 1     # NSPasteboardContentsCurrentHostOnly
+# Windows clipboard history, cloud clipboard and clipboard monitors skip
+# content that carries these registered formats; a zero DWORD means "no".
+WINDOWS_CLIPBOARD_EXCLUSIONS = (
+    ("ExcludeClipboardContentFromMonitorProcessing", b"\0\0\0\0"),
+    ("CanIncludeInClipboardHistory", b"\0\0\0\0"),
+    ("CanUploadToCloudClipboard", b"\0\0\0\0"),
+)
+# One saved clipboard per burst of pastes. A paste made while the previous
+# paste's restore is pending keeps that earlier snapshot, so the user's own
+# clipboard comes back instead of the previous dictation.
+PASTE_RESTORE = {"lock": threading.Lock(), "timer": None, "saved": None,
+                 "still_ours": None}
 
-    def restore():
+
+def write_private_pasteboard(pb, text: str) -> int:
+    """Put dictated text on the pasteboard, kept off history and Handoff."""
+    pb.prepareForNewContentsWithOptions_(PASTEBOARD_CURRENT_HOST_ONLY)
+    item = NSPasteboardItem.alloc().init()
+    item.setString_forType_(text, NSPasteboardTypeString)
+    for marker in PASTEBOARD_MARKER_TYPES:
+        item.setData_forType_(NSData.data(), marker)
+    pb.writeObjects_([item])
+    return pb.changeCount()
+
+
+def write_private_windows_clipboard(text: str):
+    """Put dictated text on the clipboard, kept off history and the cloud."""
+    for attempt in range(10):
         try:
-            if pb.changeCount() == our_change:   # nothing copied since us
-                restore_pasteboard(pb, saved)
+            win32clipboard.OpenClipboard()
+            break
+        except Exception:
+            if attempt == 9:
+                raise
+            time.sleep(0.05)
+    try:
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
+        for name, data in WINDOWS_CLIPBOARD_EXCLUSIONS:
+            win32clipboard.SetClipboardData(
+                win32clipboard.RegisterClipboardFormat(name), data)
+    finally:
+        win32clipboard.CloseClipboard()
+
+
+def _begin_paste_burst(snapshot) -> list:
+    """The clipboard to give back after this paste; caller holds the lock."""
+    pending = PASTE_RESTORE["timer"]
+    saved = PASTE_RESTORE["saved"]
+    still_ours = PASTE_RESTORE["still_ours"]
+    PASTE_RESTORE["timer"] = PASTE_RESTORE["saved"] = None
+    PASTE_RESTORE["still_ours"] = None
+    if pending is not None:
+        pending.cancel()
+        try:
+            if saved is not None and still_ours():
+                return saved
         except Exception:
             pass
+    try:
+        return snapshot()
+    except Exception:
+        return []
 
-    threading.Timer(1.0, restore).start()
+
+def _finish_paste_burst(saved: list, still_ours, restore):
+    """Give the clipboard back in a second unless someone copied since.
+
+    An empty snapshot restores to an empty clipboard, so dictated text never
+    outlives the paste. Caller holds the lock.
+    """
+    def run():
+        with PASTE_RESTORE["lock"]:
+            if PASTE_RESTORE["timer"] is not timer:
+                return
+            PASTE_RESTORE["timer"] = PASTE_RESTORE["saved"] = None
+            PASTE_RESTORE["still_ours"] = None
+            try:
+                if still_ours():
+                    restore(saved)
+            except Exception:
+                pass
+
+    timer = threading.Timer(1.0, run)
+    PASTE_RESTORE["timer"] = timer
+    PASTE_RESTORE["saved"] = saved
+    PASTE_RESTORE["still_ours"] = still_ours
+    timer.start()
+
+
+def paste(text: str):
+    with PASTE_RESTORE["lock"]:
+        if IS_WINDOWS:
+            def still_ours():
+                return pyperclip.paste() == text
+
+            saved = _begin_paste_burst(snapshot_windows_clipboard)
+            try:
+                write_private_windows_clipboard(text)
+            except Exception:
+                pyperclip.copy(text)
+            time.sleep(0.05)
+            with kb.pressed(keyboard.Key.ctrl):
+                kb.press("v")
+                kb.release("v")
+            _finish_paste_burst(saved, still_ours, restore_windows_clipboard)
+            return
+        pb = NSPasteboard.generalPasteboard()
+        our_change = None
+
+        def still_ours():
+            return pb.changeCount() == our_change   # nothing copied since us
+
+        saved = _begin_paste_burst(lambda: snapshot_pasteboard(pb))
+        our_change = write_private_pasteboard(pb, text)
+        time.sleep(0.05)
+        with kb.pressed(keyboard.Key.cmd):
+            kb.press("v")
+            kb.release("v")
+        _finish_paste_burst(
+            saved, still_ours, lambda items: restore_pasteboard(pb, items))
 
 
 def execute_voice_command(raw: str) -> bool:
@@ -12331,7 +12641,7 @@ def preload_model_files(repos=None):
     if IS_WINDOWS:
         for repo in repos:
             print(f"Caching faster-Whisper {repo}...")
-            windows_whisper_model(repo)
+            windows_whisper_model(repo, local_files_only=False)
     else:
         for repo in repos:
             if asr_model_is_cached(repo):

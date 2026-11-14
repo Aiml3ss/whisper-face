@@ -293,6 +293,8 @@ class PhoneEndpointBindingTests(unittest.TestCase):
                     extra={
                         "SERVER_ONLY": server_only,
                         "PHONE_PORT": 8787,
+                        "PHONE_TOKEN": {"value": ""},
+                        "os": os,
                         "PhoneHandler": object(),
                         "ThreadingHTTPServer": FakeServer,
                         "lan_ip": lambda: "192.0.2.10",
@@ -311,6 +313,488 @@ class PhoneEndpointBindingTests(unittest.TestCase):
                 self.assertEqual(calls[-1], ("serve",))
                 self.assertIn(
                     f"http://{expected_display}:8787/", output.getvalue())
+                token = namespace["PHONE_TOKEN"]["value"]
+                if server_only:
+                    # Created at start and shown once, so the operator can
+                    # give it to the phone.
+                    self.assertRegex(token, r"^[0-9a-f]{64}$")
+                    self.assertEqual(output.getvalue().count(token), 1)
+                else:
+                    self.assertEqual(token, "")
+
+
+class PhoneEndpointRequestTests(unittest.TestCase):
+    """What a caller that reaches port 8787 can and cannot do."""
+
+    TOKEN = "a" * 64
+
+    def handler(self, server_only, transcribed="Insert my address."):
+        calls = []
+
+        def decode_audio(path):
+            calls.append(("decode", Path(path).read_bytes()))
+            return np.zeros(16000, dtype=np.float32)
+
+        ns = load_definitions(
+            "PhoneHandler", "parse_multipart", "phone_host_allowed",
+            "phone_token_matches",
+            assignments=("PHONE_MAX_BODY",),
+            extra={
+                "BaseHTTPRequestHandler": __import__(
+                    "http.server").server.BaseHTTPRequestHandler,
+                "email": __import__("email.policy"),
+                "hashlib": hashlib,
+                "tempfile": tempfile,
+                "time": time,
+                "SERVER_ONLY": server_only,
+                "PHONE_TOKEN": {"value": self.TOKEN if server_only else ""},
+                "LAST_USE": {"t": 0.0},
+                "SAMPLE_RATE": 16000,
+                "decode_audio": decode_audio,
+                "transcribe": lambda audio: transcribed,
+                "ASR_POOL": SimpleNamespace(
+                    submit=lambda fn, arg: SimpleNamespace(
+                        result=lambda: fn(arg))),
+                "phone_clean": lambda raw: calls.append(("clean", raw))
+                or "Insert my address.",
+                "source_metadata": lambda: {"source_revision": "abc"},
+                "local_license_notice": lambda: "notices",
+            },
+        )
+        return ns["PhoneHandler"], calls
+
+    @staticmethod
+    def drive(handler_class, request: bytes):
+        handler = handler_class.__new__(handler_class)
+        handler.rfile = io.BytesIO(request)
+        handler.wfile = io.BytesIO()
+        handler.client_address = ("127.0.0.1", 50000)
+        handler.server = None
+        handler.request_version = "HTTP/1.1"
+        handler.requestline = ""
+        handler.command = None
+        handler.close_connection = True
+        handler.raw_requestline = handler.rfile.readline()
+        handler.parse_request()
+        with contextlib.redirect_stdout(io.StringIO()):
+            getattr(handler, "do_" + handler.command)()
+        head, _, body = handler.wfile.getvalue().partition(b"\r\n\r\n")
+        return int(head.split(b" ")[1]), body
+
+    @staticmethod
+    def request(method, path, *, host="127.0.0.1:8787", body=b"",
+                headers=()):
+        lines = [f"{method} {path} HTTP/1.1", f"Host: {host}"]
+        lines += list(headers)
+        if method == "POST" and not any(
+                h.lower().startswith("content-length") for h in headers):
+            lines.append(f"Content-Length: {len(body)}")
+        return ("\r\n".join(lines) + "\r\n\r\n").encode() + body
+
+    def test_desktop_serves_only_the_health_check(self):
+        handler, calls = self.handler(server_only=False)
+
+        self.assertEqual(
+            self.drive(handler, self.request("GET", "/health")),
+            (200, b"ok"))
+        for path in ("/", "/source", "/license"):
+            with self.subTest(path=path):
+                status, _ = self.drive(handler, self.request("GET", path))
+                self.assertEqual(status, 404)
+        status, _ = self.drive(handler, self.request(
+            "POST", "/v1/audio/transcriptions", body=b"RIFF-audio",
+            headers=("Content-Type: text/plain",
+                     f"Authorization: Bearer {self.TOKEN}")))
+        self.assertEqual(status, 404)
+        self.assertEqual(calls, [])
+
+    def test_a_web_page_is_refused_even_on_the_health_check(self):
+        handler, _ = self.handler(server_only=False)
+        for request in (
+                self.request("GET", "/health", headers=(
+                    "Origin: https://evil.example",)),
+                self.request("GET", "/health", host="evil.example:8787")):
+            with self.subTest(request=request):
+                status, _ = self.drive(handler, request)
+                self.assertEqual(status, 403)
+
+    def test_server_mode_transcribes_only_for_the_token_holder(self):
+        handler, calls = self.handler(server_only=True)
+        audio = b"RIFF-short-audio"
+
+        refused = {
+            "no token": self.request(
+                "POST", "/v1/audio/transcriptions", body=audio),
+            "wrong token": self.request(
+                "POST", "/v1/audio/transcriptions", body=audio,
+                headers=("Authorization: Bearer " + "b" * 64,)),
+            "browser origin": self.request(
+                "POST", "/v1/audio/transcriptions", body=audio,
+                headers=(f"Authorization: Bearer {self.TOKEN}",
+                         "Origin: https://evil.example")),
+            "rebound host": self.request(
+                "POST", "/v1/audio/transcriptions", body=audio,
+                host="evil.example:8787",
+                headers=(f"Authorization: Bearer {self.TOKEN}",)),
+            "oversized body": self.request(
+                "POST", "/v1/audio/transcriptions", body=audio,
+                headers=(f"Authorization: Bearer {self.TOKEN}",
+                         f"Content-Length: {26 * 1024 * 1024}")),
+            "no length": self.request(
+                "POST", "/v1/audio/transcriptions",
+                headers=(f"Authorization: Bearer {self.TOKEN}",
+                         "Content-Length: -1")),
+        }
+        for reason, request in refused.items():
+            with self.subTest(reason=reason):
+                status, _ = self.drive(handler, request)
+                self.assertIn(status, {401, 403, 411, 413})
+        self.assertEqual(calls, [])
+
+        status, body = self.drive(handler, self.request(
+            "POST", "/v1/audio/transcriptions", host="192.0.2.10:8787",
+            body=audio, headers=(f"Authorization: Bearer {self.TOKEN}",)))
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"text": "Insert my address."})
+        self.assertEqual(calls, [
+            ("decode", audio), ("clean", "Insert my address.")])
+
+    def test_a_failed_request_reveals_no_local_detail(self):
+        handler, _ = self.handler(server_only=True)
+        handler_ns = handler.do_POST.__globals__
+        handler_ns["decode_audio"] = lambda path: (_ for _ in ()).throw(
+            RuntimeError(f"ffmpeg failed: {path}: /Users/someone/secret"))
+
+        status, body = self.drive(handler, self.request(
+            "POST", "/v1/audio/transcriptions", body=b"bad",
+            headers=(f"Authorization: Bearer {self.TOKEN}",)))
+
+        self.assertEqual(status, 500)
+        self.assertNotIn(b"/Users", body)
+
+    def test_phone_text_never_expands_snippets_or_feeds_the_history(self):
+        logged = []
+        ns = load_definitions(
+            "phone_clean",
+            extra={
+                "collapse_repeats": lambda raw: (raw, False),
+                "is_hallucination": lambda raw, language: False,
+                "looks_like_prompt_echo": lambda raw: False,
+                "apply_learned_fixes": lambda raw: raw,
+                "match_snippet": lambda raw: (
+                    "address", "742 Evergreen Terrace, Springfield"),
+                "_load_snippet_map": lambda: {
+                    "address": "742 Evergreen Terrace, Springfield"},
+                "_mask_snippets_inline": lambda raw, snippets: (
+                    raw.replace("address", "\ue000"),
+                    {"\ue000": snippets["address"]}),
+                "_restore_snippet_sentinels": lambda text, restore: (
+                    text.replace("\ue000", restore["\ue000"])),
+                "extract_tone_override": lambda raw: (raw, None),
+                "needs_llm_cleanup": lambda *args, **kwargs: False,
+                "quick_clean": lambda raw, verbatim=False, language="en": raw,
+                "llm_clean": lambda raw, tone: raw,
+                "apply_vocabulary_casing": lambda text: text,
+                "TONE": {"default": ""},
+                "append_transcript": lambda *args, **kwargs:
+                    logged.append(args),
+            },
+        )
+
+        text = ns["phone_clean"]("Insert my address.")
+
+        self.assertEqual(text, "Insert my address.")
+        self.assertNotIn("Evergreen", text)
+        self.assertEqual(logged, [])
+
+    def test_decoding_is_bounded_in_length_and_time(self):
+        seen = {}
+
+        def run(command, **kwargs):
+            seen["command"] = command
+            if kwargs.get("timeout") is None:
+                raise AssertionError("ffmpeg would run without a time limit")
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+        ns = load_definitions(
+            "decode_audio",
+            assignments=("PHONE_MAX_AUDIO_SECONDS", "PHONE_DECODE_TIMEOUT"),
+            extra={"subprocess": SimpleNamespace(
+                run=run, TimeoutExpired=subprocess.TimeoutExpired),
+                   "SAMPLE_RATE": 16000, "np": np},
+        )
+        with self.assertRaises(subprocess.TimeoutExpired):
+            ns["decode_audio"]("/tmp/upload.audio")
+        command = seen["command"]
+        self.assertEqual(command[command.index("-t") + 1], "600")
+
+
+class _FakePasteboardItem:
+    def __init__(self):
+        self.data = {}
+
+    @classmethod
+    def alloc(cls):
+        return cls()
+
+    def init(self):
+        return self
+
+    def types(self):
+        return list(self.data)
+
+    def dataForType_(self, kind):
+        return self.data.get(kind)
+
+    def setData_forType_(self, data, kind):
+        self.data[kind] = data
+        return True
+
+    def setString_forType_(self, text, kind):
+        self.data[kind] = text
+        return True
+
+
+class _FakePasteboard:
+    """The parts of NSPasteboard the clipboard round-trip uses."""
+
+    def __init__(self, text=None):
+        self.items = []
+        self.change = 0
+        self.options = None
+        if text is not None:
+            self.user_copies(text)
+
+    def user_copies(self, text):
+        item = _FakePasteboardItem()
+        item.setString_forType_(text, "public.utf8-plain-text")
+        self.change += 1
+        self.items = [item]
+
+    def pasteboardItems(self):
+        return list(self.items)
+
+    def changeCount(self):
+        return self.change
+
+    def clearContents(self):
+        self.change += 1
+        self.items = []
+        self.options = None
+
+    def prepareForNewContentsWithOptions_(self, options):
+        self.clearContents()
+        self.options = options
+
+    def writeObjects_(self, objects):
+        self.items.extend(objects)
+        return True
+
+    def setString_forType_(self, text, kind):
+        item = _FakePasteboardItem()
+        item.setString_forType_(text, kind)
+        self.items = [item]
+        return True
+
+    def text(self):
+        return [item.data.get("public.utf8-plain-text")
+                for item in self.items]
+
+
+class _FakeTimer:
+    def __init__(self, delay, function):
+        self.function = function
+        self.cancelled = False
+        self.started = False
+
+    def start(self):
+        self.started = True
+
+    def cancel(self):
+        self.cancelled = True
+
+    def fire(self):
+        if not self.cancelled:
+            self.function()
+
+
+class _FakeKeyboard:
+    def __init__(self, pasted):
+        self.pasted = pasted
+
+    @contextlib.contextmanager
+    def pressed(self, _key):
+        yield
+
+    def press(self, key):
+        self.pasted.append(key)
+
+    def release(self, _key):
+        pass
+
+
+class ClipboardRoundTripTests(unittest.TestCase):
+    """Dictated text borrows the clipboard briefly and gives it back."""
+
+    NAMES = ("paste", "snapshot_pasteboard", "restore_pasteboard",
+             "write_private_pasteboard", "_begin_paste_burst",
+             "_finish_paste_burst", "snapshot_windows_clipboard",
+             "restore_windows_clipboard", "write_private_windows_clipboard")
+    ASSIGNMENTS = ("PASTEBOARD_MARKER_TYPES", "PASTEBOARD_CURRENT_HOST_ONLY",
+                   "WINDOWS_CLIPBOARD_EXCLUSIONS", "PASTE_RESTORE")
+
+    def mac(self, pasteboard):
+        timers = []
+        presses = []
+
+        def timer(delay, function):
+            timers.append(_FakeTimer(delay, function))
+            return timers[-1]
+
+        ns = load_definitions(
+            *self.NAMES, assignments=self.ASSIGNMENTS,
+            extra={
+                "IS_WINDOWS": False,
+                "NSPasteboard": SimpleNamespace(
+                    generalPasteboard=lambda: pasteboard),
+                "NSPasteboardItem": _FakePasteboardItem,
+                "NSPasteboardTypeString": "public.utf8-plain-text",
+                "NSData": SimpleNamespace(data=lambda: b""),
+                "kb": _FakeKeyboard(presses),
+                "keyboard": SimpleNamespace(
+                    Key=SimpleNamespace(cmd="cmd", ctrl="ctrl")),
+                "time": SimpleNamespace(sleep=lambda _s: None),
+                "threading": SimpleNamespace(
+                    Timer=timer, Lock=threading.Lock),
+            },
+        )
+        return ns, timers, presses
+
+    def test_dictated_text_is_marked_transient_concealed_and_local(self):
+        pasteboard = _FakePasteboard("tracking 1Z999AA10123456784")
+        ns, _, presses = self.mac(pasteboard)
+
+        ns["paste"]("Meet at the north entrance.")
+
+        self.assertEqual(presses, ["v"])
+        self.assertEqual(pasteboard.text(), ["Meet at the north entrance."])
+        kinds = set(pasteboard.items[0].types())
+        self.assertIn("org.nspasteboard.TransientType", kinds)
+        self.assertIn("org.nspasteboard.ConcealedType", kinds)
+        # NSPasteboardContentsCurrentHostOnly: not offered to other devices.
+        self.assertEqual(pasteboard.options, 1)
+
+    def test_back_to_back_pastes_restore_the_users_clipboard(self):
+        pasteboard = _FakePasteboard("tracking 1Z999AA10123456784")
+        ns, timers, _ = self.mac(pasteboard)
+
+        ns["paste"]("First dictation.")
+        ns["paste"]("Second dictation.")
+        for timer in timers:
+            timer.fire()
+
+        self.assertEqual(pasteboard.text(), ["tracking 1Z999AA10123456784"])
+
+    def test_an_empty_clipboard_is_left_empty_after_the_paste(self):
+        pasteboard = _FakePasteboard()
+        ns, timers, _ = self.mac(pasteboard)
+
+        ns["paste"]("My account number is in the notes.")
+        for timer in timers:
+            timer.fire()
+
+        self.assertEqual(pasteboard.items, [])
+
+    def test_a_clipboard_the_user_changed_since_is_left_alone(self):
+        pasteboard = _FakePasteboard("older")
+        ns, timers, _ = self.mac(pasteboard)
+
+        ns["paste"]("Dictated.")
+        pasteboard.user_copies("copied just now")
+        ns["paste"]("Dictated again.")
+        for timer in timers:
+            timer.fire()
+
+        self.assertEqual(pasteboard.text(), ["copied just now"])
+
+    def test_windows_text_is_excluded_from_history_and_cloud_and_restored(self):
+        CF_UNICODETEXT = 13
+        state = {"formats": {CF_UNICODETEXT: "user's own text"}}
+        registered = {}
+
+        class Clipboard:
+            CF_UNICODETEXT = 13
+
+            @staticmethod
+            def OpenClipboard():
+                pass
+
+            @staticmethod
+            def CloseClipboard():
+                pass
+
+            @staticmethod
+            def EmptyClipboard():
+                state["formats"] = {}
+
+            @staticmethod
+            def EnumClipboardFormats(previous):
+                keys = sorted(state["formats"])
+                later = [key for key in keys if key > previous]
+                return later[0] if later else 0
+
+            @staticmethod
+            def GetClipboardData(kind):
+                return state["formats"][kind]
+
+            @staticmethod
+            def SetClipboardData(kind, data):
+                state["formats"][kind] = data
+
+            @staticmethod
+            def SetClipboardText(text, kind):
+                state["formats"][kind] = text
+
+            @staticmethod
+            def RegisterClipboardFormat(name):
+                return registered.setdefault(name, 0xC000 + len(registered))
+
+        timers = []
+        ns = load_definitions(
+            *self.NAMES, assignments=self.ASSIGNMENTS,
+            extra={
+                "IS_WINDOWS": True,
+                "win32clipboard": Clipboard,
+                "pyperclip": SimpleNamespace(
+                    paste=lambda: state["formats"].get(CF_UNICODETEXT, ""),
+                    copy=lambda text: self.fail("pyperclip.copy was used")),
+                "kb": _FakeKeyboard([]),
+                "keyboard": SimpleNamespace(
+                    Key=SimpleNamespace(cmd="cmd", ctrl="ctrl")),
+                "time": SimpleNamespace(sleep=lambda _s: None),
+                "threading": SimpleNamespace(
+                    Timer=lambda delay, function: timers.append(
+                        _FakeTimer(delay, function)) or timers[-1],
+                    Lock=threading.Lock),
+            },
+        )
+
+        ns["paste"]("First dictation.")
+        during = dict(state["formats"])
+        ns["paste"]("Second dictation.")
+        for timer in timers:
+            timer.fire()
+
+        self.assertEqual(during[CF_UNICODETEXT], "First dictation.")
+        for name in ("ExcludeClipboardContentFromMonitorProcessing",
+                     "CanIncludeInClipboardHistory",
+                     "CanUploadToCloudClipboard"):
+            with self.subTest(name=name):
+                self.assertIn(registered[name], during)
+        self.assertEqual(
+            during[registered["CanIncludeInClipboardHistory"]],
+            b"\0\0\0\0")
+        self.assertEqual(state["formats"], {CF_UNICODETEXT: "user's own text"})
 
 
 class GuiLauncherActivationTests(unittest.TestCase):
@@ -4660,6 +5144,43 @@ class ConfigurationTests(unittest.TestCase):
         self.assertIn("Downloading org/turbo", out.getvalue())
         self.assertNotIn("Downloading org/tiny", out.getvalue())
 
+    def test_windows_runtime_loads_models_without_contacting_the_hub(self):
+        # faster-whisper's download_model asks the Hub for repo metadata
+        # before looking in its cache unless local_files_only is set. Only
+        # the installer's preload may go online.
+        fetched = []
+
+        def download_model(repo, **kwargs):
+            fetched.append((repo, kwargs.get("local_files_only", False)))
+            return f"C:/models/{repo}"
+
+        utils = types.ModuleType("faster_whisper.utils")
+        utils.download_model = download_model
+        package = types.ModuleType("faster_whisper")
+        package.utils = utils
+        ns = load_definitions(
+            "windows_whisper_model", "preload_model_files",
+            extra={
+                "IS_WINDOWS": True,
+                "HERE": Path("C:/Whisper Face"),
+                "ASR_MODEL_REVISIONS": {"tiny": "d90ca5fe", "turbo": "0a363e91"},
+                "WINDOWS_ASR_MODELS": {},
+                "FAST_WHISPER_REPO": "tiny",
+                "WHISPER_REPO": "turbo",
+                "ctranslate2": SimpleNamespace(
+                    get_cuda_device_count=lambda: 0),
+                "WhisperModel": lambda path, device, compute_type: path,
+            },
+        )
+        with mock.patch.dict(sys.modules, {
+                "faster_whisper": package, "faster_whisper.utils": utils}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            ns["windows_whisper_model"]("tiny")
+            ns["WINDOWS_ASR_MODELS"].clear()
+            ns["preload_model_files"](("turbo",))
+
+        self.assertEqual(fetched, [("tiny", True), ("turbo", False)])
+
     def test_model_inventory_reports_every_pinned_model_without_downloading(
             self):
         ns = load_definitions(
@@ -4730,7 +5251,8 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_transcript_log_keeps_performance_metrics(self):
         ns = load_definitions(
-            "append_transcript", "transcript_app_identity",
+            *TranscriptRetentionTests.NAMES,
+            assignments=TranscriptRetentionTests.ASSIGNMENTS,
             extra={"hashlib": hashlib, "os": os, "time": time},
         )
         with tempfile.TemporaryDirectory() as td:
@@ -4752,7 +5274,8 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_a_windows_window_title_never_reaches_transcript_history(self):
         ns = load_definitions(
-            "append_transcript", "transcript_app_identity",
+            *TranscriptRetentionTests.NAMES,
+            assignments=TranscriptRetentionTests.ASSIGNMENTS,
             extra={"hashlib": hashlib, "os": os, "time": time},
         )
         with tempfile.TemporaryDirectory() as td:
@@ -4819,7 +5342,8 @@ class ConfigurationTests(unittest.TestCase):
 
         portable_os = OsWithoutFchmod()
         ns = load_definitions(
-            "append_transcript", "transcript_app_identity",
+            *TranscriptRetentionTests.NAMES,
+            assignments=TranscriptRetentionTests.ASSIGNMENTS,
             extra={"hashlib": hashlib, "os": portable_os, "time": time},
         )
         with tempfile.TemporaryDirectory() as td:
@@ -4838,8 +5362,8 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_paste_outcome_updates_only_its_receipted_record(self):
         ns = load_definitions(
-            "append_transcript", "transcript_app_identity",
-            "record_paste_outcome",
+            *TranscriptRetentionTests.NAMES, "record_paste_outcome",
+            assignments=TranscriptRetentionTests.ASSIGNMENTS,
             extra={
                 "hashlib": hashlib,
                 "os": os,
@@ -4979,6 +5503,294 @@ class ConfigurationTests(unittest.TestCase):
         )
         self.assertTrue(metadata["license_policy"].endswith("LICENSE_POLICY.md"))
         self.assertIn("without warranty", metadata["warranty"].lower())
+
+
+class TranscriptRetentionTests(unittest.TestCase):
+    """The history log stays bounded whether or not the miner ever runs."""
+
+    NOW = 1_800_000_000.0
+    DAY = 24 * 3600.0
+    NAMES = (
+        "append_transcript", "transcript_app_identity",
+        "_transcript_entry_time", "retained_transcript_lines",
+        "_trim_transcripts_locked", "_rebase_learned_processed",
+        "prune_transcripts", "clear_transcript_history",
+        "load_learned", "save_learned",
+    )
+    ASSIGNMENTS = (
+        "TRANSCRIPT_KEEP", "TRANSCRIPT_MAX_AGE", "TRANSCRIPT_TRIM_SLACK",
+        "TRANSCRIPT_AGE_SLACK",
+    )
+
+    def namespace(self, folder, *names, assignments=(), extra=None):
+        writes = []
+
+        def atomic_write_text(path, value, mode=0o600):
+            writes.append(path.name)
+            path.write_text(value)
+
+        ns = load_definitions(
+            *self.NAMES, *names,
+            assignments=self.ASSIGNMENTS + tuple(assignments),
+            extra={
+                "hashlib": hashlib,
+                "os": os,
+                "Path": Path,
+                "time": SimpleNamespace(time=lambda: self.NOW),
+                "atomic_write_text": atomic_write_text,
+                **(extra or {}),
+            },
+        )
+        ns.update({
+            "TRANSCRIPTS_FILE": Path(folder) / "transcripts.jsonl",
+            "LEARNED_FILE": Path(folder) / "learned.json",
+            "TRANSCRIPTS_LOCK": threading.Lock(),
+            "LEARN_LOCK": threading.Lock(),
+            "USAGE_CACHE": {
+                "at": 5.0, "value": (0, 0.0), "lock": threading.Lock()},
+        })
+        return ns, writes
+
+    @staticmethod
+    def write_log(path, timestamps):
+        path.write_text("".join(
+            json.dumps({
+                "ts": ts, "app": "com.apple.TextEdit",
+                "raw": f"note number {index}",
+                "clean": f"Note number {index}.",
+                "path": "fast", "language": "en",
+            }) + "\n"
+            for index, ts in enumerate(timestamps)))
+
+    @staticmethod
+    def entries(path):
+        return [json.loads(line) for line in path.read_text().splitlines()]
+
+    def test_a_failing_miner_still_leaves_the_log_bounded(self):
+        # The default install has no cleanup model, so every mining pass
+        # fails. Retention must not depend on it succeeding.
+        with tempfile.TemporaryDirectory() as td:
+            ns, _ = self.namespace(
+                td, "learn_pass", "parse_texts", "parse_dictionary",
+                "merge_learned_state",
+                assignments=(
+                    "MINER_PROMPT", "LEARN_MIN_NEW", "PROMOTE_MIN_COUNT",
+                    "AUTO_MARKER"),
+                extra={
+                    "ollama_chat": mock.Mock(side_effect=ConnectionError(
+                        "connection refused")),
+                    "refresh_glossary": lambda: [],
+                    "DICTIONARY_FILE": Path(td) / "dictionary.txt",
+                    "DICTIONARY_LOCK": threading.Lock(),
+                },
+            )
+            log = ns["TRANSCRIPTS_FILE"]
+            self.write_log(log, [
+                self.NOW - 3600 + index for index in range(2000)])
+            with contextlib.redirect_stdout(io.StringIO()):
+                ns["learn_pass"]()
+            kept = self.entries(log)
+
+        self.assertLessEqual(len(kept), ns["TRANSCRIPT_KEEP"])
+        self.assertEqual(kept[-1]["clean"], "Note number 1999.")
+
+    def test_appending_alone_never_lets_the_log_exceed_its_cap(self):
+        with tempfile.TemporaryDirectory() as td:
+            ns, writes = self.namespace(td)
+            log = ns["TRANSCRIPTS_FILE"]
+            keep = ns["TRANSCRIPT_KEEP"]
+            self.write_log(log, [self.NOW - 60] * keep)
+            sizes = []
+            for index in range(250):
+                ns["append_transcript"](
+                    f"extra {index}", f"Extra {index}.",
+                    "com.apple.TextEdit", "fast")
+                sizes.append(len(log.read_text().splitlines()))
+            kept = self.entries(log)
+
+        self.assertLessEqual(max(sizes), keep)
+        self.assertEqual(kept[-1]["clean"], "Extra 249.")
+        # Headroom per trim: the file is rewritten a few times, not per paste.
+        self.assertLessEqual(len(writes), 3)
+
+    def test_appending_drops_dictations_older_than_thirty_days(self):
+        with tempfile.TemporaryDirectory() as td:
+            ns, _ = self.namespace(td)
+            log = ns["TRANSCRIPTS_FILE"]
+            self.write_log(log, [
+                self.NOW - 40 * self.DAY,
+                self.NOW - 31 * self.DAY,
+                self.NOW - 10 * self.DAY,
+            ])
+            ns["append_transcript"](
+                "today", "Today.", "com.apple.TextEdit", "fast")
+            kept = [entry["clean"] for entry in self.entries(log)]
+
+        self.assertEqual(kept, ["Note number 2.", "Today."])
+
+    def test_a_log_within_its_bounds_is_appended_without_a_rewrite(self):
+        with tempfile.TemporaryDirectory() as td:
+            ns, writes = self.namespace(td)
+            log = ns["TRANSCRIPTS_FILE"]
+            self.write_log(log, [self.NOW - 29 * self.DAY] + [self.NOW] * 99)
+            ns["append_transcript"](
+                "fine", "Fine.", "com.apple.TextEdit", "fast")
+            count = len(log.read_text().splitlines())
+
+        self.assertEqual(count, 101)
+        self.assertEqual(writes, [])
+
+    def test_a_damaged_log_never_stops_a_dictation_from_being_recorded(self):
+        with tempfile.TemporaryDirectory() as td:
+            ns, _ = self.namespace(td)
+            log = ns["TRANSCRIPTS_FILE"]
+            self.write_log(log, [self.NOW - 60] * 3)
+            log.write_bytes(b'{"ts": \xff\xfe\n' + log.read_bytes())
+            ns["append_transcript"](
+                "after", "After.", "com.apple.TextEdit", "fast")
+            kept = self.entries(log)
+
+        # The unreadable line is dropped; every readable one is kept.
+        self.assertEqual([entry["clean"] for entry in kept], [
+            "Note number 0.", "Note number 1.", "Note number 2.", "After."])
+
+    def test_the_mining_pass_ages_out_history_without_new_dictations(self):
+        with tempfile.TemporaryDirectory() as td:
+            ns, _ = self.namespace(td)
+            log = ns["TRANSCRIPTS_FILE"]
+            self.write_log(log, [self.NOW - 45 * self.DAY] * 3)
+            ns["prune_transcripts"]()
+            remaining = log.read_text()
+
+        self.assertEqual(remaining, "")
+
+    def test_trimming_keeps_the_miner_on_the_same_dictation(self):
+        with tempfile.TemporaryDirectory() as td:
+            ns, _ = self.namespace(td)
+            log = ns["TRANSCRIPTS_FILE"]
+            keep = ns["TRANSCRIPT_KEEP"]
+            self.write_log(log, [self.NOW - 60] * keep)
+            ns["LEARNED_FILE"].write_text(json.dumps({"processed": keep}))
+            ns["append_transcript"](
+                "new", "New.", "com.apple.TextEdit", "fast")
+            lines = log.read_text().splitlines()
+            processed = json.loads(ns["LEARNED_FILE"].read_text())["processed"]
+
+        # Every older dictation was mined; only the one just added is new.
+        self.assertEqual(processed, len(lines) - 1)
+        self.assertEqual(json.loads(lines[processed])["clean"], "New.")
+
+    def test_clearing_history_erases_the_log_and_resets_the_miner(self):
+        with tempfile.TemporaryDirectory() as td:
+            ns, _ = self.namespace(td)
+            log = ns["TRANSCRIPTS_FILE"]
+            self.write_log(log, [self.NOW] * 12)
+            ns["LEARNED_FILE"].write_text(json.dumps({
+                "processed": 12, "counts": {"Qwen": 2}}))
+            ns["clear_transcript_history"]()
+            existed = log.exists()
+            learned = json.loads(ns["LEARNED_FILE"].read_text())
+            cache_at = ns["USAGE_CACHE"]["at"]
+            ns["append_transcript"](
+                "after", "After.", "com.apple.TextEdit", "fast")
+            after = [entry["clean"] for entry in self.entries(log)]
+            mode = stat.S_IMODE(log.stat().st_mode)
+
+        self.assertFalse(existed)
+        self.assertEqual(learned["processed"], 0)
+        self.assertEqual(learned["counts"], {"Qwen": 2})
+        self.assertEqual(cache_at, 0.0)
+        self.assertEqual(after, ["After."])
+        if os.name == "posix":
+            self.assertEqual(mode, 0o600)
+
+
+class VocabularyMinerTests(unittest.TestCase):
+    """What the miner may count toward the dictionary."""
+
+    NOW = TranscriptRetentionTests.NOW
+    NAMES = TranscriptRetentionTests.NAMES
+    ASSIGNMENTS = TranscriptRetentionTests.ASSIGNMENTS
+    namespace = TranscriptRetentionTests.namespace
+
+    def mine(self, texts, reply, learned):
+        with tempfile.TemporaryDirectory() as td:
+            ns, _ = self.namespace(
+                td, "learn_pass", "parse_texts", "parse_dictionary",
+                "merge_learned_state", "term_occurs",
+                assignments=(
+                    "MINER_PROMPT", "LEARN_MIN_NEW", "PROMOTE_MIN_COUNT",
+                    "AUTO_MARKER"),
+                extra={
+                    "ollama_chat": lambda *args, **kwargs: (
+                        json.dumps(reply), "stop"),
+                    "refresh_glossary": lambda: [],
+                    "DICTIONARY_FILE": Path(td) / "dictionary.txt",
+                    "DICTIONARY_LOCK": threading.Lock(),
+                },
+            )
+            ns["TRANSCRIPTS_FILE"].write_text("".join(
+                json.dumps({"ts": self.NOW - 60 + index, "app": "com.apple.Notes",
+                            "raw": text, "clean": text, "path": "fast",
+                            "language": "en"}) + "\n"
+                for index, text in enumerate(texts)))
+            ns["LEARNED_FILE"].write_text(json.dumps(learned))
+            with contextlib.redirect_stdout(io.StringIO()):
+                ns["learn_pass"]()
+            return json.loads(ns["LEARNED_FILE"].read_text())["counts"]
+
+    def test_terms_are_counted_as_whole_words_not_substrings(self):
+        texts = [
+            "We are going to ship it today.",
+            "That sounds good to me.",
+            "I sent it a week ago.",
+            "Zorblax signed the contract.",
+            "Ask Zorblax about the invoice.",
+        ] * 2
+        counts = self.mine(texts, ["Go", "Zorblax"], {"counts": {"Ago": 1}})
+
+        self.assertNotIn("Go", counts)
+        self.assertEqual(counts["Zorblax"], 4)
+        # "ago" is a word on its own, so a held term may still grow.
+        self.assertEqual(counts["Ago"], 3)
+
+    def test_a_term_the_user_corrected_away_is_never_counted(self):
+        texts = ["Gwen runs locally on the laptop.",
+                 "Ask Gwen to summarise the notes."] * 5
+        learned = {
+            "counts": {"Qwen": 2, "Gwenda": 1},
+            "fixes": {"gwen": {"to": "Qwen", "n": 1},
+                      "qwen": {"to": "Qwen", "n": 1}},
+            "confusions": {"gwenda->brenda": {
+                "from": "Gwenda", "to": "Brenda", "n": 1, "apps": {}}},
+        }
+        counts = self.mine(
+            texts + ["Gwenda called."] * 2, ["Gwen", "Qwen"], learned)
+
+        self.assertNotIn("Gwen", counts)
+        self.assertEqual(counts["Gwenda"], 1)
+        # A casing-only fix does not ban the word it fixes toward.
+        self.assertEqual(counts["Qwen"], 2)
+
+    def test_a_term_built_on_a_corrected_away_word_is_never_counted(self):
+        learned = {
+            "counts": {"Gwen Notes": 1},
+            "fixes": {"gwen": {"to": "Qwen", "n": 1}},
+            "confusions": {},
+        }
+        texts = ["Gwen 3.5 runs locally.", "Ask Gwen 3.5 for a summary.",
+                 "Gwen's notes are ready.", "Send Gwen's summary.",
+                 "Open Gwen Notes now.", "Gwendolyn Park signed."] * 2
+
+        counts = self.mine(
+            texts, ["Gwen 3.5", "Gwen's", "Gwendolyn Park"], learned)
+
+        self.assertNotIn("Gwen 3.5", counts)
+        self.assertNotIn("Gwen's", counts)
+        # A held term containing the word stops growing toward promotion.
+        self.assertEqual(counts["Gwen Notes"], 1)
+        # Only the whole word is banned, not names that begin with it.
+        self.assertEqual(counts["Gwendolyn Park"], 2)
 
 
 class InlineSnippetExpansionTests(unittest.TestCase):
@@ -8950,6 +9762,95 @@ class AcousticTimeMachineRuntimeTests(unittest.TestCase):
         self.assertEqual(state["span_ids"], [])
 
 
+class RecognitionContextPrivacyTests(unittest.TestCase):
+    """Context capture leaves secrets alone."""
+
+    @staticmethod
+    def mac(*, clipboard_types=(), role="AXTextArea", subrole=None):
+        from voice_compiler import ContextObservation, ContextRouter
+
+        clipboard = "Quixotrel"
+        snapshot = SimpleNamespace(
+            element="focused-field", text="Draft for Zorblax Dynamics",
+            selection=(0, 0), selected_text="", window_title="Notes",
+            document=None)
+        pasteboard = SimpleNamespace(
+            types=lambda: ["public.utf8-plain-text", *clipboard_types],
+            stringForType_=lambda kind: clipboard)
+        return load_definitions(
+            "capture_recognition_context", "pasteboard_is_private",
+            assignments=("PASTEBOARD_MARKER_TYPES",),
+            extra={
+                "IS_WINDOWS": False,
+                "focused_snapshot": lambda: snapshot,
+                "NSWorkspace": SimpleNamespace(sharedWorkspace=lambda:
+                    SimpleNamespace(frontmostApplication=lambda:
+                        SimpleNamespace(localizedName=lambda: "Notes"))),
+                "NSPasteboard": SimpleNamespace(
+                    generalPasteboard=lambda: pasteboard),
+                "NSPasteboardTypeString": "public.utf8-plain-text",
+                "_ax_attribute": lambda element, attribute: {
+                    "AXRole": role, "AXSubrole": subrole}.get(attribute),
+                "ContextObservation": ContextObservation,
+                "CONTEXT_ROUTER": ContextRouter(),
+                "urllib": __import__("urllib.parse"),
+                "Path": Path,
+            },
+        )["capture_recognition_context"]
+
+    def test_an_ordinary_clipboard_and_field_are_used(self):
+        _, words, _ = self.mac()()
+        self.assertIn("Quixotrel", words)
+        self.assertIn("Zorblax", words)
+
+    def test_a_concealed_or_transient_clipboard_is_never_read(self):
+        for marker in ("org.nspasteboard.ConcealedType",
+                       "org.nspasteboard.TransientType"):
+            with self.subTest(marker=marker):
+                _, words, pack = self.mac(clipboard_types=(marker,))()
+                self.assertNotIn("Quixotrel", words)
+                self.assertNotIn(
+                    "Quixotrel", [c.text for c in pack.candidates])
+                self.assertIn("Zorblax", words)
+
+    def test_a_secure_text_field_yields_no_context_at_all(self):
+        snapshot, words, pack = self.mac(
+            role="AXTextField", subrole="AXSecureTextField")()
+        self.assertEqual(words, [])
+        # Only the application's own name, which is not the user's secret.
+        self.assertEqual({c.source for c in pack.candidates}, {"app"})
+        # The insertion lease still needs to know where focus is.
+        self.assertEqual(snapshot.element, "focused-field")
+
+    def test_windows_skips_a_clipboard_marked_private(self):
+        from voice_compiler import ContextObservation, ContextRouter
+
+        for available, expected in ((set(), True), ({"private"}, False)):
+            with self.subTest(marked=bool(available)):
+                ns = load_definitions(
+                    "capture_recognition_context",
+                    "windows_clipboard_is_private",
+                    assignments=("WINDOWS_PRIVATE_CLIPBOARD_FORMATS",),
+                    extra={
+                        "IS_WINDOWS": True,
+                        "windows_foreground_title": lambda: "Vault",
+                        "pyperclip": SimpleNamespace(
+                            paste=lambda: "Quixotrel"),
+                        "win32clipboard": SimpleNamespace(
+                            RegisterClipboardFormat=lambda name: (
+                                "private" if name ==
+                                "ExcludeClipboardContentFromMonitorProcessing"
+                                else name),
+                            IsClipboardFormatAvailable=lambda kind:
+                                kind in available),
+                        "ContextObservation": ContextObservation,
+                        "CONTEXT_ROUTER": ContextRouter(),
+                    },
+                )
+                _, words, _ = ns["capture_recognition_context"]()
+                self.assertEqual("Quixotrel" in words, expected)
+
+
 class ContextFirewallRuntimeProjectionTests(unittest.TestCase):
     def _namespace(self):
         pipeline = {}
@@ -9584,13 +10485,14 @@ class OllamaChatTransportTests(unittest.TestCase):
     """Structured-output schema and streamed generation deadlines."""
 
     @staticmethod
-    def namespace(post):
+    def namespace(post, installed=True):
         return load_definitions(
             "ollama_chat", "_ollama_stream_reply",
             extra={
                 "OLLAMA_MODEL": "test-model",
-                "OLLAMA_URL": "http://localhost:11434/api/chat",
-                "requests": SimpleNamespace(post=post),
+                "OLLAMA_URL": "http://127.0.0.1:11434/api/chat",
+                "LOCAL_MODEL_SESSION": SimpleNamespace(post=post),
+                "cleanup_model_installed": lambda: installed,
                 "time": time,
             },
         )
@@ -9605,6 +10507,38 @@ class OllamaChatTransportTests(unittest.TestCase):
             close=lambda: None,
             raise_for_status=lambda: None,
         )
+
+    def test_nothing_is_sent_when_the_cleanup_model_is_not_installed(self):
+        # The default install has no cleanup model. Cleanup, warm-up,
+        # keep-warm and the learning pass all reach the model through
+        # ollama_chat, so none of them may put text on the wire.
+        posted = []
+        ns = load_definitions(
+            "ollama_chat", "_ollama_stream_reply", "cleanup_model_installed",
+            assignments=("OLLAMA_MODEL",),
+            extra={
+                "os": os,
+                "Path": Path,
+                "time": time,
+                "OLLAMA_URL": "http://127.0.0.1:11434/api/chat",
+                "LOCAL_MODEL_SESSION": SimpleNamespace(
+                    post=lambda *a, **k: posted.append(k) or self.response(
+                        body={"message": {"content": "ok"}})),
+            },
+        )
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.dict(os.environ, {"OLLAMA_MODELS": td}):
+            with self.assertRaises(RuntimeError):
+                ns["ollama_chat"](None, "Send the contract to Priya.")
+            self.assertEqual(posted, [])
+
+            manifest = (Path(td) / "manifests" / "registry.ollama.ai" /
+                        "library" / "qwen3.5" / "4b")
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text("{}")
+            out, _ = ns["ollama_chat"](None, "Send the contract to Priya.")
+        self.assertEqual(out, "ok")
+        self.assertEqual(len(posted), 1)
 
     def test_schema_is_sent_and_non_streaming_path_is_unchanged(self):
         posted = []

@@ -26,13 +26,23 @@ sockets, ``create_connection``, ``urlopen``, ``http.client``, and name
 resolution, so a green run here is evidence rather than an unarmed alarm.
 
 Nothing in this file touches the real network, real audio, or a real model.
+The proxy test alone opens sockets, and only between servers it starts on
+127.0.0.1 itself.
 """
 
 import ast
+import contextlib
 import http.client
+import json
+import os
+import shutil
 import socket
+import subprocess
 import sys
+import tempfile
+import textwrap
 import unittest
+from unittest import mock
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -59,10 +69,10 @@ from voice_compiler import (  # noqa: E402
 # Ollama and the app's own health endpoint are the only sockets the product is
 # allowed to touch while dictating. Model downloads reach Hugging Face, but
 # only from the installer and the preload path, never from this pipeline.
+# Ollama is reached by address only: "localhost" resolves to ::1 first, where
+# a process other than Ollama could be listening.
 ALLOWED_ENDPOINTS = frozenset({
     ("127.0.0.1", 11434),
-    ("localhost", 11434),
-    ("::1", 11434),
     ("127.0.0.1", 8787),
     ("localhost", 8787),
     ("::1", 8787),
@@ -88,8 +98,12 @@ AUDITED_NETWORK_IMPORTS = frozenset({"socket", "requests", "http.server"})
 # each one is for. The set is asserted exactly: a sixth entry means someone
 # added a network call that nobody has reviewed.
 AUDITED_CALL_SITES = {
-    # The only outbound HTTP client in the product. Target is OLLAMA_URL. The
-    # call sits in a closure so the schema-rejection retry can reuse it (#126).
+    # The one HTTP client: LOCAL_MODEL_SESSION, built with trust_env off so no
+    # environment or system proxy applies (LocalModelProxyTests proves it).
+    "<module>": frozenset({"requests.Session"}),
+    # The only outbound HTTP call in the product, made through that session.
+    # Target is OLLAMA_URL. The call sits in a closure so the schema-rejection
+    # retry can reuse it (#126).
     "ollama_chat.post": frozenset({"requests.post"}),
     # Route discovery for the printed LAN address. UDP connect assigns a
     # source address; it transmits nothing. Server-only mode reaches it.
@@ -183,11 +197,20 @@ def _import_aliases(tree: ast.AST) -> dict[str, str]:
 
     ``import requests as client`` binds ``client`` to ``requests``;
     ``from requests import post as send`` binds ``send`` to ``requests.post``.
+    A module-level ``SESSION = requests.Session()`` binds ``SESSION`` to
+    ``requests``, because a session answers the same verbs as the module.
     Without this table, an ordinary alias would walk a call straight past the
     audit: the alias's written name matches no client root, and the audit
     would conclude the module makes no outbound calls at all.
     """
     aliases: dict[str, str] = {}
+    for node in getattr(tree, "body", ()):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            constructor = _dotted(node.value.func) or ""
+            if constructor.split(".")[0] in _CLIENT_CALL_ROOTS:
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        aliases[target.id] = constructor.split(".")[0]
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -322,12 +345,15 @@ class RuntimeOutboundCallSiteTests(unittest.TestCase):
         # Match by resolved name so `import requests as client` cannot hide a
         # post from this check, and cover every client verb while at it.
         aliases = _import_aliases(self.tree)
-        posts = [
-            node for node in ast.walk(self.tree)
+        calls = [
+            (node, _resolve(dotted, aliases)) for node in ast.walk(self.tree)
             if isinstance(node, ast.Call)
             and (dotted := _dotted(node.func)) is not None
             and _resolve(dotted, aliases).startswith("requests.")
         ]
+        sessions = [node for node, name in calls if name == "requests.Session"]
+        self.assertEqual(len(sessions), 1, "one local-model client, not more")
+        posts = [node for node, name in calls if name != "requests.Session"]
         self.assertTrue(posts)
         for call in posts:
             self.assertTrue(call.args, "requests.post lost its URL argument")
@@ -535,7 +561,7 @@ class EgressTripwire:
         return False
 
     def requests_double(self, payload):
-        """A ``requests`` stand-in that records the URL it was handed."""
+        """A session stand-in that records the URL it was handed."""
         tripwire = self
 
         class _Requests:
@@ -698,7 +724,8 @@ class ProductionCleanupEgressTests(unittest.TestCase):
                 extra={
                     "json": json,
                     "re": re,
-                    "requests": tripwire.requests_double(payload),
+                    "LOCAL_MODEL_SESSION": tripwire.requests_double(payload),
+                    "cleanup_model_installed": lambda: True,
                 },
             )
             text, done = namespace["ollama_chat"](None, "um ship it friday")
@@ -729,8 +756,9 @@ class ProductionCleanupEgressTests(unittest.TestCase):
                     "json": json,
                     "re": re,
                     "OLLAMA_URL": "https://cleanup.example.com/api/chat",
-                    "requests": tripwire.requests_double(
+                    "LOCAL_MODEL_SESSION": tripwire.requests_double(
                         {"message": {"content": "x"}}),
+                    "cleanup_model_installed": lambda: True,
                 },
             )
             namespace["ollama_chat"](None, "anything")
@@ -738,6 +766,149 @@ class ProductionCleanupEgressTests(unittest.TestCase):
         self.assertEqual(
             tripwire.disallowed,
             (("requests.post", ("cleanup.example.com", 443)),))
+
+    def test_without_the_cleanup_model_nothing_is_sent_at_all(self):
+        # A default install has no cleanup model. The dictation must not be
+        # posted anywhere, not even to a port that will refuse it.
+        import json
+        import re
+        from pathlib import Path as _Path
+
+        with tempfile.TemporaryDirectory() as models, \
+                mock.patch.dict(os.environ, {"OLLAMA_MODELS": models}):
+            with EgressTripwire() as tripwire:
+                namespace = self._load(
+                    "ollama_chat", "cleanup_model_installed",
+                    assignments=("OLLAMA_URL", "OLLAMA_MODEL"),
+                    extra={
+                        "json": json,
+                        "re": re,
+                        "os": os,
+                        "Path": _Path,
+                        "LOCAL_MODEL_SESSION": tripwire.requests_double(
+                            {"message": {"content": "x"}}),
+                    },
+                )
+                with self.assertRaises(RuntimeError):
+                    namespace["ollama_chat"](None, "Call Priya at noon.")
+        self.assertEqual(tripwire.attempts, [])
+
+
+def _local_model_client_source() -> str:
+    """The shipping local-model client: its session, constants and caller."""
+    tree = ast.parse((ROOT / "dictate.py").read_text(encoding="utf-8"))
+    selected = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in {
+                "ollama_chat", "_ollama_stream_reply"}:
+            selected.append(node)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                base = target.value if isinstance(target, ast.Attribute) \
+                    else target
+                if isinstance(base, ast.Name) and base.id in {
+                        "LOCAL_MODEL_SESSION", "OLLAMA_URL", "OLLAMA_MODEL"}:
+                    selected.append(node)
+                    break
+    return "from __future__ import annotations\n" + "\n\n".join(
+        ast.unparse(node) for node in selected) + "\n"
+
+
+_PROXY_PROBE = textwrap.dedent('''
+    import http.server, json, os, re, sys, threading, time
+    import requests
+
+    hits = {"model": 0, "proxy": 0}
+
+    def serve(kind, content):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                hits[kind] += 1
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                body = json.dumps({"message": {"content": content},
+                                   "done_reason": "stop"}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server.server_address[1]
+
+    model = serve("model", "Ship it on Friday.")
+    proxy = serve("proxy", "relayed")
+    for name in ("NO_PROXY", "no_proxy"):
+        os.environ.pop(name, None)
+    for name in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy",
+                 "ALL_PROXY", "all_proxy"):
+        os.environ[name] = f"http://127.0.0.1:{proxy}"
+
+    namespace = {"requests": requests, "json": json, "re": re, "time": time,
+                 "cleanup_model_installed": lambda: True}
+    with open(sys.argv[1], encoding="utf-8") as source:
+        exec(compile(source.read(), "dictate-selected", "exec"), namespace)
+    namespace["OLLAMA_URL"] = f"http://127.0.0.1:{model}/api/chat"
+    text, _ = namespace["ollama_chat"](None, "um ship it friday")
+    shipped = dict(hits)
+    control = requests.post(namespace["OLLAMA_URL"], json={}, timeout=5)
+    print(json.dumps({"text": text, "shipped": shipped,
+                      "control": control.json()["message"]["content"],
+                      "requests": requests.__version__}))
+''')
+
+
+class LocalModelProxyTests(unittest.TestCase):
+    """A proxy set for the user's other traffic never receives a dictation.
+
+    This runs the shipping client inside the locked runtime environment, so
+    the proxy decision is made by the exact ``requests`` release that ships.
+    """
+
+    def test_the_cleanup_call_bypasses_an_environment_proxy(self):
+        uv = os.environ.get("UV") or shutil.which("uv")
+        self.assertIsNotNone(uv, "uv is required to reach the locked runtime")
+        dictate = str(ROOT / "dictate.py")
+        environment = {key: value for key, value in os.environ.items()
+                       if key != "VIRTUAL_ENV"}
+        # Offline: this file never reaches the real network. The release
+        # gate's earlier `uv run --locked --script dictate.py` fills the cache.
+        synced = subprocess.run(
+            [uv, "sync", "--script", dictate, "--locked", "--offline",
+             "--quiet"],
+            cwd=ROOT, env=environment, capture_output=True, text=True,
+            timeout=900)
+        self.assertEqual(
+            synced.returncode, 0,
+            "the locked runtime is not in the uv cache; run "
+            "`uv sync --script dictate.py --locked` once, then retry\n"
+            + synced.stderr)
+        python = subprocess.run(
+            [uv, "python", "find", "--script", dictate],
+            cwd=ROOT, env=environment, check=True, capture_output=True,
+            text=True, timeout=60).stdout.strip()
+        with tempfile.TemporaryDirectory() as folder:
+            probe = os.path.join(folder, "probe.py")
+            client = os.path.join(folder, "client.py")
+            with open(probe, "w", encoding="utf-8") as handle:
+                handle.write(_PROXY_PROBE)
+            with open(client, "w", encoding="utf-8") as handle:
+                handle.write(_local_model_client_source())
+            completed = subprocess.run(
+                [python, "-I", probe, client], cwd=folder,
+                capture_output=True, text=True, timeout=120)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout.strip().splitlines()[-1])
+
+        # Armed: an ordinary client in this environment would be relayed.
+        self.assertEqual(result["control"], "relayed")
+        self.assertEqual(result["text"], "Ship it on Friday.")
+        self.assertEqual(result["shipped"], {"model": 1, "proxy": 0},
+                         "the local model call went through a proxy")
 
 
 class EgressTripwireTests(unittest.TestCase):
