@@ -245,6 +245,31 @@ class FreshInstallDictationTests(unittest.TestCase):
                 fake_platform.Pasteboard.STRING) == "my own clipboard",
             3.0), "the user's clipboard was not given back")
 
+    def test_secrets_on_screen_never_reach_the_recognizer(self):
+        mac = booted()
+        desktop = mac.desktop
+
+        def prompts_while_dictating(field):
+            before = len(desktop.whisper_requests)
+            mac.dictate_sentence("Done.", field=field)
+            return " ".join(request.get("initial_prompt") or ""
+                            for request in desktop.whisper_requests[before:])
+
+        # What the user can see biases the recognizer...
+        desktop.pasteboard.copy_text("Ask Okonkwo about it.")
+        prompt = prompts_while_dictating(TextField("Meet Quellmeyer at noon"))
+        self.assertIn("Okonkwo", prompt)
+        self.assertIn("Quellmeyer", prompt)
+        # ...except what a password field holds...
+        password = TextField("Zxqvlarbinth")
+        password.secure = True
+        self.assertNotIn("Zxqvlarbinth", prompts_while_dictating(password))
+        # ...and what a password manager copied.
+        desktop.pasteboard.copy_text("Ask Vorbeckhauser about it.",
+                                     concealed=True)
+        self.assertNotIn("Vorbeckhauser",
+                         prompts_while_dictating(TextField("Notes")))
+
     def test_text_after_an_emoji_is_pasted_and_verified(self):
         # Accessibility counts the caret in UTF-16 units, and the emoji
         # before it is four of them but two characters.

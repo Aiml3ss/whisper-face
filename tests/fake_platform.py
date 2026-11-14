@@ -412,9 +412,13 @@ class Pasteboard:
                 return value
         return None
 
-    def copy_text(self, value: str):
-        """Something the user copied: a plain item with no privacy markers."""
+    def copy_text(self, value: str, concealed: bool = False):
+        """Something the user copied. A password manager marks what it copies
+        concealed, following the nspasteboard.org convention."""
         self.setString_forType_(value, self.STRING)
+        if concealed:
+            self.items[-1].setData_forType_(
+                b"", "org.nspasteboard.ConcealedType")
 
 
 class Keyboard:
