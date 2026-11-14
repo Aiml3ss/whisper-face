@@ -8248,10 +8248,20 @@ def context_firewall_state_snapshot() -> dict:
     }
 
 
+def _snippet_is_placeholder(text: str) -> bool:
+    """True for a template value the user has not replaced yet.
+
+    Both installers seed snippets.json with "EDIT ME ..." values. Until one
+    is filled in it is not something the user asked to have typed, so it is
+    never inserted: the dictation is delivered as spoken instead.
+    """
+    return text.lstrip().startswith("EDIT ME")
+
+
 def match_snippet(raw: str) -> tuple[str, str] | None:
     """Whole-dictation snippet trigger: "insert my address" pastes
-    snippets.json["address"]. Unknown names return None so the phrase
-    falls through as ordinary dictation."""
+    snippets.json["address"]. Unknown names and unfilled placeholders return
+    None so the phrase falls through as ordinary dictation."""
     m = SNIPPET_RE.match(raw.strip())
     if not m or not SNIPPETS_FILE.exists():
         return None
@@ -8270,7 +8280,7 @@ def match_snippet(raw: str) -> tuple[str, str] | None:
         return None
     for name, text in snippets.items():
         if isinstance(text, str) and key == snippet_name_key(name):
-            return name, text
+            return None if _snippet_is_placeholder(text) else (name, text)
     return None
 
 
@@ -8294,23 +8304,32 @@ def _load_snippet_map() -> dict[str, str]:
 
 
 def _compile_snippet_pattern(snippets: dict[str, str]):
-    """One whole-word, case-insensitive alternation over every trigger. Triggers
-    are ordered longest-first so a compound trigger ("email signature") wins over
-    a prefix ("email"), each is re.escape'd, and the boundaries are stricter than
-    \\b — (?<!\\w)(...)(?!\\w) — so "address" never fires inside "addressed"."""
-    if not snippets:
+    """The spoken cue "insert my <name>" over every usable snippet name.
+
+    A bare name is never a trigger: the names people give snippets ("email",
+    "address", "signature") are ordinary words, and expanding them inside
+    "send me your email" would replace what was said with private text. The
+    cue is the one the whole-utterance command uses. Names are ordered
+    longest-first so "email signature" wins over "email", and the boundaries
+    are stricter than \\b so "address" never fires inside "addresses".
+    Unfilled placeholders and names with no word characters are left out.
+    """
+    triggers = sorted(
+        (name for name, text in snippets.items()
+         if snippet_name_key(name) and not _snippet_is_placeholder(text)),
+        key=len, reverse=True)
+    if not triggers:
         return None
-    triggers = sorted(snippets, key=len, reverse=True)
     alternation = "|".join(re.escape(trigger) for trigger in triggers)
-    return re.compile(rf"(?<!\w)({alternation})(?!\w)", re.I)
+    return re.compile(rf"(?<!\w)insert\s+my\s+({alternation})(?!\w)", re.I)
 
 
 def expand_snippets_inline(raw: str, snippets: dict[str, str] | None = None) -> str:
-    """Pure, side-effect-free inline expansion: replace each whole-word snippet
-    trigger embedded in a longer dictation with its canonical expansion,
-    case-insensitively and longest-trigger-first. Returns raw unchanged when
-    there are no snippets or no trigger fires. snippets defaults to the live
-    snippets.json via _load_snippet_map()."""
+    """Pure, side-effect-free inline expansion: replace each spoken
+    "insert my <name>" embedded in a longer dictation with that snippet's
+    text, case-insensitively and longest-name-first. Returns raw unchanged
+    when there are no snippets or the cue is not spoken. snippets defaults to
+    the live snippets.json via _load_snippet_map()."""
     if snippets is None:
         snippets = _load_snippet_map()
     pattern = _compile_snippet_pattern(snippets)
@@ -8338,10 +8357,10 @@ def _snippet_sentinel(index: int) -> str:
 
 def _mask_snippets_inline(
         raw: str, snippets: dict[str, str]) -> tuple[str, dict[str, str]]:
-    """Round-trip masking half of inline expansion: replace each whole-word
-    trigger (same matching as expand_snippets_inline) with an opaque sentinel and
-    return (masked_text, sentinel -> expansion). An empty mapping means nothing
-    matched, and the caller must leave raw untouched."""
+    """Round-trip masking half of inline expansion: replace each spoken
+    "insert my <name>" (same matching as expand_snippets_inline) with an opaque
+    sentinel and return (masked_text, sentinel -> expansion). An empty mapping
+    means nothing matched, and the caller must leave raw untouched."""
     pattern = _compile_snippet_pattern(snippets)
     if pattern is None:
         return raw, {}
@@ -11298,8 +11317,8 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             return
 
         # Inline snippet expansion is additive to the whole-utterance command
-        # handled above: a trigger embedded in a longer dictation ("text him my
-        # address and say thanks") expands only the trigger words while the
+        # handled above: the same cue inside a longer dictation ("send it to
+        # insert my address and say thanks") expands only the cue while the
         # surrounding phrase still flows through normal cleanup. Mask each hit
         # with an opaque sentinel now and restore the exact expansion after
         # cleanup (below), so multiline boilerplate is never reflowed. Limited
