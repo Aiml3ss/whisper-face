@@ -261,6 +261,26 @@ class CleanupCompilerTests(unittest.TestCase):
                 self.assertEqual(plan.edits, [])
                 self.assertFalse(plan.needs_semantic_cleanup)
 
+    def test_capitalized_um_and_uh_are_names_not_fillers(self):
+        for spoken in (
+            "I studied at UM for four years",
+            "The UH campus is closed on Friday.",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken)
+                self.assertEqual(plan.edits, [])
+
+    def test_a_filler_spoken_as_its_own_sentence_leaves_no_punctuation(self):
+        self.assertEqual(compile_cleanup("Um.").text, "")
+        self.assertEqual(compile_cleanup("Hmm...").text, "")
+        self.assertEqual(
+            compile_cleanup("It works. Um. Anyway, next.").text,
+            "It works. Anyway, next.")
+        self.assertEqual(
+            compile_cleanup("Um, so we ship Friday.").text,
+            "so we ship Friday.")
+
     def test_scratch_that_removes_only_the_latest_clause(self):
         plan = compile_cleanup(
             "Keep this sentence. remove this part scratch that use this instead")
@@ -468,6 +488,17 @@ class CleanupCompilerTests(unittest.TestCase):
         )
         self.assertIn("spoken_enumeration", plan.edit_kinds)
         self.assertFalse(plan.needs_semantic_cleanup)
+
+    def test_a_number_past_the_announced_count_stays_inside_its_item(self):
+        plan = compile_cleanup(
+            "Here are two things. One, buy milk. Two, eggs, three dozen.")
+
+        self.assertEqual(
+            plan.text,
+            "Here are two things:\n"
+            "- Buy milk.\n"
+            "- Eggs, three dozen.",
+        )
 
     def test_repeated_number_words_without_list_intent_stay_as_prose(self):
         for spoken in (

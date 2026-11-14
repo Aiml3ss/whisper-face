@@ -24,8 +24,11 @@ STOP_WORDS = {
     "you", "your",
 }
 TOKEN_RE = re.compile(r"(?<![\w])([A-Za-z][A-Za-z0-9_+.-]{2,})(?![\w])")
+# A filler that a recognizer wrote as its own sentence ("Um.") takes its
+# terminator with it; otherwise the terminator is all that would be pasted.
 SIMPLE_FILLER_RE = re.compile(
-    r"(?:,\s*)?\b(?:um+|uh+|erm|hmm)\b(?:\s*,)?", re.I)
+    r"(?:^|(?<=[.!?…]\s))(?P<own>um+|uh+|erm|hmm)[.!?…]+(?=\s|$)|"
+    r"(?:,\s*)?\b(?P<word>um+|uh+|erm|hmm)\b(?:\s*,)?", re.I | re.M)
 DISCOURSE_FILLER_RE = re.compile(
     r"^[ \t]*(?:you know|I mean|basically|kind of|sort of)\b\s*,|"
     r",\s*(?:you know|I mean|basically|kind of|sort of)\b\s*,",
@@ -160,6 +163,11 @@ LIST_NUMBER = {
     ), start=1)
     for word in pair
 }
+COUNTED_HEADER_RE = re.compile(
+    r"\b(two|three|four|five|six|seven|eight|nine|ten)\s+"
+    r"(?:feedback\s+)?(?:ideas|items|points|things)\b",
+    re.I,
+)
 COUNTED_LIST_SIZE = {
     "two": 2, "three": 3, "four": 4, "five": 5,
 }
@@ -325,6 +333,11 @@ def _format_numbered_list_markers(text: str) -> str | None:
         r"[\s,;:.!?–—-]+$", "", text[:markers[0][0].start()]).strip()
     if not header or not LIST_SIGNAL_RE.search(header):
         return None
+    announced = COUNTED_HEADER_RE.search(header)
+    if announced:
+        # "Here are two things" promises two items, so a later "three" is a
+        # number inside the last item ("eggs, three dozen"), not a marker.
+        markers = markers[:LIST_NUMBER[announced.group(1).casefold()]]
 
     items: list[str] = []
     for index, (_marker, _number, item_start) in enumerate(markers):
@@ -588,12 +601,17 @@ def compile_cleanup(raw: str, language: str = "en") -> CleanupPlan:
     if had_spoken_structure:
         edits.append(CleanupEdit("spoken_structure", before, text))
 
-    for regex, kind in (
-        (SIMPLE_FILLER_RE, "remove_filler"),
-        (DISCOURSE_FILLER_RE, "remove_discourse_filler"),
+    def drop_filler(match: "re.Match[str]") -> str:
+        word = match.group("own") or match.group("word")
+        # UM and UH in capitals are names (a university, a unit), not sounds.
+        return match.group(0) if len(word) > 1 and word.isupper() else " "
+
+    for regex, replacement, kind in (
+        (SIMPLE_FILLER_RE, drop_filler, "remove_filler"),
+        (DISCOURSE_FILLER_RE, " ", "remove_discourse_filler"),
     ):
         before = text
-        text = regex.sub(" ", text)
+        text = regex.sub(replacement, text)
         if text != before:
             edits.append(CleanupEdit(kind, before, text))
 
@@ -612,6 +630,10 @@ def compile_cleanup(raw: str, language: str = "en") -> CleanupPlan:
         edits.append(CleanupEdit("scratch_that", before, text))
 
     text = normalize_spacing(text)
+    if edits and not text.strip(" \t\n.,;:!?…—–-"):
+        # Only punctuation survived the edits ("Um, uh." -> "."), and a
+        # lone mark is not something the speaker dictated.
+        text = ""
     deterministic_list = (
         _format_numbered_list_markers(text)
         or _format_counted_inline_list(text))
