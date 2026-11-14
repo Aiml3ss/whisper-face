@@ -51,7 +51,7 @@ uv run performance_lab.py stress --cycles 10 --restart-every 50
 uv run performance_lab.py lifecycle --iterations 25
 ```
 
-`default_path_sentences.json` (92 everyday sentences, each with the exact text
+`default_path_sentences.json` (94 everyday sentences, each with the exact text
 a fresh install must type) is not part of the scorecard. `uv run
 tests/test_whole_program.py` dictates every sentence through the real
 `dictate.py` booted on a fake Mac, with no models, audio device or network,

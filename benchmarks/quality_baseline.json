@@ -1,7 +1,7 @@
 {
   "description": "Pinned deterministic dictation-quality metrics. The release gate (quality_gate.py) fails on any difference, so quality changes are always visible in review beside the change that caused them. Content-free: counts and rates only.",
   "metrics": {
-    "default_cleanup.cases": 144,
+    "default_cleanup.cases": 146,
     "default_cleanup.changed": 24,
     "default_cleanup.edits.remove_filler": 8,
     "default_cleanup.edits.scratch_that": 4,

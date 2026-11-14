@@ -85,6 +85,8 @@
     {"id": "tone-word-code", "covers": "tone-word-opening", "spoken": "Code review is at noon.", "expected": "Code review is at noon."},
     {"id": "tone-word-verbatim", "covers": "tone-word-opening", "spoken": "Verbatim quotes need a source.", "expected": "Verbatim quotes need a source."},
     {"id": "tone-word-technical", "covers": "tone-word-opening", "spoken": "Technical debt is piling up.", "expected": "Technical debt is piling up."},
+    {"id": "tone-word-colon", "covers": "tone-word-opening", "spoken": "Code: 4471 opens the side gate.", "expected": "Code: 4471 opens the side gate."},
+    {"id": "tone-word-comma", "covers": "tone-word-opening", "spoken": "Formal, but friendly, works best.", "expected": "Formal, but friendly, works best."},
     {"id": "tone-word-neutral", "covers": "tone-word-opening", "spoken": "Neutral colors work best here.", "expected": "Neutral colors work best here."},
 
     {"id": "repeat-digits-pin", "covers": "repeats", "spoken": "My PIN is 4 4 4 4.", "expected": "My PIN is 4 4 4 4."},

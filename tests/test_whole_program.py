@@ -300,6 +300,26 @@ class FreshInstallDictationTests(unittest.TestCase):
         mac.dictate_sentence("See you soon.", field=field)
         self.assertEqual(field.text, "Thanks 👍🏽 See you soon. and bye")
 
+    def test_a_filled_snippet_expands_only_when_asked_for(self):
+        mac = booted()
+        template = json.loads(
+            (ROOT / "snippets.template.json").read_text())["email"]
+        mac.dictate.save_gui_snippet("email", template, "sam@example.com")
+        try:
+            cases = (
+                ("What is your email address?",
+                 "What is your email address?"),
+                ("Please insert my email here.",
+                 "Please sam@example.com here."),
+                ("Insert my email.", "sam@example.com"),
+            )
+            for spoken, expected in cases:
+                with self.subTest(spoken=spoken):
+                    field = mac.dictate_sentence(spoken, field=TextField())
+                    self.assertEqual(field.text, expected)
+        finally:
+            mac.dictate.save_gui_snippet("email", "sam@example.com", template)
+
     def test_whisper_tiny_never_overrules_parakeet(self):
         # A default install has no large-v3-turbo, so nothing can break a
         # tie between Parakeet and the Tiny cross-check: Parakeet stands.
