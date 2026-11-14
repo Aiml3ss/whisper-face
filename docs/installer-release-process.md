@@ -141,7 +141,7 @@ with no macOS runtime present.
 
 The list above is what a release must pass. It is not what GitHub blocks a
 merge on, and the difference is where #139 got through. `main` requires
-exactly two checks, and both run on the self-hosted `bergserver` runner:
+exactly two checks, and both run on GitHub-hosted runners:
 
 | Required check | Workflow | What it holds |
 |---|---|---|
@@ -151,19 +151,35 @@ exactly two checks, and both run on the self-hosted `bergserver` runner:
 Both are set under branch protection for `main`, with *Require branches to be
 up to date* on and administrators included.
 
+Neither runs on the self-hosted `bergserver` runner, and
+`tests/test_repository_governance.py` fails if a pull-request job is moved
+there. A required check pinned to one machine blocks every merge while that
+machine is away, and a persistent runner must never execute a pull request's
+code. The cost is that both checks now depend on hosted runners being
+available to this repository: if they are not, neither check can start and no
+pull request can merge until they are.
+
+`cla-check.yml` runs on `pull_request_target`, so GitHub takes the workflow
+from `main`, not from the pull request. That has a one-time consequence. The
+pull request that introduces the trigger gets no `acceptance-recorded` run at
+all: its own copy no longer has a `pull_request` trigger, and `main`'s copy
+does not have `pull_request_target` yet. With the check required, that one
+pull request cannot merge on its own. The Project Owner checks the ledger by
+hand, lifts the `acceptance-recorded` requirement for that merge, and restores
+it straight afterwards. Every later pull request is checked by `main`'s copy.
+
 Everything else is advisory. `windows-smoke.yml` carries most of the gate list,
-including the governance suite, but it is not a required check and it runs on
-a GitHub-hosted runner, whose availability depends on a minutes budget that
-has been exhausted before. That is exactly how #139 merged with the face
-roster stale: the suite's only enforced home was a job nothing blocked on. A
-gate reported by a workflow nobody blocks on is reporting, not enforcement.
+including the governance suite, but it is not a required check. That is
+exactly how #139 merged with the face roster stale: the suite's only enforced
+home was a job nothing blocked on. A gate reported by a workflow nobody blocks
+on is reporting, not enforcement.
 
 A suite earns a required check here by being cheap and self-contained — no
 models, no audio device, no platform runtime, seconds not minutes — because
-every required check queues on the one self-hosted machine. The governance
-suite qualifies at about 0.1s. Suites that do not qualify stay in the release
-gate list above, which is the weaker guarantee: it depends on a person running
-it before a release, not on GitHub refusing the merge.
+every required check has to start and finish on every pull request. The
+governance suite qualifies at about 0.1s. Suites that do not qualify stay in
+the release gate list above, which is the weaker guarantee: it depends on a
+person running it before a release, not on GitHub refusing the merge.
 
 ## Deliberate gate exclusions
 
