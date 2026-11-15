@@ -568,7 +568,8 @@ class HelperProcess:
     With ``Desktop.runtime_start_gate`` set to an event, the runtime takes a
     slow start, as a cold Core ML cache makes it: it holds its ready line
     until the test sets the event, or until it is stopped, and never
-    answers if neither happens.
+    answers if neither happens. ``Desktop.helper_start_gate`` does the same
+    to the FluidAudio helper.
     """
 
     def __init__(self, desktop, argv):
@@ -615,8 +616,8 @@ class HelperProcess:
 
     def _serve(self):
         try:
-            gate = (getattr(self.desktop, "runtime_start_gate", None)
-                    if self.runtime else None)
+            gate = getattr(self.desktop, "runtime_start_gate" if self.runtime
+                           else "helper_start_gate", None)
             while gate is not None and not gate.wait(0.01):
                 if self.stopped.is_set():
                     return
@@ -755,8 +756,10 @@ class Desktop:
         self.runtime_requests = []
         self.runtime_failure = None
         self.helper_failure = None
-        # Set to a threading.Event, the runtime's start waits for it.
+        # Set to a threading.Event, the runtime's (or the helper's) start
+        # waits for it.
         self.runtime_start_gate = None
+        self.helper_start_gate = None
         self.whisper_requests = []
         self.main_thread_calls = []
         self.installed_models = set()

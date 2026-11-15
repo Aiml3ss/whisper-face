@@ -895,15 +895,19 @@ FAST_ACCEPT_CONFIDENCE = 0.70
 # snapshot missing, or audio beyond the cross-check bound).
 PARAKEET_ROUTE_CONFIDENCE = 0.84
 PARAKEET_STARTUP_TIMEOUT = 10.0
-# How long Whisper Face's own runtime may take to load before it is stopped
-# and benched. When Core ML's compiled-model cache is cold (after an install
-# rebuilds the binary, an OS update, or a purge of ~/Library/Caches) a first
-# load takes about 10 s, measured at 10.13 s against 0.13 s warm, so the
-# helper's 10 s limit stopped it a tenth of a second short, and the stop
-# meant the cache was never filled and the next try was cold too. The
-# runtime loads in the background while the FluidAudio helper answers, so
-# nothing waits on this; a minute is several times the slowest cold load
-# seen and still stops a runtime that hangs.
+# How long a program that runs the Parakeet model may take to load before it
+# is stopped and benched. Core ML keeps its compiled copy of the model per
+# program name and per macOS build (~/Library/Caches/<program>/
+# com.apple.e5rt.e5bundlecache/<build>/...), so the first load after every
+# macOS update is cold for every user, as it is after a fresh install or a
+# purge of ~/Library/Caches. A cold load takes about 10 s: 10.13 s for
+# Whisper Face's own runtime against 0.13 s warm, 9.44 s for the FluidAudio
+# helper. The 10 s start-up limit stopped the runtime a tenth of a second
+# short, and a load stopped part-way never fills the cache, so every retry
+# was cold too. The runtime loads in the background from the start, and a
+# helper start that passes PARAKEET_STARTUP_TIMEOUT goes on loading in the
+# background, so no dictation waits on this; a minute is several times the
+# slowest cold load seen and still stops a program that hangs.
 PARAKEET_RUNTIME_START_ALLOWANCE = 60.0
 PARAKEET_MIN_REQUEST_TIMEOUT = 3.0
 PARAKEET_MAX_REQUEST_TIMEOUT = 10.0
@@ -2304,12 +2308,20 @@ def apply_speech_runtime() -> None:
     selected = speech_runtime_selected()
     PARAKEET.preferred = OWN_PARAKEET if selected else None
     if selected:
+        # Asked for: warmup() waits from here, not only once it spawns.
+        OWN_PARAKEET.start_pending = True
+        OWN_PARAKEET._settle()
+
         def start_runtime():
             # Checked under the lock, so a switch turned off meanwhile,
             # whose close takes the same lock, is never undone.
             with OWN_PARAKEET.lock:
-                if PARAKEET.preferred is OWN_PARAKEET:
-                    OWN_PARAKEET._ready_process()
+                try:
+                    if PARAKEET.preferred is OWN_PARAKEET:
+                        OWN_PARAKEET._ready_process()
+                finally:
+                    OWN_PARAKEET.start_pending = False
+                    OWN_PARAKEET._settle()
 
         threading.Thread(target=start_runtime, name="speech-runtime-start",
                          daemon=True).start()
@@ -8228,6 +8240,16 @@ def ensure_event_permissions() -> bool:
 # ------------------------- native Mac ASR helper -------------------------
 
 
+class HelperStillLoading(TimeoutError):
+    """A start's deadline passed before any of its ready line arrived.
+
+    Nothing was read from the pipe, so the program may go on loading and its
+    ready line can still be read whole by a later call. A deadline that
+    passes part-way through a line is a plain TimeoutError: those bytes are
+    gone, and the start fails as it always has.
+    """
+
+
 def bounded_helper_exchange(
         process, chunks, *, timeout: float,
         maximum_bytes: int = PARAKEET_MAX_RESPONSE_BYTES) -> dict:
@@ -8280,11 +8302,15 @@ def bounded_helper_exchange(
         if len(response) > maximum_bytes:
             raise RuntimeError("helper response exceeded size limit")
         remaining = deadline - time.monotonic()
+        # A start (nothing written) that has read nothing yet is still
+        # loading; anything else that runs out of time timed out.
+        timed_out = (HelperStillLoading if not chunks and not response
+                     else TimeoutError)
         if remaining <= 0:
-            raise TimeoutError("helper response timed out")
+            raise timed_out("helper response timed out")
         readable, _, _ = select.select([output_fd], [], [], remaining)
         if not readable:
-            raise TimeoutError("helper response timed out")
+            raise timed_out("helper response timed out")
         try:
             chunk = os.read(output_fd, min(
                 4096, maximum_bytes + 1 - len(response)))
@@ -8360,6 +8386,23 @@ class ParakeetClient:
         self.start_allowance = PARAKEET_RUNTIME_START_ALLOWANCE
         self.start_thread = start_thread or self._start_on_a_thread
         self.loading = None
+        # Set while nothing is loading and no start has been asked for and
+        # not yet begun (apply_speech_runtime's thread): warmup() waits on
+        # it so its request is not sent while the runtime loads.
+        self.start_pending = False
+        self.idle = threading.Event()
+        self.idle.set()
+
+    def _settle(self) -> None:
+        if self.loading is None and not self.start_pending:
+            self.idle.set()
+        else:
+            self.idle.clear()
+
+    def wait_until_settled(self, timeout: float) -> bool:
+        """Until no load is under way or asked for, for at most
+        ``timeout``; whether that was reached."""
+        return self.idle.wait(timeout)
 
     def _start_on_a_thread(self, target):
         threading.Thread(target=target, name=f"{self.name} start",
@@ -8397,6 +8440,7 @@ class ParakeetClient:
             # process is stopped here; that thread closes the pipes when it
             # wakes and finds the start was given up.
             self._stop(loading, streams=False)
+            self._settle()
         process, self.process = self.process, None
         self.protocol = 1
         if process is not None:
@@ -8465,6 +8509,8 @@ class ParakeetClient:
     def _start(self):
         if self.process is not None and self.process.poll() is None:
             return self.process
+        if self.loading is not None:
+            return None
         self._close()
         process = self._spawn()
         if process is None:
@@ -8473,6 +8519,16 @@ class ParakeetClient:
         try:
             status = self.exchange(
                 process, (), timeout=PARAKEET_STARTUP_TIMEOUT)
+        except HelperStillLoading:
+            # Past the start-up limit with nothing read: a cold Core ML
+            # cache. The request that waited gives up as before and the
+            # next program answers it, but the process is kept and goes on
+            # loading in the background for the rest of the allowance:
+            # stopped now, it would leave the cache cold for every retry.
+            self.process = None
+            self._load_in_background(process, max(
+                0.0, self.start_allowance - PARAKEET_STARTUP_TIMEOUT))
+            return None
         except Exception as error:
             return self._start_failed(type(error).__name__)
         if not status.get("ready"):
@@ -8495,20 +8551,31 @@ class ParakeetClient:
         self._close()
         process = self._spawn()
         if process is not None:
-            self.loading = process
-            print(f"[asr] {self.name} is loading; {self.fallback} answers "
-                  f"until it is ready")
-            self.start_thread(lambda: self._await_ready(process))
+            self._load_in_background(process, self.start_allowance)
         return None
 
-    def _await_ready(self, process) -> None:
-        """Wait for a background start's ready line for up to the whole
-        allowance, then take the process, or stop it and bench it."""
+    def _load_in_background(self, process, timeout: float) -> None:
+        """Wait for ``process``'s ready line off the request's thread, for
+        up to ``timeout``. Called with the lock held."""
+        self.loading = process
+        self._settle()
+        print(f"[asr] {self.name} is loading; {self.fallback} answers "
+              f"until it is ready")
+        self.start_thread(lambda: self._await_ready(process, timeout))
+
+    def _await_ready(self, process, timeout: float) -> None:
+        """Wait for a background start's ready line, then take the
+        process, or stop it and bench it."""
+        status, reason = {}, "TimeoutError"
         try:
-            status = self.exchange(process, (), timeout=self.start_allowance)
-            reason = None if status.get("ready") else "not ready"
+            if timeout > 0:
+                status = self.exchange(process, (), timeout=timeout)
+                reason = None if status.get("ready") else "not ready"
         except Exception as error:
-            status, reason = {}, type(error).__name__
+            # Still nothing read when the allowance ran out is a timeout
+            # like any other.
+            reason = ("TimeoutError" if isinstance(error, TimeoutError)
+                      else type(error).__name__)
         with self.lock:
             if self.loading is not process:
                 # Given up while it loaded (switched off or closed): it was
@@ -8516,6 +8583,7 @@ class ParakeetClient:
                 self._stop(process)
                 return
             self.loading = None
+            self._settle()
             if reason is None:
                 self._ready(process, status)
                 return
@@ -14037,6 +14105,17 @@ def finish_in_release_order(rec: Recorder, hud: HUD, active: dict):
 # ------------------------- warmup & main -------------------------
 
 
+def wait_for_speech_runtime() -> bool:
+    """Until the program asked first has finished loading (or failed to),
+    for at most its start allowance. At once with the switch off, or with
+    the runtime missing, benched or already loaded."""
+    runtime = getattr(PARAKEET, "preferred", None)
+    if runtime is None or runtime.idle.is_set():
+        return True
+    print("Waiting for the speech runtime to finish loading...")
+    return runtime.wait_until_settled(runtime.start_allowance)
+
+
 def warmup():
     started_at = time.perf_counter()
     all_ready = 1.0
@@ -14053,6 +14132,12 @@ def warmup():
             False,
             FAST_WHISPER_REPO,
         ).result())
+        # The speech runtime started loading with the app. Sent now, this
+        # request would find it loading and start the FluidAudio helper
+        # cold beside it; once it settles, the request warms the runtime's
+        # first decode instead, as on a warm start. Waited for here, not in
+        # ASR_POOL, so a dictation meanwhile is not queued behind the wait.
+        wait_for_speech_runtime()
         trace_operation("warmup_asr_final", lambda: ASR_POOL.submit(
             transcribe,
             np.zeros(SAMPLE_RATE // 2, dtype=np.float32),

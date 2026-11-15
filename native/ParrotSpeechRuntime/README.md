@@ -306,9 +306,12 @@ and 10.2–11.9 s for the helper from a cold cache, and the owner's Mac
 (`PARAKEET_STARTUP_TIMEOUT`, 10 s) is too short for that, so the runtime
 does not use it: it loads in the background, with
 `PARAKEET_RUNTIME_START_ALLOWANCE` (60 s), while the helper answers, and
-takes over once it is ready. The helper keeps its 10 s limit, so after an
-OS update or a purge of `~/Library/Caches` it can still miss it and be
-benched behind Whisper.
+takes over once it is ready; warm-up waits for that load so the helper is
+not started cold beside it. The helper keeps its 10 s limit for the request
+that starts it, but a start that passes it with nothing read goes on
+loading in the background for the same allowance instead of being stopped.
+Core ML keeps its compiled copy per program name and per macOS build, so
+every macOS update makes the first load of either program cold.
 
 Peak memory, from `/usr/bin/time -l` around each process for a whole run:
 

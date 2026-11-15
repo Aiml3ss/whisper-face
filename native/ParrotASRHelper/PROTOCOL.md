@@ -249,8 +249,23 @@ line arrives, the next request goes to it. A load is given
 `PARAKEET_RUNTIME_START_ALLOWANCE` (60 s), not the helper's
 `PARAKEET_STARTUP_TIMEOUT` (10 s): with Core ML's compiled-model cache cold
 a first load takes about 10 s (measured at 10.13 s, then 0.13 s), and
-stopping it then leaves the cache cold for the next try. The FluidAudio
-helper still starts inside the request, within its 10 s, as before.
+stopping it then leaves the cache cold for the next try. Core ML keeps that
+cache per program name and per macOS build, so the first load after every
+macOS update is cold. At app start, warm-up waits (off the ASR pool, for at
+most the allowance) for a load asked for or under way before its own
+decode, so that decode warms the runtime and the helper is not started cold
+beside it; a dictation meanwhile is answered as above.
+
+The FluidAudio helper, whether it is asked first or second, starts inside
+the request as before, and a start that finishes within its 10 s is
+unchanged. One that passes the 10 s with nothing of its ready line read
+(`HelperStillLoading`, a cold cache) is not stopped: that request gives up
+at 10 s and Whisper answers it, as before, but the process goes on loading
+in the background for the rest of the allowance and then answers, or is
+stopped and benched as below. Requests while it loads go straight to
+Whisper. Any other start failure (it does not spawn, its pipe closes, the
+line is not a ready line, is malformed, or was cut off part-way when the
+10 s passed) stops it and benches it at once, as before.
 
 With the runtime selected, `PARAKEET` (the FluidAudio helper's client) asks
 `OWN_PARAKEET` (the runtime's) first for every request:

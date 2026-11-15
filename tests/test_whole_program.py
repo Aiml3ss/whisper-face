@@ -1201,9 +1201,11 @@ class SpeechRuntimeTests(unittest.TestCase):
         dictate.PARAKEET_RUNTIME_PINNED = False
         dictate.PARAKEET.preferred = None
         # Released first, so a slow start held by a test ends at once.
-        if self.mac.desktop.runtime_start_gate is not None:
-            self.mac.desktop.runtime_start_gate.set()
-        self.mac.desktop.runtime_start_gate = None
+        for name in ("runtime_start_gate", "helper_start_gate"):
+            gate = getattr(self.mac.desktop, name)
+            if gate is not None:
+                gate.set()
+            setattr(self.mac.desktop, name, None)
         for client in (dictate.OWN_PARAKEET, dictate.PARAKEET):
             with client.lock:
                 client._close()
@@ -1249,12 +1251,33 @@ class SpeechRuntimeTests(unittest.TestCase):
                 own.process is not None or own.failed_starts > failed),
             30.0), self.mac.log_tail())
 
-    def hold_the_start(self):
-        """The runtime's next start is slow until the test releases it."""
+    def hold_the_start(self, program="runtime"):
+        """The runtime's (or the helper's) next start is slow until the
+        test releases it."""
         gate = threading.Event()
-        self.mac.desktop.runtime_start_gate = gate
+        setattr(self.mac.desktop, f"{program}_start_gate", gate)
         self.addCleanup(gate.set)
         return gate
+
+    def warm_up_on_a_thread(self):
+        """main()'s warm-up, as it runs at app start, on its own thread."""
+        errors = []
+
+        def run():
+            try:
+                self.mac.dictate.warmup()
+            except BaseException as error:  # reported by the test
+                errors.append(error)
+
+        thread = threading.Thread(target=run, name="test-warmup", daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 60)
+        return thread, errors
+
+    def wait_for_log(self, text, logged):
+        self.assertTrue(self.mac.wait_until(
+            lambda: text in self.mac.log.getvalue()[logged:], 30.0),
+            self.mac.log_tail())
 
     def programs_spawned_since(self, count: int) -> list[str]:
         return [Path(argv[0]).name
@@ -1483,6 +1506,99 @@ class SpeechRuntimeTests(unittest.TestCase):
         self.assertEqual(self.programs_spawned_since(spawns).count(
             fake_platform.RUNTIME_NAME), 1)
         self.assertIsNone(own.loading)
+
+    def test_warmup_waits_for_the_runtime_and_does_not_start_the_helper(
+            self):
+        # A cold start: the runtime is still loading when warm-up reaches
+        # its decode. Warm-up waits for the load, then that decode goes to
+        # the runtime, and the FluidAudio helper is never started beside it.
+        dictate = self.mac.dictate
+        desktop = self.mac.desktop
+        gate = self.hold_the_start()
+        logged = len(self.mac.log.getvalue())
+        self.switch_on(wait=False)
+        spawns = len(desktop.helper_spawns)
+        runtime_asked = len(desktop.runtime_requests)
+        thread, errors = self.warm_up_on_a_thread()
+        self.wait_for_log(
+            "Waiting for the speech runtime to finish loading", logged)
+        self.assertTrue(thread.is_alive())
+        self.assertEqual(self.programs_spawned_since(spawns), [])
+        gate.set()
+        thread.join(60)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertGreater(len(desktop.runtime_requests), runtime_asked)
+        self.assertEqual(self.programs_spawned_since(spawns), [])
+        self.assertIsNone(dictate.PARAKEET.process)
+        self.assertIsNone(dictate.PARAKEET.loading)
+
+    def test_a_dictation_during_the_warmup_wait_is_typed_as_now(self):
+        # The wait is outside the ASR pool: a dictation meanwhile is not
+        # queued behind it, and is typed by the helper while the runtime
+        # loads, as without the wait.
+        desktop = self.mac.desktop
+        gate = self.hold_the_start()
+        logged = len(self.mac.log.getvalue())
+        self.switch_on(wait=False)
+        thread, errors = self.warm_up_on_a_thread()
+        self.wait_for_log(
+            "Waiting for the speech runtime to finish loading", logged)
+        helper_asked = len(desktop.parakeet_requests)
+        self.assertEqual(self.dictate(), self.SPOKEN)
+        self.assertGreater(len(desktop.parakeet_requests), helper_asked)
+        self.assertTrue(thread.is_alive())
+        gate.set()
+        thread.join(60)
+        self.assertEqual(errors, [])
+
+    def test_switched_off_warmup_does_not_wait(self):
+        # With the switch off nothing is loading: warm-up runs straight
+        # through, and its decode goes to the helper as it always has.
+        logged = len(self.mac.log.getvalue())
+        self.hold_the_start()   # a runtime start would hang; none happens
+        thread, errors = self.warm_up_on_a_thread()
+        thread.join(60)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertNotIn("Waiting for the speech runtime",
+                         self.mac.log.getvalue()[logged:])
+        self.assertIsNone(self.mac.dictate.OWN_PARAKEET.loading)
+
+    def test_a_helper_start_past_its_limit_goes_on_loading_then_answers(
+            self):
+        # The switch is off: the FluidAudio helper alone, as for every
+        # user. Its limit is scaled down so the test waits no real 10 s; its
+        # start is held past it. That dictation falls to Whisper as before,
+        # but the helper is not stopped: once loaded it answers.
+        dictate = self.mac.dictate
+        desktop = self.mac.desktop
+        helper = dictate.PARAKEET
+        with helper.lock:
+            helper._close()
+        self.addCleanup(setattr, dictate, "PARAKEET_STARTUP_TIMEOUT",
+                        dictate.PARAKEET_STARTUP_TIMEOUT)
+        dictate.PARAKEET_STARTUP_TIMEOUT = 0.2
+        gate = self.hold_the_start("helper")
+        logged = len(self.mac.log.getvalue())
+        spawns = len(desktop.helper_spawns)
+        self.assertEqual(self.dictate(), self.MISHEARD)
+        loading = helper.loading
+        self.assertIsNotNone(loading)
+        self.assertIsNone(loading.poll())
+        # While it loads, Whisper answers at once and nothing restarts it.
+        self.assertEqual(self.dictate(), self.MISHEARD)
+        self.assertIs(helper.loading, loading)
+        self.assertEqual(self.programs_spawned_since(spawns),
+                         [fake_platform.HELPER_NAME])
+        gate.set()
+        self.assertTrue(self.mac.wait_until(
+            lambda: helper.process is loading, 30.0), self.mac.log_tail())
+        self.assertEqual(self.dictate(), self.SPOKEN)
+        log = self.mac.log.getvalue()[logged:]
+        self.assertIn("[asr] Parakeet helper is loading; Whisper answers "
+                      "until it is ready", log)
+        self.assertNotIn("Parakeet helper did not start", log)
 
     def test_when_both_fail_whisper_types_as_it_always_has(self):
         desktop = self.mac.desktop
