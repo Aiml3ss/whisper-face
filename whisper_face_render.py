@@ -193,7 +193,10 @@ if RENDER_APPKIT_AVAILABLE:
     from whisper_face_theme import jelly_face_scale
 
     def _render_rgb(r, g, b, a=1.0):
-        NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, a).set()
+        # sRGB, like the exported SVGs and the site: the calibrated space
+        # draws the same numbers visibly paler, and the two renderers would
+        # disagree about every color in the spec.
+        NSColor.colorWithSRGBRed_green_blue_alpha_(r, g, b, a).set()
 
     def _render_poly(points):
         path = NSBezierPath.bezierPath()
@@ -203,21 +206,29 @@ if RENDER_APPKIT_AVAILABLE:
         path.closePath()
         return path
 
+    def _render_fill(path, op) -> None:
+        """Fill ``path``; a ``grow`` op is also stroked out to its border."""
+        _render_rgb(*op.color, op.alpha)
+        path.fill()
+        if op.grow > 0.0:
+            path.setLineWidth_(2.0 * op.grow)
+            path.setLineJoinStyle_(1)
+            path.stroke()
+
     def replay_ops(ops) -> None:
         """Draw a shared character op list through Core Graphics.
 
         The single Core Graphics twin of ``whisper_face_characters._svg_op``;
         the HUD and the window both call this so the two renderers cannot
-        drift apart.
+        drift apart.  The sticker outline and hard shadow arrive as ordinary
+        filled ops carrying ``grow``.
         """
         for op in ops:
             if isinstance(op, Ellipse):
-                _render_rgb(*op.color, op.alpha)
-                NSBezierPath.bezierPathWithOvalInRect_(
-                    NSMakeRect(op.x, op.y, op.w, op.h)).fill()
+                _render_fill(NSBezierPath.bezierPathWithOvalInRect_(
+                    NSMakeRect(op.x, op.y, op.w, op.h)), op)
             elif isinstance(op, Polygon):
-                _render_rgb(*op.color, op.alpha)
-                _render_poly(op.points).fill()
+                _render_fill(_render_poly(op.points), op)
             elif isinstance(op, Stroke):
                 _render_rgb(*op.color, op.alpha)
                 path = NSBezierPath.bezierPath()
@@ -229,10 +240,10 @@ if RENDER_APPKIT_AVAILABLE:
                     path.lineToPoint_(point)
                 path.stroke()
             elif isinstance(op, RoundedRect):
-                _render_rgb(*op.color, op.alpha)
-                NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                    NSMakeRect(op.x, op.y, op.w, op.h),
-                    op.radius, min(op.radius, op.h / 2.0)).fill()
+                _render_fill(
+                    NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                        NSMakeRect(op.x, op.y, op.w, op.h),
+                        op.radius, min(op.radius, op.h / 2.0)), op)
             elif isinstance(op, Arc):
                 _render_rgb(*op.color, op.alpha)
                 path = NSBezierPath.bezierPath()
@@ -243,14 +254,16 @@ if RENDER_APPKIT_AVAILABLE:
                 path.setLineCapStyle_(1)
                 path.stroke()
             elif isinstance(op, Curve):
-                _render_rgb(*op.color, op.alpha)
                 path = NSBezierPath.bezierPath()
                 path.moveToPoint_(op.start)
                 for control_one, control_two, end in op.segments:
                     path.curveToPoint_controlPoint1_controlPoint2_(
                         end, control_one, control_two)
                 path.closePath()
-                path.fill()
+                _render_fill(path, op)
+            else:
+                raise TypeError(
+                    f"unsupported draw op: {type(op).__name__}")
 
     class LiveFaceView(NSView):
         """The window's living character: breath, blinks, glances, speech.

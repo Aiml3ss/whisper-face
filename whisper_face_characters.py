@@ -12,6 +12,12 @@ Core Graphics; ``scripts/generate_face_art.py`` replays the same ops into SVG.
 Both renderers therefore move together by construction.  It stays free of
 AppKit so the geometry can be tested without displaying a window.
 
+The look is Sticker: flat saturated fills, one thick ink outline around the
+whole character (never around an inner feature), and an optional hard shadow
+of that same silhouette.  Both are ordinary ops at the front of the list, so
+every renderer draws them without knowing what an outline is; see
+``character_ops`` for how a surface asks for the shadow.
+
 Animation contract: ``mouth`` sweeps a closed smile through a rounded open
 jaw, ``level`` drives the trailing speech puffs, ``blink`` closes the eyes
 into happy lids, and ``gaze`` drifts the pupils a few points so an idle
@@ -25,11 +31,9 @@ to survive 18 points, so it is drawn as its own artwork.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from typing import Mapping, Sequence
-
-from whisper_face_theme import FACE_CHIP_COLORS
 
 Color = tuple[float, float, float]
 Point = tuple[float, float]
@@ -38,28 +42,58 @@ Point = tuple[float, float]
 # and squashes it.
 DESIGN_SIZE = 256.0
 
-EMERALD = FACE_CHIP_COLORS["parrot"]     # pastel emerald, #89e2bd
-DEEP = (0.239, 0.588, 0.463)             # #3d9676, relaxed parrot accent
-BEAK_UP = (0.969, 0.808, 0.451)          # #f7ce73
-BEAK_LO = (0.941, 0.718, 0.353)          # #f0b75a
-DARK_EYE = (0.165, 0.129, 0.110)         # #2a211c, warm clay near-black
+# The sticker palette.  Every hue is the old pastel turned up: saturation
+# roughly half again as strong, value a touch lower, then tuned by eye so
+# each animal stays as easy to tell apart as it was.  The chips in
+# ``whisper_face_theme.FACE_CHIP_COLORS`` keep the pastels, because a chip is
+# the ground and the character standing on it is the loud thing; a test
+# holds each head to its chip's hue so the chip still names its animal.
+DARK_EYE = (0.165, 0.129, 0.110)         # #2a211c, warm near-black
+INK = DARK_EYE                           # the outline and its hard shadow
 MOUTH = (0.200, 0.157, 0.122)            # #33281f
-MINT = FACE_CHIP_COLORS["owl"]           # #a2efdf
 CATCH = (1.000, 0.992, 0.973)            # #fffdf8, warm porcelain catchlight
-TONGUE = (0.965, 0.604, 0.655)           # #f69aa7
-BLUSH = (0.976, 0.702, 0.714)            # #f9b3b6, chibi rouge
-IRIS_GOLD = (0.969, 0.808, 0.451)        # owl iris, same gold as the beaks
+EMERALD = (0.286, 0.869, 0.626)          # #49dda0, parrot head
+BEAK_UP = (0.950, 0.687, 0.106)          # #f2af1b
+BEAK_LO = (0.922, 0.572, 0.000)          # #eb9200
+MINT = (0.405, 0.919, 0.812)             # #67eacf, owl head and speech puffs
+OWL_DEEP = (0.351, 0.269, 0.622)         # #59459f, horn tufts and chevrons
+OWL_CREAM = (0.828, 0.778, 0.980)        # #d3c6fa, facial discs
+TONGUE = (0.946, 0.341, 0.426)           # #f1576d
+BLUSH = (0.956, 0.483, 0.504)            # #f47b80, rouge laid over a warm head
+ROUGE = (0.974, 0.687, 0.692)            # #f8afb0, the same rouge as a flat
+#                                          opaque color, for the green heads
+EAR_TIP = (0.420, 0.180, 0.070)          # #6b2e12, fox ear caps
+IRIS_GOLD = BEAK_UP                      # owl iris, same gold as the beaks
+
+# Sticker proportions, in design units.  The outline is grown from the
+# character's body shapes; the hard shadow is that same silhouette, offset.
+OUTLINE = 6.5
+SHADOW_OFFSET: Point = (7.0, 9.0)
+EYE_SCALE = 1.14                         # eyes, about their old centers
+HEAVY = 1.35                             # every thin stroke, so it holds
+#                                          up next to the outline
+SMILE_WIDTH = 5.0 * HEAVY                # closed smile
+LID_WIDTH = 5.5 * HEAVY                  # the happy lid of a blink
+QUILL_GROW = 1.5                         # see ``_quill_ops``
 
 
 @dataclass(frozen=True)
 class Ellipse:
-    """Axis-aligned oval, given as its bounding box."""
+    """Axis-aligned oval, given as its bounding box.
+
+    ``grow``, here and on the other three filled ops, swells the shape by
+    that many design units on every side with round corners: a renderer
+    fills the shape and then strokes it in the same color at twice the
+    width.  It is how the sticker outline and its hard shadow are drawn, and
+    it is only ever set on opaque ops, where fill and stroke may overlap.
+    """
     x: float
     y: float
     w: float
     h: float
     color: Color
     alpha: float = 1.0
+    grow: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -67,6 +101,7 @@ class Polygon:
     points: tuple[Point, ...]
     color: Color
     alpha: float = 1.0
+    grow: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -87,6 +122,7 @@ class RoundedRect:
     radius: float
     color: Color
     alpha: float = 1.0
+    grow: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -108,6 +144,7 @@ class Curve:
     segments: tuple[tuple[Point, Point, Point], ...]
     color: Color
     alpha: float = 1.0
+    grow: float = 0.0
 
 
 Op = Ellipse | Polygon | Stroke | RoundedRect | Arc | Curve
@@ -119,8 +156,9 @@ class CharacterStyle:
 
     ``ears`` picks the silhouette: ``pointed`` for the feline and vulpine
     faces, ``round`` for the bear family, ``floppy`` for the dog, whose flat
-    silhouette has always had hanging ears, ``long`` for the rabbit, and
-    ``none`` for the two faces whose crown carries something else entirely.
+    silhouette has always had hanging ears, ``retriever`` for the goldens'
+    broader ones, ``long`` for the rabbit, and ``none`` for the faces whose
+    crown carries something else entirely.
     ``snout`` gives the pig the feature that separates it from a pink bear.
     The remaining flags are the species accents that keep a dozen similar
     toys from reading as one animal in a dozen colorways.
@@ -135,6 +173,11 @@ class CharacterStyle:
     litter-mates and share one coat: Olive wears a white bow at her ear,
     and Pickles rests the tip of his tongue past the closed smile the way
     the real dog does.  Accessories, not palette, tell the pair apart.
+
+    ``fit`` shrinks the three faces whose ears or quills reach the edge of
+    the design box, by just enough that their outline and hard shadow still
+    land inside it without the face leaving the center line.  See
+    ``_fitted``.
     """
     head: Color
     deep: Color
@@ -161,120 +204,132 @@ class CharacterStyle:
     beak: bool = False
     bow: bool = False
     blep: bool = False
+    fit: float = 1.0
 
 
 COMPANIONS: Mapping[str, CharacterStyle] = {
     "fox": CharacterStyle(
-        head=FACE_CHIP_COLORS["fox"],
-        deep=(0.812, 0.447, 0.302),
-        muzzle=(1.000, 0.937, 0.839),
+        head=(0.980, 0.471, 0.282),         # #fa7848
+        deep=(0.796, 0.226, 0.000),         # #cb3a00
+        muzzle=(0.980, 0.861, 0.677),       # #fadcad
         cheek_fluff=True,
         ear_tips=True,
     ),
     "cat": CharacterStyle(
-        head=FACE_CHIP_COLORS["cat"],
-        deep=(0.443, 0.502, 0.702),
-        muzzle=(0.906, 0.945, 1.000),
+        head=(0.755, 0.666, 0.949),         # #c1aaf2
+        deep=(0.253, 0.352, 0.688),         # #415aaf
+        muzzle=(0.778, 0.862, 0.980),       # #c6dcfa
         whiskers=True,
         fangs=True,
     ),
     "bear": CharacterStyle(
-        head=FACE_CHIP_COLORS["bear"],
-        deep=(0.576, 0.443, 0.351),
-        muzzle=(0.949, 0.831, 0.694),
+        head=(0.972, 0.729, 0.128),         # #f8ba21
+        deep=(0.564, 0.342, 0.189),         # #905730
+        muzzle=(0.930, 0.725, 0.487),       # #edb97c
         ears="round",
     ),
     "dog": CharacterStyle(
-        head=FACE_CHIP_COLORS["dog"],
-        deep=(0.718, 0.573, 0.412),
-        muzzle=(0.996, 0.957, 0.894),
+        head=(0.899, 0.667, 0.381),         # #e5aa61
+        deep=(0.704, 0.463, 0.197),         # #b37632
+        muzzle=(0.976, 0.894, 0.763),       # #f9e4c2
         ears="floppy",
         brow_patch=True,
         big_tongue=True,
     ),
     "wolf": CharacterStyle(
-        head=FACE_CHIP_COLORS["wolf"],
-        deep=(0.506, 0.541, 0.596),
-        muzzle=(0.902, 0.922, 0.949),
+        head=(0.714, 0.757, 0.820),         # #b6c1d1
+        deep=(0.373, 0.455, 0.588),         # #5f7496
+        muzzle=(0.910, 0.933, 0.965),       # #e8eef6
         cheek_fluff=True,
         stern_brows=True,
         blush_alpha=0.34,
     ),
     "pig": CharacterStyle(
-        head=FACE_CHIP_COLORS["pig"],
-        deep=(0.878, 0.608, 0.675),
-        muzzle=(1.000, 0.910, 0.922),
+        head=(0.961, 0.617, 0.674),         # #f59dac
+        deep=(0.860, 0.399, 0.513),         # #db6683
+        muzzle=(0.980, 0.784, 0.811),       # #fac8cf
         ears="round",
         snout=True,
         blush_alpha=0.65,
     ),
     "panda": CharacterStyle(
-        head=FACE_CHIP_COLORS["panda"],
-        deep=(0.333, 0.349, 0.365),
-        muzzle=(1.000, 1.000, 1.000),
+        head=(0.922, 0.918, 0.922),         # #ebeaeb
+        deep=(0.288, 0.323, 0.358),         # #49525b
+        muzzle=(1.000, 1.000, 1.000),       # #ffffff
         ears="round",
         patches=True,
         inner_ears=False,
         blush_alpha=0.55,
     ),
     "tiger": CharacterStyle(
-        head=FACE_CHIP_COLORS["tiger"],
-        deep=(0.871, 0.557, 0.318),
-        muzzle=(1.000, 0.945, 0.867),
+        head=(0.972, 0.611, 0.223),         # #f89c39
+        deep=(0.854, 0.369, 0.000),         # #da5e00
+        muzzle=(0.980, 0.872, 0.719),       # #fadeb7
         stripes=True,
     ),
     "frog": CharacterStyle(
-        head=FACE_CHIP_COLORS["frog"],
-        deep=(0.427, 0.635, 0.239),
-        muzzle=(0.973, 0.988, 0.859),
+        head=(0.621, 0.869, 0.251),         # #9edd40
+        deep=(0.295, 0.622, 0.000),         # #4b9f00
+        muzzle=(0.939, 0.968, 0.714),       # #eff7b6
         ears="none",
         eye_domes=True,
         wide_mouth=True,
         blush_alpha=0.55,
     ),
     "rabbit": CharacterStyle(
-        head=FACE_CHIP_COLORS["rabbit"],
-        deep=(0.867, 0.494, 0.604),
-        muzzle=(1.000, 0.949, 0.957),
+        head=(0.945, 0.388, 0.561),         # #f1638f
+        deep=(0.850, 0.232, 0.414),         # #d93b6a
+        muzzle=(1.000, 0.949, 0.957),       # #fff2f4
         ears="long",
         buck_teeth=True,
         blush_alpha=0.55,
     ),
     "hedgehog": CharacterStyle(
-        head=FACE_CHIP_COLORS["hedgehog"],
-        deep=(0.404, 0.302, 0.216),
-        muzzle=(1.000, 0.953, 0.894),
+        head=(0.730, 0.517, 0.311),         # #ba844f
+        deep=(0.522, 0.310, 0.129),         # #854f21
+        muzzle=(0.980, 0.883, 0.760),       # #fae1c2
         ears="none",
         quills=True,
         snout_point=True,
         blush_alpha=0.42,
+        fit=0.92,
     ),
     "penguin": CharacterStyle(
-        head=FACE_CHIP_COLORS["penguin"],
-        deep=(0.216, 0.318, 0.443),
-        muzzle=(1.000, 0.996, 0.965),
+        head=(0.236, 0.696, 0.922),         # #3cb1eb
+        deep=(0.063, 0.230, 0.434),         # #103b6f
+        muzzle=(1.000, 0.996, 0.965),       # #fffef6
         ears="none",
         hood=True,
         beak=True,
         blush_alpha=0.45,
     ),
     "pickles": CharacterStyle(
-        head=FACE_CHIP_COLORS["pickles"],
-        deep=(0.804, 0.647, 0.412),
-        muzzle=(1.000, 0.976, 0.925),
+        head=(0.945, 0.844, 0.621),         # #f1d79e
+        deep=(0.788, 0.531, 0.145),         # #c98725
+        muzzle=(0.980, 0.925, 0.807),       # #faecce
         ears="retriever",
         big_tongue=True,
         blep=True,
         blush_alpha=0.45,
+        fit=0.935,
     ),
     "olive": CharacterStyle(
-        head=FACE_CHIP_COLORS["olive"],
-        deep=(0.808, 0.686, 0.502),
-        muzzle=(1.000, 0.984, 0.949),
+        head=(0.930, 0.844, 0.696),         # #edd7b1
+        deep=(0.792, 0.588, 0.280),         # #ca9647
+        muzzle=(1.000, 0.984, 0.949),       # #fffbf2
         ears="retriever",
         bow=True,
         blush_alpha=0.45,
+        fit=0.935,
     ),
+}
+
+# The head color of every face, for surfaces that pick a ground to set the
+# character against.
+FACE_HEAD_COLORS: Mapping[str, Color] = {
+    "parrot": EMERALD,
+    "owl": MINT,
+    **{face: style.head for face, style in COMPANIONS.items()},
 }
 
 # Parrot and owl keep bespoke geometry; the other fourteen share one template.
@@ -320,11 +375,18 @@ def _eye_ops(left: float, right: float, y: float, w: float, h: float,
     """
     ops: list[Op] = []
     gx, gy = _clamp_gaze(gaze)
+    # Sticker eyes are bigger than the box the caller names, about the same
+    # centers, so every face grows its eyes by one rule.
+    left -= w * (EYE_SCALE - 1.0) / 2.0
+    right -= w * (EYE_SCALE - 1.0) / 2.0
+    y -= h * (EYE_SCALE - 1.0) / 2.0
+    w *= EYE_SCALE
+    h *= EYE_SCALE
     centers = (left + w / 2.0, right + w / 2.0)
     if blink >= 0.75:
         for cx in centers:
             ops.append(Arc(cx, y + h * 0.62, w * 0.52, 200, 340,
-                           lid, 5.5))
+                           lid, LID_WIDTH))
         return ops
     open_h = h * (1.0 - 0.88 * blink)
     top = y + (h - open_h) / 2.0 + gy
@@ -352,7 +414,8 @@ def _smile_and_jaw(cx: float, top: float, mouth: float, *,
     ops: list[Op] = []
     if mouth < 0.18:
         fade = 1.0 - mouth / 0.18
-        ops.append(Arc(cx, top - 4.0, 10.5, 38, 142, MOUTH, 5.0, fade))
+        ops.append(Arc(cx, top - 4.0, 10.5, 38, 142, MOUTH, SMILE_WIDTH,
+                       fade))
     if mouth <= 0.04:
         return ops
 
@@ -396,7 +459,7 @@ def _wide_grin(cx: float, top: float, mouth: float) -> list[Op]:
         fade = 1.0 - mouth / 0.18
         ops.append(Stroke(((cx - 56, top - 8), (cx - 30, top + 8),
                            (cx, top + 12), (cx + 30, top + 8),
-                           (cx + 56, top - 8)), MOUTH, 6.5, fade))
+                           (cx + 56, top - 8)), MOUTH, 6.5 * HEAVY, fade))
     if mouth <= 0.04:
         return ops
 
@@ -439,14 +502,22 @@ def _beak_ops(top: float, mouth: float) -> list[Op]:
     ]
 
 
-def _quill_ops(color: Color) -> list[Op]:
+def _quill_ops(color: Color, *, ink: bool = False) -> list[Op]:
     """The hedgehog's spines, fanned around the crown behind the head.
 
     Each spine roots just inside the head ellipse and points straight out of
     it, so the head swallows the bases and only the tips break the outline.
+
+    ``ink=True`` returns the spines' share of the sticker outline instead.
+    A needle grown by the full ``OUTLINE`` with round joins ends in a blunt
+    knob, so each spine brings its own ink: a wider, longer triangle with
+    only ``QUILL_GROW`` of rounding.  The line it leaves starts at the full
+    outline weight where the spine meets the head and comes to a point past
+    the tip, which is what keeps the fan spiky.
     """
     ops: list[Op] = []
     count = 9
+    half, reach = (23.0, 39.0) if ink else (16.0, 28.5)
     for index in range(count):
         angle = math.radians(200.0 + index * (140.0 / (count - 1)))
         edge_x = 128.0 + 98.0 * math.cos(angle)
@@ -456,22 +527,25 @@ def _quill_ops(color: Color) -> list[Op]:
         out_x, out_y = out_x / span, out_y / span
         root_x, root_y = edge_x - out_x * 14.0, edge_y - out_y * 14.0
         ops.append(Polygon((
-            (root_x - out_y * 16.0, root_y + out_x * 16.0),
-            (edge_x + out_x * 34.0, edge_y + out_y * 34.0),
-            (root_x + out_y * 16.0, root_y - out_x * 16.0),
-        ), color))
+            (root_x - out_y * half, root_y + out_x * half),
+            (edge_x + out_x * reach, edge_y + out_y * reach),
+            (root_x + out_y * half, root_y - out_x * half),
+        ), color, grow=QUILL_GROW if ink else 0.0))
     return ops
 
 
 def _blush_ops(alpha: float, *, y: float = 146.0,
-               inset: float = 0.0) -> list[Op]:
-    """Big soft chibi rouge, tucked right under the eyes.
+               inset: float = 0.0, solid: bool = False) -> list[Op]:
+    """Big chibi rouge, tucked right under the eyes.
 
     ``y`` follows the eyes on faces that moved them, and ``inset`` pulls the
     pads toward the center on faces whose cheeks are not the head color.
+    ``solid`` is for the green heads: pink laid over green goes gray, so
+    they wear the rouge as one flat opaque color instead of a tint.
     """
-    return [Ellipse(42 + inset, y, 42, 24, BLUSH, alpha),
-            Ellipse(172 - inset, y, 42, 24, BLUSH, alpha)]
+    color, alpha = (ROUGE, 1.0) if solid else (BLUSH, alpha)
+    return [Ellipse(42 + inset, y, 42, 24, color, alpha),
+            Ellipse(172 - inset, y, 42, 24, color, alpha)]
 
 
 def _nose_ops(color: Color, y: float = 142.0) -> list[Op]:
@@ -489,34 +563,25 @@ def _nose_ops(color: Color, y: float = 142.0) -> list[Op]:
     ]
 
 
-def _clay_ops(style_deep: Color) -> list[Op]:
-    """The soft-vinyl read: a crown sheen and a jaw shadow, both flat.
+def _companion_ops(face: str, mouth: float, blink: float,
+                   gaze: Point = (0.0, 0.0)) -> tuple[list[Op], list[Op]]:
+    """``(body, ops)`` for one template companion.
 
-    Two low-alpha overlays stand in for the radial gradients the op DSL
-    deliberately does not have (SVG gradients would force element ids into
-    ``character_body``, which the site's shared documents forbid).
+    ``ops`` is everything, in paint order.  ``body`` names the few of them
+    that reach the character's outer edge -- ears, head, anything worn past
+    the head -- which is what the sticker outline is grown from.  Features
+    stay out of it so the outline never rings an eye or a nose.
     """
-    return [
-        Ellipse(62, 62, 108, 58, CATCH, 0.17),
-        Curve(
-            (52, 192),
-            (((78, 232), (178, 232), (204, 192)),
-             ((182, 216), (74, 216), (52, 192))),
-            style_deep, 0.10,
-        ),
-    ]
-
-
-def _companion_ops(face: str, mouth: float, level: float, blink: float,
-                   gaze: Point = (0.0, 0.0)) -> list[Op]:
     style = COMPANIONS.get(face, COMPANIONS["fox"])
     ops: list[Op] = []
+    body: list[Op] = []
 
     # Ears sit behind the shared rounded head, tucked low so the silhouette
     # stays one soft blob.
     if style.ears == "round":
         ops += [Ellipse(46, 40, 52, 52, style.deep),
                 Ellipse(158, 40, 52, 52, style.deep)]
+        body += ops     # nothing is drawn before the ears, so this is them
         if style.inner_ears:
             ops += [Ellipse(58, 52, 28, 28, style.muzzle),
                     Ellipse(170, 52, 28, 28, style.muzzle)]
@@ -538,6 +603,7 @@ def _companion_ops(face: str, mouth: float, level: float, blink: float,
              ((144, 70), (148, 100), (160, 104))),
             style.deep,
         ))
+        body += ops
         ops.append(Curve(
             (96, 98),
             (((84, 92), (76, 52), (86, 34)),
@@ -575,6 +641,7 @@ def _companion_ops(face: str, mouth: float, level: float, blink: float,
                  ((x(112), 152), (x(118), 92), (x(96), 70))),
                 style.deep,
             ))
+            body.append(ops[-1])
             # Feathering: one paler wave riding the inner edge, the fringe
             # a golden carries down the length of the ear. Low alpha so it
             # reads as fur at 208 points and vanishes politely at 18.
@@ -586,36 +653,45 @@ def _companion_ops(face: str, mouth: float, level: float, blink: float,
                 style.muzzle, 0.30,
             ))
     elif style.ears == "floppy":
-        # Teardrop ears that hug the head instead of hanging past the jaw;
-        # closed curves so they still droop rather than stand up stiff.
-        ops.append(Curve(
-            (74, 62),
-            (((38, 74), (28, 132), (48, 158)),
-             ((62, 174), (78, 156), (78, 132)),
-             ((90, 102), (88, 72), (74, 62))),
-            style.deep,
-        ))
-        ops.append(Curve(
-            (182, 62),
-            (((218, 74), (228, 132), (208, 158)),
-             ((194, 174), (178, 156), (178, 132)),
-             ((166, 102), (168, 72), (182, 62))),
-            style.deep,
-        ))
+        # Long ovals hanging down each side of the head, from above the
+        # eyes to the cheek, the way the dog's menu-bar silhouette has
+        # always worn them.  The head covers the inner half; the outer half
+        # hangs clear of it, which is what makes this a dog and not a bear
+        # with its ears off.  Slimmer and shorter than the goldens' ears,
+        # and a little fuller at the bottom so they droop.
+        for flip in (False, True):
+            def x(value: float) -> float:
+                return 256.0 - value if flip else value
+
+            ops.append(Curve(
+                (x(56), 78),
+                (((x(30), 78), (x(14), 104), (x(14), 138)),
+                 ((x(14), 172), (x(26), 194), (x(44), 194)),
+                 ((x(64), 194), (x(76), 170), (x(76), 138)),
+                 ((x(76), 104), (x(72), 78), (x(56), 78))),
+                style.deep,
+            ))
+        body += ops
     else:
         # Short, wide triangles: pointed species keep their ears, chibi
         # keeps them stubby.
         ops += [
             Polygon(((50, 92), (66, 36), (112, 76)), style.deep),
             Polygon(((144, 76), (190, 36), (206, 92)), style.deep),
+        ]
+        body += ops
+        ops += [
             Polygon(((64, 76), (70, 52), (94, 72)), style.muzzle),
             Polygon(((162, 72), (186, 52), (192, 76)), style.muzzle),
         ]
         if style.ear_tips:
             # Tip triangles ride the outer ear's own edges so the dark fur
-            # caps the apex instead of floating inside the ear.
-            ops += [Polygon(((61.5, 51.5), (66, 36), (79.5, 47.5)), MOUTH),
-                    Polygon(((176.5, 47.5), (190, 36), (194.5, 51.5)), MOUTH)]
+            # caps the apex instead of floating inside the ear.  They are
+            # brown rather than near-black, and reach well down the ear, so
+            # the cap stays a marking instead of thickening the ink outline.
+            ops += [Polygon(((59.3, 59.5), (66, 36), (85.3, 52.8)), EAR_TIP),
+                    Polygon(((170.7, 52.8), (190, 36), (196.7, 59.5)),
+                            EAR_TIP)]
 
     if style.eye_domes:
         # Head-colored bulges on the crown.  A frog's eyes are not on its
@@ -623,10 +699,13 @@ def _companion_ops(face: str, mouth: float, level: float, blink: float,
         # color keeps the silhouette one blob with two bumps.
         ops += [Ellipse(44, 32, 70, 70, style.head),
                 Ellipse(142, 32, 70, 70, style.head)]
+        body += ops[-2:]
     if style.quills:
         ops += _quill_ops(style.deep)
+        body += _quill_ops(style.deep, ink=True)
 
     ops.append(Ellipse(30, 52, 196, 184, style.head))
+    body.append(ops[-1])
 
     if style.cheek_fluff:
         # Two soft fur bumps per jaw side, drawn before the cheeks so only
@@ -637,6 +716,7 @@ def _companion_ops(face: str, mouth: float, level: float, blink: float,
             Polygon(((186, 148), (222, 158), (188, 172)), style.muzzle),
             Polygon(((184, 172), (216, 184), (182, 192)), style.muzzle),
         ]
+        body += ops[-4:]
 
     if style.hood:
         # A dark cap over the crown and one cream bib instead of the paired
@@ -682,12 +762,9 @@ def _companion_ops(face: str, mouth: float, level: float, blink: float,
             style.deep,
         ))
 
-    ops += _clay_ops(style.deep)
-
     if style.quills:
-        # A dark spiny mantle over the crown, laid on after the clay sheen so
-        # the sheen does not leave a bald highlight in the middle of it.  The
-        # fan behind the head breaks the outline; this is what it grows from.
+        # A dark spiny mantle over the crown.  The fan behind the head
+        # breaks the outline; this is what it grows from.
         ops.append(Curve(
             (48, 100),
             (((48, 66), (84, 52), (128, 52)),
@@ -697,12 +774,9 @@ def _companion_ops(face: str, mouth: float, level: float, blink: float,
         ))
 
     if style.eye_domes:
-        # Pink over green goes gray, so the rouge sits on small cream pads,
-        # the same trick the parrot and the owl use.  The eyeballs come back
-        # on top of the head so the domes keep a rim of head color.
-        ops += [Ellipse(46, 125, 38, 21, CATCH, 0.5),
-                Ellipse(172, 125, 38, 21, CATCH, 0.5)]
-        ops += _blush_ops(style.blush_alpha, y=126.0, inset=4.0)
+        # The eyeballs come back on top of the head so the domes keep a rim
+        # of head color.
+        ops += _blush_ops(style.blush_alpha, y=126.0, inset=4.0, solid=True)
         ops += [Ellipse(55, 43, 48, 48, CATCH),
                 Ellipse(153, 43, 48, 48, CATCH)]
         ops += _eye_ops(68, 166, 54, 22, 26, blink, gaze=gaze)
@@ -719,16 +793,18 @@ def _companion_ops(face: str, mouth: float, level: float, blink: float,
     if style.brow_patch:
         ops.append(Ellipse(146, 88, 30, 18, style.deep, 0.9))
     if style.stern_brows:
-        ops += [Stroke(((82, 98), (102, 102)), style.deep, 4.0, 0.45),
-                Stroke(((174, 98), (154, 102)), style.deep, 4.0, 0.45)]
+        ops += [
+            Stroke(((82, 98), (102, 102)), style.deep, 4.0 * HEAVY, 0.9),
+            Stroke(((174, 98), (154, 102)), style.deep, 4.0 * HEAVY, 0.9),
+        ]
 
     if style.stripes:
         # Three stubby crown stripes, round-capped so they read as plush
         # markings instead of brush strokes.
         ops += [
-            Stroke(((128, 58), (128, 84)), style.deep, 6.0, 0.9),
-            Stroke(((106, 62), (110, 86)), style.deep, 5.0, 0.9),
-            Stroke(((150, 62), (146, 86)), style.deep, 5.0, 0.9),
+            Stroke(((128, 58), (128, 84)), style.deep, 6.0 * HEAVY, 0.9),
+            Stroke(((106, 62), (110, 86)), style.deep, 5.0 * HEAVY, 0.9),
+            Stroke(((150, 62), (146, 86)), style.deep, 5.0 * HEAVY, 0.9),
         ]
 
     if style.bow:
@@ -751,6 +827,7 @@ def _companion_ops(face: str, mouth: float, level: float, blink: float,
              ((196, 86), (197, 96), (202, 100))),
             style.deep,
         ))
+        body += ops[-2:]
         ops.append(Curve(
             (188, 98),
             (((172, 104), (150, 98), (148, 88)),
@@ -766,6 +843,7 @@ def _companion_ops(face: str, mouth: float, level: float, blink: float,
             CATCH,
         ))
         ops.append(Ellipse(185, 79, 26, 26, style.deep))
+        body.append(ops[-1])
         ops.append(Ellipse(188, 82, 20, 20, CATCH))
         ops.append(Ellipse(193, 90, 8, 6, style.deep, 0.20))
 
@@ -805,7 +883,8 @@ def _companion_ops(face: str, mouth: float, level: float, blink: float,
         # tongue takes over without two tongues ever showing.
         fade = 1.0 - mouth / 0.18
         ops.append(Ellipse(117, 167, 22, 21, TONGUE, fade))
-        ops.append(Stroke(((128, 174), (128, 184)), BLUSH, 2.5, fade * 0.55))
+        ops.append(Stroke(((128, 174), (128, 184)), BLUSH, 2.5 * HEAVY,
+                          fade * 0.55))
 
     if style.buck_teeth:
         # Two incisors on their own dark pad: cream teeth on a cream cheek
@@ -818,16 +897,16 @@ def _companion_ops(face: str, mouth: float, level: float, blink: float,
     if style.whiskers:
         for y, dy in ((152, -5), (160, 0), (168, 5)):
             ops.append(Stroke(((90, y), (68, y + dy * 0.4), (48, y + dy)),
-                              style.deep, 2.2, 0.5))
+                              style.deep, 2.2 * HEAVY, 0.7))
             ops.append(Stroke(((166, y), (188, y + dy * 0.4), (208, y + dy)),
-                              style.deep, 2.2, 0.5))
+                              style.deep, 2.2 * HEAVY, 0.7))
 
-    return ops + _whisper_ops(level)
+    return body, ops
 
 
-def _parrot_ops(mouth: float, level: float, blink: float,
-                gaze: Point = (0.0, 0.0)) -> list[Op]:
-    """Pastel emerald head, stubby gold crest, small hooked beak."""
+def _parrot_ops(mouth: float, blink: float,
+                gaze: Point = (0.0, 0.0)) -> tuple[list[Op], list[Op]]:
+    """Emerald head, stubby gold crest, small hooked beak."""
     ops: list[Op] = [
         # Three gold crest feathers fanned above the crown, center tallest.
         # Chibi keeps them short and round so the crest reads as a tuft.
@@ -854,14 +933,11 @@ def _parrot_ops(mouth: float, level: float, blink: float,
         ),
         Ellipse(30, 52, 196, 184, EMERALD),
     ]
-    ops += _clay_ops(DEEP)
+    body = list(ops)
     # Bare facial patches behind the eyes, the parrot's white "spectacles".
     ops += [Ellipse(70, 102, 32, 36, CATCH, 0.92),
             Ellipse(154, 102, 32, 36, CATCH, 0.92)]
-    # Pink over emerald goes gray, so the rouge sits on small cream pads.
-    ops += [Ellipse(44, 148, 38, 21, CATCH, 0.55),
-            Ellipse(174, 148, 38, 21, CATCH, 0.55)]
-    ops += _blush_ops(0.6)
+    ops += _blush_ops(1.0, solid=True)
     ops += _eye_ops(80, 158, 108, 17, 21, blink, gaze=gaze)
 
     # Beak stack, bottom-up: dark gape, then the gold hook whose tip ends
@@ -888,14 +964,14 @@ def _parrot_ops(mouth: float, level: float, blink: float,
     ))
     ops += [Ellipse(120, 143, 3.5, 4, MOUTH, 0.5),
             Ellipse(132, 143, 3.5, 4, MOUTH, 0.5)]
-    return ops + _whisper_ops(level)
+    return body, ops
 
 
-def _owl_ops(mouth: float, level: float, blink: float,
-             gaze: Point = (0.0, 0.0)) -> list[Op]:
-    mint = FACE_CHIP_COLORS["owl"]
-    deep = (0.475, 0.427, 0.635)
-    cream = (0.929, 0.906, 1.000)
+def _owl_ops(mouth: float, blink: float,
+             gaze: Point = (0.0, 0.0)) -> tuple[list[Op], list[Op]]:
+    mint = MINT
+    deep = OWL_DEEP
+    cream = OWL_CREAM
     gx, gy = _clamp_gaze(gaze)
     ops: list[Op] = [
         # Horn tufts big enough to survive the chibi head swallowing them.
@@ -903,53 +979,115 @@ def _owl_ops(mouth: float, level: float, blink: float,
         Polygon(((150, 78), (196, 34), (218, 108)), deep),
         Ellipse(28, 50, 200, 188, mint),
     ]
-    ops += _clay_ops(deep)
+    body = list(ops)
     ops += [Ellipse(x, 100, 64, 64, cream) for x in (60, 132)]
-    # Pink over mint goes gray, so the rouge sits on small cream pads.
-    ops += [Ellipse(42, 150, 38, 21, cream, 0.6),
-            Ellipse(176, 150, 38, 21, cream, 0.6)]
-    ops += [Ellipse(44, 151, 36, 20, BLUSH, 0.55),
-            Ellipse(178, 151, 36, 20, BLUSH, 0.55)]
+    ops += [Ellipse(42, 150, 38, 21, ROUGE),
+            Ellipse(176, 150, 38, 21, ROUGE)]
 
     # Golden iris rings around wide pupils; the iris, pupil, and catchlights
     # drift with ``gaze`` while the outer eye stays put.
+    # Like every sticker eye, the whole stack is EYE_SCALE larger about the
+    # same center.
+    big = EYE_SCALE
     if blink >= 0.75:
-        ops += [Arc(92, 136, 13, 200, 340, DARK_EYE, 5.5),
-                Arc(164, 136, 13, 200, 340, DARK_EYE, 5.5)]
+        ops += [Arc(92, 136, 13 * big, 200, 340, DARK_EYE, LID_WIDTH),
+                Arc(164, 136, 13 * big, 200, 340, DARK_EYE, LID_WIDTH)]
     else:
         squash = 1.0 - 0.88 * blink
         for cx in (92.0, 164.0):
-            outer_h = 30.0 * squash
-            ops.append(Ellipse(cx - 13, 132 - outer_h / 2.0, 26, outer_h,
-                               DARK_EYE))
-            iris_h = 20.0 * squash
-            ops.append(Ellipse(cx - 8.5 + gx * 0.8,
-                               132 + gy * 0.8 - iris_h / 2.0, 17, iris_h,
-                               IRIS_GOLD))
-            pupil_h = 11.0 * squash
-            ops.append(Ellipse(cx - 4.5 + gx * 0.8,
-                               132 + gy * 0.8 - pupil_h / 2.0, 9, pupil_h,
-                               DARK_EYE))
+            outer_h = 30.0 * big * squash
+            ops.append(Ellipse(cx - 13 * big, 132 - outer_h / 2.0,
+                               26 * big, outer_h, DARK_EYE))
+            iris_h = 20.0 * big * squash
+            ops.append(Ellipse(cx - 8.5 * big + gx * 0.8,
+                               132 + gy * 0.8 - iris_h / 2.0,
+                               17 * big, iris_h, IRIS_GOLD))
+            pupil_h = 11.0 * big * squash
+            ops.append(Ellipse(cx - 4.5 * big + gx * 0.8,
+                               132 + gy * 0.8 - pupil_h / 2.0,
+                               9 * big, pupil_h, DARK_EYE))
             if blink < 0.45:
-                ops.append(Ellipse(cx - 1 + gx * 0.8,
+                ops.append(Ellipse(cx - 1 * big + gx * 0.8,
                                    132 + gy * 0.8 - outer_h * 0.30,
-                                   6, 7 * squash, CATCH))
-                ops.append(Ellipse(cx - 6 + gx * 0.8,
+                                   6 * big, 7 * big * squash, CATCH))
+                ops.append(Ellipse(cx - 6 * big + gx * 0.8,
                                    132 + gy * 0.8 + outer_h * 0.12,
-                                   3, 3.4 * squash, CATCH, 0.85))
+                                   3 * big, 3.4 * big * squash, CATCH, 0.85))
 
     ops += _beak_ops(152, mouth)
     # Two rows of chest chevrons read as feathers where the parrot wears its
     # single scallop, so the two birds stay distinct below the beak.
     for row_y, spread in ((202.0, 14.0), (216.0, 10.0)):
         ops.append(Stroke(((128 - spread, row_y), (128, row_y + 6),
-                           (128 + spread, row_y)), deep, 4.0, 0.35))
-    return ops + _whisper_ops(level)
+                           (128 + spread, row_y)),
+                          deep, 4.0 * HEAVY, 0.35))
+    return body, ops
+
+
+# Every head rests its chin on this point, and a face that has to shrink
+# shrinks toward it, so a row of faces keeps one baseline.
+CHIN: Point = (128.0, 236.0)
+
+
+def _moved(op: Op, scale: float, dx: float, dy: float) -> Op:
+    """``op`` scaled about ``CHIN`` and then shifted; line widths follow."""
+    def at(point: Point) -> Point:
+        return (CHIN[0] + (point[0] - CHIN[0]) * scale + dx,
+                CHIN[1] + (point[1] - CHIN[1]) * scale + dy)
+
+    if isinstance(op, (Ellipse, RoundedRect)):
+        x, y = at((op.x, op.y))
+        moved = replace(op, x=x, y=y, w=op.w * scale, h=op.h * scale)
+        if isinstance(op, RoundedRect):
+            moved = replace(moved, radius=op.radius * scale)
+        return moved
+    if isinstance(op, Polygon):
+        return replace(op, points=tuple(at(point) for point in op.points))
+    if isinstance(op, Stroke):
+        return replace(op, points=tuple(at(point) for point in op.points),
+                       width=op.width * scale)
+    if isinstance(op, Arc):
+        cx, cy = at((op.cx, op.cy))
+        return replace(op, cx=cx, cy=cy, radius=op.radius * scale,
+                       width=op.width * scale)
+    if isinstance(op, Curve):
+        return replace(op, start=at(op.start), segments=tuple(
+            (at(c1), at(c2), at(end)) for c1, c2, end in op.segments))
+    raise TypeError(f"unsupported draw op: {type(op).__name__}")
+
+
+def _fitted(ops: Sequence[Op], fit: float) -> list[Op]:
+    """Keep a wide character, its outline, and its shadow inside the box.
+
+    Most faces already leave room and pass through untouched.  The hedgehog
+    and the two goldens reach the box edge, so they shrink by ``fit`` toward
+    the chin.  Nothing shifts sideways: every face stays centered on the
+    same vertical line, and the placement is the same whether or not the
+    shadow is drawn, so asking for it never moves the face.
+    """
+    if fit >= 1.0:
+        return list(ops)
+    return [_moved(op, fit, 0.0, 0.0) for op in ops]
+
+
+def _inked(op: Op) -> Op:
+    """``op`` as a piece of the ink silhouette, ``OUTLINE`` larger all round.
+
+    Body shapes are filled ops today; a stroked one would simply widen.  A
+    shape that arrives with its own ``grow`` keeps it: that is a body part
+    that drew its outline by hand, like the hedgehog's spines.
+    """
+    if isinstance(op, (Stroke, Arc)):
+        return replace(op, color=INK, alpha=1.0,
+                       width=op.width + 2.0 * OUTLINE)
+    return replace(op, color=INK, alpha=1.0, grow=op.grow or OUTLINE)
 
 
 def character_ops(face: str, mouth: float, level: float,
                   blink: float = 0.0,
-                  gaze: Point = (0.0, 0.0)) -> tuple[Op, ...]:
+                  gaze: Point = (0.0, 0.0), *,
+                  shadow: bool = False,
+                  whispers: bool = True) -> tuple[Op, ...]:
     """Ordered draw ops for ``face`` at one animation instant.
 
     ``mouth``, ``level``, and ``blink`` are all 0..1; ``gaze`` is a small
@@ -957,17 +1095,38 @@ def character_ops(face: str, mouth: float, level: float,
     into the returned coordinates so a renderer never has to manage a
     transform stack.  ``blink`` and ``gaze`` only ever move in live views;
     the exported frames keep both at rest.
+
+    The list opens with the sticker outline: the character's body shapes in
+    ink, grown by ``OUTLINE`` (the hedgehog's spines bring a sharper one of
+    their own), so their union reads as one line around the whole
+    character.  ``shadow=True`` puts a second copy of that
+    silhouette under it, offset by ``SHADOW_OFFSET``.  The shadow belongs to
+    the surface rather than the art: ask for it where the face is large and
+    stands on its own, leave it off where the face is small or already sits
+    in an outlined container.  Either way everything stays inside the design
+    box and the face does not move.
+
+    ``whispers=False`` drops the speech puffs for surfaces that show the
+    character inside a tight chip.
     """
     mouth = _clamp01(mouth)
     level = _clamp01(level)
     blink = _clamp01(blink)
+    fit = 1.0
     if face == "parrot":
-        ops = _parrot_ops(mouth, level, blink, gaze)
+        body, ops = _parrot_ops(mouth, blink, gaze)
     elif face == "owl":
-        ops = _owl_ops(mouth, level, blink, gaze)
+        body, ops = _owl_ops(mouth, blink, gaze)
     else:
-        ops = _companion_ops(face, mouth, level, blink, gaze)
-    return tuple(ops)
+        body, ops = _companion_ops(face, mouth, blink, gaze)
+        fit = COMPANIONS.get(face, COMPANIONS["fox"]).fit
+    if whispers:
+        ops = ops + _whisper_ops(level)
+    silhouette = [_inked(op) for op in _fitted(body, fit)]
+    drawn: list[Op] = []
+    if shadow:
+        drawn += [_moved(op, 1.0, *SHADOW_OFFSET) for op in silhouette]
+    return tuple(drawn + silhouette + _fitted(ops, fit))
 
 
 def _hex(color: Color) -> str:
@@ -975,16 +1134,25 @@ def _hex(color: Color) -> str:
         max(0, min(255, round(channel * 255))) for channel in color)
 
 
+def _svg_fill(op: Ellipse | Polygon | RoundedRect | Curve) -> str:
+    """The paint attributes of a filled op, including its ``grow`` border."""
+    paint = f' fill="{_hex(op.color)}"'
+    if op.alpha < 1.0:
+        paint += f' fill-opacity="{op.alpha:.3f}"'
+    if op.grow > 0.0:
+        paint += (f' stroke="{_hex(op.color)}"'
+                  f' stroke-width="{2.0 * op.grow:g}"'
+                  f' stroke-linejoin="round"')
+    return paint
+
+
 def _svg_op(op: Op) -> str:
     if isinstance(op, Ellipse):
-        fill = "" if op.alpha >= 1.0 else f' fill-opacity="{op.alpha:.3f}"'
         return (f'<ellipse cx="{op.x + op.w / 2:g}" cy="{op.y + op.h / 2:g}"'
-                f' rx="{op.w / 2:g}" ry="{op.h / 2:g}"'
-                f' fill="{_hex(op.color)}"{fill}/>')
+                f' rx="{op.w / 2:g}" ry="{op.h / 2:g}"{_svg_fill(op)}/>')
     if isinstance(op, Polygon):
-        fill = "" if op.alpha >= 1.0 else f' fill-opacity="{op.alpha:.3f}"'
         points = " ".join(f"{x:g},{y:g}" for x, y in op.points)
-        return f'<polygon points="{points}" fill="{_hex(op.color)}"{fill}/>'
+        return f'<polygon points="{points}"{_svg_fill(op)}/>'
     if isinstance(op, Stroke):
         opacity = ("" if op.alpha >= 1.0
                    else f' stroke-opacity="{op.alpha:.3f}"')
@@ -994,11 +1162,10 @@ def _svg_op(op: Op) -> str:
                 f' stroke-width="{op.width:g}" stroke-linecap="round"'
                 f' stroke-linejoin="round"/>')
     if isinstance(op, RoundedRect):
-        fill = "" if op.alpha >= 1.0 else f' fill-opacity="{op.alpha:.3f}"'
         radius = min(op.radius, op.w / 2.0), min(op.radius, op.h / 2.0)
         return (f'<rect x="{op.x:g}" y="{op.y:g}" width="{op.w:g}"'
                 f' height="{op.h:g}" rx="{radius[0]:g}" ry="{radius[1]:g}"'
-                f' fill="{_hex(op.color)}"{fill}/>')
+                f'{_svg_fill(op)}/>')
     if isinstance(op, Arc):
         start = math.radians(op.start_degrees)
         end = math.radians(op.end_degrees)
@@ -1014,13 +1181,12 @@ def _svg_op(op: Op) -> str:
                 f' stroke="{_hex(op.color)}"{opacity}'
                 f' stroke-width="{op.width:g}" stroke-linecap="round"/>')
     if isinstance(op, Curve):
-        fill = "" if op.alpha >= 1.0 else f' fill-opacity="{op.alpha:.3f}"'
         data = f"M{op.start[0]:g} {op.start[1]:g}"
         for (c1, c2, end) in op.segments:
             data += (f" C{c1[0]:g} {c1[1]:g} {c2[0]:g} {c2[1]:g}"
                      f" {end[0]:g} {end[1]:g}")
         data += " Z"
-        return f'<path d="{data}" fill="{_hex(op.color)}"{fill}/>'
+        return f'<path d="{data}"{_svg_fill(op)}/>'
     raise TypeError(f"unsupported draw op: {type(op).__name__}")
 
 
@@ -1037,29 +1203,26 @@ TALK_FRAME = FRAMES["talk"]
 
 
 def character_body(face: str, *, frame: str = "idle",
-                   whispers: bool = True) -> str:
+                   whispers: bool = True, shadow: bool = False) -> str:
     """Character markup without the ``<svg>`` wrapper, for inlining.
 
-    ``frame`` names an entry in ``FRAMES``.  ``whispers`` can drop the
-    trailing speech puffs for surfaces that show the character inside a tight
-    chip, where the puffs would collide with the chip edge.
+    ``frame`` names an entry in ``FRAMES``.  ``whispers`` and ``shadow`` mean
+    what they mean to ``character_ops``.
 
     The colored characters use no ``<mask>`` elements, so the returned markup
     carries no element ids and any number of them can share one document.
     """
     mouth, level = FRAMES[frame]
-    ops: Sequence[Op] = character_ops(face, mouth, level)
-    if not whispers:
-        skip = set(_whisper_ops(level))
-        ops = [op for op in ops if op not in skip]
-    return "".join(_svg_op(op) for op in ops)
+    return "".join(_svg_op(op) for op in character_ops(
+        face, mouth, level, shadow=shadow, whispers=whispers))
 
 
 def character_svg(face: str, *, frame: str = "idle",
-                  whispers: bool = True) -> str:
+                  whispers: bool = True, shadow: bool = False) -> str:
     """Standalone colored SVG for ``face``."""
     size = f"{DESIGN_SIZE:g}"
-    body = character_body(face, frame=frame, whispers=whispers)
+    body = character_body(face, frame=frame, whispers=whispers,
+                          shadow=shadow)
     return (f'<svg xmlns="http://www.w3.org/2000/svg"'
             f' viewBox="0 0 {size} {size}" width="{size}" height="{size}"'
             f' role="img" aria-hidden="true">{body}</svg>')
