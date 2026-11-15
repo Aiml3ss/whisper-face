@@ -44,6 +44,7 @@ from whisper_face_gui import (
     onboarding_presentation,
     home_bubble_actions,
     home_review_due,
+    home_outbox_line,
     home_review_in_row,
     setup_rows,
     normalize_email_compose_receipt,
@@ -1114,6 +1115,41 @@ class SnapshotTests(unittest.TestCase):
         # A state built with a count and nothing else needs a home too.
         self.assertEqual(
             gui_module.GUIState(outbox_count=3).outbox_unchecked, 0)
+
+    def test_homes_outbox_row_says_what_the_outbox_holds(self):
+        def line(**changes):
+            key, values = home_outbox_line(
+                gui_module.GUIState(**changes))
+            return localized_string(key, **values)
+
+        self.assertEqual(line(), localized_string("overview.outbox.empty"))
+        # Only copies of pastes that could not be read back.
+        self.assertEqual(
+            line(outbox_count=5, outbox_unchecked=5,
+                 outbox_summary="Pasted, not double-checked"),
+            "Voice Outbox: 5 pasted, not double-checked")
+        self.assertEqual(
+            line(outbox_count=1, outbox_unchecked=1),
+            "Voice Outbox: 1 pasted, not double-checked")
+        # Anything that still needs a home keeps the recoverable line, for
+        # the whole outbox, with the summary of what needs it.
+        self.assertEqual(
+            line(outbox_count=5, outbox_unchecked=4,
+                 outbox_summary="Not pasted — destination changed"),
+            "Voice Outbox: 5 recoverable · Not pasted — destination changed")
+        self.assertEqual(
+            line(outbox_count=2,
+                 outbox_summary="Paste may have landed — verify before "
+                 "reusing"),
+            "Voice Outbox: 2 recoverable · "
+            "Paste may have landed — verify before reusing")
+        # The window draws exactly this.
+        source = (ROOT / "whisper_face_gui.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "            outbox_key, outbox_values = home_outbox_line(state)\n"
+            "            outbox = self._l(outbox_key, **outbox_values)\n"
+            "            self.dynamic[\"overview_outbox\"]"
+            ".setStringValue_(outbox)\n", source)
 
     def test_the_calm_outbox_copy_counts_without_calling_it_a_problem(self):
         catalog = STRING_CATALOGS["en"]

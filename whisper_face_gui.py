@@ -3323,6 +3323,21 @@ def home_review_in_row(state: GUIState) -> bool:
     return bool(state.outbox_count) and home_review_due(state)
 
 
+def home_outbox_line(state: GUIState) -> tuple[str, dict[str, Any]]:
+    """Catalog key and values for Home's Voice Outbox row.
+
+    An empty outbox says so. One that holds only copies of pastes that
+    could not be read back counts them for what they are. Anything that
+    still needs a home keeps the recoverable count and its summary.
+    """
+    if not state.outbox_count:
+        return "overview.outbox.empty", {}
+    if state.outbox_unchecked >= state.outbox_count:
+        return "overview.outbox.unchecked", {"count": state.outbox_count}
+    return "overview.outbox.pending", {
+        "count": state.outbox_count, "summary": state.outbox_summary}
+
+
 # The face picker's grid: eight chips a row, the spec's gap between them,
 # each chip as large as the group's width then allows.
 FACE_GRID_COLUMNS = 8
@@ -10669,16 +10684,8 @@ if APPKIT_AVAILABLE:
             self.dynamic["overview_engine"].setStringValue_(
                 self._l(
                     "overview.engine.active", engine=state.active_engine))
-            if not state.outbox_count:
-                outbox = self._l("overview.outbox.empty")
-            elif state.outbox_unchecked >= state.outbox_count:
-                # Nothing here needs a home: say what the copies are.
-                outbox = self._l(
-                    "overview.outbox.unchecked", count=state.outbox_count)
-            else:
-                outbox = self._l(
-                    "overview.outbox.pending", count=state.outbox_count,
-                    summary=state.outbox_summary)
+            outbox_key, outbox_values = home_outbox_line(state)
+            outbox = self._l(outbox_key, **outbox_values)
             self.dynamic["overview_outbox"].setStringValue_(outbox)
             for key, label_key, value in (
                 ("overview_phase", "overview.accessibility.phase", phase),
@@ -16734,6 +16741,7 @@ __all__ = [
     "home_bubble_actions",
     "home_dictation_landed",
     "home_review_due",
+    "home_outbox_line",
     "home_review_in_row",
     "face_grid",
     "model_checks_note",
