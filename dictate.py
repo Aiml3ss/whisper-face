@@ -2930,9 +2930,9 @@ def hud_slot_width(mode: str) -> float:
     """Width of the slot between the face and the text, for one state.
 
     It holds the state's own mark: the level bars while listening, three
-    dots while working, and at the end a disc with a check, an arrow set
-    down on a line, or an exclamation mark. The text starts a fixed gap
-    after whichever it is.
+    dots while working, and at the end a disc with a check, three lines
+    of text, or an exclamation mark. The text starts a fixed gap after
+    whichever it is.
     """
     if mode == "processing":
         return 3.0 * HUD_DOT_SIZE + 2.0 * HUD_DOT_GAP
@@ -3188,9 +3188,9 @@ def _hud_draw_working_dots(center_x, center_y, shade, t, reduce_motion):
 def _hud_draw_mark(center_x, center_y, shades, check, pasted=False):
     """A porcelain disc carrying a check mark or an exclamation mark.
 
-    ``pasted`` draws neither: an arrow set down on a line, for text that
-    was put in place and not read back. It claims no check and raises no
-    alarm.
+    ``pasted`` draws neither: three lines of text, for words that were
+    sent and not read back. It claims no check and raises no alarm, and
+    it is not an arrow, which reads as a download.
     """
     radius = HUD_MARK_SIZE / 2.0
     disc = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(
@@ -3205,14 +3205,11 @@ def _hud_draw_mark(center_x, center_y, shades, check, pasted=False):
     stroke.setLineCapStyle_(1)
     stroke.setLineJoinStyle_(1)
     if pasted:
+        # Three lines of text, the last one short: the words, set down.
         stroke.setLineWidth_(2.4)
-        stroke.moveToPoint_((center_x, center_y - 6.6))
-        stroke.lineToPoint_((center_x, center_y + 1.6))
-        stroke.moveToPoint_((center_x - 3.6, center_y - 2.0))
-        stroke.lineToPoint_((center_x, center_y + 1.6))
-        stroke.lineToPoint_((center_x + 3.6, center_y - 2.0))
-        stroke.moveToPoint_((center_x - 5.0, center_y + 6.2))
-        stroke.lineToPoint_((center_x + 5.0, center_y + 6.2))
+        for offset, reach in ((-4.4, 5.2), (0.0, 5.2), (4.4, 0.6)):
+            stroke.moveToPoint_((center_x - 5.2, center_y + offset))
+            stroke.lineToPoint_((center_x + reach, center_y + offset))
         stroke.stroke()
         return
     if check:
@@ -12574,7 +12571,8 @@ def report_dictation_problem(
 
 def report_unchecked_paste(
         rec: Recorder, hud: HUD, log_message: str, *, sound: str = "Pop",
-        seconds: float = DICTATION_UNCHECKED_SECONDS):
+        seconds: float = DICTATION_UNCHECKED_SECONDS,
+        active: dict | None = None):
     """Say the paste was sent and that this app could not be read back.
 
     Not a problem report: the pill stays porcelain, the menu-bar face goes
@@ -12582,15 +12580,27 @@ def report_unchecked_paste(
     landed plays. It claims nothing about delivery either. The copy stays
     in the Voice Outbox and every record of the dictation stays unverified;
     this only decides how the outcome is shown.
+
+    ``active`` is the hotkey worker's record of the take being recorded.
+    When the next dictation has already begun, the overlay, its caption
+    and the menu-bar face belong to that one: a calm notice does not take
+    them from someone who is speaking, so only the cue is played.
     """
+    print(log_message)
+    if active is not None and active.get("rec") is not None:
+        play(sound)
+        return
     CAPTION["text"] = HUD_PASTED_CAPTION
     CAPTION["confidence"] = None
     CAPTION["stable_prefix"] = False
+    # An uncertain take is held longer so that its alternative can be read.
+    # This pill shows the fixed line instead, so that hold has nothing left
+    # to show and the pill keeps its own short one.
+    rec.uncertain = False
     rec.feedback_seconds = max(
         float(getattr(rec, "feedback_seconds", 0.0) or 0.0),
         max(0.0, float(seconds)),
     )
-    print(log_message)
     set_status("off" if PAUSED["on"] else "idle")
     AppHelper.callAfter(hud.showMode_, "pasted")
     play(sound)
@@ -13041,13 +13051,16 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             if (integrity_receipt is not None
                     and integrity_receipt.state != ReceiptState.VERIFIED):
                 if integrity_receipt.pasted_unchecked:
-                    # Sent, and this app would not let it be read back.
+                    # Sent into an app that hides its text, so there was
+                    # never anything to read back. A field that could be
+                    # read and went quiet after the paste is not this.
                     report_unchecked_paste(
                         rec,
                         hud,
                         "[insertion] snippet pasted, not double-checked "
                         f"({integrity_receipt.reason.value}); copy kept in "
                         "Voice Outbox",
+                        active=active,
                     )
                 elif integrity_receipt.paste_attempted:
                     report_dictation_problem(
@@ -13321,9 +13334,11 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             record_undoable_insertion(build_undoable_insertion(
                 rec, insertion_target, bundle, event_id))
         elif integrity_receipt.pasted_unchecked:
-            # Sent, and this app would not let it be read back. Everything
-            # below still treats the dictation as unverified; only the way
-            # the outcome is shown is calm.
+            # Sent into an app that hides its text, so there was never
+            # anything to read back. A field that could be read and went
+            # quiet after the paste is not this, and keeps the error below.
+            # Everything after this still treats the dictation as
+            # unverified; only the way the outcome is shown is calm.
             report_unchecked_paste(
                 rec,
                 hud,
@@ -13334,6 +13349,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                     PIPELINE_STATE["last_consequence_route"],
                     is_macos=IS_MACOS,
                 ),
+                active=active,
             )
         elif attempted:
             report_dictation_problem(

@@ -3299,7 +3299,7 @@ class RecordingOverlayTests(unittest.TestCase):
                     self.assertNotEqual(
                         pasted["fill"],
                         color_token("stage_emerald", dark, contrast))
-                    # Its ring and arrow are an edge on the pill itself.
+                    # Its ring and glyph are an edge on the pill itself.
                     self.assertGreaterEqual(contrast_ratio(
                         pasted["mark_ink"].color, pasted["fill"].color), 4.5)
 
@@ -14754,7 +14754,7 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
 
     def deliver(self, outcome, *, snippet=None, is_macos=True,
                 paused=False, route="standard", spoken=None,
-                coordinator=None, utterance="take-1"):
+                coordinator=None, utterance="take-1", recording=None):
         """One dictation with a named delivery outcome; what it did."""
         spoken = self.SPOKEN if spoken is None else spoken
         seen = SimpleNamespace(
@@ -14976,7 +14976,9 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
             cut_samples=8_000, chunks=[],
         )
         hud = SimpleNamespace(showMode_=seen.modes.append)
-        ns["finish_and_process"](recorder, hud, {})
+        # ``recording`` is a newer take the hotkey worker is recording
+        # while this one finishes.
+        ns["finish_and_process"](recorder, hud, {"rec": recording})
         for log in seen.logs:
             # The harness must never pass by the pipeline falling over.
             self.assertNotIn("follow-up failed", log)
@@ -15051,6 +15053,30 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
         # Paused in the meantime: the face goes back to paused, not idle.
         self.assertEqual(
             self.deliver("unchecked", paused=True).statuses, ["off"])
+
+    def test_a_newer_take_keeps_the_overlay_and_a_failure_still_takes_it(
+            self):
+        newer = SimpleNamespace()
+        for snippet in (None, ("signature", "Best,\nBerg")):
+            with self.subTest(snippet=bool(snippet)):
+                calm = self.deliver(
+                    "unchecked", snippet=snippet, recording=newer)
+                # Pasted and kept, and the person who is already speaking
+                # again keeps their overlay, its caption and the face.
+                self.assertEqual(len(calm.pasted), 1)
+                self.assertTrue(calm.receipt.pasted_unchecked)
+                self.assertEqual(calm.modes, [])
+                self.assertEqual(calm.statuses, [])
+                self.assertNotEqual(
+                    calm.caption.get("text"), HUD_PASTED_CAPTION)
+                self.assertEqual(calm.sounds, ["Pop"])
+                self.assertEqual(calm.coordinator.recoverable_count(), 1)
+                # A real failure interrupts, as it always has.
+                failed = self.deliver(
+                    "destination-changed", snippet=snippet, recording=newer)
+                self.assertEqual(failed.modes, ["error"])
+                self.assertEqual(failed.statuses, ["err"])
+                self.assertEqual(failed.sounds, ["Funk"])
 
     def test_every_real_failure_keeps_the_error(self):
         unverified = "Paste unverified — check target; saved in Voice Outbox"
@@ -15583,7 +15609,8 @@ class OpaqueDestinationEvidenceTests(unittest.TestCase):
 
 
 class UncheckedPasteReportTests(unittest.TestCase):
-    def report(self, *, paused=False, uncertain=False, **kwargs):
+    def report(self, *, paused=False, uncertain=False, recording=None,
+               **kwargs):
         seen = SimpleNamespace(
             caption={"text": "the dictated words", "confidence": 0.9,
                      "stable_prefix": True},
@@ -15608,6 +15635,10 @@ class UncheckedPasteReportTests(unittest.TestCase):
         seen.ns = ns
         seen.recorder = SimpleNamespace(
             uncertain=uncertain, feedback_seconds=0.0)
+        if recording is not None:
+            # The hotkey worker's record of the take being recorded: None
+            # between takes, the newer take's recorder during one.
+            kwargs["active"] = {"rec": recording or None}
         ns["report_unchecked_paste"](
             seen.recorder, SimpleNamespace(showMode_=seen.modes.append),
             "[insertion] pasted, not double-checked", **kwargs)
@@ -15640,9 +15671,48 @@ class UncheckedPasteReportTests(unittest.TestCase):
         # held at least a third longer than this is.
         self.assertGreaterEqual(unchecked, 1.2)
         self.assertLessEqual(unchecked, 0.75 * error)
-        # A take that was already being held for an uncertain result keeps
-        # the longer hold, exactly as it would after an error.
-        self.assertEqual(self.report(uncertain=True).delay, 3.0)
+        # An uncertain take is held longer so its alternative can be read.
+        # This pill shows its own fixed line instead, so it keeps its own
+        # short hold: it never stays up as long as an error does.
+        uncertain = self.report(uncertain=True)
+        self.assertEqual(uncertain.delay, unchecked)
+        self.assertLess(uncertain.delay, error)
+        # An error on an uncertain take still gets the longer hold.
+        problem = self.report(uncertain=True)
+        problem.recorder.uncertain = True
+        problem.recorder.feedback_seconds = 0.0
+        problem.ns["report_dictation_problem"](
+            problem.recorder, SimpleNamespace(showMode_=problem.modes.append),
+            "Destination changed — saved in Voice Outbox", "[insertion] x")
+        self.assertEqual(
+            problem.ns["dictation_feedback_delay"](problem.recorder), 3.0)
+
+    def test_it_does_not_take_the_overlay_from_the_next_dictation(self):
+        # The next take is already being recorded when this one settles:
+        # the overlay shows that take's level, the caption is its caption
+        # and the menu-bar face is recording. All three are left alone.
+        seen = self.report(recording=SimpleNamespace())
+
+        self.assertEqual(seen.modes, [])
+        self.assertEqual(seen.statuses, [])
+        self.assertEqual(seen.caption, {
+            "text": "the dictated words", "confidence": 0.9,
+            "stable_prefix": True})
+        self.assertEqual(seen.delay, 0.0)
+        # It is still logged, and the cue still says it went.
+        self.assertEqual(seen.sounds, ["Pop"])
+        self.assertEqual(seen.logs, ["[insertion] pasted, not double-checked"])
+        # Between takes it is shown as ever.
+        idle = self.report(recording=False)
+        self.assertEqual(idle.modes, ["pasted"])
+        self.assertEqual(idle.statuses, ["idle"])
+        # Both report sites hand it the worker's record.
+        finish = ast.unparse(next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "finish_and_process"))
+        self.assertEqual(finish.count("report_unchecked_paste("), 2)
+        self.assertEqual(finish.count("active=active)"), 2)
 
     def test_a_problem_report_is_still_the_error(self):
         seen = self.report()
