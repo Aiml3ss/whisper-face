@@ -6804,6 +6804,10 @@ if APPKIT_AVAILABLE:
                 return None
             self.rows = []
             self.separators = []
+            # What was last marked for drawing (width, height, where the
+            # separators are), and how many times it has been marked.
+            self.drawn_shape = None
+            self.marked = 0
             return self
 
         def isFlipped(self):
@@ -6834,14 +6838,22 @@ if APPKIT_AVAILABLE:
         def arrange(self, width: float) -> float:
             """Stack the visible rows top-down; return the group height."""
             top = 0.0
-            self.separators = []
+            separators = []
             for index, row in enumerate(self.visible_rows()):
                 height = row.arrange(width)
                 row.setFrame_(NSMakeRect(0, top, width, height))
                 if index:
-                    self.separators.append(top)
+                    separators.append(top)
                 top += height
-            self.setNeedsDisplay_(True)
+            self.separators = separators
+            # Its fill and edge follow its size and its separators follow
+            # the rows: nothing else it draws can change here, so it is
+            # marked for drawing only when one of those did.
+            shape = (float(width), top, tuple(separators))
+            if shape != self.drawn_shape:
+                self.drawn_shape = shape
+                self.marked += 1
+                self.setNeedsDisplay_(True)
             return top
 
         def viewDidChangeEffectiveAppearance(self):
@@ -6939,10 +6951,39 @@ if APPKIT_AVAILABLE:
                 return None
             self.sections = []
             self.arranging = False
+            # What the page was last laid out for, and how many times it
+            # has been laid out.
+            self.arranged_for = None
+            self.arranged = 0
             return self
 
         def isFlipped(self):
             return True
+
+        @objc.python_method
+        def layout_inputs(self) -> tuple[Any, ...]:
+            """Everything a layout of the page is worked out from: its
+            width, which of its views show, and what each one says (a
+            text's words, a button's title, a key cap's key). Colours and
+            states that take no room are not part of it."""
+            inputs: list[Any] = [round(self.content_width(), 2)]
+
+            def read(view: Any) -> None:
+                words = ""
+                if bool(view.isKindOfClass_(NSTextField)):
+                    words = str(view.stringValue())
+                elif bool(view.isKindOfClass_(NSButton)):
+                    words = str(view.title())
+                elif bool(view.isKindOfClass_(KeyCapView)):
+                    words = view.key
+                inputs.append((bool(view.isHidden()), words))
+                if not bool(view.respondsToSelector_("cell")):
+                    for child in view.subviews():
+                        read(child)
+
+            for child in self.subviews():
+                read(child)
+            return tuple(inputs)
 
         @objc.python_method
         def add_section(self, header: Any, group: Any,
@@ -6962,11 +7003,18 @@ if APPKIT_AVAILABLE:
             return float(self.frame().size.width)
 
         @objc.python_method
-        def arrange(self) -> float:
+        def arrange(self, force: bool = False) -> float:
+            """Lay the page out, unless it already is laid out for its
+            width and its copy (``force`` lays it out regardless). Every
+            render asks, and so does every pass of the scroll view; most
+            of them have changed nothing."""
             if self.arranging:
+                return float(self.frame().size.height)
+            if not force and self.layout_inputs() == self.arranged_for:
                 return float(self.frame().size.height)
             self.arranging = True
             try:
+                self.arranged += 1
                 width = self.content_width()
                 y = PAGE_TOP
                 first = True
@@ -6986,6 +7034,9 @@ if APPKIT_AVAILABLE:
                 if (abs(float(self.frame().size.width) - width) > 0.25
                         or abs(float(self.frame().size.height) - y) > 0.25):
                     self.setFrameSize_(NSMakeSize(width, y))
+                # Read again after the layout: it shows and hides headers
+                # and notes itself.
+                self.arranged_for = self.layout_inputs()
                 return y
             finally:
                 self.arranging = False
@@ -8037,6 +8088,10 @@ if APPKIT_AVAILABLE:
             # window that has never been on screen draws its active look.
             self.setup_mode = False
             self._window_active = True
+            # What the last render was drawn from, and how many there
+            # have been.
+            self._rendered_from: tuple[Any, ...] | None = None
+            self.renders = 0
             # Trailing title-strip items: (row key, view, visible-when).
             self.title_items: list[tuple[str, Any, Any]] = []
             if read_system_state:
@@ -10370,6 +10425,17 @@ if APPKIT_AVAILABLE:
             self._render_advanced(state)
             self._render_notices(state)
             self._render_finish(state)
+            self._rendered_from = self._what_a_render_reads()
+            self.renders += 1
+
+        @objc.python_method
+        def _what_a_render_reads(self) -> tuple[Any, ...]:
+            """What a render reads: the view model's state, and whether
+            the window is drawn dark and with increased contrast. Nothing
+            else decides what a render writes."""
+            return (self.view_model.state,
+                    _uses_dark_appearance(self.window),
+                    _increase_contrast())
 
         @objc.python_method
         def _render_shell(self, state: GUIState) -> None:
@@ -12146,8 +12212,13 @@ if APPKIT_AVAILABLE:
             self.render()
 
         def refreshTimer_(self, _timer: Any) -> None:
+            """Every 2 seconds: read the runtime again, and render only if
+            that, or the appearance, changed what a render would write.
+            Most ticks change nothing, and then nothing is laid out or
+            marked for drawing."""
             self.view_model.refresh()
-            self.render()
+            if self._what_a_render_reads() != self._rendered_from:
+                self.render()
 
         def windowDidResize_(self, _notification: Any) -> None:
             """Home and setup lay themselves out again as their page takes
@@ -14877,7 +14948,7 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                 # must then change nothing: a render that forgot to would
                 # leave a key cap over a title or a caption cut short.
                 left = page_frames(document)
-                document.arrange()
+                document.arrange(force=True)
                 require(
                     page_frames(document) == left,
                     f"the render left {name} laid out at {size_name}")
@@ -15133,16 +15204,27 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         def left_laid_out(name: str, moves: bool, **changes: Any) -> None:
             document = controller.dynamic["page_documents"][name]
             before = page_frames(document)
+            before_arranged = document.arranged
+            before_marked = sum(
+                section[1].marked for section in document.sections)
             model.state = replace(calm_state, **changes)
             controller.render()
+            arranged = document.arranged
             left = page_frames(document)
-            document.arrange()
             require(
-                page_frames(document) == left,
+                document.arranged > before_arranged,
+                f"a render lays {name} out again for its new copy")
+            document.arrange(force=True)
+            require(
+                page_frames(document) == left
+                and document.arranged == arranged + 1,
                 f"a render leaves {name} laid out for its new copy")
             require(
-                not moves or left != before,
-                f"{name}: the new copy moves its rows")
+                not moves or (left != before and sum(
+                    section[1].marked for section in document.sections)
+                    > before_marked),
+                f"{name}: the new copy moves its rows, and the groups "
+                "they are in are marked for drawing")
             model.state = calm_state
             controller.render()
             require(
@@ -15726,6 +15808,106 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                  night.line),
             "dark appearance: the amber button keeps the dark ink")
         controller.window.setAppearance_(None)
+
+        # ---- A render that changes nothing lays nothing out and marks
+        # nothing for drawing. A page is laid out only when its width or
+        # its copy changed, a group is marked only when its size or its
+        # separators did, and a tick of the 2-second timer that finds
+        # nothing new does not render at all.
+        page_documents = controller.dynamic["page_documents"]
+
+        def work_done() -> tuple[Any, ...]:
+            """How many times each page has been laid out, and each
+            group, Home's and setup's included, marked for drawing."""
+            return (
+                tuple(sorted((name, document.arranged)
+                             for name, document in page_documents.items())),
+                tuple((name, tuple(section[1].marked
+                                   for section in document.sections))
+                      for name, document in page_documents.items()),
+                home_group.marked, setup_group.marked)
+
+        controller.render()
+        root_view.layoutSubtreeIfNeeded()
+        controller.render()
+        settled = work_done()
+        controller.render()
+        controller.render()
+        require(
+            work_done() == settled,
+            "two renders of an unchanged state lay no page out a second "
+            "time and mark no group for drawing a second time")
+        # New copy on one page lays that page out once, and no other.
+        steady_state = model.state
+        for name, changes in (
+                ("Personalize", {"language": "ja"}),
+                ("Controls", {"sound_theme": "silent"}),
+                ("Privacy", {"recent_dictations": True}),
+                ("Advanced", {"verification": "Passed just now"})):
+            before = dict(work_done()[0])
+            model.state = replace(steady_state, **changes)
+            controller.render()
+            controller.render()
+            after = dict(work_done()[0])
+            require(
+                {page: after[page] - before[page] for page in after}
+                == {page: int(page == name) for page in after},
+                f"new copy on {name} lays out {name}, once, and no other "
+                f"page")
+            model.state = steady_state
+            controller.render()
+        # A change of width lays every page out, once.
+        before = dict(work_done()[0])
+        controller.window.setContentSize_(WINDOW_MIN_SIZE)
+        root_view.layoutSubtreeIfNeeded()
+        controller.render()
+        controller.render()
+        after = dict(work_done()[0])
+        require(
+            all(after[page] > before[page] for page in after)
+            and all(round(document.content_width(), 2)
+                    == document.arranged_for[0]
+                    for document in page_documents.values()),
+            "a new width lays every page out again")
+        controller.window.setContentSize_(WINDOW_DEFAULT_SIZE)
+        root_view.layoutSubtreeIfNeeded()
+        controller.render()
+        # The timer: the first tick below catches the view model up with
+        # the runtime; the second finds nothing new.
+        controller.refreshTimer_(None)
+        root_view.layoutSubtreeIfNeeded()
+        idle_renders, idle_work = controller.renders, work_done()
+        controller.refreshTimer_(None)
+        controller.refreshTimer_(None)
+        # No render ran, so nothing was written to any view: nothing is
+        # laid out and nothing is marked for drawing.
+        require(
+            controller.renders == idle_renders and work_done() == idle_work,
+            "a timer tick that finds nothing new does not render, lays "
+            "nothing out and marks no group for drawing")
+        # Something new in the runtime, a flip of the appearance, or
+        # Increase Contrast: each is rendered on the next tick.
+        runtime["words_today"] = int(runtime.get("words_today", 0)) + 7
+        controller.refreshTimer_(None)
+        require(
+            controller.renders == idle_renders + 1,
+            "a timer tick renders what changed in the runtime")
+        was_dark = _uses_dark_appearance(controller.window)
+        controller.window.setAppearance_(NSAppearance.appearanceNamed_(
+            NSAppearanceNameAqua if was_dark else NSAppearanceNameDarkAqua))
+        controller.refreshTimer_(None)
+        require(
+            controller.renders == idle_renders + 2
+            and controller._dark != was_dark,
+            "a timer tick follows a flip of the appearance")
+        controller.window.setAppearance_(None)
+        controller.refreshTimer_(None)
+        ticks = controller.renders
+        with_increased_contrast(lambda: controller.refreshTimer_(None))
+        require(
+            controller.renders == ticks + 1,
+            "a timer tick follows Increase Contrast")
+        controller.refreshTimer_(None)
 
         # Close, then do what the next "Open Whisper Face" does short of
         # ordering the window on screen.

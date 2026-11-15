@@ -3626,6 +3626,61 @@ class SettingsPagesContractTests(unittest.TestCase):
                     "settings.accessibility.edit.help"):
             self.assertNotIn(key, STRING_CATALOGS["en"])
 
+    def test_a_render_that_changes_nothing_does_no_work(self):
+        # A page is laid out only when what a layout is worked out from
+        # (its width, which views show, what they say) has changed.
+        page = _gui_class("GroupedPageView")
+        arrange = ast.unparse(_gui_function("arrange", page))
+        self.assertIn(
+            "if not force and self.layout_inputs() == self.arranged_for:",
+            arrange)
+        self.assertIn("self.arranged_for = self.layout_inputs()", arrange)
+        inputs = ast.unparse(_gui_function("layout_inputs", page))
+        for read in ("self.content_width()", "view.stringValue()",
+                     "view.title()", "view.key", "view.isHidden()"):
+            self.assertIn(read, inputs)
+        # A group is marked for drawing only when its size or its
+        # separators changed: the one call is inside that test.
+        group = _gui_function("arrange", _gui_class("GroupBoxView"))
+        marks = [
+            node for node in ast.walk(group)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "attr", "") == "setNeedsDisplay_"]
+        guarded = [
+            node for branch in ast.walk(group)
+            if isinstance(branch, ast.If)
+            and "self.drawn_shape" in ast.unparse(branch.test)
+            for node in ast.walk(branch)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "attr", "") == "setNeedsDisplay_"]
+        self.assertEqual(len(marks), 1)
+        self.assertEqual(marks, guarded)
+        self.assertIn(
+            "shape = (float(width), top, tuple(separators))",
+            ast.unparse(group))
+        # The 2-second timer renders only when the state, the appearance
+        # or Increase Contrast changed what a render would write.
+        controller = _gui_class("WhisperFaceWindowController")
+        tick = ast.unparse(_gui_function("refreshTimer_", controller))
+        self.assertIn(
+            "    if self._what_a_render_reads() != self._rendered_from:\n"
+            "        self.render()", tick)
+        reads = ast.unparse(
+            _gui_function("_what_a_render_reads", controller))
+        for read in ("self.view_model.state", "_uses_dark_appearance",
+                     "_increase_contrast()"):
+            self.assertIn(read, reads)
+        render = ast.unparse(_gui_function("render", controller))
+        self.assertIn(
+            "self._rendered_from = self._what_a_render_reads()", render)
+        # Every other render (an action, a window being shown) still
+        # renders: only the timer asks first.
+        callers = [
+            node.name for node in ast.walk(controller)
+            if isinstance(node, ast.FunctionDef)
+            and "_what_a_render_reads" in _called_names(node)]
+        self.assertEqual(sorted(callers), ["refreshTimer_", "render"])
+
     def test_buttons_are_system_push_buttons_read_through_their_cells(self):
         button = _gui_function("_button")
         text = ast.unparse(button)
