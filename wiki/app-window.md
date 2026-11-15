@@ -78,7 +78,9 @@ Diagnostics) and the original panes (Modes, Personalize, Privacy) went in
   Outbox line. An outbox that holds only copies of pastes that could not
   be read back leaves Home in its ordinary phase and the line counts
   them ("5 pasted, not double-checked"); only an entry that still needs
-  a home brings up the recovery headline ([[insertion-transaction]]).
+  a home brings up the recovery headline, and the line then counts the
+  two kinds apart ("1 recoverable, 5 pasted · …")
+  ([[insertion-transaction]]).
 - **Personalize** = the face picker — all sixteen faces in a grid that
   fills its group, eight to a row on chips of up to 78 pt, the chosen one
   amber with its hard shadow and named beside the "Your face" header —

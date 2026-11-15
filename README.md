@@ -81,7 +81,8 @@ are never Supporter-only features.
   as unverified instead of training from an assumption: the overlay says
   **Pasted** and that this app could not be checked, a copy is kept in the
   outbox, and nothing is shown as an error, because nothing is known to have
-  gone wrong. A readback that reads different text, a paste that was never
+  gone wrong. A readback that reads different text, a field that could be
+  read and answers nothing once the paste is sent, a paste that was never
   attempted, and a paste whose outcome is unknown remain errors. If macOS cannot identify any focused
   element at all, the insertion fails closed into the outbox. The count-only
   **Voice Outbox** menu entry routes directly to Home; only the existing
