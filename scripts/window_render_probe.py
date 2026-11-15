@@ -23,6 +23,20 @@ first-run stage, into ``.probe-renders/`` by default.
 
 Pass ``--size WIDTHxHEIGHT`` to review a different window size; the window's
 minimum size is where truncation shows up first.
+
+Pass ``--overlay`` to review the recording overlay instead of the window:
+
+    uv run scripts/window_render_probe.py --overlay [output-dir]
+
+The overlay lives in ``dictate.py``, whose dependencies this script does not
+carry, so it is drawn by the overlay's own smoke test: the probe runs
+``dictate.py --native-gui-smoke-test`` with ``WHISPER_FACE_HUD_FRAMES_DIR``
+set, which makes that test write every frame it checks as a transparent PNG
+(every state in both appearances, with and without Increase Contrast, the
+Reduce Motion stills, and all sixteen faces at their loudest). The frames
+land in ``frames/`` and the probe lays them over a light and a dark desktop
+in a handful of contact sheets, ``overlay-*.png``. A frame is written before
+it is checked, so a failing check still leaves its picture behind.
 """
 
 from __future__ import annotations
@@ -39,8 +53,194 @@ if "--size" in ARGS:
     width, _, height = ARGS.pop(index + 1).partition("x")
     ARGS.pop(index)
     SIZE = (float(width), float(height))
+OVERLAY = "--overlay" in ARGS
+if OVERLAY:
+    ARGS.remove("--overlay")
 OUT = Path(ARGS[0]) if ARGS else REPO / ".probe-renders"
 sys.path.insert(0, str(REPO))
+
+# Must stay the name dictate.py reads (``HUD_FRAMES_ENV``); a test holds the
+# two together.
+HUD_FRAMES_ENV = "WHISPER_FACE_HUD_FRAMES_DIR"
+SHEET_SCALE = 2.0
+LIGHT_DESKTOP = (0.949, 0.953, 0.961)    # a document, a pale wallpaper
+DARK_DESKTOP = (0.106, 0.114, 0.129)     # a dark editor, a night wallpaper
+
+
+def render_overlay(out: Path) -> int:
+    """Write every overlay frame and the contact sheets; 0 if the smoke
+    test that drew them passed."""
+    import os
+    import subprocess
+
+    from AppKit import (
+        NSAttributedString,
+        NSBezierPath,
+        NSBitmapImageFileTypePNG,
+        NSBitmapImageRep,
+        NSColor,
+        NSColorSpace,
+        NSCompositingOperationSourceOver,
+        NSDeviceRGBColorSpace,
+        NSFont,
+        NSFontAttributeName,
+        NSForegroundColorAttributeName,
+        NSGraphicsContext,
+        NSMakeRect,
+    )
+    from Foundation import NSData
+
+    frames = out / "frames"
+    frames.mkdir(parents=True, exist_ok=True)
+    for stale in list(frames.glob("*.png")) + list(out.glob("overlay-*.png")):
+        stale.unlink()
+    smoke = subprocess.run(
+        ["uv", "run", "--locked", "--script", str(REPO / "dictate.py"),
+         "--native-gui-smoke-test"],
+        cwd=REPO, env={**os.environ, HUD_FRAMES_ENV: str(frames)},
+        capture_output=True, text=True)
+    print((smoke.stdout + smoke.stderr).strip())
+
+    # Frames in the order the smoke test drew them.
+    drawn = sorted(frames.glob("*.png"),
+                   key=lambda path: (path.stat().st_mtime_ns, path.name))
+    if not drawn:
+        print("no overlay frames were written")
+        return smoke.returncode or 1
+    loaded = {
+        path.stem: NSBitmapImageRep.imageRepWithData_(
+            NSData.dataWithContentsOfFile_(str(path)))
+        for path in drawn}
+
+    def color(rgb, alpha=1.0):
+        return NSColor.colorWithSRGBRed_green_blue_alpha_(*rgb, alpha)
+
+    def label(text, x, y, rgb, size=11.0, bold=False):
+        font = (NSFont.boldSystemFontOfSize_(size) if bold
+                else NSFont.systemFontOfSize_(size))
+        NSAttributedString.alloc().initWithString_attributes_(text, {
+            NSFontAttributeName: font,
+            NSForegroundColorAttributeName: color(rgb),
+        }).drawAtPoint_((x, y))
+
+    def sheet(name, title, bands):
+        """One PNG: a title, then bands of frames, each on its desktop.
+
+        A band is ``(heading, desktop, columns, crop, [(caption, stem)])``;
+        ``crop`` keeps only the left part of each frame, in points.
+        """
+        pad, gap, caption_height, heading_height = 20.0, 14.0, 16.0, 26.0
+        frame_size = next(iter(loaded.values())).size()
+        widths = []
+        height = pad + 24.0
+        placed = []
+        for heading, desktop, columns, crop, cells in bands:
+            cell_width = min(crop or frame_size.width, frame_size.width)
+            rows = -(-len(cells) // columns)
+            band_width = columns * cell_width + (columns + 1) * gap
+            band_height = (heading_height + rows * (
+                caption_height + frame_size.height) + gap)
+            placed.append((height, band_width, band_height, cell_width))
+            widths.append(band_width)
+            height += band_height + gap
+        width = max(widths) + 2.0 * pad
+        height += pad - gap
+        bitmap = NSBitmapImageRep.alloc() \
+            .initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(
+                None, int(width * SHEET_SCALE), int(height * SHEET_SCALE),
+                8, 4, True, False, NSDeviceRGBColorSpace, 0, 0)
+        bitmap = bitmap.bitmapImageRepByRetaggingWithColorSpace_(
+            NSColorSpace.sRGBColorSpace())
+        bitmap.setSize_((width, height))
+        context = NSGraphicsContext.graphicsContextWithBitmapImageRep_(bitmap)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.setCurrentContext_(context)
+
+        # Bitmap contexts are y-up; ``top`` measures down from the top.
+        def from_top(top, tall):
+            return height - top - tall
+
+        color((1.0, 1.0, 1.0)).setFill()
+        NSBezierPath.fillRect_(NSMakeRect(0, 0, width, height))
+        label(title, pad, from_top(pad, 16.0), (0.1, 0.1, 0.1), 13.0, True)
+        for (heading, desktop, columns, crop, cells), (
+                top, band_width, band_height, cell_width) in zip(
+                    bands, placed):
+            ink = ((0.12, 0.13, 0.15) if sum(desktop) > 1.5
+                   else (0.92, 0.93, 0.95))
+            color(desktop).setFill()
+            NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                NSMakeRect(pad, from_top(top, band_height),
+                           band_width, band_height), 12.0, 12.0).fill()
+            label(heading, pad + gap, from_top(top + 7.0, 14.0), ink,
+                  12.0, True)
+            for index, (caption, stem) in enumerate(cells):
+                row, column = divmod(index, columns)
+                x = pad + gap + column * (cell_width + gap)
+                cell_top = top + heading_height + row * (
+                    caption_height + frame_size.height)
+                label(caption, x, from_top(cell_top + 1.0, 13.0), ink, 10.0)
+                frame = loaded.get(stem)
+                if frame is None:
+                    label("(not drawn)", x, from_top(
+                        cell_top + 50.0, 13.0), ink)
+                    continue
+                frame.drawInRect_fromRect_operation_fraction_respectFlipped_hints_(
+                    NSMakeRect(x, from_top(
+                        cell_top + caption_height, frame_size.height),
+                        cell_width, frame_size.height),
+                    NSMakeRect(0, 0, cell_width, frame_size.height),
+                    NSCompositingOperationSourceOver, 1.0, False, None)
+        NSGraphicsContext.restoreGraphicsState()
+        path = out / f"{name}.png"
+        path.write_bytes(bytes(bitmap.representationUsingType_properties_(
+            NSBitmapImageFileTypePNG, {})))
+        print(f"wrote {path}")
+
+    def stems(prefix, suffix):
+        """``(what, stem)`` for the frames of one family and variant."""
+        return [(stem[len(prefix):-len(suffix)], stem) for stem in loaded
+                if stem.startswith(prefix) and stem.endswith(suffix)]
+
+    desktops = (("On a light desktop", LIGHT_DESKTOP),
+                ("On a dark desktop", DARK_DESKTOP))
+    for appearance in ("light", "dark"):
+        for contrast in ("", "-contrast"):
+            suffix = f"-{appearance}{contrast}"
+            cells = stems("state-", suffix)
+            if not cells:
+                continue
+            sheet(f"overlay-states{suffix}",
+                  f"Recording overlay: every state, {appearance} appearance"
+                  + (", Increase Contrast" if contrast else ""),
+                  [(heading, desktop, 2, None, cells)
+                   for heading, desktop in desktops])
+        cells = stems("face-", f"-{appearance}")
+        if cells:
+            sheet(f"overlay-faces-{appearance}",
+                  f"Recording overlay: every face at its loudest, "
+                  f"{appearance} appearance",
+                  [(heading, desktop, 4, 216.0, cells)
+                   for heading, desktop in desktops])
+    cells = [(f"{what}, {appearance} appearance", stem)
+             for appearance in ("light", "dark")
+             for what, stem in stems("still-", f"-{appearance}")]
+    if cells:
+        sheet("overlay-reduce-motion",
+              "Recording overlay: Reduce Motion (no level, no squash, "
+              "dots at rest)",
+              [(heading, desktop, 2, None, cells)
+               for heading, desktop in desktops])
+    print(f"done → {out}")
+    return smoke.returncode
+
+
+if OVERLAY:
+    from AppKit import NSApplication as _Application
+
+    _Application.sharedApplication()
+    OUT.mkdir(parents=True, exist_ok=True)
+    raise SystemExit(render_overlay(OUT))
 
 import whisper_face_gui as gui  # noqa: E402
 from whisper_face_gui import (  # noqa: E402

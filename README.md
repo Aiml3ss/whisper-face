@@ -97,8 +97,9 @@ are never Supporter-only features.
   immediately; they self-delete after one minute, a new usable result replaces
   them, disabling wipes them, and no replay file is written.
 - **Hold-to-talk anywhere** — hold Right Option (Right Alt on Windows), speak,
-  release; text pastes into whatever app has focus, with a frosted HUD
-  waveform while you talk. On Mac the capture key, an optional undo key, the
+  release; text pastes into whatever app has focus. On Mac a recording pill
+  shows the face you picked and a row of level bars while you talk, and
+  the capture key, an optional undo key, the
   feedback sounds, and the “Actually” corrections switch are under
   Settings → Controls. The microphone is
   pre-warmed at login and the start cue sounds only once capture is ready. A

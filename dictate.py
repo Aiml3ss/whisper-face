@@ -337,17 +337,24 @@ else:
 
 from whisper_face_theme import (  # noqa: E402
     FACE_CHIP_COLORS,
+    LIGHT_PALETTE,
     MOTION_SPECS,
     TYPE_SPECS,
+    BrandShape,
+    Shade,
+    color_token,
+    contrast_ratio,
     hud_presentation,
     jelly_face_scale,
     palette_for_appearance,
 )
 from whisper_face_characters import (  # noqa: E402
+    DESIGN_SIZE,
     character_ops,
 )
 from whisper_face_render import (  # noqa: E402
     IdleLifeDriver,
+    mood_overrides,
 )
 from parrot_core import (  # noqa: E402
     CleanupEdit,
@@ -998,17 +1005,39 @@ HOTKEY_WATCHDOG_INTERVAL = 3.0
 
 LOCK_FILE = HERE / ".dictate.lock"
 
-# HUD: compact native sticker card. Face and waveform retain the existing
-# off-hot-path renderer; shared theme/motion contracts supply the personality.
-HUD_SCALE = 0.30
-HUD_W, HUD_H = 248.0, 178.0
+# HUD: the recording pill. An ink-outlined capsule with a hard shadow, the
+# selected face leaning out of its left end, then the level, the state and
+# one or two lines of caption. The panel is a fixed, transparent box big
+# enough for the widest pill, its shadow and a face at its loudest squash,
+# all stretched as far as the pop and the wobble stretch the whole view;
+# the pill itself is drawn only as wide as what it says, centred in it.
+# Everything here is in points, y down, from the panel's top-left corner.
+HUD_W = 472.0
+HUD_H = 106.0
 HUD_BOTTOM_MARGIN = 80.0
-HUD_RADIUS = 20.0
-STAGE = 320.0 * HUD_SCALE    # square stage, centered horizontally
-STAGE_TOP = 31.0             # design y-down coords
-PARROT_SCALE = 280.0 / 256.0
-RADIAL_BARS = 60
-BAR_INNER_R = 134.0
+HUD_PILL = BrandShape(
+    radius=32.0, outline=2.5, shadow_right=4.0, shadow_down=5.0, height=64.0)
+HUD_PILL_TOP = 26.0          # room above the pill for the face
+HUD_FACE_SIZE = 82.0         # larger than the pill is tall, on purpose
+HUD_FACE_TILT = -6.0         # screen sense, positive clockwise
+HUD_FACE_OVERHANG = 12.0     # how far the face's box leans out to the left
+HUD_FACE_LIFT = 4.0          # and how far its middle rides above the pill's
+HUD_CONTENT_LEFT = 78.0      # pill edge to the level slot, clear of the face
+HUD_LEVEL_BARS = 7
+HUD_BAR_WIDTH = 5.0
+HUD_BAR_GAP = 3.0
+HUD_BAR_MIN = 6.0
+HUD_BAR_MAX = 32.0
+HUD_SLOT_WIDTH = (
+    HUD_LEVEL_BARS * HUD_BAR_WIDTH + (HUD_LEVEL_BARS - 1) * HUD_BAR_GAP)
+HUD_SLOT_GAP = 12.0          # level slot to the text
+HUD_TEXT_MIN = 96.0
+HUD_TEXT_MAX = 250.0
+HUD_PADDING_RIGHT = 24.0
+HUD_DOT_SIZE = 7.0           # the three dots that mean "working"
+HUD_DOT_GAP = 6.0
+HUD_MARK_SIZE = 28.0         # the check and the exclamation mark's disc
+HUD_CAPTION_LIMIT = 72       # characters of caption kept, newest last
 # Mouth, blink, breath, and gaze schedules live in whisper_face_render's
 # IdleLifeDriver so the HUD and the window face cannot drift apart.
 LEVEL_SMOOTH = 0.35
@@ -2769,12 +2798,26 @@ def _poly(points):
     return path
 
 
-def _rgb(r, g, b, a=1.0):
-    NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, a).set()
+def _srgb(shade, alpha=1.0):
+    """A theme shade as the sRGB colour its hex names.
+
+    The overlay used to read the same numbers as calibrated RGB, which draws
+    every mid-tone paler than its hex. The pill is drawn in the space the
+    faces and the window use, so the three agree where they meet.
+    """
+    red, green, blue = shade.color
+    return NSColor.colorWithSRGBRed_green_blue_alpha_(
+        red, green, blue, shade.alpha * alpha)
 
 
-def _color(r, g, b, a=1.0):
-    return NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, a)
+def _hud_increase_contrast() -> bool:
+    """Whether the person asked the system to increase contrast."""
+    try:
+        return bool(
+            NSWorkspace.sharedWorkspace()
+            .accessibilityDisplayShouldIncreaseContrast())
+    except Exception:
+        return False
 
 
 def _theme_is_dark() -> bool:
@@ -2865,6 +2908,155 @@ def hud_level_step(raw: float, current: float, mode: str,
     return current + (target - current) * LEVEL_SMOOTH
 
 
+def hud_slot_width(mode: str) -> float:
+    """Width of the slot between the face and the text, for one state.
+
+    It holds the state's own mark: the level bars while listening, three
+    dots while working, a disc with a check or an exclamation mark at the
+    end. The text starts a fixed gap after whichever it is.
+    """
+    if mode == "processing":
+        return 3.0 * HUD_DOT_SIZE + 2.0 * HUD_DOT_GAP
+    if mode in ("done", "error"):
+        return HUD_MARK_SIZE
+    return HUD_SLOT_WIDTH
+
+
+def hud_pill_width(text_width: float, mode: str = "recording") -> float:
+    """How wide the pill's body is around a text column ``text_width`` wide.
+
+    The face and the state's mark are a fixed lead-in; only the text column
+    stretches, between a floor that keeps "Listening…" from looking pinched
+    and a ceiling the panel was sized for. Listening has the widest mark,
+    so it is the widest pill there can be.
+    """
+    text = max(HUD_TEXT_MIN, min(HUD_TEXT_MAX, float(text_width)))
+    return (HUD_CONTENT_LEFT + hud_slot_width(mode) + HUD_SLOT_GAP + text
+            + HUD_PADDING_RIGHT)
+
+
+def hud_pill_frame(width: float) -> tuple[float, float, float, float]:
+    """The pill's body in the panel as ``(x, y, width, height)``, y down.
+
+    What gets centred is the whole object the eye reads: the face that
+    hangs off the left end, the body, and the hard shadow on the right.
+    """
+    whole = HUD_FACE_OVERHANG + width + HUD_PILL.shadow_right
+    return ((HUD_W - whole) / 2.0 + HUD_FACE_OVERHANG, HUD_PILL_TOP,
+            width, HUD_PILL.height)
+
+
+def hud_face_matrix(
+        pill_x: float, pill_y: float,
+        scale_x: float = 1.0, scale_y: float = 1.0,
+) -> tuple[float, float, float, float, float, float]:
+    """The affine map from the face's design box to the panel.
+
+    Returned as ``(m11, m12, m21, m22, tx, ty)``, the layout AppKit's
+    transform struct uses. The face is scaled to ``HUD_FACE_SIZE``, squashed
+    about its own middle, leaned ``HUD_FACE_TILT`` degrees, and parked so
+    its box hangs ``HUD_FACE_OVERHANG`` off the pill's left end with its
+    middle ``HUD_FACE_LIFT`` above the pill's.
+    """
+    unit = HUD_FACE_SIZE / DESIGN_SIZE
+    angle = math.radians(HUD_FACE_TILT)
+    cos, sin = math.cos(angle), math.sin(angle)
+    m11, m12 = unit * scale_x * cos, unit * scale_x * sin
+    m21, m22 = -unit * scale_y * sin, unit * scale_y * cos
+    middle = DESIGN_SIZE / 2.0
+    center_x = pill_x - HUD_FACE_OVERHANG + HUD_FACE_SIZE / 2.0
+    center_y = pill_y + HUD_PILL.height / 2.0 - HUD_FACE_LIFT
+    return (m11, m12, m21, m22,
+            center_x - (m11 + m21) * middle,
+            center_y - (m12 + m22) * middle)
+
+
+def hud_face_point(matrix, x: float, y: float) -> tuple[float, float]:
+    """Where a point of the face's design box lands in the panel."""
+    m11, m12, m21, m22, tx, ty = matrix
+    return (m11 * x + m21 * y + tx, m12 * x + m22 * y + ty)
+
+
+def hud_bar_heights(level: float, frame: int) -> tuple[float, ...]:
+    """Heights of the level bars, in points, for one frame.
+
+    The level goes through the same soft knee as the mouth, so quiet speech
+    still moves the bars, and each bar rides its own slow sine so the row
+    reads as a voice instead of a meter. At rest every bar is a dot.
+    """
+    try:
+        energy = float(level)
+    except (TypeError, ValueError):
+        energy = 0.0
+    if not math.isfinite(energy):
+        energy = 0.0
+    loud = min(1.0, max(0.0, energy) ** 0.7 * 1.35)
+    # The row is tallest in the middle, the shape people read as a voice.
+    return tuple(
+        HUD_BAR_MIN + (HUD_BAR_MAX - HUD_BAR_MIN) * loud
+        * (0.55 + 0.45 * math.sin(
+            math.pi * (index + 0.5) / HUD_LEVEL_BARS))
+        * (0.35 + 0.65 * abs(math.sin(index * 1.9 + frame * 0.16)))
+        for index in range(HUD_LEVEL_BARS))
+
+
+def hud_pill_shades(mode: str, dark: bool,
+                    increased_contrast: bool = False) -> dict:
+    """Every colour the pill is drawn in, for one state and appearance.
+
+    The pill is a sticker, and a sticker is bright in both appearances:
+    porcelain while listening and working, the stage emerald when done, the
+    theme's coral for an error. It does not go dark with the Mac, because
+    the face leans over it and the face's ink outline is all but invisible
+    on the dark surface colour (about 1.2:1). So the text, the outline and
+    the hard shadow are dark inks everywhere, and the appearance only picks
+    the theme's own shade of the emerald and of the outline ink. Increase
+    Contrast swaps in a token's stronger value where that value is darker.
+    """
+    palette = palette_for_appearance(dark)
+    if mode in ("done", "error"):
+        fill = (color_token("stage_emerald", dark, increased_contrast)
+                if mode == "done" else Shade(palette.error))
+        ink = color_token("on_amber_ink", dark, increased_contrast)
+        soft = ink
+    else:
+        fill = Shade(LIGHT_PALETTE.surface)
+        ink = Shade(LIGHT_PALETTE.ink)
+        soft = Shade(LIGHT_PALETTE.ink_soft)
+    return {
+        "fill": fill,
+        # The dark appearance's stronger outline is the light ink, which is
+        # for dark fills; a bright pill keeps the dark one.
+        "outline": color_token(
+            "ink_outline", dark, increased_contrast and not dark),
+        "shadow": color_token("ink_outline", dark),
+        "ink": ink,
+        "soft": soft,
+        # The bars sit on porcelain in both appearances, so they take the
+        # light appearance's green and its stronger value.
+        "level": color_token("switch_on", False, increased_contrast),
+        # The disc behind the check and the exclamation mark is porcelain in
+        # both appearances: it only ever sits on a bright pill.
+        "mark": Shade(LIGHT_PALETTE.surface),
+        "mark_ink": color_token("on_amber_ink", dark, increased_contrast),
+    }
+
+
+def hud_caption_text(caption: str) -> str:
+    """The caption as the pill shows it.
+
+    The bare "Listening" the capture path publishes at key-down becomes a
+    hint, because the headline already says it. Anything longer than the
+    pill can hold keeps its newest words and loses its oldest.
+    """
+    text = str(caption or "").strip()
+    if text == "Listening":
+        text = "Speak naturally"
+    if len(text) > HUD_CAPTION_LIMIT:
+        text = "…" + text[-(HUD_CAPTION_LIMIT - 2):]
+    return text
+
+
 def _caption_add(fut, context_terms=(), bundle="", context_pack=None,
                  language=LANGUAGE_DEFAULT):
     try:
@@ -2889,8 +3081,120 @@ def _caption_add(fut, context_terms=(), bundle="", context_pack=None,
         CAPTION["stable_prefix"] = True
 
 
+def _hud_line(text, role, shade, alpha=1.0, wrap=False):
+    """One piece of pill text in a named type role."""
+    spec = TYPE_SPECS[role]
+    attributes = {
+        NSFontAttributeName: _rounded_font(spec.size, spec.weight),
+        NSForegroundColorAttributeName: _srgb(shade, alpha),
+    }
+    if wrap:
+        paragraph = NSMutableParagraphStyle.alloc().init()
+        paragraph.setLineBreakMode_(0)       # NSLineBreakByWordWrapping
+        attributes[NSParagraphStyleAttributeName] = paragraph
+    return NSAttributedString.alloc().initWithString_attributes_(
+        text, attributes)
+
+
+def _hud_fit_caption(view, shade, alpha):
+    """The caption as drawn: ``(string, width, height)`` or ``None``.
+
+    A caption wider than the pill's text column wraps to a second line
+    instead of losing its tail: "Paste unverified — check target; saved
+    in Voice Outbox" must keep the half that says what to do. If two
+    lines are still not enough, the oldest words go, a few characters
+    at a time, until what is left fits. The fitted text is remembered
+    so a caption is only measured down once.
+    """
+    text = hud_caption_text(CAPTION["text"])
+    if not text:
+        return None
+    if view.fitted_caption[0] == text:
+        text = view.fitted_caption[1]
+    asked = text
+    while True:
+        string = _hud_line(text, "hud_caption", shade, alpha, wrap=True)
+        size = string.size()
+        if size.width <= HUD_TEXT_MAX:
+            width, height = size.width, size.height
+            break
+        box = string.boundingRectWithSize_options_(
+            (HUD_TEXT_MAX, 8.0 * size.height), 1)  # line-fragment origin
+        width, height = HUD_TEXT_MAX, box.size.height
+        if height <= 2.0 * size.height + 1.0 or len(text) <= 12:
+            break
+        text = "…" + text.lstrip("…")[4:].lstrip()
+    if text != asked:
+        view.fitted_caption = (hud_caption_text(CAPTION["text"]), text)
+    return string, width, height
+
+
+def _hud_capsule(x, y, width, height, radius):
+    radius = max(0.0, min(radius, width / 2.0, height / 2.0))
+    return NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+        NSMakeRect(x, y, width, height), radius, radius)
+
+
+def _hud_on_screen(view):
+    window = view.window()
+    try:
+        return window is not None and bool(window.isVisible())
+    except Exception:
+        return False
+
+
+def _hud_draw_working_dots(center_x, center_y, shade, t, reduce_motion):
+    """Three dots that hop in turn while the words are being tidied.
+
+    Dots, not bars, so working never reads as listening, and never an
+    amber dot: that is the system's microphone indicator. Under Reduce
+    Motion they sit still as a plain ellipsis.
+    """
+    size, gap = HUD_DOT_SIZE, HUD_DOT_GAP
+    left = center_x - (3.0 * size + 2.0 * gap) / 2.0
+    for index in range(3):
+        hop, alpha = 0.0, 1.0
+        if not reduce_motion:
+            hop = max(0.0, math.sin(t * 6.0 - index * 1.1))
+            alpha = 0.45 + 0.55 * hop
+        _srgb(shade, alpha).setFill()
+        NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(
+            left + index * (size + gap),
+            center_y - size / 2.0 - 3.0 * hop, size, size)).fill()
+
+
+def _hud_draw_mark(center_x, center_y, shades, check):
+    """A porcelain disc carrying a check mark or an exclamation mark."""
+    radius = HUD_MARK_SIZE / 2.0
+    disc = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(
+        center_x - radius + 1.0, center_y - radius + 1.0,
+        HUD_MARK_SIZE - 2.0, HUD_MARK_SIZE - 2.0))
+    _srgb(shades["mark"]).setFill()
+    disc.fill()
+    disc.setLineWidth_(2.0)
+    _srgb(shades["mark_ink"]).setStroke()
+    disc.stroke()
+    stroke = NSBezierPath.bezierPath()
+    stroke.setLineCapStyle_(1)
+    stroke.setLineJoinStyle_(1)
+    if check:
+        stroke.setLineWidth_(2.6)
+        stroke.moveToPoint_((center_x - 5.4, center_y + 0.4))
+        stroke.lineToPoint_((center_x - 1.8, center_y + 4.0))
+        stroke.lineToPoint_((center_x + 5.6, center_y - 3.6))
+    else:
+        stroke.setLineWidth_(3.0)
+        stroke.moveToPoint_((center_x, center_y - 6.5))
+        stroke.lineToPoint_((center_x, center_y + 1.2))
+    stroke.stroke()
+    if not check:
+        _srgb(shades["mark_ink"]).setFill()
+        NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(
+            center_x - 1.7, center_y + 4.6, 3.4, 3.4)).fill()
+
+
 class WaveView(NSView):
-    """Voice Listening stage with a selectable, audio-reactive character."""
+    """The recording pill: the face, the level, the state and a caption."""
 
     def initWithFrame_(self, frame):
         self = objc.super(WaveView, self).initWithFrame_(frame)
@@ -2904,6 +3208,15 @@ class WaveView(NSView):
         self.frame_n = 0
         self.reduce_motion = False
         self.last_accessibility_value = ""
+        self.pill_width = None       # eased toward what the text needs
+        self.face_matrix = None      # where the last frame put the face
+        self.text_boxes = {}         # and each piece of its text
+        self.fitted_caption = ("", "")
+        # Left as None these follow the system and the saved preference. The
+        # smoke test pins them so every variant is drawn and checked.
+        self.dark = None
+        self.increase_contrast = None
+        self.face = None
         try:
             self.setAccessibilityElement_(True)
             self.setAccessibilityRole_("AXGroup")
@@ -2935,11 +3248,13 @@ class WaveView(NSView):
         return True
 
     def drawRect_(self, rect):
-        W = self.bounds().size.width
-        palette = palette_for_appearance(_theme_is_dark())
+        dark = _theme_is_dark() if self.dark is None else bool(self.dark)
+        contrast = (
+            _hud_increase_contrast() if self.increase_contrast is None
+            else bool(self.increase_contrast))
         presentation = self._presentation()
+        shades = hud_pill_shades(self.mode, dark, contrast)
         # per-frame state
-        S = HUD_SCALE
         if not self.reduce_motion:
             self.t += 1.0 / FPS
             self.frame_n += 1
@@ -2947,93 +3262,112 @@ class WaveView(NSView):
         self.lv = hud_level_step(
             self.raw, self.lv, self.mode, self.reduce_motion)
         lv = max(0.0, min(1.0, self.lv))
-        cx = W / 2.0
-        cy = STAGE_TOP + STAGE / 2.0
 
-        # Sticker card: calm surface, one hard offset shadow, no wall of
-        # decoration. The face remains the playful object.
-        card_rect = NSMakeRect(5, 3, W - 16, HUD_H - 14)
-        shadow_rect = NSMakeRect(11, 9, W - 16, HUD_H - 14)
-        _rgb(*palette.line, 0.96)
-        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            shadow_rect, HUD_RADIUS, HUD_RADIUS).fill()
-        card = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            card_rect, HUD_RADIUS, HUD_RADIUS)
-        _rgb(*palette.surface)
-        card.fill()
-        card.setLineWidth_(2.0)
-        _rgb(*palette.line)
-        card.stroke()
-
-        accent = (
-            palette.accent if presentation.accent == "accent"
-            else palette.error if presentation.accent == "error"
-            else palette.brand
-        )
-        eyebrow_type = TYPE_SPECS["hud_eyebrow"]
-        status = NSAttributedString.alloc().initWithString_attributes_(
-            presentation.eyebrow, {
-                NSFontAttributeName: _rounded_font(
-                    eyebrow_type.size, eyebrow_type.weight),
-                NSForegroundColorAttributeName: _color(*palette.line),
-            })
-        status_size = status.size()
-        status_w = status_size.width + 18
-        _rgb(*accent)
-        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            NSMakeRect(15, 11, status_w, 19), 9.5, 9.5).fill()
-        status.drawAtPoint_((24, 14))
-
+        # What the pill says decides how wide it is.
+        headline = _hud_line(
+            presentation.headline, "hud_headline", shades["ink"])
+        headline_size = headline.size()
+        confidence = None
+        row_width = headline_size.width
         if presentation.confidence:
-            confidence_type = TYPE_SPECS["hud_confidence"]
-            confidence = NSAttributedString.alloc() \
-                .initWithString_attributes_(
-                    presentation.confidence, {
-                        NSFontAttributeName: _rounded_font(
-                            confidence_type.size, confidence_type.weight),
-                        NSForegroundColorAttributeName:
-                            _color(*palette.ink_soft),
-                    })
-            confidence_size = confidence.size()
-            confidence.drawAtPoint_(
-                (W - 16 - confidence_size.width, 14))
+            confidence = _hud_line(
+                presentation.confidence, "hud_confidence", shades["soft"])
+            row_width += 8.0 + confidence.size().width
+        # The transcript is dimmed while it is being tidied: it is still
+        # provisional, and the headline is what changed.
+        caption = _hud_fit_caption(self, 
+            shades["ink"], 0.75 if self.mode == "processing" else 1.0)
+        text_width = max(row_width, caption[1] if caption else 0.0)
 
-        # radial waveform (spec: 60 bars, inner r 134, len 6 + v*66)
-        if self.mode == "recording" or lv > 0.01:
-            for i in range(RADIAL_BARS):
-                ang = (i / RADIAL_BARS) * 2.0 * math.pi - math.pi / 2.0
-                v = max(0.03, lv * (0.4 + 0.6 * abs(
-                    math.sin(i * 0.7 + self.frame_n * 0.16))))
-                r0 = BAR_INNER_R * S
-                r1 = (BAR_INNER_R + 6.0 + v * 66.0) * S
-                bar = NSBezierPath.bezierPath()
-                bar.setLineWidth_(max(1.6, 3.2 * S))
-                bar.setLineCapStyle_(1)
-                bar.moveToPoint_((cx + r0 * math.cos(ang),
-                                  cy + r0 * math.sin(ang)))
-                bar.lineToPoint_((cx + r1 * math.cos(ang),
-                                  cy + r1 * math.sin(ang)))
-                _rgb(*palette.brand, 0.20 + 0.58 * v)
-                bar.stroke()
-
-        # pulse ring (300px, scale 1 + lv*0.16, opacity 0.12 + lv*0.5)
-        rr = 150.0 * S * (1.0 + lv * 0.16)
-        ring = NSBezierPath.bezierPathWithOvalInRect_(
-            NSMakeRect(cx - rr, cy - rr, rr * 2, rr * 2))
-        ring.setLineWidth_(1.5)
-        if self.mode == "processing":
-            _rgb(*palette.accent,
-                 0.18 + 0.18 * abs(math.sin(self.t * 2.2)))
-        elif self.mode == "error":
-            _rgb(*palette.error, 0.42)
+        # The body eases to a new width so words arriving do not make it
+        # jump. Off screen, or under Reduce Motion, it is simply the width.
+        target = hud_pill_width(text_width, self.mode)
+        if (self.reduce_motion or self.pill_width is None
+                or not _hud_on_screen(self)
+                or abs(target - self.pill_width) < 0.5):
+            self.pill_width = target
         else:
-            _rgb(*palette.brand, 0.16 + lv * 0.44)
-        ring.stroke()
+            self.pill_width += (target - self.pill_width) * LEVEL_SMOOTH
+        x, y, width, height = hud_pill_frame(self.pill_width)
+        middle = y + height / 2.0
 
-        # Selected Whisper Face (256 viewBox, centered). Live level drives a
-        # small whole-head squash/stretch as well as the mouth, and a slow
-        # sub-percent breathing cycle keeps the character alive between
-        # sentences. Reduce Motion freezes all of it to an identity.
+        # The pill: hard shadow, fill, then the outline inside its edge.
+        _srgb(shades["shadow"]).setFill()
+        _hud_capsule(
+            x + HUD_PILL.shadow_right, y + HUD_PILL.shadow_down,
+            width, height, HUD_PILL.radius).fill()
+        _srgb(shades["fill"]).setFill()
+        _hud_capsule(x, y, width, height, HUD_PILL.radius).fill()
+        inset = HUD_PILL.outline / 2.0
+        edge = _hud_capsule(
+            x + inset, y + inset, width - 2.0 * inset, height - 2.0 * inset,
+            HUD_PILL.radius - inset)
+        edge.setLineWidth_(HUD_PILL.outline)
+        _srgb(shades["outline"]).setStroke()
+        edge.stroke()
+
+        # The state's own mark, in the slot the level bars live in, so the
+        # state never rests on the pill's colour alone.
+        slot_x = x + HUD_CONTENT_LEFT
+        slot_width = hud_slot_width(self.mode)
+        slot_middle = slot_x + slot_width / 2.0
+        if self.mode == "recording":
+            _srgb(shades["level"]).setFill()
+            for index, bar in enumerate(hud_bar_heights(lv, self.frame_n)):
+                _hud_capsule(
+                    slot_x + index * (HUD_BAR_WIDTH + HUD_BAR_GAP),
+                    middle - bar / 2.0, HUD_BAR_WIDTH, bar,
+                    HUD_BAR_WIDTH / 2.0).fill()
+        elif self.mode == "processing":
+            _hud_draw_working_dots(
+                slot_middle, middle, shades["ink"], self.t,
+                self.reduce_motion)
+        elif self.mode == "done":
+            _hud_draw_mark(slot_middle, middle, shades, check=True)
+        elif self.mode == "error":
+            _hud_draw_mark(slot_middle, middle, shades, check=False)
+
+        # Headline, the confidence read-out on its baseline, then the
+        # caption. The block is centred on the pill; anything still easing
+        # into view is clipped to the body rather than drawn over the edge.
+        text_x = slot_x + slot_width + HUD_SLOT_GAP
+        block = headline_size.height + (caption[2] if caption else 0.0)
+        top = middle - block / 2.0
+        ctx = NSGraphicsContext.currentContext()
+        ctx.saveGraphicsState()
+        _hud_capsule(
+            x + HUD_PILL.outline, y + HUD_PILL.outline,
+            width - 2.0 * HUD_PILL.outline, height - 2.0 * HUD_PILL.outline,
+            HUD_PILL.radius - HUD_PILL.outline).addClip()
+        headline.drawAtPoint_((text_x, top))
+        self.text_boxes = {"headline": (
+            text_x, top, headline_size.width, headline_size.height)}
+        if confidence is not None:
+            headline_font = _rounded_font(
+                TYPE_SPECS["hud_headline"].size,
+                TYPE_SPECS["hud_headline"].weight)
+            confidence_font = _rounded_font(
+                TYPE_SPECS["hud_confidence"].size,
+                TYPE_SPECS["hud_confidence"].weight)
+            confidence_at = (
+                text_x + headline_size.width + 8.0,
+                top + headline_font.ascender() - confidence_font.ascender())
+            confidence.drawAtPoint_(confidence_at)
+            confidence_size = confidence.size()
+            self.text_boxes["confidence"] = (
+                *confidence_at, confidence_size.width, confidence_size.height)
+        if caption:
+            caption[0].drawInRect_(NSMakeRect(
+                text_x, top + headline_size.height, HUD_TEXT_MAX, caption[2]))
+            self.text_boxes["caption"] = (
+                text_x, top + headline_size.height, caption[1], caption[2])
+        ctx.restoreGraphicsState()
+
+        # The selected face, last, so it leans out over the pill's edge.
+        # Live level drives a small whole-head squash/stretch as well as
+        # the mouth, and a slow sub-percent breathing cycle keeps the
+        # character alive between sentences. Reduce Motion freezes all of
+        # it to an identity.
         scale_x, scale_y = jelly_face_scale(
             lv,
             processing=self.mode == "processing",
@@ -3043,65 +3377,16 @@ class WaveView(NSView):
             breath = 0.006 * math.sin(self.t * 1.8)
             scale_x *= 1.0 - breath * 0.5
             scale_y *= 1.0 + breath
-        ctx = NSGraphicsContext.currentContext()
         ctx.saveGraphicsState()
+        self.face_matrix = hud_face_matrix(x, y, scale_x, scale_y)
         tr = NSAffineTransform.transform()
-        tr.translateXBy_yBy_(cx - 140.0 * S, STAGE_TOP + 20.0 * S)
-        tr.scaleBy_(PARROT_SCALE * S)
-        tr.translateXBy_yBy_(128.0, 128.0)
-        tr.scaleXBy_yBy_(scale_x, scale_y)
-        tr.translateXBy_yBy_(-128.0, -128.0)
+        tr.setTransformStruct_(self.face_matrix)
         tr.concat()
         self.drawFace_(lv)
         ctx.restoreGraphicsState()
 
-        # Stable prefix/result stays readable on a quiet theme surface.
-        text = CAPTION["text"].strip()
-        if text == "Listening":
-            text = "Speak naturally"
-        if len(text) > 72:
-            text = "…" + text[-70:]
-        if text:
-            caption_type = TYPE_SPECS["hud_caption"]
-            para = NSMutableParagraphStyle.alloc().init()
-            para.setAlignment_(1)                # NSTextAlignmentCenter
-            para.setLineBreakMode_(0)            # NSLineBreakByWordWrapping
-            dim = 0.75 if self.mode == "processing" else 1.0
-            cap = NSAttributedString.alloc().initWithString_attributes_(
-                text, {
-                    NSFontAttributeName: _rounded_font(
-                        caption_type.size, caption_type.weight),
-                    NSForegroundColorAttributeName:
-                        _color(*palette.ink, dim),
-                    NSParagraphStyleAttributeName: para,
-                })
-            size = cap.size()
-            # A message wider than the card wraps instead of losing its tail:
-            # "Paste unverified — check target; saved in Voice Outbox" was
-            # drawing one clipped line, and the clipped half was the half
-            # that says what to do. Wrapped height comes from measuring at
-            # the pill's real text width; the 72-char cap above bounds it to
-            # two lines of this type size.
-            max_text_width = W - 30 - 22
-            if size.width > max_text_width:
-                wrapped = cap.boundingRectWithSize_options_(
-                    (max_text_width, 4 * size.height), 1)  # line-fragment origin
-                cw = W - 30
-                th = wrapped.size.height
-            else:
-                cw = size.width + 22
-                th = size.height
-            ch = th + 8
-            chip_y = STAGE_TOP + STAGE + 12
-            _rgb(*palette.bg)
-            NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                NSMakeRect((W - cw) / 2.0, chip_y, cw, ch),
-                min(ch / 2.0, 14.0), min(ch / 2.0, 14.0)).fill()
-            cap.drawInRect_(NSMakeRect((W - cw) / 2.0 + 11, chip_y + 4,
-                                       cw - 22, th))
-
     def drawFace_(self, lv):
-        face = current_face()
+        face = self.face or current_face()
         if face == "parrot":
             self.drawParrot_(lv)
         elif face == "owl":
@@ -3126,8 +3411,19 @@ class WaveView(NSView):
         replay_ops(ops)
 
     def _draw_character(self, face, lv):
+        """The face without its hard shadow or its speech puffs.
+
+        It sits in the pill's own outlined container, and the bars beside
+        it already show the level. Working and error give it the same mood
+        the window's face wears: eyes closed in thought, or looking down.
+        """
+        blink = self._update_blink()
+        mood = mood_overrides(self.mode)
         self._replay_ops(character_ops(
-            face, self._update_mouth(), lv, self._update_blink()))
+            face, self._update_mouth(), lv,
+            max(blink, mood.get("blink", 0.0)),
+            gaze=mood.get("gaze", (0.0, 0.0)),
+            whispers=False))
 
     def drawParrot_(self, lv):
         self._draw_character("parrot", lv)
@@ -3139,7 +3435,7 @@ class WaveView(NSView):
         self._draw_character("owl", lv)
 
 class HUD(NSObject):
-    """Floating Whisper Face card. Main-thread only."""
+    """The floating recording pill. Main-thread only."""
 
     def init(self):
         self = objc.super(HUD, self).init()
@@ -3165,7 +3461,8 @@ class HUD(NSObject):
             | NSWindowCollectionBehaviorStationary
         )
 
-        # The stage paints its own themed sticker card — no effect view.
+        # The view paints the pill itself; the panel stays borderless and
+        # clear, so the face can lean out of it over whatever is behind.
         wave = WaveView.alloc().initWithFrame_(rect)
         wave.setAutoresizingMask_(18)
         wave.setWantsLayer_(True)
@@ -3173,6 +3470,7 @@ class HUD(NSObject):
 
         self.panel = panel
         self.wave = wave
+        self.shown_mode = None       # the mode the last tick saw on screen
         self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             1.0 / FPS, self, "tick:", None, True
         )
@@ -3210,12 +3508,22 @@ class HUD(NSObject):
 
     def tick_(self, timer):
         if not self.panel.isVisible():
+            # Hidden: the next showing starts fresh, at its own width and
+            # with the pop rather than a wobble.
+            self.shown_mode = None
+            self.wave.pill_width = None
             return
         accessibility_changed = self.wave.syncAccessibilityState()
         if self.wave.reduce_motion:
             if accessibility_changed:
                 self.wave.setNeedsDisplay_(True)
             return
+        # The pill pops when it appears; after that, each change of state
+        # (listening to working, working to a result) gets one wobble, so
+        # letting go of the key is felt as well as read.
+        if self.shown_mode not in (None, self.wave.mode):
+            _add_jelly_animation(self.wave.layer(), "wobble")
+        self.shown_mode = self.wave.mode
         self.wave.raw = LEVELS[-1] if LEVELS else 0.0
         bar = STATUS.get("bar")
         if bar is not None and hasattr(bar, "setMouthLevel_"):
@@ -13199,44 +13507,394 @@ def check_parakeet_model_revision():
                     f"Parakeet model revision drift: {path.name} is {revision}")
 
 
+# Every state the overlay can be in, as the capture path leaves it: a name
+# for the frame, the mode handed to ``showMode_``, the caption, confidence
+# and stable-prefix flag in ``CAPTION``, and the microphone level. The smoke
+# test draws each one in both appearances, with and without Increase
+# Contrast, and checks what it drew.
+HUD_SMOKE_STATES = (
+    ("listening", "recording", "Listening", None, False, 0.72),
+    ("mode", "recording", "Reply mode", None, False, 0.0),
+    ("heard", "recording", "Local smoke transcript", 0.91, True, 0.72),
+    ("heard-long", "recording",
+     "this sentence keeps going well past the end of one line so the pill "
+     "has to wrap it and then drop its oldest words", 0.87, True, 0.35),
+    ("working", "processing", "Local smoke transcript", 0.61, True, 0.0),
+    ("uncertain", "processing",
+     "Uncertain (58%): meet at for · Alt: meet at four", 0.58, True, 0.0),
+    ("done", "done", "Typed 9 words", None, False, 0.0),
+    ("error", "error", "I couldn't understand that — try again",
+     None, False, 0.0),
+)
+# Set to a directory, the smoke test also writes every frame it checks there
+# as a transparent PNG. ``scripts/window_render_probe.py --overlay`` uses it
+# to put the overlay in front of a person; nothing else reads it.
+HUD_FRAMES_ENV = "WHISPER_FACE_HUD_FRAMES_DIR"
+HUD_SMOKE_SCALE = 2.0
+
+
+def _hud_smoke_bitmap(wave):
+    """Draw the overlay view off screen into an sRGB bitmap of a fixed
+    scale, so a pixel means the same thing on every machine."""
+    from AppKit import NSBitmapImageRep, NSColorSpace, NSDeviceRGBColorSpace
+
+    bounds = wave.bounds()
+    bitmap = NSBitmapImageRep.alloc() \
+        .initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(
+            None,
+            int(round(bounds.size.width * HUD_SMOKE_SCALE)),
+            int(round(bounds.size.height * HUD_SMOKE_SCALE)),
+            8, 4, True, False, NSDeviceRGBColorSpace, 0, 0)
+    bitmap = bitmap.bitmapImageRepByRetaggingWithColorSpace_(
+        NSColorSpace.sRGBColorSpace())
+    bitmap.setSize_(bounds.size)
+    wave.cacheDisplayInRect_toBitmapImageRep_(bounds, bitmap)
+    return bitmap
+
+
+def _hud_smoke_pixel(bitmap, x, y):
+    """Straight ``(red, green, blue, alpha)`` at a point of the panel."""
+    column = int(x * HUD_SMOKE_SCALE)
+    row = int(y * HUD_SMOKE_SCALE)
+    if not (0 <= column < bitmap.pixelsWide()
+            and 0 <= row < bitmap.pixelsHigh()):
+        return (0.0, 0.0, 0.0, 0.0)
+    color = bitmap.colorAtX_y_(column, row)
+    if color is None:
+        return (0.0, 0.0, 0.0, 0.0)
+    return (color.redComponent(), color.greenComponent(),
+            color.blueComponent(), color.alphaComponent())
+
+
+def _hud_smoke_matches(pixel, shade, backdrop=None, tolerance=0.035):
+    """Whether an opaque pixel is ``shade``, laid over ``backdrop`` if the
+    shade is translucent."""
+    color = shade.over(backdrop.color) if backdrop is not None \
+        else shade.color
+    return pixel[3] > 0.98 and all(
+        abs(got - want) <= tolerance for got, want in zip(pixel, color))
+
+
+def _hud_smoke_find(bitmap, shade, left, top, right, bottom, backdrop=None):
+    """Whether any pixel in a box of the panel is ``shade``."""
+    step = 1.0 / HUD_SMOKE_SCALE
+    y = top
+    while y < bottom:
+        x = left
+        while x < right:
+            if _hud_smoke_matches(
+                    _hud_smoke_pixel(bitmap, x, y), shade, backdrop):
+                return True
+            x += step
+        y += step
+    return False
+
+
+def _hud_smoke_inked(bitmap, fill, box, floor=3.0):
+    """Whether anything opaque in a box of the panel, given as ``(x, y,
+    width, height)``, reads against ``fill`` at ``floor``:1 or better.
+
+    Small text is all soft edges, so it is looked for by contrast with the
+    pill instead of by its exact colour.
+    """
+    left, top, width, height = box
+    step = 1.0 / HUD_SMOKE_SCALE
+    y = top
+    while y < top + height:
+        x = left
+        while x < left + width:
+            pixel = _hud_smoke_pixel(bitmap, x, y)
+            if pixel[3] > 0.98 and contrast_ratio(
+                    pixel[:3], fill.color) >= floor:
+                return True
+            x += step
+        y += step
+    return False
+
+
+def _hud_smoke_check_edges(name, bitmap):
+    """Nothing reaches the panel's edge, so nothing was clipped by it: not
+    the pill, not its shadow, not a face at its loudest squash."""
+    wide, high = bitmap.pixelsWide(), bitmap.pixelsHigh()
+    edge = [(column, row) for column in range(wide) for row in (0, high - 1)]
+    edge += [(column, row) for row in range(high) for column in (0, wide - 1)]
+    for column, row in edge:
+        color = bitmap.colorAtX_y_(column, row)
+        if color is not None and color.alphaComponent() > 0.02:
+            raise RuntimeError(
+                f"HUD smoke frame {name}: something is drawn on the "
+                "panel's edge")
+
+
+def _hud_smoke_check_frame(name, wave, bitmap, shades):
+    """What an overlay frame must show, read back from its pixels."""
+    def fail(what):
+        raise RuntimeError(f"HUD smoke frame {name}: {what}")
+
+    x, y, width, height = hud_pill_frame(wave.pill_width)
+    if x < 0.0 or y < 0.0 or x + width + HUD_PILL.shadow_right > HUD_W \
+            or y + height + HUD_PILL.shadow_down > HUD_H:
+        fail("the pill does not fit inside the panel")
+    middle = y + height / 2.0
+
+    # The pill: its fill, its outline and its hard shadow.
+    if not _hud_smoke_matches(
+            _hud_smoke_pixel(bitmap, x + width - 12.0, middle),
+            shades["fill"]):
+        fail("the pill is not filled in its state's colour")
+    if not _hud_smoke_matches(
+            _hud_smoke_pixel(
+                bitmap, x + width - HUD_PILL.outline / 2.0, middle),
+            shades["outline"], shades["fill"]):
+        fail("the pill has no outline")
+    if not _hud_smoke_matches(
+            _hud_smoke_pixel(
+                bitmap, x + width / 2.0 + 40.0,
+                y + height + HUD_PILL.shadow_down - 1.5),
+            shades["shadow"]):
+        fail("the pill has no hard shadow")
+
+    # The state's mark, in the level slot.
+    slot_x = x + HUD_CONTENT_LEFT
+    slot_width = hud_slot_width(wave.mode)
+    slot = (slot_x, middle - HUD_BAR_MAX / 2.0,
+            slot_x + slot_width, middle + HUD_BAR_MAX / 2.0)
+    mark = {
+        "recording": shades["level"],
+        "processing": shades["ink"],
+        "done": shades["mark"],
+        "error": shades["mark"],
+    }[wave.mode]
+    if wave.mode == "processing" and not wave.reduce_motion:
+        # The dots fade as they hop, so each is the ink at some opacity
+        # over the fill. The middle dot never drops below 45%.
+        dot = _hud_smoke_pixel(
+            bitmap, slot_x + slot_width / 2.0, middle - 0.5)
+        if dot[3] < 0.98 or _hud_smoke_matches(dot, shades["fill"]):
+            fail("the processing mark is missing")
+    elif not _hud_smoke_find(bitmap, mark, *slot):
+        fail(f"the {wave.mode} mark is missing")
+    if wave.mode == "recording":
+        # Just above where a resting bar ends: level colour there means a
+        # bar has risen. It must for a voice, and must not for silence or
+        # under Reduce Motion.
+        risen = _hud_smoke_find(
+            bitmap, shades["level"], slot[0],
+            middle - HUD_BAR_MIN / 2.0 - 3.0, slot[2],
+            middle - HUD_BAR_MIN / 2.0 - 2.0)
+        if risen != (wave.raw > 0.3 and not wave.reduce_motion):
+            fail("the level bars do not follow the level")
+    if wave.mode in ("done", "error") and not _hud_smoke_find(
+            bitmap, shades["mark_ink"],
+            slot_x + slot_width / 2.0 - 7.0, middle - 8.0,
+            slot_x + slot_width / 2.0 + 7.0, middle + 8.0):
+        fail(f"the {wave.mode} mark has no glyph")
+
+    # The headline, in the text column.
+    text_x = slot_x + slot_width + HUD_SLOT_GAP
+    if not _hud_smoke_find(
+            bitmap, shades["ink"], text_x, y + 6.0,
+            text_x + 60.0, middle + 4.0):
+        fail("the headline is missing")
+
+    # The confidence read-out beside it, whenever the state has one.
+    boxes = wave.text_boxes
+    if wave._presentation().confidence and not (
+            "confidence" in boxes and _hud_smoke_inked(
+                bitmap, shades["fill"], boxes["confidence"])):
+        fail("the confidence read-out is missing")
+
+    # The caption under it, on every line it was given. A caption too long
+    # for one line must come out as two, with words on the second: the half
+    # of "Paste unverified — check target; saved in Voice Outbox" that says
+    # what to do is on that line.
+    shown = hud_caption_text(CAPTION["text"])
+    if shown:
+        if "caption" not in boxes:
+            fail("the caption is missing")
+        left, top, wide, high = boxes["caption"]
+        if top < y + HUD_PILL.outline \
+                or top + high > y + height - HUD_PILL.outline:
+            fail("the caption does not fit inside the pill")
+        one_line = _hud_line(shown, "hud_caption", shades["ink"]).size()
+        line = one_line.height
+        if not _hud_smoke_inked(
+                bitmap, shades["fill"], (left, top, wide, line)):
+            fail("the caption is missing")
+        if one_line.width > HUD_TEXT_MAX:
+            if high < 2.0 * line - 1.0:
+                fail("a long caption was not given a second line")
+            if not _hud_smoke_inked(
+                    bitmap, shades["fill"],
+                    (left, top + line + 2.0, wide, line - 4.0)):
+                fail("the caption's second line is missing")
+
+    # The face, whichever it is. Walking in from the panel's left edge along
+    # the row through the face's middle, the first solid pixel is the outer
+    # edge of its sticker outline: ink, and left of the pill. That stretch
+    # is over nothing at all, so a renderer that stops stroking the outline
+    # leaves the head's own colour there instead.
+    from whisper_face_characters import Ellipse, INK
+
+    matrix = wave.face_matrix
+    row = hud_face_point(matrix, DESIGN_SIZE / 2.0, DESIGN_SIZE / 2.0)[1]
+    step = 1.0 / HUD_SMOKE_SCALE
+    reach = 0.0
+    while reach < x and _hud_smoke_pixel(bitmap, reach, row)[3] < 0.98:
+        reach += step
+    if reach >= x:
+        fail("the face does not lean out of the pill")
+    if not _hud_smoke_matches(
+            _hud_smoke_pixel(bitmap, reach + step, row), Shade(INK)):
+        fail("the face has no ink outline")
+    # The other half of that outline lies over the pill, and there the pill
+    # is all it has to read against. Walking back from the level slot, the
+    # pill's fill ends at the outline: ink, and ink that can be told from
+    # the fill. A dark pill fails here; the ink on it is about 1.2:1.
+    back = slot_x - step
+    ground = _hud_smoke_pixel(bitmap, back, row)
+    if not _hud_smoke_matches(ground, shades["fill"]):
+        fail("the face reaches the level slot")
+    while back > x and _hud_smoke_matches(
+            _hud_smoke_pixel(bitmap, back, row), shades["fill"]):
+        back -= step
+    if not _hud_smoke_matches(
+            _hud_smoke_pixel(bitmap, back - 2.0 * step, row), Shade(INK)):
+        fail("the face has no ink outline over the pill")
+    if contrast_ratio(INK, ground[:3]) < 3.0:
+        fail("the face's ink outline does not read against the pill")
+    if wave.face != "parrot":
+        return
+
+    # The parrot, exactly. Its head is the largest ellipse of the sticker
+    # silhouette and nothing overlaps its left side, so the ring just
+    # outside the head's edge is ink and the head's own colour starts
+    # just inside it.
+    ops = character_ops(wave.face, 0.0, 0.0, whispers=False)
+    silhouette = [op for op in ops
+                  if isinstance(op, Ellipse) and op.grow > 0.0
+                  and op.color == INK]
+    if not silhouette:
+        fail("the face has no outlined head to check")
+    head = max(silhouette, key=lambda op: op.w * op.h)
+    ring = hud_face_point(
+        matrix, head.x - head.grow / 2.0, head.y + head.h / 2.0)
+    if ring[0] >= x:
+        fail("the head's outline is not outside the pill")
+    if not _hud_smoke_matches(
+            _hud_smoke_pixel(bitmap, *ring), Shade(INK)):
+        fail("the face has no ink outline outside its head")
+    inside = hud_face_point(
+        matrix, head.x + head.w * 0.06, head.y + head.h * 0.39)
+    pixel = _hud_smoke_pixel(bitmap, *inside)
+    if pixel[3] < 0.98 or _hud_smoke_matches(pixel, Shade(INK)) \
+            or _hud_smoke_matches(pixel, shades["fill"]):
+        fail("the face is not drawn inside its outline")
+
+
 def run_native_hud_smoke_test() -> dict[str, int]:
     """Exercise Phase 1 AppKit surfaces without showing UI or reading state."""
     if not IS_MACOS:
         raise RuntimeError("native HUD smoke requires macOS")
 
+    frames_dir = os.environ.get(HUD_FRAMES_ENV, "").strip()
+    frames = Path(frames_dir) if frames_dir else None
+    if frames is not None:
+        frames.mkdir(parents=True, exist_ok=True)
     saved_caption = dict(CAPTION)
     hud = status_bar = None
+    drawn = 0
+
+    def draw(name, mode, caption, confidence, stable, level, *,
+             dark=False, contrast=False, face="parrot", reduce_motion=False):
+        nonlocal drawn
+        wave = hud.wave
+        wave.mode = mode
+        wave.face = face
+        wave.dark = dark
+        wave.increase_contrast = contrast
+        wave.reduce_motion = reduce_motion
+        # Under Reduce Motion the level is still handed over; the view is
+        # what has to ignore it.
+        wave.raw = level
+        wave.lv = level
+        wave.t = 0.0
+        wave.frame_n = 0
+        wave.life = IdleLifeDriver()
+        CAPTION.update({
+            "text": caption,
+            "confidence": confidence,
+            "stable_prefix": stable,
+        })
+        wave.syncAccessibilityState()
+        if str(wave.accessibilityValue() or "") \
+                != wave._presentation().accessibility_value:
+            raise RuntimeError(
+                f"HUD smoke frame {name}: VoiceOver is not told the state")
+        # A few frames, so the mouth has opened to the level it is given.
+        for _ in range(4):
+            bitmap = _hud_smoke_bitmap(wave)
+        data = bitmap.representationUsingType_properties_(
+            NSBitmapImageFileTypePNG, {})
+        if data is None or data.length() == 0:
+            raise RuntimeError(f"could not render {name} HUD smoke frame")
+        if frames is not None:
+            (frames / f"{name}.png").write_bytes(bytes(data))
+        _hud_smoke_check_edges(name, bitmap)
+        _hud_smoke_check_frame(
+            name, wave, bitmap, hud_pill_shades(mode, dark, contrast))
+        drawn += 1
+
     try:
         NSApplication.sharedApplication()
         hud = HUD.alloc().init()
-        for mode, confidence, stable in (
-                ("recording", 0.91, True),
-                ("processing", 0.61, True)):
-            hud.wave.mode = mode
-            hud.wave.raw = 0.72
-            hud.wave.reduce_motion = False
-            CAPTION.update({
-                "text": "Local smoke transcript",
-                "confidence": confidence,
-                "stable_prefix": stable,
-            })
-            hud.wave.syncAccessibilityState()
-            hud.wave.setNeedsDisplay_(True)
-            hud.wave.displayIfNeeded()
-            bounds = hud.wave.bounds()
-            bitmap = hud.wave.bitmapImageRepForCachingDisplayInRect_(bounds)
-            hud.wave.cacheDisplayInRect_toBitmapImageRep_(bounds, bitmap)
-            data = bitmap.representationUsingType_properties_(
-                NSBitmapImageFileTypePNG, {})
-            if data is None or data.length() == 0:
-                raise RuntimeError(f"could not render {mode} HUD smoke frame")
+        bounds = hud.wave.bounds()
+        if (bounds.size.width, bounds.size.height) != (HUD_W, HUD_H):
+            raise RuntimeError("the HUD view does not fill its panel")
+
+        # The view as the app leaves it: appearance, contrast and face all
+        # asked of the system and the saved preference.
+        hud.wave.raw = 0.72
+        CAPTION.update({
+            "text": "Local smoke transcript",
+            "confidence": 0.91,
+            "stable_prefix": True,
+        })
+        hud.wave.syncAccessibilityState()
+        hud.wave.setNeedsDisplay_(True)
+        hud.wave.displayIfNeeded()
+        _hud_smoke_bitmap(hud.wave)
+
+        for dark in (False, True):
+            for contrast in (False, True):
+                suffix = ("dark" if dark else "light") + (
+                    "-contrast" if contrast else "")
+                for state in HUD_SMOKE_STATES:
+                    draw(f"state-{state[0]}-{suffix}", *state[1:],
+                         dark=dark, contrast=contrast)
+            # Reduce Motion: no level, no squash, still every part drawn.
+            suffix = "dark" if dark else "light"
+            for state in HUD_SMOKE_STATES[:1] + HUD_SMOKE_STATES[4:5]:
+                draw(f"still-{state[0]}-{suffix}", *state[1:],
+                     dark=dark, reduce_motion=True)
+            # Every face, at the loudest level it can be squashed by: none
+            # of them may reach the edge of the panel.
+            for face in FACE_CHOICES:
+                draw(f"face-{face}-{suffix}", "recording", "Listening",
+                     None, False, 1.0, dark=dark, face=face)
 
         status_bar = StatusBar.alloc().init()
         status_bar.setState_("rec")
         status_bar.setMouthLevel_(0.5)
         status_bar.setMouthLevel_(0.0)
         status_bar.setState_("proc")
-        return {"states": 2, "motions": len(MOTION_SPECS)}
+        return {"states": len(HUD_SMOKE_STATES), "frames": drawn,
+                "motions": len(MOTION_SPECS)}
+    except Exception as error:
+        # The caller reports only that the smoke test failed. Say which
+        # frame and which check, so the gate's log is enough to act on.
+        print(f"native HUD smoke: {error}", file=sys.stderr)
+        raise
     finally:
         CAPTION.clear()
         CAPTION.update(saved_caption)

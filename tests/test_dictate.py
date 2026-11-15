@@ -2990,6 +2990,449 @@ class FacePreferenceTests(unittest.TestCase):
             ns["hud_level_step"](0.9, 0.7, "error", False), 0.7)
 
 
+class RecordingOverlayTests(unittest.TestCase):
+    """The recording pill's geometry, colour and copy, without AppKit.
+
+    What it looks like is checked by ``run_native_hud_smoke_test`` from the
+    pixels it draws; these hold the numbers that picture is built from, on
+    every platform the tests run on.
+    """
+
+    CONSTANTS = {
+        "HUD_W", "HUD_H", "HUD_BOTTOM_MARGIN", "HUD_PILL", "HUD_PILL_TOP",
+        "HUD_FACE_SIZE", "HUD_FACE_TILT", "HUD_FACE_OVERHANG",
+        "HUD_FACE_LIFT", "HUD_CONTENT_LEFT", "HUD_LEVEL_BARS",
+        "HUD_BAR_WIDTH", "HUD_BAR_GAP", "HUD_BAR_MIN", "HUD_BAR_MAX",
+        "HUD_SLOT_WIDTH", "HUD_SLOT_GAP", "HUD_TEXT_MIN", "HUD_TEXT_MAX",
+        "HUD_PADDING_RIGHT", "HUD_DOT_SIZE", "HUD_DOT_GAP",
+        "HUD_MARK_SIZE", "HUD_CAPTION_LIMIT",
+        "HUD_FRAMES_ENV",
+    }
+
+    def _overlay(self):
+        import math
+
+        import whisper_face_theme as theme
+        from whisper_face_characters import DESIGN_SIZE
+
+        return load_definitions(
+            "hud_slot_width", "hud_pill_width", "hud_pill_frame", "hud_face_matrix",
+            "hud_face_point", "hud_bar_heights",
+            "hud_pill_shades", "hud_caption_text",
+            assignments=self.CONSTANTS,
+            extra={
+                "math": math,
+                "DESIGN_SIZE": DESIGN_SIZE,
+                "BrandShape": theme.BrandShape,
+                "Shade": theme.Shade,
+                "LIGHT_PALETTE": theme.LIGHT_PALETTE,
+                "color_token": theme.color_token,
+                "palette_for_appearance": theme.palette_for_appearance,
+            })
+
+    def _class(self, name):
+        return next(
+            node for node in TREE.body
+            if isinstance(node, ast.ClassDef) and node.name == name)
+
+    def test_the_pill_is_only_as_wide_as_what_it_says(self):
+        ns = self._overlay()
+        width = ns["hud_pill_width"]
+        lead = (ns["HUD_CONTENT_LEFT"] + ns["HUD_SLOT_WIDTH"]
+                + ns["HUD_SLOT_GAP"] + ns["HUD_PADDING_RIGHT"])
+
+        self.assertEqual(width(150.0), lead + 150.0)
+        self.assertEqual(width(0.0), lead + ns["HUD_TEXT_MIN"])
+        self.assertEqual(width(5000.0), lead + ns["HUD_TEXT_MAX"])
+        self.assertLess(width(0.0), width(5000.0))
+        # Each state's mark has its own width, and the text follows it at
+        # the same gap. Listening's bars are the widest, so the panel only
+        # has to be sized for a listening pill.
+        slot = ns["hud_slot_width"]
+        self.assertEqual(slot("recording"), ns["HUD_SLOT_WIDTH"])
+        self.assertEqual(slot("processing"), 3 * 7.0 + 2 * 6.0)
+        self.assertEqual(slot("done"), ns["HUD_MARK_SIZE"])
+        self.assertEqual(slot("error"), ns["HUD_MARK_SIZE"])
+        for mode in ("processing", "done", "error"):
+            self.assertEqual(
+                width(150.0, "recording") - width(150.0, mode),
+                slot("recording") - slot(mode))
+            self.assertLess(width(5000.0, mode), width(5000.0))
+
+    def test_the_pill_and_its_shadow_stay_inside_the_panel(self):
+        ns = self._overlay()
+        pill = ns["HUD_PILL"]
+
+        for text in (0.0, 140.0, 5000.0):
+            x, y, width, height = ns["hud_pill_frame"](
+                ns["hud_pill_width"](text))
+            self.assertEqual(height, 64.0)
+            self.assertGreater(x - ns["HUD_FACE_OVERHANG"], 0.0)
+            self.assertLess(x + width + pill.shadow_right, ns["HUD_W"])
+            self.assertGreater(y, 0.0)
+            self.assertLess(y + height + pill.shadow_down, ns["HUD_H"])
+            # The face, the body and the shadow are centred as one object.
+            left = x - ns["HUD_FACE_OVERHANG"]
+            right = ns["HUD_W"] - (x + width + pill.shadow_right)
+            self.assertAlmostEqual(left, right)
+        # A capsule: the corners are half the height, and the pill wears the
+        # outline and hard shadow of the speech bubble it is a sibling of.
+        self.assertEqual(pill.radius, pill.height / 2.0)
+        from whisper_face_theme import BRAND_SHAPES
+
+        bubble = BRAND_SHAPES["bubble"]
+        self.assertEqual(
+            (pill.outline, pill.shadow_right, pill.shadow_down),
+            (bubble.outline, bubble.shadow_right, bubble.shadow_down))
+
+    def test_the_springs_never_push_the_pill_past_the_panel(self):
+        ns = self._overlay()
+        pill = ns["HUD_PILL"]
+        # The pop and the wobble scale the whole view about its middle, and
+        # the panel clips what leaves it. The widest pill, with the face
+        # hanging off one end and the shadow off the other, must still be
+        # inside at the widest either spring starts from.
+        widest = (ns["HUD_FACE_OVERHANG"] + ns["hud_pill_width"](5000.0)
+                  + pill.shadow_right)
+        tallest = 2.0 * max(
+            ns["HUD_H"] / 2.0 - 4.0,
+            ns["HUD_PILL_TOP"] + pill.height + pill.shadow_down
+            - ns["HUD_H"] / 2.0)
+        for name in ("pop", "wobble"):
+            spec = MOTION_SPECS[name]
+            with self.subTest(motion=name):
+                self.assertLess(
+                    widest * max(1.0, spec.squash_x), ns["HUD_W"] - 2.0)
+                self.assertLessEqual(
+                    tallest * max(1.0, spec.squash_y), ns["HUD_H"])
+        self.assertGreater(MOTION_SPECS["wobble"].squash_x, 1.0)
+
+    def test_the_face_leans_out_of_the_pill_and_is_never_clipped(self):
+        ns = self._overlay()
+        matrix, point = ns["hud_face_matrix"], ns["hud_face_point"]
+
+        # Larger than the pill is tall, and leaning.
+        self.assertGreater(ns["HUD_FACE_SIZE"], ns["HUD_PILL"].height)
+        self.assertNotEqual(ns["HUD_FACE_TILT"], 0.0)
+
+        # The loudest squash the theme allows, plus the breath on top.
+        loud_x, loud_y = jelly_face_scale(1.0)
+        for text in (0.0, 5000.0):
+            x, y, _width, height = ns["hud_pill_frame"](
+                ns["hud_pill_width"](text))
+            for scale_x, scale_y in ((1.0, 1.0),
+                                     (loud_x * 1.003, loud_y * 1.006)):
+                face = matrix(x, y, scale_x, scale_y)
+                corners = [point(face, design_x, design_y)
+                           for design_x in (0.0, 256.0)
+                           for design_y in (0.0, 256.0)]
+                self.assertGreater(min(c[0] for c in corners), 4.0)
+                self.assertGreater(min(c[1] for c in corners), 4.0)
+                self.assertLess(
+                    max(c[1] for c in corners), ns["HUD_H"] - 4.0)
+                # Out of the left end and above the top of the pill.
+                self.assertLess(min(c[0] for c in corners), x)
+                self.assertLess(min(c[1] for c in corners), y)
+                # And never over the level slot.
+                self.assertLess(
+                    max(c[0] for c in corners),
+                    x + ns["HUD_CONTENT_LEFT"] + 2.0)
+            # The middle of the face rides a little above the pill's.
+            middle = point(matrix(x, y), 128.0, 128.0)
+            self.assertAlmostEqual(
+                middle[1], y + height / 2.0 - ns["HUD_FACE_LIFT"])
+            # Its crown leans away from the pill: left of its chin.
+            crown = point(matrix(x, y), 128.0, 0.0)
+            chin = point(matrix(x, y), 128.0, 256.0)
+            self.assertLess(crown[0], chin[0])
+
+    def test_level_bars_rest_as_dots_and_follow_the_level(self):
+        ns = self._overlay()
+        bars = ns["hud_bar_heights"]
+
+        self.assertEqual(len(bars(0.5, 3)), ns["HUD_LEVEL_BARS"])
+        self.assertEqual(set(bars(0.0, 9)), {ns["HUD_BAR_MIN"]})
+        for bad in (float("nan"), float("inf"), None, -3.0):
+            self.assertEqual(set(bars(bad, 9)), {ns["HUD_BAR_MIN"]}, bad)
+        for frame in range(0, 90, 7):
+            for level in (0.05, 0.4, 1.0, 7.0):
+                heights = bars(level, frame)
+                self.assertGreaterEqual(min(heights), ns["HUD_BAR_MIN"])
+                self.assertLessEqual(max(heights), ns["HUD_BAR_MAX"])
+        # Louder is taller, the row moves, and it is not one flat block.
+        self.assertGreater(sum(bars(0.8, 5)), sum(bars(0.1, 5)))
+        self.assertNotEqual(bars(0.6, 5), bars(0.6, 12))
+        self.assertGreater(len(set(bars(0.6, 5))), 3)
+        # The row fits the slot it is drawn in.
+        self.assertEqual(ns["HUD_SLOT_WIDTH"], 7 * 5.0 + 6 * 3.0)
+        self.assertLess(ns["HUD_BAR_MAX"], ns["HUD_PILL"].height - 16.0)
+
+    def test_every_state_reads_in_both_appearances(self):
+        from whisper_face_theme import (
+            Shade,
+            color_token,
+            contrast_ratio,
+        )
+
+        ns = self._overlay()
+        shades = ns["hud_pill_shades"]
+        for mode in ("recording", "processing", "done", "error"):
+            for dark in (False, True):
+                for contrast in (False, True):
+                    with self.subTest(
+                            mode=mode, dark=dark, contrast=contrast):
+                        got = shades(mode, dark, contrast)
+                        fill = got["fill"].color
+                        self.assertEqual(got["fill"].alpha, 1.0)
+                        # Headline, caption and confidence are text.
+                        self.assertGreaterEqual(
+                            contrast_ratio(got["ink"].color, fill), 4.5)
+                        self.assertGreaterEqual(
+                            contrast_ratio(got["soft"].color, fill), 4.5)
+                        # The outline is an edge against the pill's fill.
+                        self.assertGreaterEqual(
+                            contrast_ratio(got["outline"].over(fill), fill),
+                            3.0)
+                        # The hard shadow is the dark ink, always.
+                        self.assertEqual(
+                            got["shadow"], color_token("ink_outline", dark))
+                        # The mark's glyph reads on its porcelain disc.
+                        self.assertGreaterEqual(
+                            contrast_ratio(got["mark_ink"].color,
+                                           got["mark"].color), 4.5)
+        for dark in (False, True):
+            palette = DARK_PALETTE if dark else LIGHT_PALETTE
+            listening = shades("recording", dark)
+            working = shades("processing", dark)
+            # Porcelain in both appearances: the pill is a sticker, not a
+            # piece of window chrome, and it does not go dark with the Mac.
+            self.assertEqual(listening["fill"], Shade(LIGHT_PALETTE.surface))
+            self.assertEqual(working["fill"], listening["fill"])
+            self.assertEqual(listening["ink"], Shade(LIGHT_PALETTE.ink))
+            self.assertEqual(listening["soft"], Shade(LIGHT_PALETTE.ink_soft))
+            self.assertEqual(listening["level"],
+                             color_token("switch_on", dark))
+            # On porcelain the bars take the light appearance's stronger
+            # green under Increase Contrast, whatever the Mac is set to.
+            self.assertEqual(shades("recording", dark, True)["level"],
+                             color_token("switch_on", False, True))
+            self.assertGreaterEqual(contrast_ratio(
+                shades("recording", dark, True)["level"].color,
+                listening["fill"].color), 4.5)
+            # The transcript is dimmed while it is tidied; still text.
+            self.assertGreaterEqual(contrast_ratio(
+                Shade(working["ink"].color, 0.75).over(
+                    working["fill"].color), working["fill"].color), 4.5)
+            self.assertEqual(shades("done", dark)["fill"],
+                             color_token("stage_emerald", dark))
+            self.assertEqual(shades("error", dark)["fill"],
+                             Shade(palette.error))
+            # Never amber: that is the system's microphone indicator.
+            for mode in ("recording", "processing", "done", "error"):
+                for shade in shades(mode, dark).values():
+                    self.assertNotEqual(shade.color, palette.accent)
+
+    def test_the_face_never_sits_on_a_dark_pill(self):
+        from whisper_face_characters import INK
+        from whisper_face_theme import color_token, contrast_ratio
+
+        ns = self._overlay()
+        shades = ns["hud_pill_shades"]
+
+        # The face's sticker outline is ink, and the half of it that lies
+        # over the pill has nothing else to read against. On the dark
+        # surface colour it measures about 1.2:1, which is why no state in
+        # either appearance may fill the pill with it.
+        self.assertLess(contrast_ratio(INK, DARK_PALETTE.surface), 1.5)
+        for mode in ("recording", "processing", "done", "error"):
+            for dark in (False, True):
+                for contrast in (False, True):
+                    with self.subTest(
+                            mode=mode, dark=dark, contrast=contrast):
+                        got = shades(mode, dark, contrast)
+                        self.assertGreaterEqual(
+                            contrast_ratio(INK, got["fill"].color), 4.5)
+                        # A bright fill keeps the dark ink for its outline
+                        # and its hard shadow, in both appearances; Increase
+                        # Contrast may only make that ink darker.
+                        self.assertEqual(got["outline"].alpha, 1.0)
+                        self.assertGreaterEqual(contrast_ratio(
+                            got["outline"].color, got["fill"].color), 4.5)
+                        self.assertEqual(
+                            got["outline"],
+                            color_token("ink_outline", dark,
+                                        contrast and not dark))
+                        self.assertEqual(
+                            got["shadow"], color_token("ink_outline", dark))
+        # One edge rule for the whole pill: nothing computes an opacity for
+        # a light outline here. Controls with a dark fill get theirs from
+        # the window's shared helpers, not from the overlay.
+        self.assertFalse(any(
+            isinstance(node, ast.FunctionDef)
+            and node.name == "hud_edge_alpha" for node in TREE.body))
+
+    def test_caption_keeps_its_newest_words(self):
+        ns = self._overlay()
+        text = ns["hud_caption_text"]
+
+        self.assertEqual(text("Listening"), "Speak naturally")
+        self.assertEqual(text("  Reply mode "), "Reply mode")
+        self.assertEqual(text(""), "")
+        self.assertEqual(text(None), "")
+        short = "x" * ns["HUD_CAPTION_LIMIT"]
+        self.assertEqual(text(short), short)
+        long = "old words " + "y" * 80 + " newest words"
+        shown = text(long)
+        self.assertEqual(len(shown), ns["HUD_CAPTION_LIMIT"] - 1)
+        self.assertTrue(shown.startswith("…"))
+        self.assertTrue(shown.endswith("newest words"))
+
+    def test_state_changes_wobble_once_and_reduce_motion_stops_them(self):
+        wobbles, mouths, fed = [], [], []
+        ns = load_definitions(
+            "HUD",
+            extra={
+                "NSObject": object,
+                "LEVELS": [0.4],
+                "STATUS": {"bar": SimpleNamespace(
+                    setMouthLevel_=lambda level: mouths.append(level),
+                    gui=SimpleNamespace(
+                        feed_level=lambda level, mode: fed.append(
+                            (level, mode))))},
+                "_add_jelly_animation":
+                    lambda layer, name: wobbles.append(name),
+            })
+        hud = ns["HUD"].__new__(ns["HUD"])
+        visible = [True]
+        hud.panel = SimpleNamespace(isVisible=lambda: visible[0])
+        hud.wave = SimpleNamespace(
+            mode="recording", reduce_motion=False, raw=0.0,
+            pill_width=300.0,
+            syncAccessibilityState=lambda: False,
+            setNeedsDisplay_=lambda flag: None,
+            layer=lambda: object())
+        hud.shown_mode = None
+
+        hud.tick_(None)                  # appearing is the pop's moment
+        hud.tick_(None)
+        self.assertEqual(wobbles, [])
+        self.assertEqual(hud.wave.raw, 0.4)
+        # The same tick still feeds the menu-bar mouth and the window face.
+        self.assertEqual(mouths, [0.4, 0.4])
+        self.assertEqual(fed, [(0.4, "recording"), (0.4, "recording")])
+        hud.wave.mode = "processing"     # the key was let go
+        hud.tick_(None)
+        hud.tick_(None)
+        self.assertEqual(wobbles, ["wobble"])
+        hud.wave.mode = "error"
+        hud.tick_(None)
+        self.assertEqual(wobbles, ["wobble", "wobble"])
+
+        visible[0] = False               # dismissed, then shown again
+        self.assertEqual(hud.wave.pill_width, 300.0)
+        self.assertEqual(fed[-1], (0.4, "error"))
+        ticks = len(fed)
+        hud.tick_(None)
+        self.assertEqual(len(fed), ticks)     # hidden: nothing is fed
+        # The next showing starts at its own width instead of easing from
+        # the last one's.
+        self.assertIsNone(hud.wave.pill_width)
+        visible[0] = True
+        hud.wave.mode = "recording"
+        hud.tick_(None)
+        self.assertEqual(wobbles, ["wobble", "wobble"])
+
+        hud.wave.reduce_motion = True
+        hud.wave.mode = "processing"
+        hud.tick_(None)
+        self.assertEqual(wobbles, ["wobble", "wobble"])
+
+    def test_the_panel_never_takes_focus_or_clicks(self):
+        # Behaviour the new look must not touch: a non-activating,
+        # click-through panel on every Space and over full-screen apps,
+        # with no system shadow or background of its own.
+        init = next(
+            node for node in self._class("HUD").body
+            if isinstance(node, ast.FunctionDef) and node.name == "init")
+        source = ast.unparse(init)
+        for needed in (
+                "NSWindowStyleMaskBorderless "
+                "| NSWindowStyleMaskNonactivatingPanel",
+                "setLevel_(NSStatusWindowLevel)",
+                "setOpaque_(False)",
+                "setBackgroundColor_(NSColor.clearColor())",
+                "setHasShadow_(False)",
+                "setIgnoresMouseEvents_(True)",
+                "setHidesOnDeactivate_(False)",
+                "NSWindowCollectionBehaviorCanJoinAllSpaces "
+                "| NSWindowCollectionBehaviorFullScreenAuxiliary "
+                "| NSWindowCollectionBehaviorStationary",
+                "NSMakeRect(0, 0, HUD_W, HUD_H)",
+        ):
+            self.assertIn(needed, source)
+        # It keeps its place: centred, a fixed margin above the Dock.
+        show = next(
+            node for node in self._class("HUD").body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "showMode_")
+        placed = ast.unparse(show)
+        self.assertIn("(screen.size.width - HUD_W) / 2.0", placed)
+        self.assertIn("screen.origin.y + HUD_BOTTOM_MARGIN", placed)
+        self.assertEqual(self._overlay()["HUD_BOTTOM_MARGIN"], 80.0)
+
+    def test_the_face_is_drawn_without_shadow_or_speech_puffs(self):
+        # The pill is the face's outlined container and the bars beside it
+        # show the level, so the face brings neither of its own.
+        draw = next(
+            node for node in self._class("WaveView").body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_draw_character")
+        calls = [
+            node for node in ast.walk(draw)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", "") == "character_ops"]
+        self.assertEqual(len(calls), 1)
+        keywords = {
+            keyword.arg: ast.unparse(keyword.value)
+            for keyword in calls[0].keywords}
+        self.assertEqual(keywords.get("whispers"), "False")
+        self.assertNotIn("shadow", keywords)
+        self.assertIn("gaze", keywords)
+
+    def test_the_overlay_is_drawn_in_srgb_like_the_faces(self):
+        # Only the overlay's own code: the rest of dictate.py may colour
+        # things as it likes.
+        overlay = "\n".join(
+            ast.unparse(node) for node in TREE.body
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef))
+            and (node.name in ("WaveView", "HUD", "_srgb")
+                 or node.name.startswith(("hud_", "_hud_"))))
+        self.assertIn("class WaveView", overlay)
+        self.assertNotIn("colorWithCalibratedRed", overlay)
+        self.assertIn("colorWithSRGBRed_green_blue_alpha_", overlay)
+
+    def test_smoke_covers_every_state_and_the_probe_can_ask_for_frames(self):
+        ns = load_definitions(
+            assignments={"HUD_SMOKE_STATES", "HUD_FRAMES_ENV"})
+        states = ns["HUD_SMOKE_STATES"]
+
+        self.assertEqual(
+            {state[1] for state in states},
+            {"recording", "processing", "done", "error"})
+        names = [state[0] for state in states]
+        self.assertEqual(len(names), len(set(names)))
+        # Listening with and without stable words, a voice mode, a caption
+        # that has to wrap, working, the uncertain read-out, done, error.
+        self.assertEqual(names, [
+            "listening", "mode", "heard", "heard-long", "working",
+            "uncertain", "done", "error"])
+        self.assertTrue(any(len(state[2]) > 72 for state in states))
+        probe = (ROOT / "scripts" / "window_render_probe.py").read_text(
+            encoding="utf-8")
+        self.assertIn(f'HUD_FRAMES_ENV = "{ns["HUD_FRAMES_ENV"]}"', probe)
+        self.assertIn('"--native-gui-smoke-test"', probe)
+
+
 class SelectiveRelistenPreferenceTests(unittest.TestCase):
     def _namespace(self, *, is_macos=True, evidence_ready=True):
         calls = []
@@ -3171,7 +3614,7 @@ class WhisperFaceThemeTests(unittest.TestCase):
             SURFACE_SPECS["work"].border_width,
         )
 
-    HUD_TYPE_ROLES = {"hud_eyebrow", "hud_confidence", "hud_caption"}
+    HUD_TYPE_ROLES = {"hud_headline", "hud_confidence", "hud_caption"}
     # Size, weight, rounded, tabular for every window role of the new look.
     WINDOW_TYPE_ROLES = {
         "page_title": (17.0, 0.40, True, False),
@@ -3193,12 +3636,20 @@ class WhisperFaceThemeTests(unittest.TestCase):
             set(TYPE_SPECS),
             self.HUD_TYPE_ROLES | set(self.WINDOW_TYPE_ROLES),
         )
-        self.assertLess(TYPE_SPECS["hud_eyebrow"].size, 10.0)
-        self.assertLessEqual(TYPE_SPECS["hud_caption"].size, 12.0)
+        # The pill has no small capitals label any more: its one heavy line
+        # is the state, a step above the caption in size and in weight.
+        headline = TYPE_SPECS["hud_headline"]
+        caption = TYPE_SPECS["hud_caption"]
+        self.assertEqual((headline.size, headline.weight), (16.0, 0.56))
+        self.assertGreater(headline.size, caption.size)
+        self.assertGreater(headline.weight, caption.weight)
+        self.assertLessEqual(caption.size, 12.0)
         for role in self.HUD_TYPE_ROLES:
             # The HUD renderer draws these rounded without asking.
             self.assertTrue(TYPE_SPECS[role].rounded, role)
             self.assertFalse(TYPE_SPECS[role].tabular, role)
+            # Nothing a person reads on the pill goes under 10 points.
+            self.assertGreaterEqual(TYPE_SPECS[role].size, 10.0, role)
 
     def test_window_type_roles_keep_rounded_for_the_brand_voice(self):
         for role, expected in self.WINDOW_TYPE_ROLES.items():
@@ -3227,16 +3678,33 @@ class WhisperFaceThemeTests(unittest.TestCase):
             "error", "I couldn't understand that — try again", 0.61,
             stable_prefix=True)
 
-        self.assertEqual(listening.eyebrow, "HEARD YOU")
+        # The same four states and the same words as before the pill; they
+        # are now the pill's headline, so they are set as a sentence instead
+        # of in capitals.
+        self.assertEqual(listening.headline, "Heard you")
         self.assertEqual(listening.confidence, "Recognition 91%")
         self.assertIn("hello world", listening.accessibility_value)
-        self.assertEqual(processing.eyebrow, "TIDYING UP")
+        self.assertEqual(processing.headline, "Tidying up…")
         self.assertEqual(processing.accent, "accent")
-        self.assertEqual(error.eyebrow, "TRY AGAIN")
+        self.assertEqual(error.headline, "Try again")
         self.assertEqual(error.confidence, "")
         self.assertEqual(error.accent, "error")
         self.assertIn(
             "Dictation needs another try", error.accessibility_value)
+        self.assertEqual(
+            hud_presentation("recording", "Listening").headline,
+            "Listening…")
+        for presentation in (listening, processing, error):
+            self.assertNotEqual(
+                presentation.headline, presentation.headline.upper())
+
+    def test_hud_copy_has_a_done_state_that_says_what_happened(self):
+        done = hud_presentation("done", "Typed 9 words", 0.93)
+
+        self.assertEqual(done.headline, "Done")
+        self.assertEqual(done.confidence, "")
+        self.assertEqual(
+            done.accessibility_value, "Dictation done. Typed 9 words")
 
     def test_reduce_motion_disables_whole_head_squash(self):
         self.assertEqual(
