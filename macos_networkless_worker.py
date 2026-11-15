@@ -160,10 +160,11 @@ class MacOSNetworklessWorker:
         self._process = process
         self._socket_path = socket_path
         try:
-            # The worker binds its socket and only then makes it private, so
-            # the path can be seen a moment before its mode is final. Ready
-            # means present and private; until then it is still starting,
-            # and one that never gets there is refused at the deadline.
+            # The worker binds its socket, listens, and only then makes it
+            # private, so the path can be seen a moment before its mode is
+            # final. Ready means present and private, which is also when it
+            # can be connected to; until then it is still starting, and one
+            # that never gets there is refused at the deadline.
             while not self._socket_is_private(socket_path):
                 if process.poll() is not None:
                     raise NetworklessWorkerUnavailable(

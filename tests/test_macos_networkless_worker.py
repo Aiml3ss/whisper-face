@@ -63,10 +63,16 @@ class _WorkerStandIn:
     """Stands in for the worker process and binds its socket the way the
     real one does: present first, private a moment later, or never."""
 
-    def __init__(self, command, private_after):
+    def __init__(self, command, private_after, endpoint="socket"):
         self.path = command[-2]
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.listener.bind(self.path)
+        if endpoint == "file":
+            # Private, and not a socket at all.
+            Path(self.path).write_bytes(b"")
+        else:
+            self.listener.bind(self.path)
+        if endpoint == "open directory":
+            os.chmod(os.path.dirname(self.path), 0o755)
         os.chmod(self.path, 0o755)
         self.timer = None
         if private_after is not None:
@@ -99,9 +105,9 @@ class MacOSNetworklessWorkerStartupTests(unittest.TestCase):
     caller can see the socket before its mode is final. Under load that
     used to fail a start about once in two hundred."""
 
-    def start(self, *, private_after, timeout):
+    def start(self, *, private_after, timeout, endpoint="socket"):
         def launch(command, **_options):
-            return _WorkerStandIn(command, private_after)
+            return _WorkerStandIn(command, private_after, endpoint)
 
         worker = MacOSNetworklessWorker(timeout=timeout)
         self.addCleanup(worker.close)
@@ -118,6 +124,25 @@ class MacOSNetworklessWorkerStartupTests(unittest.TestCase):
     def test_a_socket_that_never_becomes_private_is_refused(self):
         with self.assertRaises(NetworklessWorkerUnavailable):
             self.start(private_after=None, timeout=0.2)
+
+    # A private mode alone is not a private endpoint: whose it is, what it
+    # is, and the directory it sits in are checked once it shows.
+
+    def test_a_private_socket_in_an_open_directory_is_refused(self):
+        with self.assertRaises(NetworklessWorkerUnavailable):
+            self.start(private_after=0.0, timeout=1.0,
+                       endpoint="open directory")
+
+    def test_a_private_file_that_is_not_a_socket_is_refused(self):
+        with self.assertRaises(NetworklessWorkerUnavailable):
+            self.start(private_after=0.0, timeout=1.0, endpoint="file")
+
+    def test_a_private_socket_owned_by_someone_else_is_refused(self):
+        someone_else = os.geteuid() + 1
+        with patch.object(
+                worker_module.os, "geteuid", lambda: someone_else):
+            with self.assertRaises(NetworklessWorkerUnavailable):
+                self.start(private_after=0.0, timeout=1.0)
 
 
 @unittest.skipUnless(sys.platform == "darwin", "requires macOS")

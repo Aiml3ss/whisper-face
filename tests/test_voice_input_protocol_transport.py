@@ -8,12 +8,14 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from voice_input_protocol import VoiceInputProtocolSession  # noqa: E402
+import voice_input_protocol_transport as transport_module  # noqa: E402
 from voice_input_protocol_transport import (  # noqa: E402
     MAX_FRAME_BYTES,
     ProtocolTransportClosed,
@@ -44,6 +46,31 @@ class VoiceInputProtocolTransportTests(unittest.TestCase):
         )
         worker.start()
         return worker, outcome
+
+    def test_a_socket_is_listening_by_the_time_it_is_private(self):
+        # A caller waits for the private mode and then connects at once.
+        # Made private before it listened, the socket refused that caller.
+        listening = []
+        make_private = os.chmod
+
+        def chmod(path, mode):
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                probe.connect(os.fspath(path))
+                listening.append(True)
+            except OSError:
+                listening.append(False)
+            finally:
+                probe.close()
+            make_private(path, mode)
+
+        server = UnixProtocolServer(self.path, lambda message: message)
+        self.addCleanup(server.close)
+        with mock.patch.object(transport_module.os, "chmod", chmod):
+            server.start()
+
+        self.assertEqual(listening, [True])
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
 
     def test_canonical_round_trip_is_sequential_and_socket_is_private(self):
         received = []
