@@ -234,6 +234,16 @@ The native GUI smoke command is a macOS-only gate. It constructs and tears
 down the AppKit window, menu-bar face, and HUD without showing or activating
 them, querying permissions, loading user files, starting runtime services, or
 persisting defaults.
+It has two parts. The construction check builds those three surfaces and draws
+each once; `setup.sh` runs that part alone, as
+`--native-gui-smoke-test --construction-only`, and stops it after 60 seconds.
+The release gate runs the command without the flag: the construction check
+first, held to its counted list of drawings and to twice the processor time
+the import before it took, and then the whole walk of the look, the keyboard,
+and what VoiceOver reads. The walk measures nothing that differs from one Mac
+to the next, so an install does not pay for it.
+`tests/test_installers.py` keeps the installer's flag and bound and the gate's
+order in step.
 `tests/test_whisper_face_gui.py` validates the same static contract on Windows;
 Windows setup must never execute AppKit.
 Headless Mac endpoints use `./setup.sh --server-only --verify`; that mode skips
@@ -243,7 +253,8 @@ desired Ollama plist into a temporary file and requires an exact installed
 plist match, a strict SHA-256 last-load receipt, a running launchd agent, and
 equality between its PID and the unique listener PID. It does not reload,
 kickstart, rewrite, or repair the installation. Release CI always runs the
-separately bounded native GUI smoke on a windowed macOS runner.
+separately bounded native GUI smoke on a windowed macOS runner, the whole
+command under a 120-second bound.
 
 Windows verification requires a strict private digest receipt for the generated
 launcher, binds that launcher to the current checkout and locked `dictate.py`

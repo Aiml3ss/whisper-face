@@ -14,7 +14,7 @@ confidence: high
 
 ## Definition
 
-`whisper_face_gui.py` (15,617 lines, AppKit, no browser runtime) is the
+`whisper_face_gui.py` (16,709 lines, AppKit, no browser runtime) is the
 Mac app window opened from [[menu-bar]]'s first row. Underneath, the view
 model still has three sections and three settings panes:
 
@@ -44,7 +44,8 @@ Diagnostics) and the original panes (Modes, Personalize, Privacy) went in
   never amber, which would read as the system's microphone indicator).
   Then **Home**, a small "Settings" group label, and **Personalize**,
   **Controls**, **Privacy** and **Advanced**, each a 32 pt row with an SF
-  Symbol. `BUILD {version}` sits at the foot. Pressing the face chip only
+  Symbol; the row that is showing has the selection fill and a bold
+  label. `Build {version}` sits at the foot. Pressing the face chip only
   wobbles it.
 - **Title strip**: the page's name, read by VoiceOver as a heading, over a
   content column of up to 720 pt centred in the rest of the window. Its
@@ -53,7 +54,10 @@ Diagnostics) and the original panes (Modes, Personalize, Privacy) went in
 - **Notices** sit in a band at the foot of the column: a Review Setup
   notice clears by itself once the issue it describes is no longer
   reported; other error notices stay until the next action, and
-  success/info notices last about 8 s.
+  success/info notices last about 8 s. A page that scrolls runs to the
+  window's bottom edge while no notice is showing and stops just above
+  one that is; Home and setup always keep clear of the band, so they do
+  not move when a notice comes or goes.
 
 ## The pages
 
@@ -65,14 +69,17 @@ Diagnostics) and the original panes (Modes, Personalize, Privacy) went in
   one secondary is Copy & Dismiss while the Voice Outbox holds text,
   otherwise Review Setup when a review is due. When both are due, Review
   Setup moves to a row at the top of the Dictation group below, so no
-  action is out of reach. Under the stage, three tilted stat stickers (Last dictation,
-  Words today, Time saved), then one group of rows headed **Dictation**
+  action is out of reach. Under the stage, three tilted stat stickers,
+  one number each (Last dictation, Words today, Time saved), then one
+  group of rows headed **Dictation**
   with the active engine beside the header: the last result's summary,
   mode and engine with **Inspect Evidence**, the retained-audio line with
   Play Span and Clear ([[acoustic-personalization]]), and the Voice
   Outbox line.
-- **Personalize** = the face picker — all sixteen faces in one grid of
-  chips, the chosen one amber — then six rows led by the dictation
+- **Personalize** = the face picker — all sixteen faces in a grid that
+  fills its group, eight to a row on chips of up to 78 pt, the chosen one
+  amber with its hard shadow and named beside the "Your face" header —
+  then six rows led by the dictation
   **Language** pop-up — it decides which recognizer runs, so it outranks
   everything below it ([[asr-cascade]]) — then App tones, Snippets,
   Vocabulary, Learned corrections ([[personalization]]), and
@@ -98,8 +105,10 @@ Diagnostics) and the original panes (Modes, Personalize, Privacy) went in
   with its state as a word and a symbol (Ready / Installed / Optional /
   Missing / Needs repair / Wrong version / Checking — an optional model
   that was never installed raises no warning, November 2026), then notes
-  under the group, among them the wallet shadow advisory
-  ([[model-wallet]]). **Status**: Service, Microphone, Accessibility,
+  under the group. One of them is the wallet shadow advisory
+  ([[model-wallet]]) in plain words: how many model files were found on
+  this Mac and how many are warmed up, and that the checks never change
+  which model runs. **Status**: Service, Microphone, Accessibility,
   Correction tests (the Personal Regression Lab), Motion, Build.
   **Support**: Verification (Run Verification, ⌘R), Log (Open Log),
   Support snapshot (Copy Support Snapshot), Support bundle (Export
@@ -113,7 +122,12 @@ scroll view: a section header, then a rounded group with a hairline
 between rows, the label and caption on the left and system controls on
 the right (`NSSwitch` at the small size System Settings uses, pop-ups,
 segmented controls, regular push buttons). Home and first-run setup are
-laid out to fit the window instead of scrolling.
+laid out to fit the window instead of scrolling, and their rows are the
+same group: Home's Dictation rows and each setup step's rows are drawn by
+the code that draws a settings group, so the fill, the edge, the
+separators and the type are one look everywhere. A row button tells
+VoiceOver what it does to what ("Edit snippets", "Change capture key");
+the visible title stays short.
 
 - **No undo or re-insert in the window** (November 2026): the window has
   no Undo Last Dictation button, and the recent-dictations dialog is
@@ -192,7 +206,17 @@ and Drop-to-Target view-model layers are covered in
   dictations on; Advanced; and the five first-run stages) in both
   appearances — 24 PNGs — into the gitignored `.probe-renders/`.
   `--size WIDTHxHEIGHT` lets the 880×648 minimum be reviewed directly,
-  and `--overlay` draws the recording pill instead ([[whisper-faces]]).
+  `--states` adds every state Home can be in and every variant of the
+  first-run steps (78 PNGs in all), and `--overlay` draws the recording
+  pill instead ([[whisper-faces]]).
+- **The window's own check**: `dictate.py --native-gui-smoke-test` builds
+  the window headless and measures the look, the keyboard and what
+  VoiceOver reads. An install runs only its first part
+  (`--construction-only`: build and draw each surface once); the release
+  gate runs all of it.
+- **Idle cost**: while the window is open a 2-second timer reads the
+  runtime again, and renders only when the state, the appearance or
+  Increase Contrast changed.
 
 > 📝 **History of the shell**: from the chibi-clay rebuild (#120) until
 > November 2026 the window had no sidebar — a 64pt top bar carried the
@@ -213,11 +237,14 @@ and Drop-to-Target view-model layers are covered in
 
 ## References
 
-- whisper_face_gui.py (`SECTIONS`/`SETTINGS_PANES` :37-43,
-  `SIDEBAR_ROWS` :67, key equivalents :1299, `result_evidence_text`
-  :3425, `_build_window` :9011, `_build_sidebar` :9244, `_build_home`
-  :9388, `_build_setup` :9667, `_build_settings` :10058,
-  `_build_advanced` :10392, `_install_main_menu` :11520);
+- whisper_face_gui.py (`SECTIONS`/`SETTINGS_PANES` :35-41,
+  `SIDEBAR_ROWS` :65, key equivalents :1310, `model_checks_note`
+  :2902, `face_grid` :3314, `result_evidence_text` :3500,
+  `SettingsRowView` :6703, `GroupBoxView` :6840, `arrange_section`
+  :6934, `_build_window` :8931, `_build_sidebar` :9168,
+  `_build_home` :9313, `_build_setup` :9523, `_build_settings`
+  :9884, `_build_advanced` :10209, `_install_main_menu`
+  :11334);
   whisper_face_render.py (`LiveFaceView`);
   scripts/window_render_probe.py; README "Native Mac window"
 - [[2026-07-26-interface-rebuild-research]]

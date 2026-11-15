@@ -164,7 +164,7 @@ it in any case. That finding is recorded in the tree, in
 - whisper_face_theme.py (palettes :42-64, `TYPE_SPECS` :131,
   `MOTION_SPECS` :162, `SURFACE_SPECS` :182, AA inks :202-203,
   `COLOR_TOKENS` :401, `STAGE_FOR_FACE` :450, `BRAND_SHAPES` :532);
-  whisper_face_gui.py (`center_layer_anchor` :5867, `add_jelly_motion`
-  :5895, `fade_in` :5934, `_srgb_color` :6946, `_token_color` :6967);
+  whisper_face_gui.py (`center_layer_anchor` :5984, `add_jelly_motion`
+  :6012, `fade_in` :6051, `_srgb_color` :7115, `_token_color` :7136);
   dictate.py `_center_layer_anchor` (:2846); site/src/data/motion.ts
 - [[2026-07-26-interface-rebuild-research]]

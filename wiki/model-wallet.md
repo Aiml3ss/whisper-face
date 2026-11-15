@@ -46,8 +46,12 @@ deliberately withheld.
   routing. Since 2026-07-26 that label sits on **Advanced**, with the
   four model rows and their readiness states — the Models and Diagnostics
   panes merged into one section ([[app-window]]). Since November 2026 it
-  is a note under the Models group, and each row states its readiness as
-  a word with a symbol.
+  is a note under the Models group in plain words — how many model
+  files were found on this Mac and how many are warmed up, and that the
+  checks never change which model runs — and each row states its
+  readiness as a word with a symbol. The runtime's own sentence and its
+  catalog keys are unchanged; the page maps it through
+  `model_checks_note`.
 
 ## Related Concepts
 
