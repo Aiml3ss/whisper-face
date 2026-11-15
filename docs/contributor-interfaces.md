@@ -169,7 +169,9 @@ Two rules matter more than the list:
    `{"inserted": False, "reason": "unavailable"}`; `undo_last_dictation`
    defaults to `{"undone": False, "reason": "nothing_to_undo"}`;
    `set_self_correction` defaults to returning `False`, so an unwired switch
-   stays off. If you add a field, give it a default that fails closed, and
+   stays off; `set_remove_repeats` defaults to returning `True`, the
+   runtime's own default, so an unwired switch never claims the repair was
+   turned off. If you add a field, give it a default that fails closed, and
    wire it in `main()`: a whole-program test should call the window's own
    action object, because a missing wiring line otherwise passes every test.
 2. **Guard logic lives in the runtime, never in the window.** Hotkey conflict
