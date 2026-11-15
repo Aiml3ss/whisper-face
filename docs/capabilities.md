@@ -181,16 +181,18 @@ Qwen3.5-4B, and has no Parakeet.
   A Mac install needs an administrator account (Homebrew), the Command Line
   Tools with Swift 6, and macOS 14 or newer. The Windows installer has not
   been run on real Windows hardware.
-- **Native Mac window** with three sections — Home, Settings, Advanced —
-  covering status, personalization, privacy, models, and diagnostics. It has
-  no undo or re-insert button; those live in the menu bar.
+- **Native Mac window** with a sidebar of five pages — Home, then
+  Personalize, Controls, Privacy, and Advanced — covering status,
+  personalization, privacy, models, and diagnostics. It has no undo or
+  re-insert button; those live in the menu bar.
 - **Menu-bar presence** with sixteen animated companion characters whose mouths
   move with your speech; recovery rows appear only when they have something.
 - **Guided first run** through permissions, hotkey practice, model readiness,
   and a first real dictation, each confirmed by evidence rather than assumed.
-- **Accessibility.** VoiceOver labels, keyboard navigation with a standard
-  Edit and Window menu, contrast in light and dark, and Reduce Motion that
-  disables animation entirely. No VoiceOver session has been recorded.
+- **Accessibility.** VoiceOver labels, keyboard navigation with the standard
+  Edit, View, and Window shortcuts (Command-1 to Command-5 choose the page),
+  contrast in light and dark with stronger edges under Increase Contrast,
+  and Reduce Motion that disables animation entirely. No VoiceOver session has been recorded.
 - **Local support bundle** — a transcript-free health export you choose to
   save; never uploaded.
 - **Explicit updates (Mac).** **Check for Updates…** fetches the checkout's
