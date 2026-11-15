@@ -895,6 +895,16 @@ FAST_ACCEPT_CONFIDENCE = 0.70
 # snapshot missing, or audio beyond the cross-check bound).
 PARAKEET_ROUTE_CONFIDENCE = 0.84
 PARAKEET_STARTUP_TIMEOUT = 10.0
+# How long Whisper Face's own runtime may take to load before it is stopped
+# and benched. When Core ML's compiled-model cache is cold (after an install
+# rebuilds the binary, an OS update, or a purge of ~/Library/Caches) a first
+# load takes about 10 s, measured at 10.13 s against 0.13 s warm, so the
+# helper's 10 s limit stopped it a tenth of a second short, and the stop
+# meant the cache was never filled and the next try was cold too. The
+# runtime loads in the background while the FluidAudio helper answers, so
+# nothing waits on this; a minute is several times the slowest cold load
+# seen and still stops a runtime that hangs.
+PARAKEET_RUNTIME_START_ALLOWANCE = 60.0
 PARAKEET_MIN_REQUEST_TIMEOUT = 3.0
 PARAKEET_MAX_REQUEST_TIMEOUT = 10.0
 # The helper protocol this client asks for. A protocol 1 helper ignores the
@@ -2284,13 +2294,27 @@ def apply_speech_runtime() -> None:
     """Ask the selected program first from the next dictation on.
 
     Only the client's ``preferred`` changes; a request already running
-    keeps the program it started with. Switched off, the runtime is closed
+    keeps the program it started with. Switched on (and at app start, when
+    it is on), the runtime begins loading in the background, so a cold
+    load is paid before the first dictation that could use it; until it is
+    ready the FluidAudio helper answers. Switched off, the runtime is closed
     off the calling thread, under its lock, so its memory is given back
     without making the window wait for a decode in progress.
     """
     selected = speech_runtime_selected()
     PARAKEET.preferred = OWN_PARAKEET if selected else None
-    if selected or OWN_PARAKEET.process is None:
+    if selected:
+        def start_runtime():
+            # Checked under the lock, so a switch turned off meanwhile,
+            # whose close takes the same lock, is never undone.
+            with OWN_PARAKEET.lock:
+                if PARAKEET.preferred is OWN_PARAKEET:
+                    OWN_PARAKEET._ready_process()
+
+        threading.Thread(target=start_runtime, name="speech-runtime-start",
+                         daemon=True).start()
+        return
+    if OWN_PARAKEET.process is None and OWN_PARAKEET.loading is None:
         return
 
     def close_runtime():
@@ -6356,6 +6380,10 @@ def runtime_status_snapshot() -> dict:
             for client in (PARAKEET, getattr(PARAKEET, "preferred", None))))
     except Exception:
         helper_running = False
+    # The runtime asked first is still loading in the background, which a
+    # cold Core ML cache can stretch to about 10 s.
+    speech_runtime_preparing = getattr(
+        getattr(PARAKEET, "preferred", None), "loading", None) is not None
     engine = str(PIPELINE_STATE["last_asr_engine"] or (
         "Parakeet Unified" if helper_running else "Warming up"))
     flight_active = FLIGHT.is_enabled()
@@ -6402,6 +6430,7 @@ def runtime_status_snapshot() -> dict:
         "recent_dictations": bool(PREFERENCES["recent_dictations"]),
         "new_speech_runtime": speech_runtime_selected(),
         "new_speech_runtime_last": PIPELINE_STATE["last_speech_program"],
+        "new_speech_runtime_preparing": speech_runtime_preparing,
         "language": current_language(),
         "undo_available": undoable_insertion_status()["available"],
         "flight_recorder": flight_active,
@@ -8202,9 +8231,15 @@ def ensure_event_permissions() -> bool:
 def bounded_helper_exchange(
         process, chunks, *, timeout: float,
         maximum_bytes: int = PARAKEET_MAX_RESPONSE_BYTES) -> dict:
-    """Write one request and read one bounded JSON line before a deadline."""
+    """Write one request and read one bounded JSON line before a deadline.
+
+    With nothing to write it reads a start's ready line, which may wait as
+    long as the runtime's start allowance; a request keeps its own bound.
+    """
+    bound = (PARAKEET_MAX_REQUEST_TIMEOUT if chunks
+             else PARAKEET_RUNTIME_START_ALLOWANCE)
     if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
-            or not 0 < float(timeout) <= PARAKEET_MAX_REQUEST_TIMEOUT):
+            or not 0 < float(timeout) <= bound):
         raise ValueError("helper timeout is outside the runtime bound")
     deadline = time.monotonic() + float(timeout)
     input_fd = process.stdin.fileno()
@@ -8280,7 +8315,8 @@ class ParakeetClient:
                  exchange=None, clock=None, models=PARAKEET_MODEL_DIR, *,
                  name="Parakeet helper", fallback="Whisper",
                  request_fallback="Whisper Turbo", ready_note="",
-                 missing_note="", retry_after_failure=False, preferred=None):
+                 missing_note="", retry_after_failure=False, preferred=None,
+                 background_start=False, start_thread=None):
         self.helper = Path(helper)
         # The pinned snapshot Python downloaded and verified. Named
         # explicitly so a helper that honours --models loads exactly that
@@ -8314,17 +8350,29 @@ class ParakeetClient:
         # The client whose text the last transcribe() returned: this one,
         # the one asked first, or None when neither answered.
         self.last_answered = None
+        # A program asked first loads in the background: a request that
+        # finds it not ready returns None at once, so the next program in
+        # line answers, and the start is given the whole allowance instead
+        # of the helper's start-up limit. ``loading`` is the process while
+        # it loads. ``start_thread`` runs the wait for its ready line (a
+        # daemon thread; tests pass their own).
+        self.background_start = background_start
+        self.start_allowance = PARAKEET_RUNTIME_START_ALLOWANCE
+        self.start_thread = start_thread or self._start_on_a_thread
+        self.loading = None
 
-    def _close(self):
-        process, self.process = self.process, None
-        self.protocol = 1
-        if process is None:
-            return
-        for stream in (process.stdin, process.stdout):
-            try:
-                stream and stream.close()
-            except Exception:
-                pass
+    def _start_on_a_thread(self, target):
+        threading.Thread(target=target, name=f"{self.name} start",
+                         daemon=True).start()
+
+    @staticmethod
+    def _stop(process, *, streams=True):
+        if streams:
+            for stream in (process.stdin, process.stdout):
+                try:
+                    stream and stream.close()
+                except Exception:
+                    pass
         try:
             process.terminate()
         except Exception:
@@ -8340,6 +8388,19 @@ class ParakeetClient:
                 process.wait(timeout=0.25)
             except Exception:
                 pass
+
+    def _close(self):
+        """Stop the program, and a start still loading in the background."""
+        loading, self.loading = self.loading, None
+        if loading is not None:
+            # The start's own thread is reading its pipe, so only the
+            # process is stopped here; that thread closes the pipes when it
+            # wakes and finds the start was given up.
+            self._stop(loading, streams=False)
+        process, self.process = self.process, None
+        self.protocol = 1
+        if process is not None:
+            self._stop(process)
 
     def _bench(self) -> float:
         """Hold off the next start; the wait doubles with each failure."""
@@ -8358,10 +8419,10 @@ class ParakeetClient:
               f"{self.fallback}, next attempt in {wait:.0f}s")
         return None
 
-    def _start(self):
-        if self.process is not None and self.process.poll() is None:
-            return self.process
-        self._close()
+    def _spawn(self):
+        """A new process that has not said it is ready, or None when there
+        is nothing to start (switched off, not installed, benched, or the
+        spawn failed, which benches it)."""
         if not PARAKEET_ENABLED:
             return None
         if not self.helper.is_file():
@@ -8378,7 +8439,7 @@ class ParakeetClient:
         try:
             # A protocol 1 helper reads only its first argument, so the
             # extra ones cost an old helper nothing.
-            process = self.process_factory(
+            return self.process_factory(
                 [str(self.helper), "--server",
                  "--protocol", str(PARAKEET_PROTOCOL),
                  "--models", str(self.models)],
@@ -8390,6 +8451,24 @@ class ParakeetClient:
             )
         except Exception as error:
             return self._start_failed(type(error).__name__)
+
+    def _ready(self, process, status: dict) -> None:
+        """Take a process whose ready line arrived as the one that answers."""
+        self.process = process
+        self.protocol = helper_protocol(status)
+        if not self.retry_after_failure:
+            self.failed_starts = 0
+        mark_model_warm_path_observed(PARAKEET_PROFILE.provider_id)
+        print(f"[asr] Parakeet Unified ready in "
+              f"{float(status.get('load_s', 0.0)):.2f}s{self.ready_note}")
+
+    def _start(self):
+        if self.process is not None and self.process.poll() is None:
+            return self.process
+        self._close()
+        process = self._spawn()
+        if process is None:
+            return None
         self.process = process
         try:
             status = self.exchange(
@@ -8398,13 +8477,50 @@ class ParakeetClient:
             return self._start_failed(type(error).__name__)
         if not status.get("ready"):
             return self._start_failed("not ready")
-        self.protocol = helper_protocol(status)
-        if not self.retry_after_failure:
-            self.failed_starts = 0
-        mark_model_warm_path_observed(PARAKEET_PROFILE.provider_id)
-        print(f"[asr] Parakeet Unified ready in "
-              f"{float(status.get('load_s', 0.0)):.2f}s{self.ready_note}")
+        self._ready(process, status)
         return process
+
+    def _ready_process(self):
+        """The loaded process, or None while there is none.
+
+        For a client that starts in the background. With none loaded and
+        none loading it begins a start, on ``start_thread``, and still
+        returns None: no request waits for a load. Called with the lock
+        held; ``start_thread`` must not run its target before it returns.
+        """
+        if self.process is not None and self.process.poll() is None:
+            return self.process
+        if self.loading is not None:
+            return None
+        self._close()
+        process = self._spawn()
+        if process is not None:
+            self.loading = process
+            print(f"[asr] {self.name} is loading; {self.fallback} answers "
+                  f"until it is ready")
+            self.start_thread(lambda: self._await_ready(process))
+        return None
+
+    def _await_ready(self, process) -> None:
+        """Wait for a background start's ready line for up to the whole
+        allowance, then take the process, or stop it and bench it."""
+        try:
+            status = self.exchange(process, (), timeout=self.start_allowance)
+            reason = None if status.get("ready") else "not ready"
+        except Exception as error:
+            status, reason = {}, type(error).__name__
+        with self.lock:
+            if self.loading is not process:
+                # Given up while it loaded (switched off or closed): it was
+                # stopped then, and only its pipes are left to close.
+                self._stop(process)
+                return
+            self.loading = None
+            if reason is None:
+                self._ready(process, status)
+                return
+            self._stop(process)
+            self._start_failed(reason)
 
     def transcribe(self, audio: np.ndarray):
         """``(text, processing_s)`` as a ParakeetResult, or None.
@@ -8430,7 +8546,8 @@ class ParakeetClient:
                 return result
         payload = np.ascontiguousarray(audio, dtype="<f4")
         with self.lock:
-            process = self._start()
+            process = (self._ready_process() if self.background_start
+                       else self._start())
             if process is None:
                 return None
             try:
@@ -8478,6 +8595,10 @@ OWN_PARAKEET = ParakeetClient(
     missing_note=("! Speech runtime is not installed; using the FluidAudio "
                   "helper (./setup.sh builds it)"),
     retry_after_failure=True,
+    # A cold Core ML cache makes its first load take about 10 s; it loads
+    # while the FluidAudio helper answers, for up to
+    # PARAKEET_RUNTIME_START_ALLOWANCE.
+    background_start=True,
 )
 PARAKEET = ParakeetClient(
     preferred=OWN_PARAKEET if PARAKEET_RUNTIME == "own" else None)

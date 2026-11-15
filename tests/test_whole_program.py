@@ -19,6 +19,7 @@ Whisper Tiny, no large-v3-turbo, no cleanup model).
 import json
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import unittest
@@ -1197,23 +1198,63 @@ class SpeechRuntimeTests(unittest.TestCase):
     def tearDown(self):
         dictate = self.mac.dictate
         dictate.PARAKEET_RUNTIME = "fluidaudio"
+        dictate.PARAKEET_RUNTIME_PINNED = False
         dictate.PARAKEET.preferred = None
+        # Released first, so a slow start held by a test ends at once.
+        if self.mac.desktop.runtime_start_gate is not None:
+            self.mac.desktop.runtime_start_gate.set()
+        self.mac.desktop.runtime_start_gate = None
         for client in (dictate.OWN_PARAKEET, dictate.PARAKEET):
-            client._close()
+            with client.lock:
+                client._close()
             client.failed_starts = 0
             client.next_start = 0.0
         dictate.OWN_PARAKEET.missing_reported = False
+        dictate.OWN_PARAKEET.start_allowance = (
+            dictate.PARAKEET_RUNTIME_START_ALLOWANCE)
         self.mac.desktop.runtime_failure = None
         dictate.PARAKEET_RUNTIME_HELPER.write_bytes(b"")
         dictate.PARAKEET_RUNTIME_HELPER.chmod(0o755)
 
-    def switch_on(self):
-        # What PARROT_ASR_RUNTIME=own sets up at import; tests/test_dictate.py
-        # (SpeechRuntimeSwitchTests) holds the import-time expressions.
+    def switch_on(self, *, wait=True):
+        # What PARROT_ASR_RUNTIME=own sets up at import (tests/test_dictate.py,
+        # SpeechRuntimeSwitchTests, holds the import-time expressions), then
+        # what main() does with it at start-up: apply_speech_runtime, which
+        # starts the runtime loading in the background. ``wait`` waits for
+        # that load to end, ready or benched, as a person who turned the
+        # switch on a while ago would find it.
         dictate = self.mac.dictate
         dictate.PARAKEET_RUNTIME = "own"
-        dictate.PARAKEET.preferred = dictate.OWN_PARAKEET
+        dictate.PARAKEET_RUNTIME_PINNED = True
         dictate.PARAKEET._close()
+        own = dictate.OWN_PARAKEET
+        failed = own.failed_starts
+        dictate.apply_speech_runtime()
+        self.assertIs(dictate.PARAKEET.preferred, own)
+        if not dictate.PARAKEET_RUNTIME_HELPER.is_file():
+            return
+        # The start is on a thread of its own: wait for it to begin, or,
+        # with ``wait``, to end.
+        if wait:
+            self.wait_for_the_load(failed)
+        else:
+            self.assertTrue(self.mac.wait_until(
+                lambda: own.loading is not None, 30.0), self.mac.log_tail())
+
+    def wait_for_the_load(self, failed: int):
+        """Until the runtime is ready, or benched once more than ``failed``."""
+        own = self.mac.dictate.OWN_PARAKEET
+        self.assertTrue(self.mac.wait_until(
+            lambda: own.loading is None and (
+                own.process is not None or own.failed_starts > failed),
+            30.0), self.mac.log_tail())
+
+    def hold_the_start(self):
+        """The runtime's next start is slow until the test releases it."""
+        gate = threading.Event()
+        self.mac.desktop.runtime_start_gate = gate
+        self.addCleanup(gate.set)
+        return gate
 
     def programs_spawned_since(self, count: int) -> list[str]:
         return [Path(argv[0]).name
@@ -1231,6 +1272,9 @@ class SpeechRuntimeTests(unittest.TestCase):
         desktop = self.mac.desktop
         spawns, asked = len(desktop.helper_spawns), len(desktop.runtime_requests)
         self.mac.dictate.PARAKEET._close()
+        # What main() does at start-up, with the switch off.
+        self.mac.dictate.apply_speech_runtime()
+        self.assertIsNone(self.mac.dictate.OWN_PARAKEET.loading)
         for _ in range(3):
             self.assertEqual(self.dictate(), self.SPOKEN)
         self.assertEqual(len(desktop.runtime_requests), asked)
@@ -1282,6 +1326,11 @@ class SpeechRuntimeTests(unittest.TestCase):
         self.assertIs(actions.set_new_speech_runtime(True), True)
         self.assertIs(json.loads(dictate.PREFERENCES_FILE.read_text(
             encoding="utf-8"))["new_speech_runtime"], True)
+        # It begins loading at once; once it is ready the next dictation
+        # goes to it.
+        self.assertTrue(self.mac.wait_until(
+            lambda: dictate.OWN_PARAKEET.process is not None, 30.0),
+            self.mac.log_tail())
         self.assertEqual(self.dictate(), self.SPOKEN)
         self.assertEqual(len(desktop.runtime_requests), runtime_asked + 1)
         status = status_of()
@@ -1300,14 +1349,15 @@ class SpeechRuntimeTests(unittest.TestCase):
 
     def test_a_missing_runtime_leaves_the_helper_to_answer(self):
         desktop = self.mac.desktop
-        self.switch_on()
         self.mac.dictate.PARAKEET_RUNTIME_HELPER.unlink()
         spawns, helper_asked = (len(desktop.helper_spawns),
                                 len(desktop.parakeet_requests))
+        self.switch_on()
         for _ in range(2):
             self.assertEqual(self.dictate(), self.SPOKEN)
         self.assertEqual(self.programs_spawned_since(spawns),
                          [fake_platform.HELPER_NAME])
+        self.assertIsNone(self.mac.dictate.OWN_PARAKEET.loading)
         self.assertGreater(len(desktop.parakeet_requests), helper_asked)
         self.assertEqual(self.mac.log.getvalue().count(
             "! Speech runtime is not installed; using the FluidAudio helper"),
@@ -1315,14 +1365,14 @@ class SpeechRuntimeTests(unittest.TestCase):
 
     def test_a_runtime_that_does_not_start_leaves_the_helper_to_answer(self):
         desktop = self.mac.desktop
-        self.switch_on()
         desktop.runtime_failure = "start"
         spawns, helper_asked = (len(desktop.helper_spawns),
                                 len(desktop.parakeet_requests))
+        self.switch_on()
         for _ in range(2):
             self.assertEqual(self.dictate(), self.SPOKEN)
-        # Started once, then benched: the second dictation did not wait for
-        # it again.
+        # Started once, at start-up, then benched: neither dictation waited
+        # for it or started it again.
         self.assertEqual(self.programs_spawned_since(spawns),
                          [fake_platform.RUNTIME_NAME, fake_platform.HELPER_NAME])
         self.assertGreater(len(desktop.parakeet_requests), helper_asked)
@@ -1353,6 +1403,86 @@ class SpeechRuntimeTests(unittest.TestCase):
         # Benched: the next dictation goes straight to the helper.
         self.assertEqual(self.dictate(), self.SPOKEN)
         self.assertEqual(len(desktop.runtime_requests), runtime_asked + 1)
+
+    def test_a_slow_start_is_answered_by_the_helper_then_taken_over(self):
+        # A cold Core ML cache: the runtime takes longer to load than the
+        # helper's start-up limit. It is not stopped while it loads; the
+        # helper types meanwhile, and the runtime takes over once ready.
+        dictate = self.mac.dictate
+        desktop = self.mac.desktop
+        own = dictate.OWN_PARAKEET
+        status_of = dictate.STATUS["bar"].gui.view_model.actions.status_snapshot
+        gate = self.hold_the_start()
+        runtime_asked = len(desktop.runtime_requests)
+        helper_asked = len(desktop.parakeet_requests)
+        logged = len(self.mac.log.getvalue())
+        self.switch_on(wait=False)
+        loading = own.loading
+        self.assertIsNotNone(loading)
+        self.assertIs(status_of()["new_speech_runtime_preparing"], True)
+        for _ in range(2):
+            self.assertEqual(self.dictate(), self.SPOKEN)
+        self.assertGreater(len(desktop.parakeet_requests), helper_asked)
+        self.assertEqual(len(desktop.runtime_requests), runtime_asked)
+        # Still loading, the same process, never stopped.
+        self.assertIs(own.loading, loading)
+        self.assertIsNone(loading.poll())
+        gate.set()
+        self.assertTrue(self.mac.wait_until(
+            lambda: own.process is loading, 30.0), self.mac.log_tail())
+        self.assertIs(status_of()["new_speech_runtime_preparing"], False)
+        self.assertEqual(self.dictate(), self.SPOKEN)
+        self.assertEqual(len(desktop.runtime_requests), runtime_asked + 1)
+        # The helper let go once the runtime answered.
+        self.assertIsNone(dictate.PARAKEET.process)
+        self.assertNotIn("Speech runtime did not start",
+                         self.mac.log.getvalue()[logged:])
+        self.assertEqual(status_of()["new_speech_runtime_last"], "new")
+
+    def test_a_dictation_while_it_loads_does_not_wait_for_it(self):
+        # The start is held for the whole test. A dictation that waited for
+        # it would not finish (dictate_sentence gives up after 10 s and
+        # fails); it is typed by the helper while the load is still under
+        # way.
+        own = self.mac.dictate.OWN_PARAKEET
+        desktop = self.mac.desktop
+        gate = self.hold_the_start()
+        self.switch_on(wait=False)
+        loading = own.loading
+        runtime_asked = len(desktop.runtime_requests)
+        self.assertEqual(self.dictate(), self.SPOKEN)
+        self.assertFalse(gate.is_set())
+        self.assertIs(own.loading, loading)
+        self.assertEqual(len(desktop.runtime_requests), runtime_asked)
+
+    def test_a_start_that_never_finishes_is_stopped_and_benched(self):
+        # The allowance is scaled down so the test does not wait a minute;
+        # the start is never released.
+        dictate = self.mac.dictate
+        desktop = self.mac.desktop
+        own = dictate.OWN_PARAKEET
+        self.hold_the_start()
+        own.start_allowance = 0.2
+        spawns = len(desktop.helper_spawns)
+        logged = len(self.mac.log.getvalue())
+        self.switch_on(wait=False)
+        loading = own.loading
+        self.assertEqual(self.dictate(), self.SPOKEN)
+        self.wait_for_the_load(0)
+        self.assertIsNone(own.process)
+        self.assertTrue(self.mac.wait_until(
+            lambda: loading.poll() is not None, 30.0))
+        self.assertIn("! Speech runtime did not start (TimeoutError); using "
+                      "the FluidAudio helper, next attempt in 30s",
+                      self.mac.log.getvalue()[logged:])
+        # Benched: the next dictation is the helper's, and the runtime is
+        # not started again.
+        runtime_asked = len(desktop.runtime_requests)
+        self.assertEqual(self.dictate(), self.SPOKEN)
+        self.assertEqual(len(desktop.runtime_requests), runtime_asked)
+        self.assertEqual(self.programs_spawned_since(spawns).count(
+            fake_platform.RUNTIME_NAME), 1)
+        self.assertIsNone(own.loading)
 
     def test_when_both_fail_whisper_types_as_it_always_has(self):
         desktop = self.mac.desktop

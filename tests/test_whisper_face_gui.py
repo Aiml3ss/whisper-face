@@ -3406,6 +3406,14 @@ class ControlSettingsViewModelTests(unittest.TestCase):
                 self.assertEqual(normalize_snapshot(
                     {"new_speech_runtime_last": last})
                     .new_speech_runtime_last, expected)
+        # Still getting ready only when the runtime says True.
+        for preparing, expected in ((True, True), (False, False),
+                                    ("true", False), (1, False), (None, False)):
+            with self.subTest(preparing=preparing):
+                self.assertIs(normalize_snapshot(
+                    {"new_speech_runtime_preparing": preparing})
+                    .new_speech_runtime_preparing, expected)
+        self.assertFalse(normalize_snapshot({}).new_speech_runtime_preparing)
 
     def test_the_new_speech_runtime_switch_shows_what_the_runtime_stored(
             self):
@@ -3454,6 +3462,22 @@ class ControlSettingsViewModelTests(unittest.TestCase):
         self.assertIn("new\u00a0one", speech_runtime_caption(True, "new"))
         self.assertIn("previous\u00a0one",
                       speech_runtime_caption(False, "previous"))
+        # Switched on and still loading, it says so, after what the switch
+        # does, in place of which program answered last; switched off the
+        # loading state is never shown.
+        preparing = localized_string(
+            "models.speech_runtime.preparing", caption=on)
+        for last in ("", "new", "previous"):
+            with self.subTest(preparing_last=last):
+                self.assertEqual(
+                    speech_runtime_caption(True, last, preparing=True),
+                    preparing)
+                self.assertEqual(
+                    speech_runtime_caption(False, last, preparing=True),
+                    speech_runtime_caption(False, last))
+        self.assertTrue(preparing.startswith(on + " "))
+        self.assertIn("getting ready", preparing)
+        self.assertIn("previous one", preparing)
         # What it does, in plain words: its own code, and it goes back by
         # itself. No program, package or switch name is ever shown.
         for text in (on, off, localized_string("models.speech_runtime.help")):
@@ -3468,9 +3492,11 @@ class ControlSettingsViewModelTests(unittest.TestCase):
                 "models.accessibility.speech_runtime")]
         visible.append(localized_string(
             "operation.speech_runtime.update_failed", error="busy"))
-        visible += [speech_runtime_caption(enabled, last)
+        visible += [speech_runtime_caption(enabled, last,
+                                           preparing=preparing)
                     for enabled in (True, False)
-                    for last in ("new", "previous")]
+                    for last in ("new", "previous")
+                    for preparing in (False, True)]
         for text in visible:
             for word in ("FluidAudio", "fluidaudio", "parrot", "Parakeet",
                          "PARROT_ASR_RUNTIME", "protocol", "helper",

@@ -161,6 +161,8 @@ BASELINE_ASSIGNMENTS = (
     "PROSODY_FORMATTING",
     "PARAKEET_WORD_CONFIDENCE_ROUTING",
     "PARAKEET_PROTOCOL",
+    # bounded_helper_exchange's bound for a start, and the runtime's client.
+    "PARAKEET_RUNTIME_START_ALLOWANCE",
 )
 
 try:  # pragma: no cover - depends on the runner
@@ -2498,6 +2500,43 @@ class ParakeetClientTests(unittest.TestCase):
             )["bounded_helper_exchange"]
             with self.assertRaisesRegex(TimeoutError, "response timed out"):
                 exchange(process, (), timeout=0.01)
+        finally:
+            process.stdin.close()
+            process.stdout.close()
+            os.close(input_read)
+            os.close(output_write)
+
+    @unittest.skipIf(os.name == "nt", "select() cannot wait on Windows pipes")
+    def test_a_start_may_wait_the_runtime_allowance_and_a_request_may_not(self):
+        # Reading a ready line may take as long as the runtime's start
+        # allowance (a cold Core ML load); a request keeps its own bound.
+        allowance = BASELINE_VALUES["PARAKEET_RUNTIME_START_ALLOWANCE"]
+        input_read, input_write = os.pipe()
+        output_read, output_write = os.pipe()
+        process = SimpleNamespace(
+            stdin=os.fdopen(input_write, "wb", buffering=0),
+            stdout=os.fdopen(output_read, "rb", buffering=0),
+        )
+        try:
+            exchange = load_definitions(
+                "bounded_helper_exchange",
+                extra={
+                    "PARAKEET_MAX_RESPONSE_BYTES": 64 * 1024,
+                    "PARAKEET_MAX_REQUEST_TIMEOUT": 10.0,
+                    "json": json,
+                    "os": os,
+                    "select": select,
+                    "time": time,
+                },
+            )["bounded_helper_exchange"]
+            os.write(output_write, b'{"ready": true}\n')
+            self.assertEqual(exchange(process, (), timeout=allowance),
+                             {"ready": True})
+            for chunks, timeout in (((b"x",), 10.5), ((), allowance + 1)):
+                with self.subTest(chunks=chunks, timeout=timeout), \
+                        self.assertRaisesRegex(
+                            ValueError, "outside the runtime bound"):
+                    exchange(process, chunks, timeout=timeout)
         finally:
             process.stdin.close()
             process.stdout.close()
@@ -15150,17 +15189,29 @@ class SpeechRuntimeSwitchTests(unittest.TestCase):
 
     def chain(self, directory, *, runtime="own", own_installed=True,
               own_start="ok", own_request="ok", fluid_request="ok",
-              printed=None):
-        """(fluid client with the runtime in front, spawns, requests, now)."""
+              printed=None, started=True, load_seconds=0.1):
+        """(fluid client with the runtime in front, spawns, requests, now).
+
+        The runtime loads in the background: its starts wait in
+        ``self.loads`` until ``finish_loads()`` runs them, so a test says
+        exactly when a load finishes. ``load_seconds`` is how long the load
+        takes on the injected clock; a start whose allowance is shorter
+        times out after the allowance, as the real pipe read does.
+        ``started`` starts the runtime as the app does at start-up and lets
+        that load finish.
+        """
         directory = Path(directory)
         (directory / self.FLUID).write_bytes(b"helper")
         if own_installed:
             (directory / self.OWN).write_bytes(b"runtime")
         script = {"own_start": own_start, "own_request": own_request,
-                  "fluid_request": fluid_request}
+                  "fluid_request": fluid_request,
+                  "load_seconds": load_seconds}
         spawned = []
         requests = []
         now = [1_000.0]
+        self.loads = []
+        self.start_timeouts = []
 
         def factory(argv, **_kwargs):
             spawned.append(Path(argv[0]).name)
@@ -15169,8 +15220,14 @@ class SpeechRuntimeSwitchTests(unittest.TestCase):
         def exchange(process, chunks, *, timeout):
             kind = "own" if process.name == self.OWN else "fluid"
             if not chunks:
-                if kind == "own" and script["own_start"] != "ok":
-                    return {"ok": False, "error": "model load failed"}
+                if kind == "own":
+                    self.start_timeouts.append(timeout)
+                    if script["load_seconds"] > timeout:
+                        now[0] += timeout
+                        raise TimeoutError("helper response timed out")
+                    now[0] += script["load_seconds"]
+                    if script["own_start"] != "ok":
+                        return {"ok": False, "error": "model load failed"}
                 return {"ready": True, "load_s": 0.1}
             requests.append((process.name, b"".join(
                 bytes(chunk) for chunk in chunks)))
@@ -15187,9 +15244,26 @@ class SpeechRuntimeSwitchTests(unittest.TestCase):
             client.process_factory = factory
             client.exchange = exchange
             client.clock = lambda: now[0]
+        ns["OWN_PARAKEET"].start_thread = self.loads.append
+        if started and runtime == "own":
+            self.start_as_the_app_does(ns["OWN_PARAKEET"])
+            self.finish_loads()
         return ns["PARAKEET"], spawned, requests, now, script
 
+    @staticmethod
+    def start_as_the_app_does(own):
+        # What apply_speech_runtime's thread does at start-up and when the
+        # switch is turned on.
+        with own.lock:
+            own._ready_process()
+
+    def finish_loads(self):
+        """Let every load waiting in the background finish."""
+        while self.loads:
+            self.loads.pop(0)()
+
     def test_a_healthy_runtime_answers_and_the_helper_never_starts(self):
+        # Started with the app, it is ready before the first dictation.
         with tempfile.TemporaryDirectory() as directory:
             client, spawned, requests, _now, _script = self.chain(directory)
             for _ in range(3):
@@ -15207,6 +15281,7 @@ class SpeechRuntimeSwitchTests(unittest.TestCase):
                              ("heard by fluid", 0.02))
         self.assertEqual(spawned, [self.FLUID])
         self.assertEqual([name for name, _payload in requests], [self.FLUID])
+        self.assertEqual(self.loads, [])
 
     def test_a_missing_runtime_hands_every_request_to_the_helper(self):
         printed = []
@@ -15217,6 +15292,7 @@ class SpeechRuntimeSwitchTests(unittest.TestCase):
                 self.assertEqual(client.transcribe(np.ones(160, np.float32)),
                                  ("heard by fluid", 0.02))
         self.assertEqual(spawned, [self.FLUID])
+        self.assertEqual(self.loads, [])
         self.assertEqual(printed.count(
             "! Speech runtime is not installed; using the FluidAudio helper "
             "(./setup.sh builds it)"), 1)
@@ -15226,15 +15302,22 @@ class SpeechRuntimeSwitchTests(unittest.TestCase):
         audio = np.linspace(-0.5, 0.5, 320, dtype=np.float32)
         with tempfile.TemporaryDirectory() as directory:
             client, spawned, requests, now, script = self.chain(
-                directory, own_start="fail", printed=printed)
+                directory, own_start="fail", printed=printed, started=False)
+            # The first dictation starts it loading and is answered by the
+            # helper; the load then fails.
             self.assertEqual(client.transcribe(audio), ("heard by fluid", 0.02))
+            self.finish_loads()
             # Benched: the next decodes go straight to the helper.
             now[0] += 29.0
             self.assertEqual(client.transcribe(audio), ("heard by fluid", 0.02))
+            self.assertEqual(self.loads, [])
             self.assertEqual(spawned, [self.OWN, self.FLUID])
-            # After the wait it is tried again, and answers once it can.
+            # After the wait it is started again in the background, and
+            # answers once it is ready.
             now[0] += 2.0
             script["own_start"] = "ok"
+            self.assertEqual(client.transcribe(audio), ("heard by fluid", 0.02))
+            self.finish_loads()
             self.assertEqual(client.transcribe(audio), ("heard by own", 0.02))
             self.assertEqual(spawned, [self.OWN, self.FLUID, self.OWN])
         self.assertIn(
@@ -15260,8 +15343,11 @@ class SpeechRuntimeSwitchTests(unittest.TestCase):
             self.assertEqual(client.transcribe(audio), ("heard by fluid", 0.02))
             self.assertEqual([name for name, _payload in requests],
                              [self.OWN, self.FLUID, self.FLUID])
+            # After the wait it loads again behind the helper.
             now[0] += 21.0
             script["own_request"] = "ok"
+            self.assertEqual(client.transcribe(audio), ("heard by fluid", 0.02))
+            self.finish_loads()
             self.assertEqual(client.transcribe(audio), ("heard by own", 0.02))
             self.assertEqual(spawned, [self.OWN, self.FLUID, self.OWN])
         self.assertIn(
@@ -15279,32 +15365,47 @@ class SpeechRuntimeSwitchTests(unittest.TestCase):
                 return [line for line in printed
                         if line.startswith("! Speech runtime")]
 
+            def until_benched():
+                # One failure: a start in the background, and for a runtime
+                # that starts, the request after it.
+                seen = len(benched())
+                for _ in range(2):
+                    self.assertEqual(
+                        client.transcribe(np.ones(160, np.float32)),
+                        ("heard by fluid", 0.02))
+                    self.finish_loads()
+                    if len(benched()) > seen:
+                        break
+                self.assertEqual(len(benched()), seen + 1)
+                return int(re.search(
+                    r"next attempt in (\d+)s", benched()[-1]).group(1))
+
             with self.subTest(failing=failing), \
                     tempfile.TemporaryDirectory() as directory:
                 client, _spawned, _requests, now, script = self.chain(
-                    directory, printed=printed, **{failing: "fail"})
+                    directory, printed=printed, started=False,
+                    **{failing: "fail"})
                 waits = []
                 for _ in range(6):
-                    self.assertEqual(client.transcribe(np.ones(160, np.float32)),
-                                     ("heard by fluid", 0.02))
-                    waits.append(int(re.search(
-                        r"next attempt in (\d+)s", benched()[-1]).group(1)))
+                    waits.append(until_benched())
                     # Not asked again until the wait is over.
                     seen = len(benched())
                     now[0] += waits[-1] - 1.0
                     self.assertEqual(client.transcribe(np.ones(160, np.float32)),
                                      ("heard by fluid", 0.02))
+                    self.assertEqual(self.loads, [])
                     self.assertEqual(len(benched()), seen)
                     now[0] += 1.0
                 self.assertEqual(waits, [30, 60, 120, 240, 300, 300])
                 # One answer clears the count: the next failure waits 30 s.
                 script[failing] = "ok"
+                client.transcribe(np.ones(160, np.float32))
+                self.finish_loads()
                 self.assertEqual(client.transcribe(np.ones(160, np.float32)),
                                  ("heard by own", 0.02))
                 script[failing] = "fail"
                 client.preferred._close()
-                client.transcribe(np.ones(160, np.float32))
-                self.assertIn("next attempt in 30s", benched()[-1])
+                self.assertEqual(until_benched(), 30)
 
     def test_an_empty_answer_from_the_runtime_is_the_answer(self):
         # Both programs run the same model, and parity says they give the
@@ -15336,6 +15437,11 @@ class SpeechRuntimeSwitchTests(unittest.TestCase):
             self.assertIsNone(helper.poll())
             now[0] += 31.0
             script["own_request"] = "ok"
+            # The helper answers while the runtime loads again.
+            self.assertEqual(client.transcribe(np.ones(160, np.float32)),
+                             ("heard by fluid", 0.02))
+            self.assertIs(client.process, helper)
+            self.finish_loads()
             self.assertEqual(client.transcribe(np.ones(160, np.float32)),
                              ("heard by own", 0.02))
             self.assertIsNone(client.process)
@@ -15389,17 +15495,159 @@ class SpeechRuntimeSwitchTests(unittest.TestCase):
                 answered = {None: None, "fluid": client}.get(expected, own)
                 self.assertIs(client.last_answered, answered)
 
+    # -- a cold start ---------------------------------------------------------
+    # Measured on the owner's Mac: with Core ML's compiled-model cache cold
+    # the runtime loaded in 10.13 s, then 0.13 s and 0.13 s. The helper's
+    # 10 s start-up limit stopped it a tenth of a second short, and the stop
+    # left the cache cold for the next try.
+
+    COLD_LOAD_SECONDS = 10.13
+    ALLOWANCE = BASELINE_VALUES["PARAKEET_RUNTIME_START_ALLOWANCE"]
+
+    def test_a_cold_load_is_given_the_whole_allowance(self):
+        printed = []
+        with tempfile.TemporaryDirectory() as directory:
+            client, spawned, _requests, _now, _script = self.chain(
+                directory, printed=printed, started=False,
+                load_seconds=self.COLD_LOAD_SECONDS)
+            own = client.preferred
+            self.start_as_the_app_does(own)
+            self.finish_loads()
+            self.assertEqual(client.transcribe(np.ones(160, np.float32)),
+                             ("heard by own", 0.02))
+        self.assertEqual(self.start_timeouts, [self.ALLOWANCE])
+        # Several times the slowest cold load seen, not the helper's 10 s.
+        self.assertGreaterEqual(self.ALLOWANCE,
+                                5 * self.COLD_LOAD_SECONDS)
+        self.assertEqual(spawned, [self.OWN])
+        self.assertEqual(own.failed_starts, 0)
+        self.assertFalse([line for line in printed if "did not start" in line])
+
+    def test_a_slow_start_is_answered_by_the_helper_and_then_taken_over(self):
+        printed = []
+        with tempfile.TemporaryDirectory() as directory:
+            client, spawned, requests, _now, _script = self.chain(
+                directory, printed=printed, started=False,
+                load_seconds=self.COLD_LOAD_SECONDS)
+            own = client.preferred
+            self.start_as_the_app_does(own)
+            loading = own.loading
+            self.assertIsNotNone(loading)
+            # Dictations while it loads go to the helper, as with the
+            # switch off, and the load is neither restarted nor stopped.
+            for _ in range(3):
+                self.assertEqual(client.transcribe(np.ones(160, np.float32)),
+                                 ("heard by fluid", 0.02))
+            self.assertIs(own.loading, loading)
+            self.assertIsNone(loading.poll())
+            self.assertEqual(len(self.loads), 1)
+            self.assertEqual(spawned, [self.OWN, self.FLUID])
+            # Ready: the next dictation goes to it, and the helper lets go.
+            self.finish_loads()
+            self.assertIsNone(own.loading)
+            self.assertIs(own.process, loading)
+            self.assertEqual(client.transcribe(np.ones(160, np.float32)),
+                             ("heard by own", 0.02))
+            self.assertIsNone(client.process)
+        self.assertEqual([name for name, _payload in requests],
+                         [self.FLUID] * 3 + [self.OWN])
+        self.assertIn("[asr] Speech runtime is loading; the FluidAudio helper "
+                      "answers until it is ready", printed)
+
+    def test_no_dictation_waits_for_a_load(self):
+        # The load never finishes in this test: a dictation that waited for
+        # it would never return. Each is answered by the helper, and none
+        # starts a second load.
+        with tempfile.TemporaryDirectory() as directory:
+            client, spawned, _requests, _now, _script = self.chain(
+                directory, started=False)
+            for _ in range(3):
+                self.assertEqual(client.transcribe(np.ones(160, np.float32)),
+                                 ("heard by fluid", 0.02))
+            self.assertEqual(len(self.loads), 1)
+            self.assertEqual(spawned, [self.OWN, self.FLUID])
+            self.assertIsNone(client.preferred.loading.poll())
+
+    def test_a_start_that_never_finishes_is_stopped_and_benched(self):
+        printed = []
+        with tempfile.TemporaryDirectory() as directory:
+            client, spawned, _requests, now, _script = self.chain(
+                directory, printed=printed, started=False,
+                load_seconds=float("inf"))
+            own = client.preferred
+            self.start_as_the_app_does(own)
+            loading = own.loading
+            started_at = now[0]
+            self.finish_loads()
+            # Stopped once the whole allowance had gone by, and benched.
+            self.assertEqual(now[0] - started_at,
+                             self.ALLOWANCE)
+            self.assertIsNotNone(loading.poll())
+            self.assertIsNone(own.loading)
+            self.assertIsNone(own.process)
+            self.assertIn("! Speech runtime did not start (TimeoutError); "
+                          "using the FluidAudio helper, next attempt in 30s",
+                          printed)
+            # The helper answers, and the runtime is not tried again until
+            # the bench is over; then it starts in the background again.
+            now[0] += 29.0
+            self.assertEqual(client.transcribe(np.ones(160, np.float32)),
+                             ("heard by fluid", 0.02))
+            self.assertEqual(spawned, [self.OWN, self.FLUID])
+            now[0] += 1.0
+            self.assertEqual(client.transcribe(np.ones(160, np.float32)),
+                             ("heard by fluid", 0.02))
+            self.assertEqual(spawned, [self.OWN, self.FLUID, self.OWN])
+            self.assertEqual(len(self.loads), 1)
+
+    def test_a_load_given_up_is_not_taken_or_benched(self):
+        # Switched off (or closed) while it loads: the process is stopped,
+        # and when its ready line arrives it is not taken as the program
+        # that answers, nor counted as a failure.
+        printed = []
+        with tempfile.TemporaryDirectory() as directory:
+            client, _spawned, _requests, _now, _script = self.chain(
+                directory, printed=printed, started=False)
+            own = client.preferred
+            self.start_as_the_app_does(own)
+            loading = own.loading
+            with own.lock:
+                own._close()
+            self.assertIsNotNone(loading.poll())
+            self.finish_loads()
+            self.assertIsNone(own.process)
+            self.assertIsNone(own.loading)
+            self.assertEqual(own.failed_starts, 0)
+            self.assertFalse([line for line in printed
+                              if line.startswith("! Speech runtime")])
+
+    def test_only_the_runtime_starts_in_the_background(self):
+        # The FluidAudio helper starts inside the request, with its own
+        # start-up limit, exactly as before there was a runtime.
+        with tempfile.TemporaryDirectory() as directory:
+            ns = self.namespace("own", directory)
+            self.assertIs(ns["OWN_PARAKEET"].background_start, True)
+            self.assertIs(ns["PARAKEET"].background_start, False)
+
     class Runtime:
         """The runtime's client, as far as the switch can see it."""
 
         def __init__(self):
             self.process = None
+            self.loading = None
             self.lock = threading.Lock()
             self.closed = 0
+            self.starts = 0
+
+        def _ready_process(self):
+            # Begins a load in the background; nothing is ready yet.
+            self.starts += 1
+            return None
 
         def _close(self):
             self.closed += 1
             self.process = None
+            self.loading = None
 
     class Thread:
         """Runs the close at once, so the test needs no waiting."""
@@ -15463,6 +15711,8 @@ class SpeechRuntimeSwitchTests(unittest.TestCase):
                 self.assertIs(ns["speech_runtime_selected"](), expected)
                 self.assertIs(ns["PARAKEET"].preferred,
                               own if expected else None)
+                # On at app start, it begins loading at once; off, never.
+                self.assertEqual(own.starts, 1 if expected else 0)
 
     def test_the_window_switch_applies_at_once_and_is_saved(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -15474,9 +15724,11 @@ class SpeechRuntimeSwitchTests(unittest.TestCase):
 
             self.assertIs(ns["set_new_speech_runtime"](True), True)
             self.assertIs(saved(), True)
-            # The next transcribe asks the runtime first; nothing restarts.
+            # The next transcribe asks the runtime first; nothing restarts,
+            # and the runtime begins loading at once, in the background.
             self.assertIs(ns["PARAKEET"].preferred, own)
             self.assertEqual(own.closed, 0)
+            self.assertEqual(own.starts, 1)
             own.process = object()  # it answered a dictation
             self.assertIs(ns["set_new_speech_runtime"](False), False)
             self.assertIs(saved(), False)
@@ -15484,6 +15736,14 @@ class SpeechRuntimeSwitchTests(unittest.TestCase):
             # Switched off, the runtime gives its memory back.
             self.assertEqual(own.closed, 1)
             self.assertIsNone(own.process)
+            # A load still under way is stopped too.
+            ns["set_new_speech_runtime"](True)
+            self.assertEqual(own.starts, 2)
+            own.loading = object()
+            ns["set_new_speech_runtime"](False)
+            self.assertEqual(own.closed, 2)
+            self.assertIsNone(own.loading)
+            self.assertEqual(own.starts, 2)
             # A reinstall keeps the file, and the choice with it.
             ns["set_new_speech_runtime"](True)
             ns["PREFERENCES"]["new_speech_runtime"] = False
@@ -15513,6 +15773,7 @@ class SpeechRuntimeSwitchTests(unittest.TestCase):
                         preferences.read_text(encoding="utf-8"), before)
                     self.assertIs(ns["PARAKEET"].preferred,
                                   own if expected else None)
+                    self.assertEqual(own.starts, 1 if expected else 0)
                 else:
                     self.assertIs(answer, not expected)
 

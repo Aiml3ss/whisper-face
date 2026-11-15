@@ -1289,6 +1289,29 @@ class InstallerContractTests(unittest.TestCase):
                                   warnings[0])
                     self.assertIn("Parakeet helper", warnings[0])
 
+    def test_the_runtime_is_preloaded_before_the_dictation_service_starts(
+            self):
+        # A first load from a cold Core ML cache takes about 10 s. Setup
+        # pays it with --preload, in the foreground, before the dictation
+        # service is started or restarted, so a fresh install does not begin
+        # with the service's own load racing a cold cache.
+        preload = self.shell.index("\ninstall_speech_runtime\n")
+        service = self.shell.index("\nreload_agent com.berg.dictate ")
+        self.assertLess(preload, service)
+        self.assertEqual(self.shell.count("reload_agent com.berg.dictate "), 1)
+        # The only other restart is --models, which installs models and
+        # exits before the runtime is built, so it never restarts the
+        # service onto a freshly built, cold runtime.
+        restart = 'launchctl kickstart -k "gui/$(id -u)/com.berg.dictate"'
+        self.assertEqual(self.shell.count(restart), 1)
+        self.assertIn(restart, shell_function("install_optional_models"))
+        self.assertLess(
+            self.shell.index('if [ "$MODELS_ONLY" -eq 1 ]; then\n'
+                             '    install_optional_models\n    exit 0\nfi'),
+            preload)
+        body = shell_function("install_speech_runtime")
+        self.assertNotIn("&\n", body.replace("&&", ""))
+
     def test_mac_installer_builds_verifies_and_removes_the_speech_runtime(self):
         package = ROOT / "native" / "ParrotSpeechRuntime"
         required = self.shell[self.shell.index("\nrequired=("):]

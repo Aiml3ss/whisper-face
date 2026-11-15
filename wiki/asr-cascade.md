@@ -87,7 +87,8 @@ speech is recognized *while you talk* through rolling chunk cuts, so a
   on every measured clip. `setup.sh` requires the helper and builds the runtime if it can (a runtime
   that does not build or load is skipped with one line, not an install failure);
   the New speech runtime switch (Advanced → Models, preference
-  `new_speech_runtime`, applied from the next dictation) or
+  `new_speech_runtime`; the runtime loads in the background, the helper
+  answering until it is ready) or
   `PARROT_ASR_RUNTIME=own`, which wins when set, asks the runtime first, and anything it cannot
   answer goes to the FluidAudio helper, then Whisper. Off by default until
   the owner has used it. Details, parity and attribution:
