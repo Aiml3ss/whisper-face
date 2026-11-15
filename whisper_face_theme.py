@@ -129,9 +129,9 @@ WEIGHT_HEAVY = 0.56
 # buttons and key caps. Rows stay on SF Pro. Row titles are 13pt, the size
 # macOS uses for body and row text, rather than the mock-up's 13.5.
 TYPE_SPECS: Mapping[str, TypeSpec] = {
-    "hud_eyebrow": TypeSpec(9.5, 0.65),
+    "hud_headline": TypeSpec(16.0, WEIGHT_HEAVY),
     "hud_confidence": TypeSpec(10.5, 0.35),
-    "hud_caption": TypeSpec(11.5, 0.28),
+    "hud_caption": TypeSpec(12.0, WEIGHT_MEDIUM),
     "page_title": TypeSpec(17.0, WEIGHT_BOLD),
     "section_header": TypeSpec(13.0, WEIGHT_BOLD),
     "bubble_headline": TypeSpec(27.0, WEIGHT_HEAVY),
@@ -189,7 +189,7 @@ SURFACE_SPECS: Mapping[str, SurfaceSpec] = {
 
 @dataclass(frozen=True)
 class HudPresentation:
-    eyebrow: str
+    headline: str
     confidence: str
     accessibility_value: str
     accent: str
@@ -253,21 +253,29 @@ def hud_presentation(
         f"Recognition {normalized:.0%}" if normalized is not None else "")
     clean_caption = " ".join(str(caption or "").split())
 
+    # The headline is the pill's one heavy line: the state, said the way the
+    # character would say it. It is never set in capitals and never sits
+    # under a smaller label.
     if mode == "error":
-        eyebrow = "TRY AGAIN"
+        headline = "Try again"
         confidence_copy = ""
         accent = "error"
         phase = "Dictation needs another try"
+    elif mode == "done":
+        headline = "Done"
+        confidence_copy = ""
+        accent = "brand"
+        phase = "Dictation done"
     elif mode == "processing":
-        eyebrow = "TIDYING UP"
+        headline = "Tidying up…"
         accent = "accent"
         phase = "Processing dictation"
     elif stable_prefix and clean_caption:
-        eyebrow = "HEARD YOU"
+        headline = "Heard you"
         accent = "brand"
         phase = "Listening; stable words available"
     else:
-        eyebrow = "LISTENING"
+        headline = "Listening…"
         accent = "brand"
         phase = "Listening"
 
@@ -277,7 +285,7 @@ def hud_presentation(
     if clean_caption:
         pieces.append(clean_caption)
     return HudPresentation(
-        eyebrow=eyebrow,
+        headline=headline,
         confidence=confidence_copy,
         accessibility_value=". ".join(pieces),
         accent=accent,
