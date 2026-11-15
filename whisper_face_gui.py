@@ -3264,6 +3264,40 @@ def home_review_in_row(state: GUIState) -> bool:
     return bool(state.outbox_count) and home_review_due(state)
 
 
+# The face picker's grid: eight chips a row, the spec's gap between them,
+# each chip as large as the group's width then allows.
+FACE_GRID_COLUMNS = 8
+FACE_CHIP_GAP = 10.0
+FACE_CHIP_MAX = 78.0
+FACE_CHIP_MIN = 40.0
+
+
+def face_grid(width: float, count: int) -> tuple[int, float, float, int]:
+    """Columns, chip side, left margin and rows for ``count`` face chips
+    in a grid ``width`` points wide.
+
+    Chips sit ``FACE_CHIP_GAP`` apart, eight to a row, and take the width
+    between them: as large as it allows, in whole points so they draw
+    crisp at any scale, and never more than ``FACE_CHIP_MAX``. What the
+    whole points leave over (under eight points) is split evenly, so the
+    grid is centred in its width. A width too narrow for eight chips of
+    ``FACE_CHIP_MIN`` takes fewer to a row instead of smaller chips.
+    """
+    count = max(1, int(count))
+    columns = min(FACE_GRID_COLUMNS, count)
+
+    def side(columns: int) -> float:
+        return float(math.floor(min(FACE_CHIP_MAX, (
+            width - (columns - 1) * FACE_CHIP_GAP) / columns)))
+
+    while columns > 1 and side(columns) < FACE_CHIP_MIN:
+        columns -= 1
+    chip = max(1.0, side(columns))
+    used = columns * chip + (columns - 1) * FACE_CHIP_GAP
+    margin = float(max(0.0, math.floor((width - used) / 2.0)))
+    return columns, chip, margin, -(-count // columns)
+
+
 def _build_degraded_issues(
     *,
     service_status: str,
@@ -6185,17 +6219,10 @@ if APPKIT_AVAILABLE:
         callers never learned it is not a segmented control. Each chip is a
         ``FaceChipButton``: a radio button for VoiceOver with the animal's
         name as its label and tooltip, a Tab stop like any button, Space to
-        choose. The grid fills its width: up to eight chips a row, each as
-        large as the row allows up to ``CHIP_MAX``, never closer than
-        ``GAP_MIN``, and it says how tall it is at a width so the page can
-        lay out around it.
+        choose. The grid fills its width, eight chips a row (``face_grid``
+        has the arithmetic), and it says how tall it is at a width so the
+        page can lay out around it.
         """
-
-        COLUMNS = 8
-        CHIP_MAX = 54.0
-        CHIP_MIN = 40.0
-        GAP_MIN = 10.0
-        ROW_GAP = 10.0
 
         def initWithFrame_(self, frame):
             self = objc.super(ArtFacePicker, self).initWithFrame_(frame)
@@ -6236,49 +6263,41 @@ if APPKIT_AVAILABLE:
 
         @objc.python_method
         def grid(self, width: float) -> tuple[int, float, float, int]:
-            """Columns, chip side, gap between chips and rows at ``width``.
+            """Columns, chip side, left margin and rows at ``width``.
 
             The last chip's hard shadow sticks out past its body, so the
             bodies share what is left once that is set aside.
             """
-            width = width - BRAND_SHAPES["face_chip"].shadow_right
-            # One row until the chips would crowd. Sixteen at the 40pt
-            # floor need 790pt with their gaps, more than the widest
-            # column, so the roster wraps at eight a row and the chips grow
-            # into the room that leaves.
-            count = max(1, len(self.chips))
-            columns = min(self.COLUMNS, count)
-            chip = self.CHIP_MIN
-            while columns > 1:
-                chip = min(self.CHIP_MAX, (
-                    width - (columns - 1) * self.GAP_MIN) / columns)
-                if chip >= self.CHIP_MIN:
-                    break
-                columns -= 1
-            if columns == 1:
-                chip = max(1.0, min(self.CHIP_MAX, width))
-            gap = ((width - columns * chip) / (columns - 1)
-                   if columns > 1 else 0.0)
-            return columns, chip, gap, -(-count // columns)
+            return face_grid(
+                width - BRAND_SHAPES["face_chip"].shadow_right,
+                len(self.chips))
 
         @objc.python_method
         def height_for_width(self, width: float) -> float:
-            _columns, chip, _gap, rows = self.grid(width)
+            _columns, chip, _margin, rows = self.grid(width)
             shape = BRAND_SHAPES["face_chip"]
-            return rows * chip + (rows - 1) * self.ROW_GAP + shape.shadow_down
+            return (rows * chip + (rows - 1) * FACE_CHIP_GAP
+                    + shape.shadow_down)
 
         @objc.python_method
         def arrange(self) -> None:
             width = float(self.bounds().size.width)
-            columns, chip, gap, _rows = self.grid(width)
+            columns, chip, margin, _rows = self.grid(width)
             shape = BRAND_SHAPES["face_chip"]
+            step = chip + FACE_CHIP_GAP
             for index, view in enumerate(self.chips):
                 row, column = divmod(index, columns)
                 # The frame is the chip's whole footprint: the body plus
                 # the room its hard shadow takes, right and down.
-                view.setFrame_(NSMakeRect(
-                    column * (chip + gap), row * (chip + self.ROW_GAP),
-                    chip + shape.shadow_right, chip + shape.shadow_down))
+                frame = NSMakeRect(
+                    margin + column * step, row * step,
+                    chip + shape.shadow_right, chip + shape.shadow_down)
+                current = view.frame()
+                if (current.origin.x != frame.origin.x
+                        or current.origin.y != frame.origin.y
+                        or current.size.width != frame.size.width
+                        or current.size.height != frame.size.height):
+                    view.setFrame_(frame)
 
         def layout(self):
             objc.super(ArtFacePicker, self).layout()
@@ -9731,8 +9750,8 @@ if APPKIT_AVAILABLE:
             """Personalize: the face grid, then language and your words."""
             document = self._grouped_page(personalize, "Personalize")
             # Every face as a chip, the chosen one amber. Animal names are
-            # the chips' tooltips and VoiceOver labels, and the line under
-            # the grid names the face that is chosen.
+            # the chips' tooltips and VoiceOver labels, and the header's
+            # line names the face that is chosen.
             picker = ArtFacePicker.alloc().initWithFrame_(
                 NSMakeRect(0, 0, CONTENT_WIDTH - 2 * ROW_INSET, 140))
             picker.populate(
@@ -9744,31 +9763,33 @@ if APPKIT_AVAILABLE:
                 picker,
                 self._l("settings.accessibility.face.label"),
                 self._l("settings.accessibility.face.help"))
-            hint = self._soft(
-                "", NSMakeRect(0, 0, 240, 15), size=12, wrap=True)
+            # Which face is chosen, and where it shows, at the far end of
+            # the header's line.
+            hint = self._header_note()
             face_row = SettingsRowView.alloc().initWithFrame_(
                 NSMakeRect(0, 0, CONTENT_WIDTH, 180))
             face_row.addSubview_(picker)
-            face_row.addSubview_(hint)
+            chip_shape = BRAND_SHAPES["face_chip"]
 
+            # The chips' bodies fill the group from inset to inset. Their
+            # hard shadows fall in the inset on the right and below, so
+            # the last chip's shadow stays inside the group.
             def face_height(width: float) -> float:
-                inner = width - 2.0 * ROW_INSET
-                return (ROW_INSET + picker.height_for_width(inner) + 10.0
-                        + _text_height(hint, inner) + ROW_INSET)
+                grid = picker.height_for_width(
+                    width - 2.0 * ROW_INSET + chip_shape.shadow_right)
+                return 2.0 * ROW_INSET + grid - chip_shape.shadow_down
 
             def face_layout(width: float, _height: float) -> None:
-                inner = width - 2.0 * ROW_INSET
-                grid = picker.height_for_width(inner)
-                picker.setFrame_(NSMakeRect(ROW_INSET, ROW_INSET, inner, grid))
+                inner = width - 2.0 * ROW_INSET + chip_shape.shadow_right
+                picker.setFrame_(NSMakeRect(
+                    ROW_INSET, ROW_INSET, inner,
+                    picker.height_for_width(inner)))
                 picker.arrange()
-                hint.setFrame_(NSMakeRect(
-                    ROW_INSET, ROW_INSET + grid + 10.0, inner,
-                    _text_height(hint, inner)))
 
             face_row.configure(custom=(face_height, face_layout))
             document.add_section(
                 self._section_header(self._l("pages.personalize.face")),
-                self._settings_group([face_row]))
+                self._settings_group([face_row]), trailing=hint)
 
             personalize_key_views: list[Any] = list(picker.chips)
             # Language leads the list: it decides which recognizer runs, so
@@ -14649,14 +14670,18 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             return [leaf for child in children
                     for leaf in visible_leaves(child)]
 
-        def check_grouped_pages(size_name: str) -> None:
+        def check_grouped_pages(
+                size_name: str, *, may_scroll: Sequence[str] = ()) -> None:
             """The four settings pages at this window size.
 
             Each scrolls in a system scroll view as wide as the page
             column; inside it every visible view sits within the document,
             no two overlap, no label is cut short, the first group shows
             whole without scrolling, and the three settings panes show
-            every group without scrolling at all.
+            every group without scrolling at all. ``may_scroll`` names the
+            panes let off that last rule here: Personalize, whose face
+            grid fills its group, and only at the window minimum while a
+            two-line notice has taken the foot of the page.
             """
             def page_leaves(view: Any) -> list[Any]:
                 # A control is one thing, whatever its private parts are.
@@ -14750,7 +14775,77 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                     + first_group.frame().size.height
                     <= visible.origin.y + visible.size.height + 0.5,
                     f"{name}: the first group shows whole at {size_name}")
-                if name in SETTINGS_PANES:
+                if name == "Personalize":
+                    # The face grid fills its group: eight chips a row,
+                    # the spec's gap between their bodies, each as large
+                    # as the group then allows, the same inset all round,
+                    # and the last chip's hard shadow inside the group.
+                    picker = controller.dynamic["face_picker"]
+                    chip_shape = BRAND_SHAPES["face_chip"]
+                    bodies = []
+                    for chip in picker.chips:
+                        frame = first_group.convertRect_fromView_(
+                            chip.frame(), picker)
+                        bodies.append((
+                            float(frame.origin.x), float(frame.origin.y),
+                            float(frame.size.width)
+                            - chip_shape.shadow_right,
+                            float(frame.size.height)
+                            - chip_shape.shadow_down))
+                    group_size = first_group.bounds().size
+                    side = math.floor(min(FACE_CHIP_MAX, (
+                        group_size.width - 2.0 * ROW_INSET
+                        - (FACE_GRID_COLUMNS - 1) * FACE_CHIP_GAP)
+                        / FACE_GRID_COLUMNS))
+                    left = bodies[0][0] - ROW_INSET
+                    right = (group_size.width - ROW_INSET
+                             - bodies[FACE_GRID_COLUMNS - 1][0] - side)
+                    require(
+                        first_group == picker.superview().superview()
+                        and len(bodies) == len(FACES) == 16
+                        and side >= 66.0
+                        and all(abs(width - side) < 0.01
+                                and abs(height - side) < 0.01
+                                for _x, _y, width, height in bodies)
+                        and all(abs(bodies[index + 1][0] - bodies[index][0]
+                                    - side - FACE_CHIP_GAP) < 0.01
+                                and bodies[index + 1][1] == bodies[index][1]
+                                for index in range(FACE_GRID_COLUMNS - 1))
+                        and abs(bodies[FACE_GRID_COLUMNS][1] - bodies[0][1]
+                                - side - FACE_CHIP_GAP) < 0.01
+                        and bodies[FACE_GRID_COLUMNS][0] == bodies[0][0]
+                        and 0.0 <= left <= 3.5 and abs(right - left) <= 1.0
+                        and abs(bodies[0][1] - ROW_INSET) < 0.01
+                        and abs(group_size.height - ROW_INSET
+                                - bodies[-1][1] - side) < 0.01
+                        and bodies[-1][0] + side + chip_shape.shadow_right
+                        <= group_size.width - 0.5
+                        and bodies[-1][1] + side + chip_shape.shadow_down
+                        <= group_size.height - 0.5,
+                        f"the face grid fills its group at {size_name}")
+                    # The line that names the chosen face rides the
+                    # header's line, at its far end, outside the group.
+                    hint = controller.dynamic["face_hint"]
+                    header = document.sections[0][0]
+                    hint_frame, header_frame = hint.frame(), header.frame()
+                    require(
+                        hint.superview() == document
+                        and document.sections[0][3] == hint
+                        and not bool(hint.isHidden())
+                        and str(hint.stringValue()) == localized_string(
+                            "pages.personalize.face.hint",
+                            face=localized_string(
+                                f"settings.face.{model.state.face}"))
+                        and abs(hint_frame.origin.x + hint_frame.size.width
+                                - (width - SECTION_HEADER_INSET)) < 0.5
+                        and hint_frame.origin.x
+                        >= header_frame.origin.x + header_frame.size.width
+                        and hint_frame.origin.y + hint_frame.size.height
+                        <= first_group.frame().origin.y
+                        and hint_frame.origin.y >= header_frame.origin.y,
+                        f"the chosen face is named on the header's line "
+                        f"at {size_name}")
+                if name in SETTINGS_PANES and name not in may_scroll:
                     require(
                         last_group.frame().origin.y
                         + last_group.frame().size.height
@@ -14803,7 +14898,29 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             require(
                 lowest >= notice_frame.origin.y + notice_frame.size.height,
                 f"{page_name} fits at the window minimum")
+        # With that two-line notice at the foot of the page the face grid
+        # may send Personalize's last rows below the fold; every other
+        # pane, and Personalize whenever no notice is showing, shows every
+        # group without scrolling.
+        noticed_state = model.state
+        notice_view = controller.dynamic["notice"]
+        require(
+            in_window(notice_view).size.height
+            >= NOTICE_WRAPPED_HEIGHT - 0.5,
+            "the failure notice takes two lines at the window minimum")
+        check_grouped_pages(
+            "the window minimum under a two-line notice",
+            may_scroll=("Personalize",))
+        model.state = replace(noticed_state, notice="", notice_level="info")
+        controller.render()
+        root_view.layoutSubtreeIfNeeded()
+        require(
+            in_window(notice_view).size.height <= NOTICE_LINE_HEIGHT + 0.5,
+            "no notice, no second line")
         check_grouped_pages("the window minimum")
+        model.state = noticed_state
+        controller.render()
+        root_view.layoutSubtreeIfNeeded()
         # Fitting is also sideways. At the window minimum the column is at
         # its narrowest, so Home is checked there with everything it can
         # show at once (the Voice Outbox holding text and a setup item
@@ -14868,7 +14985,14 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         root_view.layoutSubtreeIfNeeded()
         controller.window.setContentSize_(WINDOW_DEFAULT_SIZE)
         root_view.layoutSubtreeIfNeeded()
+        check_grouped_pages("the default size under a notice")
+        model.state = replace(fitted_state, notice="", notice_level="info")
+        controller.render()
+        root_view.layoutSubtreeIfNeeded()
         check_grouped_pages("the default size")
+        model.state = fitted_state
+        controller.render()
+        root_view.layoutSubtreeIfNeeded()
         default_column = in_window(controller.dynamic["page_column"])
         require(
             abs(default_column.size.width - CONTENT_WIDTH) < 0.5
@@ -15043,6 +15167,60 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             and str(microphone.text.stringValue()) == "Unavailable"
             and contrast_ratio(warn_symbol, light_surface) >= 3.0,
             "a health warning keeps a warning symbol that stands out")
+
+        # The face grid's chips, from what they draw: the chosen one is
+        # amber with the ink outline and its hard shadow, the others are
+        # a faint tile, and a press on one of those shows before it is
+        # chosen.
+        face_picker = controller.dynamic["face_picker"]
+        chosen_index = FACES.index(model.state.face)
+
+        def chip_look(chip: Any) -> tuple[Any, ...]:
+            """A chip's fill beside its art, its left edge, and the row
+            under its body where only a hard shadow draws."""
+            def measure() -> tuple[Any, ...]:
+                rep = rendered(chip)
+                body = hard_shadow_body_rect(
+                    chip.bounds(), BRAND_SHAPES["face_chip"])
+                middle = body.origin.y + body.size.height / 2.0
+                return (
+                    pixel(rep, body.origin.x + 4.0, middle),
+                    pixel(rep, body.origin.x + 0.75, middle),
+                    pixel(rep, body.origin.x + body.size.width / 2.0,
+                          chip.bounds().size.height - 0.75))
+            return shown_while(chip, measure)
+
+        chosen_fill, chosen_edge, chosen_shadow = chip_look(
+            face_picker.chips[chosen_index])
+        require(
+            [index for index, chip in enumerate(face_picker.chips)
+             if chip.selected] == [chosen_index]
+            and int(face_picker.selectedSegment()) == chosen_index
+            and near(chosen_fill, light.accent) and chosen_fill[3] > 0.99
+            and near(chosen_edge, light.line) and chosen_edge[3] > 0.99
+            and near(chosen_shadow, light.line) and chosen_shadow[3] > 0.99,
+            "the chosen face's chip, and only it, is amber with the ink "
+            "outline and a hard shadow")
+        resting = [chip_look(chip)
+                   for index, chip in enumerate(face_picker.chips)
+                   if index != chosen_index]
+        rest_alpha = color_token("chip_rest", False).alpha
+        require(
+            len(resting) == len(FACES) - 1
+            and all(abs(fill[3] - rest_alpha) < 0.03
+                    and abs(edge[3] - rest_alpha) < 0.03
+                    and shadow[3] < 0.02
+                    for fill, edge, shadow in resting),
+            "every other chip is a faint tile with no outline and no "
+            "shadow")
+        pressed_chip = face_picker.chips[(chosen_index + 1) % len(FACES)]
+        pressed_chip.cell().setHighlighted_(True)
+        pressed_fill = chip_look(pressed_chip)[0]
+        pressed_chip.cell().setHighlighted_(False)
+        require(
+            pressed_fill[3] > rest_alpha + 0.08
+            and not pressed_chip.selected,
+            "a press on a chip that is not chosen shows")
 
         # Nothing a default install shows on the four pages uses the
         # runtime's internal words as its label, and every control's
@@ -15330,6 +15508,7 @@ __all__ = [
     "home_dictation_landed",
     "home_review_due",
     "home_review_in_row",
+    "face_grid",
     "setup_rows",
     "setup_rows_turned_good",
     "setup_waits_on_a_row",

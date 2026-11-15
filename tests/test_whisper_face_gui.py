@@ -3612,6 +3612,57 @@ class SettingsPagesContractTests(unittest.TestCase):
             "chip.set_selected(",
             ast.unparse(_gui_function("_paint_selection", picker)))
 
+    def test_the_face_grid_fills_its_group_eight_to_a_row(self):
+        from whisper_face_gui import (
+            FACE_CHIP_GAP, FACE_CHIP_MAX, FACE_CHIP_MIN, FACE_GRID_COLUMNS,
+            face_grid)
+        self.assertEqual(
+            (FACE_GRID_COLUMNS, FACE_CHIP_GAP, FACE_CHIP_MAX), (8, 10.0, 78.0))
+        values = _gui_constants(
+            "CONTENT_WIDTH", "PAGE_COLUMN_MIN_WIDTH",
+            "PAGE_COLUMN_MAX_WIDTH", "ROW_INSET")
+        # The room the chips' bodies get: the group, less its two insets.
+        for column in (values["PAGE_COLUMN_MIN_WIDTH"],
+                       values["PAGE_COLUMN_MAX_WIDTH"]):
+            width = column - 2 * values["ROW_INSET"]
+            with self.subTest(column=column):
+                columns, chip, margin, rows = face_grid(width, len(FACES))
+                self.assertEqual((columns, rows), (8, 2))
+                # As large as the width allows with the spec's gap, in
+                # whole points; what is left over is under a point a chip
+                # and is split evenly either side.
+                self.assertEqual(chip, math.floor(
+                    (width - 7 * FACE_CHIP_GAP) / 8))
+                self.assertEqual(chip, int(chip))
+                left_over = width - (8 * chip + 7 * FACE_CHIP_GAP)
+                self.assertTrue(0.0 <= left_over < 8.0)
+                self.assertEqual(margin, math.floor(left_over / 2.0))
+                self.assertLessEqual(margin, 3.5)
+        self.assertEqual(face_grid(720.0 - 28.0, 16)[1], 77.0)
+        self.assertEqual(face_grid(632.0 - 28.0, 16)[1], 66.0)
+        # Never larger than the cap; then the grid is centred.
+        columns, chip, margin, rows = face_grid(1000.0, 16)
+        self.assertEqual((columns, chip, rows), (8, FACE_CHIP_MAX, 2))
+        self.assertEqual(margin, (1000.0 - (8 * 78.0 + 70.0)) / 2.0)
+        # Too narrow for eight chips of the smallest size: fewer to a row,
+        # not smaller chips.
+        columns, chip, _margin, rows = face_grid(300.0, 16)
+        self.assertLess(columns, 8)
+        self.assertGreaterEqual(chip, FACE_CHIP_MIN)
+        self.assertEqual(rows, -(-16 // columns))
+        self.assertEqual(face_grid(500.0, 3)[0], 3)
+        # The picker asks this function, and the line naming the chosen
+        # face rides the section header's line, outside the group.
+        picker = _gui_class("ArtFacePicker")
+        self.assertIn("face_grid", _called_names(
+            _gui_function("grid", picker)))
+        build = ast.unparse(_gui_function(
+            "_build_settings_personalize",
+            _gui_class("WhisperFaceWindowController")))
+        self.assertIn("hint = self._header_note()", build)
+        self.assertIn("trailing=hint", build)
+        self.assertNotIn("face_row.addSubview_(hint)", build)
+
     def test_model_states_are_shown_in_words_with_a_tone(self):
         from whisper_face_gui import ModelStatus, model_status_display
         models = normalize_snapshot({"models": [
@@ -5415,17 +5466,37 @@ class SettingsPagesAppKitTests(unittest.TestCase):
             AppKit.NSMakeRect(0, 0, 604, 140))
         picker.populate(FACES, [None] * len(FACES),
                         [face.title() for face in FACES], None, None)
-        for width in (604.0, 692.0):
+        shape = gui_module.BRAND_SHAPES["face_chip"]
+        # The grid's width is the group between its insets plus the room
+        # the last chip's hard shadow takes.
+        for width, side in ((604.0 + shape.shadow_right, 66.0),
+                            (692.0 + shape.shadow_right, 77.0)):
             with self.subTest(width=width):
-                columns, chip, gap, rows = picker.grid(width)
-                self.assertEqual((columns, rows), (8, 2))
-                self.assertGreaterEqual(gap, picker.GAP_MIN)
-                self.assertLessEqual(chip, picker.CHIP_MAX)
+                columns, chip, margin, rows = picker.grid(width)
+                self.assertEqual((columns, rows, chip), (8, 2, side))
                 picker.setFrameSize_((width, picker.height_for_width(width)))
                 picker.arrange()
-                last = picker.chips[-1].frame()
+                frames = [view.frame() for view in picker.chips]
+                first, second, last = frames[0], frames[1], frames[-1]
+                self.assertEqual(
+                    (first.size.width, first.size.height),
+                    (side + shape.shadow_right, side + shape.shadow_down))
+                # Bodies are exactly the spec's gap apart, across and down.
+                self.assertEqual(
+                    second.origin.x - first.origin.x - side,
+                    gui_module.FACE_CHIP_GAP)
+                self.assertEqual(
+                    frames[8].origin.y - first.origin.y - side,
+                    gui_module.FACE_CHIP_GAP)
+                # The bodies fill the width, the same margin either side,
+                # and the last chip's shadow stays inside the grid.
+                self.assertEqual(first.origin.x, margin)
+                self.assertLessEqual(margin, 3.5)
                 self.assertAlmostEqual(
-                    last.origin.x + last.size.width, width, delta=0.5)
+                    width - shape.shadow_right
+                    - (last.origin.x + side), margin, delta=1.0)
+                self.assertLessEqual(
+                    last.origin.x + last.size.width, width + 0.01)
                 self.assertAlmostEqual(
                     last.origin.y + last.size.height,
                     picker.height_for_width(width), delta=0.5)
