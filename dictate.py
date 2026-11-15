@@ -1553,6 +1553,7 @@ PREFERENCES = {
     "sounds": SOUND_THEME_DEFAULT,
     "recent_dictations": False,
     "self_correction": False,
+    "remove_repeats": True,
     "language": LANGUAGE_DEFAULT,
 }
 ACOUSTIC_TIME_MACHINE = AcousticTimeMachine()
@@ -2009,6 +2010,10 @@ def load_preferences():
     # value, and a file written before the key existed, leaves it off.
     PREFERENCES["self_correction"] = bool(
         loaded.get("self_correction") is True)
+    # A phrase said twice by accident is typed once unless the user turned
+    # that off. A file written before the key existed keeps the default.
+    PREFERENCES["remove_repeats"] = bool(
+        loaded.get("remove_repeats") is not False)
     # Cross-platform: both mlx-whisper and faster-whisper take the same bare
     # ISO 639-1 code, so one preference drives Mac and Windows alike.
     PREFERENCES["language"] = normalize_language(loaded.get("language"))
@@ -2088,6 +2093,7 @@ def save_preferences():
         "sounds": normalize_sound_theme(PREFERENCES["sounds"]),
         "recent_dictations": bool(PREFERENCES["recent_dictations"]),
         "self_correction": bool(PREFERENCES["self_correction"]),
+        "remove_repeats": bool(PREFERENCES["remove_repeats"]),
         "language": normalize_language(PREFERENCES["language"]),
     }
     atomic_write_text(
@@ -2209,6 +2215,13 @@ def set_self_correction(enabled: bool) -> bool:
     PREFERENCES["self_correction"] = bool(enabled)
     save_preferences()
     return PREFERENCES["self_correction"]
+
+
+def set_remove_repeats(enabled: bool) -> bool:
+    """Persist the on-by-default repair of a phrase said twice by accident."""
+    PREFERENCES["remove_repeats"] = bool(enabled)
+    save_preferences()
+    return PREFERENCES["remove_repeats"]
 
 
 def set_voice_object_commands_enabled(enabled: bool) -> None:
@@ -6061,6 +6074,7 @@ def gui_settings_snapshot() -> dict:
         "banned_vocabulary": sorted(banned),
         "corrections": corrections,
         "self_correction": bool(PREFERENCES["self_correction"]),
+        "remove_repeats": bool(PREFERENCES["remove_repeats"]),
     }
 
 
@@ -11400,12 +11414,25 @@ def strip_context_echo(text: str, context_tail: str) -> str:
 
 def quick_clean(text: str, verbatim: bool = False,
                 continuing: bool = False,
-                language: str = LANGUAGE_DEFAULT) -> str:
+                language: str = LANGUAGE_DEFAULT,
+                remove_repeats: bool | None = None) -> str:
+    """Deterministic finish: the cleanup compiler, then English casing.
+
+    ``remove_repeats`` follows the preference unless the caller says
+    otherwise. Text that comes back from the cleanup model passes False:
+    the repair already ran before the model saw the text, and run again on
+    the model's punctuation (a full stop turned into a comma) it would
+    delete a phrase the speaker ended a sentence after, with nothing in the
+    record to say so.
+    """
     t = text.strip()
     if verbatim or not t:
         return t
     language = str(language or "").strip().casefold() or LANGUAGE_DEFAULT
-    t = compile_cleanup(t, language, PREFERENCES["self_correction"]).text
+    if remove_repeats is None:
+        remove_repeats = PREFERENCES["remove_repeats"]
+    t = compile_cleanup(t, language, PREFERENCES["self_correction"],
+                        remove_repeats).text
     if not t:
         return ""
     if language != "en":
@@ -11440,7 +11467,8 @@ def needs_llm_cleanup(raw: str, tone_override: str | None,
     if language != "en":
         return False
     plan = plan or compile_cleanup(
-        raw, language, PREFERENCES["self_correction"])
+        raw, language, PREFERENCES["self_correction"],
+        PREFERENCES["remove_repeats"])
     return bool(not verbatim and (
         mode in {"compose", "reply", "edit"}
         or
@@ -11597,8 +11625,9 @@ def build_delayed_cleanup_proposal(
     )
     if proof.text != candidate:
         return None
+    # The repair of a phrase said twice ran before the model saw the text.
     text = quick_clean(
-        proof.text, continuing=continuing)
+        proof.text, continuing=continuing, remove_repeats=False)
     if tone_key == "casual":
         text = strip_casual_period(text)
     text = apply_vocabulary_casing(text)
@@ -13116,13 +13145,16 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             # Verbatim is a hard contract: retain acoustic text rather than a
             # context/personal compiler substitution.
             raw, tone_override = extract_tone_override(recognized_raw)
-        self_correction = PREFERENCES["self_correction"]
-        plan = compile_code_dictation(raw, rec.language, self_correction) \
-            if rec.mode == "code" else compile_cleanup(
-                raw, rec.language, self_correction)
-        compiled = plan.text
         verbatim = ((is_verbatim_app(bundle) or tone_override == "verbatim")
                     and rec.mode in {"capture", "code"})
+        self_correction = PREFERENCES["self_correction"]
+        # A verbatim app gets the words as they were said, repeats included;
+        # code mode never repairs repeats (compile_code_dictation).
+        plan = compile_code_dictation(raw, rec.language, self_correction) \
+            if rec.mode == "code" else compile_cleanup(
+                raw, rec.language, self_correction,
+                PREFERENCES["remove_repeats"] and not verbatim)
+        compiled = plan.text
         needs_llm = needs_llm_cleanup(
             compiled, tone_override, verbatim, rec.mode, plan, rec.language)
         delayed_cleanup_requested = bool(
@@ -13195,9 +13227,11 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                     semantic_edits = [CleanupEdit(
                         f"proof:{edit.kind}", edit.before, edit.after)
                         for edit in proof_edits if edit.accepted]
+                    # The repeat repair ran on ``compiled``, before the
+                    # model; it does not run again on the model's text.
                     text = proof.text if rec.mode == "code" else quick_clean(
                         proof.text, verbatim=verbatim, continuing=continuing,
-                        language=rec.language)
+                        language=rec.language, remove_repeats=False)
                 else:
                     print("! LLM proof edits did not reconstruct its output; "
                           "pasting deterministic cleanup")
@@ -13263,8 +13297,11 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             cleaned_alternatives = []
             for alternative in PIPELINE_STATE["last_alternatives"]:
                 candidate = apply_learned_fixes(alternative, bundle)
+                # Code mode keeps a repeated token in its alternatives too.
                 candidate = quick_clean(
-                    candidate, verbatim=verbatim, language=rec.language)
+                    candidate, verbatim=verbatim, language=rec.language,
+                    remove_repeats=(PREFERENCES["remove_repeats"]
+                                    and rec.mode != "code"))
                 if tone_key == "casual" and not verbatim:
                     candidate = strip_casual_period(candidate, rec.language)
                 if candidate and candidate != text:
@@ -14312,6 +14349,7 @@ def main():
             preview_sound=preview_sound_cue,
             set_recent_dictations=set_recent_dictations_enabled,
             set_self_correction=set_self_correction,
+            set_remove_repeats=set_remove_repeats,
             recent_dictations=recent_dictation_metadata,
             reveal_recent_dictation=reveal_recent_dictation,
             insert_recent_dictation=insert_recent_dictation,

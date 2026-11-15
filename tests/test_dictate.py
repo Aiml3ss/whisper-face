@@ -2849,6 +2849,7 @@ class FacePreferenceTests(unittest.TestCase):
                 "sounds": "system",
                 "recent_dictations": False,
                 "self_correction": False,
+                "remove_repeats": True,
                 "language": "en",
             })
 
@@ -2968,6 +2969,78 @@ class FacePreferenceTests(unittest.TestCase):
                 encoding="utf-8"))["self_correction"], False)
             self.assertEqual(ns["quick_clean"](spoken), spoken)
             self.assertEqual(ns["phone_clean"](spoken), spoken)
+
+    def test_remove_repeats_is_on_unless_the_file_says_false(self):
+        with tempfile.TemporaryDirectory() as directory:
+            preferences = Path(directory) / "preferences.json"
+            ns = load_definitions(
+                "normalize_face", "current_face", "load_preferences",
+                "save_preferences", "normalize_hotkey",
+                "normalize_sound_theme", "set_remove_repeats",
+                "quick_clean", "needs_llm_cleanup", "phone_clean",
+                "collapse_repeats", "extract_tone_override",
+                assignments={
+                    "FACE_CHOICES", "DEFAULT_FACE", "PREFERENCES",
+                    "HOTKEY_CHOICES", "HOTKEY_DEFAULT",
+                    "SOUND_THEMES", "SOUND_THEME_DEFAULT",
+                    "TONE", "TONE_OVERRIDE_RE", "TONE_ALIASES",
+                },
+                extra={
+                    "PREFERENCES_FILE": preferences,
+                    "IS_MACOS": True,
+                    "ACOUSTIC_TIME_MACHINE": AcousticTimeMachine(),
+                    "json": json,
+                    "apply_hotkey_bindings": lambda: None,
+                    "atomic_write_text": lambda path, value:
+                        path.write_text(value, encoding="utf-8"),
+                    "compile_cleanup": compile_cleanup,
+                    "NUMBER_WORDS": NUMBER_WORDS,
+                    "is_hallucination": lambda *_args: False,
+                    "looks_like_prompt_echo": lambda _raw: False,
+                    "apply_learned_fixes": lambda raw: raw,
+                    "apply_vocabulary_casing": lambda text: text,
+                },
+            )
+            spoken = "Of course I can. I have nothing I have nothing going on"
+            repaired = "Of course I can. I have nothing going on."
+            self.assertIs(ns["PREFERENCES"]["remove_repeats"], True)
+            # An install from before the key existed, and every value that
+            # is not the JSON literal false, keeps the repair on.
+            for stored in ({}, {"self_correction": True},
+                           {"remove_repeats": "false"},
+                           {"remove_repeats": 0},
+                           {"remove_repeats": None},
+                           {"remove_repeats": True}):
+                with self.subTest(stored=stored):
+                    ns["PREFERENCES"]["remove_repeats"] = False
+                    preferences.write_text(
+                        json.dumps(stored), encoding="utf-8")
+                    ns["load_preferences"]()
+                    self.assertIs(ns["PREFERENCES"]["remove_repeats"], True)
+                    self.assertEqual(ns["quick_clean"](spoken), repaired)
+                    self.assertEqual(ns["phone_clean"](spoken), repaired)
+
+            preferences.write_text(
+                json.dumps({"remove_repeats": False}), encoding="utf-8")
+            ns["load_preferences"]()
+            self.assertIs(ns["PREFERENCES"]["remove_repeats"], False)
+            self.assertEqual(ns["quick_clean"](spoken), spoken + ".")
+            self.assertEqual(ns["phone_clean"](spoken), spoken + ".")
+
+            self.assertIs(ns["set_remove_repeats"](True), True)
+            self.assertIs(json.loads(preferences.read_text(
+                encoding="utf-8"))["remove_repeats"], True)
+            self.assertEqual(ns["quick_clean"](spoken), repaired)
+            # A tone command for verbatim keeps the words as spoken.
+            self.assertEqual(
+                ns["phone_clean"]("Verbatim mode, I I think so"), "I I think so")
+            self.assertIs(ns["set_remove_repeats"](False), False)
+            self.assertIs(json.loads(preferences.read_text(
+                encoding="utf-8"))["remove_repeats"], False)
+            ns["PREFERENCES"]["remove_repeats"] = True
+            ns["load_preferences"]()
+            self.assertIs(ns["PREFERENCES"]["remove_repeats"], False)
+            self.assertEqual(ns["quick_clean"]("the the cat"), "The the cat.")
 
     def test_privacy_preferences_are_mac_only_and_default_off(self):
         for is_macos, acoustic, voice_objects, expected in (
@@ -12453,6 +12526,47 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
         namespace["PREFERENCES"]["self_correction"] = True
         self.assertEqual(propose(), "The invoice says 450.")
 
+    def test_delayed_proposal_does_not_repair_repeats_again(self):
+        # The model turns the full stop the speaker said into a comma; the
+        # words are unchanged, so the proof accepts it. The repeat repair
+        # ran before the model and must not run on its text: the typed text
+        # keeps both copies.
+        compiled = "I want to. I want to ask you something."
+        namespace = load_definitions(
+            "build_delayed_cleanup_proposal", "quick_clean",
+            extra={
+                "VOICE_COMPILER": VoiceCompiler(),
+                "EditProposal": EditProposal,
+                "llm_clean_with_edits": lambda *_args: (
+                    "I want to, I want to ask you something.",
+                    (SimpleNamespace(
+                        kind="punctuation",
+                        before="to. I want", after="to, I want"),),
+                ),
+                "compile_cleanup": compile_cleanup,
+                "LANGUAGE_DEFAULT": "en",
+                "strip_casual_period": lambda text: text,
+                "apply_vocabulary_casing": lambda text: text,
+                "_restore_snippet_sentinels": lambda text, _restore: text,
+            },
+        )
+        namespace["PREFERENCES"]["remove_repeats"] = True
+        voice_ir = SimpleNamespace(context=SimpleNamespace(candidates=()))
+        self.assertEqual(
+            namespace["build_delayed_cleanup_proposal"](
+                compiled, "tone", voice_ir, continuing=False,
+                context_tail="", context_text=None, tone_key="default",
+                snippet_restore={}),
+            "I want to, I want to ask you something.")
+        # quick_clean still follows the preference when not told otherwise.
+        self.assertEqual(
+            namespace["quick_clean"]("I want to, I want to ask you."),
+            "I want to ask you.")
+        self.assertEqual(
+            namespace["quick_clean"]("I want to, I want to ask you.",
+                                     remove_repeats=False),
+            "I want to, I want to ask you.")
+
     def test_delayed_proposal_keeps_a_word_that_starts_with_the_field(self):
         class Compiler:
             def verify_edits(self, original, proposals, candidates, *, mode,
@@ -12518,6 +12632,33 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
             "load_delayed_cleanup_activation()",
             ast.get_source_segment(source, main),
         )
+
+    def test_repeats_are_repaired_once_before_the_model_and_never_in_code(
+            self):
+        # The model's proof text, now and delayed, is finished without the
+        # repeat repair; code mode's alternatives never get it.
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        calls = {}
+        for name in ("finish_and_process", "build_delayed_cleanup_proposal"):
+            function = next(
+                node for node in TREE.body
+                if isinstance(node, ast.FunctionDef) and node.name == name)
+            for node in ast.walk(function):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == "quick_clean"):
+                    first = ast.get_source_segment(source, node.args[0])
+                    keywords = {
+                        keyword.arg: ast.get_source_segment(
+                            source, keyword.value)
+                        for keyword in node.keywords}
+                    calls.setdefault(first, []).append(keywords)
+        self.assertEqual(len(calls["proof.text"]), 2)
+        for keywords in calls["proof.text"]:
+            self.assertEqual(keywords.get("remove_repeats"), "False")
+        (alternative,) = calls["candidate"]
+        self.assertIn('rec.mode != "code"',
+                      alternative.get("remove_repeats", ""))
 
 
 class ReadbackEdgeWhitespaceTests(unittest.TestCase):

@@ -552,6 +552,7 @@ class SnapshotTests(unittest.TestCase):
                 "operation.face.change_failed",
                 "operation.flight.update_failed",
                 "operation.self_correction.update_failed",
+                "operation.remove_repeats.update_failed",
                 "operation.acoustic.update_failed",
                 "operation.relisten.update_failed",
                 "operation.acoustic.play_failed",
@@ -3344,6 +3345,51 @@ class ControlSettingsViewModelTests(unittest.TestCase):
         self.assertFalse(
             model.set_self_correction(True).settings.self_correction)
 
+    def test_the_repeat_repair_is_on_unless_settings_say_off(self):
+        # A runtime from before the switch, and every value that is not the
+        # JSON literal false, reads as on.
+        self.assertTrue(GUIActions().set_remove_repeats(True))
+        self.assertTrue(normalize_settings({}).remove_repeats)
+        self.assertTrue(
+            normalize_settings({"remove_repeats": "no"}).remove_repeats)
+        self.assertFalse(
+            normalize_settings({"remove_repeats": False}).remove_repeats)
+
+    def test_the_repeat_repair_switch_shows_what_the_runtime_stored(self):
+        stored = {"remove_repeats": True}
+
+        def set_remove_repeats(enabled):
+            self.calls.append(enabled)
+            stored["remove_repeats"] = enabled
+            return enabled
+
+        model = self.model(
+            settings_snapshot=lambda: dict(stored),
+            set_remove_repeats=set_remove_repeats)
+        self.assertTrue(model.select_section("Settings").settings
+                        .remove_repeats)
+        state = model.set_remove_repeats(False)
+        self.assertEqual(self.calls, [False])
+        self.assertFalse(state.settings.remove_repeats)
+        self.assertFalse(model.refresh().settings.remove_repeats)
+        self.assertTrue(model.set_remove_repeats(True)
+                        .settings.remove_repeats)
+
+    def test_a_refused_repeat_repair_change_shows_what_was_stored(self):
+        model = self.model(set_remove_repeats=lambda _enabled: True)
+        self.assertTrue(
+            model.set_remove_repeats(False).settings.remove_repeats)
+
+    def test_a_raising_repeat_repair_switch_reports_and_stays_on(self):
+        def explode(*_args, **_kwargs):
+            raise RuntimeError("private detail")
+
+        model = self.model(set_remove_repeats=explode)
+        state = model.set_remove_repeats(False)
+        self.assertTrue(state.settings.remove_repeats)
+        self.assertEqual(state.notice_level, "error")
+        self.assertIn("Repeated words", state.notice)
+
     def test_a_runtime_that_raises_never_takes_the_window_down(self):
         def explode(*_args, **_kwargs):
             raise RuntimeError("private detail")
@@ -4109,6 +4155,8 @@ class SettingsPagesContractTests(unittest.TestCase):
                 *spoken,
                 "settings.controls.self_correction.off",
                 "settings.controls.self_correction.on",
+                "settings.controls.remove_repeats.off",
+                "settings.controls.remove_repeats.on",
                 "pages.models.advisory",
                 "pages.models.advisory.evidence",
                 "pages.models.advisory.unavailable"):

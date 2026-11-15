@@ -1771,6 +1771,9 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn('"hotkey": "alt_r"', template)
         self.assertIn('"sounds": "system"', template)
         self.assertIn('"recent_dictations": false', template)
+        # The restart repair ships on; an older preferences file without the
+        # key is read as on by the runtime, so neither installer rewrites it.
+        self.assertIn('"remove_repeats": true', template)
         # The dictation language ships defaulted to English, so an existing
         # install keeps the fast native recognizer without touching anything.
         self.assertIn('"language": "en"', template)

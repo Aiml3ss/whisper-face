@@ -120,6 +120,13 @@
     {"id": "repeat-three-times-unpunctuated", "covers": "repeats", "spoken": "That was very, very, very good", "expected": "That was very, very, very good."},
     {"id": "repeat-three-times-bare", "covers": "repeats", "spoken": "It was a really really really long day.", "expected": "It was a really really really long day."},
     {"id": "repeat-four-times", "covers": "repeats", "spoken": "No no no no, don't send that.", "expected": "No no no no, don't send that."},
+    {"id": "repeat-restart-owner", "covers": "repeats", "app": "com.apple.MobileSMS", "spoken": "Of course I can. I have nothing I have nothing going on", "expected": "Of course I can. I have nothing going on"},
+    {"id": "repeat-restart-pair", "covers": "repeats", "spoken": "We can, we can do it on Friday.", "expected": "We can do it on Friday."},
+    {"id": "repeat-restart-word", "covers": "repeats", "spoken": "Pass me the the salt.", "expected": "Pass me the salt."},
+    {"id": "repeat-phrase-three-times", "covers": "repeats", "spoken": "No way, no way, no way.", "expected": "No way, no way, no way."},
+    {"id": "repeat-particle-in", "covers": "repeats", "spoken": "I logged in in the morning.", "expected": "I logged in in the morning."},
+    {"id": "repeat-place-name", "covers": "repeats", "spoken": "New York, New York is my favorite song.", "expected": "New York, New York is my favorite song."},
+    {"id": "repeat-across-sentences", "covers": "repeats", "spoken": "I have nothing. I have nothing going on.", "expected": "I have nothing. I have nothing going on."},
 
     {"id": "emoji-before-caret", "covers": "emoji", "field": "Nice work 🎉", "spoken": "Ship it on Friday.", "expected": "Nice work 🎉 Ship it on Friday."},
     {"id": "emoji-skin-tone-before-caret", "covers": "emoji", "field": "Thanks 👍🏽 ", "spoken": "See you tomorrow.", "expected": "Thanks 👍🏽 See you tomorrow."},

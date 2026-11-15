@@ -630,10 +630,13 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.controls.sound.detail.system": "Borrowed macOS system sounds",
         "settings.controls.sound.detail.whisper": "Short first-party cues for start, finish, and trouble",
         "settings.controls.sound.detail.silent": "No sound at all",
+        "settings.controls.remove_repeats": "Repeated words",
+        "settings.controls.remove_repeats.on": "On. “I have nothing I have nothing going on” types “I have nothing going\u00a0on”.",
+        "settings.controls.remove_repeats.off": "Off. When on, “I have nothing I have nothing going on” types “I have nothing going\u00a0on”.",
         "settings.controls.self_correction": "“Actually” corrections",
         "settings.controls.self_correction.off": "Off. When on, “Meet at 3 pm, actually 4 pm” types “Meet at 4 pm” for numbers, days, months\u00a0and\u00a0times.",
         "settings.controls.self_correction.on": "On. “Meet at 3 pm, actually 4 pm” types “Meet at 4 pm” for numbers, days, months\u00a0and\u00a0times.",
-        "settings.controls.self_correction.cost": "A real contrast changes too: “I thought it was Tuesday, actually Wednesday” loses “Tuesday”.",
+        "settings.controls.self_correction.cost": "With “Actually” on, a real contrast changes too: “I thought it was Tuesday, actually Wednesday” loses “Tuesday”.",
         "settings.controls.action.change": "Change…",
         "settings.controls.action.preview": "Preview",
         "settings.dialog.hotkey.title": "Choose your capture key",
@@ -665,6 +668,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.privacy.recent.browse": "Browse…",
         "settings.privacy.recent.browse.help": "List recent dictations by time, length, and app.",
         "settings.accessibility.recent.label": "Recent dictations",
+        "settings.accessibility.remove_repeats.label": "Repeated words",
+        "settings.accessibility.remove_repeats.help": "On by default. A phrase said twice by accident is typed once: “I have nothing I have nothing going on” types “I have nothing going on”. Anything said three times, like “no way no way no way”, stays as you said it.",
         "settings.accessibility.self_correction.label": "“Actually” corrections",
         "settings.accessibility.self_correction.help": "Off by default. When on, “Meet at 3 pm, actually 4 pm” types “Meet at 4 pm”: between two numbers, days, months or times, only the second is kept. A sentence contrasting two things, like “I thought it was Tuesday, actually Wednesday”, changes too.",
         "settings.accessibility.recent.help": "Show recent dictations so their words can be revealed.",
@@ -923,6 +928,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "operation.keyword.export_failed": "Could not copy the pronunciation keyword export: {error}. Nothing reached the clipboard — try Copy Export again.",
         "operation.keyword.forget_failed": "Could not forget that pronunciation keyword: {error}. Its evidence is unchanged — try Forget again.",
         "operation.face.change_failed": "Could not change your companion: {error}. The current face stays — pick it again.",
+        "operation.remove_repeats.update_failed": "Could not change Repeated words: {error}. It stayed exactly as it was — try the switch again.",
         "operation.self_correction.update_failed": "Could not change “Actually” corrections: {error}. It stayed exactly as it was — try the switch again.",
         "operation.flight.update_failed": "Could not update Flight Recorder: {error}. It stayed exactly as it was — try the switch again.",
         "operation.acoustic.update_failed": "Could not update Acoustic Time Machine: {error}. It stayed exactly as it was — try the switch again.",
@@ -1309,6 +1315,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "settings.accessibility.language.label",
             "settings.accessibility.flight.label",
             "settings.accessibility.acoustic.label",
+            "settings.accessibility.remove_repeats.label",
             "settings.accessibility.self_correction.label",
             "settings.accessibility.voice_objects.label",
             "settings.accessibility.voice_objects.chooser",
@@ -1378,6 +1385,7 @@ class GUIActions:
     preview_sound: Callable[[str], bool] = lambda _cue: False
     set_recent_dictations: Callable[[bool], bool] = lambda _enabled: False
     set_self_correction: Callable[[bool], bool] = lambda _enabled: False
+    set_remove_repeats: Callable[[bool], bool] = lambda _enabled: True
     recent_dictations: Callable[[], Sequence[Mapping[str, Any]]] = lambda: ()
     reveal_recent_dictation: Callable[[str], str | None] = (
         lambda _entry_id: None)
@@ -1769,6 +1777,7 @@ class UnifiedSettings:
     banned_vocabulary: tuple[str, ...] = field(default_factory=tuple)
     corrections: tuple[CorrectionSetting, ...] = field(default_factory=tuple)
     self_correction: bool = False
+    remove_repeats: bool = True
 
 
 def tone_for_app_index(
@@ -2696,6 +2705,7 @@ def normalize_settings(snapshot: Mapping[str, Any] | None) -> UnifiedSettings:
         banned_vocabulary=_text_items(source.get("banned_vocabulary")),
         corrections=tuple(corrections),
         self_correction=source.get("self_correction") is True,
+        remove_repeats=source.get("remove_repeats") is not False,
     )
 
 
@@ -4692,6 +4702,21 @@ class WhisperFaceViewModel:
             self.state = replace(
                 self.state, notice=self.localized(
                     "operation.self_correction.update_failed", error=error),
+                notice_level="error")
+        return self.state
+
+    def set_remove_repeats(self, enabled: bool) -> GUIState:
+        try:
+            stored = self.actions.set_remove_repeats(bool(enabled)) is True
+            self.state = replace(
+                self.state, settings=replace(
+                    self.state.settings, remove_repeats=stored),
+                notice="", notice_level="info")
+            return self.refresh()
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.remove_repeats.update_failed", error=error),
                 notice_level="error")
         return self.state
 
@@ -10606,8 +10631,18 @@ if APPKIT_AVAILABLE:
                 self._section_header(self._l("pages.controls.sounds")),
                 self._settings_group([sound_row]))
 
-            # What the switch does is the caption; what it costs, the one
-            # sentence it gets wrong, is the note under the group.
+            # What each switch does is its caption. The repeat repair comes
+            # first: it is on for everyone. "Actually" sits last, beside the
+            # note under the group, which is the one sentence it gets wrong.
+            repeats_switch = self._switch(
+                NSMakeRect(0, 0, 40, 22), "removeRepeatsChanged:",
+                label=self._l("settings.accessibility.remove_repeats.label"),
+                help_text=self._l(
+                    "settings.accessibility.remove_repeats.help"))
+            repeats_row, _title, repeats_detail = self._settings_row(
+                self._l("settings.controls.remove_repeats"), caption="",
+                accessories=(repeats_switch,))
+            control_key_views.append(repeats_switch)
             correction_switch = self._switch(
                 NSMakeRect(0, 0, 40, 22), "selfCorrectionChanged:",
                 label=self._l("settings.accessibility.self_correction.label"),
@@ -10621,7 +10656,7 @@ if APPKIT_AVAILABLE:
             control_key_views.append(correction_switch)
             document.add_section(
                 self._section_header(self._l("pages.controls.corrections")),
-                self._settings_group([correction_row]),
+                self._settings_group([repeats_row, correction_row]),
                 (correction_cost,))
 
             self.dynamic.update(
@@ -10630,6 +10665,8 @@ if APPKIT_AVAILABLE:
                 sound_theme_detail=sound_detail,
                 self_correction_toggle=correction_switch,
                 self_correction_detail=correction_detail,
+                remove_repeats_toggle=repeats_switch,
+                remove_repeats_detail=repeats_detail,
             )
             return tuple(control_key_views)
 
@@ -11579,6 +11616,21 @@ if APPKIT_AVAILABLE:
             # Nothing to preview when the answer is silence.
             self.dynamic["sound_preview_button"].setEnabled_(
                 state.sound_theme != "silent")
+            remove_repeats = settings.remove_repeats
+            self.dynamic["remove_repeats_toggle"].setState_(
+                NSControlStateValueOn if remove_repeats
+                else NSControlStateValueOff)
+            set_accessible_text(
+                self.dynamic["remove_repeats_detail"],
+                self._l("settings.controls.remove_repeats.on"
+                        if remove_repeats
+                        else "settings.controls.remove_repeats.off"),
+                label=self._l("settings.accessibility.remove_repeats.label"))
+            sync_accessibility(
+                self.dynamic["remove_repeats_toggle"],
+                self._l("settings.state.enabled") if remove_repeats
+                else self._l("settings.state.disabled"),
+                label=self._l("settings.accessibility.remove_repeats.label"))
             self_correction = settings.self_correction
             self.dynamic["self_correction_toggle"].setState_(
                 NSControlStateValueOn if self_correction
@@ -13287,6 +13339,11 @@ if APPKIT_AVAILABLE:
             self.view_model.set_self_correction(enabled)
             self.render()
 
+        def removeRepeatsChanged_(self, sender: Any) -> None:
+            enabled = sender.state() == NSControlStateValueOn
+            self.view_model.set_remove_repeats(enabled)
+            self.render()
+
         def recentDictationsChanged_(self, sender: Any) -> None:
             enabled = sender.state() == NSControlStateValueOn
             self.view_model.set_recent_dictations(enabled)
@@ -13892,6 +13949,11 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         private_settings["self_correction"] = bool(enabled)
         return bool(enabled)
 
+    def set_remove_repeats(enabled: bool) -> bool:
+        calls.append(("remove_repeats", enabled))
+        private_settings["remove_repeats"] = bool(enabled)
+        return bool(enabled)
+
     actions = GUIActions(
         status_snapshot=lambda: dict(runtime),
         settings_snapshot=lambda: dict(private_settings),
@@ -13904,6 +13966,7 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         preview_sound=lambda cue: calls.append(("preview_sound", cue)) or True,
         set_recent_dictations=set_recent_dictations,
         set_self_correction=set_self_correction,
+        set_remove_repeats=set_remove_repeats,
         # Two entries share one metadata row, as two short dictations into
         # the same app within a minute do.
         recent_dictations=lambda: (
@@ -15970,6 +16033,40 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         controller.selfCorrectionChanged_(self_correction_toggle)
         require(not model.state.settings.self_correction,
                 "the actually switch turns the correction off")
+        # The smoke's settings file predates the key, as an install from
+        # before the switch does: the repair is on.
+        repeats_toggle = controller.dynamic["remove_repeats_toggle"]
+        require(
+            accessible_value(repeats_toggle, "accessibilityLabel")
+            == localized_string(
+                "settings.accessibility.remove_repeats.label")
+            and repeats_toggle in controller.dynamic[
+                "settings_key_views"]["Controls"],
+            "the repeated words switch is labelled and reachable by keyboard")
+        require(
+            "remove_repeats" not in private_settings
+            and int(repeats_toggle.state()) == int(NSControlStateValueOn)
+            and str(controller.dynamic["remove_repeats_detail"]
+                    .stringValue()) == localized_string(
+                        "settings.controls.remove_repeats.on"),
+            "the repeated words repair starts on and says so")
+        repeats_toggle.setState_(NSControlStateValueOff)
+        controller.removeRepeatsChanged_(repeats_toggle)
+        require(
+            ("remove_repeats", False) in calls
+            and not model.state.settings.remove_repeats
+            and int(repeats_toggle.state()) == int(NSControlStateValueOff)
+            and str(controller.dynamic["remove_repeats_detail"]
+                    .stringValue()) == localized_string(
+                        "settings.controls.remove_repeats.off")
+            and accessible_value(repeats_toggle, "accessibilityValue") ==
+            localized_string("settings.state.disabled"),
+            "the repeated words switch turns the repair off")
+        repeats_toggle.setState_(NSControlStateValueOn)
+        controller.removeRepeatsChanged_(repeats_toggle)
+        require(model.state.settings.remove_repeats
+                and private_settings["remove_repeats"] is True,
+                "the repeated words switch turns the repair back on")
         require(
             hotkey_name_for_keycode(61) == "alt_r"
             and hotkey_name_for_keycode(0) == ""

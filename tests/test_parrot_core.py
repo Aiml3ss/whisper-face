@@ -31,6 +31,7 @@ from parrot_core import (  # noqa: E402
     confidence_from_segments,
     recognition_words_from_segments,
     correction_similarity,
+    find_restart,
     find_self_correction,
     infer_revised_insertion,
     mode_from_modifiers,
@@ -826,6 +827,321 @@ class CleanupCompilerTests(unittest.TestCase):
             "result equals parse open paren payload close paren semicolon")
         self.assertEqual(plan.text, "result = parse(payload);")
         self.assertIn("spoken_code_token", plan.edit_kinds)
+
+
+# A phrase said twice by accident, and what is typed. The owner's own
+# message comes first.
+MUST_REPAIR = (
+    ("Of course I can. I have nothing I have nothing going on",
+     "Of course I can. I have nothing going on"),
+    ("I have nothing I have nothing going on", "I have nothing going on"),
+    ("I have I have to go", "I have to go"),
+    ("we can we can do it", "we can do it"),
+    ("it's a it's a problem", "it's a problem"),
+    ("in the in the morning", "in the morning"),
+    ("to the to the store", "to the store"),
+    ("I I think", "I think"),
+    # Twenty more, the harder ones.
+    ("In the in the morning we left.", "In the morning we left."),
+    ("Go to the, to the store.", "Go to the store."),
+    ("I have nothing... I have nothing going on.",
+     "I have nothing going on."),
+    ("I have nothing — I have nothing going on.", "I have nothing going on."),
+    ("I want to- I want to ask you something.",
+     "I want to ask you something."),
+    ("I want to - I want to ask you something.",
+     "I want to ask you something."),
+    ("Do you want do you want to come?", "Do you want to come?"),
+    ("We need to talk... we need to talk about the budget.",
+     "We need to talk about the budget."),
+    ("I'm not sure I'm not sure what you mean.",
+     "I'm not sure what you mean."),
+    ("They're going they're going to love it.", "They're going to love it."),
+    ("he's a he's a good guy", "he's a good guy"),
+    ("Pass me the the salt.", "Pass me the salt."),
+    ("The the report is late.", "The report is late."),
+    ("Send it to to Dana.", "Send it to Dana."),
+    ("It's one of of the best.", "It's one of the best."),
+    ("I lost my my keys.", "I lost my keys."),
+    ("That took an an hour.", "That took an hour."),
+    ("We we need more time.", "We need more time."),
+    ("And and then we left.", "And then we left."),
+    ("I think that, I think that we should go.",
+     "I think that we should go."),
+    ("I said I said it was fine.", "I said it was fine."),
+    ("the cat sat the cat sat on the mat", "the cat sat on the mat"),
+    # A filler between the two copies goes first, then the repeat.
+    ("I, um, I think so.", "I think so."),
+    # Two separate restarts in one dictation.
+    ("I have I have to go to the to the store.", "I have to go to the store."),
+    # Plain restarts the first review found left as they were.
+    ("Can you can you hear me?", "Can you hear me?"),
+    ("Is it is it worth it?", "Is it worth it?"),
+    ("Did you did you get my message?", "Did you get my message?"),
+    ("Have you have you eaten yet?", "Have you eaten yet?"),
+    ("I think I think I should go.", "I think I should go."),
+    ("Can we can we talk later?", "Can we talk later?"),
+    ("My mom my mom is coming over.", "My mom is coming over."),
+    ("Let me let me check.", "Let me check."),
+    ("So I so I told him.", "So I told him."),
+    ("If you if you want, we can meet.", "If you want, we can meet."),
+    ("There's a there's a problem with the order.",
+     "There's a problem with the order."),
+    ("That's what that's what I said.", "That's what I said."),
+    ("It's it's fine.", "It's fine."),
+    ("I'm I'm on my way.", "I'm on my way."),
+    ("This is this is the best part.", "This is the best part."),
+    ("Where's the where's the remote?", "Where's the remote?"),
+    ("Because because it's late.", "Because it's late."),
+    # A comma at the restart point after a word no phrase ends on.
+    ("We can, we can do it on Friday.", "We can do it on Friday."),
+    ("I want to, I want to ask you something.",
+     "I want to ask you something."),
+)
+
+# Repeats a person meant, and anything the repair must not read.
+MUST_KEEP = (
+    # Three or more times is emphasis.
+    "no way no way no way",
+    "No way, no way, no way, I said.",
+    "I I I think so.",
+    "the the the end",
+    "ha ha ha ha ha ha, very funny",
+    # A sentence end between the copies.
+    "Of course I can. I have nothing. I have nothing going on.",
+    "I have nothing. I have nothing going on.",
+    "Is it? Is it really?",
+    # A single word outside the closed list.
+    "no no, not that one",
+    "That was very very good.",
+    "Okay, bye bye now.",
+    "He had had enough.",
+    "He said that that was fine.",
+    "Walla Walla is in Washington.",
+    "I logged in in the morning.",
+    "Check in in five minutes.",
+    # Pairs that do not open like a restart.
+    "New York New York is my favorite song.",
+    "again and again and again",
+    "on and on and on",
+    "day after day after day",
+    "tick tock tick tock goes the clock",
+    "and so on and so on and so forth",
+    "You know you know what I mean.",
+    "He said he said it.",
+    "She thinks she thinks too much.",
+    # Numbers.
+    "one two three one two three go",
+    "Call 555 1234 555 1234 now.",
+    "My PIN is 4 4 4 4.",
+    # Quotation marks, a line break, a spoken command.
+    'He wrote "I have I have to go" on the board.',
+    "She typed “the the” on purpose.",
+    "I have nothing\nI have nothing going on",
+    "Tuesday scratch that scratch that Wednesday",
+    # Said twice at the end of a sentence, or set off by a comma: on purpose.
+    "I love you, I love you.",
+    "I know, I know, I should have called.",
+    "Of course, of course, come in.",
+    "we will see we will see.",
+    "Pass me the the.",
+    # A capital in mid-sentence is a name or a letter.
+    "I got an A a week ago.",
+    "The grade was A A A plus.",
+    "Plan A a day keeps things simple.",
+    # Spelled-out letters.
+    "spell it a a r o n",
+    # A comma alone at the restart point, after a copy that is a whole
+    # phrase, is how a repeat on purpose is written. The restart written the
+    # same way is kept too: the words cannot tell the two apart.
+    "I have nothing, I have nothing going on.",
+    "And I mean it, I mean it this time.",
+    "I'm serious, I'm serious about this.",
+    "We won, we won the whole thing!",
+    "It's mine, it's mine and you can't have it.",
+    "I'm sorry, I'm sorry I didn't mean it.",
+    "I did it for you, for you and nobody else.",
+    "Without you, without you I'm nothing.",
+    "In the end, in the end it doesn't even matter is the line.",
+    "You and me, you and me against the world.",
+    "The chorus goes one more time, one more time and then the drop.",
+    "He goes I know, I know and then leaves.",
+    "The kids yelled we want cake, we want cake all afternoon.",
+    "Hold on, hold on a second.",
+    # Both copies set off by commas.
+    "We sang happy birthday to you, happy birthday to you, and then cut "
+    "the cake.",
+    "Don't stop me now, don't stop me now, I'm having such a good time.",
+    "Come in, come in, sit down.",
+    "Yes we can, yes we can, and we will.",
+    # A quotation after a verb of saying, singing or chanting.
+    "The crowd chanted we will, we will rock you.",
+    "She whispered I love you, I love you over and over.",
+    "She sang let it go let it go all day.",
+    # A word being named, not used, and "oh my my".
+    "Oh my my what a mess.",
+    "Type and and or in the search box.",
+    "The words and and or are conjunctions.",
+    "Use and and or to join them.",
+    "The letter a, a vowel, comes first.",
+    "Write I I for the roman numeral two.",
+    "The regex is a a star b.",
+    # Patterns, codes and lists: no word that opens a phrase, half numbers,
+    # or only letters.
+    "The pattern is red blue green red blue green and so on.",
+    "Knit one purl one knit one purl one to the end of the row.",
+    "The code is X Y Z X Y Z then press enter.",
+    "The plate is K L M K L M and it is red.",
+    "Call foo bar baz foo bar baz in the loop.",
+    "Clap on one and two on one and two then stop.",
+    "The rhyme scheme is a b a b and so on.",
+    # Said over and over, with the sentence going on after.
+    "on and on and on we went",
+    "over and over and over again",
+    "you know you know you know what I mean",
+    "This way this way please.",
+    # A sentence end after the second copy, with more text after it.
+    "I love you I love you. See you soon.",
+    # A full stop inside each copy.
+    "No. I have no. I have nothing going on",
+    # An opening mark on a later word of the second copy.
+    "I have nothing (I have nothing going on",
+)
+
+
+class RestartRepairTests(unittest.TestCase):
+    def test_a_restart_is_typed_once(self):
+        for spoken, expected in MUST_REPAIR:
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, expected)
+                self.assertIn("remove_repeat", plan.edit_kinds)
+
+    def test_a_repeat_someone_meant_is_kept(self):
+        for spoken in MUST_KEEP:
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken.strip())
+                self.assertNotIn("remove_repeat", plan.edit_kinds)
+                self.assertIsNone(find_restart(spoken))
+
+    def test_the_lists_hold_enough_hard_cases(self):
+        # The brief's own examples plus at least twenty more of each.
+        self.assertGreaterEqual(len(MUST_REPAIR), 8 + 20)
+        self.assertGreaterEqual(len(MUST_KEEP), 13 + 20)
+
+    def test_the_repair_runs_once_on_already_compiled_text(self):
+        # quick_clean compiles text the compiler has already compiled; that
+        # second pass must find nothing new, or a removal would go
+        # unrecorded.
+        for spoken in [spoken for spoken, _ in MUST_REPAIR] + list(MUST_KEEP):
+            with self.subTest(spoken=spoken):
+                once = compile_cleanup(spoken).text
+                self.assertNotIn("remove_repeat",
+                                 compile_cleanup(once).edit_kinds)
+
+    def test_a_spoken_command_is_never_part_of_a_run(self):
+        # The cleanup expands or resolves a command before the repair runs;
+        # what reaches it is a phrase the command rules kept as words, or a
+        # command they could not place. Either way it is not the repair's.
+        for spoken in ("Start a new line a new line here.",
+                       "we need a new paragraph a new paragraph here",
+                       "let's scratch that let's scratch that plan"):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(compile_cleanup(spoken).text, spoken)
+        for text in ("Then new line then new line goes here",
+                     "so scratch that so scratch that now"):
+            with self.subTest(text=text):
+                self.assertIsNone(find_restart(text))
+
+    def test_three_repeats_are_kept_whatever_the_length(self):
+        for phrase in ("the", "I have", "I have nothing",
+                       "we can do it", "it's a long way"):
+            for joiner in (" ", ", "):
+                spoken = joiner.join([phrase] * 3) + " going on"
+                with self.subTest(spoken=spoken):
+                    self.assertEqual(compile_cleanup(spoken).text, spoken)
+                spoken = joiner.join([phrase] * 4) + " going on"
+                with self.subTest(spoken=spoken):
+                    self.assertEqual(compile_cleanup(spoken).text, spoken)
+
+    def test_the_owner_sentence_is_one_recorded_edit(self):
+        spoken = "Of course I can. I have nothing I have nothing going on"
+        plan = compile_cleanup(spoken)
+        self.assertEqual(plan.edit_kinds, ["remove_repeat"])
+        self.assertEqual(len(plan.edits), 1)
+        edit = plan.edits[0]
+        self.assertEqual(edit.before, spoken)
+        self.assertEqual(edit.after, "Of course I can. I have nothing going on")
+        self.assertFalse(plan.needs_semantic_cleanup)
+
+    def test_the_repair_can_be_turned_off(self):
+        for spoken, _expected in MUST_REPAIR:
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken, remove_repeats=False)
+                self.assertNotIn("remove_repeat", plan.edit_kinds)
+                self.assertNotEqual(plan.text, _expected)
+
+    def test_the_repair_runs_again_to_a_fixed_point(self):
+        for spoken, expected in MUST_REPAIR:
+            with self.subTest(spoken=spoken):
+                once = compile_cleanup(spoken).text
+                self.assertEqual(compile_cleanup(once).text, once)
+
+    def test_the_kept_copy_takes_the_first_copy_capital(self):
+        self.assertEqual(compile_cleanup("In the in the end it worked.").text,
+                         "In the end it worked.")
+        # A capital the recognizer gave the second copy in mid-sentence
+        # does not survive.
+        self.assertEqual(
+            compile_cleanup("so we can go We can go now.").text,
+            "so we can go now.")
+        self.assertEqual(
+            compile_cleanup("We met I have nothing I have nothing going on.")
+            .text, "We met I have nothing going on.")
+
+    def test_other_languages_are_left_exactly_as_they_are(self):
+        for language, spoken in (
+            ("de", "Ich habe ich habe nichts vor"),
+            ("fr", "je je pense que oui"),
+            ("es", "en la en la mañana"),
+            ("nl", "the the cat"),
+            ("ja", "私は 私は 行きます"),
+        ):
+            with self.subTest(language=language):
+                plan = compile_cleanup(spoken, language)
+                self.assertNotIn("remove_repeat", plan.edit_kinds)
+                self.assertIn(spoken.split()[0], plan.text)
+                self.assertEqual(plan.text.split()[:2], spoken.split()[:2])
+
+    def test_code_dictation_never_repairs_a_repeat(self):
+        for spoken in ("the the cat", "I have nothing I have nothing going on"):
+            with self.subTest(spoken=spoken):
+                plan = compile_code_dictation(spoken)
+                self.assertNotIn("remove_repeat", plan.edit_kinds)
+                self.assertEqual(plan.text, spoken)
+
+    def test_a_snippet_placeholder_is_never_part_of_a_run(self):
+        token = ""
+        for spoken in (f"I want {token} I want {token} today",
+                       f"the {token} the {token} report",
+                       f"{token} {token} and then"):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(compile_cleanup(spoken).text, spoken)
+
+    def test_a_long_dictation_stays_fast(self):
+        import time
+        sentence = "I have nothing I have nothing going on. "
+        started = time.perf_counter()
+        plan = compile_cleanup(sentence * 60)
+        elapsed = time.perf_counter() - started
+        self.assertEqual(plan.text.count("I have nothing going on."), 60)
+        # Compared with plain cleanup of the same text in the same run, not
+        # with a number of seconds measured on one machine.
+        started = time.perf_counter()
+        compile_cleanup(sentence * 60, remove_repeats=False)
+        baseline = time.perf_counter() - started
+        self.assertLess(elapsed, max(baseline * 200, 0.5))
 
 
 class CorrectionTests(unittest.TestCase):

@@ -9,5 +9,6 @@
   "sounds": "system",
   "recent_dictations": false,
   "self_correction": false,
+  "remove_repeats": true,
   "language": "en"
 }
