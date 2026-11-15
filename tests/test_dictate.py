@@ -3746,10 +3746,10 @@ class WhisperFaceThemeTests(unittest.TestCase):
             COLOR_TOKENS, STICKER_INK, STICKER_TINTS, color_token)
 
         self.assertEqual(set(COLOR_TOKENS), {
-            "ink_outline", "hairline", "stage_amber", "stage_emerald",
-            "switch_on", "brand_ink", "sticker_teal", "sticker_butter",
-            "sticker_rose", "sticker_ink", "on_amber_ink", "chip_rest",
-            "sidebar_selection",
+            "ink_outline", "control_edge", "hairline", "stage_amber",
+            "stage_emerald", "switch_on", "brand_ink", "sticker_teal",
+            "sticker_butter", "sticker_rose", "sticker_ink", "on_amber_ink",
+            "chip_rest", "sidebar_selection",
         })
         for name, light, dark in (
                 ("stage_amber", "#F6BE55", "#D9A23F"),
