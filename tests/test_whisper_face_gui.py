@@ -3698,6 +3698,169 @@ class ShellNavigationTests(unittest.TestCase):
         # Model snapshots really produce these phases.
         self.assertIn(normalize_snapshot({}).status_phase, phases)
 
+    def test_page_shortcuts_are_in_the_smoke_contract(self):
+        equivalents = native_appkit_smoke_contract().key_equivalents
+        for index, row in enumerate(SIDEBAR_ROWS):
+            self.assertIn(f"command-{index + 1}:{row.key}", equivalents)
+        self.assertIn("command-d:advanced", equivalents)
+
+    def test_shell_structure_is_the_systems(self):
+        controller = _gui_class("WhisperFaceWindowController")
+        build = ast.unparse(_gui_function("_build_window", controller))
+        # A split view controller with a sidebar item, in a full-size
+        # content view: the material, divider and full-height layout are
+        # the system's. No toolbar, no hand-made effect view.
+        self.assertIn("NSSplitViewItem.sidebarWithViewController_(", build)
+        self.assertIn("setContentViewController_(", build)
+        self.assertIn("NSWindowStyleMaskFullSizeContentView", build)
+        self.assertIn("setTitlebarAppearsTransparent_(True)", build)
+        self.assertIn("setTitleVisibility_(NSWindowTitleHidden)", build)
+        for hand_made in ("NSVisualEffectView", "NSToolbar"):
+            self.assertNotIn(hand_made, GUI_SOURCE)
+        self.assertEqual(
+            [base.id for base in _gui_class(
+                "ShellSplitViewController").bases],
+            ["NSSplitViewController"])
+        # The old in-window header and pane switch are gone for good.
+        for gone in ("topbar", "settings_pane_control",
+                     "settingsPaneChanged", "sectionChanged"):
+            self.assertNotIn(gone, GUI_SOURCE)
+
+    def test_shell_names_are_imported_inside_the_appkit_guard(self):
+        # One missing AppKit name outside the guard would stop the module
+        # importing at all, instead of leaving the window unavailable.
+        guard = next(
+            node for node in GUI_TREE.body
+            if isinstance(node, ast.Try) and any(
+                isinstance(item, ast.Assign)
+                and getattr(item.targets[0], "id", "") == "APPKIT_AVAILABLE"
+                for item in node.body))
+        guarded = {
+            alias.name
+            for item in guard.body if isinstance(item, ast.ImportFrom)
+            for alias in item.names}
+        self.assertLessEqual(
+            {"NSSplitViewController", "NSSplitViewItem", "NSStackView",
+             "NSViewController", "NSWindowStyleMaskFullSizeContentView",
+             "NSWindowTitleHidden", "NSAccessibilityListRole"}, guarded)
+        # Newer than macOS 14, so looked up rather than imported.
+        self.assertNotIn("NSAccessibilityHeadingRole", guarded)
+
+    def test_sidebar_row_has_every_state_a_custom_control_needs(self):
+        row = _gui_class("SidebarRowButton")
+        self.assertEqual([base.id for base in row.bases], ["BrandButton"])
+        self.assertTrue(ast.get_docstring(row))
+        self.assertLessEqual(
+            {"configure", "set_selected", "drawRect_", "keyDown_",
+             "mouseDown_", "hitTest_", "canBecomeKeyView",
+             "drawFocusRingMask",
+             "focusRingMaskBounds", "viewDidChangeEffectiveAppearance"},
+            _method_names(row))
+        text = ast.unparse(row)
+        # Selected, for VoiceOver as well as for the eye.
+        self.assertIn("setAccessibilitySelected_", text)
+        self.assertIn("'sidebar_selection'", text)
+        # No press spring on navigation: the click skips JellyButton.
+        self.assertIn(
+            "objc.super(JellyButton, self).mouseDown_(event)", text)
+        self.assertNotIn("add_jelly_motion", text)
+
+    def test_shell_render_and_actions_are_wired(self):
+        controller = _gui_class("WhisperFaceWindowController")
+        shell = _called_names(_gui_function("_render_shell", controller))
+        for name in ("_apply_window_theme", "sidebar_row_index",
+                     "_sync_sidebar", "_sync_title_strip",
+                     "_animate_section_change"):
+            self.assertIn(name, shell)
+        self.assertLess(
+            shell.index("_apply_window_theme"), shell.index("_sync_sidebar"),
+            "the sidebar reads the appearance the theme resolves")
+        for name in ("set_setup_mode", "add_title_item", "selectSidebarRow_",
+                     "move_sidebar_focus", "windowDidBecomeKey_",
+                     "windowDidResignKey_", "_build_sidebar"):
+            _gui_function(name, controller)
+        self.assertIn(
+            "select_sidebar_row",
+            _called_names(_gui_function("_select_sidebar_row", controller)))
+        menu = ast.unparse(_gui_function("_install_main_menu", controller))
+        self.assertIn("'menu.view'", menu)
+        self.assertIn("'selectSidebarRow:'", menu)
+        self.assertIn("enumerate(SIDEBAR_ROWS)", menu)
+        self.assertEqual(localized_string("menu.view"), "View")
+
+    def test_shell_geometry_adds_up(self):
+        values = _gui_constants(
+            "SIDEBAR_WIDTH", "CONTENT_WIDTH", "CONTENT_MIN_WIDTH",
+            "CONTENT_EDGE_MIN", "CONTENT_INSET", "WINDOW_MIN_SIZE",
+            "WINDOW_DEFAULT_SIZE", "TITLE_STRIP_HEIGHT", "TITLE_BAR_HEIGHT",
+            "SIDEBAR_BRAND_TOP", "SIDEBAR_FACE_SIZE", "SIDEBAR_BRAND_GAP",
+            "SIDEBAR_ROW_HEIGHT", "SIDEBAR_ROW_GAP",
+            "SIDEBAR_GROUP_LABEL_HEIGHT", "SIDEBAR_FOOT_INSET",
+            "SIDEBAR_PADDING", "SIDEBAR_ROW_RADIUS", "PAGE_COLUMN_MIN_WIDTH")
+        # At the window minimum the column is at its narrowest, and the
+        # margin beside it is never less than CONTENT_EDGE_MIN. Today the
+        # pages need CONTENT_MIN_WIDTH, which leaves exactly that margin;
+        # with PAGE_COLUMN_MIN_WIDTH it would be the full CONTENT_INSET.
+        margin = (values["WINDOW_MIN_SIZE"][0] - values["SIDEBAR_WIDTH"]
+                  - values["CONTENT_MIN_WIDTH"]) / 2.0
+        self.assertGreaterEqual(margin, values["CONTENT_EDGE_MIN"])
+        self.assertLessEqual(margin, values["CONTENT_INSET"])
+        self.assertLessEqual(
+            values["PAGE_COLUMN_MIN_WIDTH"], values["CONTENT_MIN_WIDTH"])
+        self.assertLess(values["CONTENT_MIN_WIDTH"], values["CONTENT_WIDTH"])
+        self.assertLess(values["CONTENT_EDGE_MIN"], values["CONTENT_INSET"])
+        # The default window has room for the full column and full insets.
+        self.assertGreaterEqual(
+            values["WINDOW_DEFAULT_SIZE"][0],
+            values["SIDEBAR_WIDTH"] + 2 * values["CONTENT_INSET"]
+            + values["CONTENT_WIDTH"])
+        # The brand block starts below the title bar, and the title bar
+        # fits inside the strip that replaces it on the content side.
+        self.assertGreater(
+            values["SIDEBAR_BRAND_TOP"], values["TITLE_BAR_HEIGHT"])
+        self.assertGreater(
+            values["TITLE_STRIP_HEIGHT"], values["TITLE_BAR_HEIGHT"])
+        # Everything in the sidebar fits the minimum height with the build
+        # label clear of the last row.
+        rows = len(SIDEBAR_ROWS)
+        rows_bottom = (
+            values["SIDEBAR_BRAND_TOP"] + values["SIDEBAR_FACE_SIZE"]
+            + values["SIDEBAR_BRAND_GAP"]
+            + rows * values["SIDEBAR_ROW_HEIGHT"]
+            + (rows - 1) * values["SIDEBAR_ROW_GAP"]
+            + values["SIDEBAR_GROUP_LABEL_HEIGHT"])
+        self.assertLess(
+            rows_bottom + 24.0,
+            values["WINDOW_MIN_SIZE"][1] - values["SIDEBAR_FOOT_INSET"] - 14.0)
+        self.assertLess(
+            values["SIDEBAR_ROW_RADIUS"], values["SIDEBAR_ROW_HEIGHT"] / 2.0)
+
+    def test_sidebar_text_keeps_aa_on_the_selection_and_the_material(self):
+        import whisper_face_theme as theme
+
+        # The opaque colours the sidebar material falls back to, measured
+        # in the probe: what an inactive window and a headless render show.
+        materials = {False: (0.941, 0.941, 0.941), True: (0.157, 0.157, 0.157)}
+        for dark, material in materials.items():
+            palette = theme.palette_for_appearance(dark)
+            with self.subTest(dark=dark):
+                for contrast in (False, True):
+                    selection = theme.color_token(
+                        "sidebar_selection", dark, contrast).over(material)
+                    self.assertGreaterEqual(
+                        theme.contrast_ratio(palette.ink, selection), 4.5)
+                dimmed = theme.Shade(palette.ink, 0.10).over(material)
+                self.assertGreaterEqual(
+                    theme.contrast_ratio(palette.ink, dimmed), 4.5)
+                for ink in (palette.ink, palette.ink_soft):
+                    self.assertGreaterEqual(
+                        theme.contrast_ratio(ink, material), 4.5)
+                attention = (
+                    palette.error if dark else gui_module.ERROR_TEXT_ON_LIGHT)
+                self.assertGreaterEqual(
+                    theme.contrast_ratio(attention, material), 3.0)
+
+
 
 @unittest.skipUnless(
     APPKIT_AVAILABLE,
@@ -4109,6 +4272,326 @@ class BrandComponentAppKitTests(unittest.TestCase):
         widths = {gui_module._text_size(digit * 4, stat)[0]
                   for digit in "0123456789"}
         self.assertEqual(len(widths), 1)
+
+
+@unittest.skipUnless(
+    APPKIT_AVAILABLE,
+    "needs AppKit: run with "
+    "uv run --with pyobjc-framework-Cocoa --with pyobjc-framework-Quartz "
+    "tests/test_whisper_face_gui.py ShellAppKitTests")
+class ShellAppKitTests(unittest.TestCase):
+    """The shell in a real window that is never shown.
+
+    The native smoke test asserts the structure in the release gate; these
+    look closer at what it leaves out: pixels, key events and resizing.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import AppKit
+        cls.AppKit = AppKit
+        cls.app = AppKit.NSApplication.sharedApplication()
+
+    def setUp(self):
+        contrast = patch.object(
+            gui_module, "_increase_contrast", lambda: False)
+        contrast.start()
+        self.addCleanup(contrast.stop)
+        self.model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {}, settings_snapshot=lambda: {}))
+        self.model.state = replace(
+            self.model.state, onboarding_acknowledged=True)
+        self.controller = gui_module.WhisperFaceWindowController.alloc() \
+            .initForSmokeWithViewModel_(self.model)
+        self.window = self.controller.window
+        self.addCleanup(self.close)
+        self.set_appearance(dark=False)
+
+    def close(self):
+        self.window.setDelegate_(None)
+        self.window.close()
+        self.controller.pages.clear()
+        self.controller.dynamic.clear()
+
+    def set_appearance(self, *, dark):
+        AppKit = self.AppKit
+        appearance = AppKit.NSAppearance.appearanceNamed_(
+            AppKit.NSAppearanceNameDarkAqua if dark
+            else AppKit.NSAppearanceNameAqua)
+        self.app.setAppearance_(appearance)
+        self.window.setAppearance_(appearance)
+        self.controller.render()
+
+    def layout(self, width=None, height=None):
+        if width is not None:
+            self.window.setContentSize_((width, height))
+        self.window.contentView().layoutSubtreeIfNeeded()
+
+    def in_window(self, view):
+        return view.convertRect_toView_(view.bounds(), None)
+
+    def row_pixel(self, row, x, y):
+        """Unpremultiplied RGBA at a point in the row, from its top left."""
+        bounds = row.bounds()
+        rep = row.bitmapImageRepForCachingDisplayInRect_(bounds)
+        row.cacheDisplayInRect_toBitmapImageRep_(bounds, rep)
+        srgb = rep.bitmapImageRepByConvertingToColorSpace_renderingIntent_(
+            self.AppKit.NSColorSpace.sRGBColorSpace(), 0)
+        scale = rep.pixelsWide() / bounds.size.width
+        color = srgb.colorAtX_y_(int(x * scale), int(y * scale))
+        return (color.redComponent(), color.greenComponent(),
+                color.blueComponent(), color.alphaComponent())
+
+    def key_event(self, key_code):
+        AppKit = self.AppKit
+        return AppKit.NSEvent \
+            .keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(
+                AppKit.NSEventTypeKeyDown, (0.0, 0.0), 0, 0.0,
+                self.window.windowNumber(), None, "", "", False, key_code)
+
+    def test_selected_row_is_drawn_in_the_selection_colour(self):
+        from whisper_face_theme import LIGHT_PALETTE, color_token
+
+        rows = self.controller.sidebar_rows
+        for dark in (False, True):
+            self.set_appearance(dark=dark)
+            shade = color_token("sidebar_selection", dark)
+            red, green, blue, alpha = self.row_pixel(rows[0], 4, 16)
+            with self.subTest(dark=dark):
+                self.assertAlmostEqual(alpha, shade.alpha, delta=0.03)
+                for got, want in zip((red, green, blue), shade.color):
+                    self.assertAlmostEqual(got, want, delta=0.04)
+                self.assertLess(self.row_pixel(rows[1], 4, 16)[3], 0.02)
+                # The corner is rounded away.
+                self.assertLess(self.row_pixel(rows[0], 0.5, 0.5)[3], 0.1)
+        self.set_appearance(dark=False)
+        self.controller.windowDidResignKey_(None)
+        red, green, blue, alpha = self.row_pixel(rows[0], 4, 16)
+        self.assertAlmostEqual(alpha, 0.10, delta=0.03)
+        for got, want in zip((red, green, blue), LIGHT_PALETTE.ink):
+            self.assertAlmostEqual(got, want, delta=0.12)
+        self.controller.windowDidBecomeKey_(None)
+        self.assertAlmostEqual(
+            self.row_pixel(rows[0], 4, 16)[3], 0.38, delta=0.03)
+
+    def test_increase_contrast_outlines_the_selected_row(self):
+        from whisper_face_theme import LIGHT_PALETTE
+
+        row = self.controller.sidebar_rows[0]
+        self.assertLess(self.row_pixel(row, 60, 0.5)[3], 0.6)
+        with patch.object(gui_module, "_increase_contrast", lambda: True):
+            self.controller.render()
+            red, green, blue, alpha = self.row_pixel(row, 60, 0.5)
+        self.assertGreater(alpha, 0.9)
+        for got, want in zip((red, green, blue), LIGHT_PALETTE.ink):
+            self.assertAlmostEqual(got, want, delta=0.06)
+
+    def test_arrow_keys_move_through_the_rows_and_stop_at_the_ends(self):
+        rows = self.controller.sidebar_rows
+        down, up = self.key_event(125), self.key_event(126)
+        rows[0].keyDown_(up)
+        self.assertEqual(self.model.state.section, "Home")
+        expected = [("Settings", "Personalize"), ("Settings", "Controls"),
+                    ("Settings", "Privacy"), ("Advanced", "Privacy")]
+        for index, (section, pane) in enumerate(expected):
+            rows[index].keyDown_(down)
+            self.assertEqual(
+                (self.model.state.section, self.model.state.settings_pane),
+                (section, pane))
+            self.assertTrue(rows[index + 1].selected)
+            self.assertEqual(self.window.firstResponder(), rows[index + 1])
+            # At most one Tab stop: the row the arrows landed on, when the
+            # system lets buttons take Tab stops at all.
+            buttons_take_tab = bool(self.controller.dynamic[
+                "window_face_button"].canBecomeKeyView())
+            self.assertEqual(
+                [bool(row.canBecomeKeyView()) for row in rows],
+                [buttons_take_tab and position == index + 1
+                 for position in range(len(rows))])
+        rows[4].keyDown_(down)
+        self.assertEqual(self.model.state.section, "Advanced")
+        rows[4].keyDown_(up)
+        self.assertEqual(
+            (self.model.state.section, self.model.state.settings_pane),
+            ("Settings", "Privacy"))
+
+    def test_a_click_anywhere_in_a_row_reaches_the_row(self):
+        row = self.controller.sidebar_rows[2]
+        frame = row.frame()
+        for offset in (4.0, 17.0, 60.0, frame.size.width - 4.0):
+            hit = row.hitTest_(
+                (frame.origin.x + offset, frame.origin.y + 16.0))
+            self.assertEqual(hit, row)
+        self.assertIsNone(row.hitTest_(
+            (frame.origin.x + 20.0, frame.origin.y - 1.0)))
+        row.performClick_(None)
+        self.assertEqual(self.model.state.settings_pane, "Controls")
+        self.assertEqual(self.model.state.section, "Settings")
+
+    def test_focus_ring_is_the_rows_own_shape(self):
+        row = self.controller.sidebar_rows[1]
+        ring, bounds = row.focusRingMaskBounds(), row.bounds()
+        self.assertEqual(
+            (ring.origin.x, ring.origin.y, ring.size.width, ring.size.height),
+            (bounds.origin.x, bounds.origin.y, bounds.size.width,
+             bounds.size.height))
+        self.assertTrue(row.acceptsFirstResponder())
+        self.assertTrue(row.isFlipped())
+
+    def test_the_divider_is_a_line_not_a_handle(self):
+        split = self.controller.split_controller
+        view = split.splitView()
+        rect = self.AppKit.NSMakeRect(199, 0, 1, 680)
+        grab = split.splitView_effectiveRect_forDrawnRect_ofDividerAtIndex_(
+            view, rect, rect, 0)
+        self.assertEqual((grab.size.width, grab.size.height), (0.0, 0.0))
+        self.assertTrue(view.isVertical())
+        for width in (880.0, 1000.0, 1400.0):
+            self.layout(width, 700.0)
+            sidebar = self.in_window(self.controller.sidebar)
+            self.assertAlmostEqual(
+                sidebar.size.width + view.dividerThickness(),
+                gui_module.SIDEBAR_WIDTH, delta=0.5)
+            self.assertAlmostEqual(sidebar.size.height, 700.0, delta=0.5)
+
+    def test_the_column_keeps_its_range_and_its_insets_at_every_width(self):
+        narrowest = gui_module.CONTENT_MIN_WIDTH
+        widest = gui_module.CONTENT_WIDTH
+        for window_width in (880.0, 904.0, 940.0, 968.0, 1000.0, 1400.0):
+            # The column takes what the comfortable inset leaves, within
+            # its range, and sits in the middle of the content side.
+            side = window_width - gui_module.SIDEBAR_WIDTH
+            column_width = min(widest, max(
+                narrowest, side - 2.0 * gui_module.CONTENT_INSET))
+            inset = (side - column_width) / 2.0
+            with self.subTest(window=window_width):
+                self.assertGreaterEqual(inset, gui_module.CONTENT_EDGE_MIN)
+                self.layout(window_width, 680.0)
+                column = self.in_window(self.controller.dynamic["page_column"])
+                self.assertAlmostEqual(
+                    column.size.width, column_width, delta=0.5)
+                self.assertAlmostEqual(
+                    column.origin.x - gui_module.SIDEBAR_WIDTH, inset,
+                    delta=0.5)
+                title = self.controller.dynamic["page_title"]
+                self.assertAlmostEqual(
+                    self.in_window(title).origin.x
+                    + title.alignmentRectInsets().left,
+                    column.origin.x, delta=0.5)
+
+    def test_the_sidebar_keeps_its_foot_and_its_top_as_the_window_grows(self):
+        for height in (648.0, 680.0, 1000.0):
+            with self.subTest(height=height):
+                self.layout(1000.0, height)
+                header = self.in_window(
+                    self.controller.dynamic["window_header"])
+                version = self.in_window(
+                    self.controller.dynamic["window_version"])
+                self.assertAlmostEqual(
+                    height - header.origin.y - header.size.height,
+                    gui_module.SIDEBAR_BRAND_TOP, delta=0.5)
+                self.assertAlmostEqual(
+                    version.origin.y, gui_module.SIDEBAR_FOOT_INSET,
+                    delta=0.5)
+                last_row = self.in_window(self.controller.sidebar_rows[-1])
+                self.assertGreater(
+                    last_row.origin.y,
+                    version.origin.y + version.size.height + 24.0)
+
+    def test_the_state_line_follows_the_runtime_and_setup(self):
+        label = self.controller.dynamic["window_state"]
+        for phase, (key, _tone) in SIDEBAR_STATES.items():
+            with self.subTest(phase=phase):
+                self.model.state = replace(
+                    self.model.state, status_phase=phase)
+                self.controller.render()
+                self.assertEqual(
+                    str(label.stringValue()), localized_string(key))
+                self.assertEqual(
+                    str(label.accessibilityLabel()),
+                    localized_string("shell.state.accessibility.label"))
+        self.model.state = replace(
+            self.model.state, onboarding_acknowledged=False,
+            onboarding_complete=False)
+        self.controller.render()
+        self.assertEqual(str(label.stringValue()), "Setting up")
+
+    def test_setup_mode_round_trip_changes_nothing_else(self):
+        self.layout(1000.0, 680.0)
+        self.controller.sidebar_rows[3].performClick_(None)
+        self.layout()
+        tracked = ("page_column", "title_strip", "page_title", "notice",
+                   "content_side")
+
+        def frames():
+            return {
+                key: tuple(round(value, 1) for value in (
+                    rect.origin.x, rect.origin.y,
+                    rect.size.width, rect.size.height))
+                for key in tracked
+                for rect in [self.in_window(self.controller.dynamic[key])]}
+
+        before = frames()
+        self.controller.set_setup_mode(True)
+        self.controller.set_setup_mode(True)       # idempotent
+        self.layout()
+        during = frames()
+        self.assertEqual(during["content_side"], (0.0, 0.0, 1000.0, 680.0))
+        self.assertEqual(during["page_column"][2], before["page_column"][2])
+        self.assertEqual(
+            during["page_column"][1] + during["page_column"][3], 680.0 - 28.0)
+        self.assertTrue(self.controller.title_strip.isHidden())
+        # The page shortcuts still work, and still move the selection.
+        self.controller.sidebar_rows[4].performClick_(None)
+        self.assertEqual(self.model.state.section, "Advanced")
+        self.controller.sidebar_rows[3].performClick_(None)
+        self.controller.set_setup_mode(False)
+        self.layout()
+        self.assertEqual(frames(), before)
+        self.assertTrue(self.controller.sidebar_rows[3].selected)
+        self.assertEqual(
+            str(self.controller.dynamic["page_title"].stringValue()),
+            "Privacy")
+
+    def test_title_items_keep_their_order_and_follow_their_page(self):
+        AppKit = self.AppKit
+
+        def button(title):
+            control = AppKit.NSButton.alloc().initWithFrame_(
+                AppKit.NSMakeRect(0, 0, 10, 10))
+            control.setTitle_(title)
+            control.setBezelStyle_(AppKit.NSBezelStyleRounded)
+            return control
+
+        first, second, elsewhere = (
+            button("First"), button("Second"), button("Elsewhere"))
+        self.controller.add_title_item("home", first)
+        self.controller.add_title_item(
+            "home", second, visible=lambda state: state.outbox_count > 0)
+        self.controller.add_title_item("advanced", elsewhere)
+        self.controller.render()
+        self.layout()
+        self.assertFalse(first.isHidden())
+        self.assertTrue(second.isHidden())
+        self.assertTrue(elsewhere.isHidden())
+        self.model.state = replace(self.model.state, outbox_count=2)
+        self.controller.render()
+        self.layout()
+        self.assertFalse(second.isHidden())
+        self.assertLess(
+            self.in_window(first).origin.x, self.in_window(second).origin.x)
+        column = self.in_window(self.controller.dynamic["page_column"])
+        stack = self.in_window(self.controller.dynamic["title_strip_items"])
+        self.assertAlmostEqual(
+            stack.origin.x + stack.size.width,
+            column.origin.x + column.size.width, delta=0.5)
+        rows = self.controller.sidebar_rows
+        self.assertEqual(rows[-1].nextKeyView(), first)
+        self.assertEqual(first.nextKeyView(), second)
+        rows[4].performClick_(None)
+        self.assertTrue(first.isHidden())
+        self.assertFalse(elsewhere.isHidden())
+        self.assertEqual(rows[-1].nextKeyView(), elsewhere)
 
 
 if APPKIT_AVAILABLE:

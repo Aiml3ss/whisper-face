@@ -1227,6 +1227,8 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "return:continue-setup",
             "command-d:advanced",
             "command-r:verification",
+            *(f"command-{index + 1}:{row.key}"
+              for index, row in enumerate(SIDEBAR_ROWS)),
         ),
         locale_fallback="en",
     )
@@ -5233,6 +5235,26 @@ try:  # The view-model above remains usable in headless test environments.
         NSWindowStyleMaskResizable,
         NSWindowStyleMaskTitled,
     )
+    # The shell: the split view that holds the sidebar, and what the sidebar
+    # and the title strip are made of. Every name has been in AppKit since
+    # macOS 10.11 or earlier, so macOS 14 has them all; anything newer is
+    # looked up with getattr where it is used, never imported here, because
+    # one missing name would leave the window unavailable.
+    from AppKit import (
+        NSAccessibilityListRole,
+        NSLayoutAttributeCenterY,
+        NSSplitViewController,
+        NSSplitViewItem,
+        NSStackView,
+        NSUserInterfaceLayoutOrientationHorizontal,
+        NSViewController,
+        NSViewHeightSizable,
+        NSWindowCloseButton,
+        NSWindowMiniaturizeButton,
+        NSWindowStyleMaskFullSizeContentView,
+        NSWindowTitleHidden,
+        NSWindowZoomButton,
+    )
     from Foundation import (
         NSAttributedString, NSLocale, NSObject, NSTimer, NSUserDefaults)
     from Quartz import (
@@ -5316,19 +5338,27 @@ if APPKIT_AVAILABLE:
     CARD_RADIUS = 12.0
     CARD_BORDER_ALPHA = 0.16
 
-    # Window skeleton: fixed vibrancy sidebar, content column capped at a
-    # comfortable reading width and centered when the window grows wider.
-    # At the window minimum the column may shrink to CONTENT_MIN_WIDTH with
-    # slimmer margins; every card interior tolerates that via autoresizing.
+    # Window skeleton: a full-height sidebar of fixed width in the system's
+    # sidebar material, and beside it the content side: a title strip over
+    # a page column capped at a comfortable reading width and centered when
+    # the window grows wider. At the window minimum the column may shrink to
+    # CONTENT_MIN_WIDTH with slimmer margins; every card interior tolerates
+    # that via autoresizing.
     SIDEBAR_WIDTH = 200.0
     CONTENT_WIDTH = 720.0
     CONTENT_MIN_WIDTH = 656.0
+    # The narrowest margin the column may keep on the content side. The
+    # pages that predate the new look need CONTENT_MIN_WIDTH, which leaves
+    # exactly this much at the window minimum; wider windows get
+    # CONTENT_INSET. Once every page fits PAGE_COLUMN_MIN_WIDTH, set
+    # CONTENT_MIN_WIDTH to it and this margin stops being reached.
+    CONTENT_EDGE_MIN = 12.0
 
-    # Layout contract for the new look. NOT USED YET: nothing below this
-    # comment changes what is on screen. The sidebar shell and the pages
-    # that are rebuilt for it share these numbers, so a page can be laid
-    # out before the shell it will sit in exists. ``SIDEBAR_WIDTH`` above is
-    # part of the contract and keeps its value.
+    # Layout contract for the new look. The shell uses SIDEBAR_WIDTH,
+    # TITLE_STRIP_HEIGHT, CONTENT_INSET, SIDEBAR_ROW_HEIGHT and
+    # SIDEBAR_FACE_SIZE; the row and group numbers are for the pages that
+    # are rebuilt to sit in it, so a page can be laid out against the same
+    # numbers the shell was.
     #
     # The title strip is the band on the content side that carries the page
     # title and its trailing toolbar items; content scrolls under it.
@@ -5355,6 +5385,24 @@ if APPKIT_AVAILABLE:
     GROUP_HEADER_GAP = 7.0
     GROUP_GAP = 18.0
 
+    # The sidebar, top to bottom. The traffic lights sit over its first
+    # 28 points, so the brand block starts clear of them.
+    SIDEBAR_PADDING = 10.0          # rows, from the sidebar's side edges
+    SIDEBAR_BRAND_TOP = 40.0        # top of the face chip
+    SIDEBAR_BRAND_INSET = 14.0      # face chip, from the sidebar's edge
+    SIDEBAR_BRAND_GAP = 14.0        # brand block to the first row
+    SIDEBAR_ROW_GAP = 2.0
+    SIDEBAR_ROW_RADIUS = 9.0
+    SIDEBAR_ROW_INSET = 9.0         # icon, from the row's edge; icon to label
+    SIDEBAR_ICON_SIZE = 16.0
+    SIDEBAR_GROUP_LABEL_HEIGHT = 31.0   # 14 above an 11pt label, 4 below
+    SIDEBAR_FOOT_INSET = 14.0       # build label, from the bottom edge
+    # What the title bar keeps for itself at the top of a full-size content
+    # view when the window cannot be asked (it can, once it exists).
+    TITLE_BAR_HEIGHT = 28.0
+    # Space between two trailing items in the title strip.
+    TITLE_STRIP_ITEM_GAP = 8.0
+
     # The first-run poster is the one full-page object in the window, so its
     # geometry is named here and shared by the builder, the constraint, and
     # the per-step re-flow.
@@ -5366,9 +5414,11 @@ if APPKIT_AVAILABLE:
     # grows upward into the column's bottom padding rather than pushing the
     # page and clipping its last row at the window minimum.
     NOTICE_LINE_HEIGHT = 16.0
-    # Advanced is the tallest page (536pt) and sits under 104pt of chrome;
-    # 8pt more leaves room for a two-line notice. The native smoke fails if
-    # any page's content falls below its page at this minimum.
+    # Advanced is the tallest page (536pt). It sits under the 52pt title
+    # strip and over the 32pt notice band, which leaves 28pt to spare and
+    # room for a two-line notice. The width is the sidebar, the column's
+    # minimum and CONTENT_EDGE_MIN on both sides of it. The native smoke
+    # fails if any page's content falls below its page at this minimum.
     WINDOW_MIN_SIZE = (880.0, 648.0)
     WINDOW_DEFAULT_SIZE = (1000.0, 680.0)
     NOTICE_WRAPPED_HEIGHT = 28.0
@@ -6596,6 +6646,195 @@ if APPKIT_AVAILABLE:
                 self.body_rect(), BRAND_SHAPES["face_chip"],
                 radius=self.corner_radius()).fill()
 
+    # ------------------------------------------------------------------
+    # The shell: what the sidebar is made of. The split view, the sidebar
+    # material and the divider are the system's; these are the only custom
+    # pieces, and they stay quiet, because navigation is something a Mac
+    # user operates, not a brand moment.
+    # ------------------------------------------------------------------
+
+    class ShellView(NSView):
+        """A plain container whose subviews are placed from the top down."""
+
+        def isFlipped(self):
+            return True
+
+    class ShellSplitViewController(NSSplitViewController):
+        """The window's two columns: the sidebar and the content side.
+
+        The sidebar has one width, so its divider is a line, not a handle:
+        it reports no area to grab, which also keeps the pointer from
+        turning into a resize cursor over it.
+        """
+
+        def splitView_effectiveRect_forDrawnRect_ofDividerAtIndex_(
+                self, _split_view, _proposed, _drawn, _index):
+            return NSZeroRect
+
+    class SidebarRowButton(BrandButton):
+        """One page in the sidebar: an SF Symbol, a label, a selection fill.
+
+        ``configure(title, symbol)`` sets it up and ``set_selected`` marks
+        the page that is showing. It is an NSButton, so it takes its target,
+        action and key equivalent like one and Space presses it. For the
+        keyboard the rows behave as one list: where the system lets Tab
+        reach buttons at all (its keyboard-navigation setting), Tab stops
+        once, on the selected row, and Up and Down are handed to the
+        window's delegate, which moves through the rows. Command-1 to
+        Command-5 reach every row whatever that setting is.
+
+        The selected row is filled with the theme's sidebar selection while
+        the window is the key window and with a quiet neutral when it is
+        not, the way a system sidebar dims. It does not squash when
+        pressed: a sidebar stays still under the pointer.
+        """
+
+        KEY_DOWN_ARROW = 125
+        KEY_UP_ARROW = 126
+
+        def initWithFrame_(self, frame):
+            self = objc.super(SidebarRowButton, self).initWithFrame_(frame)
+            if self is None:
+                return None
+            self.selected = False
+            self.emphasized = True
+            self.setBordered_(False)
+            self.setTitle_("")
+            icon = NSImageView.alloc().initWithFrame_(NSMakeRect(
+                SIDEBAR_ROW_INSET,
+                (frame.size.height - SIDEBAR_ICON_SIZE) / 2.0,
+                SIDEBAR_ICON_SIZE, SIDEBAR_ICON_SIZE))
+            icon.setImageScaling_(NSImageScaleProportionallyUpOrDown)
+            icon.setEditable_(False)
+            try:
+                # The row is the one thing VoiceOver should find here.
+                icon.setAccessibilityElement_(False)
+                # Some symbols swap to a filled drawing in the dark
+                # appearance. The rows are one family of outline icons in
+                # both, so the picture is always resolved as in light; its
+                # colour is set explicitly and does not depend on this.
+                icon.setAppearance_(
+                    NSAppearance.appearanceNamed_(NSAppearanceNameAqua))
+            except Exception:
+                pass
+            self.addSubview_(icon)
+            self.icon_view = icon
+            return self
+
+        @objc.python_method
+        def configure(self, title: str, symbol: str) -> Any:
+            self.setTitle_(title)
+            image = _symbol_image(symbol, size=14.0, weight="medium")
+            if image is not None:
+                self.icon_view.setImage_(image)
+            _accessible(self, title)
+            self.sync_icon()
+            self.setNeedsDisplay_(True)
+            return self
+
+        @objc.python_method
+        def set_selected(self, selected: bool,
+                         *, emphasized: bool = True) -> Any:
+            self.selected = bool(selected)
+            self.emphasized = bool(emphasized)
+            for element in (self, self.cell()):
+                try:
+                    element.setAccessibilitySelected_(self.selected)
+                except Exception:
+                    pass
+            self.sync_icon()
+            self.setNeedsDisplay_(True)
+            return self
+
+        @objc.python_method
+        def sync_icon(self) -> None:
+            """The icon is ink on the selected row and soft ink elsewhere."""
+            palette = palette_for_appearance(_uses_dark_appearance(self))
+            try:
+                self.icon_view.setContentTintColor_(_srgb_color(
+                    palette.ink if self.selected else palette.ink_soft))
+            except Exception:
+                pass
+
+        @objc.python_method
+        def title_font(self) -> Any:
+            return NSFont.systemFontOfSize_weight_(
+                13.0, NSFontWeightSemibold if self.selected
+                else NSFontWeightMedium)
+
+        @objc.python_method
+        def shape_path(self) -> Any:
+            return NSBezierPath \
+                .bezierPathWithRoundedRect_xRadius_yRadius_(
+                    self.bounds(), SIDEBAR_ROW_RADIUS, SIDEBAR_ROW_RADIUS)
+
+        def viewDidChangeEffectiveAppearance(self):
+            self.sync_icon()
+            self.setNeedsDisplay_(True)
+
+        def canBecomeKeyView(self):
+            # One Tab stop for the whole sidebar: the row that is showing.
+            # Whether a button may take a Tab stop at all stays the
+            # system's decision (its keyboard-navigation setting).
+            return bool(self.selected) and bool(
+                objc.super(SidebarRowButton, self).canBecomeKeyView())
+
+        def hitTest_(self, point):
+            # The icon is a picture, not a second target inside the row.
+            hit = objc.super(SidebarRowButton, self).hitTest_(point)
+            return self if hit is not None else None
+
+        def mouseDown_(self, event):
+            # Past JellyButton on purpose: no press spring on navigation.
+            objc.super(JellyButton, self).mouseDown_(event)
+
+        def keyDown_(self, event):
+            code = int(event.keyCode())
+            if code in (self.KEY_DOWN_ARROW, self.KEY_UP_ARROW):
+                window = self.window()
+                delegate = window.delegate() if window is not None else None
+                move = getattr(delegate, "move_sidebar_focus", None)
+                if move is not None:
+                    move(self, 1 if code == self.KEY_DOWN_ARROW else -1)
+                    return
+            objc.super(SidebarRowButton, self).keyDown_(event)
+
+        def drawRect_(self, _rect):
+            dark = _uses_dark_appearance(self)
+            palette = palette_for_appearance(dark)
+            bounds = self.bounds()
+            if self.selected:
+                fill = (_token_color("sidebar_selection", dark)
+                        if self.emphasized
+                        else _srgb_color(palette.ink, 0.10))
+                fill.setFill()
+                self.shape_path().fill()
+            if self.is_pressed():
+                _srgb_color(palette.ink, 0.08).setFill()
+                self.shape_path().fill()
+            if self.selected and _increase_contrast():
+                edge = NSBezierPath \
+                    .bezierPathWithRoundedRect_xRadius_yRadius_(
+                        NSInsetRect(bounds, 0.5, 0.5),
+                        SIDEBAR_ROW_RADIUS - 0.5, SIDEBAR_ROW_RADIUS - 0.5)
+                edge.setLineWidth_(1.0)
+                _srgb_color(palette.ink).setStroke()
+                edge.stroke()
+            text_x = 2.0 * SIDEBAR_ROW_INSET + SIDEBAR_ICON_SIZE
+            _draw_text(
+                str(self.title()), self.title_font(),
+                _srgb_color(palette.ink),
+                NSMakeRect(
+                    text_x, 0.0,
+                    bounds.size.width - text_x - SIDEBAR_ROW_INSET,
+                    bounds.size.height))
+
+        def focusRingMaskBounds(self):
+            return self.bounds()
+
+        def drawFocusRingMask(self):
+            self.shape_path().fill()
+
     class WhisperFaceWindowController(NSObject):
         """One-window AppKit controller; created lazily by ``WhisperFaceGUI``."""
 
@@ -6616,8 +6855,15 @@ if APPKIT_AVAILABLE:
             self._onboarding_stage: str | None = None
             self._onboarding_presentation: OnboardingPresentation | None = None
             self._onboarding_completed: frozenset[str] = frozenset()
-            self._rendered_section: str | None = None
+            self._rendered_row: int | None = None
             self._rendered_notice: str | None = None
+            # Shell state. Setup mode hides the sidebar and the title strip;
+            # the window counts as active until it is told otherwise, so a
+            # window that has never been on screen draws its active look.
+            self.setup_mode = False
+            self._window_active = True
+            # Trailing title-strip items: (row key, view, visible-when).
+            self.title_items: list[tuple[str, Any, Any]] = []
             if read_system_state:
                 try:
                     preferred = NSLocale.preferredLanguages()
@@ -6970,10 +7216,11 @@ if APPKIT_AVAILABLE:
             dark = _uses_dark_appearance(self.window)
             palette = palette_for_appearance(dark)
             self._dark = dark
-            root = self.window.contentView()
-            root.setWantsLayer_(True)
-            if root.layer() is not None:
-                root.layer().setBackgroundColor_(
+            # The field belongs to the content side only: the sidebar keeps
+            # the system's material.
+            field = self.dynamic["content_side"]
+            if field.layer() is not None:
+                field.layer().setBackgroundColor_(
                     _theme_color(palette.bg).CGColor())
             for box in self.themed.get("card", ()):
                 box.setFillColor_(_theme_color(palette.surface))
@@ -7049,80 +7296,181 @@ if APPKIT_AVAILABLE:
                     tint, 0.24 if dark else 0.34))
                 badge.setBorderColor_(_theme_color(palette.line))
 
-            # The chip stays a quiet container with a face-tinted ring; the
-            # colored character carries the personality.
-            chip = self.dynamic["window_face_chip"]
-            chip.setFillColor_(_theme_color(palette.surface))
-            chip.setBorderColor_(
-                _theme_color(FACE_CHIP_COLORS[state.face], 0.9))
-            self.dynamic["window_title"].setTextColor_(
-                _theme_color(palette.ink))
-            self.dynamic["window_badge"].setTextColor_(
-                _brand_text_color(dark))
-            self.dynamic["window_version"].setTextColor_(
-                _theme_color(palette.ink_soft))
-            for index in range(len(self.sidebar_rows)):
-                selected = SECTIONS[index] == state.section
-                self._apply_sidebar_row_theme(index, selected=selected)
-                sync_accessibility(
-                    self.sidebar_rows[index],
-                    self._l("nav.selected") if selected else "",
-                    label=self._l(f"nav.{SECTIONS[index].casefold()}"))
-
         @objc.python_method
-        def _apply_sidebar_row_theme(
-                self, index: int, *, selected: bool) -> None:
-            """Paint one nav pill for its selection and appearance."""
+        def _sync_sidebar(self, state: GUIState, row_index: int) -> None:
+            """The sidebar for this state: face, state line, selected row.
+
+            Everything here is drawn in sRGB like the rest of the new look,
+            on the system's sidebar material, so it reads the palette but
+            never paints the sidebar itself.
+            """
             dark = getattr(self, "_dark", False)
             palette = palette_for_appearance(dark)
-            row = self.sidebar_rows[index]
-            row.setWantsLayer_(True)
-            layer = row.layer()
-            if layer is not None:
-                layer.setCornerRadius_(16.0)
-                fill = (_theme_color(
-                    palette.brand, 0.30 if dark else 0.18) if selected
-                    else NSColor.clearColor())
-                layer.setBackgroundColor_(fill.CGColor())
-            text_color = (
-                _brand_text_color(dark) if selected
-                else _theme_color(palette.ink))
-            if SECTIONS[index] == "Advanced":
-                try:
-                    row.setContentTintColor_(
-                        text_color if selected
-                        else _theme_color(palette.ink_soft))
-                except Exception:
-                    pass
-                return
-            try:
-                row.setAttributedTitle_(
-                    NSAttributedString.alloc().initWithString_attributes_(
-                        str(row.title()), {
-                            NSFontAttributeName: _font(
-                                13.0,
-                                "semibold" if selected else "medium",
-                                rounded=True),
-                            NSForegroundColorAttributeName: text_color,
-                        }))
-            except Exception:
-                pass
+            # The face sits on its own chip colour, which is what keeps its
+            # ink outline visible on a dark sidebar.
+            chip_layer = self.dynamic["window_face_chip"].layer()
+            if chip_layer is not None:
+                chip_layer.setBackgroundColor_(
+                    _srgb_color(FACE_CHIP_COLORS[state.face]).CGColor())
+                chip_layer.setBorderColor_(
+                    _token_color("hairline", dark).CGColor())
+            face_name = self._l(f"settings.face.{state.face}")
+            self.dynamic["window_face"].setImage_(self._face_image(
+                state.face, talk=state.status_phase == "recording"))
+            sync_accessibility(
+                self.dynamic["window_face"], state.status_title,
+                label=face_name)
+            self.dynamic["window_title"].setTextColor_(
+                _srgb_color(palette.ink))
+
+            state_key, tone = sidebar_state(
+                state.status_phase,
+                setting_up=not (state.onboarding_complete
+                                or state.onboarding_acknowledged))
+            state_label = self.dynamic["window_state"]
+            set_accessible_text(
+                state_label, self._l(state_key),
+                label=self._l("shell.state.accessibility.label"))
+            state_label.setTextColor_(_srgb_color(palette.ink_soft))
+            dot_layer = self.dynamic["window_state_dot"].layer()
+            if dot_layer is not None:
+                dot = (_token_color("switch_on", dark) if tone == "good"
+                       else _srgb_color(
+                           palette.error if dark else ERROR_TEXT_ON_LIGHT)
+                       if tone == "attention"
+                       else _srgb_color(palette.ink_soft))
+                dot_layer.setBackgroundColor_(dot.CGColor())
+
+            self.dynamic["sidebar_group_label"].setTextColor_(
+                _srgb_color(palette.ink_soft))
+            self.dynamic["window_version"].setTextColor_(
+                _srgb_color(palette.ink_soft))
+            for index, row in enumerate(self.sidebar_rows):
+                selected = index == row_index
+                row.set_selected(selected, emphasized=self._window_active)
+                sync_accessibility(
+                    row, self._l("nav.selected") if selected else "",
+                    label=self._l(SIDEBAR_ROWS[index].label_key))
 
         @objc.python_method
-        def _animate_section_change(self, state: GUIState) -> None:
-            """Crossfade the incoming section instead of hard-cutting it."""
-            previous = self._rendered_section
-            self._rendered_section = state.section
-            if (previous is None or previous == state.section
+        def _sync_title_strip(self, state: GUIState, row_index: int) -> None:
+            """The page's name, and the trailing items that belong to it."""
+            dark = getattr(self, "_dark", False)
+            row = SIDEBAR_ROWS[row_index]
+            title = self.dynamic["page_title"]
+            # A heading reads its own text; no separate label to repeat it.
+            title.setStringValue_(self._l(row.label_key))
+            title.setTextColor_(
+                _srgb_color(palette_for_appearance(dark).ink))
+            for row_key, view, visible in self.title_items:
+                view.setHidden_(
+                    row_key != row.key
+                    or (visible is not None and not visible(state)))
+
+        @objc.python_method
+        def add_title_item(self, row_key: str, view: Any,
+                           *, visible: Callable[[GUIState], bool] | None
+                           = None) -> Any:
+            """Put a control at the trailing end of one page's title strip.
+
+            ``row_key`` is a ``SidebarRow.key``. The item shows only while
+            that page is showing and, when ``visible`` is given, only while
+            it answers True for the current state; the shell owns the
+            item's hidden flag, so a page does not hide it itself. Items
+            line up from the page column's trailing edge in the order they
+            were added, centred in the strip, and join the Tab loop between
+            the sidebar and the page. The strip lays the view out with
+            Auto Layout: a control with an intrinsic size needs nothing
+            more, anything else needs its own width and height constraints
+            (its frame is not used).
+            """
+            if row_key not in {row.key for row in SIDEBAR_ROWS}:
+                raise ValueError(f"no sidebar row is named {row_key!r}")
+            self.title_items.append((row_key, view, visible))
+            self.dynamic["title_strip_items"].addArrangedSubview_(view)
+            state = self.view_model.state
+            current = SIDEBAR_ROWS[sidebar_row_index(
+                state.section, state.settings_pane)].key
+            view.setHidden_(
+                row_key != current
+                or (visible is not None and not visible(state)))
+            return view
+
+        @objc.python_method
+        def set_setup_mode(self, enabled: bool) -> None:
+            """Give first-run setup the whole window, or give it back.
+
+            On, the sidebar and the title strip are gone and the page
+            column runs from just under the title bar to the notice line,
+            centred in the full window width at its usual width. Off, the
+            shell returns exactly as it was: the selected row is derived
+            from the view model on every render, so nothing is lost. The
+            page shortcuts keep working either way; drive this from what
+            the render shows rather than from a button, so that leaving the
+            setup page brings the shell back.
+            """
+            enabled = bool(enabled)
+            if enabled == self.setup_mode:
+                return
+            self.setup_mode = enabled
+            self.sidebar_item.setCollapsed_(enabled)
+            self.dynamic["title_strip"].setHidden_(enabled)
+            self.dynamic["title_strip_height"].setConstant_(
+                self._title_bar_height() if enabled
+                else TITLE_STRIP_HEIGHT)
+            if getattr(self, "key_views_by_section", None) is not None:
+                self._configure_key_view_loop(self.view_model.state)
+
+        @objc.python_method
+        def _title_bar_height(self) -> float:
+            """How much of the content view the title bar lies over."""
+            try:
+                over = float(
+                    self.window.frame().size.height
+                    - self.window.contentLayoutRect().size.height)
+                if over > 0.0:
+                    return over
+            except Exception:
+                pass
+            return TITLE_BAR_HEIGHT
+
+        @objc.python_method
+        def _select_sidebar_row(self, index: int) -> None:
+            select_sidebar_row(self.view_model, index)
+            self.render()
+
+        @objc.python_method
+        def move_sidebar_focus(self, row: Any, delta: int) -> bool:
+            """Up and Down on a focused row: move to its neighbour and show
+            that page, the way a system sidebar follows the arrow keys."""
+            index = int(row.tag()) + int(delta)
+            if not 0 <= index < len(self.sidebar_rows):
+                return False
+            self.window.makeFirstResponder_(self.sidebar_rows[index])
+            self._select_sidebar_row(index)
+            return True
+
+        @objc.python_method
+        def _set_window_active(self, active: bool) -> None:
+            """Selection is emphasized only in the key window."""
+            self._window_active = bool(active)
+            for row in self.sidebar_rows:
+                row.set_selected(
+                    row.selected, emphasized=self._window_active)
+
+        @objc.python_method
+        def _animate_section_change(
+                self, state: GUIState, row_index: int) -> None:
+            """Crossfade the incoming page instead of hard-cutting it."""
+            previous = self._rendered_row
+            self._rendered_row = row_index
+            if (previous is None or previous == row_index
                     or state.prefers_reduced_motion
                     or not bool(self.window.isVisible())):
                 return
             page = self.pages[state.section]
             page.setWantsLayer_(True)
             fade_in(page, reduced_motion=state.prefers_reduced_motion)
-            add_jelly_motion(
-                self.sidebar_rows[SECTIONS.index(state.section)], "pop",
-                reduced_motion=state.prefers_reduced_motion)
 
         @objc.python_method
         def _animate_notice(self, state: GUIState) -> None:
@@ -7199,9 +7547,15 @@ if APPKIT_AVAILABLE:
             return header
 
         def _build_window(self) -> None:
+            # A standard titled window whose content view runs under the
+            # title bar, so the sidebar is full height with the traffic
+            # lights over it. The title bar itself stays the system's: it
+            # is only made transparent and its title hidden, because the
+            # page's name is in the title strip.
             style = (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                      NSWindowStyleMaskMiniaturizable |
-                     NSWindowStyleMaskResizable)
+                     NSWindowStyleMaskResizable |
+                     NSWindowStyleMaskFullSizeContentView)
             self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
                 NSMakeRect(0, 0, *WINDOW_DEFAULT_SIZE), style,
                 NSBackingStoreBuffered, False)
@@ -7210,125 +7564,95 @@ if APPKIT_AVAILABLE:
             # still points at it; the next open would message freed memory.
             self.window.setReleasedWhenClosed_(False)
             self.window.setTitle_(APP_NAME)
+            self.window.setTitlebarAppearsTransparent_(True)
+            self.window.setTitleVisibility_(NSWindowTitleHidden)
             self.window.setDelegate_(self)
-            self.window.setContentMinSize_(WINDOW_MIN_SIZE)
-            self.window.center()
             self._install_main_menu()
-            root = self.window.contentView()
-            root.setWantsLayer_(True)
 
-            # ---- Top bar: brand at the left, pill navigation at the right.
-            # The old vibrancy sidebar is gone; the whole window is one calm
-            # pastel field with the living face as its centerpiece.
-            topbar = NSView.alloc().initWithFrame_(
-                NSMakeRect(0, 576, 1000, 64))
-            topbar.setTranslatesAutoresizingMaskIntoConstraints_(False)
-            root.addSubview_(topbar)
-            self.topbar = topbar
+            # ---- Two columns, held by the system's split view controller.
+            # A sidebar item gets the sidebar material, the full-height
+            # layout and the divider from whichever macOS is running, so
+            # none of that is drawn here.
+            split = ShellSplitViewController.alloc().init()
+            divider = float(split.splitView().dividerThickness())
+            sidebar_width = SIDEBAR_WIDTH - divider
+            sidebar = self._build_sidebar(sidebar_width)
+            sidebar_controller = NSViewController.alloc().init()
+            sidebar_controller.setView_(sidebar)
+            sidebar_item = NSSplitViewItem.sidebarWithViewController_(
+                sidebar_controller)
+            # One width, and no dragging it shut: together with the divider
+            # the sidebar takes exactly SIDEBAR_WIDTH. Setup mode collapses
+            # it in code.
+            sidebar_item.setMinimumThickness_(sidebar_width)
+            sidebar_item.setMaximumThickness_(sidebar_width)
+            sidebar_item.setCanCollapse_(False)
+            # A sidebar item would otherwise spring open when something is
+            # dragged to the window's edge while setup mode has it shut,
+            # and newer systems may fold it away when a window narrows.
+            sidebar_item.setSpringLoaded_(False)
+            try:
+                if sidebar_item.respondsToSelector_(
+                        "setCanCollapseFromWindowResize:"):
+                    sidebar_item.setCanCollapseFromWindowResize_(False)
+            except Exception:
+                pass
 
-            header = NSView.alloc().initWithFrame_(
-                NSMakeRect(0, 0, 1000, 64))
-            header.setAutoresizingMask_(NSViewWidthSizable)
-            face_chip = _card(
-                NSMakeRect(20, 14, 36, 36), treatment="control")
-            face_chip.setCornerRadius_(18.0)
-            face_image = NSImageView.alloc().initWithFrame_(
-                NSMakeRect(24, 18, 28, 28))
-            face_image.setImageScaling_(
-                NSImageScaleProportionallyUpOrDown)
-            face_image.setEditable_(False)
-            face_button = JellyButton.alloc().initWithFrame_(
-                NSMakeRect(20, 14, 36, 36))
-            face_button.setTitle_("")
-            face_button.setBordered_(False)
-            face_button.setTransparent_(True)
-            face_button.setTarget_(self)
-            face_button.setAction_("faceChipPressed:")
-            _accessible(
-                face_button,
-                self._l("app.face_chip.label"),
-                self._l("app.face_chip.help"))
-            title = _label(
-                APP_NAME, NSMakeRect(66, 32, 180, 20),
-                size=15, weight="semibold", rounded=True,
-                accessibility_label=self._l("app.subtitle"))
-            badge = _label(
-                self._l("app.local_badge"),
-                NSMakeRect(66, 16, 180, 13),
-                size=9.5, weight="semibold", rounded=True)
-            header.addSubview_(face_chip)
-            header.addSubview_(face_image)
-            header.addSubview_(face_button)
-            header.addSubview_(title)
-            header.addSubview_(badge)
-            topbar.addSubview_(header)
-            topbar_edge = _hairline(NSMakeRect(0, 0, 1000, 1))
-            topbar_edge.setAutoresizingMask_(NSViewWidthSizable)
-            self._register("hairline", topbar_edge)
-            topbar.addSubview_(topbar_edge)
+            # ---- Content side: title strip over a centered, capped column.
+            content_area = NSView.alloc().initWithFrame_(NSMakeRect(
+                0, 0, WINDOW_DEFAULT_SIZE[0] - SIDEBAR_WIDTH,
+                WINDOW_DEFAULT_SIZE[1]))
+            # Home's backdrop bleeds past its column on purpose; it must
+            # stop at the content side's edge, not paint over the sidebar.
+            content_area.setWantsLayer_(True)
+            if content_area.layer() is not None:
+                content_area.layer().setMasksToBounds_(True)
+            content_controller = NSViewController.alloc().init()
+            content_controller.setView_(content_area)
+            split.addSplitViewItem_(sidebar_item)
+            split.addSplitViewItem_(
+                NSSplitViewItem.splitViewItemWithViewController_(
+                    content_controller))
+            self.split_controller = split
+            self.sidebar = sidebar
+            self.sidebar_item = sidebar_item
+            self.window.setContentViewController_(split)
+            # A content view controller sizes the window to its view, so
+            # the sizes are set after it is installed.
+            self.window.setContentMinSize_(WINDOW_MIN_SIZE)
+            self.window.setContentSize_(WINDOW_DEFAULT_SIZE)
+            self.window.center()
 
-            # Home and Settings are pills; Advanced hides behind the tool
-            # button at the far right (and ⌘D, window-wide, as always).
-            rows: list[Any] = []
-            gear_width = 36.0
-            pill_specs = (("Home", 84.0), ("Settings", 100.0))
-            right = 1000.0 - 20.0
-            gear_x = right - gear_width
-            pills_right = gear_x - 12.0
-            x = pills_right - sum(w for _, w in pill_specs) - 8.0
-            for index, section in enumerate(SECTIONS):
-                if section == "Advanced":
-                    row = JellyButton.alloc().initWithFrame_(
-                        NSMakeRect(gear_x, 16, gear_width, 32))
-                    row.setTitle_("")
-                    image = _symbol_image(
-                        "wrench.and.screwdriver.fill", size=14.0)
-                    if image is not None:
-                        row.setImage_(image)
-                else:
-                    width_ = dict(pill_specs)[section]
-                    row = JellyButton.alloc().initWithFrame_(
-                        NSMakeRect(x, 16, width_, 32))
-                    row.setTitle_(self._l(f"nav.{section.casefold()}"))
-                    x += width_ + 8.0
-                row.setBordered_(False)
-                row.setWantsLayer_(True)
-                layer = row.layer()
-                if layer is not None:
-                    layer.setCornerRadius_(16.0)
-                row.setTag_(index)
-                row.setTarget_(self)
-                row.setAction_("sectionChanged:")
-                row.setAutoresizingMask_(NSViewMinXMargin)
-                _accessible(
-                    row, self._l(f"nav.{section.casefold()}"),
-                    self._l("settings.accessibility.sections.help"))
-                topbar.addSubview_(row)
-                rows.append(row)
-            self.sidebar_rows = tuple(rows)
-            # ⌘D always routes to Advanced; the tool button is visible from
-            # every section, so the shortcut works window-wide.
-            advanced_row = rows[SECTIONS.index("Advanced")]
-            advanced_row.setKeyEquivalent_("d")
-            advanced_row.setKeyEquivalentModifierMask_(
-                NSEventModifierFlagCommand)
-            _accessible(
-                advanced_row, self._l("nav.advanced"),
-                self._l("advanced.accessibility.shortcut.help"))
-            self.dynamic["advanced_button"] = advanced_row
+            strip = NSView.alloc().initWithFrame_(NSMakeRect(
+                0, 0, WINDOW_DEFAULT_SIZE[0] - SIDEBAR_WIDTH,
+                TITLE_STRIP_HEIGHT))
+            strip.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            content_area.addSubview_(strip)
+            self.title_strip = strip
+            page_title = _label(
+                "", NSMakeRect(0, 0, 320, 22), truncate=True)
+            page_title.setFont_(_role_font("page_title"))
+            page_title.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            try:
+                # VoiceOver reads the page's name as a heading. The role
+                # constant is looked up, not imported, and has this value.
+                import AppKit as _appkit
+                heading = getattr(
+                    _appkit, "NSAccessibilityHeadingRole", "AXHeading")
+                page_title.setAccessibilityRole_(heading)
+                page_title.cell().setAccessibilityRole_(heading)
+            except Exception:
+                pass
+            strip.addSubview_(page_title)
+            items = NSStackView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, 10, 10))
+            items.setOrientation_(
+                NSUserInterfaceLayoutOrientationHorizontal)
+            items.setAlignment_(NSLayoutAttributeCenterY)
+            items.setSpacing_(TITLE_STRIP_ITEM_GAP)
+            items.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            strip.addSubview_(items)
 
-            # ---- Content area: a centered, capped column under the bar.
-            content_area = NSView.alloc().initWithFrame_(
-                NSMakeRect(0, 0, 1000, 576))
-            content_area.setTranslatesAutoresizingMaskIntoConstraints_(False)
-            root.addSubview_(content_area)
-            version = _label(
-                self._l(
-                    "app.version", version=application_build_version()),
-                NSMakeRect(0, 0, 200, 13),
-                size=10, weight="medium", color=_SECONDARY, rounded=True)
-            version.setTranslatesAutoresizingMaskIntoConstraints_(False)
-            content_area.addSubview_(version)
             # Failure copy now names the next move, so the notice takes a
             # second line when it needs one. The reserved band stays one
             # line tall: the column keeps a fixed bottom so a two-line
@@ -7345,33 +7669,41 @@ if APPKIT_AVAILABLE:
 
             notice_height = notice.heightAnchor() \
                 .constraintEqualToConstant_(NOTICE_LINE_HEIGHT)
+            strip_height = strip.heightAnchor() \
+                .constraintEqualToConstant_(TITLE_STRIP_HEIGHT)
             preferred_width = column.widthAnchor() \
                 .constraintEqualToConstant_(CONTENT_WIDTH)
             # Below NSLayoutPriorityWindowSizeStayPut (500) so preferring the
             # full reading width can never grow the window itself.
             preferred_width.setPriority_(450)
+            # The comfortable inset outranks the full width but not the
+            # column's minimum: a narrow window keeps CONTENT_MIN_WIDTH and
+            # falls back to CONTENT_EDGE_MIN.
+            preferred_inset = column.leadingAnchor() \
+                .constraintGreaterThanOrEqualToAnchor_constant_(
+                    content_area.leadingAnchor(), CONTENT_INSET)
+            preferred_inset.setPriority_(480)
             NSLayoutConstraint.activateConstraints_([
-                topbar.leadingAnchor().constraintEqualToAnchor_(
-                    root.leadingAnchor()),
-                topbar.trailingAnchor().constraintEqualToAnchor_(
-                    root.trailingAnchor()),
-                topbar.topAnchor().constraintEqualToAnchor_(
-                    root.topAnchor()),
-                topbar.heightAnchor().constraintEqualToConstant_(64.0),
-                content_area.leadingAnchor().constraintEqualToAnchor_(
-                    root.leadingAnchor()),
-                content_area.trailingAnchor().constraintEqualToAnchor_(
-                    root.trailingAnchor()),
-                content_area.topAnchor().constraintEqualToAnchor_(
-                    topbar.bottomAnchor()),
-                content_area.bottomAnchor().constraintEqualToAnchor_(
-                    root.bottomAnchor()),
-                version.leadingAnchor().constraintEqualToAnchor_constant_(
-                    content_area.leadingAnchor(), 14.0),
-                version.bottomAnchor().constraintEqualToAnchor_constant_(
-                    content_area.bottomAnchor(), -10.0),
-                column.topAnchor().constraintEqualToAnchor_constant_(
-                    content_area.topAnchor(), 8.0),
+                strip.leadingAnchor().constraintEqualToAnchor_(
+                    content_area.leadingAnchor()),
+                strip.trailingAnchor().constraintEqualToAnchor_(
+                    content_area.trailingAnchor()),
+                strip.topAnchor().constraintEqualToAnchor_(
+                    content_area.topAnchor()),
+                strip_height,
+                page_title.leadingAnchor().constraintEqualToAnchor_(
+                    column.leadingAnchor()),
+                page_title.centerYAnchor().constraintEqualToAnchor_(
+                    strip.centerYAnchor()),
+                page_title.trailingAnchor()
+                .constraintLessThanOrEqualToAnchor_constant_(
+                    items.leadingAnchor(), -TITLE_STRIP_ITEM_GAP),
+                items.trailingAnchor().constraintEqualToAnchor_(
+                    column.trailingAnchor()),
+                items.centerYAnchor().constraintEqualToAnchor_(
+                    strip.centerYAnchor()),
+                column.topAnchor().constraintEqualToAnchor_(
+                    strip.bottomAnchor()),
                 column.centerXAnchor().constraintEqualToAnchor_(
                     content_area.centerXAnchor()),
                 column.widthAnchor().constraintLessThanOrEqualToConstant_(
@@ -7380,7 +7712,8 @@ if APPKIT_AVAILABLE:
                     CONTENT_MIN_WIDTH),
                 column.leadingAnchor()
                 .constraintGreaterThanOrEqualToAnchor_constant_(
-                    content_area.leadingAnchor(), 12.0),
+                    content_area.leadingAnchor(), CONTENT_EDGE_MIN),
+                preferred_inset,
                 preferred_width,
                 notice.leadingAnchor().constraintEqualToAnchor_(
                     column.leadingAnchor()),
@@ -7393,19 +7726,16 @@ if APPKIT_AVAILABLE:
                     content_area.bottomAnchor(),
                     -(10.0 + NOTICE_LINE_HEIGHT + 6.0)),
             ])
-            self.dynamic["notice_height"] = notice_height
-
             self.dynamic.update(
-                window_header=header,
-                window_face_chip=face_chip,
-                window_face=face_image,
-                window_face_button=face_button,
-                window_title=title,
-                window_badge=badge,
-                window_version=version,
+                content_side=content_area,
+                page_column=column,
+                title_strip=strip,
+                title_strip_height=strip_height,
+                title_strip_items=items,
+                page_title=page_title,
+                notice_height=notice_height,
                 notice=notice,
             )
-            self._register("brand", badge)
 
             builders = {
                 "Home": self._build_home,
@@ -7440,7 +7770,9 @@ if APPKIT_AVAILABLE:
                     self.dynamic["result_clear_audio_button"],
                     self.dynamic["result_inspect_button"],
                 ),
-                "Settings": (self.dynamic["settings_pane_control"],),
+                # Settings has no control of its own any more: the pane
+                # is chosen in the sidebar, and each pane brings its own.
+                "Settings": (),
                 "Advanced": (
                     self.dynamic["selective_relisten_toggle"],
                     self.dynamic["open_log_button"],
@@ -7454,6 +7786,151 @@ if APPKIT_AVAILABLE:
             }
             self.window.setInitialFirstResponder_(self.sidebar_rows[0])
             self.render()
+
+        @objc.python_method
+        def _build_sidebar(self, width: float) -> Any:
+            """The sidebar's contents, laid out from the top down.
+
+            Face, name and state; Home; the Settings group; the build at
+            the bottom. Rows are the only controls and all of them go into
+            ``self.sidebar_rows`` in ``SIDEBAR_ROWS`` order.
+            """
+            sidebar = ShellView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, width, WINDOW_DEFAULT_SIZE[1]))
+
+            # ---- Brand block, clear of the traffic lights above it.
+            chip_size = SIDEBAR_FACE_SIZE
+            header = ShellView.alloc().initWithFrame_(NSMakeRect(
+                0, SIDEBAR_BRAND_TOP, width, chip_size))
+            header.setAutoresizingMask_(NSViewWidthSizable)
+            chip_frame = NSMakeRect(
+                SIDEBAR_BRAND_INSET, 0, chip_size, chip_size)
+            face_chip = ShellView.alloc().initWithFrame_(chip_frame)
+            face_chip.setWantsLayer_(True)
+            if face_chip.layer() is not None:
+                # The picker's chip proportions, so the two read as kin.
+                face_chip.layer().setCornerRadius_(min(
+                    BRAND_SHAPES["face_chip"].radius, chip_size * 0.28))
+                face_chip.layer().setBorderWidth_(1.0)
+            face_image = NSImageView.alloc().initWithFrame_(
+                NSInsetRect(chip_frame, 4.0, 4.0))
+            face_image.setImageScaling_(
+                NSImageScaleProportionallyUpOrDown)
+            face_image.setEditable_(False)
+            face_button = JellyButton.alloc().initWithFrame_(chip_frame)
+            face_button.setTitle_("")
+            face_button.setBordered_(False)
+            face_button.setTransparent_(True)
+            face_button.setTarget_(self)
+            face_button.setAction_("faceChipPressed:")
+            _accessible(
+                face_button,
+                self._l("app.face_chip.label"),
+                self._l("app.face_chip.help"))
+            text_x = SIDEBAR_BRAND_INSET + chip_size + 8.0
+            text_width = width - text_x - 8.0
+            title = _label(
+                APP_NAME, NSMakeRect(text_x, 4, text_width, 19),
+                size=15, weight="bold", rounded=True, truncate=True,
+                accessibility_label=self._l("app.subtitle"))
+            state_dot = ShellView.alloc().initWithFrame_(
+                NSMakeRect(text_x + 1.0, 29.5, 7.0, 7.0))
+            state_dot.setWantsLayer_(True)
+            if state_dot.layer() is not None:
+                state_dot.layer().setCornerRadius_(3.5)
+            state_label = _label(
+                "", NSMakeRect(text_x + 13.0, 25, text_width - 13.0, 16),
+                size=12, weight="semibold", truncate=True)
+            for view in (title, state_label):
+                view.setAutoresizingMask_(NSViewWidthSizable)
+            for view in (face_chip, face_image, face_button, title,
+                         state_dot, state_label):
+                header.addSubview_(view)
+            sidebar.addSubview_(header)
+
+            # ---- The pages. VoiceOver finds them as one list.
+            row_width = width - 2.0 * SIDEBAR_PADDING
+            rows: list[Any] = []
+            nav = ShellView.alloc().initWithFrame_(NSMakeRect(
+                0, SIDEBAR_BRAND_TOP + chip_size + SIDEBAR_BRAND_GAP,
+                width, 10))
+            nav.setAutoresizingMask_(NSViewWidthSizable)
+            try:
+                nav.setAccessibilityElement_(True)
+                nav.setAccessibilityRole_(NSAccessibilityListRole)
+            except Exception:
+                pass
+            _accessible(nav, self._l("shell.sidebar.accessibility.label"))
+            y = 0.0
+            group_label = None
+            for index, spec in enumerate(SIDEBAR_ROWS):
+                if index == 1:
+                    group_label = _label(
+                        self._l("shell.sidebar.group.settings"),
+                        NSMakeRect(
+                            SIDEBAR_PADDING + SIDEBAR_ROW_INSET, y + 14.0,
+                            row_width - 2.0 * SIDEBAR_ROW_INSET, 14),
+                        size=11, weight="semibold", truncate=True)
+                    group_label.setAutoresizingMask_(NSViewWidthSizable)
+                    nav.addSubview_(group_label)
+                    y += SIDEBAR_GROUP_LABEL_HEIGHT
+                row = SidebarRowButton.alloc().initWithFrame_(NSMakeRect(
+                    SIDEBAR_PADDING, y, row_width, SIDEBAR_ROW_HEIGHT))
+                label = self._l(spec.label_key)
+                row.configure(label, spec.symbol)
+                row.setTag_(index)
+                row.setTarget_(self)
+                row.setAction_("selectSidebarRow:")
+                row.setAutoresizingMask_(NSViewWidthSizable)
+                _accessible(
+                    row, label,
+                    self._l("settings.accessibility.sections.help"))
+                nav.addSubview_(row)
+                rows.append(row)
+                y += SIDEBAR_ROW_HEIGHT + SIDEBAR_ROW_GAP
+            nav.setFrameSize_((width, y - SIDEBAR_ROW_GAP))
+            sidebar.addSubview_(nav)
+            self.sidebar_rows = tuple(rows)
+            # ⌘D always routes to Advanced; its row is in the sidebar on
+            # every page, so the shortcut works window-wide.
+            advanced_row = rows[-1]
+            advanced_row.setKeyEquivalent_("d")
+            advanced_row.setKeyEquivalentModifierMask_(
+                NSEventModifierFlagCommand)
+            _accessible(
+                advanced_row, self._l("nav.advanced"),
+                self._l("advanced.accessibility.shortcut.help"))
+            self.dynamic["advanced_button"] = advanced_row
+
+            # ---- The build, at the foot. The window has no update action
+            # of its own, so nothing sits beside it.
+            version = _label(
+                self._l(
+                    "app.version", version=application_build_version()),
+                NSMakeRect(
+                    SIDEBAR_PADDING + SIDEBAR_ROW_INSET,
+                    WINDOW_DEFAULT_SIZE[1] - SIDEBAR_FOOT_INSET - 14.0,
+                    row_width - 2.0 * SIDEBAR_ROW_INSET, 14),
+                size=11, weight="medium", truncate=True)
+            # In a flipped view the flexible "min Y" margin is the one
+            # above, which pins the label to the bottom edge.
+            version.setAutoresizingMask_(
+                NSViewWidthSizable | NSViewMinYMargin)
+            sidebar.addSubview_(version)
+
+            self.dynamic.update(
+                window_header=header,
+                window_face_chip=face_chip,
+                window_face=face_image,
+                window_face_button=face_button,
+                window_title=title,
+                window_state=state_label,
+                window_state_dot=state_dot,
+                window_version=version,
+                sidebar_list=nav,
+                sidebar_group_label=group_label,
+            )
+            return sidebar
 
         def _build_home(self, page: Any) -> None:
             width = CONTENT_WIDTH
@@ -7932,28 +8409,6 @@ if APPKIT_AVAILABLE:
             header = self._page_header(
                 page, self._l("settings.title"),
                 subtitle=self._l("settings.subtitle"))
-            # Three panes need more room than two did: at 200pt the widest
-            # label truncated to "Personal…", which is not a word.
-            pane_width = 96.0 * len(SETTINGS_PANES)
-            pane_control = JellySegmentedControl.alloc().initWithFrame_(
-                NSMakeRect(width - pane_width, 28, pane_width, 24))
-            pane_control.setSegmentCount_(len(SETTINGS_PANES))
-            pane_control.setSegmentStyle_(NSSegmentStyleRounded)
-            pane_control.setControlSize_(1)
-            for index, pane in enumerate(SETTINGS_PANES):
-                pane_control.setLabel_forSegment_(self._l(
-                    f"settings.pane.{pane.casefold()}"), index)
-                pane_control.setWidth_forSegment_(
-                    pane_width / len(SETTINGS_PANES), index)
-            pane_control.setTarget_(self)
-            pane_control.setAction_("settingsPaneChanged:")
-            pane_control.setAutoresizingMask_(NSViewMinXMargin)
-            _accessible(
-                pane_control,
-                self._l("settings.accessibility.category.label"),
-                self._l("settings.accessibility.category.help"))
-            header.addSubview_(pane_control)
-
             panes = {}
             for name in SETTINGS_PANES:
                 pane = NSView.alloc().initWithFrame_(
@@ -7975,7 +8430,6 @@ if APPKIT_AVAILABLE:
             # One builder per pane, so a pane can be rebuilt without touching
             # its neighbours. Each returns its controls in Tab order.
             self.dynamic.update(
-                settings_pane_control=pane_control,
                 settings_panes=panes,
                 settings_key_views={
                     "Personalize": self._build_settings_personalize(
@@ -8631,7 +9085,13 @@ if APPKIT_AVAILABLE:
         def _configure_key_view_loop(self, state: GUIState) -> int:
             """Make Tab order explicit while leaving arrows to native controls."""
 
-            controls = list(self.key_views_by_section[state.section])
+            # Sidebar, then the title strip's items for this page, then
+            # the page itself.
+            row = SIDEBAR_ROWS[sidebar_row_index(
+                state.section, state.settings_pane)]
+            controls = [view for row_key, view, _visible in self.title_items
+                        if row_key == row.key]
+            controls.extend(self.key_views_by_section[state.section])
             if state.section == "Settings":
                 controls.extend(
                     self.dynamic["settings_key_views"][state.settings_pane])
@@ -8647,7 +9107,8 @@ if APPKIT_AVAILABLE:
                     view = view.superview()
                 return True
 
-            chain = list(self.sidebar_rows)
+            # Setup mode has no sidebar to stop at.
+            chain = [] if self.setup_mode else list(self.sidebar_rows)
             chain.extend(
                 control for control in controls
                 if visible_and_enabled(control))
@@ -8678,17 +9139,17 @@ if APPKIT_AVAILABLE:
 
         @objc.python_method
         def _render_shell(self, state: GUIState) -> None:
-            """Window chrome: palette, visible page, header face."""
+            """Window chrome: palette, visible page, sidebar, title strip."""
             self._apply_window_theme(state)
             for section, page in self.pages.items():
                 page.setHidden_(section != state.section)
-            face_name = self._l(f"settings.face.{state.face}")
-            self.dynamic["window_face"].setImage_(self._face_image(
-                state.face, talk=state.status_phase == "recording"))
-            sync_accessibility(
-                self.dynamic["window_face"], state.status_title,
-                label=face_name)
-            self._animate_section_change(state)
+            # The sidebar and the title strip are a projection of the view
+            # model: the row is worked out from its section and pane here,
+            # on every render, and stored nowhere else.
+            row_index = sidebar_row_index(state.section, state.settings_pane)
+            self._sync_sidebar(state, row_index)
+            self._sync_title_strip(state, row_index)
+            self._animate_section_change(state, row_index)
 
         @objc.python_method
         def _render_home(self, state: GUIState) -> None:
@@ -8950,8 +9411,6 @@ if APPKIT_AVAILABLE:
         @objc.python_method
         def _render_settings_shell(self, state: GUIState) -> None:
             """Settings: which pane is showing."""
-            self.dynamic["settings_pane_control"].setSelectedSegment_(
-                SETTINGS_PANES.index(state.settings_pane))
             for pane, view in self.dynamic["settings_panes"].items():
                 view.setHidden_(pane != state.settings_pane)
 
@@ -9343,11 +9802,16 @@ if APPKIT_AVAILABLE:
 
         @objc.python_method
         def _install_main_menu(self) -> None:
-            """Give the window the standard Edit and Window key equivalents.
+            """Give the window the standard Edit, View and Window keys.
 
             The runtime is an accessory app, so this menu is never drawn, but
             AppKit still routes Cmd-W, Cmd-M and the edit shortcuts through
             it; without one they do nothing in the window and its editors.
+            View carries the five pages on Cmd-1 to Cmd-5, and Cmd-D for
+            Advanced once more, unseen. Its items have no target: the action
+            travels the responder chain to the window's delegate, which is
+            this controller, so they are live exactly while the window is
+            the key window.
             """
             app = NSApplication.sharedApplication()
             if app.mainMenu() is not None:
@@ -9364,6 +9828,16 @@ if APPKIT_AVAILABLE:
                     ("menu.edit.paste", "paste:", "v", command),
                     ("menu.edit.select_all", "selectAll:", "a", command),
                 )),
+                ("menu.view", (
+                    *((row.label_key, "selectSidebarRow:", str(index + 1),
+                       command, index)
+                      for index, row in enumerate(SIDEBAR_ROWS)),
+                    # Command-D is on the Advanced row itself, which answers
+                    # first. This hidden twin keeps the shortcut alive while
+                    # setup mode has the sidebar, and the row, put away.
+                    ("nav.advanced", "selectSidebarRow:", "d", command,
+                     len(SIDEBAR_ROWS) - 1, "hidden"),
+                )),
                 ("menu.window", (
                     ("menu.window.close", "performClose:", "w", command),
                     ("menu.window.minimize", "performMiniaturize:", "m",
@@ -9371,11 +9845,16 @@ if APPKIT_AVAILABLE:
                 )),
             ):
                 submenu = NSMenu.alloc().initWithTitle_(self._l(title_key))
-                for item_key, action, key, mask in entries:
+                for item_key, action, key, mask, *extra in entries:
                     item = NSMenuItem.alloc() \
                         .initWithTitle_action_keyEquivalent_(
                             self._l(item_key), action, key)
                     item.setKeyEquivalentModifierMask_(mask)
+                    if extra:
+                        item.setTag_(extra[0])
+                    if "hidden" in extra:
+                        item.setHidden_(True)
+                        item.setAllowsKeyEquivalentWhenHidden_(True)
                     submenu.addItem_(item)
                 holder = NSMenuItem.alloc() \
                     .initWithTitle_action_keyEquivalent_(
@@ -9441,11 +9920,6 @@ if APPKIT_AVAILABLE:
             except Exception:
                 pass
             buttons[safe].setKeyEquivalent_("\r")
-
-        def settingsPaneChanged_(self, sender: Any) -> None:
-            self.view_model.select_settings_pane(
-                SETTINGS_PANES[sender.selectedSegment()])
-            self.render()
 
         @objc.python_method
         def _tone_dialog_form(
@@ -9965,9 +10439,12 @@ if APPKIT_AVAILABLE:
                 self.dynamic["window_face"], "wobble",
                 reduced_motion=reduced)
 
-        def sectionChanged_(self, sender: Any) -> None:
-            self.view_model.select_section(SECTIONS[int(sender.tag())])
-            self.render()
+        def selectSidebarRow_(self, sender: Any) -> None:
+            """A sidebar row was pressed, or its Command-number chosen.
+
+            Both carry the row's index as their tag.
+            """
+            self._select_sidebar_row(int(sender.tag()))
 
         def faceChanged_(self, sender: Any) -> None:
             self.view_model.choose_face(FACES[sender.selectedSegment()])
@@ -10347,6 +10824,12 @@ if APPKIT_AVAILABLE:
             self._apply_onboarding_theme(
                 self.view_model.state, self._onboarding_presentation)
 
+        def windowDidBecomeKey_(self, _notification: Any) -> None:
+            self._set_window_active(True)
+
+        def windowDidResignKey_(self, _notification: Any) -> None:
+            self._set_window_active(False)
+
         def windowWillClose_(self, _notification: Any) -> None:
             if self.timer is not None:
                 self.timer.invalidate()
@@ -10641,23 +11124,194 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         require(
             controller.dynamic["window_face"].image() is not None,
             "themed window face")
+
+        # ---- The shell: a system split view with a full-height sidebar
+        # under the traffic lights, and a title strip on the content side.
+        window = controller.window
+        root_view = window.contentView()
+        root_view.layoutSubtreeIfNeeded()
         require(
-            controller.topbar is not None
-            and controller.topbar.superview() is not None,
-            "top navigation bar")
+            bool(int(window.styleMask())
+                 & int(NSWindowStyleMaskFullSizeContentView))
+            and bool(window.titlebarAppearsTransparent())
+            and int(window.titleVisibility()) == int(NSWindowTitleHidden)
+            and str(window.title()) == APP_NAME,
+            "full-size content view under a transparent, untitled title bar")
+        split = controller.split_controller
+        require(
+            window.contentViewController() == split
+            and bool(split.isKindOfClass_(NSSplitViewController))
+            and len(split.splitViewItems()) == 2
+            and split.splitViewItems()[0] == controller.sidebar_item,
+            "the system split view holds the sidebar and the content side")
+        # 1 is NSSplitViewItemBehaviorSidebar: the item the system gives
+        # the sidebar material and the full-height layout.
+        require(
+            int(controller.sidebar_item.behavior()) == 1
+            and not bool(controller.sidebar_item.canCollapse())
+            and not bool(controller.sidebar_item.isSpringLoaded())
+            and not bool(controller.sidebar_item.isCollapsed()),
+            "the sidebar is a system sidebar item that stays open")
+
+        def in_window(view: Any) -> Any:
+            return view.convertRect_toView_(view.bounds(), None)
+
+        def ancestors_of(view: Any) -> list[Any]:
+            chain = []
+            while view is not None:
+                chain.append(view)
+                view = view.superview()
+            return chain
+
+        def key_loop_from(start: Any) -> list[Any]:
+            """Every view Tab reaches from ``start``, once round the loop."""
+            seen = [start]
+            view = start.nextKeyView()
+            while view is not None and view != start and len(seen) < 400:
+                seen.append(view)
+                view = view.nextKeyView()
+            return seen
+
+        def intersects(first: Any, second: Any) -> bool:
+            return (
+                first.origin.x < second.origin.x + second.size.width
+                and second.origin.x < first.origin.x + first.size.width
+                and first.origin.y < second.origin.y + second.size.height
+                and second.origin.y < first.origin.y + first.size.height)
+
+        def shown_leaves(view: Any) -> list[Any]:
+            children = [child for child in view.subviews()
+                        if not bool(child.isHidden())]
+            if not children:
+                return [view]
+            return [leaf for child in children
+                    for leaf in shown_leaves(child)]
+
+        content_height = float(root_view.bounds().size.height)
+        sidebar_frame = in_window(controller.sidebar)
+        content_frame = in_window(controller.dynamic["content_side"])
+        divider = float(split.splitView().dividerThickness())
+        require(
+            abs(sidebar_frame.origin.x) < 0.5
+            and abs(sidebar_frame.size.width + divider - SIDEBAR_WIDTH) < 0.5
+            and abs(sidebar_frame.size.height - content_height) < 0.5
+            and abs(content_frame.origin.x - SIDEBAR_WIDTH) < 0.5
+            and abs(content_frame.size.height - content_height) < 0.5,
+            "the sidebar is SIDEBAR_WIDTH wide, on the left, full height")
+        lights = [
+            window.standardWindowButton_(kind) for kind in (
+                NSWindowCloseButton, NSWindowMiniaturizeButton,
+                NSWindowZoomButton)]
+        require(all(light is not None for light in lights), "traffic lights")
+        for light in lights:
+            light_frame = in_window(light)
+            require(
+                intersects(light_frame, sidebar_frame),
+                "the traffic lights sit over the sidebar")
+            for leaf in shown_leaves(controller.sidebar):
+                require(
+                    not intersects(light_frame, in_window(leaf)),
+                    "nothing in the sidebar is under the traffic lights")
+        require(
+            controller.dynamic["content_side"].layer() is not None
+            and bool(controller.dynamic[
+                "content_side"].layer().masksToBounds()),
+            "nothing on the content side can paint over the sidebar")
+        strip_frame = in_window(controller.title_strip)
+        column_frame = in_window(controller.dynamic["page_column"])
+        title_frame = in_window(controller.dynamic["page_title"])
+        require(
+            abs(strip_frame.size.height - TITLE_STRIP_HEIGHT) < 0.5
+            and abs(strip_frame.origin.y + strip_frame.size.height
+                    - content_height) < 0.5
+            and abs(strip_frame.origin.x - SIDEBAR_WIDTH) < 0.5,
+            "the title strip tops the content side")
+        require(
+            abs(column_frame.origin.y + column_frame.size.height
+                - strip_frame.origin.y) < 0.5,
+            "the page column starts where the title strip ends")
+        # A label's text starts its alignment inset in from its frame.
+        require(
+            abs(title_frame.origin.x + float(
+                controller.dynamic["page_title"].alignmentRectInsets().left)
+                - column_frame.origin.x) < 0.5
+            and strip_frame.origin.y <= title_frame.origin.y
+            and title_frame.origin.y + title_frame.size.height
+            <= strip_frame.origin.y + strip_frame.size.height,
+            "the page title sits in the strip on the column's leading edge")
+        require(
+            accessible_value(
+                controller.dynamic["page_title"].cell(),
+                "accessibilityRole") == "AXHeading",
+            "VoiceOver reads the page title as a heading")
+        require(
+            accessible_value(
+                controller.dynamic["sidebar_list"],
+                "accessibilityRole") == str(NSAccessibilityListRole)
+            and accessible_value(
+                controller.dynamic["sidebar_list"],
+                "accessibilityLabel") == localized_string(
+                    "shell.sidebar.accessibility.label"),
+            "VoiceOver finds the sidebar rows as one list")
+        require(
+            all(row.superview() == controller.dynamic["sidebar_list"]
+                for row in controller.sidebar_rows),
+            "every row is in the sidebar list")
+        require(
+            str(controller.dynamic["window_version"].stringValue()) ==
+            localized_string(
+                "app.version", version=application_build_version())
+            and controller.sidebar in tuple(ancestors_of(
+                controller.dynamic["window_version"])),
+            "the build label moved to the foot of the sidebar")
+        require(
+            str(controller.dynamic["window_state"].stringValue()) ==
+            localized_string("shell.state.setup"),
+            "the sidebar says setup is under way")
         require(
             controller.dynamic["home_face_view"] is not None
             and not controller.dynamic["home_face_view"].isLiving(),
             "living face view built, clock off until shown")
         require(
-            len(controller.sidebar_rows) == len(SECTIONS), "nav pills")
-        for index, section in enumerate(SECTIONS):
+            [row.key for row in SIDEBAR_ROWS] == [
+                "home", "personalize", "controls", "privacy", "advanced"]
+            and len(controller.sidebar_rows) == len(SIDEBAR_ROWS),
+            "five sidebar rows in order")
+        previous_top = None
+        for index, spec in enumerate(SIDEBAR_ROWS):
+            row = controller.sidebar_rows[index]
+            row_frame = in_window(row)
+            for element, kind in ((row, "row"), (row.cell(), "cell")):
+                require(
+                    accessible_value(element, "accessibilityLabel") ==
+                    localized_string(spec.label_key),
+                    f"sidebar {kind} label {spec.key}")
             require(
-                accessible_value(
-                    controller.sidebar_rows[index],
-                    "accessibilityLabel") == localized_string(
-                        f"nav.{section.casefold()}"),
-                f"sidebar row label {section}")
+                str(row.title()) == localized_string(spec.label_key)
+                and row.icon_view.image() is not None,
+                f"sidebar row {spec.key} has a label and a symbol")
+            require(
+                int(row.tag()) == index
+                and str(row.action()) == "selectSidebarRow:"
+                and row.target() == controller,
+                f"sidebar row {spec.key} action")
+            require(
+                abs(row_frame.size.height - SIDEBAR_ROW_HEIGHT) < 0.5
+                and row_frame.origin.x >= sidebar_frame.origin.x
+                and row_frame.origin.x + row_frame.size.width
+                <= sidebar_frame.origin.x + sidebar_frame.size.width,
+                f"sidebar row {spec.key} is 32 points tall, in the sidebar")
+            require(
+                previous_top is None or row_frame.origin.y
+                + row_frame.size.height <= previous_top,
+                f"sidebar row {spec.key} is below the one before it")
+            previous_top = row_frame.origin.y
+            require(
+                bool(row.selected) == (index == 0)
+                and bool(row.isAccessibilitySelected()) == (index == 0)
+                and accessible_value(row.cell(), "accessibilityValue") == (
+                    localized_string("nav.selected") if index == 0 else ""),
+                f"sidebar row {spec.key} selection at start")
         require(
             accessible_value(
                 controller.sidebar_rows[0], "accessibilityHelp") ==
@@ -10959,32 +11613,240 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                 "result_play_audio_button"].isEnabled()),
             "retained span play disabled without opt-in")
 
-        for index, section in enumerate(SECTIONS):
-            controller.sectionChanged_(controller.sidebar_rows[index])
+        # Every row, pressed the way a click presses it, shows its page
+        # and its pane, names it in the title strip, and is the one row
+        # the sidebar marks selected. Privacy is pressed last on purpose,
+        # so the walk ends in Settings on its last pane.
+        visited_sections = []
+        for index in (0, 4, 1, 2, 3):
+            spec = SIDEBAR_ROWS[index]
+            controller.sidebar_rows[index].performClick_(None)
             visible = tuple(
                 name for name, page in controller.pages.items()
                 if not bool(page.isHidden()))
-            require(model.state.section == section, f"section {section}")
-            require(visible == (section,), f"render {section}")
+            require(
+                model.state.section == spec.section,
+                f"section {spec.section}")
+            require(visible == (spec.section,), f"render {spec.section}")
+            visited_sections.append(spec.section)
+            if spec.pane is not None:
+                visible_panes = tuple(
+                    name for name, view in
+                    controller.dynamic["settings_panes"].items()
+                    if not bool(view.isHidden()))
+                require(
+                    model.state.settings_pane == spec.pane,
+                    f"pane {spec.pane}")
+                require(
+                    visible_panes == (spec.pane,),
+                    f"render pane {spec.pane}")
+            require(
+                sidebar_row_index(
+                    model.state.section, model.state.settings_pane) == index
+                and [bool(row.selected) for row in controller.sidebar_rows]
+                == [position == index for position in range(
+                    len(SIDEBAR_ROWS))],
+                f"the selected row follows the view model to {spec.key}")
+            require(
+                str(controller.dynamic["page_title"].stringValue()) ==
+                localized_string(spec.label_key),
+                f"title strip names {spec.key}")
+        require(set(visited_sections) == set(SECTIONS), "every section shown")
+        # What the rows draw: only the selected one is filled, with the
+        # theme's selection in the key window and a neutral out of it.
+        def row_edge_pixel(row: Any) -> tuple[float, float, float, float]:
+            bounds = row.bounds()
+            bitmap = row.bitmapImageRepForCachingDisplayInRect_(bounds)
+            row.cacheDisplayInRect_toBitmapImageRep_(bounds, bitmap)
+            scale = bitmap.pixelsWide() / bounds.size.width
+            color = bitmap.colorAtX_y_(
+                int(4 * scale), int(bounds.size.height / 2.0 * scale))
+            return (float(color.redComponent()),
+                    float(color.greenComponent()),
+                    float(color.blueComponent()),
+                    float(color.alphaComponent()))
 
-        controller.sectionChanged_(
-            controller.sidebar_rows[SECTIONS.index("Settings")])
-        pane_control = controller.dynamic["settings_pane_control"]
-        for index, pane in enumerate(SETTINGS_PANES):
-            pane_control.setSelectedSegment_(index)
-            controller.settingsPaneChanged_(pane_control)
-            visible = tuple(
-                name for name, view in
-                controller.dynamic["settings_panes"].items()
-                if not bool(view.isHidden()))
-            require(model.state.settings_pane == pane, f"pane {pane}")
-            require(visible == (pane,), f"render pane {pane}")
+        selected_pixel = row_edge_pixel(controller.sidebar_rows[3])
+        require(
+            selected_pixel[3] > 0.2
+            and selected_pixel[1] > selected_pixel[0] + 0.1,
+            "the selected row is filled with the theme's selection")
+        require(
+            row_edge_pixel(controller.sidebar_rows[0])[3] < 0.02,
+            "an unselected row draws no fill")
+        controller.windowDidResignKey_(None)
+        dimmed_pixel = row_edge_pixel(controller.sidebar_rows[3])
+        require(
+            0.02 < dimmed_pixel[3] < selected_pixel[3]
+            and abs(dimmed_pixel[1] - dimmed_pixel[0]) < 0.15,
+            "the selection is a quiet neutral out of the key window")
+        controller.windowDidBecomeKey_(None)
+        # The selection is read from the view model, not kept by the rows:
+        # changing the model alone moves it on the next render.
+        model.select_settings_pane("Controls")
+        controller.render()
+        require(
+            [bool(row.selected) for row in controller.sidebar_rows] ==
+            [False, False, True, False, False],
+            "the sidebar is a projection of the view model")
+        model.select_settings_pane("Privacy")
+        controller.render()
+        # Up and Down move through the rows and stop at the ends.
+        require(
+            controller.move_sidebar_focus(controller.sidebar_rows[3], 1)
+            and model.state.section == "Advanced",
+            "Down moves to the next row")
+        require(
+            not controller.move_sidebar_focus(controller.sidebar_rows[4], 1)
+            and model.state.section == "Advanced",
+            "Down stops at the last row")
+        require(
+            controller.move_sidebar_focus(controller.sidebar_rows[4], -1)
+            and model.state.section == "Settings"
+            and model.state.settings_pane == "Privacy",
+            "Up moves to the previous row")
+        require(
+            not controller.move_sidebar_focus(controller.sidebar_rows[0], -1),
+            "Up stops at the first row")
+        # A window that is not the key window dims its selection.
+        controller.windowDidResignKey_(None)
+        require(
+            not any(bool(row.emphasized) for row in controller.sidebar_rows)
+            and bool(controller.sidebar_rows[3].selected),
+            "an inactive window keeps its selection and dims it")
+        controller.windowDidBecomeKey_(None)
+        require(
+            all(bool(row.emphasized) for row in controller.sidebar_rows),
+            "the key window emphasizes its selection again")
         require(
             int(controller._configure_key_view_loop(model.state)) >= 4,
             "settings key-view loop")
+        # Tab goes to the sidebar, then into the page. The rows are linked
+        # in order and only the selected one may be a stop, so the sidebar
+        # is one stop like a list. Whether buttons take Tab stops at all is
+        # the system's keyboard-navigation setting, read here from another
+        # button in the sidebar.
+        for upper, lower in zip(
+                controller.sidebar_rows, controller.sidebar_rows[1:]):
+            require(upper.nextKeyView() == lower, "Tab walks the sidebar")
+        buttons_take_tab = bool(
+            controller.dynamic["window_face_button"].canBecomeKeyView())
         require(
-            controller.sidebar_rows[-1].nextKeyView() == pane_control,
+            [bool(row.canBecomeKeyView()) for row in controller.sidebar_rows]
+            == [False, False, False, buttons_take_tab, False],
+            "the selected row is the sidebar's one Tab stop")
+        require(
+            controller.sidebar_rows[-1].nextKeyView() ==
+            controller.dynamic["settings_key_views"]["Privacy"][0],
             "settings Tab order")
+        # A trailing item in the title strip belongs to one page: it shows
+        # only there, lines up on the column's trailing edge inside the
+        # strip, and takes the Tab stop between the sidebar and the page.
+        probe_item = NSButton.alloc().initWithFrame_(
+            NSMakeRect(0, 0, 96, 24))
+        probe_item.setTitle_("Probe")
+        probe_item.setBezelStyle_(NSBezelStyleRounded)
+        outbox_only = controller.add_title_item(
+            "privacy", NSButton.alloc().initWithFrame_(
+                NSMakeRect(0, 0, 96, 24)),
+            visible=lambda state: False)
+        controller.add_title_item("privacy", probe_item)
+        controller.render()
+        root_view.layoutSubtreeIfNeeded()
+        item_frame = in_window(probe_item)
+        # The stack's frame is its items' alignment rectangles: the edge
+        # of the bezel, not of the shadow room around it.
+        items_frame = in_window(controller.dynamic["title_strip_items"])
+        strip_frame = in_window(controller.title_strip)
+        column_frame = in_window(controller.dynamic["page_column"])
+        require(
+            not bool(probe_item.isHidden())
+            and bool(outbox_only.isHidden())
+            and probe_item.superview() ==
+            controller.dynamic["title_strip_items"]
+            and items_frame.size.width > 0.0
+            and abs(items_frame.origin.x + items_frame.size.width
+                    - column_frame.origin.x - column_frame.size.width) < 0.5
+            and strip_frame.origin.y <= item_frame.origin.y
+            and item_frame.origin.y + item_frame.size.height
+            <= strip_frame.origin.y + strip_frame.size.height,
+            "a title-strip item sits trailing, inside the strip")
+        require(
+            controller.sidebar_rows[-1].nextKeyView() == probe_item
+            and probe_item.nextKeyView() ==
+            controller.dynamic["settings_key_views"]["Privacy"][0],
+            "Tab goes sidebar, title strip, page")
+        try:
+            controller.add_title_item("settings", probe_item)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a title item needs a real sidebar row")
+        controller.sidebar_rows[2].performClick_(None)
+        require(
+            bool(probe_item.isHidden())
+            and controller.sidebar_rows[-1].nextKeyView() ==
+            controller.dynamic["settings_key_views"]["Controls"][0],
+            "a title-strip item leaves with its page")
+        for _row_key, item, _visible in controller.title_items:
+            item.removeFromSuperview()
+        controller.title_items.clear()
+
+        # Setup mode: the sidebar and the title strip go, the page column
+        # takes the height they held and the whole window's width to sit
+        # in, and leaving it restores the shell with the same row selected.
+        normal_column = in_window(controller.dynamic["page_column"])
+        controller.set_setup_mode(True)
+        root_view.layoutSubtreeIfNeeded()
+        setup_column = in_window(controller.dynamic["page_column"])
+        setup_content = in_window(controller.dynamic["content_side"])
+        require(
+            controller.setup_mode
+            and bool(controller.sidebar_item.isCollapsed())
+            and bool(controller.title_strip.isHidden()),
+            "setup mode hides the sidebar and the title strip")
+        require(
+            abs(setup_content.origin.x) < 0.5
+            and abs(setup_content.size.width
+                    - root_view.bounds().size.width) < 0.5,
+            "setup mode gives the content side the whole window")
+        title_bar = float(
+            window.frame().size.height
+            - window.contentLayoutRect().size.height)
+        require(
+            abs(setup_column.origin.y + setup_column.size.height
+                - (content_height - title_bar)) < 0.5
+            and abs(setup_column.origin.y - normal_column.origin.y) < 0.5
+            and abs(setup_column.size.width - normal_column.size.width) < 0.5
+            and abs(setup_column.origin.x + setup_column.size.width / 2.0
+                    - root_view.bounds().size.width / 2.0) < 0.5,
+            "setup mode runs the column from under the title bar, centred")
+        for light in lights:
+            require(
+                not intersects(in_window(light), setup_column),
+                "the setup page stays clear of the traffic lights")
+        require(
+            not any(row in key_loop_from(
+                controller.dynamic["settings_key_views"]["Controls"][0])
+                for row in controller.sidebar_rows)
+            and not any(bool(row.canBecomeKeyView())
+                        for row in controller.sidebar_rows),
+            "setup mode leaves the hidden sidebar out of the Tab loop")
+        controller.set_setup_mode(False)
+        root_view.layoutSubtreeIfNeeded()
+        restored_column = in_window(controller.dynamic["page_column"])
+        require(
+            not controller.setup_mode
+            and not bool(controller.sidebar_item.isCollapsed())
+            and not bool(controller.title_strip.isHidden())
+            and abs(restored_column.origin.x - normal_column.origin.x) < 0.5
+            and abs(restored_column.size.height
+                    - normal_column.size.height) < 0.5
+            and bool(controller.sidebar_rows[2].selected)
+            and controller.sidebar_rows[-1].nextKeyView() ==
+            controller.dynamic["settings_key_views"]["Controls"][0],
+            "leaving setup mode restores the shell and its selected row")
+        controller.sidebar_rows[3].performClick_(None)
         require(
             str(controller.dynamic["settings_keywords_button"].action()) ==
             "inspectKeywords:", "keyword inspection surface")
@@ -11182,10 +12044,13 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             "advanced command modifier")
         require(
             str(controller.dynamic["advanced_button"].action()) ==
-            "sectionChanged:", "advanced shortcut action")
+            "selectSidebarRow:", "advanced shortcut action")
         require(
-            int(controller.dynamic["advanced_button"].tag()) ==
-            SECTIONS.index("Advanced"), "advanced shortcut destination")
+            controller.dynamic["advanced_button"] ==
+            controller.sidebar_rows[-1]
+            and sidebar_row_destination(int(
+                controller.dynamic["advanced_button"].tag())) ==
+            ("Advanced", None), "advanced shortcut destination")
         require(
             str(controller.dynamic["export_support_bundle_button"].action()) ==
             "exportSupportBundle:",
@@ -11216,9 +12081,11 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                                  "nav.home"),
             "section accessibility")
         require(
-            accessible_value(pane_control, "accessibilityHelp") ==
-            localized_string("settings.accessibility.category.help"),
-            "pane accessibility")
+            accessible_value(
+                controller.dynamic["advanced_button"],
+                "accessibilityHelp") == localized_string(
+                    "advanced.accessibility.shortcut.help"),
+            "advanced shortcut accessibility")
         require(
             accessible_value(controller.dynamic["face_picker"],
                              "accessibilityHelp") == localized_string(
@@ -11274,6 +12141,51 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
              ("z", "undo:"), ("x", "cut:"), ("c", "copy:"),
              ("v", "paste:"), ("a", "selectAll:")} <= menu_keys,
             "window and edit shortcuts have a main menu to route through")
+        # Command-1 to Command-5 are the five pages, in sidebar order. The
+        # items carry no target, so the action reaches whichever window is
+        # key through its delegate, which is the controller.
+        page_items = [
+            item
+            for top in NSApplication.sharedApplication().mainMenu().itemArray()
+            if top.submenu() is not None
+            for item in top.submenu().itemArray()
+            if str(item.action()) == "selectSidebarRow:"]
+        hidden_items = [
+            item for item in page_items if bool(item.isHidden())]
+        page_items = [
+            item for item in page_items if not bool(item.isHidden())]
+        require(
+            [(str(item.keyEquivalent()), int(item.tag()),
+              bool(item.allowsKeyEquivalentWhenHidden()))
+             for item in hidden_items] ==
+            [("d", len(SIDEBAR_ROWS) - 1, True)],
+            "Command-D reaches Advanced when the sidebar is put away")
+        require(
+            [(str(item.keyEquivalent()), int(item.tag()), str(item.title()))
+             for item in page_items] ==
+            [(str(index + 1), index, localized_string(spec.label_key))
+             for index, spec in enumerate(SIDEBAR_ROWS)],
+            "Command-1 to Command-5 select the five pages")
+        require(
+            all(int(item.keyEquivalentModifierMask())
+                == int(NSEventModifierFlagCommand)
+                and item.target() is None
+                for item in page_items + hidden_items),
+            "the page shortcuts are plain Command keys on the responder chain")
+        require(
+            controller.window.delegate() == controller
+            and bool(controller.respondsToSelector_("selectSidebarRow:")),
+            "the window's delegate answers the page shortcuts")
+        state_before_shortcuts = model.state
+        for index in (4, 0, 3):
+            controller.selectSidebarRow_(page_items[index])
+            require(
+                sidebar_row_index(
+                    model.state.section, model.state.settings_pane) == index
+                and bool(controller.sidebar_rows[index].selected),
+                f"Command-{index + 1} shows {SIDEBAR_ROWS[index].key}")
+        model.state = state_before_shortcuts
+        controller.render()
 
         model.set_app_tone("com.example.mail", "casual")
         model.save_snippet(
@@ -11573,6 +12485,24 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             notice_level="error")
         controller.render()
         root_view = controller.window.contentView()
+        root_view.layoutSubtreeIfNeeded()
+        # The shell at the minimum: the sidebar keeps its width, and the
+        # column is at its narrowest with the narrowest margin beside it.
+        minimum_column = in_window(controller.dynamic["page_column"])
+        minimum_inset = min(CONTENT_INSET, (
+            WINDOW_MIN_SIZE[0] - SIDEBAR_WIDTH - CONTENT_MIN_WIDTH) / 2.0)
+        require(
+            minimum_inset >= CONTENT_EDGE_MIN
+            and abs(in_window(controller.sidebar).size.width + divider
+                    - SIDEBAR_WIDTH) < 0.5
+            and abs(minimum_column.size.width - (
+                WINDOW_MIN_SIZE[0] - SIDEBAR_WIDTH - 2.0 * minimum_inset))
+            < 0.5
+            and abs(minimum_column.origin.x - SIDEBAR_WIDTH
+                    - minimum_inset) < 0.5
+            and abs(float(root_view.bounds().size.width)
+                    - WINDOW_MIN_SIZE[0]) < 0.5,
+            "the shell fits the window minimum")
         for page_name, page in controller.pages.items():
             was_hidden = bool(page.isHidden())
             page.setHidden_(False)
@@ -11588,6 +12518,12 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                 lowest >= notice_frame.origin.y + notice_frame.size.height,
                 f"{page_name} fits at the window minimum")
         controller.window.setContentSize_(WINDOW_DEFAULT_SIZE)
+        root_view.layoutSubtreeIfNeeded()
+        default_column = in_window(controller.dynamic["page_column"])
+        require(
+            abs(default_column.size.width - CONTENT_WIDTH) < 0.5
+            and default_column.origin.x - SIDEBAR_WIDTH >= CONTENT_INSET,
+            "the default window gives the column its full width and inset")
 
         # In light appearance, read the colours the window actually draws: a
         # default install's optional model is quiet, not amber, and error
@@ -11655,7 +12591,8 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             "settings_panes": len(SETTINGS_PANES),
             "model_actions": len(expected_calls),
             "onboarding_steps": len(model.state.onboarding_steps),
-            "key_equivalents": 3,
+            "key_equivalents": len(
+                native_appkit_smoke_contract().key_equivalents),
         }
     finally:
         if controller is not None:
