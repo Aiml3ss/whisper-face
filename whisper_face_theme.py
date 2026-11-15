@@ -240,6 +240,14 @@ def normalize_confidence(confidence: object) -> float | None:
     return max(0.0, min(1.0, value))
 
 
+# What the overlay says under "Pasted" when the paste was sent and the
+# destination would not let it be read back. It has to say three things in
+# one line of the pill: nothing here was checked, that is about this app,
+# and the words are kept. It is the only caption the overlay owns; every
+# other one is written where the outcome is decided.
+HUD_PASTED_CAPTION = "Not checked here · copy in Voice Outbox"
+
+
 def hud_presentation(
         mode: str,
         caption: str,
@@ -269,6 +277,14 @@ def hud_presentation(
         confidence_copy = ""
         accent = "brand"
         phase = "Dictation done"
+    elif mode == "pasted":
+        # Sent, and not read back: this app hides its text. The headline
+        # claims the paste and nothing more, and no recognition figure
+        # sits beside it to be read as a score for the delivery.
+        headline = "Pasted"
+        confidence_copy = ""
+        accent = "neutral"
+        phase = "Dictation pasted, not double-checked"
     elif mode == "processing":
         headline = "Tidying up…"
         accent = "accent"

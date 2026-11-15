@@ -415,6 +415,193 @@ class EdgeWhitespaceVerificationTests(unittest.TestCase):
                          ReadbackResult.verified().state)
 
 
+class UncheckedPasteTests(unittest.TestCase):
+    """A paste sent into a destination that hides its text is its own outcome.
+
+    It is shown calmly and counted apart from text that still needs a home,
+    so exactly which receipts qualify is the whole of the trust decision.
+    """
+
+    READABLE = ("pid:42/field:7", (12, 0), "before|after")
+    OPAQUE = ("pid:42/window:3", (0, 0), "window-context")
+
+    def outcome(self, name, utterance="utterance-1", *, opaque=False):
+        """One committed utterance with a named outcome, on a fresh or
+        shared coordinator: ``(receipt, pasted)``.
+
+        ``opaque`` leases a destination that hid its text when the
+        dictation began; otherwise the destination was read.
+        """
+        coordinator = getattr(self, "coordinator", None) \
+            or InsertionCoordinator()
+        home = self.OPAQUE if opaque else self.READABLE
+        lease = (InsertionLease.capture_opaque(utterance, home[0], home[2])
+                 if opaque else InsertionLease.capture(utterance, *home))
+        current = DestinationObservation.capture(*home)
+        readback = ReadbackResult.verified
+        pasted = []
+        paste = pasted.append
+        if name == "no-readback":
+            # Opaque: no readback is ever run. Readable: every read after
+            # the paste answered nothing.
+            readback = ReadbackResult.unverifiable
+        elif name == "conflict":
+            readback = lambda: ReadbackResult.conflict("divergent")
+        elif name == "paste-raised":
+            def paste(_text):
+                raise RuntimeError("synthetic paste failure")
+        elif name == "readback-raised":
+            def readback():
+                raise RuntimeError("synthetic readback failure")
+        elif name == "focus-drift":
+            current = DestinationObservation.capture(
+                "pid:99/field:1", home[1], home[2])
+        elif name == "selection-drift":
+            current = DestinationObservation.capture(
+                "pid:42/field:7", (3, 0), "before|after")
+        elif name == "context-drift":
+            current = DestinationObservation.capture(
+                home[0], home[1], "something else is there now")
+        elif name == "target-unreadable":
+            current = DestinationObservation.capture(None, None, None)
+        elif name != "verified":
+            raise AssertionError(name)
+        coordinator.stage(lease, "Ship it")
+        receipt = coordinator.commit(utterance, current, paste, readback)
+        return receipt, pasted
+
+    def test_only_a_paste_sent_where_nothing_can_be_read_is_unchecked(self):
+        receipt, pasted = self.outcome("no-readback", opaque=True)
+
+        self.assertEqual(pasted, ["Ship it"])
+        self.assertEqual(receipt.state, ReceiptState.UNVERIFIABLE)
+        self.assertEqual(receipt.reason, ReceiptReason.READBACK_UNAVAILABLE)
+        self.assertTrue(receipt.destination_opaque)
+        self.assertTrue(receipt.pasted_unchecked)
+
+    def test_a_readable_field_that_answers_nothing_after_the_paste_is_not(
+            self):
+        # The destination was read when the dictation began and at release,
+        # and then every read after the paste came back empty. That is a
+        # change in an app the runtime normally reads, not an app that
+        # hides its text: the person is told to look, as before.
+        receipt, pasted = self.outcome("no-readback")
+
+        self.assertEqual(pasted, ["Ship it"])
+        self.assertEqual(receipt.state, ReceiptState.UNVERIFIABLE)
+        self.assertEqual(receipt.reason, ReceiptReason.READBACK_UNAVAILABLE)
+        self.assertTrue(receipt.paste_attempted)
+        self.assertFalse(receipt.destination_opaque)
+        self.assertFalse(receipt.pasted_unchecked)
+        # The same receipt on an opaque lease is the calm one, so the lease
+        # is the only thing that tells the two apart.
+        calm, _pasted = self.outcome("no-readback", opaque=True)
+        self.assertEqual(
+            (calm.state, calm.reason, calm.paste_attempted),
+            (receipt.state, receipt.reason, receipt.paste_attempted))
+        self.assertTrue(calm.pasted_unchecked)
+
+    def test_every_real_failure_and_every_proof_is_something_else(self):
+        expected = {
+            # (outcome, opaque lease): (state, paste attempted)
+            ("verified", False): (ReceiptState.VERIFIED, True),
+            ("no-readback", False): (ReceiptState.UNVERIFIABLE, True),
+            ("conflict", False): (ReceiptState.CONFLICT, True),
+            ("paste-raised", False): (ReceiptState.UNRESOLVED, True),
+            ("readback-raised", False): (ReceiptState.UNRESOLVED, True),
+            ("focus-drift", False): (ReceiptState.CONFLICT, False),
+            ("selection-drift", False): (ReceiptState.CONFLICT, False),
+            ("context-drift", False): (ReceiptState.CONFLICT, False),
+            ("target-unreadable", False): (ReceiptState.UNVERIFIABLE, False),
+            # An opaque destination is calm for one outcome only. Every
+            # other thing that can happen there is still a problem.
+            ("conflict", True): (ReceiptState.CONFLICT, True),
+            ("paste-raised", True): (ReceiptState.UNRESOLVED, True),
+            ("readback-raised", True): (ReceiptState.UNRESOLVED, True),
+            ("focus-drift", True): (ReceiptState.CONFLICT, False),
+            ("context-drift", True): (ReceiptState.CONFLICT, False),
+            ("target-unreadable", True): (ReceiptState.UNVERIFIABLE, False),
+        }
+        for (name, opaque), (state, attempted) in expected.items():
+            with self.subTest(outcome=name, opaque=opaque):
+                receipt, _pasted = self.outcome(name, opaque=opaque)
+                self.assertEqual(receipt.state, state)
+                self.assertEqual(receipt.paste_attempted, attempted)
+                self.assertEqual(receipt.destination_opaque, opaque)
+                self.assertFalse(receipt.pasted_unchecked)
+
+    def test_a_receipt_that_does_not_say_is_never_taken_for_unchecked(self):
+        from insertion_integrity import InsertionReceipt
+
+        bare = InsertionReceipt(
+            "utterance-1", ReceiptState.UNVERIFIABLE,
+            ReceiptReason.READBACK_UNAVAILABLE, True)
+        self.assertFalse(bare.destination_opaque)
+        self.assertFalse(bare.pasted_unchecked)
+        # Staged and waiting, an opaque lease's receipt already says what
+        # it is, and is still not a paste of any kind.
+        coordinator = InsertionCoordinator()
+        staged = coordinator.stage(InsertionLease.capture_opaque(
+            "utterance-2", self.OPAQUE[0], self.OPAQUE[2]), "Ship it")
+        self.assertTrue(staged.destination_opaque)
+        self.assertFalse(staged.pasted_unchecked)
+
+    def test_unchecked_is_never_verified(self):
+        receipt, _pasted = self.outcome("no-readback", opaque=True)
+        self.assertNotEqual(receipt.state, ReceiptState.VERIFIED)
+        self.assertNotIn(receipt.reason, (
+            ReceiptReason.COMMIT_VERIFIED,
+            ReceiptReason.COMMIT_VERIFIED_EDGE_WHITESPACE))
+
+    def test_unchecked_copies_are_kept_and_counted_apart(self):
+        self.coordinator = InsertionCoordinator()
+        for index in range(5):
+            self.outcome("no-readback", f"calm-{index}", opaque=True)
+        # Kept exactly like any other entry that was not proven delivered.
+        self.assertEqual(self.coordinator.recoverable_count(), 5)
+        self.assertEqual(
+            [item.text for item in self.coordinator.recoverable()],
+            ["Ship it"] * 5)
+        self.assertEqual(self.coordinator.needs_home_count(), 0)
+
+        problems = (
+            ("no-readback", False), ("conflict", False),
+            ("paste-raised", False), ("readback-raised", False),
+            ("focus-drift", False), ("selection-drift", False),
+            ("target-unreadable", False), ("conflict", True),
+            ("paste-raised", True), ("focus-drift", True),
+            ("target-unreadable", True))
+        for index, (name, opaque) in enumerate(problems, start=1):
+            self.outcome(name, f"problem-{index}", opaque=opaque)
+            self.assertEqual(self.coordinator.needs_home_count(), index)
+        self.assertEqual(
+            self.coordinator.recoverable_count(), 5 + len(problems))
+        # A verified paste is in neither count.
+        self.outcome("verified", "verified-1")
+        self.assertEqual(
+            self.coordinator.recoverable_count(), 5 + len(problems))
+        self.assertEqual(
+            self.coordinator.needs_home_count(), len(problems))
+
+    def test_the_count_ignores_in_flight_and_dismissed_entries(self):
+        self.coordinator = InsertionCoordinator()
+        seen = []
+        lease = InsertionLease.capture("in-flight", *self.READABLE)
+        self.coordinator.stage(lease, "Ship it")
+
+        def readback():
+            # The entry is terminal and still in flight here.
+            seen.append(self.coordinator.needs_home_count())
+            return ReadbackResult.conflict("divergent")
+
+        self.coordinator.commit(
+            "in-flight", DestinationObservation.capture(*self.READABLE),
+            lambda _text: None, readback)
+        self.assertEqual(seen, [0])
+        self.assertEqual(self.coordinator.needs_home_count(), 1)
+        self.assertTrue(self.coordinator.acknowledge("in-flight"))
+        self.assertEqual(self.coordinator.needs_home_count(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

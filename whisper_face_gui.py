@@ -353,15 +353,18 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "overview.engine.active": "Active engine: {engine}",
         "overview.outbox.empty": "Voice Outbox: all clear",
         "overview.outbox.pending": "Voice Outbox: {count} recoverable · {summary}",
+        "overview.outbox.unchecked": "Voice Outbox: {count} pasted, not double-checked",
+        "overview.outbox.mixed": "Voice Outbox: {count} recoverable, {unchecked} pasted · {summary}",
         "overview.outbox.summary.paste_attempted": "Paste may have landed — verify before reusing",
         "overview.outbox.summary.not_pasted": "Not pasted — destination changed",
+        "overview.outbox.summary.pasted_unchecked": "Pasted, not double-checked",
         "overview.action.pause": "Pause",
         "overview.action.resume": "Resume",
         "overview.action.pause.help": "Pause or resume the global dictation hotkey.",
         "overview.action.review": "Review Setup",
         "overview.action.review.help": "Show the most useful recovery guidance.",
         "overview.action.copy_outbox": "Copy & Dismiss",
-        "overview.action.copy_outbox.help": "Copy the latest recoverable dictation, then remove it from the Voice Outbox.",
+        "overview.action.copy_outbox.help": "Copy the latest dictation kept in the Voice Outbox, then remove it from there.",
         "overview.action.pause.state.paused": "Dictation paused",
         "overview.action.pause.state.active": "Dictation active",
         "overview.action.pause.label": "{action} dictation",
@@ -389,7 +392,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "overview.accessibility.onboarding.face": "{face} face, first-run guide",
         "overview.accessibility.onboarding.steps": "First run setup walkthrough",
         "overview.accessibility.onboarding.step": "Setup step {step}: {status}",
-        "overview.notice.outbox.copied": "Latest recoverable dictation copied and dismissed",
+        "overview.notice.outbox.copied": "Latest Voice Outbox dictation copied and dismissed",
         "overview.notice.outbox.error": "Could not copy Voice Outbox: {error}",
         "overview.notice.capture.error": "Could not change capture state: {error}",
         "overview.notice.status.error": "Status unavailable: {error}",
@@ -1866,6 +1869,11 @@ class GUIState:
     words_today: int = 0
     minutes_saved: float = 0.0
     outbox_count: int = 0
+    # How many of ``outbox_count`` are copies of a paste that was sent and
+    # could not be read back. They are kept and counted and are not a
+    # problem; only the rest still need a home. Zero unless the runtime
+    # says otherwise, so an entry is never taken for one by default.
+    outbox_unchecked: int = 0
     outbox_summary: str = ""
     regression_cases: int = 0
     regression_quarantined: int = 0
@@ -3316,6 +3324,28 @@ def home_review_in_row(state: GUIState) -> bool:
     return bool(state.outbox_count) and home_review_due(state)
 
 
+def home_outbox_line(state: GUIState) -> tuple[str, dict[str, Any]]:
+    """Catalog key and values for Home's Voice Outbox row.
+
+    An empty outbox says so. One that holds only copies of pastes that
+    could not be read back counts them for what they are. Anything that
+    still needs a home keeps the recoverable count and its summary, and
+    when both kinds are there each is counted as what it is, so the row
+    and the headline agree on how many dictations need a review.
+    """
+    if not state.outbox_count:
+        return "overview.outbox.empty", {}
+    unchecked = min(max(0, state.outbox_unchecked), state.outbox_count)
+    if unchecked >= state.outbox_count:
+        return "overview.outbox.unchecked", {"count": state.outbox_count}
+    if unchecked:
+        return "overview.outbox.mixed", {
+            "count": state.outbox_count - unchecked, "unchecked": unchecked,
+            "summary": state.outbox_summary}
+    return "overview.outbox.pending", {
+        "count": state.outbox_count, "summary": state.outbox_summary}
+
+
 # The face picker's grid: eight chips a row, the spec's gap between them,
 # each chip as large as the group's width then allows.
 FACE_GRID_COLUMNS = 8
@@ -3795,6 +3825,7 @@ def _localized_runtime_overview_copy(
         "outbox": (
             "overview.outbox.summary.paste_attempted",
             "overview.outbox.summary.not_pasted",
+            "overview.outbox.summary.pasted_unchecked",
         ),
     }.get(kind, ())
     key = next((
@@ -3857,6 +3888,13 @@ def normalize_snapshot(
         active_engine = localized_string(
             "overview.engine.waiting", locale=locale)
     outbox_count = _nonnegative_int(source.get("outbox_count"))
+    # Entries that still need a home. A runtime that does not say counts
+    # every entry as one, which is the careful reading.
+    outbox_needs_home = outbox_count
+    reported_needs_home = source.get("outbox_needs_home")
+    if isinstance(reported_needs_home, int) \
+            and not isinstance(reported_needs_home, bool):
+        outbox_needs_home = min(outbox_count, max(0, reported_needs_home))
     relisten = source.get("selective_relisten")
     relisten = relisten if isinstance(relisten, Mapping) else {}
     relisten_status = str(
@@ -3920,7 +3958,9 @@ def normalize_snapshot(
         capture_state=capture_state,
         paused=paused,
         hotkey_label=hotkey_label,
-        outbox_count=outbox_count,
+        # Only what still needs a home asks for a review. Copies of pastes
+        # that could not be read back leave the phase as it would be.
+        outbox_count=outbox_needs_home,
         service_status=service_status,
         degraded_issues=degraded_issues,
         models_preparing=(
@@ -3954,6 +3994,7 @@ def normalize_snapshot(
         words_today=_nonnegative_int(source.get("words_today")),
         minutes_saved=max(0.0, minutes_saved or 0.0),
         outbox_count=outbox_count,
+        outbox_unchecked=outbox_count - outbox_needs_home,
         outbox_summary=_localized_runtime_overview_copy(
             source.get("outbox_summary"), kind="outbox", locale=locale),
         regression_cases=_nonnegative_int(source.get("regression_cases")),
@@ -5295,7 +5336,8 @@ class WhisperFaceViewModel:
                 capture_state=capture_state,
                 paused=desired,
                 hotkey_label=self.state.hotkey_label,
-                outbox_count=self.state.outbox_count,
+                outbox_count=(self.state.outbox_count
+                              - self.state.outbox_unchecked),
                 service_status=self.state.service_status,
                 degraded_issues=self.state.degraded_issues,
                 locale=self.locale,
@@ -5472,8 +5514,12 @@ class WhisperFaceViewModel:
     def copy_latest_outbox(self) -> GUIState:
         try:
             self.actions.copy_latest_outbox()
+            remaining = max(0, self.state.outbox_count - 1)
             self.state = replace(
-                self.state, outbox_count=max(0, self.state.outbox_count - 1),
+                self.state, outbox_count=remaining,
+                # What still needs a home is copied first, so the unchecked
+                # copies only start to go once nothing else is left.
+                outbox_unchecked=min(self.state.outbox_unchecked, remaining),
                 notice=self.localized("overview.notice.outbox.copied"),
                 notice_level="success")
         except Exception as error:
@@ -10646,11 +10692,8 @@ if APPKIT_AVAILABLE:
             self.dynamic["overview_engine"].setStringValue_(
                 self._l(
                     "overview.engine.active", engine=state.active_engine))
-            outbox = (
-                self._l(
-                    "overview.outbox.pending", count=state.outbox_count,
-                    summary=state.outbox_summary)
-                if state.outbox_count else self._l("overview.outbox.empty"))
+            outbox_key, outbox_values = home_outbox_line(state)
+            outbox = self._l(outbox_key, **outbox_values)
             self.dynamic["overview_outbox"].setStringValue_(outbox)
             for key, label_key, value in (
                 ("overview_phase", "overview.accessibility.phase", phase),
@@ -16706,6 +16749,7 @@ __all__ = [
     "home_bubble_actions",
     "home_dictation_landed",
     "home_review_due",
+    "home_outbox_line",
     "home_review_in_row",
     "face_grid",
     "model_checks_note",
