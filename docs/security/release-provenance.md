@@ -7,7 +7,7 @@ not covered.
 
 ## What published releases carry today
 
-Every release published so far (through v0.4.0) was built and uploaded by
+Every release published so far (through v0.5.0) was built and uploaded by
 hand. The release workflow has not completed on any tag, so **no published
 release has a Developer ID signature, notarization, a stapled ticket, or a
 build-provenance attestation**. The launcher app inside the disk image is
