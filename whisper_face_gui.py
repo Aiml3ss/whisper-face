@@ -1054,6 +1054,47 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
 
         # --- new look: pages
 
+        "pages.personalize.face": "Your face",
+        "pages.personalize.face.hint": "{face} · in the menu bar and while you dictate",
+        "pages.personalize.words": "Language and words",
+        "pages.personalize.corrections.detail.one": "1 word it now fixes your way",
+        "pages.personalize.corrections.detail.many": "{count} words it now fixes your way",
+        "pages.personalize.keywords.detail": "Names it learned to hear from your fixes",
+        "pages.controls.keys": "Keys",
+        "pages.controls.sounds": "Sounds",
+        "pages.controls.corrections": "Corrections",
+        "pages.privacy.audio": "Audio kept in memory",
+        "pages.privacy.dictations": "Dictations and drafts",
+        "pages.privacy.acoustic.detail": "Keeps short pieces of your last dictation’s audio in memory, never on disk, for at most a minute.",
+        "pages.privacy.voice_objects.off": "Off",
+        "pages.privacy.voice_objects.ready": "On",
+        "pages.privacy.voice_objects.unavailable": "Not available on this Mac",
+        "pages.privacy.voice_objects.status.one": "{status} · 1 draft waiting in the Voice Inbox",
+        "pages.privacy.voice_objects.status.many": "{status} · {count} drafts waiting in the Voice Inbox",
+        "pages.advanced.models": "Models",
+        "pages.advanced.status": "Status",
+        "pages.advanced.support": "Support",
+        "pages.models.status.unavailable": "Not available",
+        "pages.models.advisory": "Model checks are for information only; they never change which model runs.",
+        "pages.relisten.detail": "Rechecks names and numbers it was unsure of · {status}",
+        "pages.relisten.status.off": "Off",
+        "pages.relisten.status.ready": "On",
+        "pages.relisten.status.warming": "On, getting ready",
+        "pages.relisten.status.starting": "On, starting",
+        "pages.relisten.status.unavailable": "Not available until this Mac passes its check",
+        "pages.diagnostics.regression": "Correction tests",
+        "pages.diagnostics.regression.held": " · {count} set aside",
+        "pages.support.verify": "Verification",
+        "pages.support.log": "Log",
+        "pages.support.log.detail": "The app’s own log file on this Mac",
+        "pages.support.snapshot": "Support snapshot",
+        "pages.support.snapshot.detail": "A summary without your words, to paste into a report",
+        "pages.support.bundle": "Support bundle",
+        "pages.support.bundle.detail": "The same summary as a file, saved where you choose",
+        "pages.support.permissions": "Permissions",
+        "pages.support.permissions.detail": "A permission Whisper Face needs is missing",
+        "pages.support.license": "License",
+
         # --- new look: home and setup
 
     },
@@ -2770,6 +2811,90 @@ def model_pill_tone(model: ModelStatus) -> str:
             model.install_state == "not_installed" and not model.required):
         return "neutral"
     return "warn"
+
+
+# What the settings pages show for a state, in words. The runtime keeps its
+# own vocabulary (RESOLVED, evidence reasons, shadow advisories) and the
+# tests that pin it; these map it to a plain phrase and a tone at the last
+# moment, so nothing internal is ever the visible label. A warning stays a
+# warning: its tone draws a warning symbol beside the phrase.
+STATUS_TONES = ("good", "neutral", "warn")
+INTERNAL_STATUS_WORDS = (
+    "RESOLVED", "UNAVAILABLE", "attested", "shadow", "advisory",
+    "consequential", "spans", "evidence", "Regression", "mapping",
+    "pinned", "quarantined", "verifier", "receipt",
+)
+
+
+def model_status_display(
+        model: ModelStatus, *, locale: str = "en") -> tuple[str, str]:
+    """The phrase and tone a model row shows for its state.
+
+    A known install state already arrives as catalog copy. Only a row
+    whose state the runtime did not name carries the runtime's own status
+    word, and that word is mapped rather than shown.
+    """
+    if model.install_state != "unknown":
+        return model.status, model_pill_tone(model)
+    word = model.status.strip().casefold()
+    if word in {"resolved", "installed", "ready"}:
+        return localized_string("models.state.installed", locale=locale), \
+            "good"
+    if word in {"unavailable", "missing", "not installed", "failed"}:
+        return localized_string(
+            "pages.models.status.unavailable", locale=locale), "warn"
+    return localized_string("models.unknown", locale=locale), "neutral"
+
+
+def model_detail_display(model: ModelStatus) -> str:
+    """The caption under a model's name: its role, then what to know.
+
+    The detail of a row whose state the runtime did not name is the
+    runtime's own receipt wording, so only the role is shown for it.
+    """
+    if model.install_state == "unknown":
+        return model.role
+    return " · ".join(part for part in (model.role, model.detail) if part)
+
+
+def relisten_status_display(status: str, *, locale: str = "en") -> str:
+    """Selective Re-listen's state as a plain phrase.
+
+    Anything but the four running states is a reason it cannot turn on yet
+    (missing or invalid evidence from this Mac), which reads the same way.
+    """
+    key = {
+        "off": "off", "ready": "ready", "warming": "warming",
+        "enabled-not-ready": "starting",
+    }.get(status, "unavailable")
+    return localized_string(
+        "pages.relisten.detail", locale=locale,
+        status=localized_string(f"pages.relisten.status.{key}",
+                                locale=locale))
+
+
+def voice_inbox_status_display(
+        status: str, count: int, *, locale: str = "en") -> str:
+    """Voice Object Commands' state and its waiting drafts, in words."""
+    word = status.strip().casefold()
+    if word not in {"off", "ready", "unavailable"}:
+        word = "unavailable"
+    return localized_string(
+        plural_key("pages.privacy.voice_objects.status", count),
+        locale=locale, count=count,
+        status=localized_string(
+            f"pages.privacy.voice_objects.{word}", locale=locale))
+
+
+def system_status_tone(value: str) -> str:
+    """Good, neutral or warn for one of the runtime's health words."""
+    word = value.strip().casefold()
+    if word in {"running", "ready", "granted"}:
+        return "good"
+    if word in {"unavailable", "needs attention", "stopped", "not running",
+                "denied", "failed"}:
+        return "warn"
+    return "neutral"
 
 
 PERMISSIONS = ("microphone", "accessibility", "input_monitoring")
@@ -5652,28 +5777,25 @@ if APPKIT_AVAILABLE:
             self.line_color.set()
             path.stroke()
 
-    def _face_grid_columns(count: int, width: float,
-                           chip_side: float = 44.0) -> tuple[int, int]:
-        """Chip columns and rows ``ArtFacePicker`` wraps to at ``width``.
-
-        Shared with the Personalize builder so the face card's height always
-        matches the rows the picker actually produces, instead of guessing a
-        chips-per-row constant that drifts as the roster grows.
-        """
-        per_row = count
-        while per_row > 1 and (
-                width - chip_side * per_row) / (per_row + 1) < 14.0:
-            per_row = -(-count // (-(-count // per_row) + 1))
-        return per_row, -(-count // per_row)
-
     class ArtFacePicker(NSView):
-        """Colored character chips standing in for a segmented control.
+        """All the faces as one grid of chips, the chosen one in amber.
 
         Speaks the two segment methods the render path and the smoke test
-        already use (``setSelectedSegment_`` / ``selectedSegment``), so
-        swapping the emoji segments for real art changes no callers. The
-        selected chip wears a ring in its character's chip color.
+        already use (``setSelectedSegment_`` / ``selectedSegment``), so the
+        callers never learned it is not a segmented control. Each chip is a
+        ``FaceChipButton``: a radio button for VoiceOver with the animal's
+        name as its label and tooltip, a Tab stop like any button, Space to
+        choose. The grid fills its width: up to eight chips a row, each as
+        large as the row allows up to ``CHIP_MAX``, never closer than
+        ``GAP_MIN``, and it says how tall it is at a width so the page can
+        lay out around it.
         """
+
+        COLUMNS = 8
+        CHIP_MAX = 54.0
+        CHIP_MIN = 40.0
+        GAP_MIN = 10.0
+        ROW_GAP = 10.0
 
         def initWithFrame_(self, frame):
             self = objc.super(ArtFacePicker, self).initWithFrame_(frame)
@@ -5684,68 +5806,83 @@ if APPKIT_AVAILABLE:
             self.selected = 0
             self.target = None
             self.pick_action = None
+            try:
+                # One radio group, read as a whole and then chip by chip.
+                self.setAccessibilityElement_(True)
+                self.setAccessibilityRole_("AXRadioGroup")
+            except Exception:
+                pass
             return self
+
+        def isFlipped(self):
+            return True
 
         @objc.python_method
         def populate(self, faces, images, tooltips, target, action):
             self.faces = tuple(faces)
             self.target = target
             self.pick_action = action
-            chip_side = 44.0
-            # One row until the chips would crowd. Sixteen across a 704pt
-            # card leaves exactly nothing between them -- 16 * 44 is 704 to
-            # the point -- and the roster is meant to keep growing, so wrap
-            # instead of letting the breathing room collapse.
-            width = self.frame().size.width
-            per_row, rows = _face_grid_columns(
-                len(faces), width, chip_side)
-            # Cap the gap so a wrapped row keeps the same rhythm the
-            # ten-face row had, rather than scattering across the card.
-            gap = min((width - chip_side * per_row) / (per_row + 1),
-                      24.0)
-            row_gap = 8.0
-            top = self.frame().size.height - chip_side - 4.0
-            for index, face in enumerate(faces):
-                row, column = divmod(index, per_row)
-                # A short last row centers rather than hanging left.
-                in_row = min(per_row, len(faces) - row * per_row)
-                inset = (width - (in_row * chip_side
-                                  + (in_row - 1) * gap)) / 2.0
-                frame = NSMakeRect(
-                    inset + column * (chip_side + gap),
-                    top - row * (chip_side + row_gap),
-                    chip_side, chip_side)
-                chip = JellyButton.alloc().initWithFrame_(frame)
-                chip.setTitle_("")
-                chip.setBordered_(False)
-                chip.setTransparent_(True)
-                chip.setWantsLayer_(True)
-                layer = chip.layer()
-                if layer is not None:
-                    layer.setCornerRadius_(chip_side / 2.0)
-                # A view, not a button image: NSImageView keeps the vector
-                # art crisp where the button cell would rasterize it small.
-                art = NSImageView.alloc().initWithFrame_(NSMakeRect(
-                    frame.origin.x + 4, frame.origin.y + 4,
-                    chip_side - 8, chip_side - 8))
-                art.setImageScaling_(NSImageScaleProportionallyUpOrDown)
-                art.setEditable_(False)
-                image = images[index]
-                if image is not None:
-                    art.setImage_(image)
-                art.setAutoresizingMask_(
-                    NSViewMinXMargin | NSViewMaxXMargin)
-                chip.setToolTip_(tooltips[index])
+            for index, face in enumerate(self.faces):
+                chip = FaceChipButton.alloc().initWithFrame_(
+                    NSMakeRect(0, 0, 46, 47))
+                chip.configure(images[index], tooltips[index])
                 chip.setTag_(index)
                 chip.setTarget_(self)
                 chip.setAction_("chipPicked:")
-                chip.setAutoresizingMask_(
-                    NSViewMinXMargin | NSViewMaxXMargin)
-                _accessible(chip, tooltips[index])
-                self.addSubview_(art)
                 self.addSubview_(chip)
                 self.chips.append(chip)
+            self.arrange()
             return self
+
+        @objc.python_method
+        def grid(self, width: float) -> tuple[int, float, float, int]:
+            """Columns, chip side, gap between chips and rows at ``width``.
+
+            The last chip's hard shadow sticks out past its body, so the
+            bodies share what is left once that is set aside.
+            """
+            width = width - BRAND_SHAPES["face_chip"].shadow_right
+            # One row until the chips would crowd. Sixteen at the 40pt
+            # floor need 790pt with their gaps, more than the widest
+            # column, so the roster wraps at eight a row and the chips grow
+            # into the room that leaves.
+            count = max(1, len(self.chips))
+            columns = min(self.COLUMNS, count)
+            chip = self.CHIP_MIN
+            while columns > 1:
+                chip = min(self.CHIP_MAX, (
+                    width - (columns - 1) * self.GAP_MIN) / columns)
+                if chip >= self.CHIP_MIN:
+                    break
+                columns -= 1
+            if columns == 1:
+                chip = max(1.0, min(self.CHIP_MAX, width))
+            gap = ((width - columns * chip) / (columns - 1)
+                   if columns > 1 else 0.0)
+            return columns, chip, gap, -(-count // columns)
+
+        @objc.python_method
+        def height_for_width(self, width: float) -> float:
+            _columns, chip, _gap, rows = self.grid(width)
+            shape = BRAND_SHAPES["face_chip"]
+            return rows * chip + (rows - 1) * self.ROW_GAP + shape.shadow_down
+
+        @objc.python_method
+        def arrange(self) -> None:
+            width = float(self.bounds().size.width)
+            columns, chip, gap, _rows = self.grid(width)
+            shape = BRAND_SHAPES["face_chip"]
+            for index, view in enumerate(self.chips):
+                row, column = divmod(index, columns)
+                # The frame is the chip's whole footprint: the body plus
+                # the room its hard shadow takes, right and down.
+                view.setFrame_(NSMakeRect(
+                    column * (chip + gap), row * (chip + self.ROW_GAP),
+                    chip + shape.shadow_right, chip + shape.shadow_down))
+
+        def layout(self):
+            objc.super(ArtFacePicker, self).layout()
+            self.arrange()
 
         def chipPicked_(self, sender):
             self.setSelectedSegment_(sender.tag())
@@ -5762,16 +5899,7 @@ if APPKIT_AVAILABLE:
         @objc.python_method
         def _paint_selection(self):
             for index, chip in enumerate(self.chips):
-                layer = chip.layer()
-                if layer is None:
-                    continue
-                if index == self.selected:
-                    ring = FACE_CHIP_COLORS.get(
-                        self.faces[index], LIGHT_PALETTE.brand)
-                    layer.setBorderWidth_(2.5)
-                    layer.setBorderColor_(_theme_color(ring, 1.0).CGColor())
-                else:
-                    layer.setBorderWidth_(0.0)
+                chip.set_selected(index == self.selected)
 
     def _theme_color(
             color: tuple[float, float, float], alpha: float = 1.0) -> Any:
@@ -5854,31 +5982,79 @@ if APPKIT_AVAILABLE:
             label.setAlignment_(alignment)
         return _accessible(label, accessibility_label or text)
 
-# Secondary buttons drop the stock Aqua bezel for the clay language:
-# porcelain fill, soft hairline, concentric radius. They repaint on every
-# appearance flip through this registry (the window is a singleton, and the
-# registry is rebuilt with it).
+    # Secondary buttons used to be layer-painted clay capsules repainted
+    # through this registry on every render. They are system push buttons
+    # now and draw themselves in both appearances, so nothing joins it; it
+    # stays for ``_restyle_secondary_buttons``, which still walks it.
     _SECONDARY_BUTTONS: list[Any] = []
+
+    class PushButton(JellyButton):
+        """A system push button whose VoiceOver copy reaches VoiceOver.
+
+        An NSButton is not itself the accessibility element: its cell is,
+        so a label or help set on the button alone is never read. Every
+        accessibility property set here, by ``_accessible`` at build or
+        ``sync_accessibility`` at render, is handed to the cell as well.
+        """
+
+        def setAccessibilityLabel_(self, label):
+            objc.super(PushButton, self).setAccessibilityLabel_(label)
+            if self.cell() is not None:
+                self.cell().setAccessibilityLabel_(label)
+
+        def setAccessibilityHelp_(self, text):
+            objc.super(PushButton, self).setAccessibilityHelp_(text)
+            if self.cell() is not None:
+                self.cell().setAccessibilityHelp_(text)
+
+        def setAccessibilityValue_(self, value):
+            objc.super(PushButton, self).setAccessibilityValue_(value)
+            if self.cell() is not None:
+                self.cell().setAccessibilityValue_(value)
+
+    def _mirror_accessibility_to_cell(control: Any) -> Any:
+        """Copy a control's VoiceOver label, help and value onto its cell.
+
+        Pop-up buttons and segmented controls are read through their cells,
+        like buttons; call this after their copy changes.
+        """
+        try:
+            cell = control.cell()
+            if cell is not None:
+                cell.setAccessibilityLabel_(control.accessibilityLabel())
+                cell.setAccessibilityHelp_(control.accessibilityHelp())
+                value = control.accessibilityValue()
+                if value is not None:
+                    cell.setAccessibilityValue_(value)
+        except Exception:
+            pass
+        return control
 
     def _button(title: str, frame: Any, target: Any, action: str,
                 *, help_text: str = "", symbol: str = "") -> Any:
-        button = JellyButton.alloc().initWithFrame_(frame)
+        """A standard bordered push button at the system's regular size.
+
+        The bezel's height and corners are the system's: the frame's height
+        only says where the button is centred, and its width is a minimum,
+        grown to fit the title.
+        """
+        button = PushButton.alloc().initWithFrame_(frame)
+        button.setBezelStyle_(NSBezelStyleRounded)
+        button.setBordered_(True)
+        button.setControlSize_(0)
         button.setTitle_(title)
-        button.setBordered_(False)
-        button.setFont_(_font(12.5, "medium", rounded=True))
         if symbol:
             image = _symbol_image(symbol, size=12.0)
             if image is not None:
                 button.setImage_(image)
                 button.setImagePosition_(NSImageLeading)
-        button.setWantsLayer_(True)
-        layer = button.layer()
-        if layer is not None:
-            layer.setCornerRadius_(min(13.0, frame.size.height / 2.0))
-            layer.setBorderWidth_(1.0)
+        fitted = button.fittingSize()
+        button.setFrame_(NSMakeRect(
+            frame.origin.x,
+            frame.origin.y + (frame.size.height - fitted.height) / 2.0,
+            max(frame.size.width, fitted.width), fitted.height))
         button.setTarget_(target)
         button.setAction_(action)
-        _SECONDARY_BUTTONS.append(button)
         return _accessible(button, title, help_text)
 
     def _hairline(frame: Any) -> Any:
@@ -5892,6 +6068,10 @@ if APPKIT_AVAILABLE:
         return line
 
     def _card(frame: Any, treatment: str = "card") -> Any:
+        if treatment == "group":
+            # A settings group: one rounded surface with a hairline edge,
+            # drawn by the view itself in whichever appearance it is in.
+            return GroupBoxView.alloc().initWithFrame_(frame)
         box = NSBox.alloc().initWithFrame_(frame)
         box.setBoxType_(NSBoxCustom)
         box.setBorderType_(NSLineBorder)
@@ -5922,6 +6102,397 @@ if APPKIT_AVAILABLE:
             box.setCornerRadius_(CARD_RADIUS)
             box.setWantsLayer_(True)
         return box
+
+    # ------------------------------------------------------------------
+    # Settings pages, laid out the way System Settings lays out a pane:
+    # section headers over groups of rows, each row its label and caption
+    # on the left and its controls on the right. Every frame is worked out
+    # from the page's width whenever it changes, and from the copy whenever
+    # a render changes it, so captions wrap instead of truncating at any
+    # column width or text size, and a page taller than the window scrolls.
+    # ------------------------------------------------------------------
+
+    PAGE_TOP = 4.0              # title strip to the first section header
+    SECTION_HEADER_INSET = 4.0  # headers and notes, from the group's edge
+    NOTE_GAP = 6.0              # group to the note under it
+    ROW_PADDING_Y = 9.0         # text block to a row's top and bottom
+    ROW_CONTROL_PADDING_Y = 8.0  # tallest control to a row's top and bottom
+    ROW_CONTROL_GAP = 12.0      # between bezelled controls; text to controls
+    ROW_TEXT_GAP = 2.0          # row title to its caption
+    STATUS_SYMBOL_SIZE = 14.0
+    STATUS_SYMBOL_GAP = 5.0
+
+    def _text_height(label: Any, width: float) -> float:
+        """Height a wrapping label needs for its current text at ``width``."""
+        try:
+            size = label.cell().cellSizeForBounds_(
+                NSMakeRect(0, 0, max(1.0, width), 10_000.0))
+            return float(math.ceil(size.height))
+        except Exception:
+            return float(label.frame().size.height)
+
+    def _natural_size(view: Any) -> tuple[float, float]:
+        """A control's own size, as its alignment rectangle."""
+        size = view.intrinsicContentSize()
+        width, height = float(size.width), float(size.height)
+        if width <= 0.0 or height <= 0.0:
+            fitted = view.fittingSize()
+            if width <= 0.0:
+                width = float(fitted.width)
+            if height <= 0.0:
+                height = float(fitted.height)
+        frame = view.frame().size
+        if width <= 0.0:
+            width = float(frame.width)
+        if height <= 0.0:
+            height = float(frame.height)
+        return width, height
+
+    def _place(view: Any, x: float, y: float, width: float,
+               height: float) -> None:
+        """Put a view's alignment rectangle at (x, y) in a flipped parent."""
+        try:
+            view.setFrame_(view.frameForAlignmentRect_(
+                NSMakeRect(x, y, width, height)))
+        except Exception:
+            view.setFrame_(NSMakeRect(x, y, width, height))
+
+    class StatusLabelView(NSView):
+        """A state in words: an SF Symbol and a plain phrase beside it.
+
+        The phrase is the secondary colour; the symbol carries the tone
+        (a check for good, a dash for neutral, a triangle for a warning),
+        so the meaning never rides on colour alone. VoiceOver reads the
+        phrase as static text; the symbol is decoration.
+        """
+
+        def initWithFrame_(self, frame):
+            self = objc.super(StatusLabelView, self).initWithFrame_(frame)
+            if self is None:
+                return None
+            self.tone = "neutral"
+            self.icon = NSImageView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, STATUS_SYMBOL_SIZE, STATUS_SYMBOL_SIZE))
+            self.icon.setImageScaling_(NSImageScaleProportionallyUpOrDown)
+            self.icon.setEditable_(False)
+            try:
+                self.icon.setAccessibilityElement_(False)
+            except Exception:
+                pass
+            self.text = _label("", NSMakeRect(0, 0, 10, 16), size=12)
+            self.addSubview_(self.icon)
+            self.addSubview_(self.text)
+            return self
+
+        def isFlipped(self):
+            return True
+
+        @objc.python_method
+        def set_status(self, text: str, tone: str, *, symbol_color: Any,
+                       text_color: Any) -> Any:
+            self.tone = tone if tone in STATUS_TONES else "neutral"
+            self.text.setStringValue_(text)
+            self.text.setTextColor_(text_color)
+            self.icon.setImage_(_symbol_image(
+                {"good": "checkmark.circle.fill",
+                 "warn": "exclamationmark.triangle.fill"}.get(
+                     self.tone, "minus.circle"),
+                size=12.0, weight="semibold"))
+            try:
+                self.icon.setContentTintColor_(symbol_color)
+            except Exception:
+                pass
+            self.invalidateIntrinsicContentSize()
+            self.setNeedsLayout_(True)
+            return self
+
+        @objc.python_method
+        def text_origin(self) -> float:
+            # A label's frame is wider than its text by its alignment
+            # insets; the gap is measured to the text, not the frame.
+            return (STATUS_SYMBOL_SIZE + STATUS_SYMBOL_GAP
+                    - float(self.text.alignmentRectInsets().left))
+
+        @objc.python_method
+        def text_overhang(self) -> float:
+            # The phrase ends flush with the view, like a plain value label
+            # placed by its alignment rectangle in the next row.
+            return float(self.text.alignmentRectInsets().right)
+
+        def intrinsicContentSize(self):
+            fitted = self.text.fittingSize()
+            return NSMakeSize(
+                self.text_origin() + math.ceil(fitted.width)
+                - self.text_overhang(),
+                max(STATUS_SYMBOL_SIZE + 2.0, float(fitted.height)))
+
+        def layout(self):
+            objc.super(StatusLabelView, self).layout()
+            self.arrange()
+
+        def resizeSubviewsWithOldSize_(self, _size):
+            # A new frame from the row's layout lands after the window's
+            # layout pass, so the parts follow the frame directly.
+            self.arrange()
+
+        @objc.python_method
+        def arrange(self) -> None:
+            bounds = self.bounds().size
+            height = float(self.text.fittingSize().height)
+            origin = self.text_origin()
+            self.icon.setFrame_(NSMakeRect(
+                0, (bounds.height - STATUS_SYMBOL_SIZE) / 2.0,
+                STATUS_SYMBOL_SIZE, STATUS_SYMBOL_SIZE))
+            self.text.setFrame_(NSMakeRect(
+                origin, (bounds.height - height) / 2.0,
+                max(0.0, bounds.width - origin + self.text_overhang()),
+                height))
+
+    class SettingsRowView(NSView):
+        """One row of a settings group.
+
+        Title and caption on the left, wrapping to the room the controls
+        leave; the controls on the right, each at its own system size, in
+        reading order, ``ROW_CONTROL_GAP`` apart and centred on the row. A
+        control that is hidden takes no room. A row may instead hold one
+        custom piece of content (the face grid) through ``custom``, a pair
+        of functions: its height at a width, and its layout at a size.
+        Hiding the row hides everything in it and closes the gap.
+        """
+
+        def initWithFrame_(self, frame):
+            self = objc.super(SettingsRowView, self).initWithFrame_(frame)
+            if self is None:
+                return None
+            self.title = None
+            self.caption = None
+            self.accessories = []
+            self.custom = None
+            return self
+
+        def isFlipped(self):
+            return True
+
+        @objc.python_method
+        def configure(self, title: Any = None, caption: Any = None,
+                      accessories: Sequence[Any] = (),
+                      custom: Any = None) -> Any:
+            self.title = title
+            self.caption = caption
+            self.accessories = list(accessories)
+            self.custom = custom
+            for view in (title, caption, *self.accessories):
+                if view is not None:
+                    self.addSubview_(view)
+            return self
+
+        @objc.python_method
+        def text_width(self, width: float) -> float:
+            shown = [view for view in self.accessories
+                     if not bool(view.isHidden())]
+            controls = sum(_natural_size(view)[0] for view in shown)
+            controls += ROW_CONTROL_GAP * len(shown)
+            return max(40.0, width - 2.0 * ROW_INSET - controls)
+
+        @objc.python_method
+        def arrange(self, width: float) -> float:
+            """Lay the row out at ``width``; return its height."""
+            if self.custom is not None:
+                height = float(self.custom[0](width))
+                self.custom[1](width, height)
+                return height
+            shown = [view for view in self.accessories
+                     if not bool(view.isHidden())]
+            sizes = [_natural_size(view) for view in shown]
+            text_width = self.text_width(width)
+            title_height = (_text_height(self.title, text_width)
+                            if self.title is not None else 0.0)
+            caption_height = (_text_height(self.caption, text_width)
+                              if self.caption is not None
+                              and str(self.caption.stringValue()) else 0.0)
+            text_height = title_height + (
+                ROW_TEXT_GAP + caption_height if caption_height else 0.0)
+            controls_height = max((h for _w, h in sizes), default=0.0)
+            height = max(
+                ROW_CAPTION_MIN_HEIGHT if self.caption is not None
+                else ROW_MIN_HEIGHT,
+                text_height + 2.0 * ROW_PADDING_Y,
+                controls_height + 2.0 * ROW_CONTROL_PADDING_Y)
+            top = (height - text_height) / 2.0
+            if self.title is not None:
+                self.title.setFrame_(NSMakeRect(
+                    ROW_INSET, top, text_width, title_height))
+            if self.caption is not None:
+                self.caption.setFrame_(NSMakeRect(
+                    ROW_INSET, top + title_height + ROW_TEXT_GAP,
+                    text_width, caption_height))
+            x = width - ROW_INSET
+            for view, (w, h) in reversed(list(zip(shown, sizes))):
+                x -= w
+                _place(view, x, (height - h) / 2.0, w, h)
+                x -= ROW_CONTROL_GAP
+            return height
+
+    class GroupBoxView(NSView):
+        """A group of rows: one rounded surface with a hairline edge.
+
+        It draws its fill, edge and the hairlines between its visible rows
+        itself, in whichever appearance it is in, so it follows a light or
+        dark flip without waiting for a render. It is not flipped, so the
+        older frame-based ``_group_row`` keeps working on it; its own rows
+        are laid out top-down by ``arrange``.
+        """
+
+        def initWithFrame_(self, frame):
+            self = objc.super(GroupBoxView, self).initWithFrame_(frame)
+            if self is None:
+                return None
+            self.rows = []
+            self.separators = []
+            return self
+
+        @objc.python_method
+        def add_row(self, row: Any) -> Any:
+            self.rows.append(row)
+            self.addSubview_(row)
+            return row
+
+        @objc.python_method
+        def visible_rows(self) -> list[Any]:
+            return [row for row in self.rows if not bool(row.isHidden())]
+
+        @objc.python_method
+        def arrange(self, width: float) -> float:
+            """Stack the visible rows top-down; return the group height."""
+            placed = [(row, row.arrange(width)) for row in self.visible_rows()]
+            total = sum(height for _row, height in placed)
+            top = 0.0
+            self.separators = []
+            for index, (row, height) in enumerate(placed):
+                row.setFrame_(NSMakeRect(
+                    0, total - top - height, width, height))
+                if index:
+                    self.separators.append(total - top)
+                top += height
+            self.setNeedsDisplay_(True)
+            return total
+
+        def viewDidChangeEffectiveAppearance(self):
+            self.setNeedsDisplay_(True)
+
+        def drawRect_(self, _rect):
+            dark = _uses_dark_appearance(self)
+            palette = palette_for_appearance(dark)
+            shape = BRAND_SHAPES["group"]
+            bounds = self.bounds()
+            outline = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                NSInsetRect(bounds, 0.5, 0.5), shape.radius - 0.5,
+                shape.radius - 0.5)
+            _srgb_color(palette.surface).setFill()
+            outline.fill()
+            hairline = _token_color("hairline", dark)
+            hairline.setStroke()
+            outline.setLineWidth_(shape.outline)
+            outline.stroke()
+            hairline.setFill()
+            for y in self.separators:
+                NSBezierPath.fillRect_(NSMakeRect(
+                    ROW_INSET, y - 0.5, bounds.size.width - ROW_INSET, 1.0))
+
+    class GroupedPageView(NSView):
+        """A settings page's scrolling document: headers, groups, notes.
+
+        ``add_section`` appends a header (optional), a group and the notes
+        under it; a section whose rows are all hidden takes no room, and a
+        note with no text takes none either. ``arrange`` lays everything out
+        at the width of the clip view it sits in and sizes itself to its
+        content, which is what lets the scroll view scroll exactly as far
+        as there is something to see.
+        """
+
+        def initWithFrame_(self, frame):
+            self = objc.super(GroupedPageView, self).initWithFrame_(frame)
+            if self is None:
+                return None
+            self.sections = []
+            self.arranging = False
+            return self
+
+        def isFlipped(self):
+            return True
+
+        @objc.python_method
+        def add_section(self, header: Any, group: Any,
+                        notes: Sequence[Any] = ()) -> Any:
+            for view in (header, group, *notes):
+                if view is not None:
+                    self.addSubview_(view)
+            self.sections.append((header, group, tuple(notes)))
+            return group
+
+        @objc.python_method
+        def content_width(self) -> float:
+            clip = self.superview()
+            if clip is not None:
+                return float(clip.bounds().size.width)
+            return float(self.frame().size.width)
+
+        @objc.python_method
+        def arrange(self) -> float:
+            if self.arranging:
+                return float(self.frame().size.height)
+            self.arranging = True
+            try:
+                width = self.content_width()
+                y = PAGE_TOP
+                first = True
+                for header, group, notes in self.sections:
+                    shown = bool(group.visible_rows())
+                    for view in (header, group, *notes):
+                        if view is not None:
+                            view.setHidden_(not shown)
+                    if not shown:
+                        continue
+                    if not first:
+                        y += GROUP_GAP
+                    first = False
+                    if header is not None:
+                        text = width - 2.0 * SECTION_HEADER_INSET
+                        height = _text_height(header, text)
+                        header.setFrame_(NSMakeRect(
+                            SECTION_HEADER_INSET, y, text, height))
+                        y += height + GROUP_HEADER_GAP
+                    height = group.arrange(width)
+                    group.setFrame_(NSMakeRect(0, y, width, height))
+                    y += height
+                    for note in notes:
+                        has_text = bool(str(note.stringValue()))
+                        note.setHidden_(not has_text)
+                        if has_text:
+                            text = width - 2.0 * SECTION_HEADER_INSET
+                            height = _text_height(note, text)
+                            note.setFrame_(NSMakeRect(
+                                SECTION_HEADER_INSET, y + NOTE_GAP, text,
+                                height))
+                            y += NOTE_GAP + height
+                y += CONTENT_INSET
+                if (abs(float(self.frame().size.width) - width) > 0.25
+                        or abs(float(self.frame().size.height) - y) > 0.25):
+                    self.setFrameSize_(NSMakeSize(width, y))
+                return y
+            finally:
+                self.arranging = False
+
+    class PageScrollView(NSScrollView):
+        """The scroll view under a settings page: the system's scrollers,
+        no border and no background of its own, and a document that is
+        laid out again whenever the scroll view is."""
+
+        def tile(self):
+            objc.super(PageScrollView, self).tile()
+            document = self.documentView()
+            if document is not None and hasattr(document, "arrange"):
+                document.arrange()
 
     # ------------------------------------------------------------------
     # Brand components of the new look. NOT USED YET: nothing in the window
@@ -6623,7 +7194,9 @@ if APPKIT_AVAILABLE:
                 _token_color("chip_rest", dark).setFill()
                 tile.fill()
                 if self.is_pressed():
-                    _token_color("chip_rest", dark).setFill()
+                    # Pressed, the resting tile darkens by a hairline's
+                    # worth of ink, so the press shows before the choice.
+                    _token_color("hairline", dark).setFill()
                     tile.fill()
                 if _increase_contrast():
                     edge = hard_shadow_path(
@@ -7783,9 +8356,9 @@ if APPKIT_AVAILABLE:
                 "Settings": (),
                 "Advanced": (
                     self.dynamic["selective_relisten_toggle"],
+                    self.dynamic["verify_button"],
                     self.dynamic["open_log_button"],
                     self.dynamic["copy_support_snapshot_button"],
-                    self.dynamic["verify_button"],
                     self.dynamic["export_support_bundle_button"],
                     self.dynamic["open_system_settings_button"],
                     self.dynamic["license_button"],
@@ -8388,21 +8961,29 @@ if APPKIT_AVAILABLE:
         @objc.python_method
         def _group_row(self, group: Any, *, index: int, count: int,
                        row_height: float, title: str, title_size: float = 13,
-                       detail_size: float = 11,
+                       detail_size: float = 12,
                        detail_width: float = 470) -> Any:
-            """One hairline-separated row inside a grouped list card."""
+            """One hairline-separated row inside a grouped card, by frame.
+
+            The settings pages lay their rows out with ``SettingsRowView``;
+            this is for a fixed-height list on a card, and draws the same
+            row: a 13pt semibold title and a 12pt caption in the secondary
+            colour, inset ``ROW_INSET``, hairlines inset the same.
+            """
             width = CONTENT_WIDTH
             y = (count - 1 - index) * row_height
             title_label = self._ink(
-                title, NSMakeRect(16, y + row_height / 2 - 1, 300, 18),
-                size=title_size, weight="medium", truncate=True)
+                title, NSMakeRect(ROW_INSET, y + row_height / 2 - 1, 300, 18),
+                size=title_size, weight="semibold", truncate=True)
             detail = self._soft(
-                "", NSMakeRect(16, y + row_height / 2 - 17, detail_width, 14),
+                "", NSMakeRect(ROW_INSET, y + row_height / 2 - 17,
+                               detail_width, 15),
                 size=detail_size, truncate=True)
             group.addSubview_(title_label)
             group.addSubview_(detail)
             if index < count - 1:
-                separator = _hairline(NSMakeRect(16, y, width - 32, 1))
+                separator = _hairline(NSMakeRect(
+                    ROW_INSET, y, width - ROW_INSET, 1))
                 separator.setAutoresizingMask_(NSViewWidthSizable)
                 self._register("hairline", separator)
                 group.addSubview_(separator)
@@ -8414,14 +8995,145 @@ if APPKIT_AVAILABLE:
             switch = JellySwitch.alloc().initWithFrame_(frame)
             switch.setTarget_(self)
             switch.setAction_(action)
-            switch.setControlSize_(1)  # small keeps 44pt rows airy
+            # The small size System Settings uses for a switch in a row.
+            switch.setControlSize_(1)
             return _accessible(switch, label, help_text)
+
+        @objc.python_method
+        def _grouped_page(self, container: Any, name: str) -> Any:
+            """Fill ``container`` with a scrolling settings page; return its
+            document, which the page's sections are added to."""
+            scroll = PageScrollView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, CONTENT_WIDTH, 460))
+            scroll.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            scroll.setHasVerticalScroller_(True)
+            scroll.setHasHorizontalScroller_(False)
+            scroll.setAutohidesScrollers_(True)
+            scroll.setBorderType_(NSNoBorder)
+            scroll.setDrawsBackground_(False)
+            try:
+                scroll.setAutomaticallyAdjustsContentInsets_(False)
+            except Exception:
+                pass
+            scroll.contentView().setDrawsBackground_(False)
+            document = GroupedPageView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, CONTENT_WIDTH, 460))
+            document.setAutoresizingMask_(NSViewWidthSizable)
+            scroll.setDocumentView_(document)
+            container.addSubview_(scroll)
+            # The page runs to the column's foot, except that a two-line
+            # notice grows up into the column's bottom padding: then the
+            # page stops above it, so nothing scrolls under the notice.
+            to_foot = scroll.bottomAnchor().constraintEqualToAnchor_(
+                container.bottomAnchor())
+            to_foot.setPriority_(490)
+            constraints = [
+                scroll.topAnchor().constraintEqualToAnchor_(
+                    container.topAnchor()),
+                scroll.leadingAnchor().constraintEqualToAnchor_(
+                    container.leadingAnchor()),
+                scroll.trailingAnchor().constraintEqualToAnchor_(
+                    container.trailingAnchor()),
+                scroll.bottomAnchor()
+                .constraintLessThanOrEqualToAnchor_(
+                    container.bottomAnchor()),
+                to_foot,
+            ]
+            notice = self.dynamic.get("notice")
+            if notice is not None:
+                constraints.append(
+                    scroll.bottomAnchor()
+                    .constraintLessThanOrEqualToAnchor_constant_(
+                        notice.topAnchor(), -4.0))
+            NSLayoutConstraint.activateConstraints_(constraints)
+            self.dynamic.setdefault("page_documents", {})[name] = document
+            self.dynamic.setdefault("page_scrolls", {})[name] = scroll
+            return document
+
+        @objc.python_method
+        def _section_header(self, text: str) -> Any:
+            """A section's name over its group: rounded, bold, secondary."""
+            header = self._soft(
+                text, NSMakeRect(0, 0, CONTENT_WIDTH, 17), wrap=True)
+            header.setFont_(_role_font("section_header"))
+            try:
+                import AppKit as _appkit
+                heading = getattr(
+                    _appkit, "NSAccessibilityHeadingRole", "AXHeading")
+                header.setAccessibilityRole_(heading)
+                header.cell().setAccessibilityRole_(heading)
+            except Exception:
+                pass
+            return header
+
+        @objc.python_method
+        def _page_note(self, text: str = "", **kwargs: Any) -> Any:
+            """Small print under a group, wrapping to the page's width."""
+            return self._soft(
+                text, NSMakeRect(0, 0, CONTENT_WIDTH, 15), size=12,
+                wrap=True, **kwargs)
+
+        @objc.python_method
+        def _settings_row(self, title: str, *, caption: str | None = None,
+                          accessories: Sequence[Any] = ()) -> Any:
+            """A row's title, optional caption and controls, as one view.
+
+            Returns ``(row, title_label, caption_label)``; the caption is
+            None for a row without one.
+            """
+            title_label = self._ink(
+                title, NSMakeRect(0, 0, 240, 16), size=13,
+                weight="semibold", wrap=True)
+            caption_label = None
+            if caption is not None:
+                caption_label = self._soft(
+                    caption, NSMakeRect(0, 0, 240, 15), size=12, wrap=True)
+            row = SettingsRowView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, CONTENT_WIDTH, ROW_MIN_HEIGHT))
+            row.configure(title_label, caption_label, accessories)
+            return row, title_label, caption_label
+
+        @objc.python_method
+        def _settings_group(self, rows: Sequence[Any]) -> Any:
+            group = _card(NSMakeRect(0, 0, CONTENT_WIDTH, 100), "group")
+            for row in rows:
+                group.add_row(row)
+            return group
+
+        @objc.python_method
+        def _value_label(self, text: str = "") -> Any:
+            """A value shown at a row's trailing edge, in one line."""
+            return self._soft(text, NSMakeRect(0, 0, 120, 16), size=12)
+
+        @objc.python_method
+        def _status_label(self) -> Any:
+            """A state in words with its symbol; tone arrives at render."""
+            return StatusLabelView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, 120, 16))
+
+        @objc.python_method
+        def _show_status(self, view: Any, text: str, tone: str) -> None:
+            """Write one state: the phrase in the secondary colour and the
+            symbol in its tone's colour, readable in both appearances."""
+            dark = getattr(self, "_dark", False)
+            palette = palette_for_appearance(dark)
+            symbol = (_token_color("brand_ink", dark) if tone == "good"
+                      else _error_text_color(dark) if tone == "warn"
+                      else _srgb_color(palette.ink_soft))
+            view.set_status(text, tone, symbol_color=symbol,
+                            text_color=_srgb_color(palette.ink_soft))
+
+        @objc.python_method
+        def _arrange_page(self, name: str) -> None:
+            """Lay a page out again after its copy or its rows changed."""
+            document = self.dynamic.get("page_documents", {}).get(name)
+            if document is not None:
+                document.arrange()
 
         def _build_settings(self, page: Any) -> None:
             width = CONTENT_WIDTH
-            header = self._page_header(
-                page, self._l("settings.title"),
-                subtitle=self._l("settings.subtitle"))
+            # The title strip names the pane, so the page starts with its
+            # first section, flush under the strip.
             panes = {}
             for name in SETTINGS_PANES:
                 pane = NSView.alloc().initWithFrame_(
@@ -8429,8 +9141,8 @@ if APPKIT_AVAILABLE:
                 pane.setTranslatesAutoresizingMaskIntoConstraints_(False)
                 page.addSubview_(pane)
                 NSLayoutConstraint.activateConstraints_([
-                    pane.topAnchor().constraintEqualToAnchor_constant_(
-                        header.bottomAnchor(), 16.0),
+                    pane.topAnchor().constraintEqualToAnchor_(
+                        page.topAnchor()),
                     pane.leadingAnchor().constraintEqualToAnchor_(
                         page.leadingAnchor()),
                     pane.trailingAnchor().constraintEqualToAnchor_(
@@ -8457,44 +9169,51 @@ if APPKIT_AVAILABLE:
         @objc.python_method
         def _build_settings_personalize(
                 self, personalize: Any) -> tuple[Any, ...]:
-            """Personalize: the face picker over the personal-data rows."""
-            width = CONTENT_WIDTH
-            # The card budgets exactly the rows the picker will wrap to at
-            # this width; a stale per-row guess left a dead band under the
-            # chips when the picker packed them tighter than the estimate.
-            _, face_rows = _face_grid_columns(len(FACES), width - 16.0)
-            face_card_height = 64.0 + (face_rows - 1) * 52.0
-            face_card = _card(NSMakeRect(0, 0, width, face_card_height))
-            self._register("card", face_card)
-            # Colored chibi chips instead of emoji segments; each chip
-            # shows the real character art, and the selected chip wears a
-            # ring in its own face color. Animal names stay available
-            # through tooltips and the menu-bar "Choose Face" submenu.
+            """Personalize: the face grid, then language and your words."""
+            document = self._grouped_page(personalize, "Personalize")
+            # Every face as a chip, the chosen one amber. Animal names are
+            # the chips' tooltips and VoiceOver labels, and the line under
+            # the grid names the face that is chosen.
             picker = ArtFacePicker.alloc().initWithFrame_(
-                NSMakeRect(8.0, 6, width - 16.0,
-                           face_card_height - 12.0))
+                NSMakeRect(0, 0, CONTENT_WIDTH - 2 * ROW_INSET, 140))
             picker.populate(
                 FACES,
                 [self._face_image(face, talk=False) for face in FACES],
                 [self._l(f"settings.face.{face}") for face in FACES],
                 self, "faceChanged_")
-            picker.setAutoresizingMask_(
-                NSViewMinXMargin | NSViewWidthSizable | NSViewMaxXMargin)
             _accessible(
                 picker,
                 self._l("settings.accessibility.face.label"),
                 self._l("settings.accessibility.face.help"))
-            face_card.addSubview_(picker)
-            self._stack(personalize, face_card,
-                        height=face_card_height)
+            hint = self._soft(
+                "", NSMakeRect(0, 0, 240, 15), size=12, wrap=True)
+            face_row = SettingsRowView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, CONTENT_WIDTH, 180))
+            face_row.addSubview_(picker)
+            face_row.addSubview_(hint)
+
+            def face_height(width: float) -> float:
+                inner = width - 2.0 * ROW_INSET
+                return (ROW_INSET + picker.height_for_width(inner) + 10.0
+                        + _text_height(hint, inner) + ROW_INSET)
+
+            def face_layout(width: float, _height: float) -> None:
+                inner = width - 2.0 * ROW_INSET
+                grid = picker.height_for_width(inner)
+                picker.setFrame_(NSMakeRect(ROW_INSET, ROW_INSET, inner, grid))
+                picker.arrange()
+                hint.setFrame_(NSMakeRect(
+                    ROW_INSET, ROW_INSET + grid + 10.0, inner,
+                    _text_height(hint, inner)))
+
+            face_row.configure(custom=(face_height, face_layout))
+            document.add_section(
+                self._section_header(self._l("pages.personalize.face")),
+                self._settings_group([face_row]))
 
             personalize_key_views: list[Any] = list(picker.chips)
             # Language leads the list: it decides which recognizer runs, so
-            # it outranks every personalization below it. It shares the same
-            # grouped card and 44pt rhythm as the rest — at the window
-            # minimum this pane has room for six rows, which is why
-            # "Voice modes" (a reference table about the capture key) now
-            # sits in Controls beside the key it describes.
+            # it outranks every personalization below it.
             rows = (
                 ("language", "settings.personalize.language", None),
                 ("tones", "settings.personalize.tones", "editTone:"),
@@ -8503,29 +9222,25 @@ if APPKIT_AVAILABLE:
                 ("corrections", "settings.personalize.corrections", "reviewCorrections:"),
                 ("keywords", "settings.personalize.keywords", "inspectKeywords:"),
             )
-            group = _card(NSMakeRect(0, 0, width, 44.0 * len(rows)))
-            self._register("card", group)
-            for index, (key, title_key, selector) in enumerate(rows):
-                title_label, detail, y = self._group_row(
-                    group, index=index, count=len(rows), row_height=44,
-                    title=self._l(title_key),
-                    detail_width=430 if key == "language" else 470)
+            row_views = []
+            for key, title_key, selector in rows:
                 if key == "language":
-                    # A popup, not a segmented control: eleven choices will
-                    # never fit a segment strip at the 880pt minimum.
+                    # A pop-up, not a segmented control: eleven choices.
                     popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-                        NSMakeRect(width - 16 - 190, y + 8, 190, 28), False)
+                        NSMakeRect(0, 0, 190, 28), False)
                     popup.addItemsWithTitles_([
                         self._l(f"settings.language.{code}")
                         for code in LANGUAGES])
                     popup.setTarget_(self)
                     popup.setAction_("languageChanged:")
-                    popup.setAutoresizingMask_(NSViewMinXMargin)
                     _accessible(
                         popup,
                         self._l("settings.accessibility.language.label"),
                         self._l("settings.accessibility.language.help"))
-                    group.addSubview_(popup)
+                    _mirror_accessibility_to_cell(popup)
+                    row, _title, detail = self._settings_row(
+                        self._l(title_key), caption="", accessories=(popup,))
+                    row_views.append(row)
                     personalize_key_views.append(popup)
                     self.dynamic["settings_language_detail"] = detail
                     self.dynamic["settings_language_popup"] = popup
@@ -8539,30 +9254,28 @@ if APPKIT_AVAILABLE:
                     if key in {"corrections", "keywords"}
                     else "settings.accessibility.edit.help")
                 button = _button(
-                    self._l(action_key),
-                    NSMakeRect(width - 16 - 94, y + 8, 94, 28),
+                    self._l(action_key), NSMakeRect(0, 0, 60, 28),
                     self, selector,
                     help_text=self._l(
                         help_key,
                         setting=self._l(title_key).casefold()))
-                button.setAutoresizingMask_(NSViewMinXMargin)
-                group.addSubview_(button)
+                row, _title, detail = self._settings_row(
+                    self._l(title_key), caption="", accessories=(button,))
+                row_views.append(row)
                 personalize_key_views.append(button)
                 self.dynamic[f"settings_{key}_detail"] = detail
                 self.dynamic[f"settings_{key}_button"] = button
-            self._stack(personalize, group, below=face_card, gap=16,
-                        height=44.0 * len(rows))
+            document.add_section(
+                self._section_header(self._l("pages.personalize.words")),
+                self._settings_group(row_views))
 
-            self.dynamic.update(face_picker=picker)
+            self.dynamic.update(face_picker=picker, face_hint=hint)
             return tuple(personalize_key_views)
 
         @objc.python_method
         def _build_settings_controls(self, controls: Any) -> tuple[Any, ...]:
-            """Controls: keys and sounds, then the spoken-correction switch."""
-            # ---- Controls: which keys drive dictation, and what it sounds
-            # like. Both were fixed constants until now; Option is the macOS
-            # accent key, and there was no way at all to mute the app.
-            width = CONTENT_WIDTH
+            """Controls: the keys, the sounds, and spoken corrections."""
+            document = self._grouped_page(controls, "Controls")
             control_rows = (
                 ("hotkey", "settings.controls.hotkey", "changeHotkey:",
                  "settings.controls.action.change",
@@ -8573,106 +9286,87 @@ if APPKIT_AVAILABLE:
                  "settings.accessibility.undo_hotkey.label",
                  "settings.accessibility.undo_hotkey.help"),
                 # Voice modes are six modifier combinations of the capture
-                # key, so they belong beside the key rather than under
-                # Personalize, where they were only ever a reference table.
+                # key, so they sit beside the key.
                 ("modes", "settings.personalize.modes", "viewModes:",
                  "settings.action.view",
                  "settings.accessibility.modes.label",
                  "settings.accessibility.modes.help"),
             )
-            controls_group = _card(
-                NSMakeRect(0, 0, width, 44.0 * (len(control_rows) + 1)))
-            self._register("card", controls_group)
             control_key_views: list[Any] = []
-            row_count = len(control_rows) + 1
-            for index, (key, title_key, selector, action_key, label_key,
-                        help_key) in enumerate(control_rows):
-                _title, detail, y = self._group_row(
-                    controls_group, index=index, count=row_count,
-                    row_height=44, title=self._l(title_key))
+            key_rows = []
+            for (key, title_key, selector, action_key, label_key,
+                 help_key) in control_rows:
                 button = _button(
-                    self._l(action_key),
-                    NSMakeRect(width - 16 - 94, y + 8, 94, 28),
-                    self, selector,
-                    help_text=self._l(help_key))
-                button.setAutoresizingMask_(NSViewMinXMargin)
+                    self._l(action_key), NSMakeRect(0, 0, 60, 28),
+                    self, selector, help_text=self._l(help_key))
                 _accessible(button, self._l(label_key), self._l(help_key))
-                controls_group.addSubview_(button)
+                accessories: list[Any] = [button]
+                if key in {"hotkey", "undo_hotkey"}:
+                    # The bound key, drawn as a key cap where the row names
+                    # it; the undo key's cap hides while none is bound.
+                    keycap = KeyCapView.alloc().initWithFrame_(
+                        NSMakeRect(0, 0, 60, 23))
+                    accessories.insert(0, keycap)
+                    self.dynamic[f"{key}_keycap"] = keycap
+                row, _title, detail = self._settings_row(
+                    self._l(title_key), caption="", accessories=accessories)
+                key_rows.append(row)
                 control_key_views.append(button)
                 self.dynamic[f"settings_{key}_detail"] = detail
                 self.dynamic[f"settings_{key}_button"] = button
+            document.add_section(
+                self._section_header(self._l("pages.controls.keys")),
+                self._settings_group(key_rows))
 
             # Sound is a three-way choice, so it earns a segmented control
             # rather than a switch: "off" is one of three answers, not the
             # absence of an answer.
-            _sound_title, sound_detail, sound_y = self._group_row(
-                controls_group, index=len(control_rows), count=row_count,
-                row_height=44, title=self._l("settings.controls.sound"),
-                detail_width=330)
             sound_control = JellySegmentedControl.alloc().initWithFrame_(
-                NSMakeRect(width - 16 - 260, sound_y + 10, 260, 24))
+                NSMakeRect(0, 0, 240, 24))
             sound_control.setSegmentCount_(len(SOUND_THEMES))
-            sound_control.setSegmentStyle_(NSSegmentStyleRounded)
-            sound_control.setControlSize_(1)
             for index, theme in enumerate(SOUND_THEMES):
                 sound_control.setLabel_forSegment_(
                     self._l(f"settings.controls.sound.{theme}"), index)
-                sound_control.setWidth_forSegment_(260.0 / len(SOUND_THEMES),
-                                                   index)
             sound_control.setTarget_(self)
             sound_control.setAction_("soundThemeChanged:")
-            sound_control.setAutoresizingMask_(NSViewMinXMargin)
             _accessible(
                 sound_control,
                 self._l("settings.accessibility.sound.label"),
                 self._l("settings.accessibility.sound.help"))
-            controls_group.addSubview_(sound_control)
+            _mirror_accessibility_to_cell(sound_control)
             sound_preview = _button(
                 self._l("settings.controls.action.preview"),
-                NSMakeRect(width - 16 - 260 - 8 - 84, sound_y + 8, 84, 28),
-                self, "previewSound:",
+                NSMakeRect(0, 0, 60, 28), self, "previewSound:",
                 help_text=self._l("settings.accessibility.sound_preview.help"))
-            sound_preview.setAutoresizingMask_(NSViewMinXMargin)
             _accessible(
                 sound_preview,
                 self._l("settings.accessibility.sound_preview.label"),
                 self._l("settings.accessibility.sound_preview.help"))
-            controls_group.addSubview_(sound_preview)
-            control_key_views.extend([sound_preview, sound_control])
-            self._stack(controls, controls_group, height=44.0 * row_count)
+            sound_row, _sound_title, sound_detail = self._settings_row(
+                self._l("settings.controls.sound"), caption="",
+                accessories=(sound_control, sound_preview))
+            control_key_views.extend([sound_control, sound_preview])
+            document.add_section(
+                self._section_header(self._l("pages.controls.sounds")),
+                self._settings_group([sound_row]))
 
-            # The rows above share one 44pt rhythm and Personalize is full at
-            # the window minimum, so this switch gets its own card with room
-            # for what it does and the sentence it gets wrong.
-            correction_height = 58.0
-            correction_width = width - 16 - 40 - 16 - 16
-            correction_group = _card(
-                NSMakeRect(0, 0, width, correction_height))
-            self._register("card", correction_group)
-            correction_title, correction_detail, _y = self._group_row(
-                correction_group, index=0, count=1,
-                row_height=correction_height,
-                title=self._l("settings.controls.self_correction"),
-                detail_width=correction_width)
-            correction_title.setFrame_(NSMakeRect(16, 35, 300, 18))
-            correction_detail.setFrame_(
-                NSMakeRect(16, 19, correction_width, 14))
-            correction_cost = self._soft(
-                self._l("settings.controls.self_correction.cost"),
-                NSMakeRect(16, 5, correction_width, 14),
-                size=11, truncate=True)
-            correction_group.addSubview_(correction_cost)
+            # What the switch does is the caption; what it costs, the one
+            # sentence it gets wrong, is the note under the group.
             correction_switch = self._switch(
-                NSMakeRect(width - 16 - 40, 18, 40, 22),
-                "selfCorrectionChanged:",
+                NSMakeRect(0, 0, 40, 22), "selfCorrectionChanged:",
                 label=self._l("settings.accessibility.self_correction.label"),
                 help_text=self._l(
                     "settings.accessibility.self_correction.help"))
-            correction_switch.setAutoresizingMask_(NSViewMinXMargin)
-            correction_group.addSubview_(correction_switch)
+            correction_row, _title, correction_detail = self._settings_row(
+                self._l("settings.controls.self_correction"), caption="",
+                accessories=(correction_switch,))
+            correction_cost = self._page_note(
+                self._l("settings.controls.self_correction.cost"))
             control_key_views.append(correction_switch)
-            self._stack(controls, correction_group, below=controls_group,
-                        gap=16, height=correction_height)
+            document.add_section(
+                self._section_header(self._l("pages.controls.corrections")),
+                self._settings_group([correction_row]),
+                (correction_cost,))
 
             self.dynamic.update(
                 sound_theme_control=sound_control,
@@ -8680,89 +9374,80 @@ if APPKIT_AVAILABLE:
                 sound_theme_detail=sound_detail,
                 self_correction_toggle=correction_switch,
                 self_correction_detail=correction_detail,
+                self_correction_cost=correction_cost,
             )
             return tuple(control_key_views)
 
         @objc.python_method
         def _build_settings_privacy(self, privacy: Any) -> tuple[Any, ...]:
             """Privacy: one switch per thing that may be kept."""
-            width = CONTENT_WIDTH
-            privacy_rows = (
-                ("voice_objects", "settings.privacy.voice_objects",
-                 "voiceObjectCommandsChanged:",
-                 "settings.accessibility.voice_objects.label",
-                 "settings.accessibility.voice_objects.help"),
-                ("flight", "settings.privacy.flight", "flightChanged:",
-                 "settings.accessibility.flight.label",
-                 "settings.accessibility.flight.help"),
-                ("acoustic", "settings.privacy.acoustic",
-                 "acousticTimeMachineChanged:",
-                 "settings.accessibility.acoustic.label",
-                 "settings.accessibility.acoustic.help"),
+            document = self._grouped_page(privacy, "Privacy")
+            privacy_rows = {
+                "flight": ("settings.privacy.flight", "flightChanged:",
+                           "settings.accessibility.flight.label",
+                           "settings.accessibility.flight.help"),
+                "acoustic": ("settings.privacy.acoustic",
+                             "acousticTimeMachineChanged:",
+                             "settings.accessibility.acoustic.label",
+                             "settings.accessibility.acoustic.help"),
                 # Off by default, and privacy-consistent with the Voice
                 # Inbox: the list is metadata until an explicit reveal.
-                ("recent", "settings.privacy.recent",
-                 "recentDictationsChanged:",
-                 "settings.accessibility.recent.label",
-                 "settings.accessibility.recent.help"),
-            )
-            privacy_group = _card(
-                NSMakeRect(0, 0, width, 44.0 * len(privacy_rows)))
-            self._register("card", privacy_group)
-            privacy_controls: dict[str, Any] = {}
-            for index, (key, title_key, selector, label_key,
-                        help_key) in enumerate(privacy_rows):
-                title_label, detail, y = self._group_row(
-                    privacy_group, index=index, count=len(privacy_rows),
-                    row_height=44, title=self._l(title_key))
+                "recent": ("settings.privacy.recent",
+                           "recentDictationsChanged:",
+                           "settings.accessibility.recent.label",
+                           "settings.accessibility.recent.help"),
+                "voice_objects": ("settings.privacy.voice_objects",
+                                  "voiceObjectCommandsChanged:",
+                                  "settings.accessibility.voice_objects.label",
+                                  "settings.accessibility.voice_objects.help"),
+            }
+            browse_recent = _button(
+                self._l("settings.privacy.recent.browse"),
+                NSMakeRect(0, 0, 60, 28), self, "browseRecentDictations:",
+                help_text=self._l("settings.privacy.recent.browse.help"))
+            _accessible(
+                browse_recent,
+                self._l("settings.accessibility.recent_list.label"),
+                self._l("settings.privacy.recent.browse.help"))
+            inspect_voice_objects = _button(
+                self._l("settings.privacy.voice_objects.inspect"),
+                NSMakeRect(0, 0, 60, 28), self, "inspectVoiceObjects:",
+                help_text=self._l(
+                    "settings.privacy.voice_objects.inspect.help"))
+            _accessible(
+                inspect_voice_objects,
+                self._l("settings.accessibility.voice_objects.inspector"),
+                self._l("settings.privacy.voice_objects.inspect.help"))
+            buttons = {"recent": browse_recent,
+                       "voice_objects": inspect_voice_objects}
+            controls: dict[str, tuple[Any, Any, Any]] = {}
+            for key, (title_key, selector, label_key,
+                      help_key) in privacy_rows.items():
                 switch = self._switch(
-                    NSMakeRect(width - 16 - 40, y + 11, 40, 22), selector,
+                    NSMakeRect(0, 0, 40, 22), selector,
                     label=self._l(label_key), help_text=self._l(help_key))
-                switch.setAutoresizingMask_(NSViewMinXMargin)
-                privacy_group.addSubview_(switch)
-                privacy_controls[key] = (switch, detail)
-                if key == "voice_objects":
-                    inspect_voice_objects = _button(
-                        self._l("settings.privacy.voice_objects.inspect"),
-                        NSMakeRect(width - 16 - 40 - 16 - 92, y + 8, 92, 28),
-                        self, "inspectVoiceObjects:",
-                        help_text=self._l(
-                            "settings.privacy.voice_objects.inspect.help"))
-                    inspect_voice_objects.setAutoresizingMask_(
-                        NSViewMinXMargin)
-                    _accessible(
-                        inspect_voice_objects,
-                        self._l(
-                            "settings.accessibility.voice_objects.inspector"),
-                        self._l(
-                            "settings.privacy.voice_objects.inspect.help"))
-                    privacy_group.addSubview_(inspect_voice_objects)
-                if key == "recent":
-                    browse_recent = _button(
-                        self._l("settings.privacy.recent.browse"),
-                        NSMakeRect(width - 16 - 40 - 16 - 92, y + 8, 92, 28),
-                        self, "browseRecentDictations:",
-                        help_text=self._l(
-                            "settings.privacy.recent.browse.help"))
-                    browse_recent.setAutoresizingMask_(NSViewMinXMargin)
-                    _accessible(
-                        browse_recent,
-                        self._l("settings.accessibility.recent_list.label"),
-                        self._l("settings.privacy.recent.browse.help"))
-                    privacy_group.addSubview_(browse_recent)
-            voice_objects, voice_object_status = privacy_controls[
-                "voice_objects"]
-            flight, flight_detail = privacy_controls["flight"]
+                accessories = ([buttons[key]] if key in buttons else []) + [
+                    switch]
+                row, _title, detail = self._settings_row(
+                    self._l(title_key), caption="", accessories=accessories)
+                controls[key] = (row, switch, detail)
+            flight_row, flight, flight_detail = controls["flight"]
             flight_detail.setStringValue_(
                 self._l("settings.privacy.flight.detail"))
-            acoustic, acoustic_detail = privacy_controls["acoustic"]
+            acoustic_row, acoustic, acoustic_detail = controls["acoustic"]
             acoustic_detail.setStringValue_(
-                self._l("settings.privacy.acoustic.detail"))
-            recent, recent_detail = privacy_controls["recent"]
+                self._l("pages.privacy.acoustic.detail"))
+            recent_row, recent, recent_detail = controls["recent"]
             recent_detail.setStringValue_(
                 self._l("settings.privacy.recent.detail"))
-            self._stack(privacy, privacy_group,
-                        height=44.0 * len(privacy_rows))
+            (voice_row, voice_objects,
+             voice_object_status) = controls["voice_objects"]
+            document.add_section(
+                self._section_header(self._l("pages.privacy.audio")),
+                self._settings_group([flight_row, acoustic_row]))
+            document.add_section(
+                self._section_header(self._l("pages.privacy.dictations")),
+                self._settings_group([recent_row, voice_row]))
 
             self.dynamic.update(
                 recent_dictations_toggle=recent,
@@ -8774,204 +9459,149 @@ if APPKIT_AVAILABLE:
                 voice_object_commands_status=voice_object_status,
                 voice_object_inspect_button=inspect_voice_objects,
             )
+            # Tab follows the page: top to bottom, left to right.
             return (
-                voice_objects, inspect_voice_objects, flight,
-                acoustic, browse_recent, recent)
+                flight, acoustic, browse_recent, recent,
+                inspect_voice_objects, voice_objects)
 
         def _build_advanced(self, page: Any) -> None:
-            width = CONTENT_WIDTH
-            header = self._page_header(page, self._l("nav.advanced"))
-            # ⌘D now lives on the always-visible sidebar row, so the
-            # shortcut reaches Advanced from every section.
+            document = self._grouped_page(page, "Advanced")
+            # ⌘D lives on the always-visible sidebar row, so the shortcut
+            # reaches Advanced from every section.
 
-            # Grouped model list: Selective Re-listen row on top, then the
-            # four local models with tinted readiness pills at the right.
-            model_count = 4
-            group_height = 44.0 + 36.0 * model_count
-            models_group = _card(NSMakeRect(0, 0, width, group_height))
-            self._register("card", models_group)
-            relisten_title = self._ink(
-                self._l("models.relisten.label"),
-                NSMakeRect(16, group_height - 26, 300, 18),
-                size=13, weight="medium", truncate=True)
-            relisten_status = self._soft(
-                self._l("models.relisten.status.evidence-required"),
-                NSMakeRect(16, group_height - 43, 470, 14), size=11,
-                truncate=True,
-                accessibility_label=self._l(
-                    "models.accessibility.relisten"))
+            # ---- Models: Selective Re-listen, then the local models, each
+            # with its state in words at the trailing edge.
             relisten = self._switch(
-                NSMakeRect(width - 16 - 40, group_height - 37, 40, 22),
-                "selectiveRelistenChanged:",
+                NSMakeRect(0, 0, 40, 22), "selectiveRelistenChanged:",
                 label=self._l("models.accessibility.relisten"),
                 help_text=self._l("models.relisten.help"))
             relisten.setToolTip_(self._l("models.relisten.help"))
-            relisten.setAutoresizingMask_(NSViewMinXMargin)
-            models_group.addSubview_(relisten_title)
-            models_group.addSubview_(relisten_status)
-            models_group.addSubview_(relisten)
-            top_separator = _hairline(NSMakeRect(
-                16, group_height - 44, width - 32, 1))
-            top_separator.setAutoresizingMask_(NSViewWidthSizable)
-            self._register("hairline", top_separator)
-            models_group.addSubview_(top_separator)
-            rows = []
-            for index in range(model_count):
-                y = (model_count - 1 - index) * 36.0
-                row_view = NSView.alloc().initWithFrame_(
-                    NSMakeRect(0, y, width, 36))
-                row_view.setAutoresizingMask_(NSViewWidthSizable)
-                name = self._ink(
-                    self._l("models.waiting"),
-                    NSMakeRect(16, 17, 330, 16),
-                    size=13, weight="medium", truncate=True)
-                detail = self._soft(
-                    "", NSMakeRect(16, 3, 440, 14), size=11,
-                    truncate=True)
-                status = self._pill(
-                    self._l("models.unknown"),
-                    NSMakeRect(width - 16 - 120, 8, 120, 20))
-                status.setAutoresizingMask_(NSViewMinXMargin)
-                row_view.addSubview_(name)
-                row_view.addSubview_(detail)
-                row_view.addSubview_(status)
-                if index < model_count - 1:
-                    separator = _hairline(NSMakeRect(16, 0, width - 32, 1))
-                    separator.setAutoresizingMask_(NSViewWidthSizable)
-                    self._register("hairline", separator)
-                    row_view.addSubview_(separator)
-                models_group.addSubview_(row_view)
-                rows.append((row_view, name, detail, status))
-            self._stack(page, models_group, below=header, gap=12,
-                        height=group_height)
-            # Shadow-advisory and model guidance are trust copy: they wrap
-            # rather than truncate so the whole claim survives the window's
-            # minimum width.
-            advisory = self._soft(
-                self._l("models.wallet.unavailable"),
-                NSMakeRect(0, 0, width, 28), size=11, wrap=True, lines=2,
-                accessibility_label=self._l(
-                    "models.accessibility.wallet"))
-            self._stack(page, advisory, below=models_group, gap=2, height=28)
-            model_guidance = self._soft(
-                self._l("models.guidance"),
-                NSMakeRect(0, 0, width, 14), size=11, truncate=True)
-            self._stack(page, model_guidance, below=advisory, gap=2,
-                        height=14)
+            relisten_row, _title, relisten_status = self._settings_row(
+                self._l("models.relisten.label"), caption="",
+                accessories=(relisten,))
+            _accessible(relisten_status, self._l(
+                "models.accessibility.relisten"))
+            model_rows = []
+            model_status_views = []
+            group_rows = [relisten_row]
+            for _index in range(4):
+                status = self._status_label()
+                row, name, detail = self._settings_row(
+                    self._l("models.waiting"), caption="",
+                    accessories=(status,))
+                group_rows.append(row)
+                model_rows.append((row, name, detail, status.text))
+                model_status_views.append(status)
+            model_guidance = self._page_note(self._l("models.guidance"))
+            # The receipt's own wording stays the runtime's; the page says
+            # what it means in one plain sentence.
+            advisory = self._page_note(
+                self._l("pages.models.advisory"),
+                accessibility_label=self._l("models.accessibility.wallet"))
+            document.add_section(
+                self._section_header(self._l("pages.advanced.models")),
+                self._settings_group(group_rows),
+                (model_guidance, advisory))
 
-            # System status: one quiet two-column list.
-            status_card = _card(NSMakeRect(0, 0, width, 88))
-            self._register("card", status_card)
-            keys = (("diagnostics.service", "diag_service"),
-                    ("diagnostics.microphone", "diag_microphone"),
-                    ("diagnostics.accessibility", "diag_accessibility"),
-                    ("diagnostics.regression", "diag_regression"),
-                    ("diagnostics.motion", "diag_motion"),
-                    ("diagnostics.build", "diag_version"))
-            column_width = (width - 32.0) / 2.0
-            for index, (heading_key, key) in enumerate(keys):
-                x = 16 + (index % 2) * column_width
-                y = 60 - (index // 2) * 26
-                caption = self._soft(
-                    self._l(heading_key),
-                    NSMakeRect(x, y, 150, 16), size=11)
-                value = self._ink(
-                    self._l("diagnostics.unknown"),
-                    NSMakeRect(x + 158, y, column_width - 166, 16),
-                    size=13, truncate=True)
-                if index % 2:
-                    caption.setAutoresizingMask_(NSViewMinXMargin)
-                    value.setAutoresizingMask_(NSViewMinXMargin)
-                status_card.addSubview_(caption)
-                status_card.addSubview_(value)
+            # ---- Status: one row per thing the runtime reports.
+            keys = (("diagnostics.service", "diag_service", True),
+                    ("diagnostics.microphone", "diag_microphone", True),
+                    ("diagnostics.accessibility", "diag_accessibility", True),
+                    ("pages.diagnostics.regression", "diag_regression",
+                     False),
+                    ("diagnostics.motion", "diag_motion", False),
+                    ("diagnostics.build", "diag_version", False))
+            status_rows = []
+            diag_status_views = {}
+            for heading_key, key, stated in keys:
+                if stated:
+                    view = self._status_label()
+                    value = view.text
+                    diag_status_views[key] = view
+                else:
+                    view = value = self._value_label(
+                        self._l("diagnostics.unknown"))
+                row, _title, _caption = self._settings_row(
+                    self._l(heading_key), accessories=(view,))
+                status_rows.append(row)
                 self.dynamic[key] = value
-            self._stack(page, status_card, below=model_guidance, gap=12,
-                        height=88)
+            guidance = self._page_note(self._l("diagnostics.ready"))
+            document.add_section(
+                self._section_header(self._l("pages.advanced.status")),
+                self._settings_group(status_rows), (guidance,))
 
-            # Toolbar-like action rows with symbols, then honest captions.
-            # Widths come from each title's fitted size so nothing truncates
-            # even at the window minimum.
-            actions_row = NSView.alloc().initWithFrame_(
-                NSMakeRect(0, 0, width, 28))
-            open_log = _button(self._l("diagnostics.action.log"),
-                               NSMakeRect(0, 0, 114, 28),
-                               self, "openLog:", symbol="folder")
-            copy_support_snapshot = _button(
-                self._l("diagnostics.action.copy_support"),
-                NSMakeRect(122, 0, 202, 28), self, "copySupportSnapshot:",
-                symbol="doc.on.doc",
-                help_text=self._l("diagnostics.action.copy_support.help"))
+            # ---- Support: verification, then what to send with a report.
+            progress = NSProgressIndicator.alloc().initWithFrame_(
+                NSMakeRect(0, 0, 16, 16))
+            progress.setStyle_(1)
+            progress.setDisplayedWhenStopped_(False)
+            progress.setControlSize_(1)
             verify = _button(self._l("diagnostics.action.verify"),
-                             NSMakeRect(332, 0, 152, 28),
-                             self, "verify:",
-                             symbol="arrow.triangle.2.circlepath")
+                             NSMakeRect(0, 0, 60, 28), self, "verify:")
             verify.setKeyEquivalent_("r")
             verify.setKeyEquivalentModifierMask_(NSEventModifierFlagCommand)
-            for view in (open_log, copy_support_snapshot, verify):
-                actions_row.addSubview_(view)
-            self._stack(page, actions_row, below=status_card, gap=12,
-                        height=28)
-
-            secondary_row = NSView.alloc().initWithFrame_(
-                NSMakeRect(0, 0, width, 28))
+            verify_row, _title, verification = self._settings_row(
+                self._l("pages.support.verify"),
+                caption=self._l("diagnostics.verification.not_run"),
+                accessories=(progress, verify))
+            open_log = _button(self._l("diagnostics.action.log"),
+                               NSMakeRect(0, 0, 60, 28), self, "openLog:")
+            log_row, _title, _caption = self._settings_row(
+                self._l("pages.support.log"),
+                caption=self._l("pages.support.log.detail"),
+                accessories=(open_log,))
+            copy_support_snapshot = _button(
+                self._l("diagnostics.action.copy_support"),
+                NSMakeRect(0, 0, 60, 28), self, "copySupportSnapshot:",
+                help_text=self._l("diagnostics.action.copy_support.help"))
+            snapshot_row, _title, _caption = self._settings_row(
+                self._l("pages.support.snapshot"),
+                caption=self._l("pages.support.snapshot.detail"),
+                accessories=(copy_support_snapshot,))
             export_support_bundle = _button(
                 self._l("diagnostics.action.export_support"),
-                NSMakeRect(0, 0, 204, 28), self, "exportSupportBundle:",
-                symbol="square.and.arrow.down",
+                NSMakeRect(0, 0, 60, 28), self, "exportSupportBundle:",
                 help_text=self._l("diagnostics.action.export_support.help"))
+            bundle_row, _title, _caption = self._settings_row(
+                self._l("pages.support.bundle"),
+                caption=self._l("pages.support.bundle.detail"),
+                accessories=(export_support_bundle,))
             open_system_settings = _accessible(_button(
                 self._l("diagnostics.action.open_system_settings"),
-                NSMakeRect(212, 0, 192, 28),
-                self, "openSystemSettings:", symbol="gearshape",
+                NSMakeRect(0, 0, 60, 28),
+                self, "openSystemSettings:",
                 help_text=self._l(
                     "diagnostics.action.open_system_settings.help")),
                 self._l("diagnostics.accessibility.open_system_settings"),
                 self._l("diagnostics.action.open_system_settings.help"))
-            secondary_row.addSubview_(export_support_bundle)
-            secondary_row.addSubview_(open_system_settings)
-            self._stack(page, secondary_row, below=actions_row, gap=6,
-                        height=28)
-
-            evidence_row = NSView.alloc().initWithFrame_(
-                NSMakeRect(0, 0, width, 28))
-            progress = NSProgressIndicator.alloc().initWithFrame_(
-                NSMakeRect(0, 6, 16, 16))
-            progress.setStyle_(1)
-            progress.setDisplayedWhenStopped_(False)
-            progress.setControlSize_(1)
-            verification = self._soft(
-                self._l("diagnostics.verification.not_run"),
-                NSMakeRect(24, 7, 310, 14), size=11, truncate=True)
+            permissions_row, _title, _caption = self._settings_row(
+                self._l("pages.support.permissions"),
+                caption=self._l("pages.support.permissions.detail"),
+                accessories=(open_system_settings,))
             license_notices = _button(
                 self._l("diagnostics.action.licenses"),
-                NSMakeRect(width - 134 - 8 - 152, 0, 152, 28),
-                self, "openLicense:", symbol="checkmark.seal")
+                NSMakeRect(0, 0, 60, 28), self, "openLicense:")
             source = _button(self._l("diagnostics.action.source"),
-                             NSMakeRect(width - 134, 0, 134, 28),
-                             self, "openSource:", symbol="curlybraces")
-            for view in (license_notices, source):
-                view.setAutoresizingMask_(NSViewMinXMargin)
-            for view in (progress, verification, license_notices, source):
-                evidence_row.addSubview_(view)
-            self._stack(page, evidence_row, below=secondary_row, gap=6,
-                        height=28)
-
-            guidance = self._soft(
-                self._l("diagnostics.ready"),
-                NSMakeRect(0, 0, width, 28), size=11, wrap=True, lines=2)
-            self._stack(page, guidance, below=evidence_row, gap=6,
-                        height=28)
-            license_line = self._soft(
-                self._l("diagnostics.license"),
-                NSMakeRect(0, 0, width, 14), size=11, truncate=True)
-            self._stack(page, license_line, below=guidance, gap=2, height=14)
+                             NSMakeRect(0, 0, 60, 28), self, "openSource:")
+            license_row, _title, _caption = self._settings_row(
+                self._l("pages.support.license"),
+                caption=self._l("diagnostics.license"),
+                accessories=(license_notices, source))
+            document.add_section(
+                self._section_header(self._l("pages.advanced.support")),
+                self._settings_group([
+                    verify_row, log_row, snapshot_row, bundle_row,
+                    permissions_row, license_row]))
             self.dynamic.update(
-                model_rows=rows,
+                model_rows=model_rows,
+                model_status_views=model_status_views,
+                diag_status_views=diag_status_views,
                 model_wallet_advisory=advisory,
                 model_guidance=model_guidance,
                 selective_relisten_toggle=relisten,
                 selective_relisten_status=relisten_status,
                 open_system_settings_button=open_system_settings,
+                open_system_settings_row=permissions_row,
                 open_log_button=open_log,
                 copy_support_snapshot_button=copy_support_snapshot,
                 export_support_bundle_button=export_support_bundle,
@@ -9476,13 +10106,13 @@ if APPKIT_AVAILABLE:
                 if (settings.manual_vocabulary or settings.banned_vocabulary)
                 else self._l("settings.personalize.vocabulary.empty"),
                 "corrections": self._l(
-                    plural_key("settings.personalize.corrections.detail",
+                    plural_key("pages.personalize.corrections.detail",
                                len(settings.corrections)),
                     count=len(settings.corrections))
                 if settings.corrections else self._l(
                     "settings.personalize.corrections.empty"),
                 "keywords": self._l(
-                    "settings.personalize.keywords.detail"),
+                    "pages.personalize.keywords.detail"),
             }
             self._render_setting_summaries(setting_summaries)
             # One quiet line, stated the same way every time: English gets
@@ -9513,6 +10143,12 @@ if APPKIT_AVAILABLE:
                 label=self._l(
                     "settings.accessibility.face.label"),
             )
+            self.dynamic["face_hint"].setStringValue_(self._l(
+                "pages.personalize.face.hint",
+                face=self._l(f"settings.face.{state.face}")))
+            _mirror_accessibility_to_cell(
+                self.dynamic["settings_language_popup"])
+            self._arrange_page("Personalize")
 
         @objc.python_method
         def _render_settings_controls(self, state: GUIState) -> None:
@@ -9560,6 +10196,14 @@ if APPKIT_AVAILABLE:
                 self._l("settings.state.enabled") if self_correction
                 else self._l("settings.state.disabled"),
                 label=self._l("settings.accessibility.self_correction.label"))
+            _mirror_accessibility_to_cell(self.dynamic["sound_theme_control"])
+            # The bound keys, as key caps. No undo key bound: no cap, and
+            # the caption says so.
+            self.dynamic["hotkey_keycap"].set_key(state.hotkey_label)
+            undo_keycap = self.dynamic["undo_hotkey_keycap"]
+            undo_keycap.set_key(state.undo_hotkey_label or "")
+            undo_keycap.setHidden_(not state.undo_hotkey_label)
+            self._arrange_page("Controls")
 
         @objc.python_method
         def _render_settings_privacy(self, state: GUIState) -> None:
@@ -9602,12 +10246,10 @@ if APPKIT_AVAILABLE:
             self.dynamic["voice_object_commands_toggle"].setState_(
                 NSControlStateValueOn if state.voice_object_commands
                 else NSControlStateValueOff)
-            voice_object_status = self._l(
-                plural_key("settings.privacy.voice_objects.status",
-                           state.voice_object_inbox_count),
-                status=state.voice_object_inbox_status,
-                count=state.voice_object_inbox_count,
-            )
+            voice_object_status = voice_inbox_status_display(
+                state.voice_object_inbox_status,
+                state.voice_object_inbox_count,
+                locale=self.view_model.locale)
             self.dynamic["voice_object_commands_status"].setStringValue_(
                 voice_object_status)
             sync_accessibility(
@@ -9615,22 +10257,21 @@ if APPKIT_AVAILABLE:
                 voice_object_status,
                 label=self._l("settings.accessibility.voice_objects.label"),
             )
+            self._arrange_page("Privacy")
 
         @objc.python_method
         def _render_advanced(self, state: GUIState) -> None:
             """Advanced: models, selective re-listen and diagnostics."""
-            dark = getattr(self, "_dark", False)
-            for index, (row, name, detail, status_label) in enumerate(
-                    self.dynamic["model_rows"]):
+            locale = self.view_model.locale
+            for index, ((row, name, detail, status_label), status_view) in \
+                    enumerate(zip(self.dynamic["model_rows"],
+                                  self.dynamic["model_status_views"])):
                 if index < len(state.models):
                     model = state.models[index]
+                    phrase, tone = model_status_display(model, locale=locale)
                     name.setStringValue_(model.name)
-                    detail.setStringValue_(
-                        " · ".join(part for part in (model.role, model.detail) if part))
-                    status_label.setStringValue_(model.status)
-                    self._set_pill_tone(
-                        status_label, model_pill_tone(model), dark)
-                    self._fit_pill(status_label)
+                    detail.setStringValue_(model_detail_display(model))
+                    self._show_status(status_view, phrase, tone)
                     sync_accessibility(
                         name, model.name,
                         label=self._l("models.accessibility.name"))
@@ -9639,7 +10280,7 @@ if APPKIT_AVAILABLE:
                         label=self._l(
                             "models.accessibility.detail", name=model.name))
                     sync_accessibility(
-                        status_label, model.status,
+                        status_label, phrase,
                         label=self._l(
                             "models.accessibility.status", name=model.name))
                     row.setHidden_(False)
@@ -9653,24 +10294,22 @@ if APPKIT_AVAILABLE:
                         label=self._l(
                             "models.accessibility.detail",
                             name=self._l("models.waiting")))
-                    set_accessible_text(
+                    self._show_status(
+                        status_view, self._l("models.unknown"), "neutral")
+                    sync_accessibility(
                         status_label, self._l("models.unknown"),
                         label=self._l(
                             "models.accessibility.status",
                             name=self._l("models.waiting")))
-                    self._set_pill_tone(status_label, "warn", dark)
-                    self._fit_pill(status_label)
+            # The runtime's advisory receipt keeps its own wording for the
+            # tests and the support snapshot; the page says what it means.
             set_accessible_text(
                 self.dynamic["model_wallet_advisory"],
-                state.model_wallet_advisory,
+                self._l("pages.models.advisory"),
                 label=self._l("models.accessibility.wallet"),
             )
-            relisten_status_key = state.selective_relisten_status
-            if relisten_status_key not in {
-                    "off", "ready", "warming", "enabled-not-ready"}:
-                relisten_status_key = "evidence-required"
-            relisten_status = self._l(
-                f"models.relisten.status.{relisten_status_key}")
+            relisten_status = relisten_status_display(
+                state.selective_relisten_status, locale=locale)
             relisten_toggle = self.dynamic["selective_relisten_toggle"]
             relisten_toggle.setState_(
                 NSControlStateValueOn
@@ -9699,19 +10338,25 @@ if APPKIT_AVAILABLE:
                 str(self.dynamic["model_guidance"].stringValue()),
                 label=self._l("models.accessibility.guidance"),
             )
-            self.dynamic["diag_service"].setStringValue_(state.service_status)
-            self.dynamic["diag_microphone"].setStringValue_(state.microphone_status)
-            self.dynamic["diag_accessibility"].setStringValue_(
-                state.accessibility_status)
+            for key, value in (
+                    ("diag_service", state.service_status),
+                    ("diag_microphone", state.microphone_status),
+                    ("diag_accessibility", state.accessibility_status)):
+                self._show_status(
+                    self.dynamic["diag_status_views"][key], value,
+                    system_status_tone(value))
+            # The row goes with its button: nothing to open, nothing shown.
+            recovery = self.view_model.permission_recovery_needed()
+            self.dynamic["open_system_settings_row"].setHidden_(not recovery)
             self.dynamic["open_system_settings_button"].setHidden_(
-                not self.view_model.permission_recovery_needed())
+                not recovery)
             regression = self._l(
                 plural_key("diagnostics.regression.cases",
                            state.regression_cases),
                 count=state.regression_cases)
             if state.regression_quarantined:
                 regression += self._l(
-                    "diagnostics.regression.quarantined",
+                    "pages.diagnostics.regression.held",
                     count=state.regression_quarantined)
             self.dynamic["diag_regression"].setStringValue_(regression)
             self.dynamic["diag_motion"].setStringValue_(
@@ -9741,6 +10386,9 @@ if APPKIT_AVAILABLE:
                     str(self.dynamic[key].stringValue()),
                     label=self._l(label_key),
                 )
+            for view in self.dynamic["diag_status_views"].values():
+                view.invalidateIntrinsicContentSize()
+            self._arrange_page("Advanced")
 
         @objc.python_method
         def _render_notices(self, state: GUIState) -> None:
@@ -12108,9 +12756,12 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             "selectiveRelistenChanged:",
             "selective re-listen surface")
         # The Selective Re-listen switch stays disabled without evidence, so
-        # the loop hands Tab to the first enabled Advanced control.
+        # the loop hands Tab to the first enabled Advanced control, which
+        # is the first button on the page, Run Verification.
         require(
             controller.sidebar_rows[-1].nextKeyView() ==
+            controller.dynamic["verify_button"]
+            and controller.dynamic["verify_button"].nextKeyView() ==
             controller.dynamic["open_log_button"],
             "advanced Tab order")
         require(
@@ -12515,12 +13166,127 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         require(expected_calls.issubset(set(calls)), "model actions")
         require(not bool(controller.window.isVisible()), "window activation")
         def visible_leaves(view: Any) -> list[Any]:
+            # A scrolling page is one piece here: what it holds may run
+            # below the window on purpose, and check_grouped_pages holds
+            # its inside to the same standard instead.
             children = [child for child in view.subviews()
                         if not bool(child.isHidden())]
-            if not children:
+            if not children or bool(view.isKindOfClass_(NSScrollView)):
                 return [view]
             return [leaf for child in children
                     for leaf in visible_leaves(child)]
+
+        def check_grouped_pages(size_name: str) -> None:
+            """The four settings pages at this window size.
+
+            Each scrolls in a system scroll view as wide as the page
+            column; inside it every visible view sits within the document,
+            no two overlap, no label is cut short, the first group shows
+            whole without scrolling, and the three settings panes show
+            every group without scrolling at all.
+            """
+            def page_leaves(view: Any) -> list[Any]:
+                # A control is one thing, whatever its private parts are.
+                children = [child for child in view.subviews()
+                            if not bool(child.isHidden())]
+                if not children or bool(view.respondsToSelector_("cell")):
+                    return [view]
+                return [leaf for child in children
+                        for leaf in page_leaves(child)]
+
+            documents = controller.dynamic["page_documents"]
+            scrolls = controller.dynamic["page_scrolls"]
+            require(
+                set(documents) == set(SETTINGS_PANES) | {"Advanced"},
+                "every settings page is a grouped, scrolling page")
+            column = in_window(controller.dynamic["page_column"])
+            for name, document in documents.items():
+                scroll = scrolls[name]
+                holders = [controller.pages["Advanced"]] if name == \
+                    "Advanced" else [controller.pages["Settings"],
+                                     controller.dynamic["settings_panes"][name]]
+                was_hidden = [bool(view.isHidden()) for view in holders]
+                for view in holders:
+                    view.setHidden_(False)
+                root_view.layoutSubtreeIfNeeded()
+                document.arrange()
+                clip = scroll.contentView()
+                width = float(clip.bounds().size.width)
+                scroll_frame = in_window(scroll)
+                require(
+                    abs(scroll_frame.origin.x - column.origin.x) < 0.5
+                    and abs(scroll_frame.size.width - column.size.width)
+                    < 0.5
+                    and abs(float(document.frame().size.width) - width)
+                    < 0.5 and width >= column.size.width - 16.0,
+                    f"{name} fills the page column at {size_name}")
+                bounds = document.bounds()
+                placed = []
+                for leaf in page_leaves(document):
+                    if leaf is document or bool(
+                            leaf.isKindOfClass_(GroupBoxView)):
+                        continue
+                    own = leaf.alignmentRectForFrame_(leaf.frame())
+                    holder = leaf.superview().bounds()
+                    # Inside whatever holds it, too: a row, the face grid.
+                    require(
+                        own.origin.x >= holder.origin.x - 0.5
+                        and own.origin.y >= holder.origin.y - 0.5
+                        and own.origin.x + own.size.width
+                        <= holder.origin.x + holder.size.width + 0.5
+                        and own.origin.y + own.size.height
+                        <= holder.origin.y + holder.size.height + 0.5,
+                        f"{name}: a {type(leaf).__name__} spills out of "
+                        f"its {type(leaf.superview()).__name__} at "
+                        f"{size_name}")
+                    rect = document.convertRect_fromView_(
+                        own, leaf.superview())
+                    require(
+                        rect.origin.x >= -0.5 and rect.origin.y >= -0.5
+                        and rect.origin.x + rect.size.width
+                        <= bounds.size.width + 0.5
+                        and rect.origin.y + rect.size.height
+                        <= bounds.size.height + 0.5,
+                        f"{name}: a view leaves its page at {size_name}")
+                    if bool(leaf.isKindOfClass_(NSTextField)):
+                        needed = leaf.cell().cellSizeForBounds_(NSMakeRect(
+                            0, 0, leaf.frame().size.width, 10_000.0))
+                        require(
+                            needed.height <= leaf.frame().size.height + 1.0
+                            and needed.width
+                            <= leaf.frame().size.width + 1.0,
+                            f"{name}: {leaf.stringValue()!r} is cut short "
+                            f"at {size_name}")
+                    placed.append((leaf, NSInsetRect(rect, 0.5, 0.5)))
+                for index, (first, first_rect) in enumerate(placed):
+                    for second, second_rect in placed[index + 1:]:
+                        require(
+                            not intersects(first_rect, second_rect),
+                            f"{name}: two views overlap at {size_name}: "
+                            f"{type(first).__name__} and "
+                            f"{type(second).__name__}")
+                groups = [view for view in document.subviews()
+                          if bool(view.isKindOfClass_(GroupBoxView))
+                          and not bool(view.isHidden())]
+                visible = clip.documentVisibleRect()
+                first_group = min(groups, key=lambda view: view.frame().origin.y)
+                last_group = max(groups, key=lambda view: view.frame().origin.y)
+                require(
+                    first_group.frame().origin.y >= visible.origin.y
+                    and first_group.frame().origin.y
+                    + first_group.frame().size.height
+                    <= visible.origin.y + visible.size.height + 0.5,
+                    f"{name}: the first group shows whole at {size_name}")
+                if name in SETTINGS_PANES:
+                    require(
+                        last_group.frame().origin.y
+                        + last_group.frame().size.height
+                        <= visible.origin.y + visible.size.height + 0.5,
+                        f"{name} shows every group without scrolling "
+                        f"at {size_name}")
+                for view, hidden in zip(holders, was_hidden):
+                    view.setHidden_(hidden)
+            root_view.layoutSubtreeIfNeeded()
 
         # At the window minimum every page's content stays clear of a
         # two-line failure notice in the band below it.
@@ -12564,6 +13330,7 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             require(
                 lowest >= notice_frame.origin.y + notice_frame.size.height,
                 f"{page_name} fits at the window minimum")
+        check_grouped_pages("the window minimum")
         # Fitting is also sideways. The sidebar takes the column down to
         # CONTENT_MIN_WIDTH, narrower than the pages were ever laid out
         # before it, so Home's action row is checked with every button it
@@ -12600,6 +13367,7 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         root_view.layoutSubtreeIfNeeded()
         controller.window.setContentSize_(WINDOW_DEFAULT_SIZE)
         root_view.layoutSubtreeIfNeeded()
+        check_grouped_pages("the default size")
         default_column = in_window(controller.dynamic["page_column"])
         require(
             abs(default_column.size.width - CONTENT_WIDTH) < 0.5
@@ -12626,28 +13394,95 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
              "install_state": "not_installed", "required": False,
              "warm": False, "status": "UNAVAILABLE",
              "detail": "Exact pinned files not resolved"},
+            # A row whose state the runtime did not name carries its own
+            # receipt words; the page must not show them.
+            {"name": "Whisper Tiny", "role": "Fast recognition preview",
+             "status": "RESOLVED",
+             "detail": "Exact pinned files resolved · Runtime readiness "
+                       "not attested · Capability bounds unavailable"},
         ]
         runtime["microphone_status"] = "Unavailable"
         model.refresh()
+        model.state = replace(
+            model.state, selective_relisten_status="receipt-invalid")
         controller.render()
         light = palette_for_appearance(False)
+        light_surface = light.surface
         optional_index = next(
             index for index, row in enumerate(model.state.models)
             if row.install_state == "not_installed" and not row.required)
-        optional_pill = controller.dynamic["model_rows"][optional_index][3]
+        optional_status = controller.dynamic["model_status_views"][
+            optional_index]
         require(
-            all(abs(drawn - expected) < 0.01 for drawn, expected in zip(
-                drawn_rgb(optional_pill.textColor()), light.ink_soft)),
-            "an optional model that was never installed draws a quiet pill")
-        tint = NSColor.colorWithCGColor_(
-            optional_pill.layer().backgroundColor())
-        tint_rgb, tint_alpha = drawn_rgb(tint), float(tint.alphaComponent())
-        # Model rows sit on a card, so the tint lies over the card surface.
+            optional_status.tone == "neutral"
+            and controller.dynamic["model_rows"][optional_index][3]
+            == optional_status.text
+            and all(abs(drawn - expected) < 0.01 for drawn, expected in zip(
+                drawn_rgb(optional_status.text.textColor()), light.ink_soft))
+            and contrast_ratio(light.ink_soft, light_surface) >= 4.5,
+            "an optional model that was never installed is stated quietly, "
+            "in words that meet AA")
+        unnamed_index = next(
+            index for index, row in enumerate(model.state.models)
+            if row.install_state == "unknown")
+        unnamed_status = controller.dynamic["model_status_views"][
+            unnamed_index]
         require(
-            contrast_ratio(light.ink_soft, tuple(
-                t * tint_alpha + under * (1 - tint_alpha)
-                for t, under in zip(tint_rgb, light.surface))) >= 4.5,
-            "the quiet pill's text meets AA in light appearance")
+            str(unnamed_status.text.stringValue()) == localized_string(
+                "models.state.installed")
+            and unnamed_status.tone == "good"
+            and str(controller.dynamic["model_rows"][unnamed_index][2]
+                    .stringValue()) == "Fast recognition preview",
+            "a runtime status word is mapped to a plain phrase")
+        microphone = controller.dynamic["diag_status_views"][
+            "diag_microphone"]
+        warn_symbol = drawn_rgb(microphone.icon.contentTintColor())
+        require(
+            microphone.tone == "warn"
+            and str(microphone.text.stringValue()) == "Unavailable"
+            and contrast_ratio(warn_symbol, light_surface) >= 3.0,
+            "a health warning keeps a warning symbol that stands out")
+
+        # Nothing a default install shows on the four pages uses the
+        # runtime's internal words as its label, and every control's
+        # VoiceOver label is on the element VoiceOver reads: its cell.
+        controller.window.setContentSize_(WINDOW_DEFAULT_SIZE)
+        page_controls = [
+            control for name in SETTINGS_PANES
+            for control in controller.dynamic["settings_key_views"][name]]
+        page_controls.extend(controller.key_views_by_section["Advanced"])
+        for name, document in controller.dynamic["page_documents"].items():
+            holders = [controller.pages["Advanced"]] if name == \
+                "Advanced" else [controller.pages["Settings"],
+                                 controller.dynamic["settings_panes"][name]]
+            was_hidden = [bool(view.isHidden()) for view in holders]
+            for view in holders:
+                view.setHidden_(False)
+            shown_text = [
+                str(leaf.stringValue()) for leaf in shown_leaves(document)
+                if bool(leaf.isKindOfClass_(NSTextField))
+                and not any(bool(view.isHidden())
+                            for view in ancestors_of(leaf))]
+            for view, hidden in zip(holders, was_hidden):
+                view.setHidden_(hidden)
+            for text in shown_text:
+                require(
+                    not any(word.casefold() in text.casefold()
+                            for word in INTERNAL_STATUS_WORDS),
+                    f"{name} shows an internal word: {text!r}")
+        for control in page_controls:
+            cell = control.cell() if control.respondsToSelector_(
+                "cell") else None
+            if cell is None or bool(control.isAccessibilityElement()):
+                continue
+            require(
+                accessible_value(control, "accessibilityLabel")
+                and accessible_value(cell, "accessibilityLabel")
+                == accessible_value(control, "accessibilityLabel")
+                and accessible_value(cell, "accessibilityHelp")
+                == accessible_value(control, "accessibilityHelp"),
+                f"VoiceOver reads {control.title() if control.respondsToSelector_('title') else control}'s "
+                "label and help on its cell")
         require(model.state.notice_level == "error", "light error notice")
         require(model.state.status_phase == "degraded", "light degraded phase")
         for key in ("notice", "overview_phase"):
