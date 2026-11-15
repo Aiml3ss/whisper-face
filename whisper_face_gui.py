@@ -2866,6 +2866,19 @@ INTERNAL_STATUS_WORDS = (
     "consequential", "spans", "evidence", "Regression", "mapping",
     "pinned", "quarantined", "verifier", "receipt", "wallet",
 )
+# The receipt's status token, which counts only as the runtime writes it, in
+# capitals. "Unavailable" is also the plain word the microphone's health
+# reports, and a Mac with no microphone shows it on Advanced.
+INTERNAL_STATUS_TOKENS = ("UNAVAILABLE",)
+
+
+def internal_words_in(text: str) -> list[str]:
+    """The runtime's own words that ``text`` shows, in any case except the
+    tokens, which are matched exactly."""
+    folded = text.casefold()
+    return [word for word in INTERNAL_STATUS_WORDS
+            if (word in text if word in INTERNAL_STATUS_TOKENS
+                else word.casefold() in folded)]
 
 
 def model_status_display(
@@ -12881,9 +12894,7 @@ def run_native_appkit_smoke(*, construction_only: bool = False
                         f"{what}: VoiceOver reads {spoken!r} where the "
                         f"label is {label!r}")
                     require(
-                        not plain_words or not any(
-                            word.casefold() in label.casefold()
-                            for word in INTERNAL_STATUS_WORDS),
+                        not plain_words or not internal_words_in(label),
                         f"{what}: the label uses an internal word")
                     if bool(view.isKindOfClass_(NSTextField)):
                         require(
@@ -13300,9 +13311,13 @@ def run_native_appkit_smoke(*, construction_only: bool = False
                 and second.origin.y < first.origin.y + first.size.height)
 
         def shown_leaves(view: Any) -> list[Any]:
+            # A control is one thing, whatever its private parts are:
+            # newer systems build a text field, a button and an image view
+            # around a view of their own, and a walk that went into it
+            # would never meet the control.
             children = [child for child in view.subviews()
                         if not bool(child.isHidden())]
-            if not children:
+            if not children or bool(view.respondsToSelector_("cell")):
                 return [view]
             return [leaf for child in children
                     for leaf in shown_leaves(child)]
@@ -16108,8 +16123,7 @@ def run_native_appkit_smoke(*, construction_only: bool = False
                 str(advisory_note.stringValue()) == expected
                 == model_checks_note(found)
                 and not bool(advisory_note.isHidden())
-                and not any(word.casefold() in expected.casefold()
-                            for word in INTERNAL_STATUS_WORDS)
+                and not internal_words_in(expected)
                 and accessible_value(advisory_note, "accessibilityLabel")
                 == localized_string("pages.models.advisory.label")
                 and advisory_note.cell().cellSizeForBounds_(NSMakeRect(
@@ -16224,10 +16238,21 @@ def run_native_appkit_smoke(*, construction_only: bool = False
                             for view in ancestors_of(leaf))]
             for view, hidden in zip(holders, was_hidden):
                 view.setHidden_(hidden)
+            # The scan has to have read the page: every row's title at the
+            # least. On a system where a text field is not a leaf of the
+            # view tree it once read nothing and passed.
+            titles = [
+                str(row.title.stringValue())
+                for _header, group, _notes, _trailing in document.sections
+                for row in group.rows
+                if row.title is not None and not bool(row.isHidden())
+                and not bool(row.title.isHidden())]
+            require(
+                titles and all(title in shown_text for title in titles),
+                f"{name}: the internal-word scan reads every row's title")
             for text in shown_text:
                 require(
-                    not any(word.casefold() in text.casefold()
-                            for word in INTERNAL_STATUS_WORDS),
+                    not internal_words_in(text),
                     f"{name} shows an internal word: {text!r}")
         # The same goes for everything else VoiceOver stops on, on each
         # of the four pages and in the sidebar beside them.

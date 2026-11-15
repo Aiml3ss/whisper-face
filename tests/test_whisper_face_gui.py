@@ -3933,7 +3933,8 @@ class SettingsPagesContractTests(unittest.TestCase):
 
     def test_the_model_checks_note_says_what_it_found(self):
         import re
-        from whisper_face_gui import INTERNAL_STATUS_WORDS, model_checks_note
+        from whisper_face_gui import (
+            INTERNAL_STATUS_WORDS, internal_words_in, model_checks_note)
         # The last words are held together by no-break spaces, so the
         # note never ends with one word alone on a line.
         information_only = (
@@ -3978,9 +3979,7 @@ class SettingsPagesContractTests(unittest.TestCase):
         for note in (model_checks_note(evidence), unavailable, informational):
             with self.subTest(note=note):
                 self.assertTrue(note.endswith(information_only))
-                self.assertFalse(
-                    [word for word in INTERNAL_STATUS_WORDS
-                     if word.casefold() in note.casefold()])
+                self.assertFalse(internal_words_in(note))
                 self.assertIsNone(re.search(
                     r"shadow|advisory|wallet|attested|\bpin", note,
                     re.IGNORECASE))
@@ -4022,8 +4021,9 @@ class SettingsPagesContractTests(unittest.TestCase):
 
     def test_no_state_phrase_uses_an_internal_word(self):
         from whisper_face_gui import (
-            INTERNAL_STATUS_WORDS, relisten_status_display,
-            system_status_tone, voice_inbox_status_display)
+            INTERNAL_STATUS_TOKENS, INTERNAL_STATUS_WORDS, internal_words_in,
+            relisten_status_display, system_status_tone,
+            voice_inbox_status_display)
         phrases = [
             relisten_status_display(status) for status in (
                 "off", "ready", "warming", "enabled-not-ready",
@@ -4035,9 +4035,21 @@ class SettingsPagesContractTests(unittest.TestCase):
                     if key.startswith("pages.")]
         for phrase in phrases:
             with self.subTest(phrase=phrase):
-                self.assertFalse(
-                    [word for word in INTERNAL_STATUS_WORDS
-                     if word.casefold() in phrase.casefold()])
+                self.assertFalse(internal_words_in(phrase))
+        # The receipt's status token counts as the runtime writes it; the
+        # microphone's own plain word for the same thing does not, and a
+        # Mac with no microphone shows it.
+        self.assertEqual(INTERNAL_STATUS_TOKENS, ("UNAVAILABLE",))
+        self.assertLessEqual(
+            set(INTERNAL_STATUS_TOKENS), set(INTERNAL_STATUS_WORDS))
+        self.assertEqual(internal_words_in("Unavailable"), [])
+        self.assertEqual(internal_words_in("UNAVAILABLE"), ["UNAVAILABLE"])
+        self.assertEqual(
+            internal_words_in("Exact pinned files resolved"),
+            ["RESOLVED", "pinned"])
+        self.assertEqual(
+            internal_words_in("Runtime readiness not attested"), ["attested"])
+        self.assertEqual(internal_words_in("Ready"), [])
         # The reasons it cannot turn on all read the same way.
         self.assertEqual(relisten_status_display("evidence-required"),
                          relisten_status_display("receipt-invalid"))
