@@ -299,12 +299,19 @@ Loading a warm model took 0.12–0.19 s in the final runs, against the
 helper's 0.08–0.21 s; the runtime's includes the one-second decode of
 silence. A first load for a
 model folder Core ML has not compiled for takes about 10 s for either
-program; `setup.sh --preload` pays it at install time. That is the
-client's start-up limit (`PARAKEET_STARTUP_TIMEOUT`, 10 s), so after an OS
-update or a purge of `~/Library/Caches` either program can miss it and be
-benched, the runtime behind the helper and the helper behind Whisper; a
-review measured 9.5–10.1 s for the runtime and 10.2–11.9 s for the helper
-from a cold cache.
+program; `setup.sh --preload` pays it at install time, before the
+dictation service is started. A review measured 9.5–10.1 s for the runtime
+and 10.2–11.9 s for the helper from a cold cache, and the owner's Mac
+10.13 s for the runtime after an install. The helper's start-up limit
+(`PARAKEET_STARTUP_TIMEOUT`, 10 s) is too short for that, so the runtime
+does not use it: it loads in the background, with
+`PARAKEET_RUNTIME_START_ALLOWANCE` (60 s), while the helper answers, and
+takes over once it is ready; warm-up waits for that load so the helper is
+not started cold beside it. The helper keeps its 10 s limit for the request
+that starts it, but a start that passes it with nothing read goes on
+loading in the background for the same allowance instead of being stopped.
+Core ML keeps its compiled copy per program name and per macOS build, so
+every macOS update makes the first load of either program cold.
 
 Peak memory, from `/usr/bin/time -l` around each process for a whole run:
 

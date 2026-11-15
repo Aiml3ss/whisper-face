@@ -564,6 +564,12 @@ class HelperProcess:
     an error line, then it exits) or "request" (every request answered with
     an error). ``Desktop.helper_failure`` does the same to the FluidAudio
     helper.
+
+    With ``Desktop.runtime_start_gate`` set to an event, the runtime takes a
+    slow start, as a cold Core ML cache makes it: it holds its ready line
+    until the test sets the event, or until it is stopped, and never
+    answers if neither happens. ``Desktop.helper_start_gate`` does the same
+    to the FluidAudio helper.
     """
 
     def __init__(self, desktop, argv):
@@ -585,6 +591,7 @@ class HelperProcess:
         self._input = os.fdopen(request_read, "rb", buffering=0)
         self._output = os.fdopen(response_write, "wb", buffering=0)
         self.returncode = None
+        self.stopped = threading.Event()
         self.thread = threading.Thread(
             target=self._serve, name="fake-parakeet-helper", daemon=True)
         self.thread.start()
@@ -609,6 +616,11 @@ class HelperProcess:
 
     def _serve(self):
         try:
+            gate = getattr(self.desktop, "runtime_start_gate" if self.runtime
+                           else "helper_start_gate", None)
+            while gate is not None and not gate.wait(0.01):
+                if self.stopped.is_set():
+                    return
             if self._failure() == "start":
                 self._reply({"ok": False, "error": "model load failed"})
                 return
@@ -653,6 +665,7 @@ class HelperProcess:
         return self.returncode
 
     def terminate(self):
+        self.stopped.set()
         with contextlib.suppress(OSError):
             self.stdin.close()
 
@@ -743,6 +756,10 @@ class Desktop:
         self.runtime_requests = []
         self.runtime_failure = None
         self.helper_failure = None
+        # Set to a threading.Event, the runtime's (or the helper's) start
+        # waits for it.
+        self.runtime_start_gate = None
+        self.helper_start_gate = None
         self.whisper_requests = []
         self.main_thread_calls = []
         self.installed_models = set()

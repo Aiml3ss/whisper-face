@@ -500,8 +500,9 @@ The launcher detects the OS. A Windows Git Bash or WSL invocation of
    it is off: if it does not build or load, setup says so in one line,
    removes the partial binary and carries on. The **New speech runtime**
    switch (Advanced → Models; `"new_speech_runtime": true` in
-   `preferences.json`) asks the runtime first from the next dictation, with
-   the helper as its fallback; `PARROT_ASR_RUNTIME` in the service's
+   `preferences.json`) starts the runtime loading in the background and
+   asks it first once it is ready, with the helper answering until then and
+   as its fallback; `PARROT_ASR_RUNTIME` in the service's
    environment, when set, wins over the switch
    (`native/ParrotASRHelper/PROTOCOL.md`, "Which program answers").
 4. Creates private configuration files without overwriting existing ones.

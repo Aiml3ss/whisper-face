@@ -554,6 +554,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "models.speech_runtime.off": "Off. When on, Whisper Face runs the speech model with its own code, and goes back to the previous one by itself if anything\u00a0fails.",
         "models.speech_runtime.last.new": "{caption} The last dictation used the new\u00a0one.",
         "models.speech_runtime.last.previous": "{caption} The last dictation used the previous\u00a0one.",
+        "models.speech_runtime.preparing": "{caption} It is still getting ready, so dictation uses the previous one until\u00a0then.",
         "models.speech_runtime.help": "Off by default. When on, Whisper Face runs the speech model with its own code from the next dictation, and goes back to the previous one by itself if anything fails.",
         "models.wallet.unavailable": "Model wallet shadow advisory only · No model execution or routing · Exact pin evidence unavailable · Runtime readiness and capability evidence remain separate.",
         "models.wallet.evidence": "Model wallet shadow advisory only · No model execution or routing · Exact files resolved {resolved}/4 · Warm path observed {warm}/4 · Runtime readiness attested 0/4 · Capability bounds available 0/4.",
@@ -1947,6 +1948,8 @@ class GUIState:
     # when that is not known).
     new_speech_runtime: bool = False
     new_speech_runtime_last: str = ""
+    # Switched on and still loading: the previous program answers meanwhile.
+    new_speech_runtime_preparing: bool = False
     prefers_reduced_motion: bool = False
     onboarding_steps: tuple[OnboardingStep, ...] = field(default_factory=tuple)
     onboarding_complete: bool = False
@@ -3040,15 +3043,20 @@ def model_checks_note(advisory: str, *, locale: str = "en") -> str:
 
 
 def speech_runtime_caption(enabled: bool, last: str, *,
+                           preparing: bool = False,
                            locale: str = "en") -> str:
     """The New speech runtime row's caption, in catalog words only.
 
-    What the switch does, then which program answered the last dictation
-    when that is known. Nothing the runtime reports is shown as text.
+    What the switch does, then, switched on and still loading, that it is
+    getting ready, or else which program answered the last dictation when
+    that is known. Nothing the runtime reports is shown as text.
     """
     caption = localized_string(
         "models.speech_runtime.on" if enabled
         else "models.speech_runtime.off", locale=locale)
+    if enabled and preparing:
+        return localized_string(
+            "models.speech_runtime.preparing", locale=locale, caption=caption)
     if last not in {"new", "previous"}:
         return caption
     return localized_string(
@@ -4144,6 +4152,8 @@ def normalize_snapshot(
             source.get("new_speech_runtime_last")
             if source.get("new_speech_runtime_last") in {"new", "previous"}
             else ""),
+        new_speech_runtime_preparing=(
+            source.get("new_speech_runtime_preparing") is True),
         prefers_reduced_motion=(
             source.get("prefers_reduced_motion") is True),
         onboarding_steps=onboarding_steps,
@@ -11847,6 +11857,7 @@ if APPKIT_AVAILABLE:
                 self.dynamic["new_speech_runtime_detail"],
                 speech_runtime_caption(
                     speech_runtime, state.new_speech_runtime_last,
+                    preparing=state.new_speech_runtime_preparing,
                     locale=locale),
                 label=self._l("models.accessibility.speech_runtime"))
             sync_accessibility(
@@ -16193,6 +16204,24 @@ def run_native_appkit_smoke(*, construction_only: bool = False
                     f"models.speech_runtime.last.{last}",
                     caption=localized_string("models.speech_runtime.on")),
                 f"the new speech runtime caption names the {last} program")
+        # Still loading in the background: the caption says it is getting
+        # ready, in place of the last program, and stops once it is ready.
+        runtime["new_speech_runtime_preparing"] = True
+        model.refresh()
+        controller.render()
+        require(
+            str(speech_detail.stringValue()) == localized_string(
+                "models.speech_runtime.preparing",
+                caption=localized_string("models.speech_runtime.on")),
+            "the new speech runtime caption says it is getting ready")
+        runtime.pop("new_speech_runtime_preparing")
+        model.refresh()
+        controller.render()
+        require(
+            str(speech_detail.stringValue()) == localized_string(
+                "models.speech_runtime.last.previous",
+                caption=localized_string("models.speech_runtime.on")),
+            "the new speech runtime caption drops getting ready once ready")
         runtime.pop("new_speech_runtime_last")
         speech_toggle.setState_(NSControlStateValueOff)
         controller.newSpeechRuntimeChanged_(speech_toggle)

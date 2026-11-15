@@ -238,16 +238,44 @@ service's environment, when it is set to anything, wins over the switch:
 value the helper, and the switch then shows what runs and changes nothing.
 Off is the default, `fluidaudio`: the FluidAudio helper alone, exactly as
 before the runtime existed, and the runtime is never started. The switch's
-caption says which program answered the last dictation once one has.
+caption says which program answered the last dictation once one has, and
+that it is still getting ready while it loads.
+
+The runtime starts in the background: at app start and the moment the
+switch is turned on, and again when a request finds it not running (after
+a bench, or a crash). No request waits for it. While it loads, every
+request goes to the helper exactly as with the switch off; once its ready
+line arrives, the next request goes to it. A load is given
+`PARAKEET_RUNTIME_START_ALLOWANCE` (60 s), not the helper's
+`PARAKEET_STARTUP_TIMEOUT` (10 s): with Core ML's compiled-model cache cold
+a first load takes about 10 s (measured at 10.13 s, then 0.13 s), and
+stopping it then leaves the cache cold for the next try. Core ML keeps that
+cache per program name and per macOS build, so the first load after every
+macOS update is cold. At app start, warm-up waits (off the ASR pool, for at
+most the allowance) for a load asked for or under way before its own
+decode, so that decode warms the runtime and the helper is not started cold
+beside it; a dictation meanwhile is answered as above.
+
+The FluidAudio helper, whether it is asked first or second, starts inside
+the request as before, and a start that finishes within its 10 s is
+unchanged. One that passes the 10 s with nothing of its ready line read
+(`HelperStillLoading`, a cold cache) is not stopped: that request gives up
+at 10 s and Whisper answers it, as before, but the process goes on loading
+in the background for the rest of the allowance and then answers, or is
+stopped and benched as below. Requests while it loads go straight to
+Whisper. Any other start failure (it does not spawn, its pipe closes, the
+line is not a ready line, is malformed, or was cut off part-way when the
+10 s passed) stops it and benches it at once, as before.
 
 With the runtime selected, `PARAKEET` (the FluidAudio helper's client) asks
 `OWN_PARAKEET` (the runtime's) first for every request:
 
 - not built: the helper answers, and the log says so once;
-- does not start (no ready line within `PARAKEET_STARTUP_TIMEOUT`, or the
-  `model load failed` line): the helper answers, and the runtime is not
-  started again for 30 s, doubling with each failure in a row, up to 5
-  minutes;
+- still loading: the helper answers, and the load goes on;
+- does not start (no ready line within the allowance, the
+  `model load failed` line, or an exit): it is stopped, the helper
+  answers, and the runtime is not started again for 30 s, doubling with
+  each failure in a row, up to 5 minutes;
 - fails a request (an error line, a timeout, a malformed or oversized
   response): it is closed, the helper decodes the same audio for the same
   dictation, and the runtime is benched the same way. Starting again does

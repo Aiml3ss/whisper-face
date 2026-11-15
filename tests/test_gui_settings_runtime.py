@@ -840,6 +840,34 @@ class RuntimeStatusWindowContractTests(unittest.TestCase):
                     (state.new_speech_runtime,
                      state.new_speech_runtime_last), expected)
 
+    def test_the_window_hears_when_the_speech_runtime_is_getting_ready(
+            self):
+        # The runtime asked first is still loading in the background (a
+        # cold Core ML cache makes that about 10 s): the snapshot says so,
+        # and the window keeps it. Ready, benched or switched off, it does
+        # not.
+        from types import SimpleNamespace
+        live = SimpleNamespace(poll=lambda: None)
+        cases = (
+            (SimpleNamespace(process=None, preferred=SimpleNamespace(
+                process=None, loading=live)), True),
+            (SimpleNamespace(process=live, preferred=SimpleNamespace(
+                process=live, loading=None)), False),
+            (SimpleNamespace(process=live, preferred=SimpleNamespace(
+                process=None, loading=None)), False),
+            (SimpleNamespace(process=live, preferred=None), False),
+            (SimpleNamespace(process=None), False),
+        )
+        for parakeet, expected in cases:
+            with self.subTest(parakeet=parakeet):
+                snapshot = self.snapshot(
+                    parakeet=parakeet, speech_runtime=True)
+                self.assertIs(
+                    snapshot["new_speech_runtime_preparing"], expected)
+                self.assertIs(
+                    self.window(snapshot).new_speech_runtime_preparing,
+                    expected)
+
     def test_default_install_shows_no_warning_for_optional_models(self):
         state = self.window(self.snapshot())
 
