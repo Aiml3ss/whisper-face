@@ -3687,6 +3687,10 @@ class WhisperFaceThemeTests(unittest.TestCase):
         self.assertIn("hello world", listening.accessibility_value)
         self.assertEqual(processing.headline, "Tidying up…")
         self.assertEqual(processing.accent, "accent")
+        # While it tidies up, this read-out is the only place the
+        # percentage shows: the unsure caption no longer repeats it.
+        self.assertEqual(processing.confidence, "Recognition 61%")
+        self.assertIn("Recognition 61%", processing.accessibility_value)
         self.assertEqual(error.headline, "Uh-oh")
         self.assertNotIn(
             error.headline.lower(), "i couldn't understand that — try again")
