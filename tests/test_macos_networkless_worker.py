@@ -1,16 +1,21 @@
 import os
+import socket
 import stat
 import sys
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import macos_networkless_worker as worker_module  # noqa: E402
 from macos_networkless_worker import (  # noqa: E402
     MacOSNetworklessWorker,
     NetworklessWorkerRejected,
+    NetworklessWorkerUnavailable,
     SANDBOX_PROFILE,
     exchange_once,
     sandbox_primitive_available,
@@ -52,6 +57,67 @@ class MacOSNetworklessWorkerContractTests(unittest.TestCase):
         self.assertEqual(str(caught.exception),
                          "networkless worker request rejected")
         self.assertNotIn("private transcript text", str(caught.exception))
+
+
+class _WorkerStandIn:
+    """Stands in for the worker process and binds its socket the way the
+    real one does: present first, private a moment later, or never."""
+
+    def __init__(self, command, private_after):
+        self.path = command[-2]
+        self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.listener.bind(self.path)
+        os.chmod(self.path, 0o755)
+        self.timer = None
+        if private_after is not None:
+            self.timer = threading.Timer(private_after, self._make_private)
+            self.timer.start()
+
+    def _make_private(self):
+        try:
+            os.chmod(self.path, 0o600)
+        except OSError:
+            pass
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        if self.timer is not None:
+            self.timer.cancel()
+        self.listener.close()
+
+    kill = terminate
+
+    def wait(self, timeout=None):
+        return 0
+
+
+@unittest.skipUnless(sys.platform == "darwin", "requires macOS")
+class MacOSNetworklessWorkerStartupTests(unittest.TestCase):
+    """The worker binds its socket and only then makes it private, so the
+    caller can see the socket before its mode is final. Under load that
+    used to fail a start about once in two hundred."""
+
+    def start(self, *, private_after, timeout):
+        def launch(command, **_options):
+            return _WorkerStandIn(command, private_after)
+
+        worker = MacOSNetworklessWorker(timeout=timeout)
+        self.addCleanup(worker.close)
+        with patch.object(worker_module.subprocess, "Popen", launch):
+            worker.start()
+        return worker
+
+    def test_a_socket_seen_before_it_is_private_is_waited_for(self):
+        worker = self.start(private_after=0.05, timeout=1.0)
+
+        self.assertEqual(
+            stat.S_IMODE(worker.socket_path.stat().st_mode), 0o600)
+
+    def test_a_socket_that_never_becomes_private_is_refused(self):
+        with self.assertRaises(NetworklessWorkerUnavailable):
+            self.start(private_after=None, timeout=0.2)
 
 
 @unittest.skipUnless(sys.platform == "darwin", "requires macOS")

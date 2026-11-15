@@ -160,7 +160,11 @@ class MacOSNetworklessWorker:
         self._process = process
         self._socket_path = socket_path
         try:
-            while not socket_path.exists():
+            # The worker binds its socket and only then makes it private, so
+            # the path can be seen a moment before its mode is final. Ready
+            # means present and private; until then it is still starting,
+            # and one that never gets there is refused at the deadline.
+            while not self._socket_is_private(socket_path):
                 if process.poll() is not None:
                     raise NetworklessWorkerUnavailable(
                         "networkless worker is unavailable")
@@ -227,6 +231,13 @@ class MacOSNetworklessWorker:
                 temporary.cleanup()
             except OSError:
                 pass
+
+    @staticmethod
+    def _socket_is_private(socket_path: Path) -> bool:
+        try:
+            return stat.S_IMODE(socket_path.stat().st_mode) == 0o600
+        except OSError:
+            return False
 
     @staticmethod
     def _verify_private_endpoint(directory: Path, socket_path: Path) -> None:
