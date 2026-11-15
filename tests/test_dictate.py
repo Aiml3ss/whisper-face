@@ -90,6 +90,7 @@ from insertion_integrity import (  # noqa: E402
     InsertionCoordinator,
     InsertionLease,
     ReadbackResult,
+    ReceiptReason,
     ReceiptState,
 )
 from model_wallet import (  # noqa: E402
@@ -110,6 +111,7 @@ from model_wallet_shadow import (  # noqa: E402
 from whisper_face_theme import (  # noqa: E402
     DARK_PALETTE,
     FACE_CHIP_COLORS,
+    HUD_PASTED_CAPTION,
     LIGHT_PALETTE,
     MOTION_SPECS,
     SURFACE_SPECS,
@@ -2262,6 +2264,32 @@ class VoiceOutboxMenuTests(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 self.assertEqual(title(invalid), "Voice Outbox")
 
+    def test_copies_of_unchecked_pastes_are_counted_not_called_recoverable(
+            self):
+        title = load_definitions(
+            "voice_outbox_menu_title",
+            extra={"VOICE_OUTBOX_MAX_ITEMS": 20},
+        )["voice_outbox_menu_title"]
+
+        # Nothing in the outbox needs a home: the row says what is there.
+        calm = title(5, 0)
+        self.assertEqual(calm, "Voice Outbox — 5 pasted, not double-checked")
+        self.assertEqual(
+            title(1000, 0), "Voice Outbox — 20 pasted, not double-checked")
+        for word in ("recover", "unverified", "fail", "error", "attention",
+                     "review", "!"):
+            self.assertNotIn(word, calm.casefold())
+        # One entry that still needs a home keeps today's wording for all.
+        self.assertEqual(title(5, 1), "Voice Outbox — 5 recoverable")
+        self.assertEqual(title(5, 5), "Voice Outbox — 5 recoverable")
+        # A count that is missing or is not a count is never read as "none
+        # needs a home".
+        for unknown in (None, False, True, "0", 0.0, [], "none"):
+            with self.subTest(unknown=unknown):
+                self.assertEqual(
+                    title(5, unknown), "Voice Outbox — 5 recoverable")
+        self.assertEqual(title(0, 0), "Voice Outbox")
+
     def test_menu_only_routes_to_existing_recovery_surface(self):
         status_bar = next(
             node for node in TREE.body
@@ -2291,6 +2319,11 @@ class VoiceOutboxMenuTests(unittest.TestCase):
                       refresh_source)
         self.assertNotIn("INSERTION_COORDINATOR.recoverable()",
                          refresh_source)
+        # The row's wording comes from how many entries still need a home,
+        # read the same payload-free way.
+        self.assertIn(
+            "voice_outbox_menu_title(outbox_count, "
+            "INSERTION_COORDINATOR.needs_home_count())", refresh_source)
 
 
 class FakeStream:
@@ -3005,7 +3038,7 @@ class RecordingOverlayTests(unittest.TestCase):
         "HUD_BAR_WIDTH", "HUD_BAR_GAP", "HUD_BAR_MIN", "HUD_BAR_MAX",
         "HUD_SLOT_WIDTH", "HUD_SLOT_GAP", "HUD_TEXT_MIN", "HUD_TEXT_MAX",
         "HUD_PADDING_RIGHT", "HUD_DOT_SIZE", "HUD_DOT_GAP",
-        "HUD_MARK_SIZE", "HUD_CAPTION_LIMIT",
+        "HUD_MARK_SIZE", "HUD_RESULT_MODES", "HUD_CAPTION_LIMIT",
         "HUD_FRAMES_ENV",
     }
 
@@ -3053,7 +3086,11 @@ class RecordingOverlayTests(unittest.TestCase):
         self.assertEqual(slot("processing"), 3 * 7.0 + 2 * 6.0)
         self.assertEqual(slot("done"), ns["HUD_MARK_SIZE"])
         self.assertEqual(slot("error"), ns["HUD_MARK_SIZE"])
-        for mode in ("processing", "done", "error"):
+        # A paste that could not be read back ends a dictation too, and
+        # carries a mark of the same size as the other two results.
+        self.assertEqual(slot("pasted"), ns["HUD_MARK_SIZE"])
+        self.assertEqual(ns["HUD_RESULT_MODES"], ("done", "pasted", "error"))
+        for mode in ("processing", "done", "pasted", "error"):
             self.assertEqual(
                 width(150.0, "recording") - width(150.0, mode),
                 slot("recording") - slot(mode))
@@ -3176,7 +3213,7 @@ class RecordingOverlayTests(unittest.TestCase):
 
         ns = self._overlay()
         shades = ns["hud_pill_shades"]
-        for mode in ("recording", "processing", "done", "error"):
+        for mode in ("recording", "processing", "done", "pasted", "error"):
             for dark in (False, True):
                 for contrast in (False, True):
                     with self.subTest(
@@ -3228,9 +3265,87 @@ class RecordingOverlayTests(unittest.TestCase):
             self.assertEqual(shades("error", dark)["fill"],
                              Shade(palette.error))
             # Never amber: that is the system's microphone indicator.
-            for mode in ("recording", "processing", "done", "error"):
+            for mode in ("recording", "processing", "done", "pasted",
+                         "error"):
                 for shade in shades(mode, dark).values():
                     self.assertNotEqual(shade.color, palette.accent)
+
+    def test_a_paste_that_was_not_read_back_is_the_quiet_pill(self):
+        from whisper_face_theme import Shade, color_token, contrast_ratio
+
+        ns = self._overlay()
+        shades = ns["hud_pill_shades"]
+        for dark in (False, True):
+            for contrast in (False, True):
+                with self.subTest(dark=dark, contrast=contrast):
+                    pasted = shades("pasted", dark, contrast)
+                    # The pill listening and working are drawn on, exactly:
+                    # porcelain, with the same inks.
+                    listening = shades("recording", dark, contrast)
+                    self.assertEqual(pasted, listening)
+                    self.assertEqual(
+                        pasted["fill"], Shade(LIGHT_PALETTE.surface))
+                    # Never the colour of a verified result or of a
+                    # failure, nor anything that could be taken for one.
+                    for other in ("done", "error"):
+                        fill = shades(other, dark, contrast)["fill"]
+                        self.assertNotEqual(pasted["fill"], fill)
+                        self.assertGreater(max(
+                            abs(a - b) for a, b in zip(
+                                pasted["fill"].color, fill.color)), 0.15)
+                    self.assertNotEqual(pasted["fill"].color,
+                                        (DARK_PALETTE if dark
+                                         else LIGHT_PALETTE).error)
+                    self.assertNotEqual(
+                        pasted["fill"],
+                        color_token("stage_emerald", dark, contrast))
+                    # Its ring and arrow are an edge on the pill itself.
+                    self.assertGreaterEqual(contrast_ratio(
+                        pasted["mark_ink"].color, pasted["fill"].color), 4.5)
+
+    def test_the_pasted_mark_is_neither_a_check_nor_an_exclamation(self):
+        draw = next(
+            node for node in self._class("WaveView").body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "drawRect_")
+        calls = {}
+        for node in ast.walk(draw):
+            if not isinstance(node, ast.If):
+                continue
+            test = ast.unparse(node.test)
+            if not test.startswith("self.mode == "):
+                continue
+            for call in ast.walk(ast.Module(body=node.body, type_ignores=[])):
+                if isinstance(call, ast.Call) \
+                        and getattr(call.func, "id", "") == "_hud_draw_mark":
+                    calls[test] = {
+                        keyword.arg: ast.unparse(keyword.value)
+                        for keyword in call.keywords}
+        self.assertEqual(calls, {
+            "self.mode == 'done'": {"check": "True"},
+            "self.mode == 'pasted'": {"check": "False", "pasted": "True"},
+            "self.mode == 'error'": {"check": "False"},
+        })
+        mark = next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_hud_draw_mark")
+        # The pasted glyph returns before either of the other two is drawn.
+        branch = next(
+            node for node in mark.body
+            if isinstance(node, ast.If)
+            and ast.unparse(node.test) == "pasted")
+        self.assertIsInstance(branch.body[-1], ast.Return)
+        self.assertLess(
+            branch.lineno, next(
+                node.lineno for node in mark.body
+                if isinstance(node, ast.If)
+                and ast.unparse(node.test) == "check"))
+        # And the calm state gets the calm face: only working and a real
+        # error change it.
+        from whisper_face_render import mood_overrides
+        self.assertEqual(mood_overrides("pasted"), {})
+        self.assertNotEqual(mood_overrides("error"), {})
 
     def test_the_face_never_sits_on_a_dark_pill(self):
         from whisper_face_characters import INK
@@ -3244,7 +3359,7 @@ class RecordingOverlayTests(unittest.TestCase):
         # surface colour it measures about 1.2:1, which is why no state in
         # either appearance may fill the pill with it.
         self.assertLess(contrast_ratio(INK, DARK_PALETTE.surface), 1.5)
-        for mode in ("recording", "processing", "done", "error"):
+        for mode in ("recording", "processing", "done", "pasted", "error"):
             for dark in (False, True):
                 for contrast in (False, True):
                     with self.subTest(
@@ -3413,8 +3528,11 @@ class RecordingOverlayTests(unittest.TestCase):
 
     def test_smoke_covers_every_state_and_the_probe_can_ask_for_frames(self):
         ns = load_definitions(
-            assignments={"HUD_SMOKE_STATES", "HUD_FRAMES_ENV"})
+            assignments={"HUD_SMOKE_STATES", "HUD_SMOKE_WALK_STATES",
+                         "HUD_FRAMES_ENV"},
+            extra={"HUD_PASTED_CAPTION": HUD_PASTED_CAPTION})
         states = ns["HUD_SMOKE_STATES"]
+        walk = ns["HUD_SMOKE_WALK_STATES"]
 
         self.assertEqual(
             {state[1] for state in states},
@@ -3423,10 +3541,36 @@ class RecordingOverlayTests(unittest.TestCase):
         self.assertEqual(len(names), len(set(names)))
         # Listening with and without stable words, a voice mode, a caption
         # that has to wrap, working, the uncertain read-out, done, error.
+        # This is the list an install's construction check draws, and it
+        # does not grow.
         self.assertEqual(names, [
             "listening", "mode", "heard", "heard-long", "working",
             "uncertain", "done", "error"])
         self.assertTrue(any(len(state[2]) > 72 for state in states))
+        # The whole walk adds the paste that could not be read back, with
+        # the caption the runtime shows for it. Between the two lists every
+        # mode the overlay can end in is drawn.
+        self.assertEqual(walk, (
+            ("pasted", "pasted", HUD_PASTED_CAPTION, None, False, 0.0),))
+        self.assertEqual(
+            {state[1] for state in states + walk},
+            {"recording", "processing", "done", "pasted", "error"})
+        smoke = ast.unparse(next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "run_native_hud_smoke_test"))
+        self.assertIn(
+            "if not construction_only:\n"
+            "                    for state in HUD_SMOKE_WALK_STATES:", smoke)
+        self.assertIn(
+            "len(HUD_SMOKE_STATES) + (0 if construction_only else "
+            "len(HUD_SMOKE_WALK_STATES))", smoke)
+        check = ast.unparse(next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_hud_smoke_check_frame"))
+        self.assertIn("the pasted pill is drawn in the {other} colour", check)
+        self.assertIn("the pasted caption is not whole on one line", check)
         probe = (ROOT / "scripts" / "window_render_probe.py").read_text(
             encoding="utf-8")
         self.assertIn(f'HUD_FRAMES_ENV = "{ns["HUD_FRAMES_ENV"]}"', probe)
@@ -3712,6 +3856,49 @@ class WhisperFaceThemeTests(unittest.TestCase):
         self.assertEqual(done.confidence, "")
         self.assertEqual(
             done.accessibility_value, "Dictation done. Typed 9 words")
+
+    def test_hud_copy_says_pasted_and_not_checked_without_alarm(self):
+        pasted = hud_presentation(
+            "pasted", HUD_PASTED_CAPTION, 0.93, stable_prefix=True)
+
+        self.assertEqual(pasted.headline, "Pasted")
+        # Recognition confidence is not a score for the delivery.
+        self.assertEqual(pasted.confidence, "")
+        self.assertEqual(pasted.accent, "neutral")
+        self.assertEqual(
+            pasted.accessibility_value,
+            "Dictation pasted, not double-checked. " + HUD_PASTED_CAPTION)
+        # It does not claim what "done" claims, and is not an error.
+        done = hud_presentation("done", "Typed 9 words")
+        error = hud_presentation("error", "anything")
+        self.assertNotEqual(pasted.headline, done.headline)
+        self.assertNotEqual(pasted.headline, error.headline)
+        self.assertNotIn("done", pasted.accessibility_value.casefold())
+        self.assertNotIn("verified", pasted.accessibility_value.casefold())
+        self.assertNotIn("try", pasted.accessibility_value.casefold())
+        # VoiceOver is told it was not checked even with no caption.
+        self.assertIn(
+            "not double-checked",
+            hud_presentation("pasted", "").accessibility_value)
+
+    def test_the_pasted_caption_is_short_true_and_calm(self):
+        caption = HUD_PASTED_CAPTION
+        # Not checked, about this app, and where the copy is.
+        self.assertIn("Not checked here", caption)
+        self.assertIn("Voice Outbox", caption)
+        self.assertNotIn("\n", caption)
+        folded = caption.casefold()
+        for alarm in ("!", "✓", "uh-oh", "error", "fail", "unverified",
+                      "problem", "warning", "try again", "check target",
+                      "verified"):
+            self.assertNotIn(alarm, folded)
+        # Short enough for one line of the pill, which the overlay's smoke
+        # test measures in the pill's own font; and far inside what the
+        # pill keeps of a caption, so no word of it is ever dropped.
+        limit = load_definitions(
+            assignments={"HUD_CAPTION_LIMIT"})["HUD_CAPTION_LIMIT"]
+        self.assertLessEqual(len(caption), 40)
+        self.assertLess(len(caption), limit)
 
     def test_reduce_motion_disables_whole_head_squash(self):
         self.assertEqual(
@@ -9438,7 +9625,8 @@ class InsertionAdapterTests(unittest.TestCase):
         acknowledgements = []
         item = SimpleNamespace(
             text="recover me",
-            receipt=SimpleNamespace(utterance_id="utterance-1"),
+            receipt=SimpleNamespace(
+                utterance_id="utterance-1", pasted_unchecked=False),
         )
 
         class Pasteboard:
@@ -14551,6 +14739,488 @@ class AutoreleasePoolTests(unittest.TestCase):
         self.assertIn("with cocoa_pool():\n                try:", source)
 
 
+class UncheckedPasteDeliveryTests(unittest.TestCase):
+    """A paste that was sent and could not be read back is not an error.
+
+    ``finish_and_process`` runs from a decoded take to the record it
+    writes, over the real commit path, a real coordinator and the real
+    reporters. Only the edges are fakes: Accessibility, the pasteboard,
+    the overlay, the menu-bar face, the speaker and the transcript log.
+    """
+
+    SPOKEN = "Meet me at the station."
+    BUNDLE = "com.apple.MobileSMS"
+    BEFORE = "Hi. "
+
+    def deliver(self, outcome, *, snippet=None, is_macos=True,
+                paused=False, route="standard", spoken=None,
+                coordinator=None, utterance="take-1"):
+        """One dictation with a named delivery outcome; what it did."""
+        spoken = self.SPOKEN if spoken is None else spoken
+        seen = SimpleNamespace(
+            pasted=[], modes=[], statuses=[], sounds=[], logs=[],
+            records=[], threads=[], undoable=[], delayed=[], delays=[],
+            caption={},
+            coordinator=coordinator or InsertionCoordinator())
+        element, elsewhere = object(), object()
+        field = {"value": self.BEFORE}
+        clock = [100.0]
+
+        def paste(text):
+            if outcome == "paste-raised":
+                raise RuntimeError("synthetic paste failure")
+            seen.pasted.append(text)
+            if outcome == "conflict":
+                field["value"] = "something else entirely"
+            else:
+                field["value"] = self.BEFORE + text
+
+        class Thread:
+            def __init__(self, target=None, args=(), **_kwargs):
+                self.started = (getattr(target, "__name__", str(target)),
+                                args)
+
+            def start(self):
+                seen.threads.append(self.started)
+
+        class Threading:
+            def __getattr__(self, name):
+                return getattr(threading, name)
+
+        fake_threading = Threading()
+        fake_threading.Thread = Thread
+
+        def learn_from_corrections(*_args):
+            return None
+
+        def learn_snippet_edit(*_args):
+            return None
+
+        counters = __import__("collections").defaultdict(int)
+        compiled = SimpleNamespace(
+            text=spoken, confidence=0.93, decisions=(), anchors=(),
+            stable_prefix="")
+        ns = load_definitions(
+            "finish_and_process", "commit_insertion",
+            "report_dictation_problem", "report_unchecked_paste",
+            "dictation_feedback_delay", "dictation_success_sound",
+            "insertion_join_prefix", "insertion_capability_buckets",
+            "unresolved_destination_id", "destination_observation",
+            "focus_destination_id", "focus_destination_matches",
+            "opaque_focus_context", "bounded_focus_text",
+            "capture_insertion_lease", "insertion_readback",
+            "classify_readback_conflict", "resolve_insertion_target",
+            "FocusSnapshot", "UndoableInsertion", "build_undoable_insertion",
+            "PasteReceipt", "make_paste_receipt", "committed_paste_receipt",
+            "paste_snippet_and_watch", "opaque_destination_evidence",
+            "ax_value_kind", "ax_role_name",
+            "collapse_repeats", "extract_tone_override", "needs_llm_cleanup",
+            "quick_clean", "is_hallucination", "weak_whisper_evidence",
+            "strip_context_echo",
+            assignments={
+                "TONE", "TONE_OVERRIDE_RE", "TONE_ALIASES", "CONT_END",
+                "READBACK_TIMEOUT", "DICTATION_ERROR_SECONDS",
+                "DICTATION_UNCHECKED_SECONDS", "AX_ERROR_KINDS",
+                "AX_VALUE_TYPE_KINDS", "AX_ROLE_NAME_RE",
+            } | CleanupGuardTests.HALLUCINATION_GUARD,
+            extra={
+                "np": np,
+                "dataclass": dataclass,
+                "unicodedata": __import__("unicodedata"),
+                "math": __import__("math"),
+                "IS_MACOS": is_macos,
+                "IS_WINDOWS": not is_macos,
+                "threading": fake_threading,
+                "time": SimpleNamespace(
+                    perf_counter=lambda: clock[0],
+                    monotonic=lambda: clock[0],
+                    time=lambda: clock[0],
+                    time_ns=lambda: 10,
+                    sleep=lambda seconds: clock.__setitem__(
+                        0, clock[0] + seconds)),
+                "NUMBER_WORDS": NUMBER_WORDS,
+                "compile_cleanup": compile_cleanup,
+                "release_should_wait_for_tail": lambda _rec: False,
+                "can_reuse_speculation": lambda *_args: False,
+                "ASR_POOL": SimpleNamespace(
+                    submit=lambda *_args, **_kwargs: SimpleNamespace()),
+                "BoundedRecognitionFuture": lambda *_args: SimpleNamespace(),
+                "transcribe_detailed": object(),
+                "SAMPLE_RATE": 16_000,
+                "MIN_SECONDS": 0.25,
+                "GATE_PEAK_RMS": 0.002,
+                "peak_rms": lambda _audio: 0.1,
+                "audio_gate_measurements": lambda _audio: (1.0, 0.1),
+                "assemble_raw": lambda *_args: Recognition(
+                    spoken, confidence=0.93, engine="parakeet-unified",
+                    audio_duration=1.0),
+                "Recognition": Recognition,
+                "looks_like_prompt_echo": lambda _text: False,
+                "consume_risky_action_confirmation_voice":
+                    lambda _text: False,
+                "compile_voice_evidence": lambda *_args, **_kwargs: (
+                    SimpleNamespace(
+                        context=SimpleNamespace(candidates=()),
+                        prosody=()),
+                    compiled),
+                "runtime_consequence_evidence":
+                    lambda *_args, **_kwargs: 0.0,
+                "active_consequence_verifier": lambda: None,
+                "runtime_context_firewall_evidence": lambda *_args: 0.0,
+                "learned_alternatives": lambda _text, _bundle: [],
+                "PIPELINE_STATE": {
+                    "last_consequence_route": route,
+                    "last_alternatives": []},
+                "CAPTION": seen.caption,
+                "PAUSED": {"on": paused},
+                "HUD_PASTED_CAPTION": HUD_PASTED_CAPTION,
+                "queue_voice_object_command": lambda *_args: False,
+                "apply_spoken_edit_command": lambda *_args: False,
+                "match_snippet": lambda _text: snippet,
+                "_load_snippet_map": lambda: {},
+                "_mask_snippets_inline": lambda text, _snippets: (text, {}),
+                "is_verbatim_app": lambda _bundle: False,
+                "cursor_context": lambda: None,
+                "tone_for": lambda _bundle: "default",
+                "apply_vocabulary_casing": lambda text: text,
+                "delayed_cleanup_scheduling_enabled": lambda: True,
+                "schedule_delayed_cleanup": lambda *args, **_kwargs: (
+                    seen.delayed.append(args[0]) or True),
+                "learn_snippet_edit": learn_snippet_edit,
+                "learn_from_corrections": learn_from_corrections,
+                "record_undoable_insertion": seen.undoable.append,
+                "consequence_state_snapshot": lambda: counters,
+                "context_firewall_state_snapshot": lambda: counters,
+                "append_transcript": lambda raw, clean, bundle, path, **kw: (
+                    seen.records.append(SimpleNamespace(
+                        raw=raw, clean=clean, bundle=bundle, path=path,
+                        metrics=kw["metrics"]))),
+                "INSERTION_COORDINATOR": seen.coordinator,
+                "InsertionLease": InsertionLease,
+                "DestinationObservation": DestinationObservation,
+                "ReadbackResult": ReadbackResult,
+                "ReceiptState": ReceiptState,
+                "frontmost_bundle": lambda: self.BUNDLE,
+                "frontmost_window_destination": lambda _bundle: None,
+                "user_input_signature": lambda: None,
+                "_ax_elements_equal": lambda left, right: left is right,
+                "_ax_text": lambda _element: field["value"],
+                "paste": paste,
+                "play": seen.sounds.append,
+                "set_status": seen.statuses.append,
+                "print": lambda *args: seen.logs.append(
+                    " ".join(str(arg) for arg in args)),
+                "schedule_dictation_feedback_dismissal":
+                    lambda rec, _hud, _active: seen.delays.append(
+                        ns["dictation_feedback_delay"](rec)),
+                "DICTATION_PROCESS_ORDER": SimpleNamespace(
+                    wait=lambda _ticket: None),
+                "LAST_USE": {},
+                "AppHelper": SimpleNamespace(
+                    callAfter=lambda function, *args: function(*args)),
+            },
+        )
+        snapshot = ns["FocusSnapshot"]
+        readable = snapshot(
+            element=element, text=self.BEFORE,
+            selection=(len(self.BEFORE), 0), window_title="Chat")
+        hidden = snapshot(
+            element=element, text=None, selection=None, window_title="Chat")
+        at_press = hidden if outcome == "unchecked" else readable
+        at_release = {
+            "destination-changed": snapshot(
+                element=elsewhere, text="", selection=(0, 0),
+                window_title="Notes"),
+            "target-unreadable": None,
+        }.get(outcome, at_press)
+        ns["focused_snapshot"] = lambda: at_release
+        # Every other collaborator is inert: called, returns nothing, and
+        # so takes no branch of its own.
+        for name in ("finish_and_process", "paste_snippet_and_watch"):
+            definition = next(
+                node for node in TREE.body
+                if isinstance(node, ast.FunctionDef) and node.name == name)
+            for node in ast.walk(definition):
+                if isinstance(node, ast.Name) and node.id not in ns \
+                        and not hasattr(builtins, node.id):
+                    ns[node.id] = lambda *_args, **_kwargs: None
+        lease = (ns["capture_insertion_lease"](
+            at_press, self.BUNDLE, utterance) if is_macos else None)
+        recorder = SimpleNamespace(
+            released_at=1.0, press_at=0.5, capture_ready_at=0.6,
+            speculative_future=None, speculative_invalid=False,
+            speculative_start=0, speculative_end=0, prompt=None,
+            language="en", process_ticket=None, recording=False,
+            uncertain=False, feedback_seconds=0.0, mode="capture",
+            source="hold", bundle_at_press=self.BUNDLE, context_terms=(),
+            context_pack=None, utterance_id=utterance,
+            insertion_lease=lease, insertion_receipt=None,
+            insertion_opaque_evidence=(
+                ns["opaque_destination_evidence"](
+                    at_press, lease,
+                    read=lambda _element, attribute: {
+                        "AXRole": (0, "AXTextArea"),
+                        "AXSubrole": (-25205, None),
+                        "AXValue": (-25212, None),
+                        "AXSelectedTextRange": (-25205, None),
+                    }[attribute],
+                    focused=lambda: (0, element),
+                    reported_range=lambda _element: None)
+                if is_macos else None),
+            focus_at_press=at_press if is_macos else None,
+            input_signature_at_press=None,
+            stop=lambda: np.ones(16_000, dtype=np.float32),
+            cut_samples=8_000, chunks=[],
+        )
+        hud = SimpleNamespace(showMode_=seen.modes.append)
+        ns["finish_and_process"](recorder, hud, {})
+        for log in seen.logs:
+            # The harness must never pass by the pipeline falling over.
+            self.assertNotIn("follow-up failed", log)
+            self.assertNotIn("dictation failed during", log)
+        seen.recorder = recorder
+        seen.receipt = recorder.insertion_receipt
+        seen.text = getattr(recorder, "committed_text", None)
+        return seen
+
+    def assert_unverified_everywhere(self, seen):
+        """The trust path: nothing may record this dictation as proven."""
+        self.assertNotEqual(seen.receipt.state, ReceiptState.VERIFIED)
+        # Undo has nothing recorded for it, and neither correction learning
+        # nor a delayed cleanup is started on its text.
+        self.assertEqual(seen.undoable, [])
+        self.assertEqual(seen.threads, [])
+        self.assertEqual(seen.delayed, [])
+        # Its copy is in the Voice Outbox, whole.
+        kept = seen.coordinator.recoverable()
+        self.assertEqual([item.text for item in kept], [seen.text])
+        self.assertEqual(seen.coordinator.recoverable_count(), 1)
+
+    def test_an_unchecked_paste_is_shown_calmly_and_recorded_unverified(self):
+        seen = self.deliver("unchecked")
+
+        # It was pasted, once.
+        self.assertEqual(seen.pasted, [self.SPOKEN])
+        self.assertTrue(seen.receipt.pasted_unchecked)
+        # The overlay's own calm mode, the ordinary cue, the ordinary face.
+        self.assertEqual(seen.modes, ["pasted"])
+        self.assertEqual(seen.sounds, ["Pop"])
+        self.assertEqual(seen.statuses, ["idle"])
+        self.assertEqual(seen.caption["text"], HUD_PASTED_CAPTION)
+        self.assertIsNone(seen.caption["confidence"])
+        self.assertFalse(seen.caption["stable_prefix"])
+        # It stays up briefly: shorter than a problem does, long enough to
+        # read two short lines.
+        error = load_definitions(
+            assignments={"DICTATION_ERROR_SECONDS"})["DICTATION_ERROR_SECONDS"]
+        self.assertEqual(len(seen.delays), 1)
+        self.assertGreaterEqual(seen.delays[0], 1.0)
+        self.assertLessEqual(seen.delays[0], 0.75 * error)
+        # And every record of it is unverified.
+        self.assert_unverified_everywhere(seen)
+        self.assertEqual(len(seen.records), 1)
+        record = seen.records[0]
+        self.assertTrue(record.path.startswith("outbox/"))
+        metrics = record.metrics
+        self.assertIs(metrics["insertion_verified"], False)
+        self.assertIs(metrics["paste_attempted"], True)
+        self.assertEqual(metrics["insertion_state"], "unverifiable")
+        self.assertEqual(metrics["insertion_reason"], "readback_unavailable")
+        self.assertEqual(metrics["insertion_target"], "opaque")
+        self.assertEqual(metrics["insertion_readback"], "unavailable")
+        self.assertIs(metrics["delayed_cleanup_scheduled"], False)
+        # The log says what happened without the old alarm, and without a
+        # word of the dictation.
+        delivery = [log for log in seen.logs if log.startswith("[insertion]")]
+        self.assertEqual(delivery, [
+            "[insertion] pasted, not double-checked (readback_unavailable); "
+            "copy kept in Voice Outbox"])
+        for log in seen.logs:
+            self.assertNotIn(self.SPOKEN, log)
+
+    def test_the_calm_cue_is_whatever_a_landed_dictation_would_play(self):
+        # A dictation routed to review plays its review cue either way;
+        # the calm outcome never invents a sound of its own.
+        self.assertEqual(
+            self.deliver("unchecked", route="review").sounds, ["Ping"])
+        self.assertEqual(
+            self.deliver("verified", route="review").sounds, ["Ping"])
+        # Paused in the meantime: the face goes back to paused, not idle.
+        self.assertEqual(
+            self.deliver("unchecked", paused=True).statuses, ["off"])
+
+    def test_every_real_failure_keeps_the_error(self):
+        unverified = "Paste unverified — check target; saved in Voice Outbox"
+        changed = "Destination changed — saved in Voice Outbox"
+        error = load_definitions(
+            assignments={"DICTATION_ERROR_SECONDS"})["DICTATION_ERROR_SECONDS"]
+        for outcome, caption, state, attempted, pasted in (
+            # A readback that read different text.
+            ("conflict", unverified, ReceiptState.CONFLICT, True, 1),
+            # A paste whose own outcome is unknown.
+            ("paste-raised", unverified, ReceiptState.UNRESOLVED, True, 0),
+            # Focus moved before the paste: never attempted.
+            ("destination-changed", changed, ReceiptState.CONFLICT, False, 0),
+            # The destination could not be read at release: never attempted.
+            ("target-unreadable", changed, ReceiptState.UNVERIFIABLE,
+             False, 0),
+        ):
+            with self.subTest(outcome=outcome):
+                seen = self.deliver(outcome)
+                self.assertEqual(seen.receipt.state, state)
+                self.assertEqual(seen.receipt.paste_attempted, attempted)
+                self.assertFalse(seen.receipt.pasted_unchecked)
+                self.assertEqual(len(seen.pasted), pasted)
+                # Coral, "Uh-oh", the error cue, the error face, for the
+                # full length of an error.
+                self.assertEqual(seen.modes, ["error"])
+                self.assertEqual(seen.sounds, ["Funk"])
+                self.assertEqual(seen.statuses, ["err"])
+                self.assertEqual(seen.caption["text"], caption)
+                self.assertEqual(seen.delays, [error])
+                self.assertNotIn("pasted", seen.modes)
+                self.assert_unverified_everywhere(seen)
+                record = seen.records[0]
+                self.assertTrue(record.path.startswith("outbox/"))
+                self.assertIs(record.metrics["insertion_verified"], False)
+                self.assertIs(record.metrics["paste_attempted"], attempted)
+
+    def test_a_failed_recognition_keeps_the_error(self):
+        seen = self.deliver("unchecked", spoken="")
+
+        self.assertEqual(seen.pasted, [])
+        self.assertEqual(seen.modes, ["error"])
+        self.assertEqual(seen.sounds, ["Funk"])
+        self.assertEqual(seen.statuses, ["err"])
+        self.assertEqual(
+            seen.caption["text"], "I couldn't understand that — try again")
+        self.assertEqual(seen.records, [])
+        self.assertEqual(seen.coordinator.recoverable(), ())
+
+    def test_a_verified_paste_is_untouched_by_the_calm_outcome(self):
+        seen = self.deliver("verified")
+
+        self.assertEqual(seen.pasted, [self.SPOKEN])
+        self.assertEqual(seen.receipt.state, ReceiptState.VERIFIED)
+        # No result pill at all, as before: the cue, and it is gone.
+        self.assertEqual(seen.modes, [])
+        self.assertEqual(seen.statuses, [])
+        self.assertEqual(seen.sounds, ["Pop"])
+        self.assertEqual(seen.delays, [0.0])
+        self.assertEqual(len(seen.undoable), 1)
+        self.assertEqual(seen.undoable[0].inserted, self.SPOKEN)
+        self.assertEqual(
+            [name for name, _args in seen.threads],
+            ["learn_from_corrections"])
+        self.assertEqual(seen.coordinator.recoverable(), ())
+        record = seen.records[0]
+        self.assertFalse(record.path.startswith("outbox/"))
+        self.assertIs(record.metrics["insertion_verified"], True)
+        self.assertEqual(record.metrics["insertion_target"], "readable")
+        # A readable destination has nothing to explain.
+        for key in self.OPAQUE_METRICS:
+            self.assertIsNone(record.metrics[key])
+
+    def test_windows_has_no_receipt_and_never_the_calm_mode(self):
+        seen = self.deliver("verified", is_macos=False)
+
+        self.assertEqual(seen.pasted, [self.SPOKEN])
+        self.assertIsNone(seen.receipt)
+        self.assertEqual(seen.modes, [])
+        self.assertEqual(seen.statuses, [])
+        self.assertEqual(seen.sounds, ["Pop"])
+        record = seen.records[0]
+        self.assertFalse(record.path.startswith("outbox/"))
+        self.assertEqual(record.metrics["insertion_state"], "legacy")
+        self.assertEqual(
+            record.metrics["insertion_reason"], "unsupported_field")
+        self.assertIs(record.metrics["insertion_verified"], True)
+        for key in ("insertion_target", *self.OPAQUE_METRICS):
+            self.assertIsNone(record.metrics[key])
+        self.assertEqual(seen.coordinator.recoverable(), ())
+
+    def test_the_snippet_path_uses_the_same_three_outcomes(self):
+        snippet = ("signature", "Best,\nBerg")
+        calm = self.deliver("unchecked", snippet=snippet)
+        self.assertEqual(calm.pasted, ["Best,\nBerg"])
+        self.assertEqual(calm.modes, ["pasted"])
+        self.assertEqual(calm.sounds, ["Pop"])
+        self.assertEqual(calm.statuses, ["idle"])
+        self.assertEqual(calm.caption["text"], HUD_PASTED_CAPTION)
+        # Its edits are not learned from, and its copy is kept.
+        self.assertEqual(calm.threads, [])
+        self.assertEqual(
+            [item.text for item in calm.coordinator.recoverable()],
+            ["Best,\nBerg"])
+        self.assertEqual(
+            [log for log in calm.logs if log.startswith("[insertion]")],
+            ["[insertion] snippet pasted, not double-checked "
+             "(readback_unavailable); copy kept in Voice Outbox"])
+
+        for outcome, caption in (
+            ("conflict", "Paste unverified — check target; saved in Outbox"),
+            ("paste-raised",
+             "Paste unverified — check target; saved in Outbox"),
+            ("destination-changed",
+             "Destination changed — saved in Voice Outbox"),
+        ):
+            with self.subTest(outcome=outcome):
+                seen = self.deliver(outcome, snippet=snippet)
+                self.assertEqual(seen.modes, ["error"])
+                self.assertEqual(seen.sounds, ["Funk"])
+                self.assertEqual(seen.statuses, ["err"])
+                self.assertEqual(seen.caption["text"], caption)
+                self.assertEqual(seen.threads, [])
+
+        verified = self.deliver("verified", snippet=snippet)
+        self.assertEqual(verified.modes, [])
+        self.assertEqual(verified.sounds, ["Pop"])
+        self.assertEqual(
+            [name for name, _args in verified.threads],
+            ["learn_snippet_edit"])
+
+    OPAQUE_METRICS = (
+        "insertion_opaque_reason", "insertion_focus_kind",
+        "insertion_focus_role", "insertion_focus_subrole",
+        "insertion_value_kind", "insertion_selection_kind")
+
+    def test_the_record_says_why_the_destination_could_not_be_read(self):
+        seen = self.deliver("unchecked")
+
+        metrics = seen.records[0].metrics
+        self.assertEqual(
+            {key: metrics[key] for key in self.OPAQUE_METRICS}, {
+                "insertion_opaque_reason": "value-unreadable",
+                "insertion_focus_kind": "element",
+                "insertion_focus_role": "AXTextArea",
+                "insertion_focus_subrole": "none",
+                "insertion_value_kind": "no-value",
+                "insertion_selection_kind": "unsupported",
+            })
+        # Nothing the app displayed, and none of the dictation, is in it.
+        written = json.dumps(metrics)
+        self.assertNotIn("Chat", written)
+        self.assertNotIn(self.SPOKEN, written)
+
+    def test_five_in_a_row_are_five_calm_copies(self):
+        coordinator = InsertionCoordinator()
+        for index in range(5):
+            seen = self.deliver(
+                "unchecked", coordinator=coordinator,
+                utterance=f"take-{index}")
+            self.assertEqual(seen.modes, ["pasted"])
+            self.assertEqual(seen.statuses, ["idle"])
+        self.assertEqual(coordinator.recoverable_count(), 5)
+        self.assertEqual(coordinator.needs_home_count(), 0)
+        # One that really failed is told apart from them at once.
+        seen = self.deliver(
+            "destination-changed", coordinator=coordinator,
+            utterance="take-5")
+        self.assertEqual(seen.modes, ["error"])
+        self.assertEqual(coordinator.recoverable_count(), 6)
+        self.assertEqual(coordinator.needs_home_count(), 1)
+
+
 class OpaqueDestinationEvidenceTests(unittest.TestCase):
     """Why a destination could not be read, without reading it.
 
@@ -14821,6 +15491,153 @@ class OpaqueDestinationEvidenceTests(unittest.TestCase):
             and node.name == "capture_insertion_lease"))
         self.assertNotIn("opaque_destination_evidence", lease)
         self.assertNotIn("_ax_attribute_read", lease)
+
+
+class UncheckedPasteReportTests(unittest.TestCase):
+    def report(self, *, paused=False, uncertain=False, **kwargs):
+        seen = SimpleNamespace(
+            caption={"text": "the dictated words", "confidence": 0.9,
+                     "stable_prefix": True},
+            statuses=[], modes=[], sounds=[], logs=[])
+        ns = load_definitions(
+            "report_unchecked_paste", "report_dictation_problem",
+            "dictation_feedback_delay",
+            assignments={"DICTATION_ERROR_SECONDS",
+                         "DICTATION_UNCHECKED_SECONDS"},
+            extra={
+                "AppHelper": SimpleNamespace(
+                    callAfter=lambda function, value: function(value)),
+                "CAPTION": seen.caption,
+                "HUD_PASTED_CAPTION": HUD_PASTED_CAPTION,
+                "PAUSED": {"on": paused},
+                "math": __import__("math"),
+                "play": seen.sounds.append,
+                "print": seen.logs.append,
+                "set_status": seen.statuses.append,
+            },
+        )
+        seen.ns = ns
+        seen.recorder = SimpleNamespace(
+            uncertain=uncertain, feedback_seconds=0.0)
+        ns["report_unchecked_paste"](
+            seen.recorder, SimpleNamespace(showMode_=seen.modes.append),
+            "[insertion] pasted, not double-checked", **kwargs)
+        seen.delay = ns["dictation_feedback_delay"](seen.recorder)
+        return seen
+
+    def test_it_is_the_calm_mode_the_ordinary_cue_and_the_ordinary_face(self):
+        seen = self.report()
+
+        self.assertEqual(seen.modes, ["pasted"])
+        self.assertEqual(seen.sounds, ["Pop"])
+        self.assertEqual(seen.statuses, ["idle"])
+        self.assertEqual(seen.logs, ["[insertion] pasted, not double-checked"])
+        # The transcript leaves the pill; what is shown is the fixed line.
+        self.assertEqual(seen.caption, {
+            "text": HUD_PASTED_CAPTION, "confidence": None,
+            "stable_prefix": False})
+        self.assertNotIn("err", seen.statuses)
+        self.assertNotIn("Funk", seen.sounds)
+        self.assertEqual(self.report(paused=True).statuses, ["off"])
+        self.assertEqual(self.report(sound="Ping").sounds, ["Ping"])
+
+    def test_it_stays_up_clearly_less_long_than_an_error(self):
+        seen = self.report()
+        unchecked = seen.ns["DICTATION_UNCHECKED_SECONDS"]
+        error = seen.ns["DICTATION_ERROR_SECONDS"]
+
+        self.assertEqual(seen.delay, unchecked)
+        # Two short lines take more than a second to read; a problem is
+        # held at least a third longer than this is.
+        self.assertGreaterEqual(unchecked, 1.2)
+        self.assertLessEqual(unchecked, 0.75 * error)
+        # A take that was already being held for an uncertain result keeps
+        # the longer hold, exactly as it would after an error.
+        self.assertEqual(self.report(uncertain=True).delay, 3.0)
+
+    def test_a_problem_report_is_still_the_error(self):
+        seen = self.report()
+        seen.ns["report_dictation_problem"](
+            seen.recorder, SimpleNamespace(showMode_=seen.modes.append),
+            "Destination changed — saved in Voice Outbox", "[insertion] x")
+
+        self.assertEqual(seen.modes, ["pasted", "error"])
+        self.assertEqual(seen.statuses, ["idle", "err"])
+        self.assertEqual(seen.sounds, ["Pop", "Funk"])
+        self.assertEqual(
+            seen.ns["dictation_feedback_delay"](seen.recorder),
+            seen.ns["DICTATION_ERROR_SECONDS"])
+
+
+class VoiceOutboxCopyOrderTests(unittest.TestCase):
+    def outbox(self, *entries):
+        """A real coordinator holding ``(utterance, text, outcome)``."""
+        coordinator = InsertionCoordinator()
+        for utterance, text, outcome in entries:
+            lease = InsertionLease.capture_opaque(
+                utterance, "bundle:window", "context")
+            coordinator.stage(lease, text)
+            current = DestinationObservation.capture(
+                "bundle:window" if outcome == "unchecked" else "bundle:other",
+                (0, 0), "context")
+            coordinator.commit(
+                utterance, current, lambda _text: None,
+                ReadbackResult.unverifiable)
+        copied = []
+
+        class Pasteboard:
+            def clearContents(self):
+                return None
+
+            def setString_forType_(self, text, _kind):
+                copied.append(text)
+                return True
+
+        ns = load_definitions(
+            "copy_latest_outbox",
+            extra={
+                "INSERTION_COORDINATOR": coordinator,
+                "NSPasteboard": SimpleNamespace(
+                    generalPasteboard=lambda: Pasteboard()),
+                "NSPasteboardTypeString": "public.utf8-plain-text",
+            },
+        )
+        return coordinator, ns["copy_latest_outbox"], copied
+
+    def test_what_still_needs_a_home_is_copied_before_unchecked_copies(self):
+        coordinator, copy_latest, copied = self.outbox(
+            ("u1", "needs a home, older", "not-pasted"),
+            ("u2", "pasted one", "unchecked"),
+            ("u3", "needs a home, newer", "not-pasted"),
+            ("u4", "pasted two", "unchecked"),
+            ("u5", "pasted three", "unchecked"),
+        )
+        self.assertEqual(coordinator.needs_home_count(), 2)
+
+        for _ in range(5):
+            copy_latest()
+
+        # Newest first among what needs a home, then newest first among
+        # the copies of pastes that could not be read back.
+        self.assertEqual(copied, [
+            "needs a home, newer", "needs a home, older",
+            "pasted three", "pasted two", "pasted one"])
+        self.assertEqual(coordinator.recoverable(), ())
+        with self.assertRaises(RuntimeError):
+            copy_latest()
+
+    def test_an_outbox_of_unchecked_copies_is_still_copied_newest_first(self):
+        coordinator, copy_latest, copied = self.outbox(
+            ("u1", "pasted one", "unchecked"),
+            ("u2", "pasted two", "unchecked"),
+        )
+
+        copy_latest()
+
+        self.assertEqual(copied, ["pasted two"])
+        self.assertEqual(
+            [item.text for item in coordinator.recoverable()],
+            ["pasted one"])
 
 
 if __name__ == "__main__":
