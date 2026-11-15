@@ -93,6 +93,16 @@ and generated release metadata. The DMG's filesystem UUID and compression
 metadata are not byte reproducible, so reproducibility claims apply to its
 verified logical contents, not to byte-identical DMG files across builds.
 
+The logical-tree digest covers the bundle's `.git` directory too. The packager
+therefore receives the commit's objects as loose objects, not as the pack Git
+would otherwise keep: a fetched pack's bytes depend on the build machine's own
+repository state and on a threaded delta search, so two builds of one revision
+used to ship different pack files and different digests. Loose objects make
+every covered file byte-identical between builds of one revision on one build
+host. Their bytes still depend on the host's zlib, so a build on a different
+machine may record a different digest for the same revision. The packager
+fails if anything other than a loose object lands in `.git/objects`.
+
 ## Build an unsigned local preview
 
 Run this on Apple Silicon macOS from any worktree state:

@@ -516,26 +516,47 @@ class WindowsPackagerTests(unittest.TestCase):
             self.assertEqual(status, "")
 
     def test_the_tree_digest_is_deterministic_across_builds(self):
+        # Three builds, not two: when the shipped Git objects were a fetched
+        # pack, a pair of builds often matched by chance.
         with tempfile.TemporaryDirectory() as directory:
-            second = Path(directory) / "dist"
-            subprocess.run(
-                [
-                    "bash", str(PACKAGE_SCRIPT),
-                    "--version", "1.2.3",
-                    "--revision", self.revision,
-                    "--channel", "preview",
-                    "--output-dir", str(second),
-                ],
-                cwd=ROOT, text=True, capture_output=True, check=True)
+            bundles = [self.bundle]
+            for build in ("second", "third"):
+                output = Path(directory) / build
+                subprocess.run(
+                    [
+                        "bash", str(PACKAGE_SCRIPT),
+                        "--version", "1.2.3",
+                        "--revision", self.revision,
+                        "--channel", "preview",
+                        "--output-dir", str(output),
+                    ],
+                    cwd=ROOT, text=True, capture_output=True, check=True)
+                bundles.append(output / self.bundle.name)
             receipts = []
-            for bundle in (self.bundle, second / self.bundle.name):
+            for bundle in bundles:
                 with zipfile.ZipFile(bundle) as handle:
                     receipts.append(json.loads(handle.read(
                         "Whisper Face 1.2.3/PACKAGE-CONTENTS.json")))
             self.assertEqual(receipts[0], receipts[1])
+            self.assertEqual(receipts[0], receipts[2])
             self.assertEqual(receipts[0]["source_revision"], self.revision)
             self.assertEqual(receipts[0]["version"], "1.2.3")
             self.assertEqual(receipts[0]["root_name"], "Whisper Face 1.2.3")
+
+    def test_the_shipped_git_objects_are_all_loose(self):
+        # The digest covers .git. A pack's bytes depend on the source
+        # repository's packing state and a threaded delta search, so a pack,
+        # a multi-pack index or a commit-graph in the bundle would make the
+        # digest differ between builds of one revision. Loose objects do not.
+        prefix = "Whisper Face 1.2.3/.git/objects/"
+        with zipfile.ZipFile(self.bundle) as handle:
+            files = [
+                item.filename[len(prefix):] for item in handle.infolist()
+                if item.filename.startswith(prefix) and not item.is_dir()]
+        self.assertTrue(files)
+        for name in files:
+            with self.subTest(name=name):
+                self.assertRegex(name, r"\A[0-9a-f]{2}/[0-9a-f]{38}\Z")
 
     def test_the_manifest_and_checksums_cover_the_published_bundle(self):
         manifest = json.loads(
@@ -565,6 +586,10 @@ class WindowsReleaseContractTests(unittest.TestCase):
         for expected in (
             'git -C "$REPO_DIR" archive "$FULL_REVISION"',
             "fetch -q --depth 1",
+            # Loose objects keep the digest of .git stable across builds.
+            "-c fetch.unpackLimit=2147483647",
+            "-c maintenance.auto=false",
+            "holds objects that are not loose",
             "config core.logAllRefUpdates false",
             "packaged checkout lost its immutable source revision",
             "https://github.com/Aiml3ss/whisper-face.git",

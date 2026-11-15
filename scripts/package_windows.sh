@@ -123,7 +123,20 @@ git -C "$REPO_DIR" archive "$FULL_REVISION" | tar -x -C "$BUNDLE_DIR"
 # local fetch path, and identify the public repository as origin.
 git -C "$BUNDLE_DIR" init -q
 git -C "$BUNDLE_DIR" config core.logAllRefUpdates false
-git -C "$BUNDLE_DIR" fetch -q --depth 1 "$REPO_DIR" "$FULL_REVISION"
+# Receive the objects loose, not as the pack upload-pack sends. That pack's
+# bytes follow the source repository's own packing state and a threaded delta
+# search, so two builds of one revision shipped different .git/objects/pack
+# files and PACKAGE-CONTENTS.json, which hashes every shipped file, was not
+# reproducible. A loose object's bytes follow only its content and the pinned
+# zlib level. Automatic maintenance stays off so nothing repacks the objects,
+# in the background or otherwise, while the tree is staged and stamped.
+git -C "$BUNDLE_DIR" \
+    -c fetch.unpackLimit=2147483647 \
+    -c core.looseCompression=1 \
+    -c fetch.writeCommitGraph=false \
+    -c gc.auto=0 \
+    -c maintenance.auto=false \
+    fetch -q --depth 1 "$REPO_DIR" "$FULL_REVISION"
 git -C "$BUNDLE_DIR" update-ref refs/heads/packaged-release "$FULL_REVISION"
 git -C "$BUNDLE_DIR" symbolic-ref HEAD refs/heads/packaged-release
 git -C "$BUNDLE_DIR" read-tree "$FULL_REVISION"
@@ -143,6 +156,10 @@ git -C "$BUNDLE_DIR" remote add origin \
     "https://github.com/Aiml3ss/whisper-face.git"
 [ "$(git -C "$BUNDLE_DIR" rev-parse HEAD)" = "$FULL_REVISION" ] \
     || fail "packaged checkout lost its immutable source revision"
+unstable_objects="$(cd "$BUNDLE_DIR/.git/objects" \
+    && find . -type f ! -path './[0-9a-f][0-9a-f]/*')"
+[ -z "$unstable_objects" ] \
+    || fail "packaged Git metadata holds objects that are not loose: $unstable_objects"
 
 python3 "$SCRIPT_DIR/release_manifest.py" source-metadata \
     --version "$VERSION" \
