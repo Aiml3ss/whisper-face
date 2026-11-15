@@ -950,6 +950,13 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.notice.demonstration_cancelled": "Demonstration draft rolled back",
         "settings.notice.demonstration_deleted": "Approved demonstration recipe deleted",
         "diagnostics.notice.support_snapshot.copied": "Transcript-free support snapshot copied",
+
+        # --- new look: shell
+
+        # --- new look: pages
+
+        # --- new look: home and setup
+
     },
 }
 SUPPORTED_LOCALES = tuple(STRING_CATALOGS)
@@ -5144,6 +5151,37 @@ if APPKIT_AVAILABLE:
     SIDEBAR_WIDTH = 200.0
     CONTENT_WIDTH = 720.0
     CONTENT_MIN_WIDTH = 656.0
+
+    # Layout contract for the new look. NOT USED YET: nothing below this
+    # comment changes what is on screen. The sidebar shell and the pages
+    # that are rebuilt for it share these numbers, so a page can be laid
+    # out before the shell it will sit in exists. ``SIDEBAR_WIDTH`` above is
+    # part of the contract and keeps its value.
+    #
+    # The title strip is the band on the content side that carries the page
+    # title and its trailing toolbar items; content scrolls under it.
+    TITLE_STRIP_HEIGHT = 52.0
+    # Space between the content side's edges and the page column, and
+    # between the last group and the bottom of the scrolling content.
+    CONTENT_INSET = 24.0
+    # The page column is the reading width every group of rows shares. It
+    # never grows past the old content column, and at the window minimum it
+    # is exactly what the sidebar and the two insets leave over.
+    PAGE_COLUMN_MAX_WIDTH = CONTENT_WIDTH
+    PAGE_COLUMN_MIN_WIDTH = 632.0
+    # Rows: label left, control right. A row with a one-line caption is
+    # taller; neither may be shorter than this at any text size.
+    ROW_MIN_HEIGHT = 44.0
+    ROW_CAPTION_MIN_HEIGHT = 50.0
+    # Left inset of row text, and of the hairline between two rows.
+    ROW_INSET = 14.0
+    # Sidebar rows, and the face beside the app name above them.
+    SIDEBAR_ROW_HEIGHT = 32.0
+    SIDEBAR_FACE_SIZE = 44.0
+    # Vertical rhythm: header to its group, and one group to the next
+    # section header.
+    GROUP_HEADER_GAP = 7.0
+    GROUP_GAP = 18.0
 
     # The first-run poster is the one full-page object in the window, so its
     # geometry is named here and shared by the builder, the constraint, and
