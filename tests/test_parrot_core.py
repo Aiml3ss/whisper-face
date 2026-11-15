@@ -981,6 +981,7 @@ MUST_KEEP = (
     "Oh my my what a mess.",
     "Type and and or in the search box.",
     "The words and and or are conjunctions.",
+    "Use and and or to join them.",
     "The letter a, a vowel, comes first.",
     "Write I I for the roman numeral two.",
     "The regex is a a star b.",
