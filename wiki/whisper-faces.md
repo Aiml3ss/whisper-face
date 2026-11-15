@@ -63,9 +63,12 @@ the HUD and the window's `LiveFaceView` so the two cannot drift apart.
   flashes on a rare deterministic timer every 4-7 s, frozen under
   Reduce Motion. Windows mirrors face and state in its tray icon, now
   drawn in the same pastel chibi palettes ([[windows-support]]).
-- The HUD (`WaveView`) also draws the sticker card, radial level bars,
-  the [[stable-prefix]] caption, and honest status copy (LISTENING /
-  HEARD YOU / TIDYING UP), with accessibility values kept in sync.
+- The HUD (`WaveView`) is the recording pill: an ink-outlined capsule
+  with a hard shadow, porcelain in both appearances, with the face
+  leaning out of its left end. It also draws a short row of level bars,
+  the [[stable-prefix]] caption, and honest status copy as one headline
+  (Listening… / Heard you / Tidying up… / Try again), with accessibility
+  values kept in sync.
 
 > 📝 **Updated for the chibi-clay rebuild (#120)**: the face anchors the
 > rebuilt window surfaces. A 36pt chip heads [[app-window]]'s top bar
