@@ -13226,9 +13226,21 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                     if leaf is document or bool(
                             leaf.isKindOfClass_(GroupBoxView)):
                         continue
+                    own = leaf.alignmentRectForFrame_(leaf.frame())
+                    holder = leaf.superview().bounds()
+                    # Inside whatever holds it, too: a row, the face grid.
+                    require(
+                        own.origin.x >= holder.origin.x - 0.5
+                        and own.origin.y >= holder.origin.y - 0.5
+                        and own.origin.x + own.size.width
+                        <= holder.origin.x + holder.size.width + 0.5
+                        and own.origin.y + own.size.height
+                        <= holder.origin.y + holder.size.height + 0.5,
+                        f"{name}: a {type(leaf).__name__} spills out of "
+                        f"its {type(leaf.superview()).__name__} at "
+                        f"{size_name}")
                     rect = document.convertRect_fromView_(
-                        leaf.alignmentRectForFrame_(leaf.frame()),
-                        leaf.superview())
+                        own, leaf.superview())
                     require(
                         rect.origin.x >= -0.5 and rect.origin.y >= -0.5
                         and rect.origin.x + rect.size.width
