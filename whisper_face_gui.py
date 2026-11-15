@@ -9017,7 +9017,11 @@ if APPKIT_AVAILABLE:
             face.setShadow_(True)
             face.setWhispers_(False)
             try:
+                # It took the place of an image view, and VoiceOver still
+                # finds it as the guide's picture.
                 face.setAccessibilityElement_(True)
+                face.setAccessibilityRole_(
+                    _appkit_name("NSAccessibilityImageRole"))
             except Exception:
                 pass
             host = FlowView.alloc().initWithFrame_(NSMakeRect(0, 0, 400, 164))
@@ -12203,7 +12207,15 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             and abs(setup_face.tilt - STAGE_FACE_TILT) < 1e-6
             and abs(float(setup_face.frameCenterRotation())) < 1e-6
             and abs(setup_face.art_side() - SETUP_FACE_SIZE) < 0.5
-            and not setup_face.isLiving(),
+            and not setup_face.isLiving()
+            and bool(setup_face.isAccessibilityElement())
+            and accessible_value(setup_face, "accessibilityRole")
+            == "AXImage"
+            and accessible_value(setup_face, "accessibilityLabel")
+            == localized_string(
+                "overview.accessibility.onboarding.face",
+                face=localized_string(
+                    f"settings.face.{model.state.face}")),
             "the setup face is drawn from the character ops, leaning, "
             "with its hard shadow")
         setup_bubble = controller.dynamic["onboarding_bubble"]
