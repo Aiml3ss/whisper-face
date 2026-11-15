@@ -3335,6 +3335,9 @@ def face_grid(width: float, count: int) -> tuple[int, float, float, int]:
     grid is centred in its width. A width too narrow for eight chips of
     ``FACE_CHIP_MIN`` takes fewer to a row instead of smaller chips.
     """
+    # One row until the chips would crowd. Sixteen at the 40pt floor need
+    # 790pt with their gaps, more than the widest column, so the roster
+    # wraps at eight a row and the chips grow into the room that leaves.
     count = max(1, int(count))
     columns = min(FACE_GRID_COLUMNS, count)
 
