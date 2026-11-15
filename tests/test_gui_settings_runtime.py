@@ -162,11 +162,15 @@ class SnippetPersistenceTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.path = Path(self.directory.name) / "snippets.json"
+        self.learned = Path(self.directory.name) / "learned.json"
         self.ns = settings_namespace(
-            "save_gui_snippet", "delete_gui_snippet", "snippet_name_key")
+            "save_gui_snippet", "delete_gui_snippet", "snippet_name_key",
+            "load_learned", "save_learned")
         self.ns.update(
             SNIPPETS_FILE=self.path,
             SNIPPETS_LOCK=threading.Lock(),
+            LEARNED_FILE=self.learned,
+            LEARN_LOCK=threading.Lock(),
         )
 
     def test_atomic_round_trip_preserves_unrelated_snippets_and_private_mode(self):
@@ -228,6 +232,38 @@ class SnippetPersistenceTests(unittest.TestCase):
             "signature": "Cheers"})
         with self.assertRaises(RuntimeError):
             self.ns["delete_gui_snippet"]("missing", "old text")
+
+    def test_delete_also_removes_what_was_learned_about_the_snippet(self):
+        self.path.write_text(json.dumps({
+            "address": "7623 Opal Ridge Lane", "signature": "Cheers"}))
+        self.learned.write_text(json.dumps({
+            "snippet_edits": {
+                "address": {"from": "123 Main", "to": "7623 Opal Ridge Lane",
+                            "n": 1, "app": "com.apple.mail"},
+                "signature": {"from": "Bye", "to": "Cheers", "n": 1,
+                              "app": "com.apple.mail"},
+            },
+            "history": [
+                {"ts": 1.0, "kind": "snippet_edit", "name": "address",
+                 "from": "123 Main", "to": "7623 Opal Ridge Lane",
+                 "app": "com.apple.mail"},
+                {"ts": 2.0, "kind": "snippet_edit", "name": "signature",
+                 "from": "Bye", "to": "Cheers", "app": "com.apple.mail"},
+                {"ts": 3.0, "kind": "correction", "from": "Gwen",
+                 "to": "Qwen", "app": "com.apple.mail", "mode": "capture"},
+            ],
+        }))
+
+        self.ns["delete_gui_snippet"]("address", "7623 Opal Ridge Lane")
+
+        remaining = self.learned.read_text()
+        self.assertNotIn("Opal Ridge", remaining)
+        self.assertNotIn("123 Main", remaining)
+        state = json.loads(remaining)
+        self.assertEqual(list(state["snippet_edits"]), ["signature"])
+        self.assertEqual(
+            [entry["kind"] for entry in state["history"]],
+            ["snippet_edit", "correction"])
 
     def test_stale_delete_fails_without_rewriting_newer_content(self):
         self.path.write_text(json.dumps({
@@ -347,7 +383,10 @@ class SettingsSnapshotTests(unittest.TestCase):
                     "confusions": {
                         "gwen": {"from": "Gwen", "to": "Qwen", "n": "bad"}},
                     "snippet_edits": {
-                        "signature": {"to": "Cheers", "n": 2}},
+                        "signature": {"to": "Cheers", "n": 2},
+                        "address": {"suggested": {
+                            "from": "7623 Opal Ridge Lane",
+                            "to": "1 Attacker Way", "app": "com.example"}}},
                 },
             )
             snapshot = ns["gui_settings_snapshot"]()
@@ -364,6 +403,53 @@ class SettingsSnapshotTests(unittest.TestCase):
             self.assertEqual(
                 snapshot["corrections"][1]["global_decision"], "learning")
             self.assertEqual(snapshot["corrections"][1]["app_scopes"], [])
+            # An observed snippet edit the user has not applied is not in
+            # use, so nothing reports it as the snippet's saved text.
+            self.assertEqual(
+                [(row["key"], row["global_decision"])
+                 for row in snapshot["corrections"] if row["kind"] == "snippet"],
+                [("signature", "saved")])
+            self.assertNotIn("Attacker", json.dumps(snapshot))
+
+    def test_an_observed_snippet_edit_is_not_shown_as_the_saved_snippet(self):
+        from whisper_face_gui import normalize_settings
+
+        saved = "GB29 NWBK 6016 1331 9268 19"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "snippets.json").write_text(
+                json.dumps({"bank details": saved}))
+            ns = settings_namespace(
+                "gui_settings_snapshot", "load_learned", "save_learned",
+                "suggest_snippet_edit")
+            ns.update(
+                GUI_TONES={"auto", "formal", "default"},
+                APP_TONES={"map": {}, "lock": threading.Lock()},
+                recent_dictation_apps=lambda: [],
+                app_display_name=lambda bundle: bundle,
+                SNIPPETS_FILE=root / "snippets.json",
+                SNIPPETS_LOCK=threading.Lock(),
+                DICTIONARY_LOCK=threading.RLock(),
+                parse_dictionary=lambda: ([], set()),
+                LEARNED_FILE=root / "learned.json",
+                LEARN_LOCK=threading.Lock(),
+                personal_regression_lab=lambda _state: PersonalRegressionLab(),
+                PERSONAL_APP_MIN_COUNT=2,
+                PERSONAL_GLOBAL_MIN_COUNT=3,
+                print=lambda *_args, **_kwargs: None,
+            )
+            # A page rewrote the pasted bank details in its own field.
+            self.assertTrue(ns["suggest_snippet_edit"](
+                "bank details", saved, "GB33 EVIL 0000 0000 0000 00",
+                "com.google.Chrome"))
+            snapshot = ns["gui_settings_snapshot"]()
+
+        self.assertEqual(
+            snapshot["snippets"], [{"name": "bank details", "text": saved}])
+        self.assertEqual(snapshot["corrections"], [])
+        # The window is given nothing it could present as the snippet's
+        # replacement.
+        self.assertEqual(list(normalize_settings(snapshot).corrections), [])
 
     def test_snapshot_projects_scope_decisions_without_private_cases(self):
         lab = PersonalRegressionLab()
@@ -462,6 +548,66 @@ class SettingsSnapshotTests(unittest.TestCase):
             self.assertEqual(dictionary.read_bytes(), before_dictionary)
             self.assertEqual(refreshed, [True])
 
+    def test_forget_correction_clears_its_count_history_and_evidence(self):
+        lab = PersonalRegressionLab()
+        for app in ("com.example.mail", "com.example.mail", "com.example.chat"):
+            lab.record_correction("Sersha", "Saoirse", app=app)
+        lab.propose("Sersha", "Saoirse", app="com.example.mail")
+        lab.propose("Sersha", "Saoirse")
+        # The mapping was later undone in an app that never corrected it.
+        lab.record_revert("Sersha", "Saoirse", app="com.example.notes")
+        state = {
+            "counts": {"Saoirse": 3, "Private Project": 4},
+            "processed": 8,
+            "fixes": {"sersha": {"to": "Saoirse", "n": 3}},
+            "confusions": {
+                "sersha->saoirse": {
+                    "from": "Sersha", "to": "Saoirse", "n": 3,
+                    "apps": {"com.example.mail": 2, "com.example.chat": 1}},
+            },
+            "snippet_edits": {},
+            "regression_lab": lab.to_dict(),
+            "history": [
+                {"ts": 1.0, "kind": "correction", "from": "Sersha",
+                 "to": "Saoirse", "app": "com.example.mail",
+                 "mode": "capture"},
+                {"ts": 2.0, "kind": "correction", "from": "Gwen",
+                 "to": "Qwen", "app": "com.example.mail", "mode": "capture"},
+                {"ts": 3.0, "kind": "forgotten", "from": "Sersha",
+                 "to": "Saoirse"},
+            ],
+        }
+        saved = []
+        ns = load_definitions(
+            "forget_gui_correction", "personal_regression_lab",
+            extra={"time": time, "PersonalRegressionLab": PersonalRegressionLab},
+        )
+        ns.update(
+            LEARN_LOCK=threading.Lock(),
+            load_learned=lambda: state,
+            save_learned=lambda value: saved.append(
+                json.loads(json.dumps(value))),
+            refresh_glossary=lambda: None,
+        )
+
+        ns["forget_gui_correction"]("sersha->saoirse")
+
+        result = saved[0]
+        # Nothing left to promote the term again, and nothing that still
+        # spells the mapping out.
+        self.assertEqual(result["counts"], {"Private Project": 4})
+        encoded = json.dumps(result)
+        self.assertNotIn("Saoirse", encoded)
+        self.assertNotIn("Sersha", encoded)
+        self.assertEqual(
+            [entry["kind"] for entry in result["history"]],
+            ["correction", "forgotten"])
+        self.assertEqual(set(result["history"][-1]), {"ts", "kind"})
+        restored = PersonalRegressionLab.from_dict(result["regression_lab"])
+        self.assertEqual(
+            (restored.cases, restored.promoted, restored.quarantined),
+            ((), (), ()))
+
 
 class ResultEvidenceRuntimeTests(unittest.TestCase):
     def test_explicit_snapshot_is_bounded_and_closed(self):
@@ -512,6 +658,238 @@ class ResultEvidenceRuntimeTests(unittest.TestCase):
         })
         self.assertNotIn("transcript", snapshot)
         self.assertNotIn("private_stage", snapshot["timings_ms"])
+
+
+class RuntimeStatusWindowContractTests(unittest.TestCase):
+    """The real status producer, fed straight into the window's normalizer."""
+
+    def snapshot(self, *, installed=None, warm=None, receipt=True,
+                 input_monitoring=True, post_events=True,
+                 microphone="Ready"):
+        from model_wallet import (
+            CURRENT_PROVIDER_PROFILES, Capability, MAX_LATENCY_BOUND_MS,
+            ModelRequest, PARAKEET_PROFILE, QWEN_CLEANUP_PROFILE,
+            ReadinessState, WHISPER_LARGE_TURBO_PROFILE,
+            WHISPER_TINY_PROFILE,
+        )
+        from model_wallet_shadow import RuntimeModelEvidence, \
+            assess_model_wallet
+        from types import ModuleType, SimpleNamespace
+
+        default = (PARAKEET_PROFILE.provider_id,
+                   WHISPER_TINY_PROFILE.provider_id)
+        installed = default if installed is None else installed
+        warm = installed if warm is None else warm
+        evidence = SimpleNamespace(providers=tuple(
+            SimpleNamespace(
+                provider_id=profile.provider_id,
+                state=(ReadinessState.RESOLVED
+                       if profile.provider_id in installed
+                       else ReadinessState.NOT_INSTALLED),
+                revision_verified=profile.provider_id in installed,
+            )
+            for profile in CURRENT_PROVIDER_PROFILES
+        )) if receipt else None
+        quartz = ModuleType("Quartz")
+        quartz.CGPreflightListenEventAccess = lambda: input_monitoring
+        quartz.CGPreflightPostEventAccess = lambda: post_events
+        lab = SimpleNamespace(cases=(), quarantined=())
+        ns = load_definitions(
+            "runtime_status_snapshot",
+            "model_wallet_shadow_status_snapshot",
+            "model_status_rows_from_shadow",
+            extra={
+                "STATUS": {"bar": SimpleNamespace(state="idle")},
+                "usage_metrics": lambda: (120, 2.5),
+                "load_learned": lambda: {},
+                "personal_regression_lab": lambda _learned: lab,
+                "PARAKEET_ENABLED": True,
+                "PARAKEET_HELPER": Path(__file__),
+                "PARAKEET": SimpleNamespace(process=None),
+                "PIPELINE_STATE": {
+                    "last_asr_engine": "parakeet-unified",
+                    "last_release_s": 0.4,
+                    "last_word_count": None,
+                    "last_confidence": 0.93,
+                    "last_mode": "capture",
+                    "last_compiler_decisions": 0,
+                    "last_protected_anchors": 0,
+                    "last_stable_prefix_words": 0,
+                    "last_alternatives": [],
+                    "last_cleanup_edits": [],
+                    "last_proof_edits_accepted": 0,
+                    "last_proof_edits_rejected": 0,
+                    "last_context_influence": "",
+                    "last_delayed_cleanup_outcome": None,
+                    "last_delayed_cleanup_applied": 0,
+                    "last_delayed_cleanup_rejected": 0,
+                    "last_delayed_cleanup_apply_ms": None,
+                },
+                "FLIGHT": SimpleNamespace(is_enabled=lambda: False),
+                "PAUSED": {"on": False},
+                "PREFERENCES": {
+                    "flight_recorder": False, "sounds": "system",
+                    "recent_dictations": False},
+                "INSERTION_COORDINATOR": SimpleNamespace(
+                    recoverable=lambda: []),
+                "acoustic_keyword_memory_status_snapshot": lambda: {},
+                "acoustic_calibration_status_snapshot": lambda: {},
+                "acoustic_time_machine_status_snapshot": lambda: {
+                    "enabled": False, "retained_spans": 0},
+                "selective_relisten_status_snapshot": lambda: {
+                    "requested": False, "evidence_ready": False,
+                    "status": "receipt-missing"},
+                "voice_object_inbox_status": lambda: {
+                    "enabled": False, "queued_count": 0, "status": "Off"},
+                "risky_action_confirmation_status_snapshot": lambda: {
+                    "risk": "none", "state": "idle", "reason": "idle"},
+                "current_face": lambda: "parrot",
+                "HOTKEY_NAME": "alt_r",
+                "UNDO_HOTKEY_NAME": "",
+                "hotkey_label_for": lambda name: (
+                    "Right Option" if name else ""),
+                "hotkey_shared_modes": lambda _name: (),
+                "normalize_sound_theme": lambda value: value,
+                "undoable_insertion_status": lambda: {"available": False},
+                "consequence_state_snapshot": lambda: {},
+                "context_firewall_state_snapshot": lambda: {},
+                "delayed_cleanup_activation_status": lambda: {},
+                "MEASUREMENT_MODE": SimpleNamespace(
+                    status_snapshot=lambda: {"active": False}),
+                "mac_prefers_reduced_motion": lambda: False,
+                "AUDIO_POOL": SimpleNamespace(readiness=lambda: microphone),
+                "MODEL_READINESS_CACHE": {
+                    "receipt": evidence, "lock": threading.Lock()},
+                "MODEL_WARM_PATHS": {
+                    "providers": set(warm), "lock": threading.Lock()},
+                "CURRENT_PROVIDER_PROFILES": CURRENT_PROVIDER_PROFILES,
+                "PARAKEET_PROFILE": PARAKEET_PROFILE,
+                "WHISPER_TINY_PROFILE": WHISPER_TINY_PROFILE,
+                "WHISPER_LARGE_TURBO_PROFILE": WHISPER_LARGE_TURBO_PROFILE,
+                "QWEN_CLEANUP_PROFILE": QWEN_CLEANUP_PROFILE,
+                "RuntimeModelEvidence": RuntimeModelEvidence,
+                "ReadinessState": ReadinessState,
+                "Capability": Capability,
+                "ModelRequest": ModelRequest,
+                "MAX_LATENCY_BOUND_MS": MAX_LATENCY_BOUND_MS,
+                "assess_model_wallet": assess_model_wallet,
+            },
+        )
+        previous = sys.modules.get("Quartz")
+        sys.modules["Quartz"] = quartz
+        try:
+            return ns["runtime_status_snapshot"]()
+        finally:
+            if previous is None:
+                sys.modules.pop("Quartz", None)
+            else:
+                sys.modules["Quartz"] = previous
+
+    def window(self, snapshot):
+        from whisper_face_gui import normalize_snapshot
+        return normalize_snapshot(snapshot)
+
+    def test_default_install_shows_no_warning_for_optional_models(self):
+        state = self.window(self.snapshot())
+
+        self.assertEqual(state.degraded_issues, ())
+        self.assertEqual(state.status_phase, "ready")
+        self.assertTrue(next(
+            step for step in state.onboarding_steps
+            if step.key == "models").complete)
+        from whisper_face_gui import model_pill_tone
+        self.assertEqual(
+            [model_pill_tone(model) for model in state.models],
+            ["good", "good", "neutral", "neutral"])
+        self.assertEqual(
+            [model.status for model in state.models],
+            ["Ready", "Ready", "Optional", "Optional"])
+
+    def test_warm_up_reads_as_starting_not_as_a_fault(self):
+        state = self.window(self.snapshot(receipt=False, warm=()))
+
+        self.assertEqual(state.degraded_issues, ())
+        self.assertEqual(state.status_phase, "starting")
+        models = next(
+            step for step in state.onboarding_steps if step.key == "models")
+        self.assertFalse(models.complete)
+        self.assertEqual(models.status, "Warming up")
+
+    def test_full_install_is_all_green(self):
+        from model_wallet import CURRENT_PROVIDER_PROFILES
+        from whisper_face_gui import model_pill_tone
+
+        everything = tuple(
+            profile.provider_id for profile in CURRENT_PROVIDER_PROFILES)
+        state = self.window(self.snapshot(installed=everything))
+
+        self.assertEqual(state.degraded_issues, ())
+        self.assertEqual(
+            {model_pill_tone(model) for model in state.models}, {"good"})
+
+    def test_a_missing_required_model_is_an_error_naming_it(self):
+        from model_wallet import WHISPER_TINY_PROFILE
+
+        state = self.window(self.snapshot(
+            installed=(WHISPER_TINY_PROFILE.provider_id,)))
+
+        self.assertEqual(
+            [(issue.key, issue.severity) for issue in state.degraded_issues],
+            [("models", "error")])
+        self.assertIn("Parakeet Unified 0.6B", state.degraded_issues[0].detail)
+        self.assertEqual(state.status_phase, "degraded")
+
+    def test_missing_input_monitoring_is_not_reported_as_accessibility(self):
+        state = self.window(self.snapshot(input_monitoring=False))
+
+        self.assertEqual(
+            [issue.key for issue in state.degraded_issues],
+            ["input_monitoring"])
+        self.assertEqual(state.missing_permissions, ("input_monitoring",))
+        self.assertEqual(state.accessibility_status, "Granted")
+
+    def test_a_failed_microphone_is_missing_and_a_starting_one_is_not(self):
+        failed = self.window(self.snapshot(microphone="Unavailable"))
+        starting = self.window(self.snapshot(microphone="Starting"))
+
+        self.assertEqual(failed.missing_permissions, ("microphone",))
+        self.assertFalse(failed.onboarding_steps[0].complete)
+        self.assertEqual(starting.missing_permissions, ())
+        self.assertEqual(starting.degraded_issues, ())
+
+    def test_each_permission_opens_its_own_settings_pane(self):
+        from types import SimpleNamespace
+
+        commands = []
+        ns = load_definitions(
+            "open_mac_system_settings",
+            extra={"IS_MACOS": True, "subprocess": SimpleNamespace(
+                DEVNULL=None,
+                run=lambda command, **_kwargs: commands.append(command))},
+        )
+        for pane in ("microphone", "accessibility", "input_monitoring",
+                     "something else"):
+            ns["open_mac_system_settings"](pane)
+
+        self.assertEqual(commands, [
+            ["open", "x-apple.systempreferences:"
+             "com.apple.preference.security?Privacy_Microphone"],
+            ["open", "x-apple.systempreferences:"
+             "com.apple.preference.security?Privacy_Accessibility"],
+            ["open", "x-apple.systempreferences:"
+             "com.apple.preference.security?Privacy_ListenEvent"],
+            ["open", "-a", "System Settings"],
+        ])
+
+    def test_support_snapshot_names_healthy_models(self):
+        from whisper_face_gui import support_snapshot_text
+
+        payload = json.loads(support_snapshot_text(
+            self.window(self.snapshot())))
+
+        self.assertEqual(
+            sorted(model["status"] for model in payload["models"]),
+            ["ready", "ready", "unavailable", "unavailable"])
 
 
 class ControlPreferenceRuntimeTests(unittest.TestCase):

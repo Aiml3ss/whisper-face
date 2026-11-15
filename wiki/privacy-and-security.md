@@ -59,15 +59,22 @@ anonymous.
   module that pins a model repository or revision — the runtime, the
   wallet, the scorecard, the notices, and the independent relisten and
   verifier pins — is asserted to agree with what the runtime actually
-  loads; the lock is verified on every PR; CI-published releases carry
-  Sigstore build-provenance attestations with no project key to rotate
+  loads; the lock is verified on every PR; CI-published releases would
+  carry Sigstore build-provenance attestations with no project key to
+  rotate (no published release has gone through CI yet; every one so far
+  was packaged by hand and carries checksums only)
   (`gh attestation verify <artifact> --repo Aiml3ss/whisper-face` — the
   attested subjects are the files listed in SHA256SUMS, not the listing
   itself).
-- **Port 8787** is disclosed as unauthenticated, loopback by default,
-  LAN only under explicit `--server-only`; binding/authenticating it is
-  named open security work, alongside capture sandboxing, independent
-  manifest signing, and external review.
+- **Port 8787** (corrected November 2026): desktop mode binds loopback and
+  answers only `GET /health`; the transcription, source, and license
+  routes exist only under explicit `--server-only`, where transcription
+  needs a bearer token and browser-origin or rebinding requests are
+  refused. The token is created once, kept in `phone_token.txt` in the
+  checkout (0600 on Mac), reused across restarts, and never printed or
+  logged; deleting the file and restarting rotates it. Open security work now names the menu updater (branch tip,
+  no tag or signature check) and who can use the launcher's privacy grants, alongside
+  capture sandboxing, independent manifest signing, and external review.
 - **Evidence sessions** ([[evidence-capture]]): everything the capture
   harnesses write — WAVs, resumable session state, manifests, artifacts —
   lands in the single gitignored `.evidence/` tree with 0700 directories

@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.10,<3.15"
 # dependencies = [
 #   "mlx-whisper; sys_platform == 'darwin'",
 #   "tqdm; sys_platform == 'darwin'",
@@ -63,14 +63,19 @@ New in v3.2 (always-on):
     startup, waits for the grant, and re-execs itself once trusted; warmup
     pre-opens the mic so that prompt appears immediately too. Install the
     LaunchAgent (com.berg.dictate) and it starts at login and auto-restarts.
-  * Spoken tone override: begin a dictation with "formal tone, ..."
-    "casual, ..." "technical: ..." "neutral, ..." or "verbatim, ..." to force
-    that style for just that dictation, overriding the per-app default. The
-    tone word is stripped from the pasted text; console shows e.g. llm/formal*.
+  * Spoken tone override: begin a dictation with a tone and the word
+    "tone", "style" or "mode" ("formal tone, ...", "casual style, ...",
+    "verbatim mode: ...") to force that style for just that dictation,
+    overriding the per-app default. A tone word on its own ("Casual, ...")
+    is ordinary speech. The cue is stripped from the pasted text; console
+    shows e.g. llm/formal*.
 
 New in v3.3:
-  * Snippets: say "insert <name>" / "paste my <name>" and the matching entry
-    from snippets.json pastes instead of the transcription. Unknown names
+  * Snippets: say "insert <name>" / "paste my <name>" as the whole
+    dictation and the matching entry from snippets.json pastes instead of
+    the transcription. Inside a longer sentence only "insert my <name>"
+    expands, and never when negated ("do not insert my email"). Unknown
+    names, a bare snippet name, and values still starting with "EDIT ME"
     fall through to normal dictation, so triggers can't misfire.
   * Learns from corrections: for ~10s after a paste, the focused text field is
     observed via Accessibility; if you change a word we pasted, the corrected
@@ -84,11 +89,14 @@ New in v3.3:
 New in v3.4 (iPhone):
   * OpenAI-compatible endpoint POST /v1/audio/transcriptions on PHONE_PORT,
     for the Diction iOS keyboard's Self-Hosted mode (or anything speaking
-    that API). Uploads run through the SAME pipeline as local dictation:
-    glossary-biased Whisper, snippets, spoken tone override, LLM cleanup,
-    and the transcript log (so phone vocabulary feeds learning too).
-    Desktop mode binds loopback only. Explicit --server-only mode binds the
-    trusted LAN and remains unauthenticated; audio decode needs ffmpeg.
+    that API). Uploads run through the local pipeline minus app context:
+    glossary-biased ASR, learned fixes, spoken tone override and cleanup.
+    Snippets are never expanded and nothing is written to the transcript
+    log, so a client can neither read saved text back nor feed learning.
+    Desktop mode binds loopback and answers only GET /health. Explicit
+    --server-only mode binds the trusted LAN and requires a bearer token
+    that is created at each start and printed once; browser requests are
+    refused. Audio decode needs ffmpeg.
   * --server-only: phone endpoint + models + learning loop with NO hotkey,
     HUD, mic, or TCC permission prompts. For a headless always-on Mac
     (e.g. a Mac mini serving the iPhone). Requires Apple Silicon (MLX).
@@ -357,6 +365,7 @@ from parrot_core import (  # noqa: E402
     transform_last_insertion,
     compile_cleanup,
     compile_code_dictation,
+    NUMBER_WORDS,
     confidence_from_segments,
     correction_similarity,
     hypothesis_agreement,
@@ -492,13 +501,24 @@ if IS_MACOS:
     from whisper_face_gui import GUIActions, create_gui  # noqa: E402
 
 
-def open_mac_system_settings() -> None:
-    """Open the user-controlled macOS settings app without changing TCC."""
+def open_mac_system_settings(pane: str | None = None) -> None:
+    """Open the user-controlled macOS settings app without changing TCC.
+
+    A known permission opens its own Privacy & Security pane; anything else
+    opens System Settings itself.
+    """
 
     if not IS_MACOS:
         raise RuntimeError("System Settings recovery is available only on macOS")
+    anchor = {
+        "microphone": "Privacy_Microphone",
+        "accessibility": "Privacy_Accessibility",
+        "input_monitoring": "Privacy_ListenEvent",
+    }.get(pane or "")
     subprocess.run(
-        ["open", "-a", "System Settings"],
+        ["open", "x-apple.systempreferences:"
+         f"com.apple.preference.security?{anchor}"]
+        if anchor else ["open", "-a", "System Settings"],
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -607,6 +627,40 @@ def hotkey_key_object(name: object):
     return getattr(keyboard.Key, normalize_hotkey(name), keyboard.Key.alt_r)
 
 
+def hotkey_matches(key, hotkey) -> bool:
+    """Whether a delivered key is the bound key.
+
+    pynput on Windows defines Right Alt twice, as ``Key.alt_r`` (extended
+    flag) and ``Key.alt_gr``, and delivers ``alt_gr`` for VK_RMENU. The two
+    are distinct members with one virtual-key code, so special keys are
+    matched by that code. On macOS the two names are one member.
+    """
+    if key is None or hotkey is None:
+        return False
+    if key == hotkey:
+        return True
+    if type(key) is not type(hotkey):
+        return False
+    key_vk = getattr(getattr(key, "value", None), "vk", None)
+    return key_vk is not None and key_vk == getattr(
+        getattr(hotkey, "value", None), "vk", None)
+
+
+# AltGr layouts make Windows send a synthetic Left Ctrl, scan code 0x21D,
+# ahead of Right Alt. Delivered, it would select Reply mode on every take.
+WINDOWS_VK_LCONTROL = 0xA2
+WINDOWS_ALTGR_SYNTHETIC_CTRL_SCAN = 0x21D
+
+
+def windows_hotkey_event_filter(_msg, data) -> bool:
+    """pynput ``win32_event_filter``: drop AltGr's synthetic Left Ctrl."""
+    return not (
+        getattr(data, "vkCode", None) == WINDOWS_VK_LCONTROL
+        and getattr(data, "scanCode", None)
+        == WINDOWS_ALTGR_SYNTHETIC_CTRL_SCAN
+    )
+
+
 def modifier_pressed_by(key, hotkey, families) -> str | None:
     """Name the voice-mode modifier a key press contributes, if any.
 
@@ -615,7 +669,7 @@ def modifier_pressed_by(key, hotkey, families) -> str | None:
     somebody bound a Shift, Command, or Control key, because every press
     would arrive already carrying that modifier.
     """
-    if hotkey is not None and key == hotkey:
+    if hotkey_matches(key, hotkey):
         return None
     for modifier, keys in families:
         if key in keys:
@@ -698,10 +752,17 @@ ASR_MODEL_REVISIONS = {
 }
 PARAKEET_MODEL_REPO = "FluidInference/parakeet-unified-en-0.6b-coreml"
 PARAKEET_MODEL_REVISION = "4252711f6f060f9a2f91e5f081a806d7f45eebd8"
-OLLAMA_URL = "http://localhost:11434/api/chat"
+# 127.0.0.1, not localhost: Ollama listens on IPv4 only, and "localhost"
+# resolves to ::1 first, where any local process could answer instead.
+OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 OLLAMA_MODEL = "qwen3.5:4b"
 OLLAMA_MODEL_MANIFEST_SHA256 = (
     "2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd")
+# Every request to the local model goes through this one client. With
+# trust_env off, no proxy from the environment or the system settings (and no
+# .netrc credential) is ever applied, so dictated text cannot be relayed.
+LOCAL_MODEL_SESSION = requests.Session()
+LOCAL_MODEL_SESSION.trust_env = False
 PROJECT_SOURCE_URL = os.environ.get(
     "WHISPER_FACE_SOURCE_URL",
     "https://github.com/Aiml3ss/whisper-face",
@@ -841,6 +902,7 @@ CORRECTION_POLL_INTERVAL = 0.2
 CORRECTION_MAX_LEARN = 3     # per dictation
 
 PHONE_PORT = 8787            # /v1/audio/transcriptions for the Diction app
+PHONE_TOKEN_FILE = HERE / "phone_token.txt"   # --server-only bearer token
 SERVER_ONLY = "--server-only" in sys.argv   # headless: endpoint only
 
 # Session-scoped evidence-collection override, read exactly once from the
@@ -967,12 +1029,14 @@ ENUM_RE = re.compile(
     r"(things|points|items|thoughts|questions|updates|ideas|issues)\b", re.I
 )
 # Spoken tone override: start a dictation with "formal tone, ..." /
-# "casual, ..." / "verbatim: ..." to force a style regardless of app. The
-# punctuation after the tone word is required — Whisper inserts it for the
-# natural pause, and it keeps "Formal education is..." from matching.
+# "casual style, ..." / "verbatim mode: ..." to force a style regardless of
+# app. The keyword is required: "Code, tests, and docs are updated" opens
+# with a tone word and a comma, and without the keyword it lost its first
+# word. The punctuation after the keyword is required too — a recognizer
+# writes it for the natural pause.
 TONE_OVERRIDE_RE = re.compile(
     r"^(formal|casual|code|technical|neutral|verbatim)"
-    r"(?:\s+(?:tone|style|mode))?\s*[,.:]\s+", re.I)
+    r"\s+(?:tone|style|mode)\s*[,.:]\s+", re.I)
 TONE_ALIASES = {"technical": "code", "neutral": "default"}
 
 # The cleanup model answering/refusing instead of cleaning (it happens on
@@ -985,6 +1049,12 @@ REFUSAL_RE = re.compile(
 HALLUCINATIONS = {
     "thank you", "thanks for watching", "thank you for watching", "you", "bye",
 }
+# The phrases above are what Whisper prints for audio with no speech in it.
+# They are also ordinary things to say, so a match counts only against a
+# decode from one of these engines that is itself weak evidence.
+WHISPER_ENGINES = frozenset({"tiny", "turbo"})
+# Slower than one word every this many seconds is not a spoken phrase.
+HALLUCINATION_SECONDS_PER_WORD = 2.0
 
 CASUAL_APPS = {"com.tinyspeck.slackmacgap", "com.apple.MobileSMS",
                "com.hnc.Discord"}
@@ -1298,7 +1368,6 @@ PIPELINE_STATE = {
     "last_alternatives": [],
     "last_cleanup_edits": [],
     "last_mode": "capture",
-    "last_readback_shape": "",
     "last_compiler_decisions": 0,
     "last_compiler_details": [],
     "last_protected_anchors": 0,
@@ -1446,6 +1515,7 @@ PREFERENCES = {
     "undo_hotkey": "",
     "sounds": SOUND_THEME_DEFAULT,
     "recent_dictations": False,
+    "self_correction": False,
     "language": LANGUAGE_DEFAULT,
 }
 ACOUSTIC_TIME_MACHINE = AcousticTimeMachine()
@@ -1545,11 +1615,39 @@ def exception_origin(error: BaseException) -> str:
             f"({os.path.basename(code.co_filename)}:{frame.tb_lineno})")
 
 
-def is_hallucination(text: str, language: str = LANGUAGE_DEFAULT) -> bool:
-    """Reject punctuation-only output and known silent-audio phrases.
+def weak_whisper_evidence(recognition: Recognition | None) -> bool:
+    """Whether a decode could be Whisper filling silence rather than speech.
+
+    Only a Whisper decode qualifies: Parakeet does not produce these
+    artifacts, and its route confidence measures agreement with Whisper Tiny,
+    not how likely the words are. Within Whisper the decode must be doubtful
+    on its own terms, by a low confidence or by too few words for the audio
+    it was given.
+    """
+    if recognition is None:
+        return False
+    engines = [name for name in str(recognition.engine or "").split("+")
+               if name]
+    if not engines or any(name not in WHISPER_ENGINES for name in engines):
+        return False
+    if recognition.confidence < LOW_CONFIDENCE:
+        return True
+    words = len(re.findall(r"\w+", recognition.text, flags=re.UNICODE))
+    return bool(words) and (
+        recognition.audio_duration >= words * HALLUCINATION_SECONDS_PER_WORD)
+
+
+def is_hallucination(text: str, language: str = LANGUAGE_DEFAULT,
+                     recognition: Recognition | None = None) -> bool:
+    """Reject punctuation-only output and unsupported silent-audio phrases.
 
     Normalize punctuation rather than enumerating every possible terminal
     mark ("Thank you.", "Thank you!", and "THANK YOU..." are equivalent).
+
+    "Thank you" and "Bye" are also real replies and real sign-offs, so the
+    phrase list applies only when ``recognition`` shows a weak Whisper decode
+    (see ``weak_whisper_evidence``). Without that evidence the words are the
+    speaker's and are kept.
 
     The token class is Unicode: the old ``[a-z0-9]`` matched nothing at all in
     Japanese, Chinese, Russian, or Korean, so every correct transcript in
@@ -1562,7 +1660,8 @@ def is_hallucination(text: str, language: str = LANGUAGE_DEFAULT) -> bool:
         return True
     if str(language or "").strip().casefold() != "en":
         return False
-    return " ".join(words) in HALLUCINATIONS
+    return (" ".join(words) in HALLUCINATIONS
+            and weak_whisper_evidence(recognition))
 
 
 def load_app_tones():
@@ -1869,6 +1968,10 @@ def load_preferences():
     PREFERENCES["sounds"] = normalize_sound_theme(loaded.get("sounds"))
     PREFERENCES["recent_dictations"] = bool(
         loaded.get("recent_dictations") is True)
+    # "X, actually Y" replaces X only for a user who asked for it. Any other
+    # value, and a file written before the key existed, leaves it off.
+    PREFERENCES["self_correction"] = bool(
+        loaded.get("self_correction") is True)
     # Cross-platform: both mlx-whisper and faster-whisper take the same bare
     # ISO 639-1 code, so one preference drives Mac and Windows alike.
     PREFERENCES["language"] = normalize_language(loaded.get("language"))
@@ -1947,6 +2050,7 @@ def save_preferences():
             PREFERENCES["undo_hotkey"], default=""),
         "sounds": normalize_sound_theme(PREFERENCES["sounds"]),
         "recent_dictations": bool(PREFERENCES["recent_dictations"]),
+        "self_correction": bool(PREFERENCES["self_correction"]),
         "language": normalize_language(PREFERENCES["language"]),
     }
     atomic_write_text(
@@ -1971,6 +2075,12 @@ def apply_hotkey_bindings() -> tuple[str, str]:
     HOTKEY = hotkey_key_object(HOTKEY_NAME)
     UNDO_HOTKEY_NAME = normalize_hotkey(
         PREFERENCES["undo_hotkey"], default="")
+    if UNDO_HOTKEY_NAME == HOTKEY_NAME:
+        # A hand-edited or older preferences file can name one key for both.
+        # Capture wins; the undo binding is dropped rather than letting each
+        # press delete the previous dictation.
+        UNDO_HOTKEY_NAME = ""
+        PREFERENCES["undo_hotkey"] = ""
     UNDO_HOTKEY = (hotkey_key_object(UNDO_HOTKEY_NAME)
                    if UNDO_HOTKEY_NAME else None)
     return HOTKEY_NAME, UNDO_HOTKEY_NAME
@@ -1981,6 +2091,12 @@ def set_hotkey(name: str) -> dict:
     decision = hotkey_binding_decision(name)
     if not decision["accepted"]:
         return decision
+    if decision["name"] == normalize_hotkey(
+            PREFERENCES["undo_hotkey"], default=""):
+        # The mirror of set_undo_hotkey's guard: one key cannot both start a
+        # dictation and undo the previous one.
+        return {"accepted": False, "reason": "conflicts_with_undo",
+                "name": "", "label": "", "shared_modes": ()}
     PREFERENCES["hotkey"] = decision["name"]
     apply_hotkey_bindings()
     save_preferences()
@@ -2049,6 +2165,13 @@ def set_recent_dictations_enabled(enabled: bool) -> bool:
     PREFERENCES["recent_dictations"] = bool(enabled)
     save_preferences()
     return PREFERENCES["recent_dictations"]
+
+
+def set_self_correction(enabled: bool) -> bool:
+    """Persist the off-by-default "X, actually Y" correction opt-in."""
+    PREFERENCES["self_correction"] = bool(enabled)
+    save_preferences()
+    return PREFERENCES["self_correction"]
 
 
 def set_voice_object_commands_enabled(enabled: bool) -> None:
@@ -2757,7 +2880,8 @@ def _caption_add(fut, context_terms=(), bundle="", context_pack=None,
             t = str(result or "").strip()
     except Exception:
         return
-    if t and not is_hallucination(t, language):
+    evidence = result if isinstance(result, Recognition) else None
+    if t and not is_hallucination(t, language, evidence):
         current = CAPTION["text"]
         if current == "Listening" or current.endswith(" mode"):
             current = ""
@@ -4141,10 +4265,13 @@ class FlightRecorder:
     """Opt-in continuous capture with a bounded, RAM-only audio deque."""
 
     def __init__(self, seconds=FLIGHT_BUFFER_SECONDS, stream_factory=None,
-                 restore_allowed=None):
+                 restore_allowed=None, request_refresh=None):
         self.max_samples = int(seconds * SAMPLE_RATE)
         self.stream_factory = stream_factory
         self.restore_allowed = restore_allowed or (lambda: True)
+        # Returns True when a device refresh will rebind this stream, so a
+        # deferred recovery is handed off instead of reopened here.
+        self.request_refresh = request_refresh
         self.frames = deque()
         self.total_samples = 0
         self.stream = None
@@ -4215,17 +4342,20 @@ class FlightRecorder:
                 if report:
                     print(f"! Flight Recorder stream close failed: {error}")
 
-    def _recover_locked(self):
-        """Replace an idle stale stream without exposing device details."""
+    def _suspend_locked(self) -> bool:
+        """Close an idle stale stream; defer while a take is attached."""
         with self.lock:
             if self.target is not None:
                 self.recovery_pending = True
-                return
+                return False
             stream, self.stream = self.stream, None
             self.frames.clear()
             self.total_samples = 0
             self.recovery_pending = False
         self._close_stream(stream)
+        return True
+
+    def _restore_locked(self):
         try:
             should_restore = bool(self.restore_allowed())
         except Exception:
@@ -4238,6 +4368,11 @@ class FlightRecorder:
             # A later native event can retry. Recovery never logs device
             # details or disrupts the rest of the audio path.
             pass
+
+    def _recover_locked(self):
+        """Replace an idle stale stream without exposing device details."""
+        if self._suspend_locked():
+            self._restore_locked()
 
     def enable(self):
         if self.is_enabled():
@@ -4268,14 +4403,18 @@ class FlightRecorder:
                 self.target = recorder
                 return True
 
-    def detach(self, recorder):
+    def detach(self, recorder, *, delivered_audio=True):
         with self.init_lock:
             with self.lock:
                 if self.target is not recorder:
                     return
                 self.target = None
+                if not delivered_audio:
+                    # The take's stream stopped delivering audio.
+                    self.recovery_pending = True
                 should_recover = self.recovery_pending
-            if should_recover:
+            if should_recover and not (
+                    self.request_refresh and self.request_refresh()):
                 self._recover_locked()
 
     def clear(self):
@@ -4292,8 +4431,11 @@ class FlightRecorder:
         return extract_recent_utterance(np.concatenate(frames).reshape(-1))
 
 
-FLIGHT = FlightRecorder(restore_allowed=lambda: (
-    bool(PREFERENCES.get("flight_recorder", False)) and not PAUSED["on"]))
+FLIGHT = FlightRecorder(
+    restore_allowed=lambda: (
+        bool(PREFERENCES.get("flight_recorder", False)) and not PAUSED["on"]),
+    request_refresh=lambda: _request_default_audio_refresh(),
+)
 
 
 def _capture_retrospective_flight_tap(recorder) -> np.ndarray:
@@ -4355,9 +4497,13 @@ class AudioPool:
     without leaving the microphone actively recording.
     """
 
-    def __init__(self, size: int = 2, stream_factory=None):
+    def __init__(self, size: int = 2, stream_factory=None,
+                 request_refresh=None):
         self.size = size
         self.stream_factory = stream_factory
+        # Returns True when a device refresh will reopen the pool, so a
+        # deferred recovery is handed off instead of reopened here.
+        self.request_refresh = request_refresh
         self.slots = []
         self.busy = set()
         self.lock = threading.Lock()
@@ -4429,11 +4575,14 @@ class AudioPool:
                 raise RuntimeError("microphone stream unavailable") from None
 
     def acquire(self, recorder):
-        stale_slots = []
         with self.init_lock:
             try:
                 self._warm_locked()
             except Exception:
+                # A failed PortAudio re-initialization leaves nothing that
+                # can open, and only a device refresh initializes it again.
+                if self.request_refresh is not None:
+                    self.request_refresh()
                 raise RuntimeError("microphone stream unavailable") from None
             with self.lock:
                 if self.recovery_pending:
@@ -4456,33 +4605,39 @@ class AudioPool:
                 with self.lock:
                     self.busy.discard(slot)
                     self.warm_error = type(error).__name__
-                stale_slots = self._invalidate_locked(reset_error=False)
-        self._close_slots(stale_slots)
+                # Closed under init_lock, so a device refresh can never
+                # terminate PortAudio while a close is still running.
+                self._close_slots(self._invalidate_locked(reset_error=False))
         raise RuntimeError("microphone stream unavailable") from None
 
-    def release(self, slot):
+    def release(self, slot, *, delivered_audio=True):
         if slot is None:
             return
-        stale_slots = []
         stop_error = None
         try:
             slot.stop()
         except Exception as error:
             stop_error = type(error).__name__
         finally:
+            failure = stop_error or (None if delivered_audio else "NoAudio")
             with self.init_lock:
                 with self.lock:
                     self.busy.discard(slot)
-                    if stop_error is not None:
-                        self.warm_error = stop_error
+                    if failure is not None:
+                        # A stream that stopped delivering audio is as
+                        # stale as one that failed to stop: never hand it
+                        # to the next take.
+                        self.warm_error = failure
                         self.recovery_pending = True
                     should_recover = (
                         self.recovery_pending and not self.busy)
                 if should_recover:
-                    stale_slots = self._invalidate_locked(
-                        reset_error=stop_error is None)
-            self._close_slots(stale_slots)
-            if should_recover:
+                    # Closed under init_lock, so a device refresh can never
+                    # terminate PortAudio while a close is still running.
+                    self._close_slots(self._invalidate_locked(
+                        reset_error=failure is None))
+            if should_recover and not (
+                    self.request_refresh and self.request_refresh()):
                 self.warm_async()
         if stop_error is not None:
             raise RuntimeError("microphone stream stop failed") from None
@@ -4541,8 +4696,7 @@ class AudioPool:
     def invalidate(self):
         """Forget stale default-device streams without cutting off a take."""
         with self.init_lock:
-            stale_slots = self._invalidate_locked()
-        self._close_slots(stale_slots)
+            self._close_slots(self._invalidate_locked())
 
     def close(self):
         with self.init_lock:
@@ -4552,7 +4706,7 @@ class AudioPool:
                 self.busy.clear()
                 self.recovery_pending = False
                 self.closed = True
-        self._close_slots(slots)
+            self._close_slots(slots)
 
 
 class _AudioObjectPropertyAddress(ctypes.Structure):
@@ -4662,6 +4816,13 @@ class MacAudioRecoveryNotifications:
             self.requested += 1
             self.event.set()
 
+    def request(self) -> bool:
+        """Queue a refresh from code that may hold an audio lock."""
+        if not self.started:
+            return False
+        self._signal()
+        return True
+
     def _run(self):
         while True:
             self.event.wait()
@@ -4744,20 +4905,67 @@ class MacAudioRecoveryNotifications:
         self.started = False
 
 
-AUDIO_POOL = AudioPool(size=2)
+AUDIO_POOL = AudioPool(
+    size=2, request_refresh=lambda: _request_default_audio_refresh())
+
+
+def _reinitialize_portaudio():
+    """Re-read PortAudio's device list and default input."""
+    try:
+        sd._terminate()
+    finally:
+        sd._initialize()
+
+
+def refresh_default_audio_inputs(pool, flight, reinitialize) -> bool:
+    """Rebind every stream to the input that is the default now.
+
+    PortAudio reads the device list and the default input once, in
+    Pa_Initialize, so reopening a stream alone binds the device that was the
+    default at launch. The library may only be re-initialized with no stream
+    open. A live take keeps its stream and defers the refresh; its release
+    asks for the refresh again. Returns whether PortAudio was re-initialized.
+    """
+    refreshed = False
+    with pool.init_lock:
+        with flight.init_lock:
+            pool._close_slots(pool._invalidate_locked())
+            flight_idle = flight._suspend_locked()
+            with pool.lock:
+                pool_idle = not pool.recovery_pending
+            if pool_idle and flight_idle:
+                try:
+                    reinitialize()
+                    refreshed = True
+                except Exception:
+                    # Opening below then fails and reports Unavailable; the
+                    # next device event, or a keypress whose open fails and
+                    # requests a refresh, retries.
+                    pass
+            if flight_idle:
+                flight._restore_locked()
+        if pool_idle:
+            try:
+                pool._warm_locked()
+            except Exception:
+                pass
+    return refreshed
 
 
 def _invalidate_default_audio_inputs():
-    """Refresh every stream bound to the prior macOS default input."""
-    try:
-        AUDIO_POOL.recover_default_device()
-    finally:
-        FLIGHT.invalidate()
+    """Rebind every stream to the current macOS default input."""
+    refresh_default_audio_inputs(
+        AUDIO_POOL, FLIGHT, _reinitialize_portaudio)
 
 
 AUDIO_RECOVERY = (
     MacAudioRecoveryNotifications(_invalidate_default_audio_inputs)
     if IS_MACOS else None)
+
+
+def _request_default_audio_refresh() -> bool:
+    """Hand a deferred refresh to the recovery worker when one is running."""
+    return AUDIO_RECOVERY is not None and AUDIO_RECOVERY.request()
 
 
 def _transcribe_frames(frames, prompt=None, language=None) -> Recognition:
@@ -4809,7 +5017,6 @@ def _speculative_frames(frames, prompt=None, still_valid=None,
     accurate = ASR_POOL.submit(
         transcribe_detailed, segment, prompt, True, WHISPER_REPO,
         crosscheck_text=fast.text or None, language=language).result()
-    accurate.verified = True
     if fast.text and fast.text != accurate.text:
         accurate.alternative = fast.text
     return accurate
@@ -4887,6 +5094,11 @@ class CapturedAudio:
         return np.concatenate(frames)
 
 
+# A started stream that has delivered no frame for this long is dead: a
+# warm stream calls back every few tens of milliseconds.
+NO_AUDIO_SECONDS = 2.0
+
+
 class Recorder:
     def __init__(self):
         self.frames = CapturedAudio()
@@ -4894,6 +5106,7 @@ class Recorder:
         self.recording = False
         self.press_at = None
         self.capture_ready_at = None
+        self.last_frame_at = None
         self.released_at = None
         self.audio_status = []
         self.captured_via_flight = False
@@ -4941,6 +5154,7 @@ class Recorder:
         self.source = "hold"
         self.uncertain = False
         self.feedback_seconds = 0.0
+        self.last_frame_at = None
         self.press_at = press_at or time.perf_counter()
         self.utterance_id = f"{time.time_ns():x}-{id(self):x}"
         self.insertion_lease = None
@@ -4975,6 +5189,7 @@ class Recorder:
     def _callback(self, indata, frames, time_info, status):
         if not self.recording:
             return
+        self.last_frame_at = time.perf_counter()
         if status and len(self.audio_status) < 3:
             self.audio_status.append(str(status))
         self.frames.append(indata)
@@ -5055,26 +5270,57 @@ class Recorder:
             self.speculative_start = 0
             self.speculative_end = 0
             self.speculative_invalid = False
-            self.cut_samples = self.total_samples
+            # A reused speculation ends where it was taken. Audio after that
+            # counted as silence to the rolling threshold but may be quiet
+            # speech, so it opens the next segment rather than being skipped.
+            self.cut_samples = decode_end
             self.voiced_since_cut = False
 
     def snapshot(self) -> np.ndarray:
         """Audio so far, without stopping the stream."""
         return self.frames.array()
 
+    def audio_stalled(self, now: float) -> bool:
+        """Whether this take's running stream has stopped delivering audio,
+        whether it never started or stopped partway through."""
+        if not self.recording or self.capture_ready_at is None:
+            return False
+        latest = self.capture_ready_at
+        if self.last_frame_at is not None:
+            latest = max(latest, self.last_frame_at)
+        return now - latest >= NO_AUDIO_SECONDS
+
     def stop(self) -> np.ndarray:
+        delivered_audio = not self.audio_stalled(time.perf_counter())
         self.recording = False
         if self.captured_via_flight:
-            FLIGHT.detach(self)
+            FLIGHT.detach(self, delivered_audio=delivered_audio)
         if self.slot is not None:
             slot, self.slot = self.slot, None
-            AUDIO_POOL.release(slot)
+            AUDIO_POOL.release(slot, delivered_audio=delivered_audio)
         if self.audio_status:
             print(f"! audio callback status: {'; '.join(self.audio_status)}")
         audio = self.frames.array()
+        if (self.speculative_future is not None
+                and not self.speculative_invalid
+                and peak_rms(audio[self.speculative_end:]) >= GATE_PEAK_RMS):
+            # Speech under the rolling silence threshold but above the speech
+            # gate followed the speculation; the release must decode it.
+            self.speculative_invalid = True
         if self.captured_via_flight and self.source == "hold":
             FLIGHT.clear()                   # never let a hold paste twice
         return audio
+
+
+def stalled_take_action(rec, now: float) -> str | None:
+    """How to end a take whose microphone stopped delivering audio.
+
+    A take that heard nothing is abandoned. A take that heard speech first
+    finishes like a release, so the words spoken before the stall are kept.
+    """
+    if rec is None or not rec.audio_stalled(now):
+        return None
+    return "abandon" if rec.total_samples == 0 else "finish"
 
 
 # ------------------------- glossary & learning -------------------------
@@ -5459,6 +5705,7 @@ def gui_settings_snapshot() -> dict:
         "manual_vocabulary": manual,
         "banned_vocabulary": sorted(banned),
         "corrections": corrections,
+        "self_correction": bool(PREFERENCES["self_correction"]),
     }
 
 
@@ -5532,6 +5779,17 @@ def delete_gui_snippet(name: str, expected_original: str):
                 "snippet changed since the editor was opened")
         snippets.pop(snippet_name)
         atomic_write_text(SNIPPETS_FILE, json.dumps(snippets, indent=2) + "\n")
+        # The edit record, and history written by older versions, still hold
+        # the snippet's old and new text; a deleted snippet leaves neither.
+        with LEARN_LOCK:
+            state = load_learned()
+            dropped = state["snippet_edits"].pop(snippet_name, None)
+            history = [entry for entry in state["history"]
+                       if not (isinstance(entry, dict)
+                               and entry.get("name") == snippet_name)]
+            if dropped is not None or len(history) != len(state["history"]):
+                state["history"] = history
+                save_learned(state)
 
 
 def save_gui_vocabulary(manual_values, banned_values):
@@ -5568,14 +5826,27 @@ def forget_gui_correction(key: str):
         if isinstance(fix, dict) and str(fix.get("to", "")).casefold() == replacement:
             state["fixes"].pop(old, None)
         regression = personal_regression_lab(state)
-        regression.forget(old)
-        for app in removed.get("apps", {}):
-            regression.forget(old, app=str(app))
+        # Every scope, not only the apps that corrected it: a revert leaves
+        # its evidence in whichever app the mapping was undone in.
+        scopes = {None, *(str(app) for app in removed.get("apps", {}))}
+        scopes.update(
+            item.app for item in (*regression.cases, *regression.promoted,
+                                  *regression.quarantined)
+            if item.heard.casefold() == old)
+        for app in scopes:
+            regression.forget(old, app=app)
         state["regression_lab"] = regression.to_dict()
-        state["history"].append({
-            "ts": time.time(), "kind": "forgotten",
-            "from": removed.get("from"), "to": removed.get("to"),
-        })
+        # The dictionary count this correction earned would promote the term
+        # again, and history still spells the mapping out.
+        for term in [term for term in state["counts"]
+                     if str(term).casefold() == replacement]:
+            state["counts"].pop(term)
+        state["history"] = [
+            entry for entry in state["history"]
+            if not (isinstance(entry, dict)
+                    and str(entry.get("from", "")).casefold() == old
+                    and str(entry.get("to", "")).casefold() == replacement)]
+        state["history"].append({"ts": time.time(), "kind": "forgotten"})
         state["history"] = state["history"][-100:]
         save_learned(state)
     refresh_glossary()
@@ -5597,11 +5868,15 @@ def runtime_status_snapshot() -> dict:
         from Quartz import (
             CGPreflightListenEventAccess, CGPreflightPostEventAccess,
         )
-        trusted = bool(
-            CGPreflightListenEventAccess() and CGPreflightPostEventAccess())
-        accessibility = "Granted" if trusted else "Needs attention"
+        # Input Monitoring lets the capture key be heard; Accessibility lets
+        # the words be typed. macOS grants them separately, and each has its
+        # own pane, so each is reported on its own.
+        input_monitoring = (
+            "Granted" if CGPreflightListenEventAccess() else "Needs attention")
+        accessibility = (
+            "Granted" if CGPreflightPostEventAccess() else "Needs attention")
     except Exception:
-        accessibility = "Unknown"
+        input_monitoring = accessibility = "Unknown"
     helper_ready = PARAKEET_ENABLED and PARAKEET_HELPER.is_file()
     try:
         helper_running = bool(
@@ -5707,6 +5982,7 @@ def runtime_status_snapshot() -> dict:
         "service_status": "Running" if bar is not None else "Starting",
         "microphone_status": AUDIO_POOL.readiness(),
         "accessibility_status": accessibility,
+        "input_monitoring_status": input_monitoring,
         "version": "Local checkout",
         "model_wallet_shadow": model_wallet_shadow,
         "models": model_status_rows_from_shadow(model_wallet_shadow),
@@ -5895,6 +6171,19 @@ def model_status_rows_from_shadow(snapshot: dict) -> list[dict]:
         QWEN_CLEANUP_PROFILE.provider_id: (
             "qwen3.5:4b", "Selective cleanup"),
     }
+    # A default install downloads only the models its recognition route needs;
+    # the others are opt-in upgrades, so their absence is not a fault.
+    required = (
+        {PARAKEET_PROFILE.provider_id, WHISPER_TINY_PROFILE.provider_id}
+        if PARAKEET_ENABLED else
+        {WHISPER_TINY_PROFILE.provider_id,
+         WHISPER_LARGE_TURBO_PROFILE.provider_id})
+    install_states = {
+        "resolved": "installed",
+        "not_installed": "not_installed",
+        "load_failed": "failed",
+        "revision_mismatch": "mismatch",
+    }
     pins = snapshot.get("pins", ()) if isinstance(snapshot, dict) else ()
     by_id = {
         item.get("provider_id"): item for item in pins
@@ -5909,6 +6198,12 @@ def model_status_rows_from_shadow(snapshot: dict) -> list[dict]:
         rows.append({
             "name": name,
             "role": role,
+            # Until the first readiness receipt exists nothing has been
+            # inspected yet, which is "checking", not "missing".
+            "install_state": install_states.get(
+                pin.get("resolution_state"), "checking"),
+            "required": profile.provider_id in required,
+            "warm": warm,
             "status": "RESOLVED" if resolved else "UNAVAILABLE",
             "detail": (
                 "Exact pinned files resolved · Warm path observed · Runtime "
@@ -6306,6 +6601,27 @@ def write_auto_section(promoted: list[str]):
         atomic_write_text(DICTIONARY_FILE, body)
 
 
+def corrected_away_words(state: dict) -> set[str]:
+    """Words the user corrected into a different word, casefolded.
+
+    Such a word is a misrecognition, however often it was transcribed. A
+    casing-only fix is not. The miner must not count it and the glossary must
+    not promote it, so both read this one set.
+    """
+    pairs = [
+        (key, fix.get("to")) for key, fix in state.get("fixes", {}).items()
+        if isinstance(fix, dict)
+    ] + [
+        (item.get("from"), item.get("to"))
+        for item in state.get("confusions", {}).values()
+        if isinstance(item, dict)
+    ]
+    return {
+        str(heard).casefold() for heard, preferred in pairs
+        if heard and str(heard).casefold() != str(preferred).casefold()
+    }
+
+
 def refresh_glossary():
     """Rebuild the active glossary: manual terms first, then learned terms by
     frequency, capped to the Whisper prompt budget."""
@@ -6315,9 +6631,16 @@ def refresh_glossary():
     learned_sorted = sorted(
         state["counts"].items(), key=lambda kv: -kv[1]
     )
+    # A count can predate the correction: the miner or an earlier correction
+    # counted the word before the user corrected it away. The count stays,
+    # for when that correction is forgotten, but promotes nothing meanwhile.
+    corrected_away = corrected_away_words(state)
     promoted = []
     for term, count in learned_sorted:
-        if count >= PROMOTE_MIN_COUNT and term.casefold() not in seen:
+        if (count >= PROMOTE_MIN_COUNT and term.casefold() not in seen
+                and not PersonalRegressionLab.is_common_word(term)
+                and not any(term_occurs(word, term)
+                            for word in corrected_away)):
             promoted.append(term)
             seen.add(term.casefold())
 
@@ -6330,14 +6653,16 @@ def refresh_glossary():
         chars += len(t) + 2
 
     # The full manual+promoted list (before the prompt truncation above) also
-    # feeds two additive protections that do not touch the prompt budget:
-    # listed terms become protected cleanup anchors, and their casing is
-    # normalized to what the user wrote. Bans are honored in both.
+    # feeds an additive protection that does not touch the prompt budget:
+    # listed terms become protected cleanup anchors. Casing is normalized only
+    # for terms the user wrote, because a learned term carries whatever case
+    # a correction or the miner happened to see. Bans are honored in both.
     vocab_terms = [t for t in manual + promoted if t.casefold() not in banned]
     anchor_pack = ContextPack(tuple(
         ContextCandidate(t, 3.5, "dictionary")
         for t in vocab_terms[:ANCHOR_MAX_TERMS]))
-    vocabulary = {t.casefold(): t for t in vocab_terms}
+    vocabulary = {t.casefold(): t for t in manual
+                  if t.casefold() not in banned}
     with ACOUSTIC_KEYWORD_MEMORY_LOCK:
         keyword_memory, keyword_storage_status = \
             _load_acoustic_keyword_memory()
@@ -6356,11 +6681,6 @@ def refresh_glossary():
         # Whisper to keep listing terms when the audio is silence.
         GLOSS["prompt"] = ("Common terms: " + ", ".join(terms) + ".") \
             if terms else None
-        # Mishearing fixes confirmed PROMOTE_MIN_COUNT+ times become
-        # deterministic post-ASR replacements.
-        GLOSS["fixes"] = {old: info["to"]
-                          for old, info in state["fixes"].items()
-                          if info.get("n", 0) >= PERSONAL_GLOBAL_MIN_COUNT}
         GLOSS["confusions"] = dict(state.get("confusions", {}))
         GLOSS["regression"] = personal_regression_lab(state)
 
@@ -6383,6 +6703,91 @@ def transcript_app_identity(bundle: str) -> str:
         b"whisper-face/transcript-app-identity/v1\0"
         + bundle[len("windows:"):].encode("utf-8")).hexdigest()[:16]
     return f"windows:{digest}"
+
+
+TRANSCRIPT_MAX_AGE = 30 * 24 * 3600   # no dictation is kept longer than this
+# Each trim frees this much headroom below both limits, so the log is
+# rewritten about once per hundred dictations or once a day, not per paste.
+TRANSCRIPT_TRIM_SLACK = 100
+TRANSCRIPT_AGE_SLACK = 24 * 3600
+
+
+def _transcript_entry_time(line: str) -> float | None:
+    try:
+        return float(json.loads(line)["ts"])
+    except (TypeError, ValueError, KeyError, IndexError):
+        return None
+
+
+def retained_transcript_lines(lines: list[str], now: float) -> list[str] | None:
+    """The lines a retention pass keeps, or None while the log is in bounds."""
+    if not lines:
+        return None
+    oldest = _transcript_entry_time(lines[0])
+    if (len(lines) <= TRANSCRIPT_KEEP and oldest is not None
+            and oldest >= now - TRANSCRIPT_MAX_AGE):
+        return None
+    cutoff = now - TRANSCRIPT_MAX_AGE + TRANSCRIPT_AGE_SLACK
+    kept = [line for line in lines
+            if (at := _transcript_entry_time(line)) is not None
+            and at >= cutoff]
+    return kept[-(TRANSCRIPT_KEEP - TRANSCRIPT_TRIM_SLACK):]
+
+
+def _trim_transcripts_locked() -> int:
+    """Apply the count and age limits; the caller holds TRANSCRIPTS_LOCK.
+
+    Returns how many entries were dropped from the log.
+    """
+    try:
+        # Runs on every append: a damaged byte must not stop the dictation.
+        lines = TRANSCRIPTS_FILE.read_text(errors="replace").splitlines()
+    except OSError:
+        return 0
+    kept = retained_transcript_lines(lines, time.time())
+    if kept is None:
+        return 0
+    try:
+        atomic_write_text(
+            TRANSCRIPTS_FILE, "".join(line + "\n" for line in kept))
+    except OSError as e:
+        print(f"! transcript retention failed: {e}")
+        return 0
+    return len(lines) - len(kept)
+
+
+def _rebase_learned_processed(dropped: int):
+    """Keep the miner's position on the same dictation after a trim."""
+    if dropped <= 0:
+        return
+    with LEARN_LOCK:
+        state = load_learned()
+        processed = state.get("processed", 0)
+        if processed:
+            state["processed"] = max(0, processed - dropped)
+            save_learned(state)
+
+
+def prune_transcripts():
+    """Enforce retention without waiting for a dictation or the miner."""
+    with TRANSCRIPTS_LOCK:
+        dropped = _trim_transcripts_locked()
+    _rebase_learned_processed(dropped)
+    if dropped:
+        with USAGE_CACHE["lock"]:
+            USAGE_CACHE["at"] = 0.0
+
+
+def clear_transcript_history():
+    """Erase every kept dictation; the next one starts a new log."""
+    with TRANSCRIPTS_LOCK:
+        try:
+            TRANSCRIPTS_FILE.unlink()
+        except FileNotFoundError:
+            pass
+    _rebase_learned_processed(sys.maxsize)
+    with USAGE_CACHE["lock"]:
+        USAGE_CACHE["at"] = 0.0
 
 
 def append_transcript(raw: str, cleaned: str, bundle: str, path: str,
@@ -6416,6 +6821,8 @@ def append_transcript(raw: str, cleaned: str, bundle: str, path: str,
             # If permission setup or fdopen fails, do not leak the raw handle.
             if fd is not None:
                 os.close(fd)
+        dropped = _trim_transcripts_locked()
+    _rebase_learned_processed(dropped)
     with USAGE_CACHE["lock"]:
         USAGE_CACHE["at"] = 0.0
 
@@ -6459,7 +6866,7 @@ def recent_dictation_metadata(limit: int = RECENT_DICTATION_LIMIT, *,
     app. The text itself only leaves this file through an explicit reveal or
     an explicit re-insertion, so nothing here can end up in a menu title.
 
-    The log is re-read on every call rather than cached, because ``learn_pass``
+    The log is re-read on every call rather than cached, because retention
     rewrites ``transcripts.jsonl`` in place: a retained handle or line offset
     would eventually describe a file that no longer exists.
     """
@@ -6597,6 +7004,19 @@ def insert_recent_dictation(entry_id: str) -> dict:
     return {"inserted": bool(verified), "reason": reason}
 
 
+def cleanup_model_installed() -> bool:
+    """Whether the cleanup model is on disk, from a local file check only.
+
+    A default install has no cleanup model; asking Ollama anyway would put the
+    dictation on the wire for nothing.
+    """
+    models_root = Path(os.environ.get(
+        "OLLAMA_MODELS", str(Path.home() / ".ollama" / "models")))
+    name, _, tag = OLLAMA_MODEL.partition(":")
+    return (models_root / "manifests" / "registry.ollama.ai" / "library"
+            / name / (tag or "latest")).is_file()
+
+
 def ollama_chat(system: str | None, user: str, num_predict: int = 512,
                 few_shot: list | None = None,
                 timeout: tuple = (2, 15),
@@ -6611,7 +7031,11 @@ def ollama_chat(system: str | None, user: str, num_predict: int = 512,
     rejects the schema). ``total_deadline`` switches to streaming: the read
     timeout then bounds the gap between chunks instead of the whole reply,
     and the deadline bounds the whole reply.
+
+    Raises before sending anything when the cleanup model is not installed.
     """
+    if not cleanup_model_installed():
+        raise RuntimeError(f"{OLLAMA_MODEL} is not installed")
     messages = ([{"role": "system", "content": system}] if system else [])
     messages += few_shot or []
     messages.append({"role": "user", "content": user})
@@ -6636,7 +7060,7 @@ def ollama_chat(system: str | None, user: str, num_predict: int = 512,
         payload["format"] = "json"
 
     def post(current: dict):
-        return requests.post(
+        return LOCAL_MODEL_SESSION.post(
             OLLAMA_URL, json=current, timeout=timeout, stream=streaming)
 
     r = post(payload)
@@ -6689,8 +7113,15 @@ def parse_texts(lines: list[str]) -> list[str]:
     return texts
 
 
+def term_occurs(term: str, text: str) -> bool:
+    """Whether ``term`` appears in ``text`` as a whole word, in any case."""
+    return re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", text,
+                     re.IGNORECASE) is not None
+
+
 def learn_pass():
     """Mine recent transcripts for new vocabulary and promote frequent terms."""
+    prune_transcripts()
     if not TRANSCRIPTS_FILE.exists():
         return
     lines = TRANSCRIPTS_FILE.read_text().splitlines()
@@ -6713,17 +7144,22 @@ def learn_pass():
     new_texts = parse_texts(new_lines)
     blob = "\n".join(texts)[-6000:]
 
+    corrected_away = corrected_away_words(state)
+
+    def built_on_corrected_word(term: str) -> bool:
+        return any(term_occurs(word, term) for word in corrected_away)
+
     # Terms below the promotion threshold keep accumulating against the new
     # dictations; without this they'd freeze at their discovery count and
     # could never be promoted.
     for term, count in state["counts"].items():
-        if count < PROMOTE_MIN_COUNT:
-            hits = sum(1 for t in new_texts if term.lower() in t.lower())
+        if count < PROMOTE_MIN_COUNT and not built_on_corrected_word(term):
+            hits = sum(1 for t in new_texts if term_occurs(term, t))
             if hits:
                 state["counts"][term] = count + hits
 
     manual, banned = parse_dictionary()
-    known = set(t.casefold() for t in manual) | banned \
+    known = set(t.casefold() for t in manual) | banned | corrected_away \
         | set(k.casefold() for k in state["counts"])
     known_str = ", ".join(sorted(manual + list(state["counts"])))[:1200]
 
@@ -6743,24 +7179,27 @@ def learn_pass():
         if not isinstance(cand, str):
             continue
         cand = cand.strip()
-        if not (2 <= len(cand) <= 40) or cand.casefold() in known:
+        if not (2 <= len(cand) <= 40) or cand.casefold() in known \
+                or built_on_corrected_word(cand):
             continue
         # how many dictations actually contain it
-        count = sum(1 for t in texts if cand.lower() in t.lower())
+        count = sum(1 for t in texts if term_occurs(cand, t))
         if count >= 1:
             state["counts"][cand] = state["counts"].get(cand, 0) + count
             added.append((cand, state["counts"][cand]))
 
-    # Mark everything mined as processed, then trim the log so it stores only
-    # what the learning loop can still use. Dictations appended while the
-    # miner ran stay unprocessed; re-read under the lock so they survive.
+    # Mark everything mined as processed. Appends during the miner call may
+    # have trimmed the log, so locate the last mined entry by its timestamp
+    # rather than by its old line number.
     with TRANSCRIPTS_LOCK:
-        fresh = TRANSCRIPTS_FILE.read_text().splitlines()
-        unprocessed = max(0, len(fresh) - len(lines))
-        if len(fresh) > TRANSCRIPT_KEEP + 100:
-            fresh = fresh[-TRANSCRIPT_KEEP:]
-            atomic_write_text(TRANSCRIPTS_FILE, "\n".join(fresh) + "\n")
-        state["processed"] = max(0, len(fresh) - unprocessed)
+        try:
+            fresh = TRANSCRIPTS_FILE.read_text().splitlines()
+        except OSError:
+            fresh = []
+    marker = _transcript_entry_time(lines[-1])
+    state["processed"] = next(
+        (index + 1 for index in range(len(fresh) - 1, -1, -1)
+         if _transcript_entry_time(fresh[index]) == marker), 0)
     with LEARN_LOCK:
         state = merge_learned_state(base_state, state, load_learned())
         save_learned(state)
@@ -6788,8 +7227,14 @@ def restart_dead_hotkey_listener(on_dead, listener_state=None) -> bool:
     """Replace one dead listener without losing retry state."""
     state = LISTENER if listener_state is None else listener_state
     listener = state.get("l")
-    if listener is None or getattr(listener, "running", False):
+    # pynput clears ``running`` only in stop(), after a callback raises. A
+    # listener thread whose run loop returned on its own still reads as
+    # running, so a thread that has exited counts as dead too.
+    is_alive = getattr(listener, "is_alive", None)
+    if listener is None or (getattr(listener, "running", False)
+                            and (not callable(is_alive) or is_alive())):
         state["recovering"] = False
+        state["restarts"] = 0
         return False
     if not state.get("recovering", False):
         state["recovering"] = True
@@ -6797,7 +7242,14 @@ def restart_dead_hotkey_listener(on_dead, listener_state=None) -> bool:
             on_dead()
         except Exception as e:
             print(f"! hotkey recovery cleanup failed: {e}")
-    print("! hotkey listener died — restarting it")
+    # A listener whose event tap cannot be created (no Accessibility
+    # permission) exits at once, so it is replaced on every check. Log the
+    # loop once rather than every few seconds.
+    restarts = state.get("restarts", 0)
+    if restarts == 0:
+        print("! hotkey listener died — restarting it")
+    elif restarts == 1:
+        print("! hotkey listener keeps exiting — still restarting it")
     try:
         replacement = state["make"]()
     except Exception as e:
@@ -6805,6 +7257,7 @@ def restart_dead_hotkey_listener(on_dead, listener_state=None) -> bool:
         return False
     state["l"] = replacement
     state["recovering"] = False
+    state["restarts"] = restarts + 1
     return True
 
 
@@ -6828,6 +7281,96 @@ def hotkey_watchdog_loop(on_dead):
             restart_dead_hotkey_listener(on_dead)
         except Exception as e:
             print(f"! hotkey watchdog recovered from error: {e}")
+
+
+# A key-up can be lost: pynput reads a modifier's release from the
+# family-wide flag bit, so releasing Right Shift while Left Shift is held
+# reports nothing, and a disabled or dead event tap reports nothing at all.
+MAX_TAKE_SECONDS = 600.0
+HOLD_POLL_SECONDS = 0.25
+# Consecutive "up" readings before a latched key counts as released. The
+# real key-up event normally wins this race by a wide margin.
+HOLD_KEY_UP_POLLS = 2
+
+
+def physical_key_is_down(key) -> bool | None:
+    """The bound key's hardware state; None when it cannot be read."""
+    vk = getattr(getattr(key, "value", None), "vk", None)
+    if vk is None:
+        return None
+    try:
+        if IS_MACOS:
+            from Quartz import (
+                CGEventSourceKeyState,
+                kCGEventSourceStateHIDSystemState,
+            )
+            return bool(CGEventSourceKeyState(
+                kCGEventSourceStateHIDSystemState, vk))
+        if IS_WINDOWS:
+            return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
+    except Exception:
+        return None
+    return None
+
+
+def latch_hotkey_press(latch: dict, pressed_at: float):
+    """Start supervising one capture-key hold; the caller holds the lock."""
+    latch.update(on=True, at=pressed_at, confirmed=False, up_polls=0,
+                 capped=False)
+
+
+def supervise_hotkey_latch(latch: dict, lock, events, modifiers: set,
+                           key_is_down, now: float) -> str | None:
+    """End a hold whose key-up never arrived, or that ran past the cap.
+
+    Either way a ``release`` is queued, so the take finishes through the
+    normal release path. A key that reads "up" is trusted only after it
+    has once read "down" during this hold: a remapped key or a missing
+    permission can make the hardware state unreadable, and then only the
+    cap applies. The cap leaves the latch set, so a held function key's
+    auto-repeat cannot start a second take.
+    """
+    with lock:
+        if not latch.get("on"):
+            return None
+        pressed_at = latch["at"]
+    physical = key_is_down()
+    with lock:
+        if not latch.get("on") or latch["at"] != pressed_at:
+            return None
+        if physical is True:
+            latch["confirmed"] = True
+            latch["up_polls"] = 0
+        elif physical is False and latch["confirmed"]:
+            latch["up_polls"] += 1
+            if latch["up_polls"] >= HOLD_KEY_UP_POLLS:
+                latch["on"] = False
+                if latch["capped"]:
+                    return None          # the cap already finished the take
+                events.put(("release", now, frozenset(modifiers)))
+                return "key_up_lost"
+        if not latch["capped"] and now - pressed_at >= MAX_TAKE_SECONDS:
+            latch["capped"] = True
+            events.put(("release", now, frozenset(modifiers)))
+            return "take_limit"
+    return None
+
+
+def hold_supervisor_loop(step):
+    """Poll a held capture key independently of the event tap."""
+    while True:
+        time.sleep(HOLD_POLL_SECONDS)
+        try:
+            outcome = step()
+        except Exception as e:
+            print(f"! hold supervisor recovered from error: "
+                  f"{type(e).__name__}")
+            continue
+        if outcome == "key_up_lost":
+            print("[hotkey] key release was not seen — ending the take")
+        elif outcome == "take_limit":
+            print(f"[hotkey] take reached {MAX_TAKE_SECONDS / 60:.0f} "
+                  "minutes — finishing it")
 
 
 def keepwarm_loop():
@@ -7239,13 +7782,22 @@ class ParakeetClient:
     existing Whisper Turbo path remains the faithful fallback.
     """
 
+    # A start that fails can hold a decode for the whole start-up timeout, so
+    # it is not repeated on the next decode. The wait doubles with each
+    # consecutive failure.
+    START_RETRY_SECONDS = 30.0
+    START_RETRY_MAX_SECONDS = 300.0
+
     def __init__(self, helper=PARAKEET_HELPER, process_factory=None,
-                 exchange=None):
+                 exchange=None, clock=None):
         self.helper = Path(helper)
         self.process_factory = process_factory or subprocess.Popen
         self.exchange = exchange or bounded_helper_exchange
+        self.clock = clock or time.monotonic
         self.process = None
         self.lock = threading.Lock()
+        self.failed_starts = 0
+        self.next_start = 0.0
 
     def _close(self):
         process, self.process = self.process, None
@@ -7272,29 +7824,45 @@ class ParakeetClient:
             except Exception:
                 pass
 
+    def _start_failed(self, reason: str):
+        self._close()
+        self.failed_starts += 1
+        wait = min(self.START_RETRY_MAX_SECONDS,
+                   self.START_RETRY_SECONDS * 2 ** (self.failed_starts - 1))
+        self.next_start = self.clock() + wait
+        # The reason is a fixed word or an exception class, never its
+        # message: an OSError message carries the helper's path.
+        print(f"! Parakeet helper did not start ({reason}); using Whisper, "
+              f"next attempt in {wait:.0f}s")
+        return None
+
     def _start(self):
         if self.process is not None and self.process.poll() is None:
             return self.process
         self._close()
         if not PARAKEET_ENABLED or not self.helper.is_file():
             return None
-        process = self.process_factory(
-            [str(self.helper), "--server"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=None,
-            bufsize=0,
-        )
+        if self.clock() < self.next_start:
+            return None
+        try:
+            process = self.process_factory(
+                [str(self.helper), "--server"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=None,
+                bufsize=0,
+            )
+        except Exception as error:
+            return self._start_failed(type(error).__name__)
         self.process = process
         try:
             status = self.exchange(
                 process, (), timeout=PARAKEET_STARTUP_TIMEOUT)
-        except Exception:
-            self._close()
-            return None
+        except Exception as error:
+            return self._start_failed(type(error).__name__)
         if not status.get("ready"):
-            self._close()
-            return None
+            return self._start_failed("not ready")
+        self.failed_starts = 0
         mark_model_warm_path_observed(PARAKEET_PROFILE.provider_id)
         print(f"[asr] Parakeet Unified ready in "
               f"{float(status.get('load_s', 0.0)):.2f}s")
@@ -7431,8 +7999,12 @@ def asr_decode_target(model_repo: str, *, available=None,
     return FAST_WHISPER_REPO
 
 
-def windows_whisper_model(model_repo: str):
-    """Load the Windows CTranslate2 model once, preferring an NVIDIA GPU."""
+def windows_whisper_model(model_repo: str, *, local_files_only: bool = True):
+    """Load the Windows CTranslate2 model once, preferring an NVIDIA GPU.
+
+    Like the macOS path, runtime loading never contacts the model hub; only
+    the installer's preload opts into downloading.
+    """
     if model_repo in WINDOWS_ASR_MODELS:
         return WINDOWS_ASR_MODELS[model_repo]
     from faster_whisper.utils import download_model
@@ -7440,6 +8012,7 @@ def windows_whisper_model(model_repo: str):
         model_repo,
         cache_dir=str(HERE / ".models"),
         revision=ASR_MODEL_REVISIONS.get(model_repo),
+        local_files_only=local_files_only,
     )
     options = []
     if ctranslate2.get_cuda_device_count() > 0:
@@ -7465,6 +8038,9 @@ def windows_whisper_model(model_repo: str):
 PARAKEET_IO_POOL = ThreadPoolExecutor(max_workers=1)
 PARAKEET_CROSSCHECK = os.environ.get("PARROT_ASR_CROSSCHECK", "tiny") != "off"
 PARAKEET_CROSSCHECK_MAX_SECONDS = 90.0
+# Two transcripts count as the same utterance when more than half of their
+# tokens match. Below that, an escalation has found no majority.
+CROSSCHECK_MAJORITY_AGREEMENT = 0.5
 
 
 def _clean_native_processing_s(value) -> float | None:
@@ -7479,6 +8055,21 @@ def _clean_native_processing_s(value) -> float | None:
     return native_processing_s
 
 
+def crosscheck_agreement(left: str, right: str) -> float:
+    """Token agreement between two engines' transcripts of the same audio.
+
+    Engines write the same words differently: casing, punctuation, apostrophe
+    style and digit grouping. None of that is a different hearing, so it is
+    removed before the tokens are compared.
+    """
+    def spoken(text: str) -> str:
+        text = re.sub(r"(?<=\w)['\u2019`](?=\w)", "", (text or "").casefold())
+        text = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", text)
+        return " ".join(re.findall(r"\w+", text))
+
+    return hypothesis_agreement(spoken(left), spoken(right))
+
+
 def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
                            verify: bool,
                            crosscheck_text: str | None = None) \
@@ -7491,8 +8082,9 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
     path. An independent Whisper Tiny decode of the same audio now runs on
     the calling ASR thread while the helper request waits on the I/O pool,
     so the agreement signal costs almost no wall time. Tiny is never
-    accepted as final text here; it only calibrates confidence and survives
-    as an inspectable alternative. Returns None when the helper fails so the
+    accepted as final text here; it only calibrates confidence, casts one
+    vote when Turbo is installed to break the tie, and survives as an
+    inspectable alternative. Returns None when the helper fails so the
     caller falls through to the faithful Whisper path.
     """
     duration = len(audio) / SAMPLE_RATE
@@ -7508,7 +8100,8 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
             # the two engines decode different languages.
             tiny_text = transcribe_detailed(
                 audio, prompt, verify=False,
-                model_repo=FAST_WHISPER_REPO, language="en").text
+                model_repo=FAST_WHISPER_REPO, language="en",
+                _prepared=True).text
         except Exception as error:
             print(f"! Tiny cross-check unavailable: {error}")
             tiny_text = None
@@ -7520,7 +8113,7 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
     confidence = PARAKEET_ROUTE_CONFIDENCE
     alternative = None
     if tiny_text is not None and tiny_text.strip():
-        agreement = hypothesis_agreement(text, tiny_text)
+        agreement = crosscheck_agreement(text, tiny_text)
         confidence = parakeet_confidence_from_agreement(agreement)
         if tiny_text != text:
             alternative = tiny_text
@@ -7532,30 +8125,44 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
         audio_duration=duration,
         native_processing_s=_clean_native_processing_s(parakeet[1]),
     )
+    # Escalation needs a third engine. asr_decode_target would quietly decode
+    # with Tiny when Turbo is not installed, and Tiny is the engine that just
+    # disagreed: asking it again settles nothing. Without Turbo the stronger
+    # recognizer's transcript stands, unverified.
     if (agreement is not None and verify
-            and should_escalate_uncertain(agreement, duration)):
+            and should_escalate_uncertain(agreement, duration)
+            and asr_model_is_cached(WHISPER_REPO)):
         # The engines heard different utterances: buy one independent Turbo
-        # decode and keep whichever transcript is more confident. The loser
-        # is retained as the inspectable alternative. Escalation is an
-        # optional upgrade: if the fallback decode itself fails, the primary
-        # transcript must survive rather than turn a working dictation into
-        # a dropped one.
+        # decode and let it break the tie. The vote is on the words. Parakeet's
+        # confidence is derived from agreement and Whisper's from log
+        # probabilities, so the two numbers cannot be compared. Escalation is
+        # an optional upgrade: if the decode itself fails, the primary
+        # transcript must survive rather than turn a working dictation into a
+        # dropped one.
         try:
             fallback = transcribe_detailed(
                 audio, prompt, verify=False, model_repo=WHISPER_REPO,
-                _skip_parakeet=True, language="en")
+                _skip_parakeet=True, language="en", _prepared=True)
         except Exception as error:
             print(f"! Turbo escalation unavailable: {error}")
-            recognition.verified = True
             return recognition
-        if fallback.text and fallback.confidence > recognition.confidence:
-            fallback.alternative = (
-                text if text != fallback.text else alternative)
+        if not fallback.text:
+            return recognition
+        with_parakeet = crosscheck_agreement(text, fallback.text)
+        with_tiny = crosscheck_agreement(tiny_text, fallback.text)
+        if (with_tiny > with_parakeet
+                and with_tiny > CROSSCHECK_MAJORITY_AGREEMENT):
+            # Two engines heard the same utterance and Parakeet did not.
+            # Turbo's transcript is delivered, never Tiny's.
+            fallback.alternative = text
             fallback.verified = True
             return fallback
-        if fallback.text and fallback.text != recognition.text:
+        if fallback.text != text:
             recognition.alternative = fallback.text
-        recognition.verified = True
+        if with_parakeet > CROSSCHECK_MAJORITY_AGREEMENT:
+            recognition.confidence = parakeet_confidence_from_agreement(
+                max(agreement, with_parakeet))
+            recognition.verified = True
     return recognition
 
 
@@ -7564,11 +8171,15 @@ def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
                         model_repo: str = WHISPER_REPO,
                         crosscheck_text: str | None = None,
                         _skip_parakeet: bool = False,
-                        language: str | None = None) -> Recognition:
+                        language: str | None = None,
+                        _prepared: bool = False) -> Recognition:
     # Whispered/quiet speech: lift the level into the range Whisper decodes
     # confidently. Gain is capped so the noise floor of true near-silence
     # (which the energy gate already rejects) isn't blown up to fake speech.
-    audio = prepare_asr_audio(audio)
+    # The cross-check and the escalation re-enter with audio this call has
+    # already prepared; preparing it again would apply the gain past its cap.
+    if not _prepared:
+        audio = prepare_asr_audio(audio)
     if prompt is None:
         with GLOSS["lock"]:
             prompt = GLOSS["prompt"]
@@ -7666,37 +8277,16 @@ def transcribe_detailed(audio: np.ndarray, prompt: str | None = None,
 
 def transcribe(audio: np.ndarray, prompt: str | None = None,
                language: str | None = None) -> str:
-    """Compatibility wrapper for warmup, phone, and diagnostics."""
+    """Compatibility wrapper for warmup and diagnostics."""
     return transcribe_detailed(audio, prompt, language=language).text
 
 
 def apply_learned_fixes(text: str, bundle: str = "") -> str:
-    """Deterministic mishearing repairs (e.g. Gwen -> Qwen), earned by the
-    user making the same correction PROMOTE_MIN_COUNT times."""
+    """Apply the corrections the Personal Regression Lab holds active here
+    (e.g. Gwen -> Qwen) to text that does not pass through the compiler."""
     with GLOSS["lock"]:
-        fixes = dict(GLOSS["fixes"])
-        confusions = dict(GLOSS["confusions"])
         regression = GLOSS["regression"]
-    gated = {
-        item.heard.casefold()
-        for item in (*regression.promoted, *regression.quarantined)
-        if item.app is None or item.app == (bundle or None)
-    }
-    text = regression.apply(text, app=bundle or None)
-    for old, new in fixes.items():
-        if old.casefold() in gated:
-            continue
-        text = re.sub(rf"\b{re.escape(old)}\b", new, text, flags=re.I)
-    for info in confusions.values():
-        old, new = info.get("from"), info.get("to")
-        if isinstance(old, str) and old.casefold() in gated:
-            continue
-        app_count = info.get("apps", {}).get(bundle, 0) if bundle else 0
-        if (isinstance(old, str) and isinstance(new, str)
-                and (info.get("n", 0) >= PERSONAL_GLOBAL_MIN_COUNT
-                     or app_count >= PERSONAL_APP_MIN_COUNT)):
-            text = re.sub(rf"\b{re.escape(old)}\b", new, text, flags=re.I)
-    return text
+    return regression.apply(text, app=bundle or None)
 
 
 # Whole-word matcher for vocabulary casing: an alphanumeric run, optionally
@@ -7711,7 +8301,8 @@ def apply_vocabulary_casing(text: str) -> str:
     user wrote in the dictionary (e.g. "github" -> "GitHub"). Case-insensitive
     on the match, whole-word only so "github" inside "githubbed" is left alone,
     and a token already in canonical form is untouched. Additive: only a token
-    whose casefold equals a listed term is ever changed."""
+    whose casefold equals a listed term is ever changed, and only by raising
+    letters, so a capital the recognizer produced (a sentence start) stays."""
     if not text:
         return text
     with GLOSS["lock"]:
@@ -7723,6 +8314,9 @@ def apply_vocabulary_casing(text: str) -> str:
         word = match.group(0)
         canonical = vocabulary.get(word.casefold())
         if canonical is None or canonical == word:
+            return word
+        if any(have.isupper() and not want.isupper()
+               for have, want in zip(word, canonical)):
             return word
         return canonical
 
@@ -7738,6 +8332,8 @@ def learned_alternatives(text: str, bundle: str) -> list[str]:
         old, new = info.get("from"), info.get("to")
         if not isinstance(old, str) or not isinstance(new, str):
             continue
+        if PersonalRegressionLab.remaps_common_words(old, new):
+            continue
         if re.search(rf"\b{re.escape(old)}\b", text, re.I):
             candidate = re.sub(
                 rf"\b{re.escape(old)}\b", new, text, flags=re.I)
@@ -7747,51 +8343,16 @@ def learned_alternatives(text: str, bundle: str) -> list[str]:
 
 
 def compiler_personal_priors(bundle: str) -> tuple[PersonalPrior, ...]:
-    """Project local correction history into contextual compiler evidence."""
+    """Hand the compiler the mappings the Personal Regression Lab holds
+    active in this app. The lab is the only source: a correction that has
+    not been promoted, or was held back, changes nothing."""
     with GLOSS["lock"]:
-        fixes = dict(GLOSS["fixes"])
-        confusions = dict(GLOSS["confusions"])
         regression = GLOSS["regression"]
-    gated = {
-        item.heard.casefold()
-        for item in (*regression.promoted, *regression.quarantined)
-        if item.app is None or item.app == (bundle or None)
-    }
-    priors: dict[tuple[str, str], PersonalPrior] = {}
-    for mapping in regression.promoted:
-        if mapping.app and mapping.app != bundle:
-            continue
-        apps = ((mapping.app, 2),) if mapping.app else ()
-        priors[(mapping.heard.casefold(), mapping.preferred.casefold())] = \
-            PersonalPrior(
-                mapping.heard, mapping.preferred,
-                count=1 if mapping.app else 3,
-                apps=apps,
-            )
-    for heard, preferred in fixes.items():
-        if (isinstance(heard, str) and isinstance(preferred, str)
-                and heard.casefold() not in gated):
-            priors[(heard.casefold(), preferred.casefold())] = PersonalPrior(
-                heard, preferred, count=3)
-    for info in confusions.values():
-        heard, preferred = info.get("from"), info.get("to")
-        if not isinstance(heard, str) or not isinstance(preferred, str):
-            continue
-        if heard.casefold() in gated:
-            continue
-        apps = tuple(
-            (str(app), int(count))
-            for app, count in info.get("apps", {}).items()
-            if isinstance(count, int)
-        )
-        key = (heard.casefold(), preferred.casefold())
-        candidate = PersonalPrior(
-            heard, preferred, max(1, int(info.get("n", 1))), apps)
-        existing = priors.get(key)
-        if existing is None or candidate.count > existing.count \
-                or candidate.app_count(bundle) > existing.app_count(bundle):
-            priors[key] = candidate
-    return tuple(priors.values())
+    return tuple(
+        PersonalPrior(
+            mapping.heard, mapping.preferred,
+            apps=((mapping.app, 1),) if mapping.app else ())
+        for mapping in regression.active(app=bundle or None))
 
 
 def compile_voice_evidence(recognition: Recognition,
@@ -8248,10 +8809,20 @@ def context_firewall_state_snapshot() -> dict:
     }
 
 
+def _snippet_is_placeholder(text: str) -> bool:
+    """True for a template value the user has not replaced yet.
+
+    Both installers seed snippets.json with "EDIT ME ..." values. Until one
+    is filled in it is not something the user asked to have typed, so it is
+    never inserted: the dictation is delivered as spoken instead.
+    """
+    return text.lstrip().startswith("EDIT ME")
+
+
 def match_snippet(raw: str) -> tuple[str, str] | None:
     """Whole-dictation snippet trigger: "insert my address" pastes
-    snippets.json["address"]. Unknown names return None so the phrase
-    falls through as ordinary dictation."""
+    snippets.json["address"]. Unknown names and unfilled placeholders return
+    None so the phrase falls through as ordinary dictation."""
     m = SNIPPET_RE.match(raw.strip())
     if not m or not SNIPPETS_FILE.exists():
         return None
@@ -8270,7 +8841,7 @@ def match_snippet(raw: str) -> tuple[str, str] | None:
         return None
     for name, text in snippets.items():
         if isinstance(text, str) and key == snippet_name_key(name):
-            return name, text
+            return None if _snippet_is_placeholder(text) else (name, text)
     return None
 
 
@@ -8294,23 +8865,36 @@ def _load_snippet_map() -> dict[str, str]:
 
 
 def _compile_snippet_pattern(snippets: dict[str, str]):
-    """One whole-word, case-insensitive alternation over every trigger. Triggers
-    are ordered longest-first so a compound trigger ("email signature") wins over
-    a prefix ("email"), each is re.escape'd, and the boundaries are stricter than
-    \\b — (?<!\\w)(...)(?!\\w) — so "address" never fires inside "addressed"."""
-    if not snippets:
+    """The spoken cue "insert my <name>" over every usable snippet name.
+
+    A bare name is never a trigger: the names people give snippets ("email",
+    "address", "signature") are ordinary words, and expanding them inside
+    "send me your email" would replace what was said with private text. The
+    cue is the one the whole-utterance command uses. Names are ordered
+    longest-first so "email signature" wins over "email", and the boundaries
+    are stricter than \\b so "address" never fires inside "addresses".
+    Unfilled placeholders and names with no word characters are left out.
+    A negation directly on the cue ("do not insert my email") asks for the
+    opposite, so it is talk about inserting and never a trigger.
+    """
+    triggers = sorted(
+        (name for name, text in snippets.items()
+         if snippet_name_key(name) and not _snippet_is_placeholder(text)),
+        key=len, reverse=True)
+    if not triggers:
         return None
-    triggers = sorted(snippets, key=len, reverse=True)
     alternation = "|".join(re.escape(trigger) for trigger in triggers)
-    return re.compile(rf"(?<!\w)({alternation})(?!\w)", re.I)
+    return re.compile(
+        r"(?<!\w)(?<!\bnot\s)(?<!\bnever\s)(?<!\bcannot\s)(?<!n['’]t\s)"
+        rf"insert\s+my\s+({alternation})(?!\w)", re.I)
 
 
 def expand_snippets_inline(raw: str, snippets: dict[str, str] | None = None) -> str:
-    """Pure, side-effect-free inline expansion: replace each whole-word snippet
-    trigger embedded in a longer dictation with its canonical expansion,
-    case-insensitively and longest-trigger-first. Returns raw unchanged when
-    there are no snippets or no trigger fires. snippets defaults to the live
-    snippets.json via _load_snippet_map()."""
+    """Pure, side-effect-free inline expansion: replace each spoken
+    "insert my <name>" embedded in a longer dictation with that snippet's
+    text, case-insensitively and longest-name-first. Returns raw unchanged
+    when there are no snippets or the cue is not spoken. snippets defaults to
+    the live snippets.json via _load_snippet_map()."""
     if snippets is None:
         snippets = _load_snippet_map()
     pattern = _compile_snippet_pattern(snippets)
@@ -8338,10 +8922,10 @@ def _snippet_sentinel(index: int) -> str:
 
 def _mask_snippets_inline(
         raw: str, snippets: dict[str, str]) -> tuple[str, dict[str, str]]:
-    """Round-trip masking half of inline expansion: replace each whole-word
-    trigger (same matching as expand_snippets_inline) with an opaque sentinel and
-    return (masked_text, sentinel -> expansion). An empty mapping means nothing
-    matched, and the caller must leave raw untouched."""
+    """Round-trip masking half of inline expansion: replace each spoken
+    "insert my <name>" (same matching as expand_snippets_inline) with an opaque
+    sentinel and return (masked_text, sentinel -> expansion). An empty mapping
+    means nothing matched, and the caller must leave raw untouched."""
     pattern = _compile_snippet_pattern(snippets)
     if pattern is None:
         return raw, {}
@@ -8401,14 +8985,77 @@ def save_snippet_edit(name: str, old: str, new: str, bundle: str) -> bool:
                 "ts": time.time(),
                 "kind": "snippet_edit",
                 "name": name,
-                "from": old,
-                "to": new,
                 "app": bundle,
             })
             state["history"] = state["history"][-100:]
             save_learned(state)
     print("[learn] snippet updated")
     return True
+
+
+def suggest_snippet_edit(name: str, old: str, new: str, bundle: str) -> bool:
+    """Record an observed edit of a pasted snippet as a pending suggestion.
+
+    The destination application can produce the edit as easily as the user
+    can (an input mask, a page that reformats its own field), so an
+    observation never rewrites a saved snippet. It waits under ``suggested``
+    in the snippet's ``snippet_edits`` record, beside the record of any edit
+    that was applied, until ``apply_pending_snippet_edit`` or
+    ``forget_snippet_edit``.
+    """
+    if not new.strip() or new == old or len(new) > 4000:
+        return False
+    with SNIPPETS_LOCK:
+        try:
+            snippets = json.loads(SNIPPETS_FILE.read_text())
+        except Exception as error:
+            print("! snippets.json unreadable while noting edit "
+                  f"({type(error).__name__})")
+            return False
+        if not isinstance(snippets, dict) or snippets.get(name) != old:
+            return False
+        with LEARN_LOCK:
+            state = load_learned()
+            record = state["snippet_edits"].get(name)
+            if not isinstance(record, dict):
+                record = {}
+            record["suggested"] = {"from": old, "to": new, "app": bundle}
+            state["snippet_edits"][name] = record
+            save_learned(state)
+    print("[learn] snippet edit suggested")
+    return True
+
+
+def apply_pending_snippet_edit(name: str) -> bool:
+    """Apply the pending suggested edit of one snippet, by snippet name.
+
+    A suggestion made against text the snippet no longer has is dropped
+    instead of applied. One that cannot be checked because snippets.json is
+    unreadable right now is kept.
+    """
+    with LEARN_LOCK:
+        record = load_learned()["snippet_edits"].get(name)
+    info = record.get("suggested") if isinstance(record, dict) else None
+    if not isinstance(info, dict):
+        return False
+    with SNIPPETS_LOCK:
+        try:
+            json.loads(SNIPPETS_FILE.read_text())
+        except Exception:
+            return False
+    old, new = info.get("from"), info.get("to")
+    if (isinstance(old, str) and isinstance(new, str)
+            and save_snippet_edit(name, old, new, str(info.get("app", "")))):
+        return True
+    with LEARN_LOCK:
+        state = load_learned()
+        current = state["snippet_edits"].get(name)
+        if isinstance(current, dict) and "suggested" in current:
+            current.pop("suggested")
+            if not current:
+                state["snippet_edits"].pop(name)
+            save_learned(state)
+    return False
 
 
 def forget_snippet_edit(name: str) -> bool:
@@ -8424,10 +9071,16 @@ def forget_snippet_edit(name: str) -> bool:
             except Exception:
                 snippets = None
             if isinstance(snippets, dict) \
-                    and snippets.get(name) == info.get("to"):
+                    and isinstance(info.get("to"), str) \
+                    and snippets.get(name) == info["to"]:
                 snippets[name] = str(info.get("from", ""))
                 atomic_write_text(
                     SNIPPETS_FILE, json.dumps(snippets, indent=2) + "\n")
+            # History written by older versions holds the edit's text.
+            state["history"] = [
+                entry for entry in state["history"]
+                if not (isinstance(entry, dict)
+                        and entry.get("name") == name)]
             state["history"].append({
                 "ts": time.time(), "kind": "forgotten_snippet", "name": name,
             })
@@ -8568,7 +9221,45 @@ def _coerce_range(value) -> tuple[int, int] | None:
     return (int(match.group(1)), int(match.group(2))) if match else None
 
 
-def _ax_selection(element, text: str | None) -> tuple[int, int] | None:
+def utf16_range_to_code_points(text: str, utf16_range: tuple[int, int]) \
+        -> tuple[int, int] | None:
+    """Translate an Accessibility range into (start, length) indices of text.
+
+    Accessibility counts UTF-16 code units, as NSString does, while the bridged
+    value is a Python string indexed by code point: every character outside
+    the Basic Multilingual Plane, which is most emoji, is two units there and
+    one here. A range that runs past the text or splits a surrogate pair does
+    not describe this text, so it converts to None.
+    """
+    location, length = utf16_range
+    encoded = text.encode("utf-16-le", "surrogatepass")
+    end = location + length
+    if location < 0 or length < 0 or 2 * end > len(encoded):
+        return None
+    if len(encoded) == 2 * len(text):
+        return location, length
+    try:
+        start = len(encoded[:2 * location].decode("utf-16-le"))
+        stop = len(encoded[:2 * end].decode("utf-16-le"))
+    except UnicodeDecodeError:
+        return None
+    return start, stop - start
+
+
+def code_points_to_utf16_range(text: str, selection: tuple[int, int]) \
+        -> tuple[int, int] | None:
+    """The inverse of utf16_range_to_code_points, for writing a range back."""
+    start, length = selection
+    if start < 0 or length < 0 or start + length > len(text):
+        return None
+    before = len(text[:start].encode("utf-16-le", "surrogatepass")) // 2
+    span = len(text[start:start + length].encode(
+        "utf-16-le", "surrogatepass")) // 2
+    return before, span
+
+
+def _ax_reported_range(element) -> tuple[int, int] | None:
+    """AXSelectedTextRange exactly as reported: UTF-16 code units."""
     try:
         from ApplicationServices import (
             AXValueGetType,
@@ -8588,6 +9279,19 @@ def _ax_selection(element, text: str | None) -> tuple[int, int] | None:
             return _coerce_range(extracted)
     except Exception:
         pass
+    return None
+
+
+def _ax_selection(element, text: str | None) -> tuple[int, int] | None:
+    """The field's selection as (start, length) code-point indices of text."""
+    reported = _ax_reported_range(element)
+    if reported is not None:
+        # The lease, the join prefix, the readback and undo all slice text
+        # with this range, so it changes units here and nowhere else. A range
+        # that does not fit the text is withheld rather than guessed at.
+        if text is None:
+            return reported
+        return utf16_range_to_code_points(text, reported)
     # When a field exposes only selected text, locate a unique occurrence.
     try:
         from ApplicationServices import kAXSelectedTextAttribute
@@ -8909,24 +9613,12 @@ def resolve_insertion_target(rec, timeout: float = 0.12, reader=None,
         sleeper(min(0.02, remaining))
 
 
-READBACK_TIMEOUT = 0.02
-# Chromium publishes its accessibility value well after the paste actually
-# lands, so the tight native window reads stale text, calls a good insertion a
-# conflict, and fails it closed into the Voice Outbox. Electron targets get
-# room to catch up; native fields still verify on the first read.
-READBACK_TIMEOUT_ELECTRON = 0.35
-
-
-def readback_timeout_for_frontmost() -> float:
-    """Pick the readback window for whichever app is receiving this paste."""
-    if not IS_MACOS:
-        return READBACK_TIMEOUT
-    try:
-        app = NSWorkspace.sharedWorkspace().frontmostApplication()
-    except Exception:
-        return READBACK_TIMEOUT             # unreadable app: keep the default
-    return (READBACK_TIMEOUT_ELECTRON if is_electron_app(app)
-            else READBACK_TIMEOUT)
+# Chromium, in browsers and Electron apps alike, publishes its accessibility
+# value tens to hundreds of milliseconds after the paste lands, and reading
+# stale text calls a good insertion a conflict. The readback returns on the
+# first matching read, so a native field still verifies at once; only a
+# field that never matches waits out the whole window, after the paste.
+READBACK_TIMEOUT = 0.4
 
 
 def classify_readback_conflict(observed: str | None, expected: str) -> str:
@@ -8955,7 +9647,7 @@ def classify_readback_conflict(observed: str | None, expected: str) -> str:
 
 
 def insertion_readback(snapshot: FocusSnapshot, inserted: str,
-                       timeout: float = 0.02, reader=None,
+                       timeout: float = READBACK_TIMEOUT, reader=None,
                        clock=None, sleeper=None) -> ReadbackResult:
     """Prove the exact field mutation after paste without ever retrying it."""
     if snapshot.text is None or snapshot.selection is None:
@@ -9095,7 +9787,7 @@ def commit_insertion(rec, text: str, bundle: str,
         rec, lease, current, paste_available=True)
 
     def readback():
-        """Read back, and file the conflict shape so a repeat is diagnosable.
+        """Read back; the receipt carries the result's conflict shape.
 
         The shape is a category from READBACK_CONFLICT_SHAPES, never text, so
         one app failing every paste is finally identifiable from the private
@@ -9103,10 +9795,7 @@ def commit_insertion(rec, text: str, bundle: str,
         """
         if current is None or lease.opaque:
             return ReadbackResult.unverifiable()
-        result = insertion_readback(
-            current, text, timeout=readback_timeout_for_frontmost())
-        PIPELINE_STATE["last_readback_shape"] = result.detail or ""
-        return result
+        return insertion_readback(current, text, timeout=READBACK_TIMEOUT)
 
     current_bundle = frontmost_bundle()
     receipt = INSERTION_COORDINATOR.commit(
@@ -9126,20 +9815,41 @@ def commit_insertion(rec, text: str, bundle: str,
     return receipt
 
 
-def focused_text() -> str | None:
-    snapshot = focused_snapshot()
-    return snapshot.text if snapshot else None
+# Password managers and other privacy-aware apps mark what they copy with
+# these formats; such a clipboard is never read as context.
+WINDOWS_PRIVATE_CLIPBOARD_FORMATS = (
+    "ExcludeClipboardContentFromMonitorProcessing",
+    "CanIncludeInClipboardHistory",
+    "Clipboard Viewer Ignore",
+)
+
+
+def windows_clipboard_is_private() -> bool:
+    return any(
+        win32clipboard.IsClipboardFormatAvailable(
+            win32clipboard.RegisterClipboardFormat(name))
+        for name in WINDOWS_PRIVATE_CLIPBOARD_FORMATS)
+
+
+def pasteboard_is_private(pb) -> bool:
+    kinds = {str(kind) for kind in (pb.types() or [])}
+    return any(marker in kinds for marker in PASTEBOARD_MARKER_TYPES)
 
 
 def capture_recognition_context(bundle: str = "") \
         -> tuple[FocusSnapshot | None, list[str], ContextPack]:
-    """Build an ephemeral vocabulary from what the user can currently see."""
+    """Build an ephemeral vocabulary from what the user can currently see.
+
+    Nothing is read from a secure text field or from a clipboard its owner
+    marked concealed or transient.
+    """
     if IS_WINDOWS:
         title = windows_foreground_title()
         clipboard = None
         try:
-            candidate = pyperclip.paste()
-            clipboard = candidate if len(candidate) <= 800 else None
+            if not windows_clipboard_is_private():
+                candidate = pyperclip.paste()
+                clipboard = candidate if len(candidate) <= 800 else None
         except Exception:
             pass
         observation = ContextObservation(
@@ -9150,10 +9860,17 @@ def capture_recognition_context(bundle: str = "") \
     snapshot = focused_snapshot()
     app = NSWorkspace.sharedWorkspace().frontmostApplication()
     app_name = str(app.localizedName()) if app is not None else None
+    if snapshot is not None and "AXSecureTextField" in {
+            _ax_attribute(snapshot.element, "AXRole"),
+            _ax_attribute(snapshot.element, "AXSubrole")}:
+        pack = CONTEXT_ROUTER.collect(
+            ContextObservation(app=app_name or "", bundle=bundle))
+        return snapshot, [], pack
     clipboard = None
     try:
-        clipboard = NSPasteboard.generalPasteboard().stringForType_(
-            NSPasteboardTypeString)
+        pb = NSPasteboard.generalPasteboard()
+        if not pasteboard_is_private(pb):
+            clipboard = pb.stringForType_(NSPasteboardTypeString)
         if clipboard and len(clipboard) > 800:
             clipboard = None
     except Exception:
@@ -9246,13 +9963,19 @@ class UndoableInsertion:
 
 
 def undo_utterance_id(utterance_id: str) -> str:
-    """Namespace an undo inside the coordinator that owns the insertion.
+    """Name an undo after the insertion it reverses.
 
-    Sharing the coordinator is what makes undo single-use for free: a second
-    attempt cannot stage the same id twice, and a committed entry is terminal
-    before any keystroke is synthesized.
+    The undo coordinator cannot stage the same id twice, so an insertion can
+    be undone once, and a committed entry is terminal before any keystroke
+    is synthesized.
     """
     return f"undo:{utterance_id}"
+
+
+# Undo stages here and never in INSERTION_COORDINATOR, whose recoverable
+# entries are the Voice Outbox: an undo payload is the text a dictation
+# replaced, usually nothing, and never a dictation waiting to be delivered.
+UNDO_COORDINATOR = InsertionCoordinator()
 
 
 def build_undoable_insertion(rec, snapshot: "FocusSnapshot | None",
@@ -9326,35 +10049,147 @@ def undo_refusal(reason: str) -> dict:
     return {"undone": False, "reason": reason}
 
 
+def _grapheme_attaches(character: str) -> bool:
+    """True for a code point that never starts a character of its own.
+
+    Combining marks, plus what unicodedata does not call one: the joiners,
+    the Thai and Lao vowels that attach, halfwidth sound marks, variation
+    selectors, skin tones and emoji tags.
+    """
+    code = ord(character)
+    return (unicodedata.category(character) in ("Mn", "Mc", "Me")
+            or unicodedata.combining(character) != 0
+            or code in (0x200C, 0x200D, 0x0E33, 0x0EB3, 0xFF9E, 0xFF9F)
+            or 0xFE00 <= code <= 0xFE0F
+            or 0x1F3FB <= code <= 0x1F3FF
+            or 0xE0020 <= code <= 0xE007F
+            or 0xE0100 <= code <= 0xE01EF)
+
+
+def grapheme_count(text: str) -> int:
+    """Count the characters a caret steps over, as Shift+Left does.
+
+    An emoji with a skin tone, a flag, a ZWJ family, a keycap or a letter
+    with combining accents is one step though it is several code points.
+    Where Unicode's segmentation rules and this approximation could differ,
+    it joins rather than splits: a count that is too low leaves part of an
+    insertion in place, while one that is too high selects the user's text.
+    """
+    prepend = frozenset((
+        *range(0x0600, 0x0606), 0x06DD, 0x070F, 0x0890, 0x0891, 0x08E2,
+        0x0D4E, 0x110BD, 0x110CD, 0x111C2, 0x111C3, 0x1193F, 0x11941,
+        0x11A3A, *range(0x11A84, 0x11A8A), 0x11D46, 0x11F02))
+
+    def hangul(code: int) -> bool:
+        return (0x1100 <= code <= 0x11FF or 0xA960 <= code <= 0xA97F
+                or 0xAC00 <= code <= 0xD7A3 or 0xD7B0 <= code <= 0xD7FF)
+
+    count = 0
+    previous = None
+    regional_run = 0
+    for character in text:
+        code = ord(character)
+        regional = 0x1F1E6 <= code <= 0x1F1FF
+        before = ord(previous) if previous is not None else -1
+        joins = previous is not None and (
+            _grapheme_attaches(character)
+            or before == 0x200D
+            or (previous == "\r" and character == "\n")
+            or before in prepend
+            or (regional and regional_run % 2 == 1)
+            # An Indic virama fuses the next consonant into a conjunct.
+            or (unicodedata.combining(previous) == 9
+                and unicodedata.category(character).startswith("L"))
+            # Conjoining jamo, and a syllable after a leading consonant.
+            or (hangul(code) and not 0xAC00 <= code <= 0xD7A3
+                and hangul(before))
+            or (0xAC00 <= code <= 0xD7A3
+                and (0x1100 <= before <= 0x115F
+                     or 0xA960 <= before <= 0xA97F)))
+        if not joins:
+            count += 1
+        regional_run = regional_run + 1 if regional else 0
+        previous = character
+    return count
+
+
+def _ax_select_text_range(element, text: str, selection: tuple[int, int],
+                          expected: str, timeout: float = READBACK_TIMEOUT,
+                          clock=None, sleeper=None) -> bool | None:
+    """Select a code-point range of a field through Accessibility.
+
+    True only once the field reports exactly that range holding ``expected``.
+    None when the field does not take a selection this way, which leaves the
+    caret untouched for keyboard selection. False when the range does not
+    fit the text, or a request was made but never confirmed: the selection
+    may then be anywhere, so nothing may be deleted from it. Chromium applies
+    the request asynchronously, so the confirmation is polled for, like a
+    readback.
+    """
+    target = code_points_to_utf16_range(text, selection)
+    if target is None:
+        return False
+    try:
+        from ApplicationServices import (
+            AXUIElementIsAttributeSettable,
+            AXUIElementSetAttributeValue,
+            AXValueCreate,
+            kAXSelectedTextAttribute,
+            kAXSelectedTextRangeAttribute,
+            kAXValueCFRangeType,
+        )
+        err, settable = AXUIElementIsAttributeSettable(
+            element, kAXSelectedTextRangeAttribute, None)
+    except Exception:
+        return None
+    if err or not settable:
+        return None
+    clock = clock or time.monotonic
+    sleeper = sleeper or time.sleep
+    deadline = clock() + max(0.0, timeout)
+    try:
+        AXUIElementSetAttributeValue(
+            element, kAXSelectedTextRangeAttribute,
+            AXValueCreate(kAXValueCFRangeType, target))
+        while True:
+            selected = _ax_attribute(element, kAXSelectedTextAttribute)
+            if (_ax_reported_range(element) == target
+                    and (selected is None or selected == expected)):
+                return True
+            remaining = deadline - clock()
+            if remaining <= 0:
+                return False
+            sleeper(min(0.02, remaining))
+    except Exception:
+        return False
+
+
 @with_cocoa_pool
 def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
                         coordinator=None, presser=None, paster=None,
-                        readback=None) -> dict:
+                        readback=None, selector=None) -> dict:
     """Put the destination back exactly as it was before the last insertion.
 
     Undo is an insertion in reverse and is held to the same standard: it
-    stages against the same coordinator, validates against the same
-    ``DestinationObservation`` comparison, proves the result with the same
+    validates against the same ``DestinationObservation`` comparison, makes
+    one attempt through a coordinator, proves the result with the same
     readback, and reports the same content-free receipt vocabulary. If focus
     moved, the caret moved, or the surrounding text changed, it refuses and
     says which, rather than deleting whatever happens to be there now.
     """
     snapshot_reader = snapshot_reader or focused_snapshot
     bundle_reader = bundle_reader or frontmost_bundle
-    coordinator = coordinator or INSERTION_COORDINATOR
+    coordinator = coordinator or UNDO_COORDINATOR
     presser = presser or _press_edit_chord
     paster = paster or paste
     readback = readback or insertion_readback
+    selector = selector or _ax_select_text_range
     with UNDOABLE_INSERTION["lock"]:
         record = UNDOABLE_INSERTION["record"]
         if record is None:
             return undo_refusal("nothing_to_undo")
         if len(record.inserted) > UNDO_MAX_CHARACTERS:
             return undo_refusal("too_long_to_undo")
-        # Claim it before any platform work. A second press while the first
-        # undo is still synthesizing keystrokes finds nothing to undo, which
-        # is the same answer the coordinator would give a moment later.
-        UNDOABLE_INSERTION["record"] = None
 
     undo_id = undo_utterance_id(record.utterance_id)
     lease = InsertionLease.capture(
@@ -9367,21 +10202,40 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
             selection=record.caret,
         )) or "",
     )
+    current = snapshot_reader()
+    observation = destination_observation(current, bundle_reader())
+    # Refuse before claiming anything. Nothing has touched the field, so the
+    # same undo stays available for when the caret is back where it was.
+    refusal = coordinator.validate(lease, observation)
+    if refusal is not None:
+        print(f"[undo] refused ({refusal.value})")
+        return undo_refusal(refusal.value)
+    with UNDOABLE_INSERTION["lock"]:
+        # A second press, or a newer dictation, may have got here first.
+        if UNDOABLE_INSERTION["record"] is not record:
+            return undo_refusal("nothing_to_undo")
+        UNDOABLE_INSERTION["record"] = None
     try:
         coordinator.stage(lease, record.replaced)
     except ValueError:
         # Already staged: this insertion has been undone once already.
         return undo_refusal("already_undone")
 
-    current = snapshot_reader()
-    observation = destination_observation(current, bundle_reader())
-
     def perform(replacement: str) -> None:
         # Select exactly the inserted characters, then substitute in one
         # step, so no interval exists where the text is gone and its
         # replacement is not yet there.
-        for _ in range(len(record.inserted)):
-            presser(keyboard.Key.shift, keyboard.Key.left)
+        selected = selector(current.element, current.text,
+                            record.inserted_range, record.inserted)
+        if selected is False:
+            # The selection is somewhere this could not confirm, and deleting
+            # it could take the user's own text with it.
+            raise RuntimeError("undo selection was not confirmed")
+        if selected is None:
+            # Shift+Left steps over whole user-perceived characters, so the
+            # count is of those and never of code points.
+            for _ in range(grapheme_count(record.inserted)):
+                presser(keyboard.Key.shift, keyboard.Key.left)
         if replacement:
             paster(replacement)
         else:
@@ -9397,10 +10251,13 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
                 selection=record.inserted_range,
             ),
             record.replaced,
-            timeout=readback_timeout_for_frontmost(),
+            timeout=READBACK_TIMEOUT,
         )
 
     receipt = coordinator.commit(undo_id, observation, perform, prove)
+    # What undo staged is the text the dictation replaced, never something
+    # waiting to be delivered, so no payload outlives the attempt.
+    coordinator.acknowledge(undo_id)
     if receipt.state == ReceiptState.VERIFIED:
         # Suppress before announcing: the correction watcher may still be
         # inside its ten-second window on this very utterance.
@@ -9465,64 +10322,146 @@ def record_paste_outcome(receipt: PasteReceipt, observed_text: str) -> bool:
     return False
 
 
+def _learned_count(value) -> int:
+    """A stored evidence count, tolerant of a hand-edited learned.json."""
+    return value if isinstance(value, int) and value > 0 else 0
+
+
+def committed_paste_receipt(rec, snapshot: FocusSnapshot | None,
+                            text: str, bundle: str, mode: str,
+                            event_id: str = "") -> PasteReceipt | None:
+    """Receipt for the string that reached the field, not the one handed in.
+
+    ``commit_insertion`` may put a joining separator in front of ``text``.
+    A receipt that leaves it out makes the watcher take that separator for
+    the user's first edit.
+    """
+    committed = getattr(rec, "committed_text", None) or text
+    return make_paste_receipt(snapshot, committed, bundle, mode, event_id)
+
+
+# Consecutive identical reads of the pasted range, about a second, before
+# its value counts as something the user settled on.
+CORRECTION_STABLE_POLLS = 5
+
+
+class SentUnchanged(str):
+    """A paste that settled unedited and whose field was then cleared.
+
+    Its words were accepted, which is evidence about them. It is not an
+    observed zero-edit outcome: a field reads the same after the user deletes
+    everything as it does after a send.
+    """
+
+    sent = True
+
+
 def observe_paste_outcome(receipt: PasteReceipt, timeout=None,
                           poll_interval=None, reader=None, clock=None,
-                          sleeper=None) -> str | None:
-    """Return the first safe correction before a transient field disappears.
+                          sleeper=None, stable_polls=None) -> str | None:
+    """Return what the pasted range settled to during the correction window.
 
-    Chat composers are commonly cleared as soon as the user submits. Polling
-    throughout the correction window preserves a correction made just before
-    submission; an unchanged paste is reported only when it is still present
-    at the end of the window.
+    A poll almost always lands in the middle of an edit, so one changed read
+    is never a correction. The range has to read the same for
+    ``stable_polls`` consecutive polls, and the value is reported only if it
+    was still what the range read when observation ended: an edit under way
+    at that moment means an earlier pause was a pause, not a result.
+
+    Observation ends with the window, when the field stays unreadable, or as
+    soon as the field is emptied after the paste was read. A chat composer is
+    emptied by a send, and what is typed into it next is another message. An
+    unchanged paste is returned as itself while it is still present, and as
+    ``SentUnchanged`` when the field was emptied. None means nothing safe was
+    observed.
     """
     timeout = CORRECTION_DELAY if timeout is None else max(0.0, float(timeout))
     poll_interval = CORRECTION_POLL_INTERVAL if poll_interval is None \
         else max(0.01, float(poll_interval))
+    stable_polls = CORRECTION_STABLE_POLLS if stable_polls is None \
+        else max(1, int(stable_polls))
     reader = reader or _ax_text
     clock = clock or time.monotonic
     sleeper = sleeper or time.sleep
     start, length = receipt.selection
     if start < 0 or length < 0 or start + length > len(receipt.before):
         return None
-    expected = (receipt.before[:start] + receipt.pasted
-                + receipt.before[start + length:])
-    deadline = clock() + timeout
+    prefix = receipt.before[:start]
+    suffix = receipt.before[start + length:]
+    pasted = receipt.pasted
+    # Only the pasted range is ever compared. With nothing after it, text
+    # typed past the paste is bounded so a long document is not re-diffed.
+    reach = len(pasted) + max(256, len(pasted))
 
+    def pasted_range(current):
+        if not current or current == receipt.before \
+                or not current.startswith(prefix):
+            return None
+        body = current[len(prefix):]
+        if suffix:
+            if not body.endswith(suffix):
+                return None
+            return body[:len(body) - len(suffix)]
+        if body == pasted:
+            return pasted
+        revised = infer_revised_insertion("", (0, 0), pasted, body[:reach])
+        return pasted if revised is None else revised
+
+    deadline = clock() + timeout
+    previous = unread = object()
+    value = last = shown = settled = None
+    streak = absent = 0
     while True:
         current = reader(receipt.element)
-        if current and current not in {receipt.before, expected}:
-            revised = infer_revised_insertion(
-                receipt.before,
-                receipt.selection,
-                receipt.pasted,
-                current,
-            )
-            if revised is not None:
-                return revised
+        blank = current is not None and not current.strip()
+        if previous is unread or current != previous:
+            previous = current
+            value = None if blank else pasted_range(current)
+        if value is not None:
+            shown = value
+        if value is not None and value == last:
+            streak += 1
+        else:
+            last, streak = value, int(value is not None)
+        if streak >= stable_polls:
+            settled = value
+        # None is an Accessibility read that failed and may recover; an
+        # empty field after the paste was read will not hold the paste again.
+        emptied = blank and shown is not None
+        absent = 0 if current else absent + 1
         remaining = deadline - clock()
-        if remaining <= 0:
-            return receipt.pasted if current == expected else None
+        if emptied or remaining <= 0 or absent >= stable_polls:
+            if settled is None or shown != settled:
+                return None
+            if settled != pasted or value == pasted:
+                return settled
+            return SentUnchanged(pasted) if emptied else None
         sleeper(min(poll_interval, remaining))
 
 
 @with_cocoa_pool
-def learn_snippet_edit(name: str, receipt: PasteReceipt):
-    """Turn a user's in-place edit of a pasted snippet into its saved value.
+def learn_snippet_edit(name: str, receipt: PasteReceipt,
+                       snippet: str | None = None):
+    """Offer a settled in-place edit of a pasted snippet as its new value.
 
     Same Accessibility polling loop as ``learn_from_corrections``, on its own
-    thread, so it owns a pool too.
+    thread, so it owns a pool too. ``snippet`` is the stored text; the receipt
+    holds what was pasted, which may start with a joining separator.
     """
     revised = observe_paste_outcome(receipt)
     if revised is None or revised == receipt.pasted:
         return
-    save_snippet_edit(name, receipt.pasted, revised, receipt.bundle)
+    stored = receipt.pasted if snippet is None else snippet
+    if receipt.pasted.endswith(stored):
+        joined = receipt.pasted[:len(receipt.pasted) - len(stored)]
+        if joined and revised.startswith(joined):
+            revised = revised[len(joined):]
+    suggest_snippet_edit(name, stored, revised, receipt.bundle)
 
 
 def paste_snippet_and_watch(name: str, snippet: str, bundle: str, mode: str,
                             starter=None, rec=None) -> PasteReceipt | None:
     """Paste a snippet after capturing the field needed to learn its edit."""
     snapshot = focused_snapshot()
-    receipt = make_paste_receipt(snapshot, snippet, bundle, mode)
     if rec is None:
         paste(snippet)
     else:
@@ -9530,17 +10469,18 @@ def paste_snippet_and_watch(name: str, snippet: str, bundle: str, mode: str,
         if (integrity is not None
                 and integrity.state != ReceiptState.VERIFIED):
             return None
+    receipt = committed_paste_receipt(rec, snapshot, snippet, bundle, mode)
     if receipt is None:
         print("! [snippet] cannot observe edits in this field")
         return None
     if starter is None:
         threading.Thread(
             target=learn_snippet_edit,
-            args=(name, receipt),
+            args=(name, receipt, snippet),
             daemon=True,
         ).start()
     else:
-        starter(learn_snippet_edit, (name, receipt))
+        starter(learn_snippet_edit, (name, receipt, snippet))
     return receipt
 
 
@@ -9568,15 +10508,37 @@ def learn_from_corrections(receipt: PasteReceipt | None):
     if utterance_was_undone(event_id):
         print("[learn] skipped: insertion was undone")
         return
-    record_paste_outcome(receipt, revised)
+    if not getattr(revised, "sent", False):
+        record_paste_outcome(receipt, revised)
+
+    def strip(word):
+        return word.strip(",.;:!?\"'()[]")
+
     if revised == receipt.pasted:
+        # A paste left alone, or sent as it was, is evidence against every
+        # candidate mapping whose heard word it contains: the word was right
+        # as recognized.
+        left_alone = {strip(word).casefold() for word in revised.split()}
+        with LEARN_LOCK:
+            state = load_learned()
+            counted = False
+            for info in state["confusions"].values():
+                if not isinstance(info, dict) \
+                        or str(info.get("from", "")).casefold() \
+                        not in left_alone:
+                    continue
+                kept = info.get("kept")
+                if not isinstance(kept, dict):
+                    kept = info["kept"] = {}
+                kept[receipt.bundle] = _learned_count(
+                    kept.get(receipt.bundle)) + 1
+                counted = True
+            if counted:
+                save_learned(state)
         return
     p_words, c_words = receipt.pasted.split(), revised.split()
     if not p_words or not c_words:
         return
-
-    def strip(word):
-        return word.strip(",.;:!?\"'()[]")
 
     learned = []
     sm = difflib.SequenceMatcher(None, [w.casefold() for w in p_words],
@@ -9592,7 +10554,9 @@ def learn_from_corrections(receipt: PasteReceipt | None):
             ratio = correction_similarity(old, new)
             clean = new.replace("-", "").replace("'", "")
             # similar-but-different, word-shaped: a respelling, not a rewrite
-            if 0.4 <= ratio < 1.0 and clean.isalnum() and 2 <= len(new) <= 30:
+            if (0.4 <= ratio < 1.0 and clean.isalnum() and 2 <= len(new) <= 30
+                    and not PersonalRegressionLab.remaps_common_words(
+                        old, new)):
                 learned.append((old, new))
 
     if not learned:
@@ -9606,14 +10570,22 @@ def learn_from_corrections(receipt: PasteReceipt | None):
         changed = False
         for correction_index, (old, term) in enumerate(
                 learned[:CORRECTION_MAX_LEARN]):
-            # dictionary: the corrected spelling is a strong signal
+            # Changing an active mapping's output back to the heard word is
+            # evidence against that mapping, not a new mapping the other way.
+            if regression.record_revert(
+                    term, old, app=receipt.bundle or None):
+                state["regression_lab"] = regression.to_dict()
+                changed = True
+                print("[learn] correction reverted; mapping held back")
+                continue
+            # dictionary: each correction is one observation of the spelling,
+            # so a single edit never promotes a term on its own
             if term.casefold() not in known \
-                    and state["counts"].get(term, 0) < PROMOTE_MIN_COUNT:
-                state["counts"][term] = PROMOTE_MIN_COUNT
+                    and not PersonalRegressionLab.is_common_word(term):
+                state["counts"][term] = _learned_count(
+                    state["counts"].get(term)) + 1
                 changed = True
                 print("[learn] correction observed for dictionary")
-            # fix rule: the same old->new correction seen twice becomes a
-            # deterministic post-ASR replacement
             key = old.casefold()
             fix = state["fixes"].get(key, {"to": term, "n": 0})
             if fix["to"].casefold() == term.casefold():
@@ -9636,18 +10608,28 @@ def learn_from_corrections(receipt: PasteReceipt | None):
             apps = confusion.setdefault("apps", {})
             apps[receipt.bundle] = int(apps.get(receipt.bundle, 0)) + 1
             state["confusions"][confusion_key] = confusion
+            active_before = regression.promoted
             regression.record_correction(
                 old, term, app=receipt.bundle or None)
+            kept = confusion.get("kept")
+            kept = kept if isinstance(kept, dict) else {}
             if (receipt.bundle
                     and apps[receipt.bundle] >= PERSONAL_APP_MIN_COUNT):
                 result = regression.propose(
-                    old, term, app=receipt.bundle)
+                    old, term, app=receipt.bundle,
+                    corrected=apps[receipt.bundle],
+                    kept=_learned_count(kept.get(receipt.bundle)))
                 if not result.passed:
                     print("[learn] app prior quarantined")
             if confusion["n"] >= PERSONAL_GLOBAL_MIN_COUNT:
-                result = regression.propose(old, term)
+                result = regression.propose(
+                    old, term, corrected=confusion["n"],
+                    kept=sum(_learned_count(count)
+                             for count in kept.values()))
                 if not result.passed:
                     print("[learn] global prior quarantined")
+            if set(regression.promoted) - set(active_before):
+                print("[learn] fix rule active")
             state["regression_lab"] = regression.to_dict()
             state["history"].append({
                 "ts": time.time(),
@@ -9658,8 +10640,6 @@ def learn_from_corrections(receipt: PasteReceipt | None):
                 "mode": receipt.mode,
             })
             state["history"] = state["history"][-100:]
-            if fix["n"] == PERSONAL_GLOBAL_MIN_COUNT:
-                print("[learn] fix rule active")
             if isinstance(event_id, str) and event_id:
                 accepted_keywords.append(
                     (term, f"{event_id}:{correction_index}"))
@@ -9808,25 +10788,51 @@ def audio_gate_measurements(audio: np.ndarray) -> tuple[float, float]:
 
 
 def collapse_repeats(text: str) -> tuple[str, bool]:
-    """Collapse runs of one token repeated 3+ times — the signature of an ASR
-    decode loop, never of real speech ("no no" survives, "Unraid" x40 does
-    not). Returns (text, looped) where looped means a substantial run was
-    removed.
+    """Collapse a long run of one repeated token to two of it — the
+    signature of an ASR decode loop ("Unraid" x40). Returns (text, looped).
+
+    A word said a few times is speech, with or without the commas a pause
+    leaves ("very, very, very good", "no no no no"), and is kept whole. A
+    stuck decoder repeats until the segment ends, so only a run of eight
+    or more is cut. A shorter loop is left in: extra words are visible
+    and easy to delete, and a dropped word is neither.
+
+    ``looped`` says repetition dominates the transcript, whether or not
+    anything was cut: runs of three or more, counted as two each, would
+    leave at most 60% of the words. The glossary-echo guard drops a
+    transcript on it, and an echo is often one term four or five times.
 
     Whitespace tokenization means this cannot see inside a Japanese or
     Chinese transcript, which arrives as a single token. It fails closed
     there — the text is returned untouched and ``looped`` is False — rather
     than guessing at character-level repetition and eating real speech.
+
+    Digits, number words and single characters are never collapsed: a zip
+    code ("1 0 0 0 1"), a phone number ("five five five") and a spelled
+    address ("w w w") repeat a token in real speech.
     """
+    loop_min_run = 8
     words = text.split()
-    out, prev, run = [], None, 0
-    for w in words:
-        key = w.strip(",.;:!?…\"'。、！？「」").casefold()
-        run = run + 1 if key == prev else 1
-        prev = key
-        if run <= 2:
-            out.append(w)
-    return " ".join(out), bool(words) and len(out) <= 0.6 * len(words)
+    keys = [w.strip(",.;:!?…\"'。、！？「」").casefold() for w in words]
+    out = []
+    remaining = 0
+    start = 0
+    while start < len(words):
+        key = keys[start]
+        end = start + 1
+        while end < len(words) and keys[end] == key:
+            end += 1
+        run = end - start
+        repeatable = (len(key) > 1 and key not in NUMBER_WORDS
+                      and not any(char.isdigit() for char in key))
+        if repeatable and run >= loop_min_run:
+            # The last token carries the mark that ends the run.
+            out.extend((words[start], words[end - 1]))
+        else:
+            out.extend(words[start:end])
+        remaining += min(run, 2) if repeatable else run
+        start = end
+    return " ".join(out), bool(words) and remaining <= 0.6 * len(words)
 
 
 def looks_like_prompt_echo(text: str) -> bool:
@@ -9844,6 +10850,31 @@ def looks_like_prompt_echo(text: str) -> bool:
     return hits / len(words) >= 0.8
 
 
+def strip_context_echo(text: str, context_tail: str) -> str:
+    """Drop a leading repeat of the field's own tail from a continuation.
+
+    Cleanup is told what the field already ends with and sometimes repeats
+    it. Only a whole-word repeat with new words after it counts as that: a
+    field holding "to" is also the start of "Tomorrow", and cutting there
+    pastes "morrow".
+    """
+    tail = context_tail[-40:]
+    if (len(context_tail) > 40 and context_tail[-41].isalnum()
+            and tail[:1].isalnum()):
+        # The 40-character window opened inside a word; start at the next.
+        parts = tail.split(None, 1)
+        tail = parts[1] if len(parts) > 1 else ""
+    tail = tail.lower()
+    if not tail or not text.lower().startswith(tail):
+        return text
+    rest = text[len(tail):]
+    if rest[:1].isalnum() or rest[:1] in ("_", "'", "’", "-"):
+        return text
+    if not any(char.isalnum() for char in rest):
+        return text
+    return rest.lstrip()
+
+
 def quick_clean(text: str, verbatim: bool = False,
                 continuing: bool = False,
                 language: str = LANGUAGE_DEFAULT) -> str:
@@ -9851,7 +10882,7 @@ def quick_clean(text: str, verbatim: bool = False,
     if verbatim or not t:
         return t
     language = str(language or "").strip().casefold() or LANGUAGE_DEFAULT
-    t = compile_cleanup(t, language).text
+    t = compile_cleanup(t, language, PREFERENCES["self_correction"]).text
     if not t:
         return ""
     if language != "en":
@@ -9885,7 +10916,8 @@ def needs_llm_cleanup(raw: str, tone_override: str | None,
     language = str(language or "").strip().casefold() or LANGUAGE_DEFAULT
     if language != "en":
         return False
-    plan = plan or compile_cleanup(raw, language)
+    plan = plan or compile_cleanup(
+        raw, language, PREFERENCES["self_correction"])
     return bool(not verbatim and (
         mode in {"compose", "reply", "edit"}
         or
@@ -9901,12 +10933,17 @@ CONT_END = ".!?…:\n。！？；：」』"
 
 
 def cursor_context() -> str | None:
-    """Trailing text of the focused field, only for fields small enough
-    that the cursor is almost certainly at the end (chat inputs and drafts,
-    not documents)."""
-    txt = focused_text()
+    """Text just before the insertion point, only for fields small enough
+    to be chat inputs and drafts, not documents. A field that reports no
+    selection is read as having the cursor at its end."""
+    snapshot = focused_snapshot()
+    txt = snapshot.text if snapshot else None
     if not txt or not txt.strip() or len(txt) > 2000:
         return None
+    if snapshot.selection is not None:
+        txt = txt[:snapshot.selection[0]]
+        if not txt.strip():
+            return None
     return txt[-160:]
 
 
@@ -9935,7 +10972,13 @@ def _guard_cleaned_output(text: str, out: str, done: str,
 
 def llm_clean_with_edits(text: str, tone: str, mode: str = "capture",
                          context: str | None = None) \
-        -> tuple[str, list[CleanupEdit]]:
+        -> tuple[str | None, list[CleanupEdit]]:
+    """Ask the cleanup model; returns (text, edits).
+
+    When the model cannot be used, capture and code get the deterministic
+    cleanup of ``text``. Compose, reply and edit get None: there the
+    dictation is an instruction, and inserting it is never the fallback.
+    """
     instruction = MODE_INSTRUCTIONS.get(mode, MODE_INSTRUCTIONS["capture"])
     system = BASE_PROMPT + "\n" + tone + "\n" + instruction \
         + "\n" + STRUCTURED_OUTPUT
@@ -9946,8 +10989,10 @@ def llm_clean_with_edits(text: str, tone: str, mode: str = "capture",
         user = json.dumps({"nearby_context": context or "", "dictation": text})
     few_shot = STRUCTURED_FEW_SHOT if mode in {"capture", "code"} else []
     words = len(text.split()) + len((context or "").split())
-    fallback = (context if mode == "edit" and context is not None
-                else quick_clean(text))
+    rewriting = mode not in {"capture", "code"}
+    fallback = None if rewriting else quick_clean(text)
+    instead = "nothing to insert" if rewriting \
+        else "pasting deterministic cleanup"
     if mode in {"capture", "code"}:
         num_predict = max(160, int(words * 4.0) + 64)
     else:
@@ -9958,7 +11003,7 @@ def llm_clean_with_edits(text: str, tone: str, mode: str = "capture",
     admission = LLM_CLEANUP_BREAKER.acquire()
     if not admission.allowed:
         print(f"! LLM cleanup bypassed ({admission.state.value}); "
-              "pasting deterministic cleanup")
+              f"{instead}")
         return fallback, []
     try:
         reply, done = ollama_chat(
@@ -9985,7 +11030,7 @@ def llm_clean_with_edits(text: str, tone: str, mode: str = "capture",
         out = str(out).strip('"').strip()
     except Exception as e:
         LLM_CLEANUP_BREAKER.record_transport_failure()
-        print(f"! LLM cleanup failed ({e}); pasting quick-cleaned text")
+        print(f"! LLM cleanup failed ({e}); {instead}")
         return fallback, []
 
     reject = _guard_cleaned_output(text, out, done, mode)
@@ -9994,7 +11039,7 @@ def llm_clean_with_edits(text: str, tone: str, mode: str = "capture",
         # recording success) keeps a guard rejection from resetting the
         # doubled cooldown a flaky transport has already earned.
         LLM_CLEANUP_BREAKER.release()
-        print(f"! LLM output rejected ({reject}); pasting quick-cleaned text")
+        print(f"! LLM output rejected ({reject}); {instead}")
         return fallback, []
     LLM_CLEANUP_BREAKER.record_success()
     return out, edits
@@ -10025,6 +11070,7 @@ def build_delayed_cleanup_proposal(
          for edit in semantic_edits),
         voice_ir.context.candidates,
         mode="capture",
+        self_correction=PREFERENCES["self_correction"],
     )
     if proof.text != candidate:
         return None
@@ -10034,9 +11080,7 @@ def build_delayed_cleanup_proposal(
         text = strip_casual_period(text)
     text = apply_vocabulary_casing(text)
     if continuing and text:
-        tail40 = context_tail[-40:].lower()
-        if tail40 and text.lower().startswith(tail40):
-            text = text[len(tail40):].lstrip()
+        text = strip_context_echo(text, context_tail)
         if (context_text and not context_text[-1].isspace()
                 and text[:1] not in ",.;:!?…"):
             text = " " + text
@@ -10174,15 +11218,22 @@ def parse_multipart(content_type: str, body: bytes) -> dict:
     return parts
 
 
+PHONE_MAX_BODY = 25 * 1024 * 1024    # the transcription API's own ceiling
+PHONE_MAX_AUDIO_SECONDS = 600        # longer uploads are cut, not decoded
+PHONE_DECODE_TIMEOUT = 60
+PHONE_TOKEN = {"value": ""}          # bearer token, set at --server-only start
+
+
 def decode_audio(path: str) -> np.ndarray:
     """Any container -> 16k mono float32 via ffmpeg. Deliberately avoids
     mlx_whisper.audio.load_audio: that touches MLX, and any MLX call outside
     the single ASR_POOL thread aborts the process (Metal is one-thread-only
     for us)."""
     p = subprocess.run(
-        ["ffmpeg", "-nostdin", "-i", path, "-f", "s16le", "-ac", "1",
+        ["ffmpeg", "-nostdin", "-i", path,
+         "-t", str(PHONE_MAX_AUDIO_SECONDS), "-f", "s16le", "-ac", "1",
          "-ar", str(SAMPLE_RATE), "pipe:1"],
-        capture_output=True)
+        capture_output=True, timeout=PHONE_DECODE_TIMEOUT)
     if p.returncode != 0:
         raise RuntimeError("ffmpeg failed: " + p.stderr.decode()[-200:])
     return np.frombuffer(p.stdout, np.int16).astype(np.float32) / 32768.0
@@ -10199,42 +11250,32 @@ def lan_ip() -> str:
         return "localhost"
 
 
-def phone_clean(raw: str) -> str:
-    """The local pipeline, minus app context: snippets, tone override,
-    quick/LLM routing, transcript logging."""
+def phone_clean(raw: str, recognition: Recognition | None = None) -> str:
+    """The local pipeline for network audio, minus app context: tone
+    override and quick/LLM routing.
+
+    Snippets are never expanded and nothing is logged: whoever holds the
+    token must not be able to read a saved snippet back or write into the
+    history the vocabulary miner learns from.
+
+    ``recognition`` is the decode ``raw`` came from. The silent-audio phrase
+    list applies only with that evidence; without it a silent upload to a
+    Whisper-only install comes back as "Thank you."
+    """
     language = current_language()
     raw, looped = collapse_repeats(raw)
-    if not raw or is_hallucination(raw, language) \
+    if not raw or is_hallucination(raw, language, recognition) \
             or (looks_like_prompt_echo(raw) and looped):
         return ""
     raw = apply_learned_fixes(raw)
-    hit = match_snippet(raw)
-    if hit is not None:
-        return hit[1]
-    # Inline snippet expansion, parity with the desktop pipeline. This path has
-    # no proof-checked LLM reconstruction, so when a trigger fires we shield it
-    # behind a sentinel and force the deterministic no-LLM route — the sentinel
-    # is never handed to the model — then restore the exact expansion after
-    # cleanup. With no trigger the mapping is empty and this path is unchanged.
-    masked, snippet_restore = _mask_snippets_inline(raw, _load_snippet_map())
-    if snippet_restore:
-        raw = masked
     raw, tone_override = extract_tone_override(raw)
     verbatim = tone_override == "verbatim"
     needs_llm = needs_llm_cleanup(
-        raw, tone_override, verbatim, language=language) \
-        and not snippet_restore
+        raw, tone_override, verbatim, language=language)
     tone_key = tone_override if tone_override in TONE else "default"
     text = llm_clean(raw, TONE[tone_key]) if needs_llm \
         else quick_clean(raw, verbatim=verbatim, language=language)
-    text = apply_vocabulary_casing(text)   # user's canonical term casing
-    if snippet_restore:
-        text = _restore_snippet_sentinels(text, snippet_restore)
-        raw = _restore_snippet_sentinels(raw, snippet_restore)
-    if text:
-        append_transcript(raw, text, "ios.diction", "phone",
-                          language=language)
-    return text
+    return apply_vocabulary_casing(text)   # user's canonical term casing
 
 
 def source_metadata() -> dict[str, str]:
@@ -10454,7 +11495,31 @@ def local_license_notice() -> str:
     return "\n".join(sections)
 
 
+def phone_host_allowed(host: str) -> bool:
+    """Accept an address or a local name; a DNS-rebinding page sends its own
+    domain as the Host."""
+    host = (host or "").strip().lower()
+    if host.startswith("["):
+        name = host[1:host.find("]")] if "]" in host else ""
+        return bool(re.fullmatch(r"[0-9a-f:.]+", name))
+    name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    return bool(re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", name)) \
+        or name == "localhost" or name.endswith(".local")
+
+
+def phone_token_matches(authorization: str) -> bool:
+    expected = PHONE_TOKEN["value"]
+    scheme, _, supplied = (authorization or "").partition(" ")
+    if not expected or scheme.lower() != "bearer":
+        return False
+    # Comparing digests keeps the comparison time independent of the token.
+    return hashlib.sha256(supplied.strip().encode()).digest() \
+        == hashlib.sha256(expected.encode()).digest()
+
+
 class PhoneHandler(BaseHTTPRequestHandler):
+    timeout = 30                            # a stalled client is dropped
+
     def log_message(self, *args):
         pass                                # our own log lines are enough
 
@@ -10465,16 +11530,27 @@ class PhoneHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _refuse_browser(self) -> bool:
+        """Browsers send Origin; the phone app and the installers do not."""
+        if self.headers.get("Origin") is None \
+                and phone_host_allowed(self.headers.get("Host", "")):
+            return False
+        self._reply(403, b"forbidden", "text/plain")
+        return True
+
     def do_GET(self):
-        if self.path in ("/", "/health"):
+        # The desktop listener exists only for the installers' health probe.
+        if self._refuse_browser():
+            return
+        if self.path == "/health":
             self._reply(200, b"ok", "text/plain")
-        elif self.path == "/source":
+        elif SERVER_ONLY and self.path == "/source":
             self._reply(
                 200,
                 json.dumps(source_metadata(), sort_keys=True).encode(),
                 "application/json",
             )
-        elif self.path == "/license":
+        elif SERVER_ONLY and self.path == "/license":
             self._reply(
                 200,
                 local_license_notice().encode(),
@@ -10484,13 +11560,28 @@ class PhoneHandler(BaseHTTPRequestHandler):
             self._reply(404, b"not found", "text/plain")
 
     def do_POST(self):
-        if not self.path.startswith("/v1/audio/transcriptions"):
+        if not SERVER_ONLY \
+                or not self.path.startswith("/v1/audio/transcriptions"):
             self._reply(404, b"not found", "text/plain")
+            return
+        if self._refuse_browser():
+            return
+        if not phone_token_matches(self.headers.get("Authorization", "")):
+            self._reply(401, b'{"error":"unauthorized"}', "application/json")
+            return
+        length = self.headers.get("Content-Length", "").strip()
+        if not length.isdigit():
+            self._reply(411, b'{"error":"length required"}',
+                        "application/json")
+            return
+        if int(length) > PHONE_MAX_BODY:
+            self._reply(413, b'{"error":"audio too large"}',
+                        "application/json")
             return
         try:
             LAST_USE["t"] = time.time()
             t0 = time.time()
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            body = self.rfile.read(int(length))
             ctype = self.headers.get("Content-Type", "")
             fmt = b"json"
             if "multipart/form-data" in ctype:
@@ -10504,12 +11595,23 @@ class PhoneHandler(BaseHTTPRequestHandler):
                             "application/json")
                 return
 
-            with tempfile.NamedTemporaryFile(suffix=".audio") as tmp:
-                tmp.write(audio_bytes)
-                tmp.flush()
-                audio = decode_audio(tmp.name)
-            raw = ASR_POOL.submit(transcribe, audio).result()
-            text = phone_clean(raw)
+            # ffmpeg is another process, and Windows will not let it open a
+            # file this process still holds open. So the upload is closed
+            # before it is decoded, and removed whatever happens next.
+            descriptor, upload = tempfile.mkstemp(suffix=".audio")
+            try:
+                with os.fdopen(descriptor, "wb") as tmp:
+                    tmp.write(audio_bytes)
+                audio = decode_audio(upload)
+            finally:
+                try:
+                    os.unlink(upload)
+                except OSError as e:
+                    print(f"! uploaded audio was not removed: {upload} "
+                          f"({type(e).__name__})")
+            recognition = ASR_POOL.submit(
+                transcribe_detailed, audio).result()
+            text = phone_clean(recognition.text, recognition)
 
             print(f"[{time.time() - t0:.2f}s | phone | "
                   f"{len(audio) / SAMPLE_RATE:.1f}s audio | "
@@ -10520,8 +11622,8 @@ class PhoneHandler(BaseHTTPRequestHandler):
                 self._reply(200, json.dumps({"text": text}).encode(),
                             "application/json")
         except Exception as e:
-            print(f"! phone request failed: {e}")
-            self._reply(500, json.dumps({"error": str(e)}).encode(),
+            print(f"! phone request failed: {type(e).__name__}")
+            self._reply(500, b'{"error":"transcription failed"}',
                         "application/json")
 
 
@@ -10532,6 +11634,23 @@ def phone_bind_host(server_only: bool) -> str:
     return "0.0.0.0" if server_only else "127.0.0.1"
 
 
+def load_phone_token(path: Path) -> str:
+    """The server-only bearer token, made once and kept owner-only so a
+    paired phone survives a restart. Anything other than one well-formed
+    token in a regular file is replaced; a failed save raises OSError."""
+    try:
+        if stat.S_ISREG(path.lstat().st_mode):
+            token = path.read_text(encoding="utf-8").strip()
+            if re.fullmatch(r"[0-9a-f]{64}", token):
+                os.chmod(path, 0o600)
+                return token
+    except (OSError, UnicodeDecodeError):
+        pass
+    token = os.urandom(32).hex()
+    atomic_write_text(path, token + "\n")
+    return token
+
+
 def phone_server():
     bind_host = phone_bind_host(SERVER_ONLY)
     try:
@@ -10540,8 +11659,22 @@ def phone_server():
         print(f"! phone endpoint disabled: {e}")
         return
     display_host = lan_ip() if SERVER_ONLY else bind_host
-    print(f"Phone endpoint: http://{display_host}:{PHONE_PORT}"
-          f"/v1/audio/transcriptions")
+    if SERVER_ONLY:
+        print(f"Phone endpoint: http://{display_host}:{PHONE_PORT}"
+              f"/v1/audio/transcriptions")
+        # The token itself never reaches the log: dictate.log is not private.
+        try:
+            PHONE_TOKEN["value"] = load_phone_token(PHONE_TOKEN_FILE)
+        except OSError as e:
+            print(f"! phone endpoint token could not be saved to "
+                  f"{PHONE_TOKEN_FILE} ({type(e).__name__}); every "
+                  "transcription request will be refused")
+        else:
+            print(f"Phone endpoint token: in {PHONE_TOKEN_FILE}; send it as "
+                  "'Authorization: Bearer <token>'. Delete that file and "
+                  "restart to replace the token.")
+    else:
+        print(f"Health endpoint: http://{display_host}:{PHONE_PORT}/health")
     srv.serve_forever()
 
 
@@ -10613,49 +11746,134 @@ def restore_windows_clipboard(items: list):
             pass
 
 
-def paste(text: str):
-    if IS_WINDOWS:
-        try:
-            saved = snapshot_windows_clipboard()
-        except Exception:
-            saved = []
-        pyperclip.copy(text)
-        time.sleep(0.05)
-        with kb.pressed(keyboard.Key.ctrl):
-            kb.press("v")
-            kb.release("v")
-        if saved:
-            def restore():
-                try:
-                    if pyperclip.paste() == text:
-                        restore_windows_clipboard(saved)
-                except Exception:
-                    pass
-            threading.Timer(1.0, restore).start()
-        return
-    pb = NSPasteboard.generalPasteboard()
-    try:
-        saved = snapshot_pasteboard(pb)
-    except Exception:
-        saved = []
-    pb.clearContents()
-    pb.setString_forType_(text, NSPasteboardTypeString)
-    our_change = pb.changeCount()
-    time.sleep(0.05)
-    with kb.pressed(keyboard.Key.cmd):
-        kb.press("v")
-        kb.release("v")
-    if not saved:
-        return                      # empty before -> leave the text in place
+# Clipboard managers that follow the nspasteboard.org convention neither
+# record nor show an item carrying these types.
+PASTEBOARD_MARKER_TYPES = (
+    "org.nspasteboard.TransientType",
+    "org.nspasteboard.ConcealedType",
+)
+PASTEBOARD_CURRENT_HOST_ONLY = 1     # NSPasteboardContentsCurrentHostOnly
+# Windows clipboard history, cloud clipboard and clipboard monitors skip
+# content that carries these registered formats; a zero DWORD means "no".
+WINDOWS_CLIPBOARD_EXCLUSIONS = (
+    ("ExcludeClipboardContentFromMonitorProcessing", b"\0\0\0\0"),
+    ("CanIncludeInClipboardHistory", b"\0\0\0\0"),
+    ("CanUploadToCloudClipboard", b"\0\0\0\0"),
+)
+# One saved clipboard per burst of pastes. A paste made while the previous
+# paste's restore is pending keeps that earlier snapshot, so the user's own
+# clipboard comes back instead of the previous dictation.
+PASTE_RESTORE = {"lock": threading.Lock(), "timer": None, "saved": None,
+                 "still_ours": None}
 
-    def restore():
+
+def write_private_pasteboard(pb, text: str) -> int:
+    """Put dictated text on the pasteboard, kept off history and Handoff."""
+    pb.prepareForNewContentsWithOptions_(PASTEBOARD_CURRENT_HOST_ONLY)
+    item = NSPasteboardItem.alloc().init()
+    item.setString_forType_(text, NSPasteboardTypeString)
+    for marker in PASTEBOARD_MARKER_TYPES:
+        item.setData_forType_(NSData.data(), marker)
+    pb.writeObjects_([item])
+    return pb.changeCount()
+
+
+def write_private_windows_clipboard(text: str):
+    """Put dictated text on the clipboard, kept off history and the cloud."""
+    for attempt in range(10):
         try:
-            if pb.changeCount() == our_change:   # nothing copied since us
-                restore_pasteboard(pb, saved)
+            win32clipboard.OpenClipboard()
+            break
+        except Exception:
+            if attempt == 9:
+                raise
+            time.sleep(0.05)
+    try:
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
+        for name, data in WINDOWS_CLIPBOARD_EXCLUSIONS:
+            win32clipboard.SetClipboardData(
+                win32clipboard.RegisterClipboardFormat(name), data)
+    finally:
+        win32clipboard.CloseClipboard()
+
+
+def _begin_paste_burst(snapshot) -> list:
+    """The clipboard to give back after this paste; caller holds the lock."""
+    pending = PASTE_RESTORE["timer"]
+    saved = PASTE_RESTORE["saved"]
+    still_ours = PASTE_RESTORE["still_ours"]
+    PASTE_RESTORE["timer"] = PASTE_RESTORE["saved"] = None
+    PASTE_RESTORE["still_ours"] = None
+    if pending is not None:
+        pending.cancel()
+        try:
+            if saved is not None and still_ours():
+                return saved
         except Exception:
             pass
+    try:
+        return snapshot()
+    except Exception:
+        return []
 
-    threading.Timer(1.0, restore).start()
+
+def _finish_paste_burst(saved: list, still_ours, restore):
+    """Give the clipboard back in a second unless someone copied since.
+
+    An empty snapshot restores to an empty clipboard, so dictated text never
+    outlives the paste. Caller holds the lock.
+    """
+    def run():
+        with PASTE_RESTORE["lock"]:
+            if PASTE_RESTORE["timer"] is not timer:
+                return
+            PASTE_RESTORE["timer"] = PASTE_RESTORE["saved"] = None
+            PASTE_RESTORE["still_ours"] = None
+            try:
+                if still_ours():
+                    restore(saved)
+            except Exception:
+                pass
+
+    timer = threading.Timer(1.0, run)
+    PASTE_RESTORE["timer"] = timer
+    PASTE_RESTORE["saved"] = saved
+    PASTE_RESTORE["still_ours"] = still_ours
+    timer.start()
+
+
+def paste(text: str):
+    with PASTE_RESTORE["lock"]:
+        if IS_WINDOWS:
+            def still_ours():
+                return pyperclip.paste() == text
+
+            saved = _begin_paste_burst(snapshot_windows_clipboard)
+            try:
+                write_private_windows_clipboard(text)
+            except Exception:
+                pyperclip.copy(text)
+            time.sleep(0.05)
+            with kb.pressed(keyboard.Key.ctrl):
+                kb.press("v")
+                kb.release("v")
+            _finish_paste_burst(saved, still_ours, restore_windows_clipboard)
+            return
+        pb = NSPasteboard.generalPasteboard()
+        our_change = None
+
+        def still_ours():
+            return pb.changeCount() == our_change   # nothing copied since us
+
+        saved = _begin_paste_burst(lambda: snapshot_pasteboard(pb))
+        our_change = write_private_pasteboard(pb, text)
+        time.sleep(0.05)
+        with kb.pressed(keyboard.Key.cmd):
+            kb.press("v")
+            kb.release("v")
+        _finish_paste_burst(
+            saved, still_ours, lambda items: restore_pasteboard(pb, items))
 
 
 def execute_voice_command(raw: str) -> bool:
@@ -10762,8 +11980,9 @@ def apply_spoken_edit_command(recognized_raw: str, rec, bundle: str) -> bool:
             return True
         # Select exactly the inserted characters, then paste over the selection
         # so the substitution is atomic: no interval exists where the text is
-        # deleted but its replacement is not yet in place.
-        for _ in range(len(inserted)):
+        # deleted but its replacement is not yet in place. Shift+Left steps
+        # over whole characters, so the count is of those, not code points.
+        for _ in range(grapheme_count(inserted)):
             _press_edit_chord(keyboard.Key.shift, keyboard.Key.left)
         paste(transformed)
         LAST_INSERTION["text"] = transformed
@@ -10956,7 +12175,13 @@ def assemble_raw(chunk_futs: list, pre_future,
             words_valid = False if has_bounds else timing_reliable
             elapsed += duration
         t = result.text.strip()
-        if t and not is_hallucination(t, language):
+        if t and is_hallucination(t, language, result):
+            # The rejected words stay out of the log; the evidence does not.
+            print("[dropped] ASR part rejected as non-speech "
+                  f"({result.engine or 'unknown engine'}, confidence "
+                  f"{result.confidence:.2f}, {duration:.1f}s)")
+            t = ""
+        if t:
             parts.append(t)
             confidences.append(result.confidence)
             for word, start, end in normalized_words:
@@ -11119,7 +12344,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         phase = "release-order"
         DICTATION_PROCESS_ORDER.wait(rec.process_ticket)
         raw = recognition.text
-        if not raw or is_hallucination(raw, rec.language):
+        if not raw or is_hallucination(raw, rec.language, recognition):
             report_dictation_problem(
                 rec,
                 hud,
@@ -11298,8 +12523,8 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             return
 
         # Inline snippet expansion is additive to the whole-utterance command
-        # handled above: a trigger embedded in a longer dictation ("text him my
-        # address and say thanks") expands only the trigger words while the
+        # handled above: the same cue inside a longer dictation ("send it to
+        # insert my address and say thanks") expands only the cue while the
         # surrounding phrase still flows through normal cleanup. Mask each hit
         # with an opaque sentinel now and restore the exact expansion after
         # cleanup (below), so multiline boilerplate is never reflowed. Limited
@@ -11319,8 +12544,10 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             # Verbatim is a hard contract: retain acoustic text rather than a
             # context/personal compiler substitution.
             raw, tone_override = extract_tone_override(recognized_raw)
-        plan = compile_code_dictation(raw, rec.language) \
-            if rec.mode == "code" else compile_cleanup(raw, rec.language)
+        self_correction = PREFERENCES["self_correction"]
+        plan = compile_code_dictation(raw, rec.language, self_correction) \
+            if rec.mode == "code" else compile_cleanup(
+                raw, rec.language, self_correction)
         compiled = plan.text
         verbatim = ((is_verbatim_app(bundle) or tone_override == "verbatim")
                     and rec.mode in {"capture", "code"})
@@ -11388,6 +12615,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                      for edit in semantic_edits),
                     voice_ir.context.candidates,
                     mode=rec.mode,
+                    self_correction=self_correction,
                 )
                 proof_edits = proof.edits
                 proof_reconstruction_match = proof.text == candidate
@@ -11405,12 +12633,44 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                     text = compiled if rec.mode == "code" else quick_clean(
                         compiled, verbatim=verbatim, continuing=continuing,
                         language=rec.language)
+            elif candidate is None:
+                # The rewrite did not happen: no cleanup model (a default
+                # install has none), or one that did not give a usable
+                # answer. What was dictated is an instruction or a brief,
+                # and pasting it would replace the very selection it was
+                # about.
+                missing = not cleanup_model_installed()
+                report_dictation_problem(
+                    rec,
+                    hud,
+                    f"{rec.mode.capitalize()} mode "
+                    + ("needs the cleanup model" if missing
+                       else "got no rewrite from the cleanup model")
+                    + " — nothing changed",
+                    f"[{rec.mode}] cleanup model "
+                    + ("not installed" if missing else "gave no rewrite")
+                    + "; nothing changed",
+                )
+                return
             else:
                 # Compose/reply/edit retain their explicit broad-rewrite
                 # contracts; proof edits constrain ordinary capture only.
                 text = candidate
         elif rec.mode == "code":
             text = compiled
+        elif rec.mode in {"edit", "compose", "reply"}:
+            # Reached only when the rewrite model was not asked, which means
+            # a language it does not handle. The dictation is an instruction
+            # here too, so nothing is pasted.
+            report_dictation_problem(
+                rec,
+                hud,
+                f"{rec.mode.capitalize()} mode needs English — "
+                "nothing changed",
+                f"[{rec.mode}] rewrite model not available for this "
+                "language; nothing changed",
+            )
+            return
         else:
             text = quick_clean(
                 compiled, verbatim=verbatim, continuing=continuing,
@@ -11440,9 +12700,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             PIPELINE_STATE["last_alternatives"] = list(
                 dict.fromkeys(cleaned_alternatives))[:3]
         if continuing and text:
-            tail40 = stripped_ctx[-40:].lower()
-            if tail40 and text.lower().startswith(tail40):
-                text = text[len(tail40):].lstrip()      # model echoed context
+            text = strip_context_echo(text, stripped_ctx)
             if (not ctx[-1].isspace() and text[:1] not in ",.;:!?…。、！？"
                     and language_uses_spaces(rec.language)):
                 text = " " + text                       # joining needs a space
@@ -11469,14 +12727,14 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         else:
             insertion_target = focused_snapshot() if learn_correction else None
         event_id = rec.utterance_id or f"{time.time_ns():x}-{id(rec):x}"
-        receipt = make_paste_receipt(
-            insertion_target, text, bundle, rec.mode, event_id) \
-            if learn_correction else None
         phase = "insertion"
         insertion_started_at = time.perf_counter()
         integrity_receipt = commit_insertion(
             rec, text, bundle, insertion_target)
         t_insert = time.perf_counter() - insertion_started_at
+        receipt = committed_paste_receipt(
+            rec, insertion_target, text, bundle, rec.mode, event_id) \
+            if learn_correction else None
         # Insertion is already terminal before any audio is copied. Playback
         # retention is strictly optional and failures cannot affect the paste.
         retain_consequence_microspans(
@@ -11711,7 +12969,9 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 if integrity_receipt is not None else "unsupported_field"),
             # How the destination differed, as a category only. Empty unless
             # a readback conflict happened.
-            "readback_shape": PIPELINE_STATE["last_readback_shape"],
+            "readback_shape": (
+                integrity_receipt.readback_shape
+                if integrity_receipt is not None else ""),
             "paste_attempted": attempted,
             "insertion_verified": verified,
             # The capability half of a compatibility observation. Absent
@@ -11822,7 +13082,7 @@ def preload_model_files(repos=None):
     if IS_WINDOWS:
         for repo in repos:
             print(f"Caching faster-Whisper {repo}...")
-            windows_whisper_model(repo)
+            windows_whisper_model(repo, local_files_only=False)
     else:
         for repo in repos:
             if asr_model_is_cached(repo):
@@ -12050,6 +13310,7 @@ def main():
             set_language=set_dictation_language,
             preview_sound=preview_sound_cue,
             set_recent_dictations=set_recent_dictations_enabled,
+            set_self_correction=set_self_correction,
             recent_dictations=recent_dictation_metadata,
             reveal_recent_dictation=reveal_recent_dictation,
             insert_recent_dictation=insert_recent_dictation,
@@ -12194,13 +13455,35 @@ def main():
             with cocoa_pool():
                 try:
                     if ev == "listener_recovery":
-                        abandon_active_recording(
-                            caption="Hotkey reset — try again",
-                            log_message=(
-                                "! active dictation cancelled during hotkey "
-                                "recovery"),
-                        )
+                        # With no take there is nothing to cancel, and the
+                        # reset would wipe a status or HUD the user needs.
+                        if active["rec"] is not None:
+                            abandon_active_recording(
+                                caption="Hotkey reset — try again",
+                                log_message=(
+                                    "! active dictation cancelled during "
+                                    "hotkey recovery"),
+                            )
                         continue
+                    if ev == "no_audio":
+                        rec = active["rec"]
+                        now = time.perf_counter()
+                        action = stalled_take_action(rec, now)
+                        if action == "abandon":
+                            abandon_active_recording(
+                                rec,
+                                caption="Listening failed — try again",
+                                log_message=(
+                                    "! microphone delivered no audio — "
+                                    "reopening it"),
+                            )
+                        if action != "finish":
+                            continue
+                        print("! microphone stopped delivering audio — "
+                              "finishing the take with what was heard")
+                        CAPTION["text"] = (
+                            "Microphone stopped — text may be incomplete")
+                        ev, event_at = "release", now
                     if (ev == "press" and active["rec"] is None
                             and not PAUSED["on"]):
                         LAST_USE["t"] = time.time()
@@ -12291,6 +13574,9 @@ def main():
     threading.Thread(target=hotkey_worker, daemon=True).start()
 
     key_down = {"on": False}
+    # Serializes the latch between the listener and the hold supervisor, so
+    # one hold queues exactly one release.
+    key_lock = threading.Lock()
     undo_down = {"on": False}
     modifiers = set()
     shift_keys = {keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r}
@@ -12308,11 +13594,13 @@ def main():
         modifier = modifier_pressed_by(key, HOTKEY, modifier_families)
         if modifier is not None:
             modifiers.add(modifier)
-        if key == HOTKEY and not key_down["on"]:
-            key_down["on"] = True
-            events.put(("press", time.perf_counter(), frozenset(modifiers)))
-        if (UNDO_HOTKEY is not None and key == UNDO_HOTKEY
-                and not undo_down["on"]):
+        if hotkey_matches(key, HOTKEY):
+            with key_lock:
+                if not key_down["on"]:
+                    pressed_at = time.perf_counter()
+                    latch_hotkey_press(key_down, pressed_at)
+                    events.put(("press", pressed_at, frozenset(modifiers)))
+        if hotkey_matches(key, UNDO_HOTKEY) and not undo_down["on"]:
             # Latched, so holding the key repeats nothing. Undo runs off the
             # dictation path entirely — it never opens a stream — so its own
             # thread cannot delay or reorder a capture.
@@ -12321,17 +13609,22 @@ def main():
                 target=undo_last_dictation, daemon=True).start()
 
     def on_release(key):
-        if key == HOTKEY and key_down["on"]:
-            key_down["on"] = False
-            events.put(("release", time.perf_counter(), frozenset(modifiers)))
-        if UNDO_HOTKEY is not None and key == UNDO_HOTKEY:
+        if hotkey_matches(key, HOTKEY):
+            with key_lock:
+                if key_down["on"]:
+                    key_down["on"] = False
+                    events.put((
+                        "release", time.perf_counter(), frozenset(modifiers)))
+        if hotkey_matches(key, UNDO_HOTKEY):
             undo_down["on"] = False
         modifier = modifier_pressed_by(key, HOTKEY, modifier_families)
         if modifier is not None:
             modifiers.discard(modifier)
 
     def make_listener():
-        lst = keyboard.Listener(on_press=on_press, on_release=on_release)
+        lst = keyboard.Listener(
+            on_press=on_press, on_release=on_release,
+            win32_event_filter=windows_hotkey_event_filter)
         lst.start()
         return lst
 
@@ -12340,7 +13633,16 @@ def main():
         # state before the replacement starts, then let the serialized worker
         # stop any orphaned capture ahead of the next real key event.
         undo_down["on"] = False
-        queue_hotkey_listener_recovery(key_down, modifiers, events)
+        with key_lock:
+            queue_hotkey_listener_recovery(key_down, modifiers, events)
+
+    def supervise_hold():
+        now = time.perf_counter()
+        if stalled_take_action(active.get("rec"), now) is not None:
+            events.put(("no_audio", now, frozenset()))
+        return supervise_hotkey_latch(
+            key_down, key_lock, events, modifiers,
+            lambda: physical_key_is_down(HOTKEY), time.perf_counter())
 
     LISTENER["make"] = make_listener
     LISTENER["l"] = make_listener()
@@ -12348,6 +13650,9 @@ def main():
         target=hotkey_watchdog_loop,
         args=(recover_listener_state,),
         daemon=True,
+    ).start()
+    threading.Thread(
+        target=hold_supervisor_loop, args=(supervise_hold,), daemon=True,
     ).start()
 
     AppHelper.runEventLoop(installInterrupt=True)

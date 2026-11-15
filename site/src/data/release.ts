@@ -1,4 +1,4 @@
-// The current downloadable build. Update these four values when cutting a
+// The current downloadable build. Update every value below when cutting a
 // release; every download link on the site reads from here.
 export const RELEASE = {
   version: '0.4.0',
@@ -11,8 +11,12 @@ export const RELEASE = {
   windows:
     'https://github.com/Aiml3ss/whisper-face/releases/download/v0.4.0/WhisperFace-0.4.0-windows-x64.zip',
   windowsSize: '24.0 MB',
+  /** Checksums for the Mac assets. This file does not list the Windows zip. */
   checksums:
     'https://github.com/Aiml3ss/whisper-face/releases/download/v0.4.0/SHA256SUMS',
+  /** The Windows zip's own checksum file. */
+  windowsChecksums:
+    'https://github.com/Aiml3ss/whisper-face/releases/download/v0.4.0/SHA256SUMS-windows',
   /**
    * Ad-hoc signed, not notarized: the project is not yet enrolled in the Apple
    * Developer Program, so macOS will not vouch for the developer. Flip this to
@@ -20,10 +24,10 @@ export const RELEASE = {
    */
   unsigned: true,
   /**
-   * Windows shares the pipeline and its installer runs in CI on every
-   * change, but no full dictation has been performed on real Windows
-   * hardware yet. Flip this to false once that has actually happened --
-   * not once it is expected to work.
+   * CI runs the shared Python code and tests on Windows and only parses
+   * setup.ps1; neither the installer nor a full dictation has been run on
+   * real Windows hardware. Flip this to false once both have actually
+   * happened -- not once they are expected to work.
    */
   windowsPreview: true,
 } as const;

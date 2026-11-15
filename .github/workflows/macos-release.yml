@@ -30,7 +30,9 @@ concurrency:
 
 jobs:
   package-macos:
-    runs-on: macos-14
+    # macos-15 is the oldest image GitHub still hosts. GitHub retired the
+    # macos-14 image on 2 November 2026; a job that names it never starts.
+    runs-on: macos-15
     timeout-minutes: 45
     permissions:
       contents: read
@@ -91,6 +93,13 @@ jobs:
 
       - name: Run repository release gates
         shell: bash
+        env:
+          # The interpreter an install runs on: setup.sh and setup.ps1 pin
+          # 3.12, and a fresh Mac has no other Python 3.12, so uv installs its
+          # own. Unpinned, uv took the runner's Homebrew framework Python,
+          # which the networkless worker's sandbox cannot start.
+          UV_PYTHON: "3.12"
+          UV_PYTHON_PREFERENCE: only-managed
         run: |
           uv lock --check --script dictate.py
           uv run tests/test_parrot_core.py
@@ -111,6 +120,7 @@ jobs:
           uv run tests/test_benchmark_macos_asr_warm_path.py
           uv run tests/test_performance_lab.py
           uv run tests/test_dictate.py
+          uv run tests/test_whole_program.py
           uv run tests/test_gui_settings_runtime.py
           uv run tests/test_insertion_integrity.py
           uv run tests/test_benchmark_insertion_reliability.py

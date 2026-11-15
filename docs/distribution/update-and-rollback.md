@@ -1,7 +1,31 @@
 # Update and rollback
 
-Whisper Face has no automatic updater. Keep the checkout you installed from,
-and make a backup of your private files before changing versions.
+Whisper Face never updates itself in the background. On a Mac, the menu's
+**Check for Updates…** is the update most people use; the rest of this guide
+covers updating by hand and the release-operator tools. Keep the checkout you
+installed from, and make a backup of your private files before changing
+versions.
+
+## Check for Updates… (Mac menu)
+
+When you choose it, `self_update.py`:
+
+1. refuses if the checkout has local changes or commits its upstream lacks
+   (a disk-image install built from the November 2026 fixes onward passes
+   this check; earlier disk-image installs always report local changes);
+2. runs one `git fetch` of the checkout's tracked branch (normally `main` on
+   GitHub);
+3. if that branch has moved, checks out its tip and reruns the installer;
+4. if the installer fails, restores the last revision the installer
+   provisioned cleanly, reinstalls it, and reports `rolled_back` only once
+   that is verified. The reason it reports is the installer's last `!!` line,
+   and outcomes are appended to
+   `~/Library/Application Support/Whisper Face/update.log`.
+
+It installs whatever is at the tip of the branch. There is no release-tag,
+signature, or provenance check, so you receive unreleased commits exactly as
+a fresh `git clone` would. Rollback restores code, not private state. See the
+[threat model](../security/threat-model.md) for this as an open risk.
 
 ## Before an update
 
@@ -18,10 +42,17 @@ and make a backup of your private files before changing versions.
    `acoustic_calibration_activation.json`, `relisten_activation.json`,
    `delayed_cleanup_activation.json`, `dictionary.txt`, `transcripts.jsonl`,
    `learned.json`,
-   `voice_inbox.json`, `demonstrations.json`, and `dictate.log`.
+   `voice_inbox.json`, `demonstrations.json`, `dictate.log`, and
+   `install.log`. A `--server-only` install also has `phone_token.txt`, the
+   bearer token its endpoint checks.
 
 Do not publish that backup: it can contain personal vocabulary, corrections,
-transcripts, local drafts, demonstration recipes, and logs.
+transcripts, local drafts, demonstration recipes, logs, and the endpoint
+token, which is a password.
+
+An in-place update leaves `phone_token.txt` where it is, so a paired phone
+client keeps working. Moving to a different folder does not carry it: copy it
+across, or give the client the new token the first start creates there.
 
 ## Read-only update advisor
 
@@ -127,12 +158,13 @@ git pull --ff-only origin main
 ```
 
 If Git cannot fast-forward, stop instead of forcing the update. Once the source
-is current, rerun the same one-click installer. Reinstalling in the same
+is current, rerun the same installer. Reinstalling in the same
 checkout preserves existing private files.
 
 - **Mac:** double-click `Install.command`, then run `./setup.sh --verify`.
 - **Windows:** double-click `Install.cmd`, then run
-  `.\setup.ps1 --verify` in PowerShell.
+  `.\setup.ps1 --verify` in PowerShell (or `Install.cmd --verify` from a
+  Command Prompt).
 
 ## Roll back to a known-good revision
 
@@ -197,7 +229,7 @@ What each tier covers:
 |---|---|---|
 | Software (with `--yes`) | `launchctl bootout` of `com.berg.dictate` and `com.berg.ollama`, both LaunchAgent plists, `~/Applications/Whisper Face.app`, the `Application Support/Whisper Face` receipts, `.models/bin`, `.models/swift-build`, `.dictate.lock` | the `Whisper Face` scheduled task and its legacy `Whispering Parrot` name, `.windows/launch.ps1`, `.windows/launch.sha256`, the `.windows` directory, `.dictate.lock` |
 | Models (`--remove-models`) | the Parakeet Unified Core ML model, both pinned `mlx-community/whisper-*` snapshots in the Hugging Face cache, and `ollama rm qwen3.5:4b` | the `.models` faster-Whisper cache and `ollama rm qwen3.5:4b` |
-| Personal (`--remove-personal-data`) | `snippets.json`, `tones.json`, `preferences.json`, `acoustic_keyword_memory.json`, `acoustic_keyword_activation.json`, `acoustic_calibration_activation.json`, `relisten_activation.json`, `delayed_cleanup_activation.json`, `dictionary.txt`, `transcripts.jsonl`, `learned.json`, `voice_inbox.json`, `demonstrations.json`, `dictate.log`, `ollama.log` | the same, plus `ollama-error.log` |
+| Personal (`--remove-personal-data`) | `snippets.json`, `tones.json`, `preferences.json`, `acoustic_keyword_memory.json`, `acoustic_keyword_activation.json`, `acoustic_calibration_activation.json`, `relisten_activation.json`, `delayed_cleanup_activation.json`, `dictionary.txt`, `transcripts.jsonl`, `learned.json`, `voice_inbox.json`, `demonstrations.json`, `phone_token.txt`, `dictate.log`, `ollama.log`, `install.log` | the same, plus `ollama-error.log` |
 
 The personal tier is exactly the backup list at the top of this document, and
 for the same reason: no download restores those files. They are kept unless

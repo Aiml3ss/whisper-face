@@ -4,7 +4,7 @@
 
 <h1 align="center">Whisper Face</h1>
 
-<p align="center"><b>The one-click, local-first voice input layer for Mac.</b><br/>
+<p align="center"><b>The local-first voice input layer for Mac, set up by one installer.</b><br/>
 Hold a key, speak, release — trustworthy text appears wherever your cursor is.<br/>
 No account, no word cap, no cloud dependency, and no audio leaving your machine.</p>
 
@@ -15,16 +15,18 @@ just another transcript box. The goal is commercial-quality dictation that is
 easy enough for anyone to install, fast enough to disappear into the workflow,
 and conservative enough to protect names, numbers, code, commands, and intent.
 
-Mac is the production focus today. Windows shares the core pipeline and keeps
-one-click installer parity; the native iPhone product is a future workstream,
-not a current setup promise.
+Mac is the production focus today, and it is still an unsigned preview: no
+fresh-Mac install from the published disk image has been recorded yet. Windows
+shares the core pipeline and has its own installer, but neither that installer
+nor a full dictation has been run on real Windows hardware. The native iPhone
+product is a future workstream, not a current setup promise.
 
 ## Why it is different
 
 | Product promise | What Whisper Face does |
 |---|---|
 | **Setup is part of the product** | `Install.command` provisions the app, locked dependencies, models, native helper, login services, and health checks in one repeatable flow. |
-| **Speech evidence stays authoritative** | Multiple local recognizers produce hypotheses; the Voice Compiler may improve presentation but cannot invent unsupported meaning. |
+| **Speech evidence stays authoritative** | Local recognizers produce hypotheses; app names, window titles, and dictionary terms can bias recognition but never replace a recognized word. Other on-screen text can only repair a word the recognizer was unsure of and itself wrote as a name or identifier (a visible "Qwen" repairs "Gwen"); it never replaces or introduces an ordinary word, and each repair is a recorded decision. The optional cleanup model may only make edits it can prove. Deterministic cleanup still applies a small set of written rules (fillers, spoken structure, and a typed self-correction only if you turn it on), described under [Daily use](#daily-use). |
 | **Fast by architecture** | Models stay warm, long speech is recognized while you talk, installed model paths resolve offline, and routine cleanup stays deterministic unless the words truly require semantic work. |
 | **Insertion is a transaction** | The target is leased and revalidated before one paste attempt; destination drift goes to a recoverable Voice Outbox instead of the wrong field. |
 | **Personal without surveillance** | Corrections become scoped, inspectable local rules and regression cases—not a cloud transcript dossier. |
@@ -69,8 +71,10 @@ are never Supporter-only features.
 - **Transactional insertion + Voice Outbox (Mac)** — readable text fields are
   leased at key-down and revalidated before the single paste attempt. If focus,
   selection, or nearby text changed while recognition ran, Whisper Face does
-  not guess or paste into the wrong place; it keeps the result in a bounded,
-  RAM-only recoverable outbox. Apps that hide their text still bind the
+  not guess or paste into the wrong place; it keeps the result in a bounded
+  recoverable outbox held in memory. (The same text is also appended to the
+  local `transcripts.jsonl` history, like every other dictation.) Undo
+  payloads and blank results never enter the outbox. Apps that hide their text still bind the
   insertion to the original application/focused element and surface delivery
   as unverified instead of training from an assumption; if macOS cannot identify any focused
   element at all, the insertion fails closed into the outbox. The count-only
@@ -82,50 +86,94 @@ are never Supporter-only features.
   punctuation, is left exactly as recognized.
 - **Flight Recorder (experimental)** — enable it under Settings →
   Privacy, speak
-  naturally, then tap Right Option afterward. Whisper Face finds and pastes the
-  latest utterance from a 20-second RAM-only buffer. Holding Right Option still
-  performs normal push-to-talk.
+  naturally, then tap your capture key afterward. Whisper Face finds and pastes
+  the latest utterance from a 20-second RAM-only buffer. Holding the key still
+  performs normal push-to-talk. While Flight Recorder is on, the microphone is
+  open whether or not you hold the key.
 - **Acoustic Time Machine (experimental, Mac)** — opt in under Privacy to keep
   only the latest result's short, consequence-selected audio spans in RAM after
   insertion. Home's Last dictation card can play those spans directly from
   memory or clear them
   immediately; they self-delete after one minute, a new usable result replaces
   them, disabling wipes them, and no replay file is written.
-- **Hold-to-talk anywhere** — hold Right Option, speak, release; text pastes
-  into whatever app has focus, with a frosted HUD waveform while you talk.
-  The microphone is pre-warmed at login and the start cue sounds only once
-  capture is ready.
+- **Hold-to-talk anywhere** — hold Right Option (Right Alt on Windows), speak,
+  release; text pastes into whatever app has focus, with a frosted HUD
+  waveform while you talk. On Mac the capture key, an optional undo key, the
+  feedback sounds, and the “Actually” corrections switch are under
+  Settings → Controls. The microphone is
+  pre-warmed at login and the start cue sounds only once capture is ready. A
+  take ends at ten minutes, and a hold whose key-up was lost is ended by
+  checking the key's physical state. A microphone that delivers nothing for
+  two seconds ends the take; one that stops after speech was heard keeps what
+  it heard and says the text may be incomplete.
+- **Eleven dictation languages** — English, Spanish, French, German, Italian,
+  Portuguese, Dutch, Russian, Japanese, Korean, and Chinese, chosen under
+  Settings → Personalize → Language. Parakeet is English-only, so every other
+  language is recognized by Whisper alone: Whisper Tiny on a default install,
+  large-v3-turbo once it is installed. Cleanup outside English is
+  deterministic only, and Compose, Reply, and Edit refuse with "<Mode> mode
+  needs English — nothing changed".
 - **Rolling recognition** — long dictations are transcribed *while you're
   still talking* (segments cut at natural pauses), so a 60-second ramble
   pastes as fast as a one-liner.
 - **Context-aware recognition** — the active selection, nearby field text,
   window title, local document, sibling filenames, app name, and a short
-  clipboard sample temporarily bias recognition toward the words already in
-  front of you. This context is neither logged nor learned.
-- **Three-engine confidence cascade on Mac** — Whisper Tiny speculates during
-  an end pause. Clear speech can paste immediately; uncertain English is
-  verified by a warm native Parakeet Unified helper, with Whisper
-  large-v3-turbo retained as the independent fallback. Audio reaches the
-  helper through a RAM-only pipe. Startup and duration-aware request deadlines
-  terminate a wedged helper, fall back to Turbo, and allow a lazy restart on
-  the next utterance. Windows retains the Tiny → Turbo cascade.
-- **Offline runtime model resolution** — the one-click installer downloads both
-  pinned MLX snapshots up front. Dictation then resolves only the installed
-  local paths and memoizes them, so a release never waits on Hugging Face or
-  prints a model-fetch progress bar.
-- **Structured cleanup with a safety net** — fillers and false starts removed,
-  self-corrections applied ("Tuesday, actually Wednesday" → Wednesday),
-  punctuation fixed. Safe edits are compiled deterministically; the local LLM
-  is used only for semantic cleanup and explicit writing modes. Its strict
-  JSON edit plan is guarded against refusals, over-deletion, and truncation;
-  nearby context is explicitly marked as untrusted, with a faithful local
-  fallback.
+  clipboard sample (at key-down, Mac) temporarily bias recognition toward the
+  words already in front of you. Nothing is read from a secure text field,
+  and a clipboard its owner marked concealed or transient is skipped. App
+  names, window titles, and dictionary terms only bias the recognizer and
+  protect words; they never replace a word the recognizer produced. The
+  context itself is not written to the transcript history, but in Reply and
+  Edit modes the field text or selection is what the cleanup model rewrites,
+  so the result (or, in Edit without the model, the unchanged selection) is
+  logged like any other dictation.
+- **Confidence cascade on Mac** — for English, a warm native Parakeet Unified
+  helper is the primary recognizer, and Whisper Tiny decodes the same audio
+  only to measure agreement; Tiny's text is never delivered on that route.
+  When the two disagree and Whisper large-v3-turbo is installed, Turbo casts
+  the deciding vote on the words. Without Turbo (the default install),
+  Parakeet's text is delivered unverified with Tiny's as an inspectable
+  alternative. Audio reaches the helper through a RAM-only pipe. Startup and
+  duration-aware request deadlines terminate a wedged helper and fall back to
+  Whisper; a helper that had started restarts lazily on the next utterance,
+  while one that fails to start is retried only after a backoff (30 seconds,
+  doubling to five minutes) and each failure is logged. Other languages, and
+  Windows, use Whisper alone: Tiny, with large-v3-turbo as the fallback when
+  it is installed.
+- **Offline runtime model resolution** — the installer downloads the pinned
+  model snapshots it installs up front (Parakeet and Whisper Tiny by default;
+  Turbo too with the optional models). Dictation then resolves only the
+  installed local paths and memoizes them, so a release never waits on Hugging
+  Face or prints a model-fetch progress bar. Windows loads its models with
+  local files only at runtime; only the installer's preload downloads them.
+- **Structured cleanup with a safety net** — fillers removed ("um", "uh",
+  "erm", "hmm", and "you know", "I mean", "basically", "kind of", "sort of"
+  when set off by commas) and punctuation fixed. "Scratch that" is the way to
+  take words back. A typed self-correction on "actually" is **off by
+  default**: "We meet Tuesday, actually Wednesday." is typed as spoken. Turn
+  it on under Settings → Controls → **“Actually” corrections** (on Windows,
+  which has no settings window, set `"self_correction": true` in
+  `preferences.json` and restart). When on, "actually" replaces the item
+  before it only when both sides are the same kind of thing (two numbers,
+  weekdays, months, or clock times) and each is a whole item: "We meet
+  Tuesday, actually Wednesday." becomes "We meet Wednesday.", while "I didn't
+  actually finish the report.", "From 9 to 5, actually 6" and "Not Tuesday,
+  actually Wednesday." stay as spoken. It is off by default because a sentence
+  that contrasts two things has the same shape and is changed too: "I thought
+  it was Tuesday, actually Wednesday." becomes "I thought it was Wednesday."
+  Safe edits are compiled
+  deterministically; the optional local model (Qwen3.5-4B) is used only for
+  semantic cleanup and the explicit writing modes. Its strict JSON edit plan
+  is guarded against refusals, over-deletion, and truncation; nearby context
+  is explicitly marked as untrusted, with a faithful local fallback.
 - **Evidence-driven Voice Compiler** — acoustic hypotheses, ephemeral context,
   app-scoped personal priors, and native timing evidence meet in a local
   `VoiceIR`. A conservative span graph chooses terms; protected names,
   numbers, dates, URLs, paths, identifiers, commands, and flags survive
-  cleanup; LLM edits apply only when bounded proof edits reconstruct the
-  claimed output exactly.
+  cleanup. In capture and code mode, model edits apply only when bounded
+  proof edits, each covering whole tokens and leaving every anchor and number
+  outside it intact, reconstruct the claimed output exactly. Compose, Reply,
+  and Edit are rewrites by design and are not held to that proof.
 - **Stable semantic feedback** — rolling recognition publishes only a stable
   prefix to the HUD, never provisional text into the target app. Native word
   timing may add conservative pause/paragraph formatting without enabling the
@@ -156,25 +204,55 @@ are never Supporter-only features.
   inspector explains the
   bounded receipt without exposing context or transcript text. The comparison
   cannot change the text, cleanup, insertion, or model route.
-- **Six explicit voice modes** — modifier keys turn the same Right Option
+- **Six explicit voice modes** — modifier keys turn the same capture-key
   gesture into faithful capture, polished composition, context-aware reply,
   selected-text editing, spoken-code compilation, or a small allowlist of
-  reversible editing commands.
+  reversible editing commands. Compose, Reply, and Edit are rewrites done by
+  the optional cleanup model, in English only. Without that model (the
+  default install) all three insert nothing: what you said was an instruction
+  or a brief, not text to paste, so the field and any selection stay as they
+  were, and the caption reads "<Mode> mode needs the cleanup model — nothing
+  changed". If the model is installed but gives no usable rewrite, the caption
+  reads "<Mode> mode got no rewrite from the cleanup model — nothing changed",
+  and again nothing is inserted.
 - **Tone awareness** — casual in Slack/Messages (texting style: no trailing
   period), formal prose in Mail, technical in editors and AI chats, verbatim
   in terminals. Pick a tone per app under Settings → Personalize →
-  **App tones**,
-  or force one per-dictation: *"Formal tone, …"*, *"casual, …"*.
-- **Spoken structure** — "new line" / "new paragraph" / "scratch that" work;
-  explicit list lead-ins ("two things", "here's a list", "here are some
-  feedback items") become tidy dash lists when you state multiple items. A
-  lone ordinal in ordinary prose (for example, "the second thing regarding
-  audio") stays on the deterministic fast path instead of waking the LLM.
+  **App tones**, or force one per dictation by opening with the tone and the
+  word "tone", "style", or "mode": *"Formal tone, …"*, *"casual style, …"*,
+  *"verbatim mode: …"*. A sentence that really opens that way ("Code style:
+  use tabs") is read as an override too.
+- **Spoken structure** — "new line" / "new paragraph" work, and a noun use
+  ("a new line of products") stays literal. So does the phrase right after a
+  count or quantity (a number, "dozen", "couple", "all", "most", "several",
+  "of"): "We hired two new line cooks." and "12 new line staff" keep their
+  words. The cost is that a command said without a pause right after a number
+  ("Step 1 new line step 2") is typed as words; pause before it, so the
+  recognizer writes a comma or a full stop, and it breaks the line.
+  "Scratch that" spoken as its own
+  sentence drops the previous sentence; spoken inline it drops the current
+  clause, and after a trailing-off pause written as "..." it counts as
+  inline. Explicit list lead-ins ("two things", "here's a list", "here are
+  some feedback items") become tidy dash lists when you state multiple items;
+  when the lead-in announces a count, a number past that count stays inside
+  the last item. A lone ordinal in ordinary prose (for example, "the second
+  thing regarding audio") stays on the deterministic fast path instead of
+  waking the LLM.
 - **Reversible personalization** — vocabulary is mined from your usage, while
-  corrections are learned only when the exact pasted range is changed. A
-  correction activates after two confirmations in the same app or three
-  globally, and every learned mapping can be inspected or forgotten from the
-  menu.
+  corrections are learned only from an edit of the exact pasted range that
+  stayed unchanged for about a second and was still in place when the
+  ten-second watch ended. Sending or clearing the field ends the watch, so the
+  next message you type is never read as an edit. A correction becomes active
+  after two confirmations in the same app or three globally, and only once
+  the private regression lab promotes it. A rule is never built between two
+  common English words, never adds or removes a negation, and never maps one
+  number to another; dictating the heard word and leaving it alone, or
+  sending it unedited, counts as evidence against the rule. An active rule is
+  never applied inside an email address, @handle, or URL. Every learned
+  mapping can be inspected or forgotten under Settings → Personalize →
+  **Learned corrections**; Forget removes its rule, its dictionary count, its
+  history entries, and its lab evidence. On Windows, vocabulary is mined but
+  corrections are not learned.
 - **Acoustic keyword memory foundation** — a strict local store can count
   unique observations and explicit confirmations for hard names without raw
   audio, transcript history, or unhashed app identifiers. It is exportable and
@@ -253,13 +331,12 @@ are never Supporter-only features.
   semantics, and cannot initiate a drag/drop or make a physical accuracy claim. Inert
   demonstration drafts can
   also record, preview, approve, or roll back a bounded Finder, Mail, Notes, or
-  menu recipe without replaying it. On Mac, the Privacy pane provides an
-  explicit **Demonstrations** editor; its routine list returns and renders only
-  draft number, domain, state, and step count, and private step text is returned
-  to the editor only after **Reveal/Edit**. The same pane also offers an inert
-  four-class risk-confirmation ceremony: explicitly start one class, say the
-  exact phrase “confirm risky action,” then use the separately enabled click
-  within 30 seconds. Its content-free RAM-only receipt cannot invoke an action.
+  menu recipe without replaying it, and an inert four-class risk-confirmation
+  ceremony (start one class, say the exact phrase “confirm risky action,” then
+  click within 30 seconds) produces only a content-free RAM-only receipt.
+  Neither has a control in the app window any more: the Demonstrations editor
+  and the Risk confirmation row were removed from the Privacy pane, and the
+  view-model methods behind them have no window caller.
   Outside the explicit Point-and-Speak button press and compose-window request,
   these foundations cannot send, schedule, click, type, drag, automate an app,
   or run an agent yet.
@@ -271,10 +348,15 @@ are never Supporter-only features.
   Personal Priors use that gate in the live learning path; conflicting or
   collateral-changing candidates are quarantined instead of silently becoming
   a bad rule. No audio or surrounding document text enters receipts.
-- **Self-editing snippets (Mac)** — say "insert my email" and your saved text
-  pastes instead. Edit that exact insertion within ten seconds and the revised
-  value is saved for next time and listed under Settings → Personalize →
-  **Learned corrections**.
+- **Snippets** — say "insert my email" and your saved text pastes instead.
+  The cue also works inside a longer sentence: with a filled snippet, "Please
+  insert my email here." becomes "Please <your saved text> here." A bare
+  snippet name ("send it to my email") is never expanded, nor is a negated
+  cue ("Do not insert my email here."), and a snippet whose value still
+  starts with `EDIT ME` is never inserted. On Mac, if you edit a
+  pasted snippet in place within ten seconds, the edit is kept only as a
+  pending suggestion in `learned.json`; the saved snippet does not change, and
+  the window does not show suggestions yet.
 - **Whispering works** — quiet speech is gain-normalized before recognition.
 - **Choose your Whisper Face** — sixteen characters (Parrot, Fox, Owl, Cat,
   Bear, Dog, Wolf, Pig, Panda, Tiger, Frog, Rabbit, Hedgehog, Penguin, and
@@ -288,16 +370,22 @@ are never Supporter-only features.
   bar or Windows notification area, with processing and paused states. The Mac
   menu stays a quick-glance surface: **Open Whisper Face…**, usage, pause,
   character choice, **Check for Updates…**, and quit are always there, and the
-  Last Recognition, Voice Outbox, Voice Inbox, and Selective Re-listen rows
-  each appear only once they have something to show. Tones, learned
-  corrections, mode reference, and logs live in the app window; Windows adds
-  character, pause, Flight Recorder, logs, and quit to its tray.
-- **Experimental phone compatibility endpoint** — an OpenAI-compatible
-  `/v1/audio/transcriptions` endpoint (port 8787) can support self-hosted
-  clients such as [Diction](https://diction.one). Ordinary desktop mode binds
-  it to loopback; only an explicit `--server-only` install binds the trusted
-  LAN. Native iPhone work is deliberately deferred while the Mac experience
-  is brought to product quality.
+  Last Recognition, Undo Last Dictation, Recent Dictations, Voice Outbox,
+  Voice Inbox, and Selective Re-listen rows each appear only once they have
+  something to show. Undo and Insert Again live there and on the undo key, not
+  in the window. Tones, learned corrections, mode reference, and logs live in
+  the app window; Windows adds character, pause, Flight Recorder, logs, and
+  quit to its tray.
+- **Experimental phone compatibility endpoint** — only an explicit
+  `--server-only` install serves the OpenAI-compatible
+  `/v1/audio/transcriptions` endpoint (port 8787) for self-hosted clients such
+  as [Diction](https://diction.one). It requires a bearer token that is
+  created once, kept in `phone_token.txt` in the checkout, and reused across
+  restarts; it is never printed or logged. It refuses requests
+  from browsers, expands no snippets, and writes nothing to the transcript
+  history. In ordinary desktop mode port 8787 answers only `GET /health` on
+  loopback. Native iPhone work is deliberately deferred while the Mac
+  experience is brought to product quality.
 - **Always on** — installed as launch agents: starts at login, restarts on
   crash, keeps its models warm so the first dictation after a break is never
   slow.
@@ -306,18 +394,22 @@ are never Supporter-only features.
 
 | Platform | Requirements |
 |---|---|
-| macOS | Apple Silicon, macOS 14 or newer recommended, ~5 GB free (~8 GB with `--with-all-models`) |
-| Windows | Windows 10/11 x64, ~8 GB free; NVIDIA GPU preferred, CPU fallback supported |
+| macOS | Apple Silicon, macOS 14 or newer (the installer refuses older), an administrator account (Homebrew asks for the password), the Xcode Command Line Tools with Swift 6 or newer, ~5 GB free on the install volume (~8 GB with `--with-all-models`) |
+| Windows | Windows 10/11 x64, winget, ~8 GB free; NVIDIA GPU preferred, CPU fallback supported |
 
-A default Mac install downloads only what dictation needs: Parakeet Unified
-(~565 MB, primary recognition) and Whisper Tiny (~75 MB, the fast preview
-pass). It also builds a pinned FluidAudio helper. Two models are optional
-quality upgrades and are skipped unless you ask for them:
+A default Mac install downloads only the models dictation needs: Parakeet
+Unified (~565 MB, primary English recognition) and Whisper Tiny (~75 MB, the
+agreement check and the recognizer for other languages). It also builds a
+pinned FluidAudio helper and the launcher app with your Swift toolchain. On a
+fresh Mac the Command Line Tools and Homebrew come first, so expect to
+download a few gigabytes in all and allow 15–45 minutes; no install time has
+been measured. Two models are optional quality upgrades and are skipped
+unless you ask for them:
 
 | Optional model | Size | What you lose without it |
 |---|---|---|
-| Whisper large-v3-turbo | ~1.6 GB | The accurate fallback for audio Parakeet declines; the cascade uses Whisper Tiny instead |
-| Qwen3.5-4B | ~3.4 GB | Semantic cleanup; the deterministic compiler still punctuates and cleans every dictation |
+| Whisper large-v3-turbo | ~1.6 GB | The tie-breaking vote when Parakeet and Tiny disagree, and the accurate Whisper fallback; without it, non-English dictation runs on Whisper Tiny alone |
+| Qwen3.5-4B (via Ollama) | ~3.4 GB | Semantic cleanup and the Compose, Reply, and Edit rewrites, which then insert nothing; the deterministic compiler still punctuates and cleans every ordinary dictation. Ollama itself is installed only with this model |
 
 Install them up front with `./setup.sh --with-all-models`, or add them later
 with `./setup.sh --models`. Windows installs Whisper Tiny, Whisper
@@ -329,11 +421,21 @@ must be re-audited if it moves.
 
 ## Install
 
-Clone or download the repository, then use the one-click launcher for your OS:
+Clone or download the repository, then use the launcher for your OS:
 
 Copy or extract the complete source folder to a writable local directory first;
 do not run the installer from a read-only mounted DMG or protected folder. Both
-installers check this before downloads or service changes.
+installers check this before downloads or service changes. Your dictation
+history and settings live inside this folder, so pick one that is not synced
+to a cloud drive: for example `~/Whisper Face` on Mac or
+`C:\Users\<you>\Whisper Face` on Windows, rather than Documents or Desktop,
+which iCloud Drive and OneDrive often sync.
+
+The published disk image is not signed with a Developer ID or notarized, so
+macOS blocks `Install.command` the first time. On macOS 15 and later, open it
+once, dismiss the warning, then go to System Settings → Privacy & Security
+and choose **Open Anyway** (macOS asks for your password). On macOS 14,
+Control-click `Install.command`, choose **Open**, then confirm.
 
 - **Mac:** double-click `Install.command`.
 - **Windows:** double-click `Install.cmd`.
@@ -357,10 +459,16 @@ From a terminal, the same installers are:
 The launcher detects the OS. A Windows Git Bash or WSL invocation of
 `./setup.sh` automatically hands off to `setup.ps1`. On a fresh machine it:
 
-1. Installs the native package prerequisites (`Homebrew` on Mac or `winget`
-   packages on Windows), then installs `uv`, `ffmpeg`, and Ollama.
+1. On Mac, refuses to continue before any download if the Mac is older than
+   macOS 14 or the Command Line Tools and Swift 6 are missing. Then installs
+   the native package prerequisites (`Homebrew` on Mac or `winget` packages on
+   Windows) and `uv` and `ffmpeg`. On Mac, Ollama is installed only when the
+   cleanup model is requested (or an earlier install set it up); Windows
+   always installs it.
 2. Reproduces the locked Python dependency environment from
-   `dictate.py.lock`.
+   `dictate.py.lock` on CPython 3.12, which every `uv` call and the login
+   service use. An existing install builds one new environment on its next
+   setup run.
 3. Downloads the models it needs before launching the app: Parakeet Unified
    and Whisper Tiny on Mac (plus large-v3-turbo and Qwen3.5-4B when you pass
    `--with-all-models`), Qwen3.5-4B and both Whisper models on Windows. Each
@@ -368,12 +476,18 @@ The launcher detects the OS. A Windows Git Bash or WSL invocation of
    announcing a download it will skip. On Mac it also builds and preloads the
    native Parakeet Unified helper.
 4. Creates private configuration files without overwriting existing ones.
-5. Installs and validates the tuned Ollama and dictation login services
-   (`launchd` on Mac, Task Scheduler on Windows).
+5. Installs and validates the dictation login service (`launchd` on Mac, Task
+   Scheduler on Windows) and, when the cleanup model is installed, the tuned
+   Ollama service. On Mac that Ollama service needs port 11434: if another
+   Ollama already holds it, setup names that process and stops, and never
+   stops anyone else's Ollama.
 6. On Mac, installs and verifies `~/Applications/Whisper Face.app`, a tiny
-   generic arm64 AppKit launcher. A DMG install preserves its packaged app byte
-   for byte, including its Developer ID signature when present; a source-only
-   install builds it unsigned locally. The exact checkout/revision and app
+   generic arm64 AppKit launcher. A DMG install uses its packaged app only if
+   the app's digest matches the `launcher_bundle_sha256` recorded in
+   `RELEASE-METADATA.json`; a missing, damaged, or unrecognised app is set
+   aside and the launcher is built locally instead, as a source-only install
+   always does. A locally built launcher has a different code signature, so
+   macOS may ask for the privacy grants again. The exact checkout/revision and app
    digest live in a separate user-only `0600` receipt, so no machine state
    invalidates the app's signature. The app contains no copied runtime, models,
    or private state; it validates and starts the existing `launchd` service,
@@ -382,9 +496,12 @@ The launcher detects the OS. A Windows Git Bash or WSL invocation of
 
 Homebrew's official installer may pause once to explain its changes and ask
 for your macOS password. A default Mac install downloads about 650 MB of
-models; `--with-all-models` adds roughly 5 GB, so that first run takes a
-while. Subsequent runs are idempotent, reuse the caches, and say which models
-were already present.
+models, plus the Python packages, the Swift package sources, and on a fresh
+Mac the Command Line Tools and Homebrew; `--with-all-models` adds roughly
+5 GB of models, so that first run takes a while. Subsequent runs are
+idempotent, reuse the caches, and say which models were already present.
+Every install run writes `install.log` in the checkout, readable only by you;
+`--verify` writes none.
 
 Every runtime change is governed by the repository's
 [installer release process](docs/installer-release-process.md). It requires
@@ -393,19 +510,29 @@ live platform verification where available, and publication of the commit
 before a fresh machine is told the build is available.
 
 For an existing installation, follow the concise
-[update and rollback guide](docs/distribution/update-and-rollback.md). Updates
-remain explicit: a local helper can validate and install an already-prepared
-clean sibling checkout, with linked verified current/candidate release
-metadata required before apply, while leaving the current checkout intact as
-the rollback copy. It does not download a candidate or run in the background.
+[update and rollback guide](docs/distribution/update-and-rollback.md). On Mac
+the menu's **Check for Updates…** is the updater people actually use: when you
+choose it, it runs one `git fetch` of the checkout's tracked branch, and if
+the branch has moved it checks out that branch tip and reruns the installer,
+restoring the last revision that installed cleanly if the installer fails.
+It never runs in the background. It installs whatever is at the tip of the
+branch: there is no release-tag or signature check, so you receive unreleased
+commits exactly as a fresh `git clone` would. It refuses a checkout with local
+changes; a disk-image install built from this revision onward passes that
+check. A separate operator helper can install an already-prepared sibling
+checkout against verified release metadata; it does not download anything.
 
-macOS will prompt for permissions — enable **"uv"** under System Settings →
-Privacy & Security → **Input Monitoring**, **Accessibility**, and
-**Microphone**. The app waits and restarts itself automatically once granted.
-While either evidenced permission is incomplete, Home and Advanced show
-an accessible **Open System Settings** recovery action. It opens the generic
-macOS settings app, never changes a permission, and refreshes the displayed
-evidence while the Whisper Face window remains open.
+The installer ends with "installation complete" only once the service is
+running and verified. On a first Mac install it instead says it is not
+finished yet, because macOS must grant three permissions first. Open System
+Settings → Privacy & Security and turn on **Whisper Face** under **Input
+Monitoring** (so it notices you holding the key), **Accessibility** (so it can
+paste), and **Microphone** (macOS asks the first time you dictate). The app
+starts listening by itself once the first two are on. While a permission is
+reported missing, Home and Advanced show an accessible **Open System
+Settings** action that opens that permission's own Privacy & Security pane;
+it never changes a permission, and it does not appear while permissions are
+still being checked.
 Only an explicit headless `--server-only` install needs trusted-LAN/firewall
 access for the experimental compatibility endpoint.
 
@@ -413,21 +540,28 @@ Windows may show standard package-install prompts. Enable **Microphone access**
 under Settings → Privacy & security if it is disabled. The Windows backend
 automatically uses an NVIDIA GPU when its runtime is available and otherwise
 uses optimized int8 CPU inference. Its tray icon exposes pause, Flight
-Recorder, logs, and quit. The core capture, confidence cascade, cleanup,
-snippets, tones, and learning pipeline is shared; macOS additionally provides
-the floating Cocoa HUD and richer Accessibility-based selection/document
-context.
+Recorder, logs, and quit. Capture, Whisper recognition, cleanup, snippets,
+tones, and vocabulary mining are shared; macOS additionally provides the
+floating Cocoa HUD, richer Accessibility-based selection/document context, the
+verified insertion transaction, and correction learning. Right Alt starts
+dictation; on keyboard layouts with AltGr, AltGr starts Capture, so every
+AltGr character also starts a take. The capture key cannot be changed from
+the tray. Windows support is a preview: neither its installer nor a full
+dictation has been run on real Windows hardware.
 
 After granting permissions, verify the complete installation at any time:
 
 ```sh
 ./setup.sh --verify                 # macOS
-.\setup.ps1 --verify               # Windows
+.\setup.ps1 --verify               # Windows PowerShell
+Install.cmd --verify               # Windows, from a Command Prompt
 ```
 
-This checks the dependency lock, platform login service, Qwen model, both
-Whisper caches, and the process health endpoint without changing the
-installation. On Mac it also freshly reconstructs the expected Ollama service
+This checks the dependency lock, platform login service, the Parakeet model
+and helper (Mac), the Qwen model when it is installed, and the process health
+endpoint without changing the installation. A failed check names its own
+reason. The Mac check does not inspect the Whisper caches. When the cleanup
+model is installed, it also freshly reconstructs the expected Ollama service
 definition and requires its exact digest receipt plus an exact match between
 the launchd PID and the endpoint's unique listener PID. Windows verifies its
 scheduled task's current-user principal, sole action, private launcher receipt,
@@ -469,10 +603,23 @@ the old transcript history.
 ./setup.sh --server-only
 ```
 
-No hotkey, no HUD, no permission prompts—just the compatibility endpoint and
-the learning loop. This explicit mode binds port 8787 to reachable interfaces;
-use only a trusted LAN and firewall, and never forward it to the internet. This
-is not the planned native iPhone experience.
+No hotkey, no HUD, no permission prompts—just the compatibility endpoint.
+This explicit mode binds port 8787 to reachable interfaces. The first start
+creates a bearer token and saves it in `phone_token.txt` in the checkout
+(owner-only, mode 600, on a Mac; on Windows it has the checkout folder's
+permissions). Later starts reuse it, so a paired phone client keeps working
+across restarts. The token is never printed and never written to
+`dictate.log`; the log says only where the file is. Read it from the file and
+have the client send it as `Authorization: Bearer <token>`. To rotate it,
+delete `phone_token.txt` and restart the service: a new token is created and
+the old one stops working. If the file cannot be written, every transcription
+request is refused and the log says so. The file is gitignored, and
+`--uninstall` keeps it with your other private files unless you add
+`--remove-personal-data`. Requests carrying a browser `Origin` header, or a
+`Host` that is not an IP address, `localhost`, or a `.local` name, are
+refused. Uploaded audio is written to a private temporary file while
+`ffmpeg` decodes it. Use only a trusted LAN and firewall, and never forward
+the port to the internet. This is not the planned native iPhone experience.
 Verify that headless installation later with `./setup.sh --server-only --verify`;
 the runtime/model/service checks still run while the AppKit construction gate
 is correctly skipped.
@@ -507,7 +654,8 @@ until you add `--yes`:
   Ollama itself is asked to drop.
 - **Your personal files are kept unless you ask for them to go.** Your
   dictionary, snippets, tones, preferences, learned corrections, transcripts,
-  Voice Inbox drafts, demonstrations, activation receipts, and logs are your
+  Voice Inbox drafts, demonstrations, activation receipts, logs, and a
+  `--server-only` endpoint token are your
   words. No download restores them, so `--remove-personal-data` is the only
   thing that removes them, and the run tells you where they were left.
 
@@ -533,18 +681,25 @@ is in the [update and rollback guide](docs/distribution/update-and-rollback.md).
 |---|---|
 | (hold Right Option on Mac or Right Alt on Windows, talk, release) | cleaned text at your cursor |
 | (Flight Recorder enabled: talk, then tap Right Option) | your latest utterance |
-| Shift + Right Option | compose polished prose |
-| Control + Right Option | reply using the current selection/context |
-| Command + Right Option | edit the selected text |
+| Shift + Right Option | compose polished prose (needs the optional cleanup model and English; without the model nothing is inserted) |
+| Control + Right Option | reply using the current selection/context (needs the optional cleanup model and English; without the model nothing is inserted) |
+| Command + Right Option | edit the selected text (needs the optional cleanup model and English; without the model the selection is left as it was) |
 | Shift + Control + Right Option | compile spoken code punctuation |
 | Command + Control + Right Option | run an allowlisted Mac command |
-| "…um so basically…" | fillers gone |
-| "Tuesday — actually Wednesday" | just Wednesday, in place |
+| your undo key, if you set one (Mac) | the last dictation taken back out |
+| "Uh, I think, you know, it works." | "I think it works." |
+| "We meet Tuesday, actually Wednesday." | unchanged by default. With **“Actually” corrections** turned on (Settings → Controls): "We meet Wednesday." |
+| "I thought it was Tuesday, actually Wednesday." | unchanged by default. With the switch on it becomes "I thought it was Wednesday.", which is wrong: a contrast looks the same as a correction, and that is why the switch is off |
+| "I didn't actually finish the report." | unchanged, on or off: "actually" here is not a correction |
+| "From 9 to 5, actually 6." | unchanged, on or off: part of a range is never corrected |
+| "Not Tuesday, actually Wednesday." | unchanged, on or off: a negated item is never corrected |
+| "We hired two new line cooks." | unchanged: after a count, "new line" is words, not a command |
 | "two things: … and second …" / "here's a list of ideas …" | a dash list |
 | "new paragraph" | a real paragraph break |
-| "scratch that" | previous sentence dropped |
-| "Formal tone, …" / "casual, …" / "verbatim: …" | that style, this once |
-| "insert my email" | your snippet from `snippets.json` |
+| "Hi team. The launch is Tuesday. Scratch that. Wednesday." | "Hi team. Wednesday." (on its own, it drops the previous sentence; inline, the current clause) |
+| "Formal tone, …" / "casual style, …" / "verbatim mode: …" | that style, this once |
+| "insert my email" (alone, or inside a sentence) | your snippet from `snippets.json` |
+| "send it to my email" | unchanged: a bare snippet name is never expanded |
 
 On macOS, **Voice Object Commands** is an off-by-default Privacy setting. When
 you explicitly enable it, only these exact lowercase forms bypass paste and
@@ -573,41 +728,27 @@ that check and clear can still race. The
 inspector never reads clipboard content, pastes, sends, schedules, or executes a
 draft, and it remains available when command diversion is turned off.
 
-The Mac Privacy pane's **Risk confirmation (inert)** row is a safety ceremony,
-not an agent-action launcher. Choose one of four closed risk classes and select
-**Start**. While it is awaiting voice, an exact capture-mode dictation of
-`confirm risky action` is consumed before compilation, transcript logging,
-clipboard access, or insertion. Only then is **Confirm click** enabled, and the
-ceremony expires after at most 30 monotonic seconds. `cancel risky action`, the
-Cancel button, an early click, expiry, or replay all fail closed. The runtime
-keeps only a RAM-only opaque ID plus risk/state/reason; it has no action payload
-or execution callback.
+The risk-confirmation ceremony and the Demonstrations editor described under
+Features are runtime foundations with no control in the app window today; the
+Privacy-pane rows that once exposed them were removed. Their behaviour is
+specified in `risky_action_confirmation.py` and `demonstration_drafts.py` and
+covered by their tests.
 
-Choose **Author** beside **Demonstrations** in the Mac Privacy pane to create an
-inert Finder, Mail, Notes, or menu recipe. Whisper Face generates an opaque
-local ID, lists only content-free metadata, and reveals private described steps
-only when you explicitly select **Reveal/Edit**. From that revealed editor you
-can record one bounded, domain-valid description or explicitly approve a
-non-empty recipe. **Cancel Draft** atomically rolls an unapproved recipe and its
-step text out of storage; **Delete Approved** explicitly removes a selected
-approved recipe and its private text. Approval remains a local inert state:
-this editor has no replay, automation, click, type, paste, Accessibility action,
-subprocess, network, or application API path.
-
-The bundled `EDIT ME` values are setup placeholders. On Mac, insert one and
-replace the pasted placeholder in place within ten seconds; Whisper Face saves
-that exact replacement to `snippets.json`. You can also edit the private JSON file
-directly. Learned snippet edits appear by name under Settings →
-Personalize → **Learned corrections**;
-forgetting one restores its previous value when the file has not since changed.
+The bundled `EDIT ME` values in `snippets.json` are setup placeholders, and a
+snippet whose value still starts with `EDIT ME` is never inserted. Fill your
+snippets in under Settings → Personalize → **Snippets**, or edit the private
+JSON file directly. Editing a pasted snippet in place does not change the
+saved snippet; it is recorded only as a pending suggestion.
 
 On Windows, use **Right Alt** wherever the table says Right Option and the
 **Windows key** wherever it says Command. Shift and Control are unchanged.
 
 Everything personal stays in private, gitignored local files: `dictionary.txt`
 (your terms; `-word` bans one), `snippets.json`, `tones.json`, `preferences.json`,
-`transcripts.jsonl` (your history, trimmed to recent), `learned.json` (mined
-vocabulary and fix rules), `voice_inbox.json` (only opt-in inert Voice Object
+`transcripts.jsonl` (your history: at most 500 entries and nothing older than
+30 days, trimmed whenever a dictation is appended), `learned.json` (mined
+vocabulary, correction evidence, and pending snippet suggestions),
+`voice_inbox.json` (only opt-in inert Voice Object
 drafts), and `demonstrations.json` (manually authored inert recipe steps).
 `acoustic_keyword_memory.json` stores bounded
 keyword candidates, hashed app scopes, and evidence digests without raw audio,
@@ -631,18 +772,24 @@ Privacy. Its audio is never written to disk: the bounded buffer is cleared after
 use, on pause, when disabled, and on quit. The menu-bar dot and macOS microphone
 indicator remain visible while it is active.
 
-Each local transcript entry includes latency, ASR engine, confidence,
-verification, compiler decisions, and proof-edit metrics. When macOS can
-safely re-read the exact pasted range, the same private record is updated with
-the text observed in that range after ten seconds; unsafe observations are
-skipped. This enables a clearly labeled zero-edit proxy and observed
-correction-burden measurement.
+Each local transcript entry holds the raw and cleaned text, the app, a
+timestamp, and latency, ASR engine, confidence, verification, compiler
+decisions, and proof-edit metrics. Text kept in the Voice Outbox is logged
+too. When macOS can safely re-read the exact pasted range, the same private
+record is updated with the text observed in that range after ten seconds;
+unsafe observations are skipped. This enables a clearly labeled zero-edit
+proxy and observed correction-burden measurement. There is no switch that
+turns the history off; the Privacy pane's **Recent dictations** setting only
+controls whether recent entries are listed. Usage counts for "Today" and "Last
+7 days" are computed from this bounded log, so very heavy use can be
+undercounted.
 
 ## Tuning
 
-The knobs live at the top of `dictate.py` — hotkey, ports, the
-LLM cleanup deadline, chunking aggressiveness, silence gates, tone per
-app-bundle. The `eval_cleanup.py` harness replays adversarial cases and your
+Everyday choices (capture key, undo key, sounds, language, tones, snippets)
+are in the Mac window's Settings. The remaining knobs live at the top of
+`dictate.py` — ports, the LLM cleanup deadline, chunking aggressiveness,
+silence gates. The `eval_cleanup.py` harness replays adversarial cases and your
 own transcripts through candidate Ollama models if you want to test a
 different cleanup model.
 
@@ -771,8 +918,9 @@ logging, persistence, drag/drop, or AX action surface.
 
 `acoustic_time_machine.py` is a default-off, RAM-only buffer foundation for at
 most eight 2.4-second microspans and ten seconds total. It has explicit
-read/consume/delete/clear operations and retains nothing while disabled; no
-runtime capture or replay UI is enabled yet.
+read/consume/delete/clear operations and retains nothing while disabled. The
+Mac runtime uses it only after the opt-in Privacy preference described under
+Features is turned on.
 
 ## Verify
 
@@ -790,15 +938,16 @@ uv run tests/test_installers.py
 ## Distribution, privacy, and security
 
 Public Mac releases are built from one exact Git revision with the same
-`Install.command` used in a checkout. The release pipeline emits an unsigned
-local preview or, when Apple credentials are supplied, a generic signed app
-inside a signed, notarized, and stapled disk image, together with a source ZIP,
-update/rollback manifest, and SHA-256 checksums. See the
-[Mac release runbook](docs/distribution/macos-release.md).
-The signed path additionally requires the production Apple Team ID to match the
-repo-pinned `config/macos-signing-policy.json`; its current `null` value safely
-disables signing until the Project Owner records the real Team ID. Unsigned
-local builds and source installs remain available.
+`Install.command` used in a checkout. Every release published so far was
+packaged locally as an unsigned preview: the launcher app is ad-hoc signed,
+the disk image is not notarized, and the release carries SHA-256 checksums
+but no build-provenance attestation. The release pipeline can also produce a
+generic signed app inside a signed, notarized, and stapled disk image, but
+only once the production Apple Team ID is recorded in the repo-pinned
+`config/macos-signing-policy.json`; its current `null` value disables
+signing, and that path has never produced a published release. See the
+[Mac release runbook](docs/distribution/macos-release.md) and
+[release provenance](docs/security/release-provenance.md).
 
 Whisper Face's user-facing data commitments are in the
 [privacy promise](PRIVACY.md). Security boundaries and private vulnerability
@@ -821,8 +970,8 @@ complete community edition open while allowing commercial work to fund the
 free local product.
 
 The Mac window exposes offline **License Notices** and the immutable
-**Exact Source** under Advanced. Network-facing installs publish the same
-commit-specific source offer at `GET /source` and the shipped notices at
-`GET /license`. Modified deployments should set `WHISPER_FACE_SOURCE_URL` and,
+**Exact Source** under Advanced. Network-facing (`--server-only`) installs
+publish the same commit-specific source offer at `GET /source` and the shipped
+notices at `GET /license`; ordinary desktop mode serves neither. Modified deployments should set `WHISPER_FACE_SOURCE_URL` and,
 for packaged builds without Git metadata, `WHISPER_FACE_SOURCE_REVISION` to
 their corresponding source.

@@ -4,7 +4,7 @@ const features = [
     icon: '🖥️',
     color: 'var(--parrot)',
     title: 'Runs entirely on your machine',
-    body: 'A stack of local recognizers turns speech into text on-device. No cloud, no API keys. Pull the Wi-Fi and it still works.',
+    body: 'Local recognizers turn speech into text on-device: Parakeet for English, Whisper for ten more languages. No cloud, no API keys. Pull the Wi-Fi and it still works.',
   },
   {
     icon: '🎯',
@@ -15,20 +15,20 @@ const features = [
   {
     icon: '⚡',
     color: 'var(--bear)',
-    title: "Fast enough to forget",
-    body: 'Models stay warm and long sentences are recognized while you are still talking, so the text is ready the moment you let go of the key.',
+    title: 'Built not to wait',
+    body: 'Models stay warm and long sentences are recognized while you are still talking, so only the last stretch is left to decode when you let go of the key. We have not published a latency measurement yet.',
   },
   {
     icon: '✍️',
     color: 'var(--owl)',
-    title: 'Cleans up, never makes things up',
-    body: 'The Voice Compiler smooths filler and formatting, but it cannot invent words you did not say. Your names, numbers, and code stay exactly as spoken.',
+    title: 'Cleans up by the rules',
+    body: 'Cleanup removes filler and follows spoken structure. One rule waits for you to switch it on: "Tuesday, actually Wednesday" then keeps only Wednesday. It is off by default because "I thought it was Tuesday, actually Wednesday" would lose Tuesday too. App names and your dictionary can steer recognition but never replace a word you said, and the optional cleanup model may only make edits it can prove.',
   },
   {
     icon: '📓',
     color: 'var(--cat)',
     title: 'Learns your words, not your life',
-    body: 'Corrections become small, local rules you can read and delete. There is no cloud transcript following you around.',
+    body: 'A word you fix the same way twice becomes a small, local rule you can read and forget. It never maps one everyday word to another or flips a negation, and there is no cloud transcript following you around.',
   },
   {
     icon: '🛟',
@@ -40,13 +40,13 @@ const features = [
     icon: '⏪',
     color: 'var(--pig)',
     title: 'Talk first, decide after',
-    body: 'Turn on Flight Recorder and the last twenty seconds live in memory, never on disk. Say the thing, realise you wanted it, tap the key and keep it.',
+    body: 'Turn on Flight Recorder and the microphone keeps the last twenty seconds in memory, never on disk. Say the thing, realise you wanted it, tap the key and keep it.',
   },
   {
     icon: '🎚️',
     color: 'var(--wolf)',
     title: 'Six ways to say it',
-    body: 'Hold a modifier with your key: compose polished prose, reply using what is on screen, edit the text you selected, or dictate code with real punctuation.',
+    body: 'Hold a modifier with your key to dictate code with real punctuation or run an editing command. Compose, reply, and edit-the-selection need the optional cleanup model (about 3.4 GB) and English; without it they change nothing and tell you so.',
   },
   {
     icon: '🔍',
@@ -63,9 +63,11 @@ const features = [
     <h2>An interface between thought and software.</h2>
     <p>Not another transcript box. Every part is built to earn your trust with what you actually said.</p>
     <p class="sec-note">
-      Described as they work on a Mac. Windows shares capture, recognition, cleanup, snippets and
-      tones, but not the verified insertion transaction, the Outbox, correction learning, or the
-      results view — see <a href="/docs/comparison">how it compares</a>.
+      Described as they work on a Mac with a default install: Parakeet and Whisper Tiny. The larger
+      Whisper model and the cleanup model are optional downloads. Windows shares capture,
+      recognition, cleanup, snippets and tones, but not the verified insertion transaction, the
+      Outbox, correction learning, or the results view — see
+      <a href="/docs/comparison">how it compares</a>.
     </p>
   </div>
 

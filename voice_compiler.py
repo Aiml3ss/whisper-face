@@ -16,6 +16,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable, Protocol, Sequence
 
+from parrot_core import find_self_correction
+from personal_regression import is_common_word
 from phonetic_keys import double_metaphone
 from process_verifier import RefusalReason, VerificationReceipt
 
@@ -57,13 +59,11 @@ CORRECTION_BLOCKLIST = {
     "have", "he", "i", "is", "it", "she", "should", "that", "they",
     "this", "we", "were", "will", "would", "you",
 }
-CONTEXT_REPLACEMENT_BLOCKLIST = CORRECTION_BLOCKLIST | {
-    "a", "an", "and", "as", "at", "be", "been", "being", "best",
-    "but", "by", "for", "from", "in", "into", "my", "of", "on",
-    "or", "our", "right", "sure", "the", "their", "then", "to",
-    "with", "your",
-}
 CONTEXT_REWRITE_MAX_CONFIDENCE = 0.70
+# Where the user is says nothing about what they said. These sources bias the
+# recognizer prompt and are protected anchors; they are never candidates to
+# replace a recognized word.
+ANCHOR_ONLY_CONTEXT_SOURCES = frozenset({"app", "window", "dictionary"})
 ENUMERATION_COUNTS = {
     "two", "three", "four", "five", "six", "seven", "eight", "nine",
     "ten", "2", "3", "4", "5", "6", "7", "8", "9", "10",
@@ -137,11 +137,13 @@ def _safe_context_replacement(original: str,
     stricter gate covers the riskier post-ASR path, where visible UI strings
     must never manufacture numbers, timings, or ordinary prose.
     """
-    original_word = original.casefold()
+    if candidate.source in ANCHOR_ONLY_CONTEXT_SOURCES:
+        return False
     text = candidate.text.strip()
-    folded = text.casefold()
-    if original_word in CONTEXT_REPLACEMENT_BLOCKLIST \
-            or folded in CONTEXT_REPLACEMENT_BLOCKLIST:
+    # Screen text can repair a name the recognizer misspelled ("Gwen" for a
+    # visible Qwen), never an ordinary word: "good", "not" and "who" sound
+    # enough like Code, Nate and AI to pass the phonetic gate.
+    if is_common_word(original) or is_common_word(text):
         return False
     # Progress bars and UI timings such as ``0.00s`` or ``2042.76it/s`` are
     # useful screen context but are not acoustic alternatives.  Underscored
@@ -158,8 +160,7 @@ def _safe_context_replacement(original: str,
             and any(char.isalpha() for char in text))
     )
     explicit_name_source = candidate.source in {
-        "active-context", "app", "window", "selection", "document",
-        "repository",
+        "active-context", "selection", "document", "repository",
     } and text[:1].isupper()
     return identifier_shaped or explicit_name_source
 
@@ -648,19 +649,28 @@ def _formatted_list_word_variants(text: str) -> tuple[list[str], ...]:
     )
     if first_item is None:
         return ()
-    item_lines = [line for line in lines[first_item:]
-                  if re.match(r"^\s*-\s+\S", line)]
-    if len(item_lines) < 2 or len(item_lines) > 8:
+    body = lines[first_item:]
+    items = sum(1 for line in body if re.match(r"^\s*-\s+\S", line))
+    if items < 2 or items > 8:
         return ()
     variants = [_proof_words("\n".join(lines[:first_item]))]
-    for index, line in enumerate(item_lines):
+    seen_item = False
+    for line in body:
+        if not re.match(r"^\s*-\s+\S", line):
+            # A line that is not an item is still candidate text. Its words
+            # stay in the stream, so they must be proved from the source like
+            # every other word.
+            extra = _proof_words(line)
+            variants = [words + extra for words in variants]
+            continue
         item_words = _proof_words(re.sub(r"^\s*-\s+", "", line))
         if not item_words:
             return ()
         expanded = [words + item_words for words in variants]
-        if index and item_words[0] != "and":
+        if seen_item and item_words[0] != "and":
             expanded.extend(words + ["and", *item_words] for words in variants)
         variants = expanded
+        seen_item = True
     return tuple(variants)
 
 
@@ -1331,21 +1341,27 @@ class VoiceCompiler:
     def verify_edits(self, source: str,
                      proposals: Iterable[EditProposal],
                      context: Iterable[ContextCandidate] = (),
-                     mode: str = "capture") -> ProofResult:
-        """Apply independently validated bounded edits to capture text."""
+                     mode: str = "capture",
+                     self_correction: bool = False) -> ProofResult:
+        """Apply independently validated bounded edits to capture text.
+
+        ``self_correction`` is the user's opt-in to the "X, actually Y"
+        rule, the same one ``compile_cleanup`` takes. Without it no edit is
+        accepted as a self-correction.
+        """
         current = source
         proofs: list[ProofEdit] = []
         global_anchors = protected_anchors(source, context)
         for proposal in proposals:
             before = proposal.before
             after = proposal.after
-            start = current.find(before) if before else -1
-            if start < 0 and before:
-                folded = current.casefold().find(before.casefold())
-                start = folded
-            end = start + len(before) if start >= 0 else -1
+            start, end = self._locate_edit(current, before, mode)
             reason = self._validate_edit(
-                current, proposal, start, end, global_anchors, mode)
+                current, proposal, start, end, global_anchors, mode,
+                self_correction)
+            if reason == "accepted":
+                reason = self._validate_in_context(
+                    current, proposal, start, end, global_anchors, mode)
             accepted = reason == "accepted"
             if accepted:
                 current = current[:start] + after + current[end:]
@@ -1353,9 +1369,79 @@ class VoiceCompiler:
                 proposal.kind, before, after, start, end, accepted, reason))
         return ProofResult(current, tuple(proofs))
 
+    @staticmethod
+    def _covers_whole_tokens(text: str, start: int, end: int,
+                             fragment: str, preserve_formatting: bool) -> bool:
+        """Whether ``fragment`` at ``text[start:end]`` splits no token."""
+        return (_proof_words(text[:start], preserve_formatting)
+                + _proof_words(fragment, preserve_formatting)
+                + _proof_words(text[end:], preserve_formatting)
+                ) == _proof_words(text, preserve_formatting)
+
+    def _locate_edit(self, current: str, before: str,
+                     mode: str) -> tuple[int, int]:
+        """Find the span an edit names, preferring one made of whole tokens.
+
+        "um" is also inside "document"; the edit means the word. Offsets come
+        from the text itself: case folding can change its length.
+        """
+        if not before:
+            return -1, -1
+        first = None
+        # A lookahead, so an occurrence that starts inside an earlier one
+        # ("um um" after "album um") is still considered.
+        pattern = f"(?=({re.escape(before)}))"
+        for flags in (0, re.IGNORECASE):
+            matches = re.finditer(pattern, current, flags)
+            for _attempt, match in zip(range(64), matches):
+                span = match.span(1)
+                if self._covers_whole_tokens(
+                        current, *span, before, mode == "code"):
+                    return span
+                first = first or span
+        return first or (-1, -1)
+
+    def _validate_in_context(self, current: str, proposal: EditProposal,
+                             start: int, end: int,
+                             global_anchors: Sequence[str], mode: str) -> str:
+        """Check what an edit proved on its fragment does to the whole text.
+
+        A fragment can end inside a token, where "3." is a number and a full
+        stop and removing the stop turns 3.5 into 35. The fragment proof only
+        holds when the edit replaces whole tokens and leaves every token
+        outside it as it was.
+        """
+        candidate = current[:start] + proposal.after + current[end:]
+
+        def words(text: str) -> list[str]:
+            return [token.text.casefold() for token in _lexical_tokens(text)]
+
+        remaining = words(candidate)
+        outside = words(current)
+        for word in words(proposal.before):
+            if word in outside:
+                outside.remove(word)
+        protected = {
+            word for anchor in global_anchors for word in words(anchor)
+        } | {word for word in outside
+             if any(char.isdigit() for char in word)}
+        for word in dict.fromkeys(outside):
+            if word in protected \
+                    and remaining.count(word) < outside.count(word):
+                return f"protected anchor changed: {word}"
+        preserve_formatting = mode == "code"
+        if not self._covers_whole_tokens(
+                current, start, end, proposal.before, preserve_formatting) \
+                or not self._covers_whole_tokens(
+                    candidate, start, start + len(proposal.after),
+                    proposal.after, preserve_formatting):
+            return "edit does not cover whole tokens"
+        return "accepted"
+
     def _validate_edit(self, source: str, proposal: EditProposal,
                        start: int, end: int,
-                       global_anchors: Sequence[str], mode: str) -> str:
+                       global_anchors: Sequence[str], mode: str,
+                       self_correction: bool = False) -> str:
         if not proposal.before or start < 0:
             return "source span not found"
         if len(proposal.before) > 240:
@@ -1365,17 +1451,25 @@ class VoiceCompiler:
         preserve_formatting = mode == "code"
         before_words = _proof_words(proposal.before, preserve_formatting)
         after_words = _proof_words(proposal.after, preserve_formatting)
-        correction_marker = None
-        if "actually" in before_words:
-            correction_marker = (len(before_words) - 1
-                                 - before_words[::-1].index("actually"))
-        explicit_correction = bool(
-            correction_marker is not None
-            and correction_marker == 1
-            and before_words[0] not in CORRECTION_BLOCKLIST
-            and before_words[correction_marker + 1:] == after_words
-            and len(after_words) == 1
-            and after_words)
+        # The model may claim a self-correction only where the deterministic
+        # pass would have made the same one: the user turned the rule on, and
+        # both sides of "actually" are the same kind of item. Any other
+        # "actually" is the speaker's adverb.
+        correction = find_self_correction(
+            proposal.before, source[:start], source[end:]) \
+            if self_correction else None
+        explicit_correction = False
+        if correction is not None:
+            corrected_from, corrected_to, replacement = correction
+            # The edit must begin at the corrected item, so the exemption
+            # from the anchor check below covers that item and nothing else.
+            explicit_correction = bool(
+                after_words
+                and not _proof_words(
+                    proposal.before[:corrected_from], preserve_formatting)
+                and _proof_words(
+                    replacement + proposal.before[corrected_to:],
+                    preserve_formatting) == after_words)
         for anchor in global_anchors:
             if anchor.casefold() in before_lower \
                     and anchor.casefold() not in after_lower \
@@ -1474,6 +1568,19 @@ class VoiceCompiler:
             original = token.text
             if primary.confidence > CONTEXT_REWRITE_MAX_CONFIDENCE:
                 continue
+            # Only a word the recognizer itself wrote as a name or an
+            # identifier may be repaired from the screen. Its phonetic gate
+            # ignores vowels, so eye/AI, fine/Finn and code/Git all pass it;
+            # an ordinary word, lower case or capitalized only because it
+            # starts a sentence, stays as spoken.
+            previous = primary_tokens[index - 1].text if index else "."
+            written_as_name = (
+                (original[:1].isupper()
+                 and previous not in {".", "!", "?", ":", ";"})
+                or any(char.isdigit() or char == "_" for char in original)
+                or any(char.isupper() for char in original[1:]))
+            if not written_as_name:
+                continue
             for context in voice.context.candidates:
                 if len(TOKEN_RE.findall(context.text)) != 1:
                     continue
@@ -1499,23 +1606,46 @@ class VoiceCompiler:
                     candidates[index][key] = (
                         context.text, score, f"context:{context.source}")
 
+        # A Personal Prior reaches the compiler only after the Personal
+        # Regression Lab activated it. It is a decided replacement of the
+        # exact heard word, never a score: scored, it lost to the engine
+        # bonus of every recognizer except Tiny.
+        decided: dict[int, str] = {}
         for index, token in enumerate(primary_tokens):
             for prior in voice.personal_priors:
-                if _norm(token.text) != _norm(prior.heard):
+                if token.text.casefold() != prior.heard.casefold():
                     continue
-                key = _norm(prior.preferred)
-                score = primary.confidence + min(0.35, prior.count * 0.055) \
-                    + min(0.28, prior.app_count(voice.app_bundle) * 0.10)
-                old = candidates[index].get(key)
-                if old is None or score > old[1]:
-                    candidates[index][key] = (
-                        prior.preferred, score, "personal-prior")
+                if prior.apps and not prior.app_count(voice.app_bundle):
+                    continue
+                # A word inside an email address, a handle or a URL is part
+                # of an identifier, not the word the prior was learned for.
+                run = (re.search(r"\S*\Z", primary.text[:token.start]).group()
+                       + re.match(r"\S*", primary.text[token.start:]).group())
+                if "@" in run or "://" in run:
+                    break
+                preferred = prior.preferred
+                # A capital the recognizer placed, such as a sentence start,
+                # survives an all-lowercase preferred spelling.
+                if (token.text[:1].isupper()
+                        and not prior.heard[:1].isupper()
+                        and preferred == preferred.lower()):
+                    preferred = preferred[:1].upper() + preferred[1:]
+                decided[index] = preferred
+                break
 
         replacements: list[tuple[int, int, str]] = []
         decisions: list[Decision] = []
         original_anchors = set(protected_anchors(primary.text))
         for index, options in enumerate(candidates):
             original = primary_tokens[index]
+            if index in decided:
+                if decided[index] != original.text:
+                    replacements.append(
+                        (original.start, original.end, decided[index]))
+                    decisions.append(Decision(
+                        "span-graph", original.text, decided[index], 1.0,
+                        "personal-prior"))
+                continue
             original_key = _norm(original.text)
             base = options.get(original_key, (original.text,
                                                primary.confidence, "primary"))
@@ -1526,11 +1656,10 @@ class VoiceCompiler:
             context_exact = _norm(winner[0]) in context_by_key
             is_anchor = original.text in original_anchors
             threshold = 0.12 if not is_anchor else (
-                0.18 if context_exact or winner[2] == "personal-prior" else 0.24)
+                0.18 if context_exact else 0.24)
             if delta < threshold:
                 continue
-            if (is_anchor and not context_exact
-                    and winner[2] != "personal-prior" and delta < 0.30):
+            if is_anchor and not context_exact and delta < 0.30:
                 continue
             replacements.append((original.start, original.end, winner[0]))
             decisions.append(Decision(

@@ -1,0 +1,886 @@
+{
+ "schema_version": 1,
+ "description": "What the real Parakeet helper wrote for each sentence, and every final text a person would accept. 'said' is what was spoken; 'transcript' is the recognizer's text exactly as it wrote it; 'voice' and 'recognizer' say where it came from; 'accept' is written by hand from what the speaker meant, never from what the program types. 'recognizer_error' marks a case where the recognizer itself misheard: its accept is the faithful rendering of what the recognizer wrote, so the case is not a text-path result. tests/test_whole_program.py dictates every transcript through the real program on a fake Mac as a fresh install and fails when the field text is not in accept; a case with 'known_failure' is an expected failure. uv run benchmarks/recognizer_replay.py record writes the recognizer fields and never accept.",
+ "synthetic_speech": "Every case here was spoken by the macOS speech synthesizer, not a person. Synthetic speech shows how the recognizer punctuates, capitalises and formats numbers. It says nothing about how accurately it hears a person's voice.",
+ "privacy": "synthetic speech of public sentences only; no audio is stored in this repository",
+ "recordings": {
+  "say": {
+   "recognizer": "parakeet-unified",
+   "helper": "parrot-asr-helper --server",
+   "voice": "say (system default voice)",
+   "macos": "27.3",
+   "recorded_on": "2026-11-14"
+  }
+ },
+ "cases": [
+  {
+   "id": "actually-adverb-finish",
+   "covers": "actually-adverb",
+   "said": "I didn't actually finish the report.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "I didn't actually finish the report.",
+   "accept": [
+    "I didn't actually finish the report."
+   ]
+  },
+  {
+   "id": "actually-adverb-price",
+   "covers": "actually-adverb",
+   "said": "The price is actually forty dollars.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "The price is actually $40",
+   "accept": [
+    "The price is actually $40."
+   ]
+  },
+  {
+   "id": "actually-adverb-question",
+   "covers": "actually-adverb",
+   "said": "Did you actually see it?",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Did you actually see it?",
+   "accept": [
+    "Did you actually see it?"
+   ]
+  },
+  {
+   "id": "actually-adverb-opening",
+   "covers": "actually-adverb",
+   "said": "Actually, I think we should wait.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Actually, I think we should wait",
+   "accept": [
+    "Actually, I think we should wait."
+   ]
+  },
+  {
+   "id": "actually-adverb-late",
+   "covers": "actually-adverb",
+   "said": "I was actually five minutes late.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "I was actually five minutes late.",
+   "accept": [
+    "I was actually five minutes late."
+   ]
+  },
+  {
+   "id": "actually-adverb-possessive",
+   "covers": "actually-adverb",
+   "said": "That is actually Tuesday's meeting.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "That is actually Tuesday's meeting.",
+   "accept": [
+    "That is actually Tuesday's meeting."
+   ]
+  },
+  {
+   "id": "actually-correction-day",
+   "covers": "actually-correction",
+   "said": "Let's meet Tuesday, actually Wednesday.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Let's meet Tuesday, actually Wednesday",
+   "accept": [
+    "Let's meet Tuesday, actually Wednesday."
+   ]
+  },
+  {
+   "id": "actually-correction-day-noon",
+   "covers": "actually-correction",
+   "said": "Let's meet Tuesday, actually Wednesday at noon.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Let's meet Tuesday, actually Wednesday at noon.",
+   "accept": [
+    "Let's meet Tuesday, actually Wednesday at noon."
+   ]
+  },
+  {
+   "id": "actually-correction-month",
+   "covers": "actually-correction",
+   "said": "The meeting is in March, actually April.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "The meeting is in March, actually April.",
+   "accept": [
+    "The meeting is in March, actually April."
+   ]
+  },
+  {
+   "id": "actually-correction-copies",
+   "covers": "actually-correction",
+   "said": "Send five copies, actually six copies.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Send five copies, actually six copies.",
+   "accept": [
+    "Send five copies, actually six copies."
+   ]
+  },
+  {
+   "id": "actually-correction-date",
+   "covers": "actually-correction",
+   "said": "Move the meeting from March third, actually March fourth.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Move the meeting from March 3, actually March 4th.",
+   "accept": [
+    "Move the meeting from March 3, actually March 4th."
+   ]
+  },
+  {
+   "id": "actually-correction-hour",
+   "covers": "actually-correction",
+   "said": "It starts at three, actually four.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "It starts at 3, actually 4.",
+   "accept": [
+    "It starts at 3, actually 4."
+   ]
+  },
+  {
+   "id": "actually-contrast-negated",
+   "covers": "actually-contrast",
+   "said": "It's not five, actually six.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "It's not five, actually six.",
+   "accept": [
+    "It's not five, actually six."
+   ]
+  },
+  {
+   "id": "actually-contrast-not-day",
+   "covers": "actually-contrast",
+   "said": "Not Tuesday, actually Wednesday.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Not Tuesday, actually Wednesday.",
+   "accept": [
+    "Not Tuesday, actually Wednesday."
+   ]
+  },
+  {
+   "id": "actually-contrast-out-of",
+   "covers": "actually-contrast",
+   "said": "Out of ten, actually four passed.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Out of ten, actually four past.",
+   "accept": [
+    "Out of ten, actually four past."
+   ],
+   "recognizer_error": "wrote \"past\" for \"passed\""
+  },
+  {
+   "id": "actually-contrast-thought",
+   "covers": "actually-contrast",
+   "said": "I thought it was Tuesday, actually Wednesday.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "I thought it was Tuesday, actually Wednesday.",
+   "accept": [
+    "I thought it was Tuesday, actually Wednesday."
+   ]
+  },
+  {
+   "id": "actually-contrast-expected",
+   "covers": "actually-contrast",
+   "said": "We expected twenty, actually twelve showed up.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "We expected 20, actually 12 showed up.",
+   "accept": [
+    "We expected 20, actually 12 showed up."
+   ]
+  },
+  {
+   "id": "snippet-name-email",
+   "covers": "snippet-name",
+   "said": "Send me your email.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Send me your email",
+   "accept": [
+    "Send me your email."
+   ]
+  },
+  {
+   "id": "snippet-name-address",
+   "covers": "snippet-name",
+   "said": "What's your address?",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "What's your address?",
+   "accept": [
+    "What's your address?"
+   ]
+  },
+  {
+   "id": "snippet-name-signature",
+   "covers": "snippet-name",
+   "said": "I need your signature on this.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "I need your signature on this.",
+   "accept": [
+    "I need your signature on this."
+   ]
+  },
+  {
+   "id": "sign-off-thank-you",
+   "covers": "sign-off",
+   "said": "Thank you.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Thank you.",
+   "accept": [
+    "Thank you."
+   ]
+  },
+  {
+   "id": "sign-off-bye",
+   "covers": "sign-off",
+   "said": "Bye.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Bye.",
+   "accept": [
+    "Bye."
+   ]
+  },
+  {
+   "id": "sign-off-thanks-for-watching",
+   "covers": "sign-off",
+   "said": "Thanks for watching.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Thanks for watching.",
+   "accept": [
+    "Thanks for watching."
+   ]
+  },
+  {
+   "id": "sign-off-after-words",
+   "covers": "sign-off",
+   "said": "Sounds good, thank you.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Sounds good, thank you",
+   "accept": [
+    "Sounds good, thank you."
+   ]
+  },
+  {
+   "id": "new-line-command-paused",
+   "covers": "new-line",
+   "said": "First item, new line, second item.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "First item, new line, second item",
+   "accept": [
+    "First item\nsecond item.",
+    "First item\nSecond item.",
+    "First item,\nsecond item.",
+    "First item.\nSecond item."
+   ]
+  },
+  {
+   "id": "new-paragraph-command-paused",
+   "covers": "new-line",
+   "said": "Dear team, new paragraph, the launch is on Friday.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Dear team, new paragraph, the launch is on Friday.",
+   "accept": [
+    "Dear team\n\nthe launch is on Friday.",
+    "Dear team\n\nThe launch is on Friday.",
+    "Dear team,\n\nthe launch is on Friday.",
+    "Dear team,\n\nThe launch is on Friday."
+   ]
+  },
+  {
+   "id": "scratch-that-command-sentence",
+   "covers": "scratch-that",
+   "said": "Send it Tuesday. Scratch that. Send it Wednesday.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Send it Tuesday, scratch that, send it Wednesday.",
+   "accept": [
+    "Send it Wednesday."
+   ]
+  },
+  {
+   "id": "scratch-that-command-inline",
+   "covers": "scratch-that",
+   "said": "Send it on Tuesday, scratch that, on Wednesday.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Send it on Tuesday, scratch that, on Wednesday.",
+   "accept": [
+    "Send it on Wednesday."
+   ]
+  },
+  {
+   "id": "new-line-noun-of",
+   "covers": "new-line",
+   "said": "We need a new line of products.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "We need a new line of products.",
+   "accept": [
+    "We need a new line of products."
+   ]
+  },
+  {
+   "id": "new-line-noun-counted",
+   "covers": "new-line",
+   "said": "We hired two new line cooks.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "We hired two new line cooks.",
+   "accept": [
+    "We hired two new line cooks."
+   ]
+  },
+  {
+   "id": "scratch-that-verb-itch",
+   "covers": "scratch-that",
+   "said": "I had to scratch that itch.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "I had to scratch that itch",
+   "accept": [
+    "I had to scratch that itch."
+   ]
+  },
+  {
+   "id": "scratch-that-verb-wall",
+   "covers": "scratch-that",
+   "said": "The kids scratch that wall every day.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "The kids scratch that wall every day",
+   "accept": [
+    "The kids scratch that wall every day."
+   ]
+  },
+  {
+   "id": "numbers-money",
+   "covers": "numbers",
+   "said": "The total is one thousand two hundred fifty dollars and fifty cents.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "The total is $1,250.50",
+   "accept": [
+    "The total is $1,250.50."
+   ]
+  },
+  {
+   "id": "numbers-time-date",
+   "covers": "numbers",
+   "said": "It starts at three thirty PM on November fourteenth.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "It starts at 3:30 p.m. on November 14",
+   "accept": [
+    "It starts at 3:30 p.m. on November 14."
+   ]
+  },
+  {
+   "id": "numbers-pin",
+   "covers": "numbers",
+   "said": "My PIN is four four four four.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "My pin is 4444.",
+   "accept": [
+    "My pin is 4444.",
+    "My PIN is 4444."
+   ],
+   "recognizer_error": "wrote \"pin\" for \"PIN\""
+  },
+  {
+   "id": "numbers-phone",
+   "covers": "numbers",
+   "said": "Call me at five five five, zero one zero zero.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Call me at 555-0100.",
+   "accept": [
+    "Call me at 555-0100."
+   ]
+  },
+  {
+   "id": "numbers-version-year",
+   "covers": "numbers",
+   "said": "Version two point zero ships in twenty twenty seven.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Version 2.0 ships in 2027.",
+   "accept": [
+    "Version 2.0 ships in 2027."
+   ]
+  },
+  {
+   "id": "actually-contrast-range",
+   "covers": "actually-contrast",
+   "said": "From nine to five, actually six.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "From 9 to 5, actually 6.",
+   "accept": [
+    "From 9 to 5, actually 6."
+   ]
+  },
+  {
+   "id": "tone-word-formal",
+   "covers": "tone-word-opening",
+   "said": "Formal dinners are boring.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Formal dinners are boring.",
+   "accept": [
+    "Formal dinners are boring."
+   ]
+  },
+  {
+   "id": "tone-word-casual",
+   "covers": "tone-word-opening",
+   "said": "Casual Friday is tomorrow.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Casual Friday is tomorrow.",
+   "accept": [
+    "Casual Friday is tomorrow."
+   ]
+  },
+  {
+   "id": "tone-word-friendly",
+   "covers": "tone-word-opening",
+   "said": "Friendly reminder that rent is due.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Friendly reminder that rent is due",
+   "accept": [
+    "Friendly reminder that rent is due."
+   ]
+  },
+  {
+   "id": "repeat-three-times",
+   "covers": "repeats",
+   "said": "That was very, very, very good.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "That was very, very, very good",
+   "accept": [
+    "That was very, very, very good."
+   ]
+  },
+  {
+   "id": "repeat-three-times-no",
+   "covers": "repeats",
+   "said": "No, no, no, that's wrong.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "no, no, that's wrong.",
+   "accept": [
+    "No, no, that's wrong."
+   ],
+   "recognizer_error": "wrote two \"no\"s for three, the first in lower case"
+  },
+  {
+   "id": "filler-um-opening",
+   "covers": "fillers",
+   "said": "Um, I think we should go.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Um, I think we should go.",
+   "accept": [
+    "I think we should go.",
+    "Um, I think we should go."
+   ]
+  },
+  {
+   "id": "filler-uh-oh",
+   "covers": "fillers",
+   "said": "Uh oh, the build broke.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Uh oh, the build broke.",
+   "accept": [
+    "Uh oh, the build broke.",
+    "Uh-oh, the build broke."
+   ]
+  },
+  {
+   "id": "filler-hmm",
+   "covers": "fillers",
+   "said": "Hmm, let me think.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Hum, let me think.",
+   "accept": [
+    "Hum, let me think."
+   ],
+   "recognizer_error": "wrote \"Hum\" for \"Hmm\""
+  },
+  {
+   "id": "filler-like-you-know",
+   "covers": "fillers",
+   "said": "So, like, we could, you know, ship it.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "So, like, we could, you know, ship it.",
+   "accept": [
+    "So, like, we could, you know, ship it.",
+    "So, like, we could ship it.",
+    "So, we could ship it.",
+    "So we could ship it.",
+    "We could ship it."
+   ]
+  },
+  {
+   "id": "list-counted",
+   "covers": "list",
+   "said": "Three things. One, eggs. Two, milk. Three, bread.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Three things: one, eggs, two, milk, three, bread.",
+   "accept": [
+    "Three things:\n- Eggs.\n- Milk.\n- Bread.",
+    "Three things:\n1. Eggs.\n2. Milk.\n3. Bread.",
+    "Three things: one, eggs, two, milk, three, bread."
+   ]
+  },
+  {
+   "id": "names-siobhan-kubernetes",
+   "covers": "names",
+   "said": "Ask Siobhan to review the Kubernetes rollout.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Ask Siobhan to review the Kubernetes rollout.",
+   "accept": [
+    "Ask Siobhan to review the Kubernetes rollout."
+   ]
+  },
+  {
+   "id": "names-priya",
+   "covers": "names",
+   "said": "Ping Priya about the Q three forecast.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Pink Priya about the Q3 forecast",
+   "accept": [
+    "Pink Priya about the Q3 forecast."
+   ],
+   "recognizer_error": "wrote \"Pink\" for \"Ping\""
+  },
+  {
+   "id": "quote-reported",
+   "covers": "ordinary",
+   "said": "He said, let's go, and we left.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "He said, let's go, and we left.",
+   "accept": [
+    "He said, let's go, and we left.",
+    "He said, \"Let's go,\" and we left."
+   ]
+  },
+  {
+   "id": "question-plain",
+   "covers": "ordinary",
+   "said": "Can you send me the numbers by Friday?",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Can you send me the numbers by Friday?",
+   "accept": [
+    "Can you send me the numbers by Friday?"
+   ]
+  },
+  {
+   "id": "new-line-command-unpaused",
+   "covers": "new-line",
+   "said": "First item new line second item",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "First item new line second item",
+   "accept": [
+    "First item\nsecond item.",
+    "First item\nSecond item."
+   ]
+  },
+  {
+   "id": "new-paragraph-command-unpaused",
+   "covers": "new-line",
+   "said": "Dear team new paragraph the launch is on Friday",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Dear team new paragraph the launch is on Friday.",
+   "accept": [
+    "Dear team\n\nthe launch is on Friday.",
+    "Dear team\n\nThe launch is on Friday.",
+    "Dear team,\n\nthe launch is on Friday.",
+    "Dear team,\n\nThe launch is on Friday."
+   ]
+  },
+  {
+   "id": "scratch-that-command-unpaused",
+   "covers": "scratch-that",
+   "said": "Send it Tuesday scratch that send it Wednesday",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Send it Tuesday scratch that send it Wednesday.",
+   "accept": [
+    "Send it Wednesday."
+   ]
+  },
+  {
+   "id": "new-line-command-unpaused-list",
+   "covers": "new-line",
+   "said": "Milk new line eggs new line bread",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Milk new line eggs new line bread",
+   "accept": [
+    "Milk\neggs\nbread.",
+    "Milk\nEggs\nBread.",
+    "Milk\neggs\nbread",
+    "Milk\nEggs\nBread"
+   ]
+  },
+  {
+   "id": "new-paragraph-command-unpaused-sentence",
+   "covers": "new-line",
+   "said": "Thanks for the update new paragraph I will review it tonight",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Thanks for the update new paragraph I will review it tonight.",
+   "accept": [
+    "Thanks for the update\n\nI will review it tonight.",
+    "Thanks for the update.\n\nI will review it tonight."
+   ]
+  },
+  {
+   "id": "actually-correction-unpaused-day",
+   "covers": "actually-correction",
+   "said": "Let's meet Tuesday actually Wednesday",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Let's meet Tuesday actually Wednesday.",
+   "accept": [
+    "Let's meet Tuesday actually Wednesday."
+   ]
+  },
+  {
+   "id": "actually-correction-unpaused-copies",
+   "covers": "actually-correction",
+   "said": "Send five actually six copies",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Send five actually six copies.",
+   "accept": [
+    "Send five actually six copies."
+   ]
+  },
+  {
+   "id": "actually-correction-unpaused-month",
+   "covers": "actually-correction",
+   "said": "The meeting is in March actually April",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "The meeting is in March, actually, April",
+   "accept": [
+    "The meeting is in March, actually, April."
+   ]
+  },
+  {
+   "id": "actually-correction-unpaused-called",
+   "covers": "actually-correction",
+   "said": "It was Tuesday actually Wednesday when he called",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "It was Tuesday actually Wednesday when he called.",
+   "accept": [
+    "It was Tuesday actually Wednesday when he called."
+   ]
+  },
+  {
+   "id": "actually-correction-unpaused-reasons",
+   "covers": "actually-correction",
+   "said": "There were five actually six reasons",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "There were five actually six reasons.",
+   "accept": [
+    "There were five actually six reasons."
+   ]
+  },
+  {
+   "id": "new-paragraph-noun-start",
+   "covers": "new-line",
+   "said": "Start a new paragraph about pricing in the doc.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Start a new paragraph about pricing in the dock",
+   "accept": [
+    "Start a new paragraph about pricing in the dock."
+   ],
+   "recognizer_error": "wrote \"dock\" for \"doc\""
+  },
+  {
+   "id": "new-line-noun-manager",
+   "covers": "new-line",
+   "said": "The new line manager starts Monday.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "The new line manager starts Monday.",
+   "accept": [
+    "The new line manager starts Monday."
+   ]
+  },
+  {
+   "id": "new-line-noun-item",
+   "covers": "new-line",
+   "said": "Add a new line item to the invoice.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Add a new line item to the invoice.",
+   "accept": [
+    "Add a new line item to the invoice."
+   ]
+  },
+  {
+   "id": "scratch-that-verb-table",
+   "covers": "scratch-that",
+   "said": "Don't scratch that table.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Don't scratch that table.",
+   "accept": [
+    "Don't scratch that table."
+   ]
+  },
+  {
+   "id": "insert-verb",
+   "covers": "ordinary",
+   "said": "She told me to insert my card and wait.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "She told me to insert my card and wait.",
+   "accept": [
+    "She told me to insert my card and wait."
+   ]
+  },
+  {
+   "id": "actually-contrast-she-said",
+   "covers": "actually-contrast",
+   "said": "She said five, actually six.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "She said five, actually six",
+   "accept": [
+    "She said five, actually six."
+   ]
+  },
+  {
+   "id": "actually-contrast-invoice",
+   "covers": "actually-contrast",
+   "said": "The invoice says four hundred, actually four fifty.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "The invoice says 400, actually 450",
+   "accept": [
+    "The invoice says 400, actually 450."
+   ]
+  },
+  {
+   "id": "actually-contrast-guessed",
+   "covers": "actually-contrast",
+   "said": "I guessed March, actually April.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "I guessed March, actually April.",
+   "accept": [
+    "I guessed March, actually April."
+   ]
+  },
+  {
+   "id": "actually-contrast-assumed",
+   "covers": "actually-contrast",
+   "said": "Everyone assumed Monday, actually Tuesday.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Everyone assumed Monday, actually Tuesday.",
+   "accept": [
+    "Everyone assumed Monday, actually Tuesday."
+   ]
+  },
+  {
+   "id": "tone-command-formal",
+   "covers": "tone-command",
+   "said": "Formal tone, please confirm the delivery date.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Formal tone, please confirm the delivery date",
+   "accept": [
+    "Please confirm the delivery date.",
+    "Formal tone, please confirm the delivery date."
+   ]
+  },
+  {
+   "id": "sign-off-okay-bye",
+   "covers": "sign-off",
+   "said": "Okay, bye.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "Okay, bye.",
+   "accept": [
+    "Okay, bye."
+   ]
+  },
+  {
+   "id": "sign-off-you",
+   "covers": "sign-off",
+   "said": "You.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "You.",
+   "accept": [
+    "You."
+   ]
+  },
+  {
+   "id": "repeat-twice",
+   "covers": "repeats",
+   "said": "It was a long, long time ago.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "It was a long, long time ago.",
+   "accept": [
+    "It was a long, long time ago."
+   ]
+  },
+  {
+   "id": "repeat-three-times-bare",
+   "covers": "repeats",
+   "said": "Really really really good work.",
+   "voice": "say (system default voice)",
+   "recognizer": "parakeet-unified",
+   "transcript": "really really good work.",
+   "accept": [
+    "Really really good work.",
+    "Really, really good work."
+   ],
+   "recognizer_error": "wrote two \"really\"s for three, the first in lower case"
+  }
+ ]
+}

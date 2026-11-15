@@ -172,6 +172,9 @@ class InsertionReceipt:
     state: ReceiptState
     reason: ReceiptReason
     paste_attempted: bool
+    # The readback's shape for this utterance alone, so a record written
+    # later can never pick up another utterance's. Empty when none ran.
+    readback_shape: str = ""
 
 
 @dataclass(frozen=True)
@@ -238,7 +241,7 @@ class InsertionCoordinator:
                 entry.receipt = InsertionReceipt(
                     utterance_id, state, reason, False)
                 entry.terminal = True
-                self._prune_recoverable_locked()
+                self._settle_locked(utterance_id, entry)
                 return entry.receipt
 
             # Mark terminal before invoking platform code. A reentrant or
@@ -268,7 +271,7 @@ class InsertionCoordinator:
             if not isinstance(proof, ReadbackResult):
                 raise TypeError("readback must return ReadbackResult")
             receipt = InsertionReceipt(
-                utterance_id, proof.state, proof.reason, True)
+                utterance_id, proof.state, proof.reason, True, proof.detail)
         except Exception:
             # Delivery may precede failure. Retrying risks duplication, so
             # the unresolved entry remains recoverable.
@@ -279,11 +282,7 @@ class InsertionCoordinator:
                 return receipt
             entry.in_flight = False
             entry.receipt = receipt
-            if receipt.state == ReceiptState.VERIFIED:
-                self._entries.pop(utterance_id, None)
-                self._remember_tombstone_locked(receipt)
-            else:
-                self._prune_recoverable_locked()
+            self._settle_locked(utterance_id, entry)
             return receipt
 
     def receipt(self, utterance_id: str) -> InsertionReceipt:
@@ -320,6 +319,29 @@ class InsertionCoordinator:
             self._entries.pop(utterance_id, None)
             self._remember_tombstone_locked(entry.receipt)
             return True
+
+    @staticmethod
+    def validate(lease: InsertionLease,
+                 current: DestinationObservation) -> ReceiptReason | None:
+        """Why ``current`` no longer matches ``lease``, or None if it does.
+
+        The exact check ``commit`` makes, for a caller that has to refuse
+        before it stages anything.
+        """
+        return InsertionCoordinator._validate(lease, current)
+
+    def _settle_locked(self, utterance_id: str, entry: _OutboxEntry) -> None:
+        """Keep a terminal entry recoverable only when it holds text.
+
+        A verified paste needs nothing more, and blank text gives the user
+        nothing to recover, so both keep just their dedupe receipt.
+        """
+        if (entry.receipt.state == ReceiptState.VERIFIED
+                or not entry.text.strip()):
+            self._entries.pop(utterance_id, None)
+            self._remember_tombstone_locked(entry.receipt)
+        else:
+            self._prune_recoverable_locked()
 
     def _remember_tombstone_locked(self, receipt: InsertionReceipt) -> None:
         self._tombstones[receipt.utterance_id] = receipt

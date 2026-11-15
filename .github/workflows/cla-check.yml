@@ -1,6 +1,19 @@
 name: Contributor license agreement
 
+# pull_request_target, not pull_request: for pull_request GitHub takes this
+# workflow file from the pull request's own merge commit, so a pull request
+# could rewrite the check it is supposed to pass. pull_request_target runs the
+# base branch's copy. That is safe here only because nothing below checks out
+# or executes pull-request code: the ledger and CLA.md are read from the base
+# revision, and the contributor's identity comes from the event.
 on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+  # TRANSITIONAL: the next pull request removes this trigger. While main's
+  # copy of this file listens only to pull_request, the pull request that
+  # introduces pull_request_target would get no run from either copy, and the
+  # required check could never report. Keeping pull_request for that one
+  # merge lets its own copy report, exactly as main's copy does today.
   pull_request:
     types: [opened, edited, synchronize, reopened]
 
@@ -9,15 +22,16 @@ permissions:
 
 jobs:
   acceptance-recorded:
-    # Runs on the self-hosted bergserver runner: the check is a small local
-    # ledger read, and self-hosted minutes stay outside the Actions budget.
-    runs-on: [self-hosted, bergserver]
+    # A hosted runner. A required check must never wait on a machine that can
+    # disappear, and a persistent runner must never take pull-request jobs.
+    runs-on: ubuntu-latest
     steps:
       - name: Read the protected acceptance ledger from the base revision
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 1
+          persist-credentials: false
       - name: Require a matching CLA ledger entry
         env:
           CONTRIBUTOR: ${{ github.event.pull_request.user.login }}

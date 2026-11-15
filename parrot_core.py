@@ -24,8 +24,15 @@ STOP_WORDS = {
     "you", "your",
 }
 TOKEN_RE = re.compile(r"(?<![\w])([A-Za-z][A-Za-z0-9_+.-]{2,})(?![\w])")
+# A filler that a recognizer wrote as its own sentence ("Um.") takes its
+# terminator with it; otherwise the terminator is all that would be pasted.
+# "Uh-oh", "uh huh" and "mm-hmm" are words: a filler sound joined to
+# another by a hyphen, or forming one of those pairs, is never dropped.
 SIMPLE_FILLER_RE = re.compile(
-    r"(?:,\s*)?\b(?:um+|uh+|erm|hmm)\b(?:\s*,)?", re.I)
+    r"(?:^|(?<=[.!?…]\s))(?P<own>um+|uh+|erm|hmm)[.!?…]+(?=\s|$)|"
+    r"(?:,\s*)?(?<![\w-])"
+    r"(?P<word>um+|uh+(?![ \t]+(?:huh|oh)\b)|erm|(?<!\bmm[ \t])hmm)"
+    r"(?![\w-])(?:\s*,)?", re.I | re.M)
 DISCOURSE_FILLER_RE = re.compile(
     r"^[ \t]*(?:you know|I mean|basically|kind of|sort of)\b\s*,|"
     r",\s*(?:you know|I mean|basically|kind of|sort of)\b\s*,",
@@ -34,13 +41,108 @@ DISCOURSE_FILLER_RE = re.compile(
 AMBIGUOUS_FILLER_RE = re.compile(r"\b(?:you know|I mean)\b", re.I)
 LITERAL_FILLER_RE = re.compile(
     r"\b(?:phrase|words?|expression)\s+(?:you know|I mean)\b", re.I)
-STRUCTURE_RE = re.compile(r"\bnew (line|paragraph)\b", re.I)
-CORRECTION_RE = re.compile(
-    r"\b([A-Za-z0-9][A-Za-z0-9_'’-]{0,30})\s+"
-    r"(?:—\s*)?actually\s+"
-    r"([A-Za-z0-9][A-Za-z0-9_'’-]{0,30})\b",
+STRUCTURE_RE = re.compile(r"\bnew[ \t]+(line|paragraph)\b", re.I)
+# "a new line of products" and "add new line items" are prose. A word on
+# either side that makes the phrase a noun keeps it literal.
+STRUCTURE_LITERAL_BEFORE = frozenset({
+    "a", "an", "the", "this", "that", "another", "each", "every", "one",
+    "per", "brand", "whole", "our", "my", "your", "his", "her", "their",
+    "its", "these", "those", "some", "several", "many", "few", "both",
+    "any", "no", "more", "other", "all", "most", "of", "dozen", "couple",
+})
+STRUCTURE_LITERAL_AFTER = frozenset({
+    "of", "item", "items", "character", "characters", "break", "breaks",
+    "feed",
+})
+SCRATCH_RE = re.compile(r"\bscratch[ \t]+that\b", re.I)
+# "let's scratch that idea" uses the words as a verb. These are the words
+# that put a subject or an auxiliary directly in front of it.
+SCRATCH_LITERAL_BEFORE = frozenset({
+    "to", "let's", "let’s", "lets", "i", "we", "you", "they", "he", "she",
+    "should", "could", "would", "can", "will", "must", "might", "just",
+    "not", "never",
+})
+# Punctuation ends a clause only where it ends a written item, so the comma
+# in "1,500" and the point in "$3.50" are never boundaries.
+SENTENCE_BOUNDARY_RE = re.compile(r"[.!?…](?=\s|$)|\n")
+CLAUSE_BOUNDARY_RE = re.compile(r"[.!?…,;](?=\s|$)|—|\n")
+
+NUMBER_WORDS = frozenset({
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+    "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "thirty",
+    "forty", "fifty", "sixty", "seventy", "eighty", "ninety", "hundred",
+    "thousand", "million", "billion",
+})
+_NUMBER_WORD = "(?:" + "|".join(
+    sorted(NUMBER_WORDS, key=len, reverse=True)) + ")"
+# One written number or clock time: "45", "$3.50", "1,500", "45%", "10:30".
+# Separators count only between characters, never as trailing punctuation.
+_NUMERAL = r"[$€£¥]?\d(?:[\w%]|[.,:/-](?=\w))*"
+_NUMBER = (
+    rf"(?:{_NUMERAL}|noon|midnight|"
+    rf"{_NUMBER_WORD}(?:[ \t-]{_NUMBER_WORD})*)"
+)
+_UNIT = r"[A-Za-z]+(?:[.'’][A-Za-z]+)*\.?"
+_WEEKDAY = r"(?:mon|tues|wednes|thurs|fri|satur|sun)day"
+_MONTH = (
+    r"(?:january|february|march|april|may|june|july|august|september|"
+    r"october|november|december)(?:[ \t]+\d{1,2}(?:st|nd|rd|th)?)?"
+)
+# The spoken marker with the punctuation a recognizer puts around it:
+# "Tuesday actually Wednesday", "Tuesday, actually Wednesday",
+# "Tuesday — actually, Wednesday".
+CORRECTION_MARKER_RE = re.compile(
+    r"(?:[ \t]*[,—–][ \t]*|[ \t]+-[ \t]+|[ \t]+)actually"
+    r"(?:[ \t]*,[ \t]*|[ \t]+)",
     re.I,
 )
+# Per kind: the item ending just before the marker, and the item starting
+# just after it. A number may carry one following word as its unit.
+CORRECTION_SIDES = tuple(
+    (kind,
+     re.compile(rf"(?<!\S)(?P<item>{item}){unit}$", re.I),
+     re.compile(rf"(?P<item>{item})(?!\w){unit}", re.I))
+    for kind, item, unit in (
+        ("weekday", _WEEKDAY, ""),
+        ("month", _MONTH, ""),
+        ("number", _NUMBER, rf"(?:[ \t]+(?P<unit>{_UNIT}))?"),
+    )
+)
+# X and Y must each be a whole item. A range, score, size or grouped number
+# is one item written as several: "9 to 5", "Monday through Friday",
+# "3 by 5", "555 1234", "3 hours 20". Before the corrected item, the earlier
+# part may be followed by its own unit and a joining word. "at" starts a
+# separate item ("March 5 at 3"). Per kind, in the order of CORRECTION_SIDES:
+# a part ending just before X, a part starting just after Y, and any item.
+_COMPOUND_JOINT = r"(?:to|and|or|by|of|through|thru|until|till|x)"
+_COMPOUND_DASH = r"[ \t]*[–—×][ \t]*|[ \t]+[-/:][ \t]+"
+CORRECTION_PARTS = tuple(
+    (re.compile(
+        rf"(?<!\w)(?P<item>{item})(?:(?:[ \t]+(?!at\b){_UNIT})?"
+        rf"(?:[ \t]+{_COMPOUND_JOINT})?[ \t]+|{_COMPOUND_DASH})$", re.I),
+     re.compile(
+        rf"(?:(?:[ \t]+{_COMPOUND_JOINT})?[ \t]+|{_COMPOUND_DASH})"
+        rf"(?P<item>{item})(?!\w)", re.I),
+     re.compile(rf"(?<!\w)(?P<item>{item})(?!\w)", re.I))
+    for item in (_WEEKDAY, _MONTH, _NUMBER)
+)
+# A negation ahead of X in its own clause makes Y the answer and X the thing
+# ruled out ("not Tuesday, actually Wednesday"). Replacing X would then keep
+# the negation and state the opposite of what was said.
+CORRECTION_NEGATION_RE = re.compile(
+    r"(?<![\w'’])(?:not|no|never|none|nor|neither|nobody|nothing|nowhere|"
+    r"without|cannot)(?![\w'’])|n['’]t(?!\w)",
+    re.I,
+)
+# Units a corrected number keeps when only the first number carried one
+# ("45 dollars, actually 54"). Singular, without dots or apostrophes.
+CORRECTION_UNITS = frozenset({
+    "dollar", "buck", "cent", "euro", "pound", "yen", "percent", "am", "pm",
+    "oclock", "second", "minute", "hour", "day", "week", "month", "year",
+    "mile", "kilometer", "km", "meter", "foot", "feet", "kg", "kilogram",
+    "gram", "ounce", "degree",
+})
 LIST_INTENT_RE = re.compile(
     r"^(?:(?:okay|ok|alright)[, ]+)?(?:so\s+)?(?:"
     r"here(?:['’]s|\s+is)\s+(?:a|my)\s+list\b|"
@@ -92,6 +194,11 @@ LIST_NUMBER = {
     ), start=1)
     for word in pair
 }
+COUNTED_HEADER_RE = re.compile(
+    r"\b(two|three|four|five|six|seven|eight|nine|ten)\s+"
+    r"(?:feedback\s+)?(?:ideas|items|points|things)\b",
+    re.I,
+)
 COUNTED_LIST_SIZE = {
     "two": 2, "three": 3, "four": 4, "five": 5,
 }
@@ -257,6 +364,11 @@ def _format_numbered_list_markers(text: str) -> str | None:
         r"[\s,;:.!?–—-]+$", "", text[:markers[0][0].start()]).strip()
     if not header or not LIST_SIGNAL_RE.search(header):
         return None
+    announced = COUNTED_HEADER_RE.search(header)
+    if announced:
+        # "Here are two things" promises two items, so a later "three" is a
+        # number inside the last item ("eggs, three dozen"), not a marker.
+        markers = markers[:LIST_NUMBER[announced.group(1).casefold()]]
 
     items: list[str] = []
     for index, (_marker, _number, item_start) in enumerate(markers):
@@ -335,15 +447,237 @@ def normalize_spacing(text: str, spaced: bool = True) -> str:
     return text.strip()
 
 
-def compile_cleanup(raw: str, language: str = "en") -> CleanupPlan:
+def _adjacent_word(text: str, *, before: bool) -> str:
+    """The word touching a position with only spaces between, casefolded."""
+    match = re.search(r"([A-Za-z'’]+)[ \t]+$", text) if before \
+        else re.match(r"[ \t]+([A-Za-z'’]+)", text)
+    return match.group(1).casefold() if match else ""
+
+
+def _ends_with_count(head: str) -> bool:
+    """Whether a spelled or written whole number is the last thing in ``head``.
+
+    A count makes the phrase after it a noun ("two new line cooks", "12 new
+    line staff"). It also ends the line before an unpaused command ("Room 4
+    new line guests arrive"), and nothing tells the two apart, so the words
+    stay. A price, a clock time and a phone number are not counts.
+    """
+    return bool(_adjacent_word(head, before=True) in NUMBER_WORDS
+                or re.search(r"(?:^|\s)\d+(?:,\d+)*[ \t]+$", head))
+
+
+def _expand_spoken_structure(text: str) -> str:
+    """Turn spoken "new line" / "new paragraph" into line breaks.
+
+    A recognizer hears the pause around a command as punctuation ("approved.
+    New line. Second"), so the command takes its own trailing mark and a
+    comma or dash in front of it. The sentence terminator before it stays.
+    """
+    out: list[str] = []
+    cursor = 0
+    for match in STRUCTURE_RE.finditer(text):
+        head, tail = text[cursor:match.start()], text[match.end():]
+        after_word = _adjacent_word(tail, before=False)
+        if (_adjacent_word(head, before=True) in STRUCTURE_LITERAL_BEFORE
+                or after_word in STRUCTURE_LITERAL_AFTER
+                or tail[:1] in ("-", "_", "/")
+                or _ends_with_count(head)):
+            continue
+        lead = re.search(r"(?:[ \t]*[,;—–]|[ \t]+-)?[ \t]*$", head)
+        trail = re.match(r"[ \t]*(?:[.,;:!?]+|[—–])?[ \t]*", tail)
+        out.append(head[:lead.start()])
+        out.append("\n" if match.group(1).casefold() == "line" else "\n\n")
+        cursor = match.end() + trail.end()
+    out.append(text[cursor:])
+    return "".join(out)
+
+
+def _unit_key(unit: str | None) -> str:
+    key = re.sub(r"[.'’]", "", (unit or "").casefold())
+    return key[:-1] if len(key) > 2 and key.endswith("s") else key
+
+
+def _is_clock_time(item: str, unit: str) -> bool:
+    return bool(re.match(r"\d{1,2}:\d{2}", item)
+                or item.casefold() in {"noon", "midnight"}
+                or unit in {"am", "pm", "oclock"})
+
+
+def _is_bare_hour(item: str, unit: str) -> bool:
+    if unit:
+        return False
+    if item.isdigit():
+        return 1 <= int(item) <= 12
+    return item.casefold() in {
+        "one", "two", "three", "four", "five", "six", "seven", "eight",
+        "nine", "ten", "eleven", "twelve"}
+
+
+def _reads_as_item(kind: str, item: str) -> bool:
+    # "may" and "march" are also verbs. A capital or a day number is what
+    # makes either one a month.
+    return (kind != "month" or item[:1].isupper()
+            or any(char.isdigit() for char in item))
+
+
+def _corrected_item(kind: str, before: "re.Match[str]",
+                    after: "re.Match[str]") -> str | None:
+    """The text that replaces both sides, or None if they differ in kind."""
+    first, second = before.group("item"), after.group("item")
+    if kind == "weekday":
+        return second
+    if kind == "month":
+        if not (_reads_as_item(kind, first) and _reads_as_item(kind, second)):
+            return None
+        return second
+    first_unit = _unit_key(before.group("unit"))
+    second_unit = _unit_key(after.group("unit"))
+    first_clock = _is_clock_time(first, first_unit)
+    second_clock = _is_clock_time(second, second_unit)
+    if first_clock != second_clock and not (
+            _is_bare_hour(second, second_unit) if first_clock
+            else _is_bare_hour(first, first_unit)):
+        return None
+    if not first_unit:
+        return second
+    if first_unit not in CORRECTION_UNITS:
+        # Any word may be a unit when the speaker repeats it on both sides
+        # ("3 apples, actually 4 apples"); otherwise it is just a word.
+        return second if second_unit == first_unit else None
+    if second_unit in CORRECTION_UNITS:
+        return second
+    return f"{second} {before.group('unit')}"
+
+
+def _is_part_of_a_longer_item(kind: str, parts, earlier: str, second: str,
+                              later: str) -> bool:
+    """Whether X or Y is one part of a range, score, size or grouped number.
+
+    ``earlier`` is everything before X, ``second`` is Y, ``later`` is
+    everything after Y.
+    """
+    part_before, part_after, any_item = parts
+    for part in (part_before.search(earlier), part_after.match(later)):
+        if part and _reads_as_item(kind, part.group("item")):
+            return True
+    # "5 people in room 3, actually 5 people in room 4": Y repeats an item
+    # the sentence already has, so the speaker restated from there, not
+    # from X.
+    sentence = re.split(r"[.!?…]\s", earlier)[-1]
+    return any(
+        item.group("item").casefold() == second.casefold()
+        and _reads_as_item(kind, item.group("item"))
+        for item in any_item.finditer(sentence))
+
+
+def find_self_correction(text: str, context_before: str = "",
+                         context_after: str = "",
+                         ) -> tuple[int, int, str] | None:
+    """Locate the first spoken "X, actually Y" where X and Y are the same kind.
+
+    Returns ``(start, end, replacement)``: the span from X through Y and the
+    text that replaces it. The marker is a correction only between two
+    numbers (with any unit or currency), two weekdays, two months (with an
+    optional day), or two clock times. Everywhere else "actually" is an
+    ordinary adverb and the words around it are the speaker's: "I didn't
+    actually finish" must never lose "didn't". This is the one rule for the
+    deterministic pass and for the proof validator's acceptance of a model
+    ``self_correction`` edit.
+
+    X and Y must each be a whole item. When either is one part of a range, a
+    score, a size or a grouped number ("9 to 5, actually 9 to 6"), or Y
+    repeats an earlier item of the sentence, how much the speaker restated
+    cannot be read from one side, so nothing is corrected. The same holds
+    when the clause leading up to X is negated ("not Tuesday, actually
+    Wednesday"): X is what the speaker ruled out, not a slip to replace.
+    ``context_before`` and ``context_after`` are the source around ``text``
+    when it is a span of something longer; they count for both tests.
+    """
+    for marker in CORRECTION_MARKER_RE.finditer(text):
+        left, right = text[:marker.start()], text[marker.end():]
+        for (kind, left_re, right_re), parts in zip(
+                CORRECTION_SIDES, CORRECTION_PARTS):
+            after = right_re.match(right)
+            before = left_re.search(left) if after else None
+            if before is None:
+                continue
+            earlier = context_before + left[:before.start()]
+            if _is_part_of_a_longer_item(
+                    kind, parts, earlier, after.group("item"),
+                    right[after.end():] + context_after):
+                continue
+            clause = CLAUSE_BOUNDARY_RE.split(earlier)[-1]
+            if CORRECTION_NEGATION_RE.search(clause):
+                continue
+            replacement = _corrected_item(kind, before, after)
+            if replacement is not None:
+                return (before.start(), marker.end() + after.end("item"),
+                        replacement)
+    return None
+
+
+def _resolve_scratch_that(text: str) -> tuple[str, bool]:
+    """Apply the last spoken "scratch that"; returns (text, unresolved).
+
+    ``unresolved`` means the command was heard but how much to remove could
+    not be decided, so the source is kept for semantic cleanup.
+    """
+    command = None
+    for match in SCRATCH_RE.finditer(text):
+        subject = _adjacent_word(text[:match.start()], before=True)
+        if subject not in SCRATCH_LITERAL_BEFORE and not subject.endswith(
+                ("'ll", "’ll", "n't", "n’t")):
+            command = match
+    if command is None:
+        return text, False
+    # The marks a recognizer writes around the command are the command's own:
+    # "Tuesday. Scratch that. Wednesday" and "savings, scratch that, to".
+    head = text[:command.start()].rstrip()
+    lead = re.search(r"[.!?…,;:—–]*$", head)
+    trail = re.match(r"[ \t]*[.!?…,;:]*", text[command.end():])
+    left = head[:lead.start()].rstrip()
+    right = text[command.end() + trail.end():].lstrip()
+    if not left:
+        return text, True
+    # An ellipsis before the command is a hesitation inside the sentence
+    # ("Tuesday... scratch that... Monday"), not the end of one.
+    own_sentence = bool(re.search(r"[!?]|(?<!\.)\.(?!\.)", lead.group(0))
+                        and re.search(r"[.!?…]", trail.group(0)))
+    boundaries = list((SENTENCE_BOUNDARY_RE if own_sentence
+                       else CLAUSE_BOUNDARY_RE).finditer(left))
+    if boundaries or own_sentence:
+        # Spoken as its own sentence, the command drops the sentence before
+        # it. Inline, it drops the clause it interrupts.
+        kept = left[:boundaries[-1].end()] if boundaries else ""
+        joiner = "" if not kept or kept.endswith("\n") else " "
+        return (kept.rstrip(" \t") + joiner + right).strip(), False
+    right_word = re.match(r"[A-Za-z0-9_'’-]+", right)
+    repeated = tuple(re.finditer(
+        rf"\b{re.escape(right_word.group(0))}\b", left, re.I)) \
+        if right_word else ()
+    # Without a repeated boundary, preserve the source and route it
+    # to semantic cleanup instead of guessing how much context to delete.
+    if not repeated:
+        return text, True
+    cut = repeated[-1].start()
+    return (left[:cut].rstrip() + " " + right).strip(), False
+
+
+def compile_cleanup(raw: str, language: str = "en",
+                    self_correction: bool = False) -> CleanupPlan:
     """Compile safe spoken transformations into explicit, reversible edits.
 
     Every rule below is English by construction: the filler and
     self-correction patterns are English words, "scratch that" is an English
-    phrase whose length is baked into the offset arithmetic, and the list
-    formatter reads English cardinals and ordinals. Applied to another
-    language they cannot help and can silently delete real words, so a
-    non-English utterance gets whitespace normalization and nothing else.
+    phrase, and the list formatter reads English cardinals and ordinals.
+    Applied to another language they cannot help and can silently delete
+    real words, so a non-English utterance gets whitespace normalization and
+    nothing else.
+
+    ``self_correction`` turns on the "X, actually Y" rule. It is off unless
+    the user asked for it: a speaker says the same words to contrast two
+    things ("I thought it was Tuesday, actually Wednesday"), and no rule can
+    tell that from a slip being taken back.
     """
     code = str(language or "en").strip().casefold()
     if code != "en":
@@ -358,61 +692,45 @@ def compile_cleanup(raw: str, language: str = "en") -> CleanupPlan:
 
     # Expand spoken line boundaries first so discourse fillers at the start of
     # a newly dictated line can be distinguished from meaningful prose.
-    had_spoken_structure = bool(STRUCTURE_RE.search(text))
+    before = text
+    text = _expand_spoken_structure(text)
+    had_spoken_structure = text != before
     if had_spoken_structure:
-        before = text
-        text = STRUCTURE_RE.sub(
-            lambda match: "\n" if match.group(1).lower() == "line" else "\n\n",
-            text,
-        )
         edits.append(CleanupEdit("spoken_structure", before, text))
 
-    for regex, kind in (
-        (SIMPLE_FILLER_RE, "remove_filler"),
-        (DISCOURSE_FILLER_RE, "remove_discourse_filler"),
+    def drop_filler(match: "re.Match[str]") -> str:
+        word = match.group("own") or match.group("word")
+        # UM and UH in capitals are names (a university, a unit), not sounds.
+        return match.group(0) if len(word) > 1 and word.isupper() else " "
+
+    for regex, replacement, kind in (
+        (SIMPLE_FILLER_RE, drop_filler, "remove_filler"),
+        (DISCOURSE_FILLER_RE, " ", "remove_discourse_filler"),
     ):
-        matches = [match.group(0) for match in regex.finditer(text)]
-        if matches:
-            before = text
-            text = regex.sub(" ", text)
+        before = text
+        text = regex.sub(replacement, text)
+        if text != before:
             edits.append(CleanupEdit(kind, before, text))
 
-    while True:
-        match = CORRECTION_RE.search(text)
-        if not match:
+    while self_correction:
+        correction = find_self_correction(text)
+        if correction is None:
             break
+        start, end, replacement = correction
         before = text
-        text = text[:match.start()] + match.group(2) + text[match.end():]
+        text = text[:start] + replacement + text[end:]
         edits.append(CleanupEdit("self_correction", before, text))
 
-    lowered = text.casefold()
-    scratch_needs_semantic = False
-    scratch_at = lowered.rfind("scratch that")
-    if scratch_at >= 0:
-        before = text
-        left, right = text[:scratch_at].rstrip(), text[scratch_at + 12:].lstrip()
-        sentence = max(left.rfind("."), left.rfind("!"), left.rfind("?"),
-                       left.rfind("\n"))
-        clause = max(left.rfind(","), left.rfind(";"), left.rfind("—"))
-        boundary = max(sentence + 1, clause + 1)
-        if boundary:
-            text = (left[:boundary].rstrip() + " " + right).strip()
-            edits.append(CleanupEdit("scratch_that", before, text))
-        else:
-            right_word = re.match(r"[A-Za-z0-9_'’-]+", right)
-            repeated = tuple(re.finditer(
-                rf"\b{re.escape(right_word.group(0))}\b", left, re.I)) \
-                if right_word else ()
-            # Without a repeated boundary, preserve the source and route it
-            # to semantic cleanup instead of guessing how much context to delete.
-            if repeated:
-                cut = repeated[-1].start()
-                text = (left[:cut].rstrip() + " " + right).strip()
-                edits.append(CleanupEdit("scratch_that", before, text))
-            else:
-                scratch_needs_semantic = True
+    before = text
+    text, scratch_needs_semantic = _resolve_scratch_that(text)
+    if text != before:
+        edits.append(CleanupEdit("scratch_that", before, text))
 
     text = normalize_spacing(text)
+    if edits and not text.strip(" \t\n.,;:!?…—–-"):
+        # Only punctuation survived the edits ("Um, uh." -> "."), and a
+        # lone mark is not something the speaker dictated.
+        text = ""
     deterministic_list = (
         _format_numbered_list_markers(text)
         or _format_counted_inline_list(text))
@@ -533,14 +851,15 @@ CODE_PHRASES = (
 )
 
 
-def compile_code_dictation(raw: str, language: str = "en") -> CleanupPlan:
+def compile_code_dictation(raw: str, language: str = "en",
+                           self_correction: bool = False) -> CleanupPlan:
     """Compile spoken code punctuation while preserving ordinary identifiers.
 
     CODE_PHRASES are English names for ASCII glyphs, and the spacing rules
     below are Latin code conventions, so a non-English utterance keeps
     ``compile_cleanup``'s language-safe result untouched.
     """
-    plan = compile_cleanup(raw, language)
+    plan = compile_cleanup(raw, language, self_correction)
     if str(language or "en").strip().casefold() != "en":
         return plan
     text = plan.text

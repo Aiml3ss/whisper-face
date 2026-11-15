@@ -4,7 +4,8 @@ An inventory of shipped capability, written to be quotable without
 overclaiming. Whisper Face contains three very different kinds of thing, and
 blurring them is the easiest way to say something untrue:
 
-- **Shipped** — a user can rely on it right now.
+- **Shipped** — a user can rely on it right now. Where something needs an
+  optional model that a default install does not download, it says so.
 - **Built, gated** — the code is complete and tested, but it stays off until
   local physical evidence and an explicit manual review unlock it. Off is the
   default and the honest state.
@@ -15,7 +16,16 @@ Nothing below is a comparative claim. No head-to-head measurement against
 another product exists; see
 [the neutral competitor evaluation](benchmarks/competitor-evaluation.md).
 
-Last reviewed: **26 July 2026**.
+Last reviewed: **14 November 2026**, against the source that includes the
+November 2026 audit fixes. The published v0.4.0 build predates those fixes
+and behaves differently in places (it installs Ollama by default, for
+example).
+
+**What a default install contains.** On a Mac: Parakeet Unified (English) and
+Whisper Tiny. Whisper large-v3-turbo and the Qwen3.5-4B cleanup model (with
+the Ollama service it runs in) are opt-in, through `./setup.sh --models` or
+`--with-all-models`. Windows installs Whisper Tiny, large-v3-turbo, and
+Qwen3.5-4B, and has no Parakeet.
 
 ---
 
@@ -23,51 +33,126 @@ Last reviewed: **26 July 2026**.
 
 ### Dictation
 
-- **Hold-to-talk anywhere.** Hold Right Option, speak, release; cleaned text
-  arrives at the cursor in whatever app has focus. The microphone is
-  pre-warmed at login, so the start cue means *capture is ready*, not *key
-  went down*.
+- **Hold-to-talk anywhere.** Hold Right Option (Right Alt on Windows), speak,
+  release; cleaned text arrives at the cursor in whatever app has focus. The
+  microphone is pre-warmed at login, so the start cue means *capture is
+  ready*, not *key went down*. A take ends at ten minutes; a lost key-up is
+  caught by polling the key's physical state; a microphone that delivers
+  nothing for two seconds ends the take, and one that stops after speech
+  keeps what it heard.
+- **Rebindable keys and sounds (Mac).** The capture key, an optional undo key,
+  and the feedback sounds are chosen under Settings → Controls, which also
+  holds the “Actually” corrections switch. A capture key equal to the undo
+  key is refused.
+- **Eleven dictation languages.** English, Spanish, French, German, Italian,
+  Portuguese, Dutch, Russian, Japanese, Korean, and Chinese. Parakeet is
+  English-only, so the other ten are recognized by Whisper alone — Tiny on a
+  default install, large-v3-turbo once installed — and cleaned
+  deterministically. Compose, Reply, and Edit refuse outside English.
 - **Rolling recognition.** Long dictation is transcribed while you are still
   talking, cut at natural pauses, so the decode at key release covers only
   the remainder rather than the whole recording.
-- **Three-engine cascade on Mac.** Whisper Tiny speculates during end pauses,
-  a warm native Parakeet Unified helper is the primary recognizer, and Whisper
-  large-v3-turbo is the independent fallback. Any helper failure falls back
-  faithfully and restarts lazily.
+- **Cascade on Mac.** For English, a warm native Parakeet Unified helper is
+  the primary recognizer and Whisper Tiny decodes the same audio only to
+  measure agreement; Tiny's text is never delivered on that route. When the
+  two disagree and large-v3-turbo is installed, Turbo casts a two-of-three
+  vote on the words. Without Turbo (the default), Parakeet's text is
+  delivered unverified. A helper failure falls back to Whisper; a helper that
+  had started restarts lazily, and one that cannot start is retried only
+  after a logged backoff of 30 seconds doubling to five minutes.
 - **Whispering works.** Quiet speech is gain-normalized before recognition.
 - **Flight Recorder.** A default-off, twenty-second, RAM-only rolling buffer.
-  Speak first, then tap the key to keep what you just said. Audio is never
-  written to disk, and the buffer clears on use, pause, disable, and quit.
+  Speak first, then tap the key to keep what you just said. While it is on,
+  the microphone stays open. Its audio is never written to disk, and the
+  buffer clears on use, pause, disable, and quit.
 - **Six voice modes.** Modifier keys turn the same gesture into faithful
   capture, polished composition, context-aware reply, selected-text editing,
   spoken-code compilation, or a small allowlist of reversible editing
   commands. Command mode cannot run shell commands; edit mode requires a
-  selection.
+  selection. *Compose, Reply, and Edit need the optional cleanup model and
+  English*. Without the model (the default install) none of them inserts
+  anything: the dictation is an instruction or a brief, not text to paste, so
+  the field and any selection stay as they were and the caption reads
+  "<Mode> mode needs the cleanup model — nothing changed". With the model
+  installed, a rewrite that fails or is rejected also inserts nothing
+  ("<Mode> mode got no rewrite from the cleanup model — nothing changed").
 - **Per-app tone.** Casual in chat, formal in mail, technical in editors,
   verbatim in terminals — configurable per app, or forced for one dictation by
-  saying "formal tone, …".
-- **Spoken structure.** "New line", "new paragraph", "scratch that", and
-  explicit list lead-ins become real formatting.
-- **Self-editing snippets.** Say "insert my email" and saved text arrives.
-  Correct that exact insertion within ten seconds and the new value is saved
-  for next time.
+  opening with the tone and "tone", "style", or "mode": "formal tone, …".
+- **Spoken structure.** "New line", "new paragraph", and explicit list
+  lead-ins become real formatting. The phrase stays as words in a noun use
+  ("a new line of products") and right after a count or quantity: a number,
+  "dozen", "couple", "all", "most", "several", "of" ("We hired two new line
+  cooks.", "12 new line staff"). So a command said without a pause right
+  after a number ("Step 1 new line step 2") is typed as words; with a pause,
+  which the recognizer writes as a comma or a full stop, it breaks the line.
+  "Scratch that" as its own sentence drops
+  the previous sentence; inline (or after a "..." pause) it drops the current
+  clause.
+- **Typed self-correction (off by default).** Out of the box "We meet
+  Tuesday, actually Wednesday." is typed as spoken; "scratch that" is the way
+  to take words back. The preference `self_correction` turns the rule on: the
+  “Actually” corrections switch under Settings → Controls on Mac, or
+  `"self_correction": true` in `preferences.json` on Windows, which has no
+  settings window. When on, "Tuesday, actually Wednesday" becomes "Wednesday"
+  only when both sides are the same kind of item (numbers, weekdays, months,
+  clock times) and each is a whole item. "I didn't actually finish", a
+  correction inside a range, score, or grouped number, and a correction after
+  a negation ("not Tuesday, actually Wednesday") stay as spoken. What it gets
+  wrong, and why it is opt-in: a sentence contrasting two things has the same
+  shape, so "I thought it was Tuesday, actually Wednesday." becomes "I thought
+  it was Wednesday." The same preference decides whether the cleanup model's
+  proof may claim a self-correction.
+- **Snippets.** Say "insert my email", alone or inside a sentence, and saved
+  text arrives. A bare snippet name is never expanded, nor is a negated cue
+  ("do not insert my email"), and an unfilled
+  `EDIT ME` placeholder is never inserted. On Mac, editing a pasted snippet in
+  place records only a pending suggestion; the saved snippet does not change,
+  and the window does not show suggestions yet.
 
 ### Trust and safety
 
-- **Cleanup cannot invent meaning.** Names, numbers, dates, URLs, paths,
-  identifiers, and commands are protected anchors. The optional local language
-  model may only make edits it can prove, each with an exact source span; if
-  the declared edits do not reconstruct the model's own output, the whole
-  result is discarded and deterministic cleanup is used instead.
+- **The optional cleanup model can only make edits it can prove.** Names,
+  numbers, dates, URLs, paths, identifiers, and commands are protected
+  anchors. In capture and code mode the optional local language model may only
+  make edits it can prove, each covering whole tokens with an exact source
+  span and leaving every anchor and number outside it intact; if the declared
+  edits do not reconstruct the model's own output, the whole result is
+  discarded and deterministic cleanup is used instead. Compose, Reply, and
+  Edit are rewrites by design and are not held to the proof. The deterministic
+  path applies only the written rules above (fillers, spoken structure,
+  snippets on the explicit cue, and the typed self-correction only when it is
+  turned on).
+- **Bounded context.** App names, window titles, and dictionary terms bias
+  the recognizer and protect words but never replace a recognized word. Other
+  on-screen text (the selection, the open document, the repository, the
+  focused field, the clipboard) can only *repair a name*: the recognizer
+  must have been unsure of the take (confidence 0.70 or lower, scored for the
+  whole utterance, not per word) and must itself have written the word as a
+  name or identifier — capitalized in the middle
+  of a sentence, or containing a digit, an underscore, or an inner capital —
+  and the on-screen term must sound like it. So a visible "Qwen" repairs "Ask
+  Gwen to review it." What it cannot do: replace or introduce a common word
+  ("Looks good." stays, whatever is selected), touch a word the recognizer
+  wrote in lower case or one capitalized only because it starts a sentence,
+  or act when the recognizer was confident. From the focused field and the
+  clipboard only identifier-shaped terms (`Qwen3_5`, `D55`, `camelCase`) are
+  eligible. Each repair is recorded as an inspectable decision. Nothing is
+  read from secure text fields or private clipboards.
 - **Insertion is a transaction.** The destination is leased at key-down and
   revalidated before exactly one paste attempt. Drift in focus, selection, or
   surrounding text fails closed.
-- **Voice Outbox.** Text that was not proven delivered lands in a bounded,
-  RAM-only recovery queue instead of the wrong window, recoverable only by an
-  explicit Copy & Dismiss.
-- **Readback proof.** What actually landed is read back and compared. When a
-  destination differs only by edge whitespace, delivery is still proven, under
-  its own receipt reason; anything weaker stays a conflict.
+- **Voice Outbox.** Text that was not proven delivered lands in a bounded
+  in-memory recovery queue instead of the wrong window, recoverable only by an
+  explicit Copy & Dismiss. The same text is also written to the local
+  transcript history. Undo payloads and blank text never enter it.
+- **Readback proof.** What actually landed is read back and compared, within
+  one adaptive window of up to 0.4 seconds for every app. When a destination
+  differs only by edge whitespace, delivery is still proven, under its own
+  receipt reason; anything weaker stays a conflict.
+- **Undo (Mac).** The menu's Undo Last Dictation or the optional undo key
+  takes back the last proven insertion, after checking the destination still
+  holds it.
 - **Consequence receipts.** Names, numbers, currency, dates, recipients,
   contacts, URLs, paths, and commands get transcript-free risk receipts, and a
   review-worthy result says so.
@@ -75,38 +160,52 @@ Last reviewed: **26 July 2026**.
   against a context-free shadow compile; contextual influence on protected
   content is quarantined in an aggregate receipt. It observes only — it can
   never change text, cleanup, insertion, or routing.
-- **Reversible personalization.** Corrections are learned only from the exact
-  pasted range, must pass a private regression suite with zero regressions,
-  are scoped by app, and are individually inspectable and forgettable.
-  Contradicting evidence demotes a learned rule.
+- **Reversible personalization (Mac).** Corrections are learned only from a
+  settled edit of the exact pasted range, must pass a private regression suite
+  with zero regressions, are scoped by app, and are individually inspectable
+  and forgettable. No rule maps one common English word to another, adds or
+  removes a negation, or maps one number to another, and an active rule is
+  never applied inside an address, handle, or URL. Contradicting evidence,
+  including dictating the heard word and leaving it alone, demotes a learned
+  rule. Forget removes the rule's count, history, and evidence.
 - **Result inspector.** Compiler decisions, protected anchors, accepted and
-  rejected proof edits, alternatives considered, and timing — without storing
-  a transcript dossier.
+  rejected proof edits, alternatives considered, and timing, shown without
+  transcript text. (The separate local `transcripts.jsonl` history does hold
+  text: at most 500 entries and 30 days.)
 
 ### The application
 
-- **One-click installers** for Mac and Windows that provision dependencies,
-  pinned models, the native helper, login services, and health checks, and
-  verify their own work. Reruns are idempotent and never overwrite personal
-  files.
+- **Installers** for Mac and Windows that provision dependencies, pinned
+  models, the native helper, login services, and health checks, and verify
+  their own work. Reruns are idempotent and never overwrite personal files.
+  A Mac install needs an administrator account (Homebrew), the Command Line
+  Tools with Swift 6, and macOS 14 or newer. The Windows installer has not
+  been run on real Windows hardware.
 - **Native Mac window** with three sections — Home, Settings, Advanced —
-  covering status, personalization, privacy, models, and diagnostics.
+  covering status, personalization, privacy, models, and diagnostics. It has
+  no undo or re-insert button; those live in the menu bar.
 - **Menu-bar presence** with sixteen animated companion characters whose mouths
   move with your speech; recovery rows appear only when they have something.
 - **Guided first run** through permissions, hotkey practice, model readiness,
   and a first real dictation, each confirmed by evidence rather than assumed.
-- **Accessibility.** VoiceOver labels, full keyboard navigation, contrast in
-  light and dark, and Reduce Motion that disables animation entirely.
+- **Accessibility.** VoiceOver labels, keyboard navigation with a standard
+  Edit and Window menu, contrast in light and dark, and Reduce Motion that
+  disables animation entirely. No VoiceOver session has been recorded.
 - **Local support bundle** — a transcript-free health export you choose to
   save; never uploaded.
-- **Explicit updates.** A menu check that fetches, applies, and rolls back on
-  failure; no background polling, no silent updates.
+- **Explicit updates (Mac).** **Check for Updates…** fetches the checkout's
+  tracked branch, checks out its tip, reruns the installer, and rolls back to
+  the last revision that installed cleanly on failure; no background polling,
+  no silent updates. It does not check release tags or signatures, so it
+  installs unreleased commits.
 
 ### Platform notes
 
-- macOS is the production focus. Windows shares capture, the cascade,
-  cleanup, snippets, tones, and learning, with a tray icon in place of the HUD
-  and no Accessibility-based insertion transaction.
+- macOS is the production focus. Windows shares capture, Whisper
+  recognition, cleanup, snippets, tones, and vocabulary mining, with a tray
+  icon in place of the HUD, no Accessibility-based insertion transaction, and
+  no correction learning. Right Alt is the Windows capture key; on AltGr
+  layouts AltGr starts Capture.
 - Distribution is currently an **unsigned preview**: macOS warns that the
   developer cannot be verified, and permissions may need re-granting after an
   update. Signing and notarization are not done.
@@ -128,8 +227,10 @@ receipt is indistinguishable from no receipt at all.
   priority in the recognizer's prompt.
 - **Delayed cleanup** — inserting the deterministic result immediately, then
   merging proven cleanup edits into untouched spans afterwards.
-- **Acoustic Time Machine** — opt-in, RAM-only replay of the short spans
-  behind a consequential word, self-deleting after one minute.
+
+The **Acoustic Time Machine** — RAM-only replay of the short spans behind a
+consequential word, self-deleting after one minute — is not receipt-gated: it
+is an ordinary opt-in Privacy preference on Mac, off by default.
 
 A guided capture harness exists for each corpus, so recording the evidence is
 a session rather than a research project. The harnesses record what happened

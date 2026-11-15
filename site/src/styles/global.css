@@ -122,9 +122,6 @@ body {
   min-height: 100vh;
   overflow-x: hidden;
 }
-jelly-theme.site-theme {
-  display: contents;
-}
 /* Backdrop: three huge soft pastel blobs, the same teal/amber/blush trio the
    app floats behind its Home page, so the site reads as a playground instead
    of a report. Fixed, so the field holds still while content scrolls by. */
@@ -163,9 +160,37 @@ a {
   text-decoration: none;
 }
 :focus-visible {
-  outline: 3px solid var(--brand);
+  /* The raw emerald is 1.8:1 on the cream field; the ink tone clears the
+     3:1 a focus indicator needs in both themes. */
+  outline: 3px solid var(--brand-ink);
   outline-offset: 3px;
   border-radius: 6px;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.skip-link {
+  position: absolute;
+  left: 16px;
+  top: -60px;
+  z-index: 40;
+  padding: 10px 16px;
+  border: 2px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 700;
+}
+.skip-link:focus-visible {
+  top: 12px;
 }
 
 /* face frames shared */
@@ -256,9 +281,72 @@ a {
   align-items: center;
   gap: 12px;
 }
+/* Below 860px the links fold into a native disclosure, so Docs, Blog and
+   Privacy stay one tap away on a phone with no script involved. */
+.nav-menu {
+  display: none;
+  position: relative;
+}
+.nav-menu summary {
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 2px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 700;
+  font-size: 14px;
+  cursor: pointer;
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--line) 94%, transparent);
+}
+.nav-menu summary::-webkit-details-marker {
+  display: none;
+}
+.nav-menu summary svg {
+  width: 16px;
+  height: 16px;
+  transition: rotate 0.16s ease;
+}
+.nav-menu[open] summary svg {
+  rotate: 180deg;
+}
+.nav-menu-list {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 10px);
+  display: flex;
+  flex-direction: column;
+  min-width: 190px;
+  padding: 8px;
+  margin: 0;
+  list-style: none;
+  border: 1.5px solid var(--card-line);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: var(--card-shadow-hover);
+}
+.nav-menu-list a {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 12px;
+  border-radius: 12px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.nav-menu-list a:hover {
+  background: color-mix(in srgb, var(--brand) 18%, var(--surface));
+}
 @media (max-width: 860px) {
   .nav-links {
     display: none;
+  }
+  .nav-menu {
+    display: block;
   }
 }
 @media (max-width: 560px) {
@@ -273,6 +361,18 @@ a {
   }
   .nav-right .btn-ghost {
     display: none;
+  }
+}
+/* On the narrowest phones the wordmark yields to the menu; the parrot mark
+   stays, and the name stays for screen readers. */
+@media (max-width: 440px) {
+  .brand-name {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
 }
 
@@ -319,24 +419,26 @@ a {
   font-size: 14px;
   border-radius: 14px;
 }
-/* The site's one real Jelly UI element. Its soft body is painted into a canvas,
-   so the sticker treatment goes around the body rather than replacing it: black
-   frame and hard shadow on the host, candy fill on the body. Everything is
-   driven from the site tokens so it themes with the rest of the nav. */
+/* A native button with the candy fill the old Jelly UI body had: black
+   frame, hard shadow, teal body, warm ink glyph that does not flip. */
 .theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 44px;
   height: 44px;
+  padding: 0;
   border: 2px solid var(--line);
   border-radius: 16px;
-  background: var(--surface);
+  background: var(--teal);
+  color: var(--chip-ink);
+  cursor: pointer;
   box-shadow: 3px 3px 0 color-mix(in srgb, var(--line) 94%, transparent);
   transition: transform 0.12s ease, box-shadow 0.12s ease;
-  --jelly-button-height: 44px;
-  --jelly-button-min-width: 44px;
-  --jelly-button-padding-inline: 0;
-  --jelly-button-radius: 12px;
-  --jelly-fill: var(--teal);
-  --jelly-label: var(--chip-ink);
+}
+.theme-toggle svg {
+  width: 20px;
+  height: 20px;
 }
 .theme-toggle:hover {
   transform: translate(-1px, -1px);
@@ -346,16 +448,6 @@ a {
   transform: translate(2px, 2px);
   box-shadow: 1px 1px 0 color-mix(in srgb, var(--line) 94%, transparent);
 }
-/* Until jelly.js upgrades the element — or if the CDN ever fails — the toggle
-   still has to be a usable, on-brand button. */
-.theme-toggle:not(:defined) {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 18px;
-  color: var(--ink);
-  cursor: pointer;
-}
 
 /* ============================================================= HERO */
 .hero {
@@ -363,13 +455,13 @@ a {
   grid-template-columns: 1.02fr 0.98fr;
   gap: 48px;
   align-items: center;
-  padding: 64px 0 44px;
+  padding-block: 64px 44px;
 }
 @media (max-width: 920px) {
   .hero {
     grid-template-columns: 1fr;
     gap: 34px;
-    padding: 40px 0 20px;
+    padding-block: 40px 20px;
     text-align: center;
   }
 }
@@ -659,8 +751,10 @@ h1.title {
 }
 
 /* ============================================================= SECTIONS */
+/* padding-block, never the shorthand: these elements also carry .wrap, and
+   a zero inline padding here removed the side gutter on every phone. */
 section.band {
-  padding: 74px 0;
+  padding-block: 74px;
 }
 .sec-head {
   display: flex;
@@ -800,7 +894,7 @@ section.band {
 .step .num::before {
   content: counter(step);
 }
-.step h4 {
+.step h3 {
   font-family: var(--disp);
   font-weight: 800;
   font-size: 16px;
@@ -980,6 +1074,7 @@ section.band {
 }
 .platform-tab[aria-selected='true'] {
   background: var(--brand);
+  color: var(--chip-ink);
   box-shadow: var(--sticker);
 }
 .platform-tab:hover {
@@ -1006,6 +1101,14 @@ section.band {
     transition: none;
   }
 }
+.isteps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
 .istep {
   display: flex;
   gap: 14px;
@@ -1025,7 +1128,7 @@ section.band {
   box-shadow: 2px 2px 0 color-mix(in srgb, var(--line) 94%, transparent);
   color: var(--chip-ink);
 }
-.istep h4 {
+.istep h3 {
   font-family: var(--disp);
   font-weight: 800;
   font-size: 17px;
@@ -1207,6 +1310,7 @@ footer.foot .wrap {
 }
 .foot-faces {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 .foot-faces .mini {
@@ -1242,13 +1346,16 @@ footer.foot .wrap {
 /* ============================================================= DOCS */
 .doc-shell {
   display: grid;
-  grid-template-columns: 240px 1fr;
+  /* minmax(0, …): a bare 1fr track grows to its widest child, so one long
+     code line or the comparison table pushed the whole page sideways on a
+     phone. With a zero minimum they scroll inside themselves instead. */
+  grid-template-columns: 240px minmax(0, 1fr);
   gap: 40px;
-  padding: 44px 0 80px;
+  padding-block: 44px 80px;
 }
 @media (max-width: 820px) {
   .doc-shell {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 24px;
   }
 }
@@ -1349,6 +1456,13 @@ footer.foot .wrap {
   margin: 0 0 16px;
   padding-left: 22px;
 }
+/* Tailwind's preflight strips list markers; ordered steps need their numbers. */
+.prose ul {
+  list-style: disc;
+}
+.prose ol {
+  list-style: decimal;
+}
 .prose li {
   margin: 6px 0;
 }
@@ -1383,6 +1497,13 @@ footer.foot .wrap {
   padding: 0;
   font-size: 13.5px;
   line-height: 1.6;
+}
+/* A table wider than the column scrolls inside this region. The wrapper
+   keeps the table a table for screen readers, which display: block on the
+   table itself would not. */
+.prose .table-scroll {
+  overflow-x: auto;
+  margin: 0 0 18px;
 }
 .prose blockquote {
   margin: 0 0 18px;
@@ -1477,8 +1598,8 @@ footer.foot .wrap {
 /* Reduce Motion switches the squish off, it does not shorten it. The blanket
    rule below covers every animation on the site; the explicit rule ahead of it
    documents the guarantee for the jelly hooks and survives any later change to
-   the blanket rule. jelly.js's own canvas physics is gated separately, by the
-   data-jelly-motion="reduce" flag Base.astro puts on <html>. */
+   the blanket rule. The data-jelly-motion flag Base.astro puts on <html>
+   records the same choice in the served markup. */
 @media (prefers-reduced-motion: reduce) {
   [data-jelly],
   [data-jelly][data-jelly-play] {

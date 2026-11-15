@@ -56,6 +56,6 @@ Whisper Face runs the whole path on your machine: recognition, cleanup, and inse
 
 You can run the aeroplane test on it yourself, and we would rather you did than take our word for it.
 
-It is also worth saying what offline does *not* mean. Local is not the same as anonymous — a local file is still a file on a machine someone could get access to. That is why the private files Whisper Face writes are kept to a documented list, stored with restrictive permissions, and individually inspectable and deletable. Offline is one property. Handling what stays behind carefully is a different one, and both have to be true.
+It is also worth saying what offline does *not* mean. Local is not the same as anonymous — a local file is still a file on a machine someone could get access to. That is why the private files Whisper Face writes are kept to a documented list and stored with restrictive permissions, and why the dictation history is capped at 500 entries and 30 days. Some can be cleared from the app; the rest, including the history, are ordinary files you can inspect and delete yourself. Offline is one property. Handling what stays behind carefully is a different one, and both have to be true.
 
 Read more about [where your voice goes](/blog/your-voice-stays-local), or [get started](/docs/getting-started).

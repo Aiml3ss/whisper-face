@@ -152,9 +152,9 @@ gui = create_gui(GUIActions(status_snapshot=my_status, set_face=my_set_face))
 - `scripts/window_render_probe.py` constructs a bare `GUIActions()` and renders
   the window; it is the worked example.
 
-The dataclass currently declares 65 callables covering status and evidence
+The dataclass currently declares 66 callables covering status and evidence
 snapshots, face selection, hotkeys, sound themes, recent dictations and undo,
-the gated feature toggles, voice-object and demonstration drafts, risky-action
+the "X, actually Y" correction switch, the gated feature toggles, voice-object and demonstration drafts, risky-action
 confirmation, retained spans, tones and snippets and vocabulary, correction and
 keyword forgetting, pause/resume, diagnostics, Point-and-Speak, and
 Drop-to-Target.
@@ -167,8 +167,11 @@ Two rules matter more than the list:
    `{"accepted": False, "reason": "unsupported_key", "name": "", "label": "", "shared_modes": ()}`;
    `insert_recent_dictation` defaults to
    `{"inserted": False, "reason": "unavailable"}`; `undo_last_dictation`
-   defaults to `{"undone": False, "reason": "nothing_to_undo"}`. If you add a
-   field, give it a default that fails closed.
+   defaults to `{"undone": False, "reason": "nothing_to_undo"}`;
+   `set_self_correction` defaults to returning `False`, so an unwired switch
+   stays off. If you add a field, give it a default that fails closed, and
+   wire it in `main()`: a whole-program test should call the window's own
+   action object, because a missing wiring line otherwise passes every test.
 2. **Guard logic lives in the runtime, never in the window.** Hotkey conflict
    rules, permission checks, and confirmation nonces are the runtime's job. The
    window asks and renders the answer.

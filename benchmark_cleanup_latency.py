@@ -175,7 +175,10 @@ def _proof_matches(raw: str, payload: Any, output: str) -> bool:
             return False
         proposals.append(EditProposal(str(edit.get("kind", "semantic_cleanup")),
                                       str(edit.get("before", ""))[:200], str(edit.get("after", ""))[:200]))
-    return VoiceCompiler().verify_edits(raw, proposals).text == output
+    # The corpus's corrections ("Tuesday actually Wednesday") are measured
+    # with the opt-in rule on; a default install accepts none of them.
+    return VoiceCompiler().verify_edits(
+        raw, proposals, self_correction=True).text == output
 
 
 def _recovery_guard(case: dict[str, Any], done_reason: str) \
@@ -387,7 +390,8 @@ def build_report(cases: tuple[dict[str, Any], ...], results: list[dict[str, Any]
     ))
     faster_safe = [result["id"] for result in results if result["id"] != "current" and safe(result) and safe(baseline) and result["latency_ms"]["p95"] < baseline["latency_ms"]["p95"]]
     qwen_routed = [case for case in cases
-                   if compile_cleanup(case["raw"]).needs_semantic_cleanup]
+                   if compile_cleanup(case["raw"], self_correction=True)
+                   .needs_semantic_cleanup]
     qwen_risks = {
         risk: sum(risk in case["risks"] for case in qwen_routed)
         for risk in sorted({risk for case in qwen_routed

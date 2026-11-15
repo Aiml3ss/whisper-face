@@ -31,6 +31,7 @@ from parrot_core import (  # noqa: E402
     confidence_from_segments,
     recognition_words_from_segments,
     correction_similarity,
+    find_self_correction,
     infer_revised_insertion,
     mode_from_modifiers,
     phonetic_key,
@@ -62,13 +63,529 @@ class ContextTests(unittest.TestCase):
 class CleanupCompilerTests(unittest.TestCase):
     def test_compiles_fillers_structure_and_correction(self):
         plan = compile_cleanup(
-            "um Tuesday actually Wednesday new paragraph I mean, ship it")
+            "um Tuesday actually Wednesday new paragraph I mean, ship it",
+            self_correction=True)
         self.assertEqual(plan.text, "Wednesday\n\nship it")
         self.assertEqual(
             plan.edit_kinds,
             ["spoken_structure", "remove_filler",
              "remove_discourse_filler", "self_correction"],
         )
+
+    def test_punctuated_fillers_structure_and_correction_compile_the_same(self):
+        plan = compile_cleanup(
+            "Um, Tuesday, actually Wednesday. New paragraph. I mean, ship it.",
+            self_correction=True)
+        self.assertEqual(plan.text, "Wednesday.\n\nship it.")
+        self.assertEqual(
+            plan.edit_kinds,
+            ["spoken_structure", "remove_filler",
+             "remove_discourse_filler", "self_correction"],
+        )
+
+    def test_self_correction_is_off_unless_asked_for(self):
+        # What the real recognizer wrote for a speaker contrasting two
+        # things. The words are the same as a correction's, so by default
+        # both are typed as spoken.
+        for spoken in (
+            "I thought it was Tuesday, actually Wednesday.",
+            "The invoice says 400, actually 450",
+            "We expected 20, actually 12 showed up.",
+            "I guessed March, actually April.",
+            "Everyone assumed Monday, actually Tuesday.",
+            "She said five, actually six",
+            "Out of ten, actually four past.",
+            "Let's meet Tuesday, actually Wednesday",
+            "It starts at 3, actually 4.",
+            "Send five actually six copies.",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken)
+                self.assertEqual(plan.edits, [])
+                self.assertFalse(plan.needs_semantic_cleanup)
+                self.assertEqual(compile_code_dictation(spoken).text, spoken)
+                asked = compile_cleanup(spoken, self_correction=True)
+                self.assertEqual(asked.edit_kinds, ["self_correction"])
+                self.assertEqual(
+                    compile_code_dictation(
+                        spoken, self_correction=True).text, asked.text)
+
+    def test_actually_as_an_adverb_changes_nothing(self):
+        for spoken in (
+            "I didn't actually finish the report",
+            "I don't actually know the answer.",
+            "she is not actually coming tomorrow",
+            "The payment was not actually approved.",
+            "We never actually shipped version 2.",
+            "Nobody actually reviewed the contract.",
+            "Siobhan actually approved the budget.",
+            "The price is actually 40 dollars.",
+            "The total is actually 500 dollars",
+            "that is actually a good idea",
+            "I actually think we should wait.",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken, self_correction=True)
+                self.assertEqual(plan.text, spoken)
+                self.assertNotIn("self_correction", plan.edit_kinds)
+                self.assertFalse(plan.needs_semantic_cleanup)
+
+    def test_self_correction_resolves_two_items_of_the_same_kind(self):
+        for spoken, expected in (
+            # Weekdays, bare and in the forms a recognizer punctuates.
+            ("Move the meeting to Tuesday actually Wednesday.",
+             "Move the meeting to Wednesday."),
+            ("Move the meeting to Tuesday, actually Wednesday.",
+             "Move the meeting to Wednesday."),
+            ("Move the meeting to Tuesday — actually, Wednesday.",
+             "Move the meeting to Wednesday."),
+            # Months, with and without a day.
+            ("move the meeting from March 3 actually March 4",
+             "move the meeting from March 4"),
+            ("Move the meeting from March 3, actually March 4.",
+             "Move the meeting from March 4."),
+            ("Move the meeting from March 3, actually 4.",
+             "Move the meeting from March 4."),
+            ("It ships in March, actually April.", "It ships in April."),
+            # Numbers, as digits or words, with a unit or a currency.
+            ("charge 45 actually 54 dollars to the travel budget",
+             "charge 54 dollars to the travel budget"),
+            ("Charge 45 dollars, actually 54 dollars.",
+             "Charge 54 dollars."),
+            ("Charge 45 dollars, actually 54.", "Charge 54 dollars."),
+            ("Pay $1,500, actually $1,600.", "Pay $1,600."),
+            ("Raise it by 4.5%, actually 5.5%.", "Raise it by 5.5%."),
+            ("We need three, actually four, reviewers.",
+             "We need four, reviewers."),
+            ("Order twenty five, actually thirty.", "Order thirty."),
+            ("I have 3 apples, actually 4 apples.", "I have 4 apples."),
+            # Clock times.
+            ("Meet at 3 pm, actually 4 pm.", "Meet at 4 pm."),
+            ("Meet at 3 p.m., actually 4 p.m.", "Meet at 4 p.m."),
+            ("Meet at 3, actually 4 pm.", "Meet at 4 pm."),
+            ("Meet at 3 pm actually 4", "Meet at 4 pm"),
+            ("Meet at 10:30, actually 11:30.", "Meet at 11:30."),
+            ("Call at noon, actually 1 pm.", "Call at 1 pm."),
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken, self_correction=True)
+                self.assertEqual(plan.text, expected)
+                self.assertEqual(plan.edit_kinds, ["self_correction"])
+
+    def test_self_correction_needs_both_sides_to_be_the_same_kind(self):
+        for spoken in (
+            "send the draft to Alex actually Alexis Chen by Friday",
+            "use HTTP actually HTTPS for the callback URL",
+            "See you Tuesday, actually 4 works better.",
+            "We may actually march tomorrow.",
+            "Pay $45, actually 4 pm is too late.",
+            "Meet at 10:30, actually 45 dollars is fine.",
+            "I counted 30 and, actually 31 is right.",
+            "We shipped version 2, actually version 3.",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken, self_correction=True)
+                self.assertEqual(plan.text, spoken)
+                self.assertNotIn("self_correction", plan.edit_kinds)
+
+    def test_a_number_is_one_item_inside_a_self_correction(self):
+        # "30" is the minutes of a clock time, not a number of its own.
+        raw = "Meet at 3:30, actually 4 dollars is the fee."
+        self.assertEqual(compile_cleanup(raw, self_correction=True).text, raw)
+        self.assertEqual(find_self_correction("at 3:30 actually 4:30"),
+                         (3, 21, "4:30"))
+        self.assertIsNone(find_self_correction("it is actually fine"))
+
+    def test_self_correction_leaves_a_compound_item_as_spoken(self):
+        # A range, score, size or grouped number is one item written as
+        # several. Correcting its last word alone splices the two versions
+        # ("From 9 to 9 to 6"), so neither version is touched.
+        for spoken in (
+            "From 9 to 5, actually 9 to 6.",
+            "Monday to Friday, actually Monday to Thursday.",
+            "The meeting runs from 2 to 3, actually 2 to 4.",
+            "Call 555 1234, actually 555 1235.",
+            "Score was 2 to 1, actually 3 to 1.",
+            "It is 3 by 5, actually 4 by 6 inches.",
+            "I was 1 of 10, actually 2 of 10.",
+            "March to May, actually March to June.",
+            "May 3 to May 5, actually May 3 to May 6.",
+            "From March 3 to 5, actually 3 to 6.",
+            "Open 9 - 5, actually 9 - 6.",
+            "Open 9–5, actually 9–6.",
+            "from nine to five, actually nine to six",
+            "It took 3 hours 20 minutes, actually 3 hours 30 minutes.",
+            "It took 3 hours 20 minutes, actually 4 hours.",
+            "It took 3 hours and 20 minutes, actually 4 hours.",
+            "He is 5 feet 10, actually 5 feet 11.",
+            "It takes 3 days, actually 4 to 5 days.",
+            "Open 9 am to 5 pm, actually 10 am to 6 pm.",
+            "It is 2 point 5, actually 2 point 6.",
+            # The restatement starts at an item the sentence already has.
+            "Seat 5 people in room 3, actually 5 people in room 4.",
+            "Open from 9 in the morning to 5, actually 9 in the morning to 6.",
+            "Book Monday at noon for Friday, actually Monday at noon for "
+            "Thursday.",
+            # Which end of a range a lone item corrects is not knowable.
+            "From 9 to 5, actually 6.",
+            "Monday through Wednesday, actually Thursday.",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken, self_correction=True)
+                self.assertEqual(plan.text, spoken)
+                self.assertNotIn("self_correction", plan.edit_kinds)
+                self.assertIsNone(find_self_correction(spoken))
+
+    def test_self_correction_leaves_a_negated_item_as_spoken(self):
+        # "Not Tuesday, actually Wednesday" names Wednesday as the answer.
+        # Replacing Tuesday would leave "Not Wednesday", the opposite.
+        for spoken in (
+            "Not Tuesday, actually Wednesday.",
+            "It's not 5, actually 6.",
+            "The meeting isn't at 3, actually 4.",
+            "The meeting isn’t at 3, actually 4.",
+            "Monday, not Tuesday, actually Wednesday.",
+            "We can't do Friday, actually Saturday works.",
+            "No one, actually two.",
+            "We cannot ship in March, actually April.",
+            "Never on Monday, actually Tuesday.",
+            "I have none on Friday, actually Saturday.",
+            "Neither 3 nor 4, actually 5.",
+            "Nothing ships Tuesday, actually Wednesday works.",
+            "Nobody is free at 3, actually 4.",
+            "Come without 45 dollars, actually 54.",
+            "NOT TUESDAY, ACTUALLY WEDNESDAY.",
+            "Don't call at 3 pm — actually, 4 pm.",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken, self_correction=True)
+                self.assertEqual(plan.text, spoken)
+                self.assertNotIn("self_correction", plan.edit_kinds)
+                self.assertIsNone(find_self_correction(spoken))
+
+    def test_self_correction_reads_a_negation_in_its_own_clause_only(self):
+        for spoken, expected in (
+            ("Let's meet Tuesday, actually Wednesday.",
+             "Let's meet Wednesday."),
+            # The negation belongs to an earlier clause or sentence.
+            ("No, Tuesday, actually Wednesday.", "No, Wednesday."),
+            ("I can't make it. Let's meet Tuesday, actually Wednesday.",
+             "I can't make it. Let's meet Wednesday."),
+            ("Don't come at 3, come at 4, actually 5.",
+             "Don't come at 3, come at 5."),
+            # "No." the abbreviation, and words that only contain one.
+            ("Send No. 5, actually 6.", "Send No. 6."),
+            ("I know it is Tuesday, actually Wednesday.",
+             "I know it is Wednesday."),
+            ("Another note is due Monday, actually Tuesday.",
+             "Another note is due Tuesday."),
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken, self_correction=True)
+                self.assertEqual(plan.text, expected)
+                self.assertEqual(plan.edit_kinds, ["self_correction"])
+
+    def test_self_correction_still_resolves_an_item_beside_other_items(self):
+        for spoken, expected in (
+            # A date and a time are two items, not one.
+            ("Let's meet March 5 at 3, actually 4 pm.",
+             "Let's meet March 5 at 4 pm."),
+            ("Let's meet on the 5th at 3, actually 4.",
+             "Let's meet on the 5th at 4."),
+            ("I ordered 2 pizzas for 45 dollars, actually 54.",
+             "I ordered 2 pizzas for 54 dollars."),
+            ("Charge 45, actually 54 dollars for 2 tickets.",
+             "Charge 54 dollars for 2 tickets."),
+            ("Send 3 copies on Tuesday, actually Wednesday.",
+             "Send 3 copies on Wednesday."),
+            ("In 2024, about 45, actually 54 people came.",
+             "In 2024, about 54 people came."),
+            # "may" the verb and the "ten" in "often" are not items.
+            ("It may be May 5, actually May 6.", "It may be May 6."),
+            ("We often meet at 3, actually 4.", "We often meet at 4."),
+            ("Tuesday, actually Wednesday night or Thursday.",
+             "Wednesday night or Thursday."),
+            # An equal item in an earlier sentence is not being restated.
+            ("Room 4 is free. Seat 3, actually 4 people there.",
+             "Room 4 is free. Seat 4 people there."),
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken, self_correction=True)
+                self.assertEqual(plan.text, expected)
+                self.assertEqual(plan.edit_kinds, ["self_correction"])
+
+    def test_self_correction_reads_the_words_around_a_bounded_span(self):
+        # The proof validator checks a span of a longer source; the words
+        # outside the span still decide whether the item is a compound.
+        self.assertEqual(
+            find_self_correction("5, actually 6"), (0, 13, "6"))
+        self.assertIsNone(find_self_correction(
+            "5, actually 6", context_before="From 9 to "))
+        self.assertIsNone(find_self_correction(
+            "20 minutes, actually 4", context_before="It took 3 hours ",
+            context_after=" hours."))
+        self.assertIsNone(find_self_correction(
+            "3, actually 4", context_after=" to 5 days."))
+        self.assertEqual(
+            find_self_correction(
+                "3, actually 4", context_before="Meet March 5 at ",
+                context_after=" pm."),
+            (0, 13, "4"))
+
+    def test_spoken_structure_takes_its_own_punctuation(self):
+        for spoken, expected in (
+            ("First line is approved. New line. Second line needs revision.",
+             "First line is approved.\nSecond line needs revision."),
+            ("First line is approved, new line, second line needs revision.",
+             "First line is approved\nsecond line needs revision."),
+            ("First line is approved. New line second line needs revision.",
+             "First line is approved.\nsecond line needs revision."),
+            ("Thanks for the update. New paragraph. I will review tonight.",
+             "Thanks for the update.\n\nI will review tonight."),
+            ("Thanks for the update — new paragraph — I will review tonight.",
+             "Thanks for the update\n\nI will review tonight."),
+            # A break before any text has nothing to separate.
+            ("New paragraph. Thanks for the update.",
+             "Thanks for the update."),
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, expected)
+                self.assertEqual(plan.edit_kinds, ["spoken_structure"])
+                self.assertFalse(plan.needs_semantic_cleanup)
+
+    def test_new_line_as_a_noun_phrase_is_not_a_command(self):
+        for spoken in (
+            "We are launching a new line of products next quarter",
+            "We are launching a new line of products next quarter.",
+            "Let me start a new line of thinking.",
+            "Add new line items to the invoice.",
+            "The new paragraph reads better.",
+            "It is a whole new line for us.",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken)
+                self.assertEqual(plan.edits, [])
+
+    def test_a_counted_new_line_noun_phrase_is_not_a_command(self):
+        # A count in front makes the phrase a noun, whatever the noun is:
+        # "two new line cooks" are cooks and "two new line staff" are
+        # staff. The first is what the real recognizer wrote.
+        for spoken in (
+            "We hired two new line cooks.",
+            "We hired 2 new line cooks.",
+            "We hired twenty-five new line cooks.",
+            "Two new line cooks start Monday.",
+            "I drafted three new paragraph styles.",
+            "The kitchen has 12 new line cooks this year.",
+            "Order 1,500 new line cards.",
+            # Not a regular plural: a mass noun, an irregular plural, a
+            # possessive, the first word of a compound.
+            "We hired two new line staff.",
+            "We hired 12 new line staff.",
+            "We hired twenty new line people.",
+            "I need 2 new line cooks' aprons.",
+            "We posted two new line cook positions.",
+            "Two new line cook jobs opened today.",
+            "We opened two new line manager roles.",
+            "We need three new paragraph style options.",
+            # Counts that are not numbers.
+            "We hired a dozen new line cooks.",
+            "We hired a couple new line cooks.",
+            "We hired a couple of new line cooks.",
+            "Hundreds of new line cooks applied.",
+            "We hired several new line cooks.",
+            "All new line cooks must sign in.",
+            "Most new line cooks quit in a month.",
+            "Do we have any new line cooks?",
+            "There is no new line at the end of the file.",
+            "Those new line cooks are fast.",
+            "Add one more new line after the title.",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken)
+                self.assertEqual(plan.edits, [])
+
+    def test_an_unpaused_command_needs_no_punctuation(self):
+        # The real recognizer writes an unpaused command without marks.
+        for spoken, expected in (
+            ("Milk new line eggs new line bread", "Milk\neggs\nbread"),
+            ("First item new line second item", "First item\nsecond item"),
+            ("Dear team new paragraph the launch is on Friday.",
+             "Dear team\n\nthe launch is on Friday."),
+            # A pause puts a mark after a count, which then ends its line.
+            ("We need 2. New line. Cooks start Monday.",
+             "We need 2.\nCooks start Monday."),
+            ("Step 1, new line, step 2, new line, step 3",
+             "Step 1\nstep 2\nstep 3"),
+            ("We need 2, new line, cooks start Monday.",
+             "We need 2\ncooks start Monday."),
+            ("The total is twenty. New paragraph. Thanks for the update.",
+             "The total is twenty.\n\nThanks for the update."),
+            # A price, a clock time and a phone number count nothing.
+            ("The total is $40 new line thanks for the update",
+             "The total is $40\nthanks for the update"),
+            ("Call me at 3:30 new line see you then",
+             "Call me at 3:30\nsee you then"),
+            ("Call me at 5 pm new line see you then",
+             "Call me at 5 pm\nsee you then"),
+            ("Call me at 555-0100 new line see you then",
+             "Call me at 555-0100\nsee you then"),
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, expected)
+                self.assertEqual(plan.edit_kinds, ["spoken_structure"])
+
+    def test_a_count_directly_before_an_unpaused_command_keeps_the_words(self):
+        # "Room 4 new line guests arrive" and "12 new line staff arrive"
+        # have the same shape, so nothing is removed: the command is typed
+        # as words, where the speaker sees it. "new line item" is a noun
+        # wherever it appears.
+        for spoken in (
+            "Step 1 new line step 2 new line step 3",
+            "Step one new line step two new line step three",
+            "Call me at 5 new line see you then",
+            "Eggs 12 new line milk 2 new line bread",
+            "Eggs 12 new line apples 6",
+            "Room 4 new line this is the big one",
+            "The total is twenty new paragraph thanks for the update",
+            "Item 2 new line item 3",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken)
+                self.assertEqual(plan.edits, [])
+
+    def test_scratch_that_takes_its_own_punctuation(self):
+        for spoken, expected in (
+            ("Move the meeting to Tuesday. Scratch that. Move it to "
+             "Wednesday.", "Move it to Wednesday."),
+            ("Keep this sentence. Remove this part. Scratch that. Use this "
+             "instead.", "Keep this sentence. Use this instead."),
+            ("Keep this sentence. Remove this part, scratch that, use this "
+             "instead.", "Keep this sentence. use this instead."),
+            ("Tell Morgan the migration starts at six, scratch that, at "
+             "seven.", "Tell Morgan the migration starts at seven."),
+            ("Tell Morgan the migration starts at six. Scratch that, at "
+             "seven.", "Tell Morgan the migration starts at seven."),
+            ("Transfer 1500 dollars to savings, scratch that, to checking.",
+             "Transfer 1500 dollars to checking."),
+            # The dropped sentence leaves an earlier spoken line break alone.
+            ("Line one. New line. Line two. Scratch that. Line three.",
+             "Line one.\nLine three."),
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, expected)
+                self.assertIn("scratch_that", plan.edit_kinds)
+                self.assertFalse(plan.needs_semantic_cleanup)
+
+    def test_scratch_that_never_cuts_inside_a_number_or_an_amount(self):
+        for spoken, expected in (
+            ("transfer 1,500 dollars to savings scratch that to checking",
+             "transfer 1,500 dollars to checking"),
+            ("Transfer 1,500 dollars to savings, scratch that, to checking.",
+             "Transfer 1,500 dollars to checking."),
+            ("pay $3.50 to Sam scratch that to Alex", "pay $3.50 to Alex"),
+            ("Pay $3.50 to Sam, scratch that, to Alex.",
+             "Pay $3.50 to Alex."),
+            ("Version 2.5 ships to beta scratch that to production",
+             "Version 2.5 ships to production"),
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(compile_cleanup(spoken).text, expected)
+
+    def test_punctuated_ambiguous_scratch_that_still_fails_closed(self):
+        raw = "Move the meeting Tuesday, scratch that, Wednesday."
+        plan = compile_cleanup(raw)
+        self.assertEqual(plan.text, raw)
+        self.assertNotIn("scratch_that", plan.edit_kinds)
+        self.assertTrue(plan.needs_semantic_cleanup)
+
+    def test_a_hesitation_before_scratch_that_is_not_a_sentence_end(self):
+        # Recognizers write a trailing-off pause as an ellipsis. The command
+        # then interrupts its own sentence and must not drop all of it.
+        for raw in (
+            "Send it Tuesday... scratch that... Monday.",
+            "Send it Tuesday… scratch that… Monday.",
+            "Send it Tuesday... Scratch that. Monday.",
+        ):
+            with self.subTest(raw=raw):
+                plan = compile_cleanup(raw)
+                self.assertEqual(plan.text, raw)
+                self.assertNotIn("scratch_that", plan.edit_kinds)
+                self.assertTrue(plan.needs_semantic_cleanup)
+        self.assertEqual(
+            compile_cleanup(
+                "Tell Morgan it starts at six... scratch that... at seven."
+            ).text,
+            "Tell Morgan it starts at seven.")
+        # After a real sentence end the command still drops that sentence.
+        self.assertEqual(
+            compile_cleanup("Send it Tuesday. Scratch that... Monday.").text,
+            "Monday.")
+
+    def test_scratch_that_as_a_verb_phrase_is_not_a_command(self):
+        for spoken in (
+            "We need to rethink it. Let's scratch that idea and start over.",
+            "I think we should scratch that plan entirely.",
+            "We'll scratch that from the list.",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken)
+                self.assertEqual(plan.edits, [])
+                self.assertFalse(plan.needs_semantic_cleanup)
+
+    def test_capitalized_um_and_uh_are_names_not_fillers(self):
+        for spoken in (
+            "I studied at UM for four years",
+            "The UH campus is closed on Friday.",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken)
+                self.assertEqual(plan.edits, [])
+
+    def test_a_filler_spoken_as_its_own_sentence_leaves_no_punctuation(self):
+        self.assertEqual(compile_cleanup("Um.").text, "")
+        self.assertEqual(compile_cleanup("Hmm...").text, "")
+        self.assertEqual(
+            compile_cleanup("It works. Um. Anyway, next.").text,
+            "It works. Anyway, next.")
+        self.assertEqual(
+            compile_cleanup("Um, so we ship Friday.").text,
+            "so we ship Friday.")
+
+    def test_a_filler_sound_inside_an_interjection_is_part_of_the_word(self):
+        # "Uh-oh" and "uh huh" are words that mean something. Dropping the
+        # filler-shaped half pasted "-oh, the build broke." and "Huh."
+        for spoken in (
+            "Uh-oh, the build broke.",
+            "Uh oh, the build broke.",
+            "Mm-hmm, sure.",
+            "Mm hmm, sure.",
+            "Uh-huh.",
+            "Uh huh.",
+            "She said uh-huh and left.",
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, spoken)
+                self.assertEqual(plan.edits, [])
+        for spoken, expected in (
+            ("It is, uh, ready.", "It is ready."),
+            ("Uh, oh well, ship it.", "oh well, ship it."),
+            ("Hmm, let me think.", "let me think."),
+        ):
+            with self.subTest(spoken=spoken):
+                plan = compile_cleanup(spoken)
+                self.assertEqual(plan.text, expected)
+                self.assertEqual(plan.edit_kinds, ["remove_filler"])
 
     def test_scratch_that_removes_only_the_latest_clause(self):
         plan = compile_cleanup(
@@ -221,6 +738,12 @@ class CleanupCompilerTests(unittest.TestCase):
         self.assertEqual(
             plan.text, "first line is approved\nsecond line needs revision")
         self.assertFalse(plan.needs_semantic_cleanup)
+        punctuated = compile_cleanup(
+            "First line is approved. New line. Second line needs revision.")
+        self.assertEqual(
+            punctuated.text,
+            "First line is approved.\nSecond line needs revision.")
+        self.assertFalse(punctuated.needs_semantic_cleanup)
 
     def test_literal_ambiguous_filler_phrases_are_preserved_without_qwen(self):
         for spoken in (
@@ -271,6 +794,17 @@ class CleanupCompilerTests(unittest.TestCase):
         )
         self.assertIn("spoken_enumeration", plan.edit_kinds)
         self.assertFalse(plan.needs_semantic_cleanup)
+
+    def test_a_number_past_the_announced_count_stays_inside_its_item(self):
+        plan = compile_cleanup(
+            "Here are two things. One, buy milk. Two, eggs, three dozen.")
+
+        self.assertEqual(
+            plan.text,
+            "Here are two things:\n"
+            "- Buy milk.\n"
+            "- Eggs, three dozen.",
+        )
 
     def test_repeated_number_words_without_list_intent_stay_as_prose(self):
         for spoken in (
@@ -417,9 +951,13 @@ class NonEnglishCleanupTests(unittest.TestCase):
     """Every rule in compile_cleanup is English by construction."""
 
     def test_english_rules_still_apply_to_english(self):
-        plan = compile_cleanup("um, ship it Tuesday actually Wednesday")
+        plan = compile_cleanup(
+            "um, ship it Tuesday actually Wednesday", self_correction=True)
         self.assertEqual(plan.text, "ship it Wednesday")
         self.assertIn("remove_filler", [edit.kind for edit in plan.edits])
+        punctuated = compile_cleanup(
+            "Um, ship it Tuesday, actually Wednesday.", self_correction=True)
+        self.assertEqual(punctuated.text, "ship it Wednesday.")
 
     def test_the_same_rules_never_run_on_another_language(self):
         # "um" is a real word in several languages, "actually" only marks a
@@ -432,7 +970,7 @@ class NonEnglishCleanupTests(unittest.TestCase):
             ("nl", "um dat is prima"),
         ):
             with self.subTest(language=language):
-                plan = compile_cleanup(text, language)
+                plan = compile_cleanup(text, language, self_correction=True)
                 self.assertEqual(plan.edits, [])
                 self.assertFalse(plan.needs_semantic_cleanup)
                 # Whitespace normalization is the one rule that holds

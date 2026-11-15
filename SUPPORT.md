@@ -11,7 +11,7 @@ The community product keeps straightforward local dictation available with:
 
 - no account or word cap;
 - local ASR and cleanup, with no required speech cloud;
-- the one-click Mac and Windows installers;
+- the Mac and Windows installers;
 - the complete core accuracy, privacy, accessibility, correction, export,
   deletion, and recovery experience; and
 - public source under the repository's community license.
@@ -40,7 +40,7 @@ and payment terms require an explicit owner decision before money is accepted.
 
 The proposed concierge pilot is one user-directed session for one Mac:
 
-- verify the normal one-click install and local health checks;
+- verify the normal install and local health checks;
 - help the user select and migrate only the local configuration they choose;
   and
 - leave the user with the public verification and recovery instructions.

@@ -127,6 +127,17 @@ git -C "$BUNDLE_DIR" fetch -q --depth 1 "$REPO_DIR" "$FULL_REVISION"
 git -C "$BUNDLE_DIR" update-ref refs/heads/packaged-release "$FULL_REVISION"
 git -C "$BUNDLE_DIR" symbolic-ref HEAD refs/heads/packaged-release
 git -C "$BUNDLE_DIR" read-tree "$FULL_REVISION"
+# .gitattributes keeps development-only trees out of the archive. Mark those
+# index entries skip-worktree so the shipped checkout reads as clean to the
+# package verifier and to the in-app updater.
+git -C "$BUNDLE_DIR" ls-files -z \
+    | git -C "$BUNDLE_DIR" check-attr -z --stdin export-ignore \
+    | python3 -c 'import sys
+fields = sys.stdin.buffer.read().split(b"\0")
+for index in range(0, len(fields) - 2, 3):
+    if fields[index + 2] == b"set":
+        sys.stdout.buffer.write(fields[index] + b"\0")' \
+    | git -C "$BUNDLE_DIR" update-index -z --skip-worktree --stdin
 rm -f "$BUNDLE_DIR/.git/FETCH_HEAD"
 git -C "$BUNDLE_DIR" remote add origin \
     "https://github.com/Aiml3ss/whisper-face.git"

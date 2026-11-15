@@ -61,6 +61,7 @@ uv run tests/test_benchmark_asr.py
 uv run tests/test_benchmark_macos_asr_warm_path.py
 uv run tests/test_performance_lab.py
 uv run tests/test_dictate.py
+uv run tests/test_whole_program.py
 uv run tests/test_gui_settings_runtime.py
 uv run tests/test_insertion_integrity.py
 uv run tests/test_benchmark_insertion_reliability.py
@@ -128,17 +129,24 @@ that the three hold exactly the same set of tests:
 `.github/workflows/windows-smoke.yml` and `.github/pull_request_template.md`
 carry the same *subset* of that list as each other: the tests that hold on a
 Windows host. They deliberately omit gates that assert a macOS-only runtime
-path — the AppKit smoke command, the Whisper/Parakeet verifier adapters, the
+path — the AppKit smoke command, the whole-program harness
+(`tests/test_whole_program.py`, which boots the macOS runtime path of
+`dictate.py` on a fake Mac and replays the recorded recognizer transcripts
+through it), the Whisper/Parakeet verifier adapters, the
 networkless worker, the point-and-speak snapshot, the voice-object and
 relisten seams — because a Windows runner cannot execute what they describe.
 Do not add a gate to the Windows workflow without first confirming it passes
 with no macOS runtime present.
 
+`tests/test_installers.py` is in that subset because most of it reads the two
+installers. The tests in it that run `setup.sh` functions need `/bin/bash`, so
+on a Windows runner they are skipped, not failed.
+
 ## Which of those gates GitHub actually blocks a merge on
 
 The list above is what a release must pass. It is not what GitHub blocks a
 merge on, and the difference is where #139 got through. `main` requires
-exactly two checks, and both run on the self-hosted `bergserver` runner:
+exactly two checks, and both run on GitHub-hosted runners:
 
 | Required check | Workflow | What it holds |
 |---|---|---|
@@ -148,19 +156,42 @@ exactly two checks, and both run on the self-hosted `bergserver` runner:
 Both are set under branch protection for `main`, with *Require branches to be
 up to date* on and administrators included.
 
+Neither runs on the self-hosted `bergserver` runner, and
+`tests/test_repository_governance.py` fails if a pull-request job is moved
+there. A required check pinned to one machine blocks every merge while that
+machine is away, and a persistent runner must never execute a pull request's
+code. The cost is that both checks now depend on hosted runners being
+available to this repository: if they are not, neither check can start and no
+pull request can merge until they are.
+
+`cla-check.yml` runs on `pull_request_target`, so GitHub takes the workflow
+from `main`, not from the pull request. Introducing that takes two pull
+requests, because the first cannot be checked by a copy of the file that is
+not on `main` yet:
+
+1. The pull request that introduces `pull_request_target` keeps the old
+   `pull_request` trigger beside it. `main`'s copy still listens only to
+   `pull_request`, so GitHub runs the pull request's own copy and
+   `acceptance-recorded` reports as it always has.
+2. The next pull request removes `pull_request`. By then `main`'s copy
+   listens to `pull_request_target`, so that pull request and every later one
+   is checked by `main`'s copy.
+
+Until the second one merges, a pull request's own copy also runs, as it did
+before this change. Nobody has to lift the required check.
+
 Everything else is advisory. `windows-smoke.yml` carries most of the gate list,
-including the governance suite, but it is not a required check and it runs on
-a GitHub-hosted runner, whose availability depends on a minutes budget that
-has been exhausted before. That is exactly how #139 merged with the face
-roster stale: the suite's only enforced home was a job nothing blocked on. A
-gate reported by a workflow nobody blocks on is reporting, not enforcement.
+including the governance suite, but it is not a required check. That is
+exactly how #139 merged with the face roster stale: the suite's only enforced
+home was a job nothing blocked on. A gate reported by a workflow nobody blocks
+on is reporting, not enforcement.
 
 A suite earns a required check here by being cheap and self-contained — no
 models, no audio device, no platform runtime, seconds not minutes — because
-every required check queues on the one self-hosted machine. The governance
-suite qualifies at about 0.1s. Suites that do not qualify stay in the release
-gate list above, which is the weaker guarantee: it depends on a person running
-it before a release, not on GitHub refusing the merge.
+every required check has to start and finish on every pull request. The
+governance suite qualifies at about 0.1s. Suites that do not qualify stay in
+the release gate list above, which is the weaker guarantee: it depends on a
+person running it before a release, not on GitHub refusing the merge.
 
 ## Deliberate gate exclusions
 

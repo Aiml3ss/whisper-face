@@ -229,15 +229,17 @@ def verify_exact_checkout(root: Path, version: str, revision: str) -> None:
         )
     except (OSError, subprocess.CalledProcessError) as exc:
         raise PackageError("packaged tracked source differs from its revision") from exc
+    # The packager's two receipts are ignored by the revision's own
+    # .gitignore, so a shipped checkout reads as clean. The in-app updater
+    # refuses any checkout that does not.
     status_output = _run(
         "git", "-C", str(root), "status", "--porcelain", "--untracked-files=all"
     )
-    expected_untracked = {
-        f"?? {RECEIPT_NAME}",
-        f"?? {RELEASE_METADATA_NAME}",
-    }
-    if set(status_output.splitlines()) != expected_untracked:
+    if status_output:
         raise PackageError("packaged checkout contains unexpected source files")
+    for name in (RECEIPT_NAME, RELEASE_METADATA_NAME):
+        if not (root / name).is_file():
+            raise PackageError(f"packaged checkout is missing {name}")
 
 
 def _check_zip_members(archive: Path, expected_root: str) -> None:
@@ -324,6 +326,21 @@ def _verify_generic_launcher(app: Path, source_root: Path) -> None:
         "--app", str(app),
         "--policy", str(source_root / "config/macos-signing-policy.json"),
     )
+    # setup.sh installs this app only when it matches the digest the bundle
+    # recorded, so a mismatch here would ship an app every install ignores.
+    try:
+        metadata = json.loads(
+            (source_root / RELEASE_METADATA_NAME).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PackageError(f"could not read {RELEASE_METADATA_NAME}: {exc}") from exc
+    digest = _run(
+        sys.executable,
+        str(source_root / "scripts/macos_launcher_app.py"),
+        "digest",
+        "--app", str(app),
+    )
+    if metadata.get("launcher_bundle_sha256") != digest:
+        raise PackageError("disk image launcher is not the one the bundle records")
 
 
 def verify_artifacts(

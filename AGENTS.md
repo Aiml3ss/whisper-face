@@ -43,6 +43,7 @@ arguments:
    uv run tests/test_benchmark_macos_asr_warm_path.py
    uv run tests/test_performance_lab.py
    uv run tests/test_dictate.py
+   uv run tests/test_whole_program.py
    uv run tests/test_gui_settings_runtime.py
    uv run tests/test_insertion_integrity.py
    uv run tests/test_benchmark_insertion_reliability.py

@@ -37,13 +37,18 @@ Outbox instead of the wrong field.
 - **Drift detection**: focus, selection, or surrounding-text drift while
   recognition ran produces a conflict receipt with no paste attempt.
 - **Readback**: where macOS can safely re-read the pasted range, the
-  observed text verifies delivery; Electron apps get a 0.35 s readback
-  window vs 0.02 s native because Chromium publishes AX values late.
+  observed text verifies delivery. Since November 2026 every app gets
+  the same adaptive window: the readback returns on the first matching
+  read and otherwise polls for up to 0.4 s, because Chromium (in browsers
+  and Electron alike) publishes AX values late. Accessibility ranges are
+  converted from UTF-16 units to code points at the boundary. (Before,
+  Electron got 0.35 s and native apps 0.02 s.)
   Since #115 a conflict names *how* the field differed through a closed
   shape vocabulary (observed-empty, trailing-whitespace,
   internal-whitespace, unicode-form, expected-is-substring,
   observed-is-prefix, divergent) carried as the `readback_shape` metrics
-  key — categories only, no destination text. Since #117 an
+  key — categories only, no destination text — taken from the utterance's
+  own Insertion Receipt since November 2026. Since #117 an
   edge-whitespace-only difference is proven delivery under its own
   receipt reason (`commit_verified_edge_whitespace`), because some
   editors trim or add whitespace at the very edges; nothing weaker

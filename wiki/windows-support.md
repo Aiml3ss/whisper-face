@@ -22,13 +22,17 @@ focus; Windows is the shared-pipeline sibling.
 ## Key Properties
 
 - **Shared**: hold-to-talk capture, the Tiny→Turbo confidence cascade,
-  [[cleanup-pipeline]], snippets, tones, Flight Recorder, and the
-  learning pipeline ([[personalization]]).
+  [[cleanup-pipeline]], snippets, tones, Flight Recorder, and vocabulary
+  mining. Correction learning is Mac-only: Windows takes no paste receipt,
+  so nothing watches the pasted range ([[personalization]]).
 - **Different**: a pystray tray icon with per-state PIL faces instead of
   the Cocoa HUD; no Accessibility, so context comes from the window
   title + clipboard and insertion takes the legacy paste path (leases
   are unavailable); Right Alt replaces Right Option and the Windows key
-  replaces Command; no word timings by default, so prosody formatting
+  replaces Command (since November 2026 Right Alt is matched by virtual-key
+  code, so it starts dictation even when it arrives as AltGr, and on AltGr
+  layouts AltGr starts Capture); runtime model loading is local-files-only,
+  so only the installer's preload contacts Hugging Face; no word timings by default, so prosody formatting
   and selective re-listen never activate.
 - **The tray did not follow the Mac menu.** #101 shrank the macOS
   [[menu-bar]] because [[app-window]] could hold what it dropped;

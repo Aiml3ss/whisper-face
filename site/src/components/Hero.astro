@@ -10,8 +10,9 @@ const initial: Animal = 'parrot';
     <p class="eyebrow"><span class="dot"></span>Local voice input for Mac &amp; Windows</p>
     <h1 class="title">Hold a key.<br />Say the thing.<br /><span class="hl">It types.</span></h1>
     <p class="lede">
-      A one-click voice keyboard for your computer. It listens, tidies up what you said, and drops
-      the text right where your cursor is. Mac is the finished experience; Windows is a preview.
+      A local voice keyboard for your computer, set up by one installer. It listens, tidies up what
+      you said, and drops the text right where your cursor is. Mac is the main platform, still an
+      unsigned preview; Windows is an earlier, unverified preview.
     </p>
     <div class="cta-row">
       <a class="btn btn-primary" data-jelly href="/#install">Download</a>
@@ -56,7 +57,8 @@ const initial: Animal = 'parrot';
 
     <div class="ticker">
       <span class="kbd">Hold&nbsp;⌥</span>
-      <span class="stream" id="stream" aria-live="polite"></span>
+      <span class="stream" id="stream" aria-hidden="true"></span>
+      <span class="sr-only" id="streamText">{FACES[initial].line}</span>
     </div>
   </div>
 </section>
@@ -70,6 +72,10 @@ const initial: Animal = 'parrot';
   const chip = document.getElementById('chip')!;
   const heroFace = document.getElementById('heroFace')!;
   const stream = document.getElementById('stream')!;
+  // The animated ticker is hidden from assistive tech: rewriting it per
+  // character would queue an announcement per letter. The whole line sits in
+  // a plain, non-live element that changes only when the face does.
+  const streamText = document.getElementById('streamText')!;
   const switcher = document.getElementById('switcher')!;
 
   let current: Animal = 'parrot';
@@ -86,6 +92,7 @@ const initial: Animal = 'parrot';
   function render() {
     chip.style.setProperty('--chip', FACES[current].color);
     heroFace.innerHTML = characterFrames(current);
+    streamText.textContent = FACES[current].line;
     setActive();
   }
 
@@ -176,6 +183,16 @@ const initial: Animal = 'parrot';
     current = (e as CustomEvent).detail as Animal;
     renderPicked();
     restart();
+  });
+
+  // A hidden tab keeps no carousel running; it picks up again on return.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      stop();
+      stage.classList.remove('speaking');
+    } else {
+      restart();
+    }
   });
 
   render();

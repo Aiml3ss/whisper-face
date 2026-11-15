@@ -10,14 +10,14 @@ Whisper Face runs the whole dictation path on your Mac: it listens, recognizes, 
 
 ## Evidence over vibes
 
-Being local is the easy part to claim. The harder promise is that the text reflects what you actually said. Whisper Face runs more than one local recognizer and treats their output as the authority. The cleanup step can improve how a sentence reads, but it cannot invent meaning that was not there. Names, numbers, code, and commands survive intact instead of being smoothed into something that merely sounds right.
+Being local is the easy part to claim. The harder promise is that the text reflects what you actually said. Whisper Face runs local recognizers and treats their output as the authority. The cleanup step follows a short list of written rules, and the optional cleanup model may only make edits it can prove, so names, numbers, code, and commands are protected from being smoothed into something that merely sounds right.
 
 ## Corrections that do not phone home
 
-When you fix a word, that correction becomes a small local rule you can open and remove. Personalization is a file on your machine, not a profile in someone's warehouse.
+When you fix the same word twice, that correction can become a small local rule you can open and remove. Personalization is a file on your machine, not a profile in someone's warehouse.
 
 ## When you need help
 
-If something breaks, Diagnostics writes a support bundle with owner-only permissions, no transcripts, and no automatic upload. You decide whether it ever leaves your disk.
+If something breaks, the app's Advanced section writes a support bundle with owner-only permissions, no transcripts, and no automatic upload. You decide whether it ever leaves your disk.
 
 Local-first only means something when the design makes leaking hard. That is the bar we are building to.

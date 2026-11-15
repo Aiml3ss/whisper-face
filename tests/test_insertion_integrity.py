@@ -98,6 +98,24 @@ class InsertionIntegrityTests(unittest.TestCase):
             fingerprint_surrounding("before|after"),
         )
 
+    def test_validation_alone_gives_commits_answer_without_staging(self):
+        coordinator = InsertionCoordinator()
+        for current, expected in (
+                (self.current, None),
+                (DestinationObservation.capture(
+                    "pid:99/field:1", (12, 0), "before|after"),
+                 ReceiptReason.FOCUS_DRIFT),
+                (DestinationObservation.capture(
+                    "pid:42/field:7", (13, 0), "before|after"),
+                 ReceiptReason.SELECTION_DRIFT),
+                (DestinationObservation.capture(None, None, None),
+                 ReceiptReason.TARGET_UNREADABLE)):
+            with self.subTest(expected=expected):
+                self.assertEqual(
+                    coordinator.validate(self.lease, current), expected)
+        self.assertEqual(coordinator.recoverable_count(), 0)
+        coordinator.stage(self.lease, "Ship it")
+
     def test_an_unreadable_target_is_unverifiable_and_never_pasted(self):
         current = DestinationObservation.capture(None, None, None)
         pasted = []
@@ -288,6 +306,28 @@ class InsertionIntegrityTests(unittest.TestCase):
         self.assertFalse(coordinator.acknowledge("utterance-1"))
         self.assertEqual(coordinator.recoverable(), ())
 
+    def test_blank_text_is_never_offered_for_recovery(self):
+        drifted = DestinationObservation.capture(
+            "pid:99/field:1", (12, 0), "before|after")
+        for text, current, readback in (
+                ("", drifted, ReadbackResult.verified),
+                ("  \n", drifted, ReadbackResult.verified),
+                ("", self.current, ReadbackResult.unverifiable),
+                (" ", self.current, ReadbackResult.conflict)):
+            with self.subTest(text=text, readback=readback.__name__):
+                coordinator = self.staged(text)
+                receipt = coordinator.commit(
+                    "utterance-1", current, lambda _text: None, readback)
+
+                self.assertNotEqual(receipt.state, ReceiptState.VERIFIED)
+                self.assertEqual(coordinator.recoverable(), ())
+                self.assertEqual(coordinator.recoverable_count(), 0)
+                # The receipt survives for dedupe; the attempt is still once.
+                self.assertEqual(coordinator.receipt("utterance-1"), receipt)
+                self.assertIs(coordinator.commit(
+                    "utterance-1", self.current, lambda _text: None,
+                    ReadbackResult.verified), receipt)
+
     def test_opaque_lease_checks_destination_without_readable_text(self):
         lease = InsertionLease.capture_opaque(
             "opaque-1", "com.example:field", "Composer")
@@ -326,6 +366,31 @@ class ReadbackConflictShapeTests(unittest.TestCase):
         for shape in READBACK_CONFLICT_SHAPES:
             with self.subTest(shape=shape):
                 self.assertEqual(ReadbackResult.conflict(shape).detail, shape)
+
+    def test_the_receipt_carries_the_shape_of_its_own_readback(self):
+        lease = InsertionLease.capture(
+            "utterance-1", "pid:42/field:7", (12, 0), "before|after")
+        matching = DestinationObservation.capture(
+            "pid:42/field:7", (12, 0), "before|after")
+        drifted = DestinationObservation.capture(
+            "pid:42/field:7", (3, 0), "before|after")
+        for current, readback, shape in (
+                (matching, lambda: ReadbackResult.conflict(
+                    "observed-is-prefix"), "observed-is-prefix"),
+                (matching, ReadbackResult.verified_edge_whitespace,
+                 "trailing-whitespace"),
+                (matching, ReadbackResult.verified, ""),
+                (matching, ReadbackResult.unverifiable, ""),
+                (drifted, lambda: ReadbackResult.conflict("divergent"), "")):
+            with self.subTest(shape=shape, current=current.selection):
+                coordinator = InsertionCoordinator()
+                coordinator.stage(lease, "Ship it")
+                receipt = coordinator.commit(
+                    "utterance-1", current, lambda _text: None, readback)
+
+                self.assertEqual(receipt.readback_shape, shape)
+                self.assertEqual(
+                    coordinator.receipt("utterance-1").readback_shape, shape)
 
 
 class EdgeWhitespaceVerificationTests(unittest.TestCase):

@@ -16,8 +16,9 @@ statement:
 - **Measurements** — head-to-head numbers on the same tasks and hardware.
   **We have none yet.** See [what we have not measured](#what-we-have-not-measured).
 
-Competitor details below were reviewed on **21 July 2026**, and Whisper Face's
-own rows were last checked on **28 July 2026**. Prices and
+Competitor details below were reviewed on **21 July 2026** and have not been
+re-checked since, and Whisper Face's own rows were last checked on
+**14 November 2026**. Prices and
 features change; check the linked sources before relying on any of it.
 
 ## The difference that actually matters
@@ -43,13 +44,30 @@ These are architectural, and you can read every one of them in the source.
 We describe them as unusual rather than unique, because we cannot audit every
 competitor's internals.
 
-**Cleanup cannot invent meaning.** Names, numbers, dates, URLs, paths,
-identifiers, and commands are treated as protected anchors. The language model
-that tidies your grammar is only allowed to make edits it can prove — each one
-has an exact source span, and if the declared edits do not reconstruct the
-model's own output, the entire result is discarded and you get the
-deterministic cleanup instead. Say a phone number, an invoice figure, or a
-file path, and it survives the polish step by construction.
+**The optional cleanup model can only make edits it can prove.** Names,
+numbers, dates, URLs, paths, identifiers, and commands are treated as protected
+anchors. The language model that tidies your grammar — an optional 3.4 GB
+download, not part of a default install — is only allowed to make edits it can
+prove: each one covers whole words with an exact source span, and if the
+declared edits do not reconstruct the model's own output, the entire result is
+discarded and you get the deterministic cleanup instead. That proof applies to
+ordinary dictation and code; Compose, Reply, and Edit are rewrites by design,
+and without the cleanup model they insert nothing ("Compose mode needs the
+cleanup model — nothing changed") rather than paste your instruction.
+The deterministic cleanup itself follows a short list of written rules, such
+as dropping "um". One of them is opt-in and off by default: a correction on
+"actually" (on a Mac, Settings → Controls → “Actually” corrections). Turned
+on, "We meet Tuesday, actually Wednesday" is typed as "We meet Wednesday",
+only between two items of the same kind. It is off because no rule can tell a
+correction from a contrast: "I thought it was Tuesday, actually Wednesday"
+would be typed as "I thought it was Wednesday".
+
+**What is on your screen can fix a name, not change your words.** App names,
+window titles, and your dictionary steer the recognizer but never replace a
+word. Other on-screen text — a selection, the open document — can only repair
+a word the recognizer was unsure of and wrote as a name: a visible "Qwen"
+fixes "Gwen". It never replaces or introduces an ordinary word, so "Looks
+good." stays "Looks good." whatever you have selected.
 
 **Insertion is a transaction, not a paste.** Your text field is leased when
 you press the key and revalidated before exactly one paste attempt. If focus
@@ -64,21 +82,25 @@ regressions, it is scoped to the app you were in, and later contradicting
 evidence demotes it again. Every learned rule is inspectable and can be
 forgotten.
 
-**Uncertain, consequential words can be re-heard.** Spans carrying numbers,
-dates, recipients, or commands can be re-verified by a second, independent,
-process-isolated recognizer under a hard deadline — and that evidence never
-silently rewrites your text; it only tells you whether to look.
+**Built, not yet switched on: re-hearing uncertain, consequential words.**
+Spans carrying numbers, dates, recipients, or commands can be re-verified by a
+second, independent, process-isolated recognizer under a hard deadline. It
+ships off, and unlocks only from evidence recorded on your own machine that no
+one has recorded yet, so today no user experiences it.
 
-**You can see what it did.** The Results view shows how many decisions the
+**You can see what it did.** The evidence inspector shows how many decisions the
 compiler made, which anchors it protected, which edits were accepted or
 rejected, and whether surrounding context influenced the outcome — without
 storing a transcript dossier.
 
 **Talk first, decide later.** Flight Recorder keeps a rolling twenty seconds
-in memory. Say something out loud, then tap the key to keep it. Nothing is
-written to disk, and it is off until you turn it on.
+in memory, so the microphone stays open while it is on. Say something out
+loud, then tap the key to keep it. Nothing is written to disk, and it is off
+until you turn it on.
 
 ## Published positions, as reviewed
+
+<div class="table-scroll" role="region" aria-label="Published positions, as reviewed" tabindex="0">
 
 | | Where transcription runs | Platforms | Price |
 |---|---|---|---|
@@ -89,6 +111,8 @@ written to disk, and it is off until you turn it on.
 | **OpenWhispr** | Local or cloud, configurable | Mac, Windows, Linux | Free, MIT |
 | **Handy** | Local | Mac, Windows, Linux | Free, MIT |
 
+</div>
+
 ## What other tools do better
 
 **Wispr Flow has phones.** iPhone and Android apps, today. Whisper Face has no
@@ -97,16 +121,19 @@ finished.
 
 **Wispr Flow supports far more languages.** They publish 100+. Whisper Face
 ships eleven — English, Spanish, French, German, Italian, Portuguese, Dutch,
-Russian, Japanese, Korean, and Chinese — chosen for recognition quality and
-script coverage rather than breadth. If your language is not on that list,
-this is not the tool for you yet.
+Russian, Japanese, Korean, and Chinese. Only English uses Parakeet; the other
+ten run on Whisper, and on a default install that is the small Whisper Tiny
+model until you add large-v3-turbo. Cleanup outside English is rule-based only.
+If your language is not on that list, this is not the tool for you yet.
 
 **Signed, frictionless installation.** Commercial alternatives are signed and
 notarized, so they open without a warning and keep their permissions across
 updates. Whisper Face is currently distributed as an unsigned preview: macOS
-will say it cannot verify the developer, and because ad-hoc signatures change
-every build, you may need to re-grant microphone and accessibility permission
-after an update. This is the most annoying thing about using it right now, and
+will say it cannot verify the developer (on macOS 15 and later you get past it
+in System Settings → Privacy & Security → Open Anyway), installing needs an
+administrator account and Apple's developer tools, and because ad-hoc
+signatures change every build, you may need to re-grant Input Monitoring,
+Accessibility, and Microphone permission after an update. This is the most annoying thing about using it right now, and
 it is being worked on.
 
 **MacWhisper is stronger for files and meetings.** Whisper Face is built for
@@ -149,5 +176,5 @@ The honest test is your own. Install it, dictate the things you actually
 dictate — the names you use, the numbers that matter, the app you live in —
 and see whether the text that appears is text you would have typed.
 
-It is free, it takes a few minutes, and nothing you say during the trial
-leaves your computer.
+It is free, a first install takes a while (allow 15 to 45 minutes on a fresh
+Mac), and nothing you say during the trial leaves your computer.

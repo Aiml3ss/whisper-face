@@ -10,9 +10,11 @@ logic can run in under a second without loading either model.
 """
 
 import ast
+import builtins
 import contextlib
 import copy
 import ctypes
+import enum
 import functools
 import hashlib
 import io
@@ -43,15 +45,19 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from parrot_core import (  # noqa: E402
+    NUMBER_WORDS,
     Recognition,
     RecognitionWord,
+    can_reuse_speculation,
     compile_cleanup,
     infer_revised_insertion,
     mode_from_modifiers,
+    should_start_speculation,
 )
 from voice_compiler import (  # noqa: E402
     ContextCandidate,
     ContextPack,
+    EditProposal,
     RecognitionHypothesis,
     VoiceCompiler,
     VoiceIR,
@@ -272,43 +278,723 @@ class PhoneEndpointBindingTests(unittest.TestCase):
                 with self.assertRaises(TypeError):
                     bind_host(invalid)
 
+    @staticmethod
+    def start_server(server_only, token_file, calls=None):
+        """Run phone_server once against a fake listener; return the
+        namespace and everything it printed."""
+        calls = [] if calls is None else calls
+
+        class FakeServer:
+            def __init__(self, address, handler):
+                calls.append(("bind", address, handler))
+
+            def serve_forever(self):
+                calls.append(("serve",))
+
+        namespace = load_definitions(
+            "phone_bind_host", "phone_server", "load_phone_token",
+            "atomic_write_text", "PhoneHandler", "phone_host_allowed",
+            "phone_token_matches", "parse_multipart",
+            assignments=("PHONE_MAX_BODY",),
+            extra={
+                "SERVER_ONLY": server_only,
+                "PHONE_PORT": 8787,
+                "PHONE_TOKEN": {"value": ""},
+                "PHONE_TOKEN_FILE": token_file,
+                "Path": Path,
+                "os": os,
+                "stat": stat,
+                "tempfile": tempfile,
+                "hashlib": hashlib,
+                "BaseHTTPRequestHandler": __import__(
+                    "http.server").server.BaseHTTPRequestHandler,
+                "ThreadingHTTPServer": FakeServer,
+                "lan_ip": lambda: "192.0.2.10",
+            },
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            namespace["phone_server"]()
+        return namespace, output.getvalue()
+
     def test_server_uses_localhost_for_desktop_and_lan_for_headless(self):
         for server_only, expected_bind, expected_display in (
                 (False, "127.0.0.1", "127.0.0.1"),
                 (True, "0.0.0.0", "192.0.2.10")):
-            with self.subTest(server_only=server_only):
+            with self.subTest(server_only=server_only), \
+                    tempfile.TemporaryDirectory() as directory:
                 calls = []
-
-                class FakeServer:
-                    def __init__(self, address, handler):
-                        calls.append(("bind", address, handler))
-
-                    def serve_forever(self):
-                        calls.append(("serve",))
-
-                namespace = load_definitions(
-                    "phone_bind_host", "phone_server",
-                    extra={
-                        "SERVER_ONLY": server_only,
-                        "PHONE_PORT": 8787,
-                        "PhoneHandler": object(),
-                        "ThreadingHTTPServer": FakeServer,
-                        "lan_ip": lambda: "192.0.2.10",
-                    },
-                )
-                output = io.StringIO()
-                original_stdout = sys.stdout
-                try:
-                    sys.stdout = output
-                    namespace["phone_server"]()
-                finally:
-                    sys.stdout = original_stdout
+                token_file = Path(directory) / "phone_token.txt"
+                namespace, output = self.start_server(
+                    server_only, token_file, calls)
 
                 self.assertEqual(
                     calls[0][1], (expected_bind, 8787))
                 self.assertEqual(calls[-1], ("serve",))
                 self.assertIn(
-                    f"http://{expected_display}:8787/", output.getvalue())
+                    f"http://{expected_display}:8787/", output)
+                token = namespace["PHONE_TOKEN"]["value"]
+                if server_only:
+                    self.assertRegex(token, r"^[0-9a-f]{64}$")
+                else:
+                    self.assertEqual(token, "")
+                    self.assertFalse(token_file.exists())
+
+    def test_the_server_token_survives_a_restart_and_is_never_printed(self):
+        # Both installers run --server-only as a login service, so a token
+        # made fresh at every start unpaired the phone at every restart and
+        # left the secret in dictate.log.
+        with tempfile.TemporaryDirectory() as directory:
+            token_file = Path(directory) / "phone_token.txt"
+            first, first_output = self.start_server(True, token_file)
+            second, second_output = self.start_server(True, token_file)
+
+            token = first["PHONE_TOKEN"]["value"]
+            self.assertRegex(token, r"^[0-9a-f]{64}$")
+            self.assertEqual(second["PHONE_TOKEN"]["value"], token)
+            self.assertEqual(token_file.read_text(encoding="utf-8").strip(),
+                             token)
+            if os.name != "nt":
+                self.assertEqual(
+                    stat.S_IMODE(token_file.stat().st_mode), 0o600)
+            for output in (first_output, second_output):
+                self.assertNotIn(token, output)
+                self.assertIn(str(token_file), output)
+                self.assertIn("Delete", output)
+
+            # The restarted server serves the stored token and nothing else.
+            handler = second["PhoneHandler"]
+            refused = PhoneEndpointRequestTests.request(
+                "POST", "/v1/audio/transcriptions", body=b"RIFF-audio")
+            self.assertEqual(PhoneEndpointRequestTests.drive(
+                handler, refused)[0], 401)
+            handler.do_POST.__globals__.update({
+                "LAST_USE": {"t": 0.0},
+                "time": time,
+                "SAMPLE_RATE": 16000,
+                "decode_audio": lambda path: np.zeros(16000, np.float32),
+                "transcribe_detailed": lambda audio: Recognition(
+                    "Send the report.", confidence=0.93,
+                    engine="parakeet-unified", audio_duration=1.0),
+                "ASR_POOL": SimpleNamespace(
+                    submit=lambda fn, arg: SimpleNamespace(
+                        result=lambda: fn(arg))),
+                "phone_clean": lambda raw, *_evidence: raw,
+            })
+            status, body = PhoneEndpointRequestTests.drive(
+                handler, PhoneEndpointRequestTests.request(
+                    "POST", "/v1/audio/transcriptions", body=b"RIFF-audio",
+                    headers=(f"Authorization: Bearer {token}",)))
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body), {"text": "Send the report."})
+
+    def test_a_missing_empty_or_malformed_token_file_gets_a_new_token(self):
+        for content in (None, "", "\n", "not-a-token\n", "A" * 64,
+                        "a" * 63, "a" * 64 + " extra"):
+            with self.subTest(content=content), \
+                    tempfile.TemporaryDirectory() as directory:
+                token_file = Path(directory) / "phone_token.txt"
+                if content is not None:
+                    token_file.write_text(content, encoding="utf-8")
+                namespace, output = self.start_server(True, token_file)
+
+                token = namespace["PHONE_TOKEN"]["value"]
+                self.assertRegex(token, r"^[0-9a-f]{64}$")
+                self.assertEqual(
+                    token_file.read_text(encoding="utf-8").strip(), token)
+                self.assertNotIn(token, output)
+                if os.name != "nt":
+                    self.assertEqual(
+                        stat.S_IMODE(token_file.stat().st_mode), 0o600)
+
+    def test_a_token_that_cannot_be_saved_locks_the_endpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            blocked = Path(directory) / "file"
+            blocked.write_text("", encoding="utf-8")
+            namespace, output = self.start_server(
+                True, blocked / "phone_token.txt")
+
+            self.assertEqual(namespace["PHONE_TOKEN"]["value"], "")
+            self.assertIn("refused", output)
+            self.assertEqual(PhoneEndpointRequestTests.drive(
+                namespace["PhoneHandler"],
+                PhoneEndpointRequestTests.request(
+                    "POST", "/v1/audio/transcriptions", body=b"RIFF-audio",
+                    headers=("Authorization: Bearer ",)))[0], 401)
+
+
+def descriptors_open_on(path) -> list[int]:
+    """The descriptors this process still holds on ``path``.
+
+    Windows will not let a second process open a file that is still open
+    here, so there the read itself fails. POSIX allows it, so on POSIX the
+    descriptor table is the only witness.
+    """
+    if not os.path.isdir("/dev/fd"):
+        return []
+    target = os.stat(path)
+    held = []
+    for name in os.listdir("/dev/fd"):
+        try:
+            info = os.fstat(int(name))
+        except (OSError, ValueError):
+            continue
+        if (info.st_dev, info.st_ino) == (target.st_dev, target.st_ino):
+            held.append(int(name))
+    return held
+
+
+class PhoneEndpointRequestTests(unittest.TestCase):
+    """What a caller that reaches port 8787 can and cannot do."""
+
+    TOKEN = "a" * 64
+
+    def handler(self, server_only, transcribed="Insert my address."):
+        calls = []
+        self.uploads = uploads = []
+        recognition = transcribed if isinstance(transcribed, Recognition) \
+            else Recognition(transcribed, confidence=0.93,
+                             engine="parakeet-unified", audio_duration=1.0)
+
+        def decode_audio(path):
+            calls.append(("decode", Path(path).read_bytes()))
+            uploads.append((path, descriptors_open_on(path)))
+            return np.zeros(16000, dtype=np.float32)
+
+        ns = load_definitions(
+            "PhoneHandler", "parse_multipart", "phone_host_allowed",
+            "phone_token_matches",
+            assignments=("PHONE_MAX_BODY",),
+            extra={
+                "BaseHTTPRequestHandler": __import__(
+                    "http.server").server.BaseHTTPRequestHandler,
+                "email": __import__("email.policy"),
+                "hashlib": hashlib,
+                "os": os,
+                "tempfile": tempfile,
+                "time": time,
+                "SERVER_ONLY": server_only,
+                "PHONE_TOKEN": {"value": self.TOKEN if server_only else ""},
+                "LAST_USE": {"t": 0.0},
+                "SAMPLE_RATE": 16000,
+                "decode_audio": decode_audio,
+                "transcribe_detailed": lambda audio: recognition,
+                "ASR_POOL": SimpleNamespace(
+                    submit=lambda fn, arg: SimpleNamespace(
+                        result=lambda: fn(arg))),
+                "phone_clean": lambda raw, *_evidence: calls.append(
+                    ("clean", raw)) or "Insert my address.",
+                "source_metadata": lambda: {"source_revision": "abc"},
+                "local_license_notice": lambda: "notices",
+            },
+        )
+        return ns["PhoneHandler"], calls
+
+    @staticmethod
+    def drive(handler_class, request: bytes):
+        handler = handler_class.__new__(handler_class)
+        handler.rfile = io.BytesIO(request)
+        handler.wfile = io.BytesIO()
+        handler.client_address = ("127.0.0.1", 50000)
+        handler.server = None
+        handler.request_version = "HTTP/1.1"
+        handler.requestline = ""
+        handler.command = None
+        handler.close_connection = True
+        handler.raw_requestline = handler.rfile.readline()
+        handler.parse_request()
+        with contextlib.redirect_stdout(io.StringIO()):
+            getattr(handler, "do_" + handler.command)()
+        head, _, body = handler.wfile.getvalue().partition(b"\r\n\r\n")
+        return int(head.split(b" ")[1]), body
+
+    @staticmethod
+    def request(method, path, *, host="127.0.0.1:8787", body=b"",
+                headers=()):
+        lines = [f"{method} {path} HTTP/1.1", f"Host: {host}"]
+        lines += list(headers)
+        if method == "POST" and not any(
+                h.lower().startswith("content-length") for h in headers):
+            lines.append(f"Content-Length: {len(body)}")
+        return ("\r\n".join(lines) + "\r\n\r\n").encode() + body
+
+    def test_desktop_serves_only_the_health_check(self):
+        handler, calls = self.handler(server_only=False)
+
+        self.assertEqual(
+            self.drive(handler, self.request("GET", "/health")),
+            (200, b"ok"))
+        for path in ("/", "/source", "/license"):
+            with self.subTest(path=path):
+                status, _ = self.drive(handler, self.request("GET", path))
+                self.assertEqual(status, 404)
+        status, _ = self.drive(handler, self.request(
+            "POST", "/v1/audio/transcriptions", body=b"RIFF-audio",
+            headers=("Content-Type: text/plain",
+                     f"Authorization: Bearer {self.TOKEN}")))
+        self.assertEqual(status, 404)
+        self.assertEqual(calls, [])
+
+    def test_a_web_page_is_refused_even_on_the_health_check(self):
+        handler, _ = self.handler(server_only=False)
+        for request in (
+                self.request("GET", "/health", headers=(
+                    "Origin: https://evil.example",)),
+                self.request("GET", "/health", host="evil.example:8787")):
+            with self.subTest(request=request):
+                status, _ = self.drive(handler, request)
+                self.assertEqual(status, 403)
+
+    def test_server_mode_transcribes_only_for_the_token_holder(self):
+        handler, calls = self.handler(server_only=True)
+        audio = b"RIFF-short-audio"
+
+        refused = {
+            "no token": self.request(
+                "POST", "/v1/audio/transcriptions", body=audio),
+            "wrong token": self.request(
+                "POST", "/v1/audio/transcriptions", body=audio,
+                headers=("Authorization: Bearer " + "b" * 64,)),
+            "browser origin": self.request(
+                "POST", "/v1/audio/transcriptions", body=audio,
+                headers=(f"Authorization: Bearer {self.TOKEN}",
+                         "Origin: https://evil.example")),
+            "rebound host": self.request(
+                "POST", "/v1/audio/transcriptions", body=audio,
+                host="evil.example:8787",
+                headers=(f"Authorization: Bearer {self.TOKEN}",)),
+            "oversized body": self.request(
+                "POST", "/v1/audio/transcriptions", body=audio,
+                headers=(f"Authorization: Bearer {self.TOKEN}",
+                         f"Content-Length: {26 * 1024 * 1024}")),
+            "no length": self.request(
+                "POST", "/v1/audio/transcriptions",
+                headers=(f"Authorization: Bearer {self.TOKEN}",
+                         "Content-Length: -1")),
+        }
+        for reason, request in refused.items():
+            with self.subTest(reason=reason):
+                status, _ = self.drive(handler, request)
+                self.assertIn(status, {401, 403, 411, 413})
+        self.assertEqual(calls, [])
+
+        status, body = self.drive(handler, self.request(
+            "POST", "/v1/audio/transcriptions", host="192.0.2.10:8787",
+            body=audio, headers=(f"Authorization: Bearer {self.TOKEN}",)))
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"text": "Insert my address."})
+        self.assertEqual(calls, [
+            ("decode", audio), ("clean", "Insert my address.")])
+
+    def test_a_failed_request_reveals_no_local_detail(self):
+        handler, _ = self.handler(server_only=True)
+        handler_ns = handler.do_POST.__globals__
+        handler_ns["decode_audio"] = lambda path: (_ for _ in ()).throw(
+            RuntimeError(f"ffmpeg failed: {path}: /Users/someone/secret"))
+
+        status, body = self.drive(handler, self.request(
+            "POST", "/v1/audio/transcriptions", body=b"bad",
+            headers=(f"Authorization: Bearer {self.TOKEN}",)))
+
+        self.assertEqual(status, 500)
+        self.assertNotIn(b"/Users", body)
+
+    def test_the_upload_is_closed_for_the_decoder_and_removed_after(self):
+        # ffmpeg is another process. Windows refuses to let it open a file
+        # this process still holds open, so there every upload failed.
+        handler, _ = self.handler(server_only=True)
+
+        status, _ = self.drive(handler, self.request(
+            "POST", "/v1/audio/transcriptions", body=b"RIFF-audio",
+            headers=(f"Authorization: Bearer {self.TOKEN}",)))
+
+        self.assertEqual(status, 200)
+        (path, still_open), = self.uploads
+        self.assertEqual(still_open, [])
+        self.assertFalse(Path(path).exists())
+
+    def test_the_upload_is_removed_when_decoding_fails(self):
+        handler, _ = self.handler(server_only=True)
+        seen = []
+
+        def failing_decode(path):
+            seen.append(path)
+            raise RuntimeError("ffmpeg failed")
+
+        handler.do_POST.__globals__["decode_audio"] = failing_decode
+
+        status, _ = self.drive(handler, self.request(
+            "POST", "/v1/audio/transcriptions", body=b"bad",
+            headers=(f"Authorization: Bearer {self.TOKEN}",)))
+
+        self.assertEqual(status, 500)
+        self.assertEqual(len(seen), 1)
+        self.assertFalse(Path(seen[0]).exists())
+
+    def test_a_silent_upload_is_not_answered_with_whisper_filler(self):
+        clean = load_definitions(
+            "phone_clean", "is_hallucination", "weak_whisper_evidence",
+            assignments=CleanupGuardTests.HALLUCINATION_GUARD,
+            extra={
+                "collapse_repeats": lambda raw: (raw, False),
+                "looks_like_prompt_echo": lambda raw: False,
+                "apply_learned_fixes": lambda raw: raw,
+                "extract_tone_override": lambda raw: (raw, None),
+                "needs_llm_cleanup": lambda *args, **kwargs: False,
+                "quick_clean": lambda raw, verbatim=False, language="en": raw,
+                "apply_vocabulary_casing": lambda text: text,
+                "TONE": {"default": ""},
+            },
+        )["phone_clean"]
+        uploads = (
+            # Six seconds of room noise on a Whisper-only install.
+            (Recognition("Thank you.", confidence=0.31, engine="tiny",
+                         audio_duration=6.0), ""),
+            (Recognition("Thanks for watching!", confidence=0.74,
+                         engine="turbo", audio_duration=9.0), ""),
+            # Somebody saying it.
+            (Recognition("Thank you.", confidence=0.84, engine="turbo",
+                         audio_duration=1.2), "Thank you."),
+            (Recognition("Thank you.", confidence=0.93,
+                         engine="parakeet-unified", audio_duration=1.2),
+             "Thank you."),
+        )
+        for recognition, expected in uploads:
+            with self.subTest(recognition=recognition):
+                handler, _ = self.handler(
+                    server_only=True, transcribed=recognition)
+                handler.do_POST.__globals__["phone_clean"] = clean
+
+                status, body = self.drive(handler, self.request(
+                    "POST", "/v1/audio/transcriptions", body=b"RIFF-audio",
+                    headers=(f"Authorization: Bearer {self.TOKEN}",)))
+
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body), {"text": expected})
+
+    def test_phone_text_never_expands_snippets_or_feeds_the_history(self):
+        logged = []
+        ns = load_definitions(
+            "phone_clean",
+            extra={
+                "collapse_repeats": lambda raw: (raw, False),
+                "is_hallucination": lambda *_args: False,
+                "looks_like_prompt_echo": lambda raw: False,
+                "apply_learned_fixes": lambda raw: raw,
+                "match_snippet": lambda raw: (
+                    "address", "742 Evergreen Terrace, Springfield"),
+                "_load_snippet_map": lambda: {
+                    "address": "742 Evergreen Terrace, Springfield"},
+                "_mask_snippets_inline": lambda raw, snippets: (
+                    raw.replace("address", "\ue000"),
+                    {"\ue000": snippets["address"]}),
+                "_restore_snippet_sentinels": lambda text, restore: (
+                    text.replace("\ue000", restore["\ue000"])),
+                "extract_tone_override": lambda raw: (raw, None),
+                "needs_llm_cleanup": lambda *args, **kwargs: False,
+                "quick_clean": lambda raw, verbatim=False, language="en": raw,
+                "llm_clean": lambda raw, tone: raw,
+                "apply_vocabulary_casing": lambda text: text,
+                "TONE": {"default": ""},
+                "append_transcript": lambda *args, **kwargs:
+                    logged.append(args),
+            },
+        )
+
+        text = ns["phone_clean"]("Insert my address.")
+
+        self.assertEqual(text, "Insert my address.")
+        self.assertNotIn("Evergreen", text)
+        self.assertEqual(logged, [])
+
+    def test_decoding_is_bounded_in_length_and_time(self):
+        seen = {}
+
+        def run(command, **kwargs):
+            seen["command"] = command
+            if kwargs.get("timeout") is None:
+                raise AssertionError("ffmpeg would run without a time limit")
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+        ns = load_definitions(
+            "decode_audio",
+            assignments=("PHONE_MAX_AUDIO_SECONDS", "PHONE_DECODE_TIMEOUT"),
+            extra={"subprocess": SimpleNamespace(
+                run=run, TimeoutExpired=subprocess.TimeoutExpired),
+                   "SAMPLE_RATE": 16000, "np": np},
+        )
+        with self.assertRaises(subprocess.TimeoutExpired):
+            ns["decode_audio"]("/tmp/upload.audio")
+        command = seen["command"]
+        self.assertEqual(command[command.index("-t") + 1], "600")
+
+
+class _FakePasteboardItem:
+    def __init__(self):
+        self.data = {}
+
+    @classmethod
+    def alloc(cls):
+        return cls()
+
+    def init(self):
+        return self
+
+    def types(self):
+        return list(self.data)
+
+    def dataForType_(self, kind):
+        return self.data.get(kind)
+
+    def setData_forType_(self, data, kind):
+        self.data[kind] = data
+        return True
+
+    def setString_forType_(self, text, kind):
+        self.data[kind] = text
+        return True
+
+
+class _FakePasteboard:
+    """The parts of NSPasteboard the clipboard round-trip uses."""
+
+    def __init__(self, text=None):
+        self.items = []
+        self.change = 0
+        self.options = None
+        if text is not None:
+            self.user_copies(text)
+
+    def user_copies(self, text):
+        item = _FakePasteboardItem()
+        item.setString_forType_(text, "public.utf8-plain-text")
+        self.change += 1
+        self.items = [item]
+
+    def pasteboardItems(self):
+        return list(self.items)
+
+    def changeCount(self):
+        return self.change
+
+    def clearContents(self):
+        self.change += 1
+        self.items = []
+        self.options = None
+
+    def prepareForNewContentsWithOptions_(self, options):
+        self.clearContents()
+        self.options = options
+
+    def writeObjects_(self, objects):
+        self.items.extend(objects)
+        return True
+
+    def setString_forType_(self, text, kind):
+        item = _FakePasteboardItem()
+        item.setString_forType_(text, kind)
+        self.items = [item]
+        return True
+
+    def text(self):
+        return [item.data.get("public.utf8-plain-text")
+                for item in self.items]
+
+
+class _FakeTimer:
+    def __init__(self, delay, function):
+        self.function = function
+        self.cancelled = False
+        self.started = False
+
+    def start(self):
+        self.started = True
+
+    def cancel(self):
+        self.cancelled = True
+
+    def fire(self):
+        if not self.cancelled:
+            self.function()
+
+
+class _FakeKeyboard:
+    def __init__(self, pasted):
+        self.pasted = pasted
+
+    @contextlib.contextmanager
+    def pressed(self, _key):
+        yield
+
+    def press(self, key):
+        self.pasted.append(key)
+
+    def release(self, _key):
+        pass
+
+
+class ClipboardRoundTripTests(unittest.TestCase):
+    """Dictated text borrows the clipboard briefly and gives it back."""
+
+    NAMES = ("paste", "snapshot_pasteboard", "restore_pasteboard",
+             "write_private_pasteboard", "_begin_paste_burst",
+             "_finish_paste_burst", "snapshot_windows_clipboard",
+             "restore_windows_clipboard", "write_private_windows_clipboard")
+    ASSIGNMENTS = ("PASTEBOARD_MARKER_TYPES", "PASTEBOARD_CURRENT_HOST_ONLY",
+                   "WINDOWS_CLIPBOARD_EXCLUSIONS", "PASTE_RESTORE")
+
+    def mac(self, pasteboard):
+        timers = []
+        presses = []
+
+        def timer(delay, function):
+            timers.append(_FakeTimer(delay, function))
+            return timers[-1]
+
+        ns = load_definitions(
+            *self.NAMES, assignments=self.ASSIGNMENTS,
+            extra={
+                "IS_WINDOWS": False,
+                "NSPasteboard": SimpleNamespace(
+                    generalPasteboard=lambda: pasteboard),
+                "NSPasteboardItem": _FakePasteboardItem,
+                "NSPasteboardTypeString": "public.utf8-plain-text",
+                "NSData": SimpleNamespace(data=lambda: b""),
+                "kb": _FakeKeyboard(presses),
+                "keyboard": SimpleNamespace(
+                    Key=SimpleNamespace(cmd="cmd", ctrl="ctrl")),
+                "time": SimpleNamespace(sleep=lambda _s: None),
+                "threading": SimpleNamespace(
+                    Timer=timer, Lock=threading.Lock),
+            },
+        )
+        return ns, timers, presses
+
+    def test_dictated_text_is_marked_transient_concealed_and_local(self):
+        pasteboard = _FakePasteboard("tracking 1Z999AA10123456784")
+        ns, _, presses = self.mac(pasteboard)
+
+        ns["paste"]("Meet at the north entrance.")
+
+        self.assertEqual(presses, ["v"])
+        self.assertEqual(pasteboard.text(), ["Meet at the north entrance."])
+        kinds = set(pasteboard.items[0].types())
+        self.assertIn("org.nspasteboard.TransientType", kinds)
+        self.assertIn("org.nspasteboard.ConcealedType", kinds)
+        # NSPasteboardContentsCurrentHostOnly: not offered to other devices.
+        self.assertEqual(pasteboard.options, 1)
+
+    def test_back_to_back_pastes_restore_the_users_clipboard(self):
+        pasteboard = _FakePasteboard("tracking 1Z999AA10123456784")
+        ns, timers, _ = self.mac(pasteboard)
+
+        ns["paste"]("First dictation.")
+        ns["paste"]("Second dictation.")
+        for timer in timers:
+            timer.fire()
+
+        self.assertEqual(pasteboard.text(), ["tracking 1Z999AA10123456784"])
+
+    def test_an_empty_clipboard_is_left_empty_after_the_paste(self):
+        pasteboard = _FakePasteboard()
+        ns, timers, _ = self.mac(pasteboard)
+
+        ns["paste"]("My account number is in the notes.")
+        for timer in timers:
+            timer.fire()
+
+        self.assertEqual(pasteboard.items, [])
+
+    def test_a_clipboard_the_user_changed_since_is_left_alone(self):
+        pasteboard = _FakePasteboard("older")
+        ns, timers, _ = self.mac(pasteboard)
+
+        ns["paste"]("Dictated.")
+        pasteboard.user_copies("copied just now")
+        ns["paste"]("Dictated again.")
+        for timer in timers:
+            timer.fire()
+
+        self.assertEqual(pasteboard.text(), ["copied just now"])
+
+    def test_windows_text_is_excluded_from_history_and_cloud_and_restored(self):
+        CF_UNICODETEXT = 13
+        state = {"formats": {CF_UNICODETEXT: "user's own text"}}
+        registered = {}
+
+        class Clipboard:
+            CF_UNICODETEXT = 13
+
+            @staticmethod
+            def OpenClipboard():
+                pass
+
+            @staticmethod
+            def CloseClipboard():
+                pass
+
+            @staticmethod
+            def EmptyClipboard():
+                state["formats"] = {}
+
+            @staticmethod
+            def EnumClipboardFormats(previous):
+                keys = sorted(state["formats"])
+                later = [key for key in keys if key > previous]
+                return later[0] if later else 0
+
+            @staticmethod
+            def GetClipboardData(kind):
+                return state["formats"][kind]
+
+            @staticmethod
+            def SetClipboardData(kind, data):
+                state["formats"][kind] = data
+
+            @staticmethod
+            def SetClipboardText(text, kind):
+                state["formats"][kind] = text
+
+            @staticmethod
+            def RegisterClipboardFormat(name):
+                return registered.setdefault(name, 0xC000 + len(registered))
+
+        timers = []
+        ns = load_definitions(
+            *self.NAMES, assignments=self.ASSIGNMENTS,
+            extra={
+                "IS_WINDOWS": True,
+                "win32clipboard": Clipboard,
+                "pyperclip": SimpleNamespace(
+                    paste=lambda: state["formats"].get(CF_UNICODETEXT, ""),
+                    copy=lambda text: self.fail("pyperclip.copy was used")),
+                "kb": _FakeKeyboard([]),
+                "keyboard": SimpleNamespace(
+                    Key=SimpleNamespace(cmd="cmd", ctrl="ctrl")),
+                "time": SimpleNamespace(sleep=lambda _s: None),
+                "threading": SimpleNamespace(
+                    Timer=lambda delay, function: timers.append(
+                        _FakeTimer(delay, function)) or timers[-1],
+                    Lock=threading.Lock),
+            },
+        )
+
+        ns["paste"]("First dictation.")
+        during = dict(state["formats"])
+        ns["paste"]("Second dictation.")
+        for timer in timers:
+            timer.fire()
+
+        self.assertEqual(during[CF_UNICODETEXT], "First dictation.")
+        for name in ("ExcludeClipboardContentFromMonitorProcessing",
+                     "CanIncludeInClipboardHistory",
+                     "CanUploadToCloudClipboard"):
+            with self.subTest(name=name):
+                self.assertIn(registered[name], during)
+        self.assertEqual(
+            during[registered["CanIncludeInClipboardHistory"]],
+            b"\0\0\0\0")
+        self.assertEqual(state["formats"], {CF_UNICODETEXT: "user's own text"})
 
 
 class GuiLauncherActivationTests(unittest.TestCase):
@@ -1624,6 +2310,39 @@ class FakeStream:
         self.closed = True
 
 
+class FakePortAudio:
+    """sounddevice over PortAudio on macOS, reduced to the device table.
+
+    Pa_Initialize snapshots the default input; Pa_GetDefaultInputDevice only
+    reads that snapshot. Terminating with a stream open would free it under
+    its Python owner, so the fake refuses.
+    """
+
+    def __init__(self, default):
+        self.system_default = default
+        self.cached_default = default
+        self.streams = []
+        self.reinitializations = 0
+
+    def InputStream(self, **kwargs):
+        stream = FakeStream(**kwargs)
+        stream.device = self.cached_default
+        self.streams.append(stream)
+        return stream
+
+    def open_devices(self):
+        return [stream.device for stream in self.streams if not stream.closed]
+
+    def _terminate(self):
+        if self.open_devices():
+            raise AssertionError("PortAudio terminated with a stream open")
+        self.cached_default = None
+
+    def _initialize(self):
+        self.cached_default = self.system_default
+        self.reinitializations += 1
+
+
 class ParakeetClientTests(unittest.TestCase):
     def test_native_helper_protocol_keeps_audio_in_memory(self):
         class FakeProcess:
@@ -1663,6 +2382,7 @@ class ParakeetClientTests(unittest.TestCase):
                     "subprocess": subprocess,
                     "threading": threading,
                     "struct": struct,
+                    "time": time,
                     "json": json,
                     "np": np,
                     "PARAKEET_STARTUP_TIMEOUT": 10.0,
@@ -1829,6 +2549,7 @@ class ParakeetClientTests(unittest.TestCase):
                     "subprocess": subprocess,
                     "threading": threading,
                     "struct": struct,
+                    "time": time,
                     "np": np,
                     "PARAKEET_STARTUP_TIMEOUT": 10.0,
                     "PARAKEET_MIN_REQUEST_TIMEOUT": 3.0,
@@ -1849,6 +2570,136 @@ class ParakeetClientTests(unittest.TestCase):
         self.assertTrue(first_process.terminated)
         self.assertTrue(first_process.killed)
         self.assertEqual(first_process.wait_calls, 2)
+
+    @staticmethod
+    def client(directory, *, process_factory, exchange, clock=None,
+               printed=None):
+        helper = Path(directory) / "parrot-asr-helper"
+        helper.write_bytes(b"helper")
+        ns = load_definitions(
+            "ParakeetClient",
+            extra={
+                "PARAKEET_HELPER": helper,
+                "PARAKEET_ENABLED": True,
+                "Path": Path,
+                "subprocess": subprocess,
+                "threading": threading,
+                "struct": struct,
+                "time": time,
+                "np": np,
+                "PARAKEET_STARTUP_TIMEOUT": 10.0,
+                "PARAKEET_MIN_REQUEST_TIMEOUT": 3.0,
+                "PARAKEET_MAX_REQUEST_TIMEOUT": 10.0,
+                "PARAKEET_PROFILE": PARAKEET_PROFILE,
+                "mark_model_warm_path_observed": lambda _provider: True,
+                "print": lambda *args, **_kwargs: (
+                    printed.append(" ".join(str(arg) for arg in args))
+                    if printed is not None else None),
+            },
+        )
+        return ns["ParakeetClient"](
+            helper=helper, process_factory=process_factory,
+            exchange=exchange, clock=clock)
+
+    def test_helper_that_cannot_be_spawned_falls_back_to_whisper(self):
+        # A zero-byte or non-executable helper file exists, so the route is
+        # taken, and the spawn itself is what fails.
+        for error in (PermissionError(13, "Permission denied"),
+                      OSError(8, "Exec format error")):
+            with self.subTest(error=type(error).__name__), \
+                    tempfile.TemporaryDirectory() as directory:
+                printed = []
+
+                def refuse(*_args, _error=error, **_kwargs):
+                    raise _error
+
+                client = self.client(
+                    directory, process_factory=refuse,
+                    exchange=lambda *_args, **_kwargs: self.fail(
+                        "no process to talk to"),
+                    printed=printed)
+                audio = np.ones(160, dtype=np.float32)
+                self.assertIsNone(client.transcribe(audio))
+
+                recognition, decodes = ParakeetCrosscheckTests.cascade(
+                    parakeet=client,
+                    scripted={"tiny-repo": ("Ship the installer today.", 0.9)},
+                    cached={"tiny-repo"})
+                self.assertEqual(recognition.text, "Ship the installer today.")
+                self.assertEqual(recognition.engine, "tiny")
+                self.assertEqual(len(printed), 1)
+
+    def test_failed_start_is_remembered_and_retried_after_a_backoff(self):
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = io.BytesIO()
+                self.stdout = io.BytesIO()
+                self.alive = True
+
+            def poll(self):
+                return None if self.alive else 1
+
+            def terminate(self):
+                self.alive = False
+
+            def wait(self, timeout=None):
+                return 0
+
+        now = [1_000.0]
+        spawned = []
+        ready = [False]
+        printed = []
+
+        def factory(*_args, **_kwargs):
+            spawned.append(FakeProcess())
+            return spawned[-1]
+
+        def exchange(_process, chunks, *, timeout):
+            if not chunks:
+                if not ready[0]:
+                    raise TimeoutError("helper response timed out")
+                return {"ready": True, "load_s": 12.25}
+            return {"ok": True, "text": "hello", "processing_s": 0.02}
+
+        audio = np.ones(160, dtype=np.float32)
+        with tempfile.TemporaryDirectory() as directory:
+            client = self.client(
+                directory, process_factory=factory, exchange=exchange,
+                clock=lambda: now[0], printed=printed)
+
+            # One slow start costs one start-up timeout, not one per decode.
+            for _decode in range(4):
+                self.assertIsNone(client.transcribe(audio))
+            self.assertEqual(len(spawned), 1)
+            self.assertFalse(spawned[0].alive)
+
+            now[0] += 29.0
+            self.assertIsNone(client.transcribe(audio))
+            self.assertEqual(len(spawned), 1)
+            now[0] += 2.0
+            self.assertIsNone(client.transcribe(audio))
+            self.assertEqual(len(spawned), 2)
+
+            # A second failure in a row waits twice as long.
+            now[0] += 59.0
+            self.assertIsNone(client.transcribe(audio))
+            self.assertEqual(len(spawned), 2)
+            now[0] += 2.0
+            ready[0] = True
+            self.assertEqual(client.transcribe(audio), ("hello", 0.02))
+            self.assertEqual(len(spawned), 3)
+
+            # A helper that started and later died is restarted at once: the
+            # backoff is for starts that fail, and a success clears it.
+            spawned[-1].alive = False
+            self.assertEqual(client.transcribe(audio), ("hello", 0.02))
+            self.assertEqual(len(spawned), 4)
+
+        failures = [line for line in printed if "did not start" in line]
+        self.assertEqual(len(failures), 2)
+        for line in failures:
+            self.assertNotIn(directory, line)
+            self.assertNotIn("timed out", line)
 
     def test_parakeet_processing_time_reaches_recognition_evidence(self):
         class ImmediatePool:
@@ -1950,6 +2801,7 @@ class FacePreferenceTests(unittest.TestCase):
                 "undo_hotkey": "",
                 "sounds": "system",
                 "recent_dictations": False,
+                "self_correction": False,
                 "language": "en",
             })
 
@@ -2000,6 +2852,75 @@ class FacePreferenceTests(unittest.TestCase):
             self.assertEqual(ns["PREFERENCES"]["undo_hotkey"], "")
             self.assertEqual(ns["PREFERENCES"]["sounds"], "system")
             self.assertFalse(ns["PREFERENCES"]["recent_dictations"])
+
+    def test_self_correction_is_off_unless_the_file_says_true(self):
+        with tempfile.TemporaryDirectory() as directory:
+            preferences = Path(directory) / "preferences.json"
+            ns = load_definitions(
+                "normalize_face", "current_face", "load_preferences",
+                "save_preferences", "normalize_hotkey",
+                "normalize_sound_theme", "set_self_correction",
+                "quick_clean", "needs_llm_cleanup", "phone_clean",
+                "collapse_repeats", "extract_tone_override",
+                assignments={
+                    "FACE_CHOICES", "DEFAULT_FACE", "PREFERENCES",
+                    "HOTKEY_CHOICES", "HOTKEY_DEFAULT",
+                    "SOUND_THEMES", "SOUND_THEME_DEFAULT",
+                    "TONE", "TONE_OVERRIDE_RE", "TONE_ALIASES",
+                },
+                extra={
+                    "PREFERENCES_FILE": preferences,
+                    "IS_MACOS": True,
+                    "ACOUSTIC_TIME_MACHINE": AcousticTimeMachine(),
+                    "json": json,
+                    "apply_hotkey_bindings": lambda: None,
+                    "atomic_write_text": lambda path, value:
+                        path.write_text(value, encoding="utf-8"),
+                    "compile_cleanup": compile_cleanup,
+                    "NUMBER_WORDS": NUMBER_WORDS,
+                    "is_hallucination": lambda *_args: False,
+                    "looks_like_prompt_echo": lambda _raw: False,
+                    "apply_learned_fixes": lambda raw: raw,
+                    "apply_vocabulary_casing": lambda text: text,
+                },
+            )
+            spoken = "I thought it was Tuesday, actually Wednesday."
+            self.assertFalse(ns["PREFERENCES"]["self_correction"])
+            # An install from before the key existed, and every value that
+            # is not the JSON literal true.
+            for stored in ({}, {"self_correction": "true"},
+                           {"self_correction": 1},
+                           {"self_correction": None},
+                           {"self_correction": False}):
+                with self.subTest(stored=stored):
+                    ns["PREFERENCES"]["self_correction"] = True
+                    preferences.write_text(
+                        json.dumps(stored), encoding="utf-8")
+                    ns["load_preferences"]()
+                    self.assertIs(
+                        ns["PREFERENCES"]["self_correction"], False)
+                    self.assertEqual(ns["quick_clean"](spoken), spoken)
+                    self.assertEqual(ns["phone_clean"](spoken), spoken)
+
+            self.assertIs(ns["set_self_correction"](True), True)
+            self.assertIs(json.loads(preferences.read_text(
+                encoding="utf-8"))["self_correction"], True)
+            self.assertEqual(
+                ns["quick_clean"](spoken), "I thought it was Wednesday.")
+            self.assertEqual(
+                ns["quick_clean"]("Let's meet Tuesday, actually Wednesday"),
+                "Let's meet Wednesday.")
+            self.assertEqual(
+                ns["phone_clean"](spoken), "I thought it was Wednesday.")
+            ns["PREFERENCES"]["self_correction"] = False
+            ns["load_preferences"]()
+            self.assertIs(ns["PREFERENCES"]["self_correction"], True)
+
+            self.assertIs(ns["set_self_correction"](False), False)
+            self.assertIs(json.loads(preferences.read_text(
+                encoding="utf-8"))["self_correction"], False)
+            self.assertEqual(ns["quick_clean"](spoken), spoken)
+            self.assertEqual(ns["phone_clean"](spoken), spoken)
 
     def test_privacy_preferences_are_mac_only_and_default_off(self):
         for is_macos, acoustic, voice_objects, expected in (
@@ -2802,6 +3723,132 @@ class AudioPoolTests(unittest.TestCase):
         self.assertEqual(len(streams), 2)
         pool.release(slot)
 
+    def recorder_namespace(self, factory, clock):
+        ns = load_definitions(
+            "AudioSlot", "AudioPool", "CapturedAudio", "Recorder",
+            "stalled_take_action",
+            assignments={"SAMPLE_RATE", "CAPTURE_BLOCK_SECONDS",
+                         "NO_AUDIO_SECONDS", "CHUNK_MIN_SECONDS",
+                         "CHUNK_CUT_SILENCE", "SPECULATIVE_MIN_SECONDS",
+                         "SPECULATIVE_SILENCE"},
+            extra={
+                "np": np,
+                "LEVELS": [],
+                "calibrated_vad_threshold": lambda: 0.008,
+                "should_start_speculation": should_start_speculation,
+                "can_reuse_speculation": can_reuse_speculation,
+                "time": SimpleNamespace(
+                    perf_counter=lambda: clock["now"],
+                    time_ns=time.time_ns),
+                "ContextPack": SimpleNamespace,
+                "FLIGHT": SimpleNamespace(attach=lambda _recorder: False),
+                "print": lambda *_args: None,
+            },
+        )
+        ns["AUDIO_POOL"] = ns["AudioPool"](size=1, stream_factory=factory)
+        ns["AUDIO_POOL"].warm()
+        return ns
+
+    def test_a_stream_that_delivers_nothing_is_detected_and_replaced(self):
+        streams = []
+        clock = {"now": 100.0}
+
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        ns = self.recorder_namespace(factory, clock)
+        pool = ns["AUDIO_POOL"]
+        recorder = ns["Recorder"]()
+        recorder.start(100.0)
+        dead = streams[0]
+
+        clock["now"] = 100.0 + ns["NO_AUDIO_SECONDS"] - 0.01
+        self.assertIsNone(ns["stalled_take_action"](recorder, clock["now"]))
+        clock["now"] = 100.0 + ns["NO_AUDIO_SECONDS"]
+        self.assertEqual(
+            ns["stalled_take_action"](recorder, clock["now"]), "abandon")
+
+        self.assertEqual(len(recorder.stop()), 0)
+
+        # The silent stream is never handed to the next take.
+        self.assertTrue(dead.closed)
+        self.assertTrue(pool.wait_for_recovery())
+        replacement = ns["Recorder"]()
+        replacement.start(clock["now"])
+        self.assertIsNot(replacement.slot.stream, dead)
+        replacement.stop()
+
+    def test_a_stream_that_stops_mid_take_keeps_its_audio_and_is_replaced(self):
+        # The microphone is unplugged, or its Bluetooth link drops, after
+        # the speaker has started: callbacks simply stop.
+        streams = []
+        clock = {"now": 100.0}
+
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        ns = self.recorder_namespace(factory, clock)
+        pool = ns["AUDIO_POOL"]
+        recorder = ns["Recorder"]()
+        recorder.start(100.0)
+        dead = streams[0]
+        for _ in range(50):
+            clock["now"] += 0.01
+            dead.callback(
+                np.full((160, 1), 0.02, dtype=np.float32), 160, None, None)
+        stalled_at = clock["now"]
+
+        clock["now"] = stalled_at + ns["NO_AUDIO_SECONDS"] - 0.01
+        self.assertIsNone(ns["stalled_take_action"](recorder, clock["now"]))
+        clock["now"] = stalled_at + ns["NO_AUDIO_SECONDS"]
+        # Speech was heard, so the take finishes rather than being dropped.
+        self.assertEqual(
+            ns["stalled_take_action"](recorder, clock["now"]), "finish")
+
+        self.assertEqual(len(recorder.stop()), 8_000)
+        self.assertTrue(dead.closed)
+        self.assertTrue(pool.wait_for_recovery())
+        replacement = ns["Recorder"]()
+        replacement.start(clock["now"])
+        self.assertIsNot(replacement.slot.stream, dead)
+        replacement.stop()
+
+    def test_a_stream_that_delivers_audio_is_kept(self):
+        streams = []
+        clock = {"now": 100.0}
+
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        ns = self.recorder_namespace(factory, clock)
+        pool = ns["AUDIO_POOL"]
+        recorder = ns["Recorder"]()
+        recorder.start(100.0)
+        # Ten seconds of 0.1 s blocks, as a live stream delivers them.
+        for _ in range(100):
+            clock["now"] += 0.1
+            streams[0].callback(
+                np.full((1600, 1), 0.01, dtype=np.float32), 1600, None, None)
+            self.assertIsNone(
+                ns["stalled_take_action"](recorder, clock["now"]))
+
+        self.assertEqual(len(recorder.stop()), 160_000)
+        self.assertEqual(pool.readiness(), "Ready")
+        self.assertFalse(streams[0].closed)
+        # Too short to judge: a quick tap that heard nothing is not a fault.
+        tap = ns["Recorder"]()
+        tap.start(110.0)
+        clock["now"] = 110.3
+        tap.stop()
+        self.assertEqual(pool.readiness(), "Ready")
+        self.assertEqual(len(streams), 1)
+
     def test_stop_failure_never_reuses_slot_and_preserves_other_active_take(self):
         class FailingStopStream(FakeStream):
             def __init__(self, **kwargs):
@@ -2910,21 +3957,230 @@ class MacAudioRecoveryNotificationTests(unittest.TestCase):
         def removeObserver_(self, token):
             self.removed.append(token)
 
-    def test_runtime_invalidation_covers_pool_and_flight_recorder(self):
-        calls = []
+    @staticmethod
+    def device_namespace(portaudio, requests=None, *, flight=True):
+        """The production pool, Flight Recorder and recovery entry point."""
         ns = load_definitions(
+            "AudioSlot", "AudioPool", "FlightRecorder",
             "_invalidate_default_audio_inputs",
+            "refresh_default_audio_inputs", "_reinitialize_portaudio",
+            assignments={"SAMPLE_RATE", "FLIGHT_BUFFER_SECONDS"},
             extra={
-                "AUDIO_POOL": SimpleNamespace(
-                    recover_default_device=lambda: calls.append("pool")),
-                "FLIGHT": SimpleNamespace(
-                    invalidate=lambda: calls.append("flight")),
+                "sd": portaudio,
+                "deque": __import__("collections").deque,
+                "np": np,
+                "time": time,
             },
         )
+        hook = None if requests is None else (
+            lambda: requests.append("refresh") or True)
+        ns["AUDIO_POOL"] = ns["AudioPool"](size=2, request_refresh=hook)
+        # restore_allowed stands in for the stored Flight Recorder opt-in.
+        ns["FLIGHT"] = ns["FlightRecorder"](
+            restore_allowed=lambda: flight, request_refresh=hook)
+        return ns
 
+    def test_a_default_input_change_rebinds_every_stream(self):
+        portaudio = FakePortAudio("built-in")
+        ns = self.device_namespace(portaudio)
+        ns["AUDIO_POOL"].warm()
+        ns["FLIGHT"].enable()
+        self.assertEqual(portaudio.open_devices(), ["built-in"] * 3)
+
+        portaudio.system_default = "usb"
         ns["_invalidate_default_audio_inputs"]()
 
-        self.assertEqual(calls, ["pool", "flight"])
+        self.assertEqual(portaudio.open_devices(), ["usb"] * 3)
+        self.assertEqual(ns["AUDIO_POOL"].readiness(), "Ready")
+        self.assertTrue(ns["FLIGHT"].is_enabled())
+        self.assertEqual(portaudio.reinitializations, 1)
+
+    def test_a_removed_launch_device_does_not_leave_dictation_dead(self):
+        # Launched on AirPods; they go back in the case and the built-in
+        # microphone becomes the default. Opening the vanished device fails.
+        portaudio = FakePortAudio("airpods")
+        opened = portaudio.InputStream
+
+        def open_existing(**kwargs):
+            if portaudio.cached_default == "airpods" and (
+                    portaudio.system_default != "airpods"):
+                raise RuntimeError("private device detail")
+            return opened(**kwargs)
+
+        portaudio.InputStream = open_existing
+        ns = self.device_namespace(portaudio, flight=False)
+        ns["AUDIO_POOL"].warm()
+
+        portaudio.system_default = "built-in"
+        ns["_invalidate_default_audio_inputs"]()
+
+        self.assertEqual(ns["AUDIO_POOL"].readiness(), "Ready")
+        slot = ns["AUDIO_POOL"].acquire(
+            SimpleNamespace(_callback=lambda *_args: None))
+        self.assertEqual(slot.stream.device, "built-in")
+        ns["AUDIO_POOL"].release(slot)
+
+    def test_a_live_pool_take_defers_the_refresh_to_its_release(self):
+        portaudio = FakePortAudio("built-in")
+        requests = []
+        ns = self.device_namespace(portaudio, requests, flight=False)
+        pool = ns["AUDIO_POOL"]
+        slot = pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+
+        portaudio.system_default = "usb"
+        ns["_invalidate_default_audio_inputs"]()
+
+        # The take keeps recording on its stream; nothing was terminated.
+        self.assertFalse(slot.stream.closed)
+        self.assertEqual(portaudio.reinitializations, 0)
+        self.assertTrue(pool.recovery_pending)
+
+        pool.release(slot)
+        self.assertEqual(requests, ["refresh"])
+        self.assertEqual(portaudio.open_devices(), [])
+        ns["_invalidate_default_audio_inputs"]()
+
+        self.assertEqual(portaudio.open_devices(), ["usb", "usb"])
+        self.assertEqual(portaudio.reinitializations, 1)
+
+    def test_a_refresh_never_terminates_while_a_release_is_closing(self):
+        # PortAudio is not thread-safe and Pa_Terminate closes every open
+        # stream itself, so a terminate that overlaps a close on another
+        # thread disposes the same stream twice.
+        closing = threading.Event()
+        finish_close = threading.Event()
+        overlaps = []
+
+        class SlowClosePortAudio(FakePortAudio):
+            def InputStream(self, **kwargs):
+                stream = super().InputStream(**kwargs)
+                close = stream.close
+
+                def slow_close():
+                    closing.set()
+                    finish_close.wait(2.0)
+                    close()
+                stream.close = slow_close
+                return stream
+
+            def _terminate(self):
+                if closing.is_set() and not finish_close.is_set():
+                    overlaps.append("terminate during close")
+                super()._terminate()
+
+        portaudio = SlowClosePortAudio("built-in")
+        requests = []
+        ns = self.device_namespace(portaudio, requests, flight=False)
+        pool = ns["AUDIO_POOL"]
+        slot = pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+        portaudio.system_default = "usb"
+        ns["_invalidate_default_audio_inputs"]()      # deferred: take is live
+
+        releaser = threading.Thread(target=pool.release, args=(slot,))
+        releaser.start()
+        self.assertTrue(closing.wait(2.0))
+        # A second default-input notification, or a wake, lands mid-close.
+        refresher = threading.Thread(
+            target=ns["_invalidate_default_audio_inputs"])
+        refresher.start()
+        refresher.join(0.2)
+        finish_close.set()
+        releaser.join(2.0)
+        refresher.join(2.0)
+
+        self.assertEqual(overlaps, [])
+        self.assertEqual(portaudio.open_devices(), ["usb", "usb"])
+        self.assertEqual(portaudio.reinitializations, 1)
+
+    def test_a_failed_reinitialization_is_retried_after_a_keypress(self):
+        class FlakyPortAudio(FakePortAudio):
+            initialized = True
+            failures = 1
+
+            def InputStream(self, **kwargs):
+                if not self.initialized:
+                    raise RuntimeError("PortAudio not initialized")
+                return super().InputStream(**kwargs)
+
+            def _terminate(self):
+                super()._terminate()
+                self.initialized = False
+
+            def _initialize(self):
+                if self.failures:
+                    self.failures -= 1
+                    raise RuntimeError("Error initializing PortAudio")
+                super()._initialize()
+                self.initialized = True
+
+        portaudio = FlakyPortAudio("built-in")
+        requests = []
+        ns = self.device_namespace(portaudio, requests, flight=False)
+        pool = ns["AUDIO_POOL"]
+        pool.warm()
+        portaudio.system_default = "usb"
+        ns["_invalidate_default_audio_inputs"]()
+        self.assertEqual(pool.readiness(), "Unavailable")
+
+        # The keypress cannot open anything, so it asks the recovery worker
+        # to initialize PortAudio again.
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+        self.assertEqual(requests, ["refresh"])
+        ns["_invalidate_default_audio_inputs"]()
+
+        self.assertEqual(pool.readiness(), "Ready")
+        slot = pool.acquire(SimpleNamespace(_callback=lambda *_args: None))
+        self.assertEqual(slot.stream.device, "usb")
+        pool.release(slot)
+
+    def test_a_live_flight_take_defers_the_refresh_to_its_detach(self):
+        portaudio = FakePortAudio("built-in")
+        requests = []
+        ns = self.device_namespace(portaudio, requests)
+        flight = ns["FLIGHT"]
+        flight.enable()
+        recorder = SimpleNamespace(_callback=lambda *_args: None)
+        self.assertTrue(flight.attach(recorder))
+
+        portaudio.system_default = "usb"
+        ns["_invalidate_default_audio_inputs"]()
+        self.assertEqual(portaudio.reinitializations, 0)
+        # The idle pool reopens at once, still on the launch-time table.
+        self.assertEqual(portaudio.open_devices(), ["built-in"] * 3)
+
+        flight.detach(recorder)
+        # Detach hands the refresh to the recovery worker instead of
+        # reopening on PortAudio's stale table.
+        self.assertEqual(requests, ["refresh"])
+        ns["_invalidate_default_audio_inputs"]()
+
+        self.assertEqual(portaudio.open_devices(), ["usb"] * 3)
+        self.assertEqual(portaudio.reinitializations, 1)
+        self.assertTrue(flight.is_enabled())
+
+    def test_refresh_requests_reach_only_a_running_recovery_worker(self):
+        ns = load_definitions(
+            "MacAudioRecoveryNotifications",
+            extra={"IS_MACOS": True, "threading": threading, "time": time},
+        )
+        refreshes = []
+        recovery = ns["MacAudioRecoveryNotifications"](
+            lambda: refreshes.append(True),
+            core_audio=self.CoreAudio(),
+            workspace_center=self.WorkspaceCenter(),
+            wake_name="wake",
+        )
+        # Not started: the caller reopens locally rather than waiting on a
+        # worker that does not exist.
+        self.assertFalse(recovery.request())
+
+        recovery.start()
+        self.assertTrue(recovery.request())
+        self.assertTrue(recovery.wait_for_idle())
+        self.assertEqual(refreshes, [True])
+        recovery.close()
+        self.assertFalse(recovery.request())
 
     def test_default_device_and_wake_events_are_content_free_and_coalesced(self):
         core = self.CoreAudio()
@@ -3552,13 +4808,268 @@ class FlightRecorderTests(unittest.TestCase):
 
 
 class CleanupGuardTests(unittest.TestCase):
+    HALLUCINATION_GUARD = {
+        "HALLUCINATIONS", "WHISPER_ENGINES", "LOW_CONFIDENCE",
+        "HALLUCINATION_SECONDS_PER_WORD",
+    }
+
     def test_hallucinations_ignore_terminal_punctuation(self):
-        ns = load_definitions("is_hallucination", assignments={"HALLUCINATIONS"})
+        ns = load_definitions(
+            "is_hallucination", "weak_whisper_evidence",
+            assignments=self.HALLUCINATION_GUARD)
         guard = ns["is_hallucination"]
-        for text in ("!", ".", "Thank you!", "THANK YOU...", "Bye?"):
+        weak = Recognition(
+            "", confidence=0.31, engine="tiny", audio_duration=1.4)
+        for text in ("Thank you!", "THANK YOU...", "Bye?", "you"):
+            with self.subTest(text=text):
+                self.assertTrue(guard(text, "en", weak))
+        # Output with no words in it is nothing, whoever produced it.
+        for text in ("!", ".", "  ...  "):
             with self.subTest(text=text):
                 self.assertTrue(guard(text))
-        self.assertFalse(guard("This is real speech!"))
+                self.assertTrue(guard(text, "en", Recognition(
+                    text, confidence=0.93, engine="parakeet-unified")))
+        self.assertFalse(guard("This is real speech!", "en", weak))
+
+    def test_silent_audio_phrases_need_a_weak_whisper_decode(self):
+        ns = load_definitions(
+            "is_hallucination", "weak_whisper_evidence",
+            assignments=self.HALLUCINATION_GUARD)
+        guard = ns["is_hallucination"]
+        kept = (
+            # Parakeet never produces Whisper's silent-audio artifacts, at
+            # any confidence its cross-check can assign.
+            Recognition("Thank you.", confidence=0.93,
+                        engine="parakeet-unified", audio_duration=1.2),
+            Recognition("Thank you.", confidence=0.45,
+                        engine="parakeet-unified", audio_duration=9.0),
+            Recognition("Bye!", confidence=0.69,
+                        engine="parakeet-unified", audio_duration=0.8),
+            # A confident Whisper decode of a clip the phrase fills.
+            Recognition("Thank you.", confidence=0.84, engine="tiny",
+                        audio_duration=1.3),
+            Recognition("Bye.", confidence=0.77, engine="turbo",
+                        audio_duration=0.9),
+            # No engine named: nothing says this was Whisper.
+            Recognition("Thank you.", confidence=0.2, audio_duration=8.0),
+        )
+        for recognition in kept:
+            with self.subTest(recognition=recognition):
+                self.assertFalse(guard(recognition.text, "en", recognition))
+        # With no evidence at all the phrase is the speaker's.
+        self.assertFalse(guard("Thank you."))
+        dropped = (
+            # Low confidence.
+            Recognition("Thank you.", confidence=0.38, engine="tiny",
+                        audio_duration=1.3),
+            Recognition("You", confidence=0.5, engine="turbo",
+                        audio_duration=0.7),
+            # Two words decoded out of seven seconds of audio.
+            Recognition("Thank you.", confidence=0.84, engine="tiny",
+                        audio_duration=7.0),
+            Recognition("Thanks for watching!", confidence=0.9,
+                        engine="tiny+turbo", audio_duration=12.0),
+        )
+        for recognition in dropped:
+            with self.subTest(recognition=recognition):
+                self.assertTrue(guard(recognition.text, "en", recognition))
+
+    def test_repeat_collapse_keeps_digits_number_words_and_letters(self):
+        ns = load_definitions(
+            "collapse_repeats", extra={"NUMBER_WORDS": NUMBER_WORDS})
+        for spoken in (
+            "the zip is 1 0 0 0 1",
+            "The zip is 1, 0, 0, 0, 1.",
+            "my number is five five five one two one two",
+            "Dial 555 555 555 and wait.",
+            "w w w dot example dot com",
+            "The grade was A A A plus.",
+            "The code is " + "7 " * 12 + "and then pound.",
+            "Type " + "five " * 9 + "and stop.",
+            "Press " + "x " * 10 + "to clear it.",
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(
+                    ns["collapse_repeats"](spoken), (spoken, False))
+
+    def test_repeat_collapse_keeps_a_word_said_a_few_times(self):
+        ns = load_definitions(
+            "collapse_repeats", extra={"NUMBER_WORDS": NUMBER_WORDS})
+        for spoken in (
+            # As the real recognizer wrote them.
+            "That was very, very, very good",
+            "no, no, that's wrong.",
+            "really really good work.",
+            "It was a long, long time ago.",
+            # Emphasis, with and without the commas a pause leaves.
+            "No, no, no, that's wrong.",
+            "Really really really good work.",
+            "No no no no, stop.",
+            "No, no, no, no, no. Stop.",
+            "Blah blah blah, he kept talking.",
+            "Ha ha ha ha ha ha ha, very funny.",
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(ns["collapse_repeats"](spoken)[0], spoken)
+
+    def test_repeat_collapse_still_removes_a_decode_loop(self):
+        ns = load_definitions(
+            "collapse_repeats", extra={"NUMBER_WORDS": NUMBER_WORDS})
+        collapse = ns["collapse_repeats"]
+        self.assertEqual(
+            collapse("Restart " + "Unraid " * 40 + "tonight."),
+            ("Restart Unraid Unraid tonight.", True))
+        # A loop on a glossary term echoes the prompt's commas. The cut
+        # keeps the run's own last mark.
+        self.assertEqual(
+            collapse("Common terms: " + "Unraid, " * 30 + "Unraid."),
+            ("Common terms: Unraid, Unraid.", True))
+        self.assertEqual(
+            collapse("Very, very, very, very, very, very, very, very good."),
+            ("Very, very good.", True))
+        self.assertEqual(
+            collapse("Ha ha ha ha ha ha ha ha, very funny."),
+            ("Ha ha, very funny.", True))
+        # Seven is still a person; eight is a decoder.
+        seven = "Okay " * 7 + "then."
+        self.assertEqual(collapse(seven)[0], seven)
+        self.assertEqual(
+            collapse("Okay " * 8 + "then."), ("Okay Okay then.", True))
+        self.assertEqual(
+            collapse("No no, that is wrong."),
+            ("No no, that is wrong.", False))
+
+    def test_a_short_repeat_is_kept_and_still_reported_as_a_loop(self):
+        # The flag is what the glossary-echo guard keys on, so it follows
+        # the repetition and not what was cut: a run of three or more that
+        # makes up 40% of the words, as before the run was kept whole.
+        ns = load_definitions(
+            "collapse_repeats", extra={"NUMBER_WORDS": NUMBER_WORDS})
+        collapse = ns["collapse_repeats"]
+        for spoken, looped in (
+            ("Unraid, Unraid, Unraid, Unraid.", True),
+            ("Unraid Unraid Unraid Unraid Unraid Unraid Unraid", True),
+            ("Okay " * 7 + "then.", True),
+            ("No, no, no, no, no. Stop.", True),
+            # Three of one word alone were never enough.
+            ("Unraid, Unraid, Unraid.", False),
+            ("Unraid, Proxmox.", False),
+            # Emphasis inside a sentence, as the real recognizer wrote it.
+            ("That was very, very, very good", False),
+            ("No, no, no, that's wrong.", False),
+            ("Really really really good work.", False),
+            ("Blah blah blah, he kept talking.", False),
+            # Numbers and letters repeat in speech and never count.
+            ("5 5 5 5 5 5", False),
+            ("five five five five five", False),
+            ("w w w w", False),
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(collapse(spoken), (spoken, looped))
+
+    def test_a_short_glossary_echo_is_dropped_on_the_phone_path(self):
+        # Whisper decoding near-silence reads the glossary prompt back,
+        # often as one term a few times over.
+        ns = load_definitions(
+            "collapse_repeats", "looks_like_prompt_echo", "phone_clean",
+            "quick_clean", "needs_llm_cleanup", "extract_tone_override",
+            assignments={"TONE", "TONE_OVERRIDE_RE", "TONE_ALIASES"},
+            extra={
+                "GLOSS": {"lock": threading.Lock(),
+                          "terms": ["Unraid", "Proxmox"]},
+                "compile_cleanup": compile_cleanup,
+                "NUMBER_WORDS": NUMBER_WORDS,
+                "is_hallucination": lambda *_args: False,
+                "apply_learned_fixes": lambda raw: raw,
+                "apply_vocabulary_casing": lambda text: text,
+            },
+        )
+        clean = ns["phone_clean"]
+        for echoed in (
+            "Unraid, Unraid, Unraid, Unraid.",
+            "Unraid Unraid Unraid Unraid Unraid Unraid Unraid",
+            "Unraid, " * 30 + "Unraid.",
+        ):
+            with self.subTest(echoed=echoed):
+                self.assertEqual(clean(echoed), "")
+        # The same terms in a sentence, and emphasis that is not a
+        # glossary term, are speech.
+        for spoken in (
+            "Move Unraid to Proxmox tonight.",
+            "Unraid, Proxmox.",
+            "That was very, very, very good.",
+            "No no no no, don't send that.",
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(clean(spoken), spoken)
+
+    def test_spoken_tone_override_needs_the_tone_keyword(self):
+        ns = load_definitions(
+            "extract_tone_override",
+            assignments={"TONE_OVERRIDE_RE", "TONE_ALIASES"})
+        extract = ns["extract_tone_override"]
+        for spoken, expected in (
+            ("Formal tone, please confirm the meeting.",
+             ("please confirm the meeting.", "formal")),
+            ("Casual style: see you at six.", ("see you at six.", "casual")),
+            ("Verbatim mode. Keep every word.",
+             ("Keep every word.", "verbatim")),
+            ("technical tone, restart the worker",
+             ("restart the worker", "code")),
+            ("Neutral tone, send the summary.",
+             ("send the summary.", "default")),
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(extract(spoken), expected)
+        # A sentence that merely opens with one of the tone words keeps it.
+        for spoken in (
+            "Code, tests, and docs are all updated.",
+            "Code: 4471 opens the side gate.",
+            "Casual, but not sloppy.",
+            "Technical, legal, and financial review is done.",
+            "Neutral. That is my position.",
+            "Verbatim: keep every word.",
+            "Formal education is expensive.",
+            "Formal tone.",
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(extract(spoken), (spoken, None))
+
+    def test_context_echo_is_stripped_only_as_whole_words(self):
+        strip = load_definitions("strip_context_echo")["strip_context_echo"]
+        # The field's short text is also the start of the next word.
+        for field, text in (
+            ("to", "Tomorrow works for me"),
+            ("ok", "Okay, see you then"),
+            ("no", "Nobody told me"),
+            ("I", "It works now"),
+            ("a", "Another thing"),
+            ("I", "I'm on my way"),
+            ("re", "re-send the invoice"),
+        ):
+            with self.subTest(field=field, text=text):
+                self.assertEqual(strip(text, field), text)
+        # Repeating the field is not an echo when nothing follows it.
+        self.assertEqual(strip("Ok.", "ok"), "Ok.")
+        # A real echo of the field's tail, followed by the new words.
+        self.assertEqual(
+            strip("see you at six thirty", "see you at"), "six thirty")
+        self.assertEqual(
+            strip("See you at, six thirty", "see you at"), ", six thirty")
+        long_field = (
+            "Thanks for the update on the quarterly migration plan and")
+        self.assertEqual(
+            long_field[-40:], "date on the quarterly migration plan and")
+        self.assertEqual(
+            strip("on the quarterly migration plan and the budget",
+                  long_field),
+            "the budget")
+        # The 40-character window opens inside "update". "date" is a word,
+        # but the field never said it.
+        dated = "date on the quarterly migration plan and the budget"
+        self.assertEqual(strip(dated, long_field), dated)
+        self.assertEqual(strip("six thirty", "see you at"), "six thirty")
+        self.assertEqual(strip("six thirty", ""), "six thirty")
 
     def test_simple_fillers_stay_on_the_fast_path(self):
         ns = load_definitions(
@@ -3573,6 +5084,11 @@ class CleanupGuardTests(unittest.TestCase):
         self.assertEqual(ns["quick_clean"]("already punctuated,"),
                          "Already punctuated.")
         self.assertEqual(ns["quick_clean"]("Two things:"), "Two things:")
+        # A filler on its own leaves nothing to paste, not its period.
+        self.assertEqual(ns["quick_clean"]("Um."), "")
+        self.assertEqual(
+            ns["quick_clean"]("I studied at UM for four years"),
+            "I studied at UM for four years.")
         self.assertEqual(
             ns["quick_clean"]("I, um, think this is ready"),
             "I think this is ready.",
@@ -3758,6 +5274,66 @@ class CleanupGuardTests(unittest.TestCase):
         self.assertFalse(any("second private dictation" in line
                              for line in lines))
 
+    def test_a_rewrite_that_did_not_happen_returns_nothing_to_insert(self):
+        # Capture can fall back to the dictation. In compose, reply and
+        # edit the dictation is an instruction, and neither it nor the
+        # selection it is about is a rewrite.
+        def not_installed(*_args, **_kwargs):
+            raise RuntimeError("the cleanup model is not installed")
+
+        def refusing(*_args, **_kwargs):
+            return json.dumps({
+                "text": "I cannot help with that.", "edits": [],
+            }), "stop"
+
+        def truncated(*_args, **_kwargs):
+            return json.dumps({"text": "Dear", "edits": []}), "length"
+
+        open_breaker = CleanupCircuitBreaker(cooldown_seconds=60)
+        open_breaker.acquire()
+        open_breaker.record_transport_failure()
+        for name, chat, breaker in (
+            ("not installed", not_installed, None),
+            ("refusal", refusing, None),
+            ("truncated", truncated, None),
+            ("cooling down", not_installed, open_breaker),
+        ):
+            lines = []
+            ns = load_definitions(
+                "_guard_cleaned_output", "llm_clean_with_edits",
+                assignments={
+                    "BASE_PROMPT", "FEW_SHOT", "LLM_CLEANUP_TIMEOUT",
+                    "LLM_CLEANUP_TOTAL_DEADLINES", "CLEANUP_RESPONSE_SCHEMA",
+                    "MODE_INSTRUCTIONS", "REFUSAL_RE", "STRUCTURED_OUTPUT",
+                },
+                extra={
+                    "CleanupEdit": object,
+                    "LLM_CLEANUP_BREAKER":
+                        breaker or CleanupCircuitBreaker(cooldown_seconds=60),
+                    "ollama_chat": chat,
+                    "quick_clean": lambda text: f"fallback:{text}",
+                    "STRUCTURED_FEW_SHOT": [],
+                    "print": lines.append,
+                },
+            )
+            for mode in ("edit", "compose", "reply"):
+                with self.subTest(failure=name, mode=mode):
+                    del lines[:]
+                    self.assertEqual(
+                        ns["llm_clean_with_edits"](
+                            "make this more formal", "neutral", mode,
+                            "Hi all"),
+                        (None, []))
+                    self.assertTrue(lines)
+                    self.assertTrue(all(
+                        line.endswith("nothing to insert")
+                        for line in lines), lines)
+            with self.subTest(failure=name, mode="capture"):
+                self.assertEqual(
+                    ns["llm_clean_with_edits"](
+                        "please clean this dictation", "neutral"),
+                    ("fallback:please clean this dictation", []))
+
     def test_guard_rejection_releases_without_resetting_the_cooldown(self):
         breaker = CleanupCircuitBreaker(cooldown_seconds=60)
 
@@ -3817,13 +5393,39 @@ class CleanupGuardTests(unittest.TestCase):
                 "CAPTION": caption,
                 "compile_voice_evidence": lambda *_args, **_kwargs: (
                     None, SimpleNamespace(stable_prefix="stable words")),
-                "is_hallucination": lambda _text, _language="en": False,
+                "is_hallucination": lambda *_args: False,
             },
         )
         future = SimpleNamespace(result=lambda: Recognition(
             "stable words provisional tail"))
         ns["_caption_add"](future)
         self.assertEqual(caption["text"], "stable words")
+
+    def test_live_caption_follows_the_silent_audio_rule_of_final_text(self):
+        def caption_after(recognition):
+            caption = {"text": "Listening"}
+            ns = load_definitions(
+                "_caption_add", "is_hallucination", "weak_whisper_evidence",
+                assignments=CleanupGuardTests.HALLUCINATION_GUARD,
+                extra={
+                    "Recognition": Recognition,
+                    "CAPTION": caption,
+                    "compile_voice_evidence": lambda result, *_args, **_kw: (
+                        None, SimpleNamespace(stable_prefix=result.text)),
+                    "join_recognized_parts":
+                        lambda parts, _language: " ".join(filter(None, parts)),
+                },
+            )
+            ns["_caption_add"](SimpleNamespace(result=lambda: recognition))
+            return caption["text"]
+
+        # Whisper filling a pause must not flash in the caption either.
+        self.assertEqual(caption_after(Recognition(
+            "Thank you.", confidence=0.31, engine="tiny",
+            audio_duration=3.0)), "Listening")
+        self.assertEqual(caption_after(Recognition(
+            "Thank you.", confidence=0.93, engine="parakeet-unified",
+            audio_duration=1.2)), "Thank you.")
 
     def test_active_context_is_compiled_before_cleanup(self):
         ns = load_definitions(
@@ -3853,6 +5455,59 @@ class CleanupGuardTests(unittest.TestCase):
             "com.openai.codex",
         )
         self.assertEqual(result.text, "Use Qwen here")
+
+    def test_dictionary_and_screen_names_anchor_without_replacing_words(self):
+        from voice_compiler import ContextObservation, ContextRouter
+
+        dictionary = ContextPack(tuple(
+            ContextCandidate(term, 3.5, "dictionary")
+            for term in ("AI", "CI", "PR")))
+        ns = load_definitions(
+            "compile_voice_evidence",
+            extra={
+                "Recognition": Recognition,
+                "WordEvidence": WordEvidence,
+                "RecognitionHypothesis": RecognitionHypothesis,
+                "ContextCandidate": ContextCandidate,
+                "ContextPack": ContextPack,
+                "VoiceIR": VoiceIR,
+                "VOICE_COMPILER": VoiceCompiler(),
+                "learned_alternatives": lambda *_args: [],
+                "compiler_personal_priors": lambda _bundle: (),
+                "np": np,
+                "analyze_prosody": lambda *_args: (),
+                "SAMPLE_RATE": 16_000,
+                "GLOSS": {
+                    "lock": threading.Lock(),
+                    "anchor_pack": dictionary,
+                },
+            },
+        )
+        # Parakeet's transcript at the confidence one disagreeing word in two
+        # leaves it with, Tiny's as the alternative, and the Context Pack the
+        # router builds for the frontmost app and window.
+        for app, title, parakeet, tiny in (
+                ("Slack", "", "Who is on call today?", "Hu is on call to day?"),
+                ("Code", "dictate.py", "Looks good.", "Look good."),
+                ("Messages", "Nate Smith", "Not yet.", "Nah yet."),
+                ("Zed", "", "She said the site is down.",
+                 "Shi set the side is down."),
+        ):
+            with self.subTest(app=app):
+                voice, result = ns["compile_voice_evidence"](
+                    Recognition(parakeet, confidence=0.69,
+                                engine="parakeet-unified", alternative=tiny),
+                    bundle="com.example.app",
+                    context_pack=ContextRouter().collect(ContextObservation(
+                        app=app, bundle="com.example.app",
+                        window_title=title)),
+                )
+                self.assertEqual(result.text, parakeet)
+                self.assertEqual(result.decisions, ())
+                self.assertEqual(
+                    {candidate.text for candidate in voice.context.candidates
+                     if candidate.source == "dictionary"},
+                    {"AI", "CI", "PR"})
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -4290,6 +5945,43 @@ class ConfigurationTests(unittest.TestCase):
         self.assertIn("Downloading org/turbo", out.getvalue())
         self.assertNotIn("Downloading org/tiny", out.getvalue())
 
+    def test_windows_runtime_loads_models_without_contacting_the_hub(self):
+        # faster-whisper's download_model asks the Hub for repo metadata
+        # before looking in its cache unless local_files_only is set. Only
+        # the installer's preload may go online.
+        fetched = []
+
+        def download_model(repo, **kwargs):
+            fetched.append((repo, kwargs.get("local_files_only", False)))
+            return f"C:/models/{repo}"
+
+        utils = types.ModuleType("faster_whisper.utils")
+        utils.download_model = download_model
+        package = types.ModuleType("faster_whisper")
+        package.utils = utils
+        ns = load_definitions(
+            "windows_whisper_model", "preload_model_files",
+            extra={
+                "IS_WINDOWS": True,
+                "HERE": Path("C:/Whisper Face"),
+                "ASR_MODEL_REVISIONS": {"tiny": "d90ca5fe", "turbo": "0a363e91"},
+                "WINDOWS_ASR_MODELS": {},
+                "FAST_WHISPER_REPO": "tiny",
+                "WHISPER_REPO": "turbo",
+                "ctranslate2": SimpleNamespace(
+                    get_cuda_device_count=lambda: 0),
+                "WhisperModel": lambda path, device, compute_type: path,
+            },
+        )
+        with mock.patch.dict(sys.modules, {
+                "faster_whisper": package, "faster_whisper.utils": utils}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            ns["windows_whisper_model"]("tiny")
+            ns["WINDOWS_ASR_MODELS"].clear()
+            ns["preload_model_files"](("turbo",))
+
+        self.assertEqual(fetched, [("tiny", True), ("turbo", False)])
+
     def test_model_inventory_reports_every_pinned_model_without_downloading(
             self):
         ns = load_definitions(
@@ -4360,7 +6052,8 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_transcript_log_keeps_performance_metrics(self):
         ns = load_definitions(
-            "append_transcript", "transcript_app_identity",
+            *TranscriptRetentionTests.NAMES,
+            assignments=TranscriptRetentionTests.ASSIGNMENTS,
             extra={"hashlib": hashlib, "os": os, "time": time},
         )
         with tempfile.TemporaryDirectory() as td:
@@ -4382,7 +6075,8 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_a_windows_window_title_never_reaches_transcript_history(self):
         ns = load_definitions(
-            "append_transcript", "transcript_app_identity",
+            *TranscriptRetentionTests.NAMES,
+            assignments=TranscriptRetentionTests.ASSIGNMENTS,
             extra={"hashlib": hashlib, "os": os, "time": time},
         )
         with tempfile.TemporaryDirectory() as td:
@@ -4449,7 +6143,8 @@ class ConfigurationTests(unittest.TestCase):
 
         portable_os = OsWithoutFchmod()
         ns = load_definitions(
-            "append_transcript", "transcript_app_identity",
+            *TranscriptRetentionTests.NAMES,
+            assignments=TranscriptRetentionTests.ASSIGNMENTS,
             extra={"hashlib": hashlib, "os": portable_os, "time": time},
         )
         with tempfile.TemporaryDirectory() as td:
@@ -4468,8 +6163,8 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_paste_outcome_updates_only_its_receipted_record(self):
         ns = load_definitions(
-            "append_transcript", "transcript_app_identity",
-            "record_paste_outcome",
+            *TranscriptRetentionTests.NAMES, "record_paste_outcome",
+            assignments=TranscriptRetentionTests.ASSIGNMENTS,
             extra={
                 "hashlib": hashlib,
                 "os": os,
@@ -4511,7 +6206,7 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_wrong_shaped_snippets_file_is_ignored(self):
         ns = load_definitions(
-            "match_snippet", "snippet_name_key",
+            "match_snippet", "snippet_name_key", "_snippet_is_placeholder",
             assignments={"SNIPPET_RE"},
         )
         with tempfile.TemporaryDirectory() as td:
@@ -4524,7 +6219,7 @@ class ConfigurationTests(unittest.TestCase):
         # The old key stripped [^a-z0-9 ], so every non-Latin name
         # collapsed to "" and matched whichever snippet came first.
         ns = load_definitions(
-            "match_snippet", "snippet_name_key",
+            "match_snippet", "snippet_name_key", "_snippet_is_placeholder",
             assignments={"SNIPPET_RE"},
         )
         with tempfile.TemporaryDirectory() as td:
@@ -4550,7 +6245,7 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_a_name_that_normalizes_to_nothing_matches_nothing(self):
         ns = load_definitions(
-            "match_snippet", "snippet_name_key",
+            "match_snippet", "snippet_name_key", "_snippet_is_placeholder",
             assignments={"SNIPPET_RE"},
         )
         with tempfile.TemporaryDirectory() as td:
@@ -4559,6 +6254,32 @@ class ConfigurationTests(unittest.TestCase):
             ns["SNIPPETS_FILE"] = snippets
             # Empty key on both sides must never count as equality.
             self.assertIsNone(ns["match_snippet"]("insert ..."))
+
+    def test_an_unfilled_placeholder_is_not_a_snippet(self):
+        ns = load_definitions(
+            "match_snippet", "snippet_name_key", "_snippet_is_placeholder",
+            assignments={"SNIPPET_RE"},
+        )
+        with tempfile.TemporaryDirectory() as td:
+            snippets = Path(td) / "snippets.json"
+            # What both installers copy into place on a fresh install.
+            template = json.loads(
+                (ROOT / "snippets.template.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                sorted(template), ["address", "email", "signature"])
+            snippets.write_text(json.dumps(template), encoding="utf-8")
+            ns["SNIPPETS_FILE"] = snippets
+            for name in template:
+                with self.subTest(name=name):
+                    self.assertIsNone(
+                        ns["match_snippet"](f"Insert my {name}."))
+            # The same name is a snippet once the user has filled it in.
+            template["email"] = "andrew@example.com"
+            snippets.write_text(json.dumps(template), encoding="utf-8")
+            self.assertEqual(
+                ns["match_snippet"]("Insert my email."),
+                ("email", "andrew@example.com"))
+            self.assertIsNone(ns["match_snippet"]("Insert my address."))
 
     def test_network_source_offer_names_license_and_corresponding_source(self):
         ns = load_definitions(
@@ -4585,17 +6306,327 @@ class ConfigurationTests(unittest.TestCase):
         self.assertIn("without warranty", metadata["warranty"].lower())
 
 
+class TranscriptRetentionTests(unittest.TestCase):
+    """The history log stays bounded whether or not the miner ever runs."""
+
+    NOW = 1_800_000_000.0
+    DAY = 24 * 3600.0
+    NAMES = (
+        "append_transcript", "transcript_app_identity",
+        "_transcript_entry_time", "retained_transcript_lines",
+        "_trim_transcripts_locked", "_rebase_learned_processed",
+        "prune_transcripts", "clear_transcript_history",
+        "load_learned", "save_learned",
+    )
+    ASSIGNMENTS = (
+        "TRANSCRIPT_KEEP", "TRANSCRIPT_MAX_AGE", "TRANSCRIPT_TRIM_SLACK",
+        "TRANSCRIPT_AGE_SLACK",
+    )
+
+    def namespace(self, folder, *names, assignments=(), extra=None):
+        writes = []
+
+        def atomic_write_text(path, value, mode=0o600):
+            writes.append(path.name)
+            path.write_text(value)
+
+        ns = load_definitions(
+            *self.NAMES, *names,
+            assignments=self.ASSIGNMENTS + tuple(assignments),
+            extra={
+                "hashlib": hashlib,
+                "os": os,
+                "Path": Path,
+                "time": SimpleNamespace(time=lambda: self.NOW),
+                "atomic_write_text": atomic_write_text,
+                **(extra or {}),
+            },
+        )
+        ns.update({
+            "TRANSCRIPTS_FILE": Path(folder) / "transcripts.jsonl",
+            "LEARNED_FILE": Path(folder) / "learned.json",
+            "TRANSCRIPTS_LOCK": threading.Lock(),
+            "LEARN_LOCK": threading.Lock(),
+            "USAGE_CACHE": {
+                "at": 5.0, "value": (0, 0.0), "lock": threading.Lock()},
+        })
+        return ns, writes
+
+    @staticmethod
+    def write_log(path, timestamps):
+        path.write_text("".join(
+            json.dumps({
+                "ts": ts, "app": "com.apple.TextEdit",
+                "raw": f"note number {index}",
+                "clean": f"Note number {index}.",
+                "path": "fast", "language": "en",
+            }) + "\n"
+            for index, ts in enumerate(timestamps)))
+
+    @staticmethod
+    def entries(path):
+        return [json.loads(line) for line in path.read_text().splitlines()]
+
+    def test_a_failing_miner_still_leaves_the_log_bounded(self):
+        # The default install has no cleanup model, so every mining pass
+        # fails. Retention must not depend on it succeeding.
+        with tempfile.TemporaryDirectory() as td:
+            ns, _ = self.namespace(
+                td, "learn_pass", "parse_texts", "parse_dictionary",
+                "merge_learned_state", "corrected_away_words",
+                assignments=(
+                    "MINER_PROMPT", "LEARN_MIN_NEW", "PROMOTE_MIN_COUNT",
+                    "AUTO_MARKER"),
+                extra={
+                    "ollama_chat": mock.Mock(side_effect=ConnectionError(
+                        "connection refused")),
+                    "refresh_glossary": lambda: [],
+                    "DICTIONARY_FILE": Path(td) / "dictionary.txt",
+                    "DICTIONARY_LOCK": threading.Lock(),
+                },
+            )
+            log = ns["TRANSCRIPTS_FILE"]
+            self.write_log(log, [
+                self.NOW - 3600 + index for index in range(2000)])
+            with contextlib.redirect_stdout(io.StringIO()):
+                ns["learn_pass"]()
+            kept = self.entries(log)
+
+        self.assertLessEqual(len(kept), ns["TRANSCRIPT_KEEP"])
+        self.assertEqual(kept[-1]["clean"], "Note number 1999.")
+
+    def test_appending_alone_never_lets_the_log_exceed_its_cap(self):
+        with tempfile.TemporaryDirectory() as td:
+            ns, writes = self.namespace(td)
+            log = ns["TRANSCRIPTS_FILE"]
+            keep = ns["TRANSCRIPT_KEEP"]
+            self.write_log(log, [self.NOW - 60] * keep)
+            sizes = []
+            for index in range(250):
+                ns["append_transcript"](
+                    f"extra {index}", f"Extra {index}.",
+                    "com.apple.TextEdit", "fast")
+                sizes.append(len(log.read_text().splitlines()))
+            kept = self.entries(log)
+
+        self.assertLessEqual(max(sizes), keep)
+        self.assertEqual(kept[-1]["clean"], "Extra 249.")
+        # Headroom per trim: the file is rewritten a few times, not per paste.
+        self.assertLessEqual(len(writes), 3)
+
+    def test_appending_drops_dictations_older_than_thirty_days(self):
+        with tempfile.TemporaryDirectory() as td:
+            ns, _ = self.namespace(td)
+            log = ns["TRANSCRIPTS_FILE"]
+            self.write_log(log, [
+                self.NOW - 40 * self.DAY,
+                self.NOW - 31 * self.DAY,
+                self.NOW - 10 * self.DAY,
+            ])
+            ns["append_transcript"](
+                "today", "Today.", "com.apple.TextEdit", "fast")
+            kept = [entry["clean"] for entry in self.entries(log)]
+
+        self.assertEqual(kept, ["Note number 2.", "Today."])
+
+    def test_a_log_within_its_bounds_is_appended_without_a_rewrite(self):
+        with tempfile.TemporaryDirectory() as td:
+            ns, writes = self.namespace(td)
+            log = ns["TRANSCRIPTS_FILE"]
+            self.write_log(log, [self.NOW - 29 * self.DAY] + [self.NOW] * 99)
+            ns["append_transcript"](
+                "fine", "Fine.", "com.apple.TextEdit", "fast")
+            count = len(log.read_text().splitlines())
+
+        self.assertEqual(count, 101)
+        self.assertEqual(writes, [])
+
+    def test_a_damaged_log_never_stops_a_dictation_from_being_recorded(self):
+        with tempfile.TemporaryDirectory() as td:
+            ns, _ = self.namespace(td)
+            log = ns["TRANSCRIPTS_FILE"]
+            self.write_log(log, [self.NOW - 60] * 3)
+            log.write_bytes(b'{"ts": \xff\xfe\n' + log.read_bytes())
+            ns["append_transcript"](
+                "after", "After.", "com.apple.TextEdit", "fast")
+            kept = self.entries(log)
+
+        # The unreadable line is dropped; every readable one is kept.
+        self.assertEqual([entry["clean"] for entry in kept], [
+            "Note number 0.", "Note number 1.", "Note number 2.", "After."])
+
+    def test_the_mining_pass_ages_out_history_without_new_dictations(self):
+        with tempfile.TemporaryDirectory() as td:
+            ns, _ = self.namespace(td)
+            log = ns["TRANSCRIPTS_FILE"]
+            self.write_log(log, [self.NOW - 45 * self.DAY] * 3)
+            ns["prune_transcripts"]()
+            remaining = log.read_text()
+
+        self.assertEqual(remaining, "")
+
+    def test_trimming_keeps_the_miner_on_the_same_dictation(self):
+        with tempfile.TemporaryDirectory() as td:
+            ns, _ = self.namespace(td)
+            log = ns["TRANSCRIPTS_FILE"]
+            keep = ns["TRANSCRIPT_KEEP"]
+            self.write_log(log, [self.NOW - 60] * keep)
+            ns["LEARNED_FILE"].write_text(json.dumps({"processed": keep}))
+            ns["append_transcript"](
+                "new", "New.", "com.apple.TextEdit", "fast")
+            lines = log.read_text().splitlines()
+            processed = json.loads(ns["LEARNED_FILE"].read_text())["processed"]
+
+        # Every older dictation was mined; only the one just added is new.
+        self.assertEqual(processed, len(lines) - 1)
+        self.assertEqual(json.loads(lines[processed])["clean"], "New.")
+
+    def test_clearing_history_erases_the_log_and_resets_the_miner(self):
+        with tempfile.TemporaryDirectory() as td:
+            ns, _ = self.namespace(td)
+            log = ns["TRANSCRIPTS_FILE"]
+            self.write_log(log, [self.NOW] * 12)
+            ns["LEARNED_FILE"].write_text(json.dumps({
+                "processed": 12, "counts": {"Qwen": 2}}))
+            ns["clear_transcript_history"]()
+            existed = log.exists()
+            learned = json.loads(ns["LEARNED_FILE"].read_text())
+            cache_at = ns["USAGE_CACHE"]["at"]
+            ns["append_transcript"](
+                "after", "After.", "com.apple.TextEdit", "fast")
+            after = [entry["clean"] for entry in self.entries(log)]
+            mode = stat.S_IMODE(log.stat().st_mode)
+
+        self.assertFalse(existed)
+        self.assertEqual(learned["processed"], 0)
+        self.assertEqual(learned["counts"], {"Qwen": 2})
+        self.assertEqual(cache_at, 0.0)
+        self.assertEqual(after, ["After."])
+        if os.name == "posix":
+            self.assertEqual(mode, 0o600)
+
+
+class VocabularyMinerTests(unittest.TestCase):
+    """What the miner may count toward the dictionary."""
+
+    NOW = TranscriptRetentionTests.NOW
+    NAMES = TranscriptRetentionTests.NAMES
+    ASSIGNMENTS = TranscriptRetentionTests.ASSIGNMENTS
+    namespace = TranscriptRetentionTests.namespace
+
+    def mine(self, texts, reply, learned):
+        with tempfile.TemporaryDirectory() as td:
+            ns, _ = self.namespace(
+                td, "learn_pass", "parse_texts", "parse_dictionary",
+                "merge_learned_state", "term_occurs", "corrected_away_words",
+                assignments=(
+                    "MINER_PROMPT", "LEARN_MIN_NEW", "PROMOTE_MIN_COUNT",
+                    "AUTO_MARKER"),
+                extra={
+                    "ollama_chat": lambda *args, **kwargs: (
+                        json.dumps(reply), "stop"),
+                    "refresh_glossary": lambda: [],
+                    "DICTIONARY_FILE": Path(td) / "dictionary.txt",
+                    "DICTIONARY_LOCK": threading.Lock(),
+                },
+            )
+            ns["TRANSCRIPTS_FILE"].write_text("".join(
+                json.dumps({"ts": self.NOW - 60 + index, "app": "com.apple.Notes",
+                            "raw": text, "clean": text, "path": "fast",
+                            "language": "en"}) + "\n"
+                for index, text in enumerate(texts)))
+            ns["LEARNED_FILE"].write_text(json.dumps(learned))
+            with contextlib.redirect_stdout(io.StringIO()):
+                ns["learn_pass"]()
+            return json.loads(ns["LEARNED_FILE"].read_text())["counts"]
+
+    def test_terms_are_counted_as_whole_words_not_substrings(self):
+        texts = [
+            "We are going to ship it today.",
+            "That sounds good to me.",
+            "I sent it a week ago.",
+            "Zorblax signed the contract.",
+            "Ask Zorblax about the invoice.",
+        ] * 2
+        counts = self.mine(texts, ["Go", "Zorblax"], {"counts": {"Ago": 1}})
+
+        self.assertNotIn("Go", counts)
+        self.assertEqual(counts["Zorblax"], 4)
+        # "ago" is a word on its own, so a held term may still grow.
+        self.assertEqual(counts["Ago"], 3)
+
+    def test_a_term_the_user_corrected_away_is_never_counted(self):
+        texts = ["Gwen runs locally on the laptop.",
+                 "Ask Gwen to summarise the notes."] * 5
+        learned = {
+            "counts": {"Qwen": 2, "Gwenda": 1},
+            "fixes": {"gwen": {"to": "Qwen", "n": 1},
+                      "qwen": {"to": "Qwen", "n": 1}},
+            "confusions": {"gwenda->brenda": {
+                "from": "Gwenda", "to": "Brenda", "n": 1, "apps": {}}},
+        }
+        counts = self.mine(
+            texts + ["Gwenda called."] * 2, ["Gwen", "Qwen"], learned)
+
+        self.assertNotIn("Gwen", counts)
+        self.assertEqual(counts["Gwenda"], 1)
+        # A casing-only fix does not ban the word it fixes toward.
+        self.assertEqual(counts["Qwen"], 2)
+
+    def test_a_term_built_on_a_corrected_away_word_is_never_counted(self):
+        learned = {
+            "counts": {"Gwen Notes": 1},
+            "fixes": {"gwen": {"to": "Qwen", "n": 1}},
+            "confusions": {},
+        }
+        texts = ["Gwen 3.5 runs locally.", "Ask Gwen 3.5 for a summary.",
+                 "Gwen's notes are ready.", "Send Gwen's summary.",
+                 "Open Gwen Notes now.", "Gwendolyn Park signed."] * 2
+
+        counts = self.mine(
+            texts, ["Gwen 3.5", "Gwen's", "Gwendolyn Park"], learned)
+
+        self.assertNotIn("Gwen 3.5", counts)
+        self.assertNotIn("Gwen's", counts)
+        # A held term containing the word stops growing toward promotion.
+        self.assertEqual(counts["Gwen Notes"], 1)
+        # Only the whole word is banned, not names that begin with it.
+        self.assertEqual(counts["Gwendolyn Park"], 2)
+
+
 class InlineSnippetExpansionTests(unittest.TestCase):
-    """Inline (embedded-trigger) snippet expansion. Additive to the
-    whole-utterance command covered by ConfigurationTests; must never alter a
-    non-matching dictation and must survive a missing or damaged file."""
+    """Inline snippet expansion inside a longer dictation.
+
+    A snippet expands only on the spoken cue "insert my <name>", the cue the
+    whole-utterance command uses. A bare name is an ordinary word, and an
+    unfilled installer placeholder is never text to insert.
+    """
+
+    INLINE = (
+        "expand_snippets_inline",
+        "_load_snippet_map",
+        "_compile_snippet_pattern",
+        "_snippet_is_placeholder",
+        "snippet_name_key",
+    )
+    PIPELINE = (
+        "_load_snippet_map",
+        "_compile_snippet_pattern",
+        "_snippet_is_placeholder",
+        "snippet_name_key",
+        "_snippet_sentinel",
+        "_mask_snippets_inline",
+        "_restore_snippet_sentinels",
+        "quick_clean",
+    )
+    PERSONAL = {
+        "email": "andrew@example.com",
+        "address": "7623 Opal Ridge Lane\nBainbridge Island, WA 98110",
+        "signature": "Best,\nAndrew",
+    }
 
     def _expander(self, mapping=None):
-        ns = load_definitions(
-            "expand_snippets_inline",
-            "_load_snippet_map",
-            "_compile_snippet_pattern",
-        )
+        ns = load_definitions(*self.INLINE)
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         path = Path(directory.name) / "snippets.json"
@@ -4604,47 +6635,134 @@ class InlineSnippetExpansionTests(unittest.TestCase):
         ns["SNIPPETS_FILE"] = path
         return ns["expand_snippets_inline"]
 
-    def test_inline_hit_inside_a_sentence(self):
-        expand = self._expander({"email": "andrew@example.com"})
+    def _dictate(self, spoken, snippets_text):
+        """The capture pipeline's order: mask, clean up, restore."""
+        ns = load_definitions(
+            *self.PIPELINE,
+            assignments={"_SNIPPET_SENTINEL_MARK"},
+            extra={"compile_cleanup": compile_cleanup},
+        )
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "snippets.json"
+        path.write_text(snippets_text, encoding="utf-8")
+        ns["SNIPPETS_FILE"] = path
+        masked, restore = ns["_mask_snippets_inline"](
+            spoken, ns["_load_snippet_map"]())
+        cleaned = ns["quick_clean"](masked if restore else spoken)
+        return ns["_restore_snippet_sentinels"](cleaned, restore)
+
+    ORDINARY = (
+        "Send me your email.",
+        "Email me when you land.",
+        "Can you send me an email about the address change?",
+        "What's your address?",
+        "Let me address that in the meeting tomorrow.",
+        "We need it before the signature deadline.",
+        "Text him my email, please.",
+        "My signature is on the last page.",
+    )
+
+    def test_shipped_template_names_are_ordinary_words(self):
+        template = (ROOT / "snippets.template.json").read_text(
+            encoding="utf-8")
+        for name in json.loads(template):
+            self.assertTrue(any(
+                name in sentence.casefold() for sentence in self.ORDINARY))
+        for spoken in self.ORDINARY:
+            with self.subTest(spoken=spoken):
+                self.assertEqual(self._dictate(spoken, template), spoken)
+
+    def test_filled_in_snippets_never_expand_on_a_bare_name(self):
+        for spoken in self.ORDINARY:
+            with self.subTest(spoken=spoken):
+                self.assertEqual(
+                    self._dictate(spoken, json.dumps(self.PERSONAL)), spoken)
+
+    def test_an_unfilled_placeholder_never_expands_even_on_the_cue(self):
+        template = (ROOT / "snippets.template.json").read_text(
+            encoding="utf-8")
+        for name in json.loads(template):
+            with self.subTest(name=name):
+                spoken = f"Please use insert my {name} for now."
+                self.assertEqual(self._dictate(spoken, template), spoken)
+
+    def test_the_spoken_cue_expands_inside_a_sentence(self):
         self.assertEqual(
-            expand("text him my email please"),
-            "text him my andrew@example.com please",
+            self._dictate(
+                "You can reach me at insert my email, or call.",
+                json.dumps(self.PERSONAL)),
+            "You can reach me at andrew@example.com, or call.",
         )
 
-    def test_expansion_is_case_insensitive(self):
+    def test_a_negated_cue_is_talk_about_inserting_not_a_request(self):
+        # "Do not insert my email here" asks for the opposite. Expanding it
+        # would put private text into a sentence that says to keep it out.
+        for spoken in (
+            "Do not insert my email here.",
+            "Never insert my address in public posts.",
+            "Please don't insert my email in that form.",
+            "Please don’t insert my signature yet.",
+            "You cannot insert my address there.",
+            "NEVER INSERT MY EMAIL.",
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertEqual(
+                    self._dictate(spoken, json.dumps(self.PERSONAL)), spoken)
+        # A negation that is not directly on the cue leaves it a request.
+        self.assertEqual(
+            self._dictate("I'm not there, so insert my email instead.",
+                          json.dumps(self.PERSONAL)),
+            "I'm not there, so andrew@example.com instead.")
+        self.assertEqual(
+            self._dictate("Add a knot, then insert my email.",
+                          json.dumps(self.PERSONAL)),
+            "Add a knot, then andrew@example.com.")
+
+    def test_the_cue_is_case_insensitive(self):
         expand = self._expander({"email": "andrew@example.com"})
-        self.assertEqual(expand("send EMAIL now"), "send andrew@example.com now")
+        self.assertEqual(
+            expand("send it to Insert My EMAIL now"),
+            "send it to andrew@example.com now")
 
     def test_partial_word_never_fires(self):
-        # "address" must not expand inside "addressed"; the boundary is
-        # stricter than \b so a suffix cannot trigger it.
+        # The name must end at a word boundary, so "address" does not fire
+        # inside "addresses".
         expand = self._expander({"address": "1 Main St"})
-        self.assertEqual(expand("he addressed the room"), "he addressed the room")
+        spoken = "please insert my addresses into the form"
+        self.assertEqual(expand(spoken), spoken)
 
-    def test_longest_trigger_wins(self):
+    def test_longest_name_wins(self):
         expand = self._expander({
             "email": "andrew@example.com",
             "email signature": "Best,\nAndrew",
         })
         self.assertEqual(
-            expand("use my email signature here"),
-            "use my Best,\nAndrew here",
+            expand("then insert my email signature here"),
+            "then Best,\nAndrew here",
         )
 
     def test_multiline_expansion_is_preserved(self):
-        expand = self._expander({"address": "7623 Opal Ridge Lane\nBainbridge Island, WA 98110"})
+        expand = self._expander(self.PERSONAL)
         self.assertEqual(
-            expand("mail it to my address today"),
-            "mail it to my 7623 Opal Ridge Lane\nBainbridge Island, WA 98110 today",
+            expand("mail it to insert my address today"),
+            "mail it to 7623 Opal Ridge Lane\nBainbridge Island, WA 98110 "
+            "today",
         )
 
-    def test_no_matching_trigger_returns_raw_unchanged(self):
+    def test_a_name_with_no_word_characters_is_never_a_trigger(self):
+        expand = self._expander({"": "BOOM", "!!!": "BOOM"})
+        spoken = "hello, insert my world. fine"
+        self.assertEqual(expand(spoken), spoken)
+
+    def test_no_cue_returns_raw_unchanged(self):
         expand = self._expander({"email": "andrew@example.com"})
         self.assertEqual(expand("just talking normally"), "just talking normally")
 
     def test_missing_file_returns_raw_unchanged(self):
         expand = self._expander(mapping=None)  # file never written
-        self.assertEqual(expand("send my email now"), "send my email now")
+        self.assertEqual(
+            expand("send insert my email now"), "send insert my email now")
 
     def test_wrong_shaped_snippets_file_returns_raw_unchanged(self):
         # Clone of ConfigurationTests.test_wrong_shaped_snippets_file_is_ignored,
@@ -4652,18 +6770,15 @@ class InlineSnippetExpansionTests(unittest.TestCase):
         # syntactically broken JSON both degrade to leaving the dictation alone.
         for payload in ("[]", "{not valid json"):
             with self.subTest(payload=payload):
-                ns = load_definitions(
-                    "expand_snippets_inline",
-                    "_load_snippet_map",
-                    "_compile_snippet_pattern",
-                )
+                ns = load_definitions(*self.INLINE)
                 with tempfile.TemporaryDirectory() as directory:
                     path = Path(directory) / "snippets.json"
                     path.write_text(payload)
                     ns["SNIPPETS_FILE"] = path
                     self.assertEqual(
-                        ns["expand_snippets_inline"]("send my email now"),
-                        "send my email now",
+                        ns["expand_snippets_inline"](
+                            "send insert my email now"),
+                        "send insert my email now",
                     )
 
     def test_masked_multiline_survives_deterministic_cleanup(self):
@@ -4672,6 +6787,8 @@ class InlineSnippetExpansionTests(unittest.TestCase):
         # restoration leaves no sentinel behind.
         ns = load_definitions(
             "_compile_snippet_pattern",
+            "_snippet_is_placeholder",
+            "snippet_name_key",
             "_snippet_sentinel",
             "_mask_snippets_inline",
             "_restore_snippet_sentinels",
@@ -4679,23 +6796,27 @@ class InlineSnippetExpansionTests(unittest.TestCase):
         )
         expansion = "Regards,\n    Andrew\n    Engineer"
         masked, restore = ns["_mask_snippets_inline"](
-            "here is my sig okay", {"my sig": expansion})
+            "here is insert my sig okay", {"sig": expansion})
         self.assertTrue(restore)
-        self.assertNotIn("my sig", masked)      # trigger was masked away
+        self.assertNotIn("sig", masked)         # cue and name were masked away
         cleaned = compile_cleanup(masked).text  # deterministic cleanup only
         restored = ns["_restore_snippet_sentinels"](cleaned, restore)
-        self.assertIn(expansion, restored)      # indentation intact
+        self.assertEqual(restored, f"here is {expansion} okay")
         self.assertEqual(restored.count("\ue000"), 0)  # no sentinel leaked
 
     def test_restoration_of_absent_sentinel_is_a_no_op(self):
         ns = load_definitions(
             "_compile_snippet_pattern",
+            "_snippet_is_placeholder",
+            "snippet_name_key",
             "_snippet_sentinel",
             "_mask_snippets_inline",
             "_restore_snippet_sentinels",
             assignments={"_SNIPPET_SENTINEL_MARK"},
         )
-        _, restore = ns["_mask_snippets_inline"]("my email", {"email": "X"})
+        _, restore = ns["_mask_snippets_inline"](
+            "insert my email", {"email": "X"})
+        self.assertTrue(restore)
         # A token the cleaned text no longer contains must not corrupt output.
         self.assertEqual(
             ns["_restore_snippet_sentinels"]("unrelated text", restore),
@@ -4704,6 +6825,704 @@ class InlineSnippetExpansionTests(unittest.TestCase):
 
 
 class LearningTests(unittest.TestCase):
+    @staticmethod
+    def learning_runtime(directory, *, manual=(), learned=None):
+        """The real learning, glossary and compile functions over scratch
+        state, with a scripted Accessibility field and a fake clock."""
+        root = Path(directory)
+        clock = [0.0]
+        field = {"timeline": []}
+        observed = []
+
+        def read(_element):
+            current = None
+            for at, text in field["timeline"]:
+                if at <= clock[0] + 1e-9:
+                    current = text
+            return current
+
+        (root / "dictionary.txt").write_text(
+            "".join(f"{term}\n" for term in manual), encoding="utf-8")
+        (root / "snippets.json").write_text("{}", encoding="utf-8")
+        if learned is not None:
+            (root / "learned.json").write_text(
+                json.dumps(learned), encoding="utf-8")
+        ns = load_definitions(
+            "parse_dictionary", "load_learned", "save_learned",
+            "personal_regression_lab", "write_auto_section",
+            "refresh_glossary", "corrected_away_words", "term_occurs",
+            "apply_vocabulary_casing",
+            "apply_learned_fixes", "learned_alternatives",
+            "compiler_personal_priors", "compile_voice_evidence",
+            "FocusSnapshot", "PasteReceipt", "make_paste_receipt",
+            "committed_paste_receipt", "_learned_count",
+            "insertion_join_prefix", "commit_insertion",
+            "observe_paste_outcome", "learn_from_corrections",
+            "learn_snippet_edit", "paste_snippet_and_watch",
+            "save_snippet_edit", "suggest_snippet_edit",
+            "apply_pending_snippet_edit", "forget_snippet_edit",
+            "forget_gui_correction", "SentUnchanged", "finish_and_process",
+            assignments={
+                "AUTO_MARKER", "PROMOTE_MIN_COUNT", "PERSONAL_APP_MIN_COUNT",
+                "PERSONAL_GLOBAL_MIN_COUNT", "ANCHOR_MAX_TERMS",
+                "CORRECTION_DELAY", "CORRECTION_POLL_INTERVAL",
+                "CORRECTION_MAX_LEARN", "CORRECTION_STABLE_POLLS",
+                "VOCAB_WORD_RE", "MIN_SECONDS", "GATE_PEAK_RMS", "CONT_END",
+            },
+            extra={
+                "Path": Path,
+                "dataclass": dataclass,
+                "difflib": __import__("difflib"),
+                "np": np,
+                "print": lambda *_args, **_kwargs: None,
+                "atomic_write_text":
+                    lambda path, value: path.write_text(value),
+                "time": SimpleNamespace(
+                    monotonic=lambda: clock[0],
+                    perf_counter=lambda: clock[0],
+                    sleep=lambda seconds: clock.__setitem__(
+                        0, clock[0] + seconds),
+                    time=lambda: 1000.0 + clock[0],
+                ),
+                "DICTIONARY_FILE": root / "dictionary.txt",
+                "LEARNED_FILE": root / "learned.json",
+                "SNIPPETS_FILE": root / "snippets.json",
+                "DICTIONARY_LOCK": threading.RLock(),
+                "LEARN_LOCK": threading.Lock(),
+                "SNIPPETS_LOCK": threading.Lock(),
+                "GLOSS": {
+                    "terms": [], "prompt": None, "confusions": {},
+                    "regression": PersonalRegressionLab(),
+                    "anchor_pack": ContextPack(), "vocabulary": {},
+                    "lock": threading.Lock(),
+                },
+                "PIPELINE_STATE": {},
+                "ACOUSTIC_KEYWORD_MEMORY_LOCK": threading.Lock(),
+                "ACOUSTIC_KEYWORD_ACTIVATION_FILE": root / "activation.json",
+                "_load_acoustic_keyword_memory":
+                    lambda: (AcousticKeywordMemory(), "missing"),
+                "active_acoustic_keywords":
+                    lambda _path, _memory: ((), "missing"),
+                "measured_keyword_hints": tuple,
+                "remember_explicit_acoustic_keyword_correction":
+                    lambda *_args, **_kwargs: True,
+                "utterance_was_undone": lambda _event_id: False,
+                "record_paste_outcome": lambda receipt, value:
+                    observed.append((receipt.pasted, value)),
+                "focused_snapshot": lambda: None,
+                "paste": lambda _text: None,
+                "ReceiptState": ReceiptState,
+                "_ax_text": read,
+                "infer_revised_insertion": infer_revised_insertion,
+                "correction_similarity": __import__(
+                    "parrot_core").correction_similarity,
+                "PersonalRegressionLab": PersonalRegressionLab,
+                "PersonalPrior": __import__("voice_compiler").PersonalPrior,
+                "ContextPack": ContextPack,
+                "ContextCandidate": ContextCandidate,
+                "Recognition": Recognition,
+                "WordEvidence": WordEvidence,
+                "RecognitionHypothesis": RecognitionHypothesis,
+                "VoiceIR": VoiceIR,
+                "VOICE_COMPILER": VoiceCompiler(),
+                "analyze_prosody": lambda *_args: (),
+                "SAMPLE_RATE": 16_000,
+            },
+        )
+        ns["refresh_glossary"]()
+
+        def dictate(text, edits=(), *, before="", bundle="com.slack",
+                    learn=True):
+            """Commit ``text`` after ``before`` the way the pipeline does,
+            script the user's later edits as (seconds, old, new), and run
+            the watcher. Returns the receipt the watcher was given."""
+            snapshot = ns["FocusSnapshot"](
+                element=object(), text=before, selection=(len(before), 0))
+            rec = SimpleNamespace(
+                insertion_lease=None, insertion_receipt=None, language="en")
+            ns["commit_insertion"](rec, text, bundle, snapshot)
+            receipt = ns["committed_paste_receipt"](
+                rec, snapshot, text, bundle, "capture",
+                f"event-{clock[0]}")
+            current = before + rec.committed_text
+            field["timeline"] = [(clock[0], current)]
+            for delay, old, new in edits:
+                current = current.replace(old, new, 1)
+                field["timeline"].append((clock[0] + delay, current))
+            if learn:
+                ns["learn_from_corrections"](receipt)
+            return receipt
+
+        def compiled(text, bundle="com.slack", engine="parakeet-unified"):
+            return ns["compile_voice_evidence"](
+                Recognition(text, confidence=0.9, engine=engine),
+                bundle=bundle)[1].text
+
+        class Delivered(BaseException):
+            """Ends a pipeline run where the learner is handed its receipt."""
+
+        def pipeline(text, edits=(), *, before="", bundle="com.slack"):
+            """Run ``finish_and_process`` itself on recognized ``text`` with
+            the focused field holding ``before``, then the learner it
+            starts, over the scripted (seconds, old, new) edits. Returns the
+            receipt the pipeline handed to the learner."""
+            element = object()
+            handed = []
+
+            class Thread:
+                def __init__(self, target=None, args=(), **_kwargs):
+                    handed.append((target, args))
+
+                def start(self):
+                    raise Delivered()
+
+            class Threading:
+                def __getattr__(self, name):
+                    return getattr(threading, name)
+
+            fake_threading = Threading()
+            fake_threading.Thread = Thread
+
+            def stopped(_rec, _hud, _caption, log, **_kwargs):
+                raise AssertionError(f"pipeline stopped early: {log}")
+
+            rec = SimpleNamespace(
+                released_at=clock[0], stop=lambda: np.zeros(
+                    16_000, dtype=np.float32),
+                cut_samples=0, chunks=[], speculative_future=None,
+                speculative_invalid=False, speculative_start=0,
+                speculative_end=0, prompt=None, language="en",
+                process_ticket=None, mode="capture", bundle_at_press=bundle,
+                context_terms=(), context_pack=None, focus_at_press=None,
+                utterance_id=f"utterance-{clock[0]}", insertion_lease=None,
+                insertion_receipt=None, recording=False, uncertain=False)
+            fakes = {
+                "threading": fake_threading,
+                "report_dictation_problem": stopped,
+                "peak_rms": lambda _audio: 0.0,
+                "audio_gate_measurements": lambda _audio: (1.0, 0.1),
+                "assemble_raw": lambda *_args: Recognition(
+                    text, confidence=0.9, engine="parakeet-unified"),
+                "DICTATION_PROCESS_ORDER": SimpleNamespace(
+                    wait=lambda _ticket: None),
+                "collapse_repeats": lambda raw: (raw, False),
+                "runtime_consequence_evidence": lambda *_a, **_k: 0.0,
+                "runtime_context_firewall_evidence": lambda *_a: 0.0,
+                "CAPTION": {},
+                "PIPELINE_STATE": {"last_consequence_route": "standard"},
+                "_mask_snippets_inline": lambda raw, _snippets: (raw, {}),
+                "extract_tone_override": lambda raw: (raw, None),
+                "compile_cleanup": lambda raw, *_options: SimpleNamespace(
+                    text=raw, edits=[]),
+                "cursor_context": lambda: before,
+                "TONE": {"default": ""},
+                "tone_for": lambda _bundle: "default",
+                "quick_clean": lambda value, **_kwargs: value,
+                "focused_snapshot": lambda: ns["FocusSnapshot"](
+                    element=element, text=before,
+                    selection=(len(before), 0)),
+                "LAST_USE": {},
+            }
+            # Every other collaborator of the pipeline is inert here: it is
+            # called, returns nothing, and so takes no branch of its own.
+            pipeline_node = next(
+                node for node in TREE.body
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "finish_and_process")
+            for node in ast.walk(pipeline_node):
+                if isinstance(node, ast.Name) and node.id not in ns \
+                        and node.id not in fakes \
+                        and not hasattr(builtins, node.id):
+                    fakes[node.id] = lambda *_args, **_kwargs: None
+            saved = {name: ns[name] for name in fakes if name in ns}
+            ns.update(fakes)
+            try:
+                ns["finish_and_process"](rec, SimpleNamespace(), {})
+            except Delivered:
+                pass
+            finally:
+                for name in fakes:
+                    ns.pop(name)
+                ns.update(saved)
+            target, (receipt,) = handed[0]
+            current = before + rec.committed_text
+            field["timeline"] = [(clock[0], current)]
+            for delay, old, new in edits:
+                current = current.replace(old, new, 1)
+                field["timeline"].append((clock[0] + delay, current))
+            target(receipt)
+            return receipt
+
+        return SimpleNamespace(
+            ns=ns, clock=clock, field=field, observed=observed,
+            dictate=dictate, compiled=compiled, pipeline=pipeline,
+            state=lambda: ns["load_learned"](),
+            snippets=lambda: json.loads(
+                (root / "snippets.json").read_text(encoding="utf-8")),
+        )
+
+    def test_correction_after_a_finished_sentence_is_learned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+
+            receipt = runtime.dictate(
+                "Ask Gwen about it.", [(3.0, "Gwen", "Qwen")],
+                before="First sentence.")
+            untouched = runtime.dictate(
+                "Then ship it.", before="First sentence. Ask Qwen about it.")
+
+            state = runtime.state()
+        # The paste joined itself to the sentence before it with a space, and
+        # the watcher has to expect that space instead of taking it for the
+        # user's first edit.
+        self.assertEqual(receipt.pasted, " Ask Gwen about it.")
+        self.assertEqual(list(state["confusions"]), ["gwen->qwen"])
+        self.assertEqual(runtime.observed, [
+            (" Ask Gwen about it.", " Ask Qwen about it."),
+            (untouched.pasted, untouched.pasted),
+        ])
+
+    def test_the_pipeline_hands_the_learner_the_text_it_committed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+
+            receipt = runtime.pipeline(
+                "Ask Gwen about it.", [(3.0, "Gwen", "Qwen")],
+                before="First sentence.")
+            untouched = runtime.pipeline(
+                "Then ship it.", before="First sentence. Ask Qwen about it.")
+
+            state = runtime.state()
+        # finish_and_process builds the learner's receipt only once the
+        # commit has decided what is inserted, joining space included.
+        self.assertEqual(receipt.pasted, " Ask Gwen about it.")
+        self.assertEqual(untouched.pasted, " Then ship it.")
+        self.assertEqual(list(state["confusions"]), ["gwen->qwen"])
+        self.assertEqual(runtime.observed, [
+            (" Ask Gwen about it.", " Ask Qwen about it."),
+            (" Then ship it.", " Then ship it."),
+        ])
+
+    def test_a_correction_typed_key_by_key_is_learned_whole(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+            # 150 ms per keystroke against the 200 ms poll: every poll during
+            # the edit sees a different half-typed word.
+            steps = ["kuberneti", "kubernet", "kuberne", "kubernet",
+                     "kubernete", "kubernetes"]
+            edits, last = [], "kubernetis"
+            for index, step in enumerate(steps):
+                edits.append((2.0 + 0.15 * index, last, step))
+                last = step
+            runtime.dictate("Ask Jon about the kubernetis rollout.", edits)
+            # Select the word and type over it.
+            runtime.dictate("Run Gwen locally.", [
+                (2.0, "Gwen", "Q"), (2.15, "Q", "Qw"),
+                (2.3, "Qw", "Qwe"), (2.45, "Qwe", "Qwen")])
+
+            state = runtime.state()
+        self.assertEqual(
+            sorted(state["confusions"]),
+            ["gwen->qwen", "kubernetis->kubernetes"])
+        self.assertEqual(sorted(state["counts"]), ["Qwen", "kubernetes"])
+        self.assertEqual(runtime.observed[0][1],
+                         "Ask Jon about the kubernetes rollout.")
+        self.assertEqual(runtime.observed[1][1], "Run Qwen locally.")
+
+    def test_a_pause_in_the_middle_of_retyping_is_not_a_correction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+
+            # The user stops for a second on half a word, late in the
+            # window, and is typing again when the window closes.
+            runtime.dictate("Restart kubernetis now.", [
+                (8.4, "kubernetis", "kubernet"),
+                (9.5, "kubernet", "kubernetes")])
+            paused = runtime.state()
+            for _ in range(2):
+                runtime.dictate("Restart kubernetis now.",
+                                [(3.0, "kubernetis", "kubernetes")])
+            learned = runtime.compiled("Restart kubernetis now.")
+
+        self.assertEqual(paused["confusions"], {})
+        self.assertEqual(paused["counts"], {})
+        self.assertEqual(runtime.observed[:1], [(
+            "Restart kubernetis now.", "Restart kubernetes now.")])
+        # Nothing stale stands in the way of the real correction.
+        self.assertEqual(learned, "Restart kubernetes now.")
+
+    def test_a_message_typed_after_sending_is_not_an_edit(self):
+        message = "Thanks Gwen, see you at noon."
+        following = "Thanks Owen, see you at one."
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+
+            # Sent after two seconds; the next message is typed straight
+            # into the emptied composer and then sits there.
+            for _ in range(2):
+                runtime.dictate(message, [
+                    (2.0, message, ""), (2.3, "", "Thanks"),
+                    (2.5, "Thanks", following)])
+
+            state = runtime.state()
+            lab = runtime.ns["GLOSS"]["regression"]
+            compiled = runtime.compiled("Ask Gwen about it at noon.")
+        self.assertEqual(runtime.observed, [])
+        self.assertEqual(state["confusions"], {})
+        self.assertEqual(state["counts"], {})
+        self.assertEqual(lab.promoted, ())
+        self.assertEqual(compiled, "Ask Gwen about it at noon.")
+
+    def test_a_confirmed_correction_rewrites_on_the_parakeet_engine(self):
+        codex, mail = "com.openai.codex", "com.apple.mail"
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+            fix = [(3.0, "Gwen", "Qwen")]
+
+            runtime.dictate("Run Gwen locally.", fix, bundle=codex)
+            once = runtime.compiled("Run Gwen locally.", codex)
+            runtime.dictate("Ask Gwen to rebase.", fix, bundle=codex)
+            # Every dictation reloads the lab from disk; so does this.
+            runtime.ns["refresh_glossary"]()
+            twice = {
+                (app, engine): runtime.compiled(
+                    "Run Gwen locally.", app, engine)
+                for app in (codex, mail)
+                for engine in ("parakeet-unified", "turbo", "tiny")}
+            runtime.dictate("Email Gwen today.", fix, bundle=mail)
+            runtime.ns["refresh_glossary"]()
+            thrice = {
+                app: runtime.compiled("Gwen is ready. Ask Gwen.", app)
+                for app in (codex, mail, "com.apple.Notes")}
+            for _ in range(2):
+                runtime.dictate(
+                    "Restart kubernetis now.",
+                    [(3.0, "kubernetis", "kubernetes")], bundle=codex)
+            ordinary = runtime.compiled(
+                "Kubernetis is down. Restart kubernetis.", codex)
+
+        self.assertEqual(once, "Run Gwen locally.")
+        for (app, engine), text in twice.items():
+            with self.subTest(app=app, engine=engine):
+                self.assertEqual(
+                    text,
+                    "Run Qwen locally." if app == codex
+                    else "Run Gwen locally.")
+        # The third correction promotes the mapping everywhere, and the app
+        # that taught it keeps it.
+        self.assertEqual(set(thrice.values()), {"Qwen is ready. Ask Qwen."})
+        self.assertEqual(ordinary, "Kubernetes is down. Restart kubernetes.")
+
+    def test_homophone_corrections_never_become_a_rule(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+
+            runtime.dictate("I think there car is outside.",
+                            [(3.0, "there", "their")])
+            runtime.dictate("Is there manager joining?",
+                            [(3.0, "there", "their")])
+            runtime.dictate("We can ship it today.",
+                            [(3.0, "can", "can't")])
+            runtime.dictate("We can make the release.",
+                            [(3.0, "can", "can't")])
+            # The same choices spelled without the apostrophe, a negation
+            # flip and a change of tense are no more a mishearing.
+            for heard, typed in (
+                    ("can", "cant"), ("want", "won't"), ("got", "get"),
+                    ("site", "sight")):
+                runtime.dictate(f"I think {heard} it works.",
+                                [(3.0, f" {heard} ", f" {typed} ")])
+                runtime.dictate(f"Maybe {heard} we go.",
+                                [(3.0, f" {heard} ", f" {typed} ")])
+
+            state = runtime.state()
+            gloss = runtime.ns["GLOSS"]
+            for engine in ("parakeet-unified", "tiny"):
+                for sentence in (
+                        "Is there a problem over there?",
+                        "Yes, we can ship it today.",
+                        "I want to ship it today.",
+                        "We got the build.",
+                        "The site is down."):
+                    with self.subTest(engine=engine, sentence=sentence):
+                        self.assertEqual(
+                            runtime.compiled(sentence, engine=engine),
+                            sentence)
+            self.assertEqual(
+                runtime.ns["apply_vocabulary_casing"](
+                    "Their plan is fine. Their team agreed."),
+                "Their plan is fine. Their team agreed.")
+        self.assertEqual(state["confusions"], {})
+        self.assertEqual(state["counts"], {})
+        self.assertEqual(gloss["regression"].promoted, ())
+        self.assertIsNone(gloss["prompt"])
+        self.assertEqual(gloss["anchor_pack"].candidates, ())
+
+    def test_one_correction_does_not_promote_its_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+            gloss = runtime.ns["GLOSS"]
+
+            runtime.dictate("Run Gwen locally.", [(3.0, "Gwen", "Qwen")])
+            after_one = (gloss["prompt"], gloss["anchor_pack"].candidates,
+                         dict(gloss["vocabulary"]))
+            runtime.dictate("Ask Gwen to rebase.", [(3.0, "Gwen", "Qwen")])
+
+            self.assertEqual(after_one, (None, (), {}))
+            self.assertEqual(gloss["prompt"], "Common terms: Qwen.")
+            self.assertEqual(
+                [item.text for item in gloss["anchor_pack"].candidates],
+                ["Qwen"])
+
+    def test_a_promotion_count_left_by_an_old_correction_is_inert(self):
+        # Earlier versions set the target's count straight to the promotion
+        # threshold, so a learned.json in the field still holds these.
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(
+                directory, learned={"counts": {"their": 2, "The": 6}})
+            gloss = runtime.ns["GLOSS"]
+
+            self.assertIsNone(gloss["prompt"])
+            self.assertEqual(gloss["anchor_pack"].candidates, ())
+            self.assertEqual(
+                runtime.ns["apply_vocabulary_casing"](
+                    "Their plan is fine. the end."),
+                "Their plan is fine. the end.")
+
+    def test_a_counted_term_the_user_corrected_away_is_not_promoted(self):
+        # The miner counted the misrecognition before the user corrected it.
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory, learned={"counts": {
+                "Gwen": 5, "Gwen Notes": 3, "Gwendolyn Park": 2}})
+            gloss = runtime.ns["GLOSS"]
+            mined = list(gloss["terms"])
+
+            for sentence in ("Run Gwen locally.", "Ask Gwen to rebase."):
+                runtime.dictate(sentence, [(3.0, "Gwen", "Qwen")])
+            corrected = list(gloss["terms"])
+            anchors = [item.text for item in gloss["anchor_pack"].candidates]
+            listed = (Path(directory) / "dictionary.txt").read_text(
+                encoding="utf-8")
+            runtime.ns["forget_gui_correction"]("gwen->qwen")
+            forgotten = list(gloss["terms"])
+
+        self.assertEqual(mined, ["Gwen", "Gwen Notes", "Gwendolyn Park"])
+        # Only the whole word is the misrecognition, not a name that begins
+        # with it.
+        self.assertEqual(corrected, ["Gwendolyn Park", "Qwen"])
+        self.assertEqual(anchors, corrected)
+        self.assertNotIn("Gwen\n", listed)
+        self.assertNotIn("Gwen Notes", listed)
+        # The counts are evidence, kept for when the correction is forgotten.
+        self.assertEqual(forgotten, mined)
+
+    def test_reverting_a_learned_correction_demotes_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+            fix = [(3.0, "Mark", "Mary")]
+            runtime.dictate("Call Mark tomorrow.", fix)
+            runtime.dictate("Ask Mark about it.", fix)
+            learned = runtime.compiled("Call Mark tomorrow.")
+
+            # The mapping now writes "Mary"; the user changes it back.
+            runtime.dictate(learned, [(3.0, "Mary", "Mark")])
+            reverted = runtime.compiled("Call Mark tomorrow.")
+            runtime.dictate("Ping Mark later.", fix)
+            runtime.ns["refresh_glossary"]()
+            still = runtime.compiled("Call Mark tomorrow.")
+            state = runtime.state()
+
+        self.assertEqual(learned, "Call Mary tomorrow.")
+        self.assertEqual(reverted, "Call Mark tomorrow.")
+        self.assertEqual(still, "Call Mark tomorrow.")
+        # The revert is not learned as the opposite rule.
+        self.assertEqual(list(state["confusions"]), ["mark->mary"])
+        self.assertEqual(
+            runtime.compiled("Call Mary tomorrow."), "Call Mary tomorrow.")
+
+    def test_unedited_pastes_count_against_a_candidate_correction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+            fix = [(3.0, "Mark", "Mary")]
+            runtime.dictate("Call Mark tomorrow.", fix)
+            # Twice the heard word is pasted and left alone for the whole
+            # correction window.
+            runtime.dictate("Mark is on call.")
+            runtime.dictate("Thank Mark for me.")
+            runtime.dictate("Ask Mark about it.", fix)
+            held = runtime.compiled("Call Mark tomorrow.")
+            kept = runtime.state()["confusions"]["mark->mary"]["kept"]
+            runtime.dictate("Ping Mark later.", fix)
+            active = runtime.compiled("Call Mark tomorrow.")
+
+        self.assertEqual(kept, {"com.slack": 2})
+        self.assertEqual(held, "Call Mark tomorrow.")
+        self.assertEqual(active, "Call Mary tomorrow.")
+
+    def test_messages_sent_unedited_count_against_a_candidate_correction(
+            self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+
+            def sent(text, fix=()):
+                """Dictate into a chat composer that is emptied by the send,
+                five seconds later."""
+                final = text
+                for _delay, old, new in fix:
+                    final = final.replace(old, new, 1)
+                return runtime.dictate(text, [*fix, (5.0, final, "")])
+
+            fix = [(3.0, "Mark", "Mary")]
+            sent("Call Mark tomorrow.", fix)
+            # The heard word is dictated, read and sent as it is, twice.
+            sent("Mark is on call.")
+            sent("Thank Mark for me.")
+            recorded = list(runtime.observed)
+            sent("Ask Mark about it.", fix)
+            held = runtime.compiled("Call Mark tomorrow.")
+            kept = runtime.state()["confusions"]["mark->mary"]["kept"]
+            sent("Ping Mark later.", fix)
+            active = runtime.compiled("Call Mark tomorrow.")
+
+        self.assertEqual(kept, {"com.slack": 2})
+        self.assertEqual(held, "Call Mark tomorrow.")
+        self.assertEqual(active, "Call Mary tomorrow.")
+        # An emptied field is not an observed zero-edit outcome: it reads
+        # the same when the user deletes the dictation.
+        self.assertEqual(recorded, [
+            ("Call Mark tomorrow.", "Call Mary tomorrow.")])
+
+    def test_destination_edit_of_a_snippet_is_only_a_suggestion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+            ns, clock, field = runtime.ns, runtime.clock, runtime.field
+            (Path(directory) / "snippets.json").write_text(json.dumps({
+                "email": "john@example.com",
+                "bank details": "GB29 NWBK 6016 1331 9268 19",
+            }))
+
+            def insert(name, before, edits=()):
+                """Paste a saved snippet after ``before`` and run the
+                observer over the scripted (seconds, old, new) edits."""
+                snippet = runtime.snippets()[name]
+                ns["focused_snapshot"] = lambda: ns["FocusSnapshot"](
+                    element=object(), text=before,
+                    selection=(len(before), 0))
+                rec = SimpleNamespace(
+                    insertion_lease=None, insertion_receipt=None,
+                    language="en")
+                started = []
+                receipt = ns["paste_snippet_and_watch"](
+                    name, snippet, "com.google.Chrome", "capture",
+                    starter=lambda target, args:
+                        started.append((target, args)),
+                    rec=rec)
+                current = before + rec.committed_text
+                field["timeline"] = [(clock[0], current)]
+                for delay, old, new in edits:
+                    current = current.replace(old, new, 1)
+                    field["timeline"].append((clock[0] + delay, current))
+                target, args = started[0]
+                target(*args)
+                return receipt
+
+            # Pasted after "Email:" the snippet gains a joining space. Left
+            # alone, that space must not come back as an edit of the snippet.
+            receipt = insert("email", "Email:")
+            self.assertEqual(receipt.pasted, " john@example.com")
+            self.assertEqual(runtime.state()["snippet_edits"], {})
+
+            # A field that reformats its own content, or a user fixing the
+            # address: either way the saved snippet is not rewritten.
+            insert("email", "Email:", [(0.5, "john@", "jon@")])
+            insert("bank details", "",
+                   [(0.5, "GB29 NWBK 6016 1331 9268 19",
+                     "GB33 EVIL 0000 0000 0000 00")])
+            self.assertEqual(runtime.snippets(), {
+                "email": "john@example.com",
+                "bank details": "GB29 NWBK 6016 1331 9268 19",
+            })
+            self.assertEqual(runtime.state()["snippet_edits"]["email"], {
+                "suggested": {
+                    "from": "john@example.com", "to": "jon@example.com",
+                    "app": "com.google.Chrome"},
+            })
+
+            # The user accepts one suggestion by name and dismisses the other.
+            self.assertTrue(ns["apply_pending_snippet_edit"]("email"))
+            self.assertFalse(ns["apply_pending_snippet_edit"]("email"))
+            self.assertTrue(ns["forget_snippet_edit"]("bank details"))
+            self.assertFalse(ns["apply_pending_snippet_edit"]("bank details"))
+            self.assertEqual(runtime.snippets(), {
+                "email": "jon@example.com",
+                "bank details": "GB29 NWBK 6016 1331 9268 19",
+            })
+            applied = runtime.state()
+            self.assertEqual(applied["snippet_edits"], {"email": {
+                "from": "john@example.com", "to": "jon@example.com",
+                "n": 1, "app": "com.google.Chrome",
+            }})
+            # Nothing in history repeats a snippet's text.
+            self.assertNotIn("example.com", json.dumps(applied["history"]))
+            self.assertNotIn("GB", json.dumps(applied["history"]))
+
+    def test_a_stale_snippet_suggestion_is_dropped_not_applied(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+            ns = runtime.ns
+            snippets = Path(directory) / "snippets.json"
+            snippets.write_text(json.dumps({"email": "john@example.com"}))
+            self.assertTrue(ns["suggest_snippet_edit"](
+                "email", "john@example.com", "jon@example.com", "com.slack"))
+            # The user edits the snippet in Settings before deciding.
+            snippets.write_text(json.dumps({"email": "j.doe@example.com"}))
+
+            self.assertFalse(ns["apply_pending_snippet_edit"]("email"))
+
+            self.assertEqual(
+                runtime.snippets(), {"email": "j.doe@example.com"})
+            self.assertEqual(runtime.state()["snippet_edits"], {})
+
+    def test_a_snippet_suggestion_keeps_the_record_of_an_applied_edit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.learning_runtime(directory)
+            ns = runtime.ns
+            snippets = Path(directory) / "snippets.json"
+            snippets.write_text(json.dumps({"email": "john@example.com"}))
+            ns["suggest_snippet_edit"](
+                "email", "john@example.com", "jon@example.com", "com.slack")
+            self.assertTrue(ns["apply_pending_snippet_edit"]("email"))
+            applied = {"from": "john@example.com", "to": "jon@example.com",
+                       "n": 1, "app": "com.slack"}
+
+            # A later observation waits beside the applied edit's record.
+            ns["suggest_snippet_edit"](
+                "email", "jon@example.com", "evil@example.net", "com.slack")
+            self.assertEqual(runtime.state()["snippet_edits"]["email"], {
+                **applied, "suggested": {
+                    "from": "jon@example.com", "to": "evil@example.net",
+                    "app": "com.slack"}})
+            # While snippets.json cannot be read the suggestion cannot be
+            # judged stale, so it is neither applied nor dropped.
+            snippets.write_text("{", encoding="utf-8")
+            self.assertFalse(ns["apply_pending_snippet_edit"]("email"))
+            self.assertIn(
+                "suggested", runtime.state()["snippet_edits"]["email"])
+            snippets.write_text(json.dumps({"email": "jon@example.com"}))
+
+            # Forget still undoes the applied edit, and the suggestion goes
+            # with it.
+            self.assertTrue(ns["forget_snippet_edit"]("email"))
+            self.assertEqual(runtime.snippets(), {"email": "john@example.com"})
+            self.assertEqual(runtime.state()["snippet_edits"], {})
+            # Forgetting a suggestion for a snippet that is gone creates
+            # nothing.
+            ns["suggest_snippet_edit"](
+                "email", "john@example.com", "jon@example.com", "com.slack")
+            snippets.write_text("{}", encoding="utf-8")
+            self.assertTrue(ns["forget_snippet_edit"]("email"))
+            self.assertEqual(runtime.snippets(), {})
+
     def test_snippet_edit_is_persisted_and_exposed_as_learning(self):
         ns = load_definitions(
             "load_learned", "save_learned", "save_snippet_edit",
@@ -4750,12 +7569,13 @@ class LearningTests(unittest.TestCase):
         events = []
         receipt = SimpleNamespace(pasted="EDIT ME: your street address")
         ns = load_definitions(
-            "paste_snippet_and_watch",
+            "paste_snippet_and_watch", "committed_paste_receipt",
             extra={
                 "threading": threading,
                 "focused_snapshot": lambda: events.append("snapshot") or
                     "focus",
-                "make_paste_receipt": lambda snapshot, pasted, bundle, mode:
+                "make_paste_receipt":
+                    lambda snapshot, pasted, bundle, mode, event_id="":
                     receipt if snapshot == "focus" else None,
                 "paste": lambda text: events.append(("paste", text)),
                 "learn_snippet_edit": lambda name, value:
@@ -4773,16 +7593,17 @@ class LearningTests(unittest.TestCase):
         self.assertEqual(events[0], "snapshot")
         self.assertEqual(events[1], ("paste", "EDIT ME: your street address"))
         self.assertEqual(events[2][0], "start")
-        self.assertEqual(events[2][2], ("address", receipt))
+        self.assertEqual(events[2][2], (
+            "address", receipt, "EDIT ME: your street address"))
 
-    def test_snippet_observer_saves_the_revised_insertion(self):
+    def test_snippet_observer_suggests_the_revised_insertion(self):
         saved = []
         ns = load_definitions(
             "learn_snippet_edit",
             extra={
                 "observe_paste_outcome": lambda _receipt:
                     "7623 Opal Ridge Lane, Bainbridge Island, 98110 WA",
-                "save_snippet_edit": lambda name, old, new, bundle:
+                "suggest_snippet_edit": lambda name, old, new, bundle:
                     saved.append((name, old, new, bundle)) or True,
             },
         )
@@ -4839,6 +7660,8 @@ class LearningTests(unittest.TestCase):
         ns = load_definitions(
             "load_learned", "save_learned", "observe_paste_outcome",
             "personal_regression_lab", "learn_from_corrections",
+            "_learned_count",
+            assignments={"CORRECTION_STABLE_POLLS"},
             extra={
                 "Path": Path,
                 "PasteReceipt": object,
@@ -4860,7 +7683,15 @@ class LearningTests(unittest.TestCase):
                 "PERSONAL_GLOBAL_MIN_COUNT": 3,
             },
         )
-        values = iter(["Hello Gwen world", "Hello Qwen world", ""])
+        # The correction is made at once, holds for a second, and the chat
+        # composer is then cleared by the user submitting the message.
+        def corrected_then_submitted():
+            started = elapsed[0]
+            return lambda _element: (
+                "Hello Gwen world" if elapsed[0] == started
+                else "Hello Qwen world" if elapsed[0] - started < 1.5
+                else "")
+
         with tempfile.TemporaryDirectory() as td:
             learned = Path(td) / "learned.json"
             ns.update({
@@ -4870,7 +7701,7 @@ class LearningTests(unittest.TestCase):
                 "CORRECTION_POLL_INTERVAL": 0.2,
                 "CORRECTION_MAX_LEARN": 3,
                 "PROMOTE_MIN_COUNT": 2,
-                "_ax_text": lambda _element: next(values),
+                "_ax_text": corrected_then_submitted(),
             })
             receipt = SimpleNamespace(
                 element=object(),
@@ -4885,11 +7716,11 @@ class LearningTests(unittest.TestCase):
             ns["learn_from_corrections"](receipt)
 
             below_threshold = json.loads(learned.read_text())
-            values = iter(["Hello Gwen world", "Hello Qwen world"])
+            ns["_ax_text"] = corrected_then_submitted()
             ns["learn_from_corrections"](receipt)
 
             state = json.loads(learned.read_text())
-            values = iter(["Hello Gwen world", "Hello Qwen world"])
+            ns["_ax_text"] = corrected_then_submitted()
             ns["learn_from_corrections"](receipt)
             global_state = json.loads(learned.read_text())
         self.assertEqual(observed, ["Qwen", "Qwen", "Qwen"])
@@ -4916,6 +7747,7 @@ class LearningTests(unittest.TestCase):
     def test_correction_is_observed_before_chat_composer_clears(self):
         ns = load_definitions(
             "observe_paste_outcome",
+            assignments={"CORRECTION_STABLE_POLLS"},
             extra={
                 "PasteReceipt": object,
                 "infer_revised_insertion": infer_revised_insertion,
@@ -4927,25 +7759,96 @@ class LearningTests(unittest.TestCase):
             selection=(6, 0),
             pasted="Gwen",
         )
-        values = iter(["Hello Gwen world", "Hello Qwen world", ""])
         elapsed = [0.0]
 
-        observed = ns["observe_paste_outcome"](
-            receipt,
-            timeout=10.0,
-            poll_interval=0.2,
-            reader=lambda _element: next(values),
-            clock=lambda: elapsed[0],
-            sleeper=lambda seconds: elapsed.__setitem__(
-                0, elapsed[0] + seconds),
-        )
+        def observe(field_at):
+            elapsed[0] = 0.0
+            return ns["observe_paste_outcome"](
+                receipt,
+                timeout=10.0,
+                poll_interval=0.2,
+                reader=lambda _element: field_at(elapsed[0]),
+                clock=lambda: elapsed[0],
+                sleeper=lambda seconds: elapsed.__setitem__(
+                    0, elapsed[0] + seconds),
+            )
 
+        # Corrected, left alone for a second, then submitted: the composer
+        # clears, and the settled correction is still reported, early.
+        observed = observe(lambda at: (
+            "Hello Gwen world" if at < 0.2
+            else "Hello Qwen world" if at < 1.5 else ""))
         self.assertEqual(observed, "Qwen")
         self.assertLess(elapsed[0], 10.0)
+        # Submitted in the middle of retyping the word: the last read before
+        # the composer cleared was half a word, and it is not reported.
+        self.assertIsNone(observe(lambda at: (
+            "Hello Gwen world" if at < 0.2
+            else "Hello Gw world" if at < 0.4
+            else "Hello Qw world" if at < 0.6 else "")))
+
+    def test_only_a_settled_edit_of_the_pasted_range_is_reported(self):
+        ns = load_definitions(
+            "observe_paste_outcome",
+            assignments={"CORRECTION_STABLE_POLLS"},
+            extra={"PasteReceipt": object},
+        )
+        document = "lorem ipsum dolor sit amet " * 800
+        pasted = " Ask Gwen about it."
+        receipt = SimpleNamespace(
+            element=object(), before=document,
+            selection=(len(document), 0), pasted=pasted)
+        elapsed = [0.0]
+        compared = []
+
+        def infer(before, selection, text, current):
+            compared.append(len(before) + len(current))
+            return infer_revised_insertion(before, selection, text, current)
+
+        ns["infer_revised_insertion"] = infer
+
+        def observe(field_at):
+            elapsed[0] = 0.0
+            return ns["observe_paste_outcome"](
+                receipt,
+                reader=lambda _element: field_at(elapsed[0]),
+                timeout=10.0, poll_interval=0.2,
+                clock=lambda: elapsed[0],
+                sleeper=lambda seconds: elapsed.__setitem__(
+                    0, elapsed[0] + seconds),
+            )
+
+        # The user keeps typing after the paste for the whole window. The
+        # pasted range itself never changes, so that is a zero-edit paste,
+        # and no poll compares more than the range and a bounded tail.
+        typed = " and then some more typing that goes on for a while"
+        self.assertEqual(
+            observe(lambda at: document + pasted
+                    + typed[:int(at * 5) % len(typed)]),
+            pasted)
+        self.assertTrue(compared)
+        self.assertLess(max(compared), 600)
+        # An edit still in progress when the window closes is not reported
+        # as anything, least of all as an unchanged paste.
+        self.assertIsNone(observe(lambda at: (
+            document + pasted if at < 9.7
+            else document + " Ask Gw about it.")))
+        # Nor is the half word the user paused on before going on typing.
+        self.assertIsNone(observe(lambda at: (
+            document + pasted if at < 8.4
+            else document + " Ask Gw about it." if at < 9.5
+            else document + " Ask Qwen about it.")))
+        # An edit that settled and was then taken back is a zero-edit paste.
+        self.assertEqual(
+            observe(lambda at: (
+                document + " Ask Qwen about it." if 2.0 <= at < 5.0
+                else document + pasted)),
+            pasted)
 
     def test_cleared_chat_composer_is_not_reported_as_unchanged(self):
         ns = load_definitions(
             "observe_paste_outcome",
+            assignments={"CORRECTION_STABLE_POLLS"},
             extra={
                 "PasteReceipt": object,
                 "infer_revised_insertion": infer_revised_insertion,
@@ -4967,6 +7870,53 @@ class LearningTests(unittest.TestCase):
         )
 
         self.assertIsNone(observed)
+
+    def test_an_emptied_composer_ends_the_observation(self):
+        ns = load_definitions(
+            "observe_paste_outcome", "SentUnchanged",
+            assignments={"CORRECTION_STABLE_POLLS"},
+            extra={
+                "PasteReceipt": object,
+                "infer_revised_insertion": infer_revised_insertion,
+            },
+        )
+        message = "Thanks Gwen, see you at noon."
+        receipt = SimpleNamespace(
+            element=object(), before="", selection=(0, 0), pasted=message)
+        elapsed = [0.0]
+
+        def observe(field_at):
+            elapsed[0] = 0.0
+            return ns["observe_paste_outcome"](
+                receipt, timeout=10.0, poll_interval=0.2,
+                reader=lambda _element: field_at(elapsed[0]),
+                clock=lambda: elapsed[0],
+                sleeper=lambda seconds: elapsed.__setitem__(
+                    0, elapsed[0] + seconds),
+            )
+
+        # Sent unedited, and the next message typed at once: the watcher
+        # stops at the send and never reads the next message.
+        observed = observe(lambda at: (
+            message if at < 2.0 else "" if at < 2.3
+            else "Thanks Owen, see you at one."))
+        self.assertEqual(observed, message)
+        self.assertTrue(observed.sent)
+        self.assertLess(elapsed[0], 2.3)
+        # A composer that reads as a lone newline when empty is as empty.
+        self.assertTrue(observe(
+            lambda at: message if at < 2.0 else "\n").sent)
+        # Sent while a word was being retyped, after a pause on half of it.
+        self.assertIsNone(observe(lambda at: (
+            message if at < 1.0
+            else "Thanks Gw, see you at noon." if at < 2.4
+            else "Thanks Qwe, see you at noon." if at < 2.6 else "")))
+        # A read that fails for a moment is not an emptied field.
+        self.assertEqual(observe(lambda at: (
+            None if 2.0 <= at < 2.5
+            else message if at < 3.0
+            else "Thanks Qwen, see you at noon.")),
+            "Thanks Qwen, see you at noon.")
 
     def test_wrong_shaped_learned_state_uses_safe_defaults(self):
         ns = load_definitions("load_learned")
@@ -5429,7 +8379,7 @@ class InsertionAdapterTests(unittest.TestCase):
                     (left is original_element and right is current_element),
                 "insertion_readback": lambda *_args, **_kwargs:
                     ReadbackResult.verified(),
-                "readback_timeout_for_frontmost": lambda: 0.02,
+                "READBACK_TIMEOUT": 0.02,
                 "paste": pasted.append,
                 "PIPELINE_STATE": pipeline,
                 "frontmost_bundle": lambda: "com.openai.codex",
@@ -5466,6 +8416,7 @@ class InsertionAdapterTests(unittest.TestCase):
     def test_readback_proves_the_exact_field_mutation(self):
         ns = load_definitions(
             "insertion_readback",
+            assignments={"READBACK_TIMEOUT"},
             extra={
                 "FocusSnapshot": object,
                 "ReadbackResult": ReadbackResult,
@@ -5482,6 +8433,77 @@ class InsertionAdapterTests(unittest.TestCase):
         )
 
         self.assertEqual(result.state, ReceiptState.VERIFIED)
+
+    def commit_with_lagging_value(self, lag):
+        """Commit into a field whose Accessibility value trails the paste.
+
+        Chromium browsers and Electron apps both publish late, and nothing
+        about the app is consulted: every destination gets the same window.
+        """
+        import unicodedata
+        now = [0.0]
+        field = {"text": "Hello", "pasted_at": None}
+
+        def paste(text):
+            field["pasted_at"] = now[0]
+            field["text"] = "Hello" + text
+
+        def ax_text(_element):
+            if (field["pasted_at"] is None or lag is None
+                    or now[0] < field["pasted_at"] + lag):
+                return "Hello"
+            return field["text"]
+
+        lease = InsertionLease.capture(
+            "utterance-1", "field-a", (5, 0), "Hello")
+        rec = SimpleNamespace(
+            insertion_lease=lease, insertion_receipt=None,
+            bundle_at_press="com.google.Chrome", language="en")
+        ns = load_definitions(
+            "commit_insertion", "insertion_capability_buckets",
+            "insertion_join_prefix", "unresolved_destination_id",
+            "insertion_readback", "classify_readback_conflict",
+            assignments={"READBACK_TIMEOUT"},
+            extra={
+                "INSERTION_COORDINATOR": InsertionCoordinator(),
+                "destination_observation": lambda *_args:
+                    DestinationObservation.capture(
+                        "field-a", (5, 0), "Hello"),
+                "ReadbackResult": ReadbackResult,
+                "unicodedata": unicodedata,
+                "_ax_text": ax_text,
+                "paste": paste,
+                "PIPELINE_STATE": {},
+                "frontmost_bundle": lambda: "com.google.Chrome",
+                "time": SimpleNamespace(
+                    monotonic=lambda: now[0],
+                    sleep=lambda delay: now.__setitem__(0, now[0] + delay)),
+            },
+        )
+        receipt = ns["commit_insertion"](
+            rec, "World.", "com.google.Chrome", SimpleNamespace(
+                element=object(), text="Hello", selection=(5, 0)))
+        return receipt, now[0]
+
+    def test_a_value_published_late_still_verifies_in_any_app(self):
+        receipt, waited = self.commit_with_lagging_value(0.15)
+
+        self.assertEqual(receipt.state, ReceiptState.VERIFIED)
+        # Returned as soon as the value matched, not at the end of the window.
+        self.assertLess(waited, 0.2)
+
+    def test_a_value_published_at_once_is_read_once(self):
+        receipt, waited = self.commit_with_lagging_value(0.0)
+
+        self.assertEqual(receipt.state, ReceiptState.VERIFIED)
+        self.assertEqual(waited, 0.0)
+
+    def test_a_value_that_never_matches_fails_within_the_window(self):
+        receipt, waited = self.commit_with_lagging_value(None)
+
+        self.assertEqual(receipt.state, ReceiptState.CONFLICT)
+        self.assertGreaterEqual(waited, 0.35)
+        self.assertLessEqual(waited, 0.45)
 
     def test_hidden_field_lease_still_binds_to_original_application(self):
         ns = load_definitions(
@@ -5550,7 +8572,7 @@ class InsertionAdapterTests(unittest.TestCase):
                         "field-a", (0, 0), "nearby"),
                 "insertion_readback": lambda *_args, **_kwargs:
                     ReadbackResult.verified(),
-                "readback_timeout_for_frontmost": lambda: 0.02,
+                "READBACK_TIMEOUT": 0.02,
                 "paste": lambda _text: None,
                 "PIPELINE_STATE": {},
                 "frontmost_bundle": lambda: "com.openai.codex",
@@ -5613,6 +8635,44 @@ class InsertionAdapterTests(unittest.TestCase):
         ns["commit_insertion"](rec, "Ship it", "com.openai.codex", object())
 
         self.assertEqual(rec.insertion_capabilities["paste"], "unavailable")
+
+    def test_a_readback_shape_never_outlives_its_utterance(self):
+        ns = self.capability_namespace(
+            InsertionCoordinator(),
+            insertion_readback=lambda *_args, **_kwargs:
+                ReadbackResult.conflict("divergent"),
+        )
+        readable = SimpleNamespace(
+            insertion_lease=InsertionLease.capture(
+                "utterance-1", "field-a", (0, 0), "nearby"),
+            insertion_receipt=None, bundle_at_press="com.openai.codex")
+        first = ns["commit_insertion"](
+            readable, "Ship it", "com.openai.codex", object())
+        self.assertEqual(first.readback_shape, "divergent")
+
+        # Refused before the paste: no readback ran, so there is no shape.
+        drifted = SimpleNamespace(
+            insertion_lease=InsertionLease.capture_opaque(
+                "utterance-2", "com.apple.Terminal:window-7", "context"),
+            insertion_receipt=None, bundle_at_press="com.apple.Terminal")
+        receipt = ns["commit_insertion"](
+            drifted, "Ship it", "com.apple.Terminal", None)
+        self.assertFalse(receipt.paste_attempted)
+        self.assertEqual(receipt.readback_shape, "")
+
+        # A re-insert from the menu commits outside the release order, so it
+        # can land between a dictation's readback and its transcript record.
+        repaste = SimpleNamespace(
+            insertion_lease=InsertionLease.capture_opaque(
+                "repaste:1", "field-a", "nearby"),
+            insertion_receipt=None, bundle_at_press="com.openai.codex")
+        ns["commit_insertion"](repaste, "Ship it", "com.openai.codex", None)
+        self.assertEqual(readable.insertion_receipt.readback_shape,
+                         "divergent")
+
+        legacy = SimpleNamespace(insertion_lease=None, insertion_receipt=None)
+        self.assertIsNone(ns["commit_insertion"](
+            legacy, "Ship it", "com.openai.codex", None))
 
     def test_the_legacy_path_reports_no_capabilities_at_all(self):
         rec = SimpleNamespace(insertion_lease=None, insertion_receipt=None)
@@ -5698,6 +8758,160 @@ class InsertionAdapterTests(unittest.TestCase):
         ])
         with self.assertRaisesRegex(ValueError, "empty"):
             ns["copy_support_snapshot"]("  ")
+
+
+class AccessibilityRangeTests(unittest.TestCase):
+    """Accessibility counts UTF-16 units; the field text counts code points."""
+
+    BUNDLE = "com.apple.Notes"
+    APPLICATION_SERVICES = SimpleNamespace(
+        AXValueGetType=lambda _value: None,
+        AXValueGetValue=lambda *_args: None,
+        kAXSelectedTextRangeAttribute="AXSelectedTextRange",
+        kAXSelectedTextAttribute="AXSelectedText",
+        kAXValueCFRangeType=4,
+    )
+
+    @staticmethod
+    def utf16_units(text):
+        return len(text.encode("utf-16-le")) // 2
+
+    def field(self, text, caret):
+        """A field that reports its caret the way macOS does, in UTF-16."""
+        field = {"text": text, "caret": caret, "element": object()}
+
+        def ax_attribute(_element, attribute):
+            if attribute == "AXSelectedTextRange":
+                return (self.utf16_units(field["text"][:field["caret"]]), 0)
+            return None
+
+        def paste(inserted):
+            # The application inserts at its real caret, which is where the
+            # user sees it, whatever unit Accessibility reports it in.
+            field["text"] = (field["text"][:field["caret"]] + inserted
+                             + field["text"][field["caret"]:])
+            field["caret"] += len(inserted)
+
+        field["ax_attribute"] = ax_attribute
+        field["paste"] = paste
+        return field
+
+    def namespace(self, field, coordinator=None):
+        import unicodedata
+        return load_definitions(
+            "_ax_selection", "_ax_reported_range", "_coerce_range",
+            "utf16_range_to_code_points", "FocusSnapshot",
+            "bounded_focus_text", "focus_destination_id",
+            "focus_destination_matches", "opaque_focus_context",
+            "capture_insertion_lease", "unresolved_destination_id",
+            "destination_observation", "commit_insertion",
+            "insertion_capability_buckets", "insertion_join_prefix",
+            "insertion_readback", "classify_readback_conflict",
+            extra={
+                "dataclass": dataclass,
+                "time": time,
+                "unicodedata": unicodedata,
+                "InsertionLease": InsertionLease,
+                "DestinationObservation": DestinationObservation,
+                "INSERTION_COORDINATOR": coordinator or InsertionCoordinator(),
+                "ReadbackResult": ReadbackResult,
+                "ReceiptState": ReceiptState,
+                "_ax_attribute": field["ax_attribute"],
+                "_ax_text": lambda _element: field["text"],
+                "_ax_elements_equal": lambda left, right: left is right,
+                "frontmost_window_destination": lambda _bundle: None,
+                "frontmost_bundle": lambda: self.BUNDLE,
+                "READBACK_TIMEOUT": 0.0,
+                "paste": field["paste"],
+                "PIPELINE_STATE": {},
+            },
+        )
+
+    def snapshot(self, ns, field):
+        with mock.patch.dict(sys.modules, {
+                "ApplicationServices": self.APPLICATION_SERVICES}):
+            selection = ns["_ax_selection"](field["element"], field["text"])
+        return ns["FocusSnapshot"](
+            element=field["element"], text=field["text"], selection=selection)
+
+    def dictate(self, text, caret, words):
+        """Lease at press, then commit at release, as the runtime does."""
+        field = self.field(text, caret)
+        ns = self.namespace(field)
+        at_press = self.snapshot(ns, field)
+        lease = ns["capture_insertion_lease"](
+            at_press, self.BUNDLE, "utterance-1")
+        rec = SimpleNamespace(
+            insertion_lease=lease, insertion_receipt=None,
+            focus_at_press=at_press, bundle_at_press=self.BUNDLE,
+            language="en")
+        receipt = ns["commit_insertion"](
+            rec, words, self.BUNDLE, self.snapshot(ns, field))
+        return lease, receipt, field["text"]
+
+    def test_an_emoji_before_a_trailing_caret_still_verifies(self):
+        lease, receipt, result = self.dictate(
+            "Sounds good \U0001F44D", len("Sounds good \U0001F44D"),
+            "See you soon.")
+
+        self.assertFalse(lease.opaque)
+        self.assertEqual(receipt.state, ReceiptState.VERIFIED)
+        self.assertEqual(result, "Sounds good \U0001F44D See you soon.")
+
+    def test_a_caret_mid_text_after_an_emoji_joins_and_verifies(self):
+        text = "\U0001F389 Great news, the build is green."
+        caret = text.index(" the build")
+        lease, receipt, result = self.dictate(text, caret, "Ship it.")
+
+        self.assertFalse(lease.opaque)
+        self.assertEqual(receipt.state, ReceiptState.VERIFIED)
+        # The character left of the caret is the comma, so one space joins.
+        self.assertEqual(
+            result,
+            "\U0001F389 Great news, Ship it. the build is green.")
+
+    def test_a_joined_emoji_sequence_before_the_caret_verifies(self):
+        family = "\U0001F468‍\U0001F469‍\U0001F467"
+        text = f"Family photo {family} and \U0001F44D\U0001F3FD"
+        lease, receipt, result = self.dictate(text, len(text), "Lovely.")
+
+        self.assertFalse(lease.opaque)
+        self.assertEqual(receipt.state, ReceiptState.VERIFIED)
+        self.assertEqual(result, text + " Lovely.")
+
+    def test_a_field_without_emoji_still_verifies(self):
+        lease, receipt, result = self.dictate(
+            "Sounds good.", len("Sounds good."), "See you soon.")
+
+        self.assertFalse(lease.opaque)
+        self.assertEqual(receipt.state, ReceiptState.VERIFIED)
+        self.assertEqual(result, "Sounds good. See you soon.")
+
+    def test_a_selection_over_an_emoji_covers_one_code_point(self):
+        field = self.field("Ok \U0001F44D!", 3)
+        ns = self.namespace(field)
+        convert = ns["utf16_range_to_code_points"]
+
+        self.assertEqual(convert("Ok \U0001F44D!", (3, 2)), (3, 1))
+        self.assertEqual(convert("Ok \U0001F44D!", (5, 1)), (4, 1))
+
+    def test_a_range_that_does_not_fit_the_text_is_withheld(self):
+        field = self.field("Ok \U0001F44D!", 3)
+        ns = self.namespace(field)
+        convert = ns["utf16_range_to_code_points"]
+
+        # Inside the surrogate pair, and past the end of the text: neither
+        # describes this text, so nothing downstream may slice with it.
+        self.assertIsNone(convert("Ok \U0001F44D!", (4, 0)))
+        self.assertIsNone(convert("Ok \U0001F44D!", (7, 0)))
+        field["ax_attribute"] = lambda _element, attribute: (
+            (9, 0) if attribute == "AXSelectedTextRange" else None)
+        ns["_ax_attribute"] = field["ax_attribute"]
+        snapshot = self.snapshot(ns, field)
+        self.assertIsNone(snapshot.selection)
+        lease = ns["capture_insertion_lease"](
+            snapshot, self.BUNDLE, "utterance-1")
+        self.assertTrue(lease.opaque)
 
 
 class ElectronAccessibilityTests(unittest.TestCase):
@@ -5872,30 +9086,60 @@ class ElectronAccessibilityTests(unittest.TestCase):
 
 
 class PersonalPriorIntegrationTests(unittest.TestCase):
-    def test_unpromoted_case_does_not_disable_established_legacy_fix(self):
+    def test_only_a_mapping_the_lab_promoted_is_applied(self):
         lab = PersonalRegressionLab()
-        lab.record_correction("Gwen", "Qwen", app="com.openai.codex")
+        lab.record_correction("gwen", "qwen", app="com.openai.codex")
         ns = load_definitions(
-            "apply_learned_fixes",
+            "apply_learned_fixes", "compiler_personal_priors",
             extra={
                 "GLOSS": {
                     "lock": threading.Lock(),
-                    "fixes": {"gwen": "Qwen"},
-                    "confusions": {},
+                    # Counts the lab never promoted are not a second way in.
+                    "fixes": {"gwen": "qwen"},
+                    "confusions": {"gwen->qwen": {
+                        "from": "gwen", "to": "qwen", "n": 9,
+                        "apps": {"com.openai.codex": 9}}},
                     "regression": lab,
                 },
+                "PersonalPrior": __import__(
+                    "voice_compiler").PersonalPrior,
             },
         )
 
         self.assertEqual(
-            ns["apply_learned_fixes"](
-                "Use Gwen", "com.openai.codex"),
-            "Use Qwen",
-        )
+            ns["apply_learned_fixes"]("Use gwen", "com.openai.codex"),
+            "Use gwen")
         self.assertEqual(
-            ns["apply_learned_fixes"]("Use Gwen", "com.apple.Notes"),
-            "Use Qwen",
+            ns["compiler_personal_priors"]("com.openai.codex"), ())
+        lab.propose("gwen", "qwen", app="com.openai.codex")
+        self.assertEqual(
+            ns["apply_learned_fixes"](
+                "Gwen is up. Use gwen.", "com.openai.codex"),
+            "Qwen is up. Use qwen.")
+        self.assertEqual(
+            ns["apply_learned_fixes"]("Use gwen", "com.apple.Notes"),
+            "Use gwen")
+
+    def test_a_common_word_pair_is_never_offered_as_an_alternative(self):
+        ns = load_definitions(
+            "learned_alternatives",
+            extra={
+                "GLOSS": {
+                    "lock": threading.Lock(),
+                    "confusions": {
+                        "there->their": {
+                            "from": "there", "to": "their", "n": 2},
+                        "gwen->qwen": {"from": "Gwen", "to": "Qwen", "n": 1},
+                    },
+                },
+                "PersonalRegressionLab": PersonalRegressionLab,
+            },
         )
+
+        self.assertEqual(
+            ns["learned_alternatives"](
+                "Is there a Gwen over there?", "com.slack"),
+            ["Is there a Qwen over there?"])
 
     def test_regression_lab_app_prior_does_not_reach_other_apps(self):
         lab = PersonalRegressionLab()
@@ -5992,6 +9236,99 @@ class HotkeyListenerRecoveryTests(unittest.TestCase):
         self.assertEqual(cleanups, [])
         self.assertFalse(state["recovering"])
 
+    class ExitedListener(threading.Thread):
+        """pynput's AbstractListener shape: a thread whose ``running`` flag
+        is set in run() and cleared only by stop(). When the platform loop
+        returns by itself the flag stays set and the thread is gone."""
+
+        def __init__(self):
+            super().__init__(daemon=True)
+            self._running = False
+
+        @property
+        def running(self):
+            return self._running
+
+        def run(self):
+            self._running = True
+
+    def test_a_listener_thread_that_exited_is_replaced(self):
+        ns = load_definitions(
+            "restart_dead_hotkey_listener",
+            extra={"print": lambda *_args: None},
+        )
+        exited = self.ExitedListener()
+        exited.start()
+        exited.join(timeout=1.0)
+        self.assertTrue(exited.running)
+        self.assertFalse(exited.is_alive())
+        replacement = SimpleNamespace(running=True)
+        cleanups = []
+        state = {"l": exited, "make": lambda: replacement,
+                 "recovering": False}
+
+        self.assertTrue(ns["restart_dead_hotkey_listener"](
+            lambda: cleanups.append(True), state))
+
+        self.assertIs(state["l"], replacement)
+        self.assertEqual(cleanups, [True])
+
+    def test_a_listener_that_keeps_exiting_is_logged_once(self):
+        logged = []
+        ns = load_definitions(
+            "restart_dead_hotkey_listener",
+            extra={"print": logged.append},
+        )
+
+        def exited_listener():
+            listener = self.ExitedListener()
+            listener.start()
+            listener.join(timeout=1.0)
+            return listener
+
+        state = {"l": exited_listener(), "make": exited_listener,
+                 "recovering": False}
+        for _ in range(5):
+            self.assertTrue(ns["restart_dead_hotkey_listener"](
+                lambda: None, state))
+        self.assertEqual(logged, [
+            "! hotkey listener died — restarting it",
+            "! hotkey listener keeps exiting — still restarting it",
+        ])
+
+        # Once a replacement stays up, a later death is reported again.
+        state["l"] = SimpleNamespace(running=True)
+        self.assertFalse(ns["restart_dead_hotkey_listener"](
+            lambda: None, state))
+        state["l"] = exited_listener()
+        self.assertTrue(ns["restart_dead_hotkey_listener"](
+            lambda: None, state))
+        self.assertEqual(
+            logged[-1], "! hotkey listener died — restarting it")
+        self.assertEqual(len(logged), 3)
+
+    def test_a_running_listener_thread_is_left_alone(self):
+        ns = load_definitions("restart_dead_hotkey_listener")
+        release = threading.Event()
+
+        class Live(self.ExitedListener):
+            def run(self):
+                self._running = True
+                release.wait(timeout=5.0)
+
+        live = Live()
+        live.start()
+        try:
+            state = {"l": live,
+                     "make": lambda: self.fail("live listener replaced"),
+                     "recovering": False}
+            self.assertFalse(ns["restart_dead_hotkey_listener"](
+                lambda: self.fail("cleanup ran"), state))
+            self.assertIs(state["l"], live)
+        finally:
+            release.set()
+            live.join(timeout=1.0)
+
     def test_dead_listener_cleanup_runs_once_across_restart_retries(self):
         ns = load_definitions(
             "restart_dead_hotkey_listener",
@@ -6057,6 +9394,119 @@ class HotkeyListenerRecoveryTests(unittest.TestCase):
         self.assertEqual(modifiers, set())
         self.assertEqual(events.get_nowait(), (
             "listener_recovery", 12.5, frozenset()))
+
+    @staticmethod
+    def hold_namespace():
+        return load_definitions(
+            "latch_hotkey_press", "supervise_hotkey_latch",
+            assignments={"MAX_TAKE_SECONDS", "HOLD_KEY_UP_POLLS"},
+        )
+
+    @staticmethod
+    def drain(events):
+        drained = []
+        while not events.empty():
+            drained.append(events.get_nowait())
+        return drained
+
+    def test_a_lost_key_up_ends_the_take_through_a_release(self):
+        # Right Shift released while Left Shift is still held: pynput reads
+        # the family flag, so no release event ever arrives.
+        ns = self.hold_namespace()
+        latch, lock, events = {"on": False}, threading.Lock(), queue.Queue()
+        modifiers = {"shift"}
+        ns["latch_hotkey_press"](latch, 100.0)
+        readings = iter([True, True, False, False])
+        step = functools.partial(
+            ns["supervise_hotkey_latch"], latch, lock, events, modifiers,
+            lambda: next(readings))
+
+        outcomes = [step(now) for now in (100.25, 100.5, 100.75, 101.0)]
+
+        self.assertEqual(outcomes, [None, None, None, "key_up_lost"])
+        self.assertEqual(self.drain(events), [
+            ("release", 101.0, frozenset({"shift"}))])
+        self.assertFalse(latch["on"])
+        # The next real press is accepted again.
+        self.assertIsNone(step(101.25))
+
+    def test_an_unreadable_key_state_never_ends_a_hold_early(self):
+        # A remapped key or a missing permission reads "up" while held. With
+        # no "down" reading during the hold, only the cap applies.
+        ns = self.hold_namespace()
+        latch, lock, events = {"on": False}, threading.Lock(), queue.Queue()
+        ns["latch_hotkey_press"](latch, 0.0)
+        cap = ns["MAX_TAKE_SECONDS"]
+        for reading in (False, None):
+            with self.subTest(reading=reading):
+                for now in (0.25, 0.5, 60.0, cap - 0.01):
+                    self.assertIsNone(ns["supervise_hotkey_latch"](
+                        latch, lock, events, set(), lambda: reading, now))
+                self.assertTrue(latch["on"])
+                self.assertEqual(self.drain(events), [])
+
+    def test_the_take_cap_finishes_once_and_keeps_the_key_latched(self):
+        ns = self.hold_namespace()
+        latch, lock, events = {"on": False}, threading.Lock(), queue.Queue()
+        ns["latch_hotkey_press"](latch, 0.0)
+        cap = ns["MAX_TAKE_SECONDS"]
+        self.assertEqual(cap, 600.0)
+        held = functools.partial(
+            ns["supervise_hotkey_latch"], latch, lock, events, set(),
+            lambda: True)
+
+        self.assertEqual(held(cap), "take_limit")
+        self.assertIsNone(held(cap + 0.25))
+        self.assertIsNone(held(cap + 30.0))
+
+        self.assertEqual(self.drain(events), [("release", cap, frozenset())])
+        # Still latched: a held function key's auto-repeat cannot start a
+        # new take, and a later lost key-up only clears the latch.
+        self.assertTrue(latch["on"])
+        for now in (cap + 31.0, cap + 31.25):
+            ns["supervise_hotkey_latch"](
+                latch, lock, events, set(), lambda: False, now)
+        self.assertFalse(latch["on"])
+        self.assertEqual(self.drain(events), [])
+
+    def test_a_real_key_event_during_a_poll_wins(self):
+        ns = self.hold_namespace()
+        latch, lock, events = {"on": False}, threading.Lock(), queue.Queue()
+        ns["latch_hotkey_press"](latch, 0.0)
+        latch.update(confirmed=True, up_polls=1)
+
+        def released_then_pressed_again():
+            # The listener releases and re-presses while the poll reads.
+            with lock:
+                latch["on"] = False
+                ns["latch_hotkey_press"](latch, 0.2)
+            return False
+
+        self.assertIsNone(ns["supervise_hotkey_latch"](
+            latch, lock, events, set(), released_then_pressed_again, 0.25))
+        self.assertTrue(latch["on"])
+        self.assertEqual(latch["at"], 0.2)
+        self.assertEqual(self.drain(events), [])
+
+    def test_physical_key_state_reads_the_bound_key_code(self):
+        reads = []
+        quartz = types.ModuleType("Quartz")
+        quartz.kCGEventSourceStateHIDSystemState = 1
+        quartz.CGEventSourceKeyState = (
+            lambda source, vk: reads.append((source, vk)) or vk == 61)
+        ns = load_definitions(
+            "physical_key_is_down",
+            extra={"IS_MACOS": True, "IS_WINDOWS": False, "ctypes": ctypes})
+        right_option = SimpleNamespace(value=SimpleNamespace(vk=61))
+        with mock.patch.dict(sys.modules, {"Quartz": quartz}):
+            self.assertTrue(ns["physical_key_is_down"](right_option))
+            self.assertFalse(ns["physical_key_is_down"](
+                SimpleNamespace(value=SimpleNamespace(vk=60))))
+            quartz.CGEventSourceKeyState = mock.Mock(
+                side_effect=RuntimeError("no access"))
+            self.assertIsNone(ns["physical_key_is_down"](right_option))
+        self.assertEqual(reads, [(1, 61), (1, 60)])
+        self.assertIsNone(ns["physical_key_is_down"](None))
 
     def test_active_hotkey_recovery_surfaces_retry_feedback(self):
         source = (ROOT / "dictate.py").read_text(encoding="utf-8")
@@ -6352,7 +9802,7 @@ class ReleasePlanTests(unittest.TestCase):
                         Recognition(
                             "remainder", verified=True, engine="tiny"),
                 "peak_rms": lambda audio: 0.1,
-                "is_hallucination": lambda text, language="en": False,
+                "is_hallucination": lambda *_args: False,
                 "Recognition": Recognition,
             },
         )
@@ -6369,6 +9819,90 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertTrue(result.verified)
         self.assertEqual(result.engine, "tiny")
         self.assertEqual(pool.submissions, 1)
+
+    def _assemble_with_the_real_guard(self, lines):
+        return load_definitions(
+            "BoundedRecognitionFuture",
+            "assemble_raw",
+            "is_hallucination",
+            "weak_whisper_evidence",
+            assignments=CleanupGuardTests.HALLUCINATION_GUARD,
+            extra={
+                "dataclass": dataclass,
+                "np": SimpleNamespace(ndarray=object),
+                "SAMPLE_RATE": 16_000,
+                "GATE_PEAK_RMS": 0.002,
+                "ASR_POOL": SimpleNamespace(),
+                "transcribe_detailed": None,
+                "peak_rms": lambda _audio: 0.0,
+                "Recognition": Recognition,
+                "RecognitionWord": RecognitionWord,
+                "print": lines.append,
+            },
+        )
+
+    def test_a_sign_off_after_a_pause_is_part_of_the_dictation(self):
+        class Future:
+            def __init__(self, value):
+                self.value = value
+
+            def result(self):
+                return self.value
+
+        lines = []
+        ns = self._assemble_with_the_real_guard(lines)
+        bounded = ns["BoundedRecognitionFuture"]
+        # A rolling chunk cut at a pause, then the sign-off decoded on its
+        # own as the remainder: the shape of any longer dictated message.
+        body = Recognition(
+            "Let me know if you have any questions.", confidence=0.93,
+            engine="parakeet-unified", audio_duration=4.6)
+        sign_off = Recognition(
+            "Thank you.", confidence=0.93, engine="parakeet-unified",
+            audio_duration=1.4)
+
+        result = ns["assemble_raw"](
+            [bounded(Future(body), 0, 73_600)],
+            bounded(Future(sign_off), 73_600, 96_000), [], None, "en")
+
+        self.assertEqual(
+            result.text, "Let me know if you have any questions. Thank you.")
+        self.assertEqual(result.engine, "parakeet-unified")
+        self.assertEqual(lines, [])
+        # Spoken alone it is still the whole dictation.
+        alone = ns["assemble_raw"](
+            [], bounded(Future(sign_off), 0, 22_400), [], None, "en")
+        self.assertEqual(alone.text, "Thank you.")
+        self.assertFalse(ns["is_hallucination"](alone.text, "en", alone))
+
+    def test_a_rejected_part_is_logged_without_its_words(self):
+        class Future:
+            def __init__(self, value):
+                self.value = value
+
+            def result(self):
+                return self.value
+
+        lines = []
+        ns = self._assemble_with_the_real_guard(lines)
+        bounded = ns["BoundedRecognitionFuture"]
+        body = Recognition(
+            "Let me know if you have any questions.", confidence=0.81,
+            engine="turbo", audio_duration=4.6)
+        silence = Recognition(
+            "Thanks for watching!", confidence=0.34, engine="turbo",
+            audio_duration=3.0)
+
+        result = ns["assemble_raw"](
+            [bounded(Future(body), 0, 73_600)],
+            bounded(Future(silence), 73_600, 121_600), [], None, "en")
+
+        self.assertEqual(result.text, "Let me know if you have any questions.")
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("[dropped] "))
+        self.assertIn("turbo", lines[0])
+        for word in ("thanks", "watching"):
+            self.assertNotIn(word, lines[0].casefold())
 
     def test_assembly_offsets_word_evidence_across_chunks(self):
         class Future:
@@ -6387,7 +9921,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "ASR_POOL": SimpleNamespace(),
                 "transcribe_detailed": None,
                 "peak_rms": lambda _audio: 0.0,
-                "is_hallucination": lambda _text, _language="en": False,
+                "is_hallucination": lambda *_args: False,
                 "Recognition": Recognition,
                 "RecognitionWord": RecognitionWord,
             },
@@ -6426,7 +9960,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "ASR_POOL": SimpleNamespace(),
                 "transcribe_detailed": None,
                 "peak_rms": lambda _audio: 0.0,
-                "is_hallucination": lambda _text, _language="en": False,
+                "is_hallucination": lambda *_args: False,
                 "Recognition": Recognition,
                 "RecognitionWord": RecognitionWord,
             },
@@ -6479,7 +10013,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "ASR_POOL": SimpleNamespace(),
                 "transcribe_detailed": None,
                 "peak_rms": lambda _audio: 0.0,
-                "is_hallucination": lambda _text, _language="en": False,
+                "is_hallucination": lambda *_args: False,
                 "Recognition": Recognition,
                 "RecognitionWord": RecognitionWord,
             },
@@ -6523,6 +10057,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "CHUNK_PREP_POOL": prep_pool,
                 "_transcribe_frames": object(),
                 "_caption_add": lambda *_args: None,
+                "time": time,
             },
         )
         recorder = ns["Recorder"]()
@@ -6538,6 +10073,93 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertIs(scheduled.future, future)
         self.assertEqual((scheduled.start_sample, scheduled.end_sample), (
             0, 16_000))
+
+    def soft_speech_take(self, segments, block=1024):
+        """Run the production rolling plan over synthetic audio, then the
+        release choice finish_and_process makes, and return what nothing
+        decodes. Futures never finish, as on a busy decode pool."""
+        class Pending:
+            def cancel(self):
+                return False
+
+            def done(self):
+                return False
+
+            def add_done_callback(self, _callback):
+                pass
+
+        ns = load_definitions(
+            "CapturedAudio", "BoundedRecognitionFuture", "Recorder",
+            "peak_rms",
+            assignments={
+                "SAMPLE_RATE", "CAPTURE_BLOCK_SECONDS", "SILENCE_RMS",
+                "GATE_PEAK_RMS", "CHUNK_MIN_SECONDS", "CHUNK_CUT_SILENCE",
+                "SPECULATIVE_MIN_SECONDS", "SPECULATIVE_SILENCE",
+                "NO_AUDIO_SECONDS",
+            },
+            extra={
+                "dataclass": dataclass,
+                "np": np,
+                "time": time,
+                "ContextPack": SimpleNamespace,
+                "LEVELS": [],
+                "should_start_speculation": should_start_speculation,
+                "can_reuse_speculation": can_reuse_speculation,
+                "CHUNK_PREP_POOL": SimpleNamespace(
+                    submit=lambda *_args, **_kwargs: Pending()),
+                "_speculative_frames": object(),
+                "_transcribe_frames": object(),
+                "_caption_add": lambda *_args: None,
+            },
+        )
+        ns["calibrated_vad_threshold"] = lambda: ns["SILENCE_RMS"]
+        recorder = ns["Recorder"]()
+        recorder.recording = True
+        rng = np.random.default_rng(0)
+        for seconds, rms in segments:
+            for _ in range(int(seconds * 16_000 / block)):
+                noise = rng.standard_normal((block, 1)).astype(np.float32)
+                recorder._callback(
+                    noise * (rms / float(np.sqrt(np.mean(noise ** 2)))),
+                    block, None, None)
+
+        audio = recorder.stop()
+        ranges = [(c.start_sample, c.end_sample) for c in recorder.chunks]
+        reused = can_reuse_speculation(
+            recorder.speculative_future is not None,
+            recorder.speculative_invalid,
+            recorder.speculative_start,
+            recorder.cut_samples)
+        if reused:
+            ranges.append(
+                (recorder.speculative_start, recorder.speculative_end))
+        else:
+            ranges.append((recorder.cut_samples, len(audio)))
+        covered = np.zeros(len(audio), dtype=bool)
+        for start, end in ranges:
+            covered[start:end] = True
+        return SimpleNamespace(
+            skipped_peak=ns["peak_rms"](audio[~covered]),
+            gate=ns["GATE_PEAK_RMS"], reused=reused)
+
+    def test_quiet_speech_after_a_pause_is_decoded_at_release(self):
+        # Loud opening, a short pause, then speech under the rolling silence
+        # threshold (0.008) but well above the speech gate (0.002).
+        take = self.soft_speech_take(
+            [(1.5, 0.05), (0.3, 0.0005), (1.5, 0.0042)])
+        self.assertLess(take.skipped_peak, take.gate)
+
+    def test_quiet_speech_across_a_chunk_cut_is_decoded(self):
+        take = self.soft_speech_take(
+            [(1.0, 0.05), (3.6, 0.0045), (1.5, 0.05), (0.7, 0.0005)])
+        self.assertLess(take.skipped_peak, take.gate)
+
+    def test_a_silent_tail_still_reuses_the_speculation(self):
+        # Room noise under the gate after the pause: the speculative decode
+        # is still the whole remainder, so release pays for nothing new.
+        take = self.soft_speech_take([(1.5, 0.05), (0.8, 0.0005)])
+        self.assertTrue(take.reused)
+        self.assertLess(take.skipped_peak, take.gate)
 
     def test_release_attaches_capture_bounds_to_remainder_decode(self):
         class Pool:
@@ -6575,7 +10197,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "audio_gate_measurements": lambda _audio: (1.0, 0.1),
                 "assemble_raw": assemble,
                 "Recognition": Recognition,
-                "is_hallucination": lambda _text, _language="en": False,
+                "is_hallucination": lambda *_args: False,
                 "report_dictation_problem": (
                     lambda _rec, _hud, caption, log, **_kwargs:
                     problems.append((caption, log))),
@@ -6638,6 +10260,218 @@ class ReleasePlanTests(unittest.TestCase):
             "[dropped] ASR gave nothing",
         )])
 
+    def _release(self, mode, language, spoken, selected="Hallo zusammen",
+                 field=None, recognition=None, rewrite=None,
+                 model_installed=False):
+        """Drive finish_and_process from a decoded take to its insertion.
+
+        ``field`` is the text already before the cursor. ``recognition``
+        replaces the default confident decode of ``spoken``. ``rewrite``
+        stands in for the cleanup model call, on an install where the model
+        is or is not on disk.
+        """
+        pasted = []
+        problems = []
+
+        def commit(_rec, text, _bundle, _target):
+            pasted.append(text)
+            raise RuntimeError("stop after the insertion call")
+
+        compiled = SimpleNamespace(
+            text=spoken, confidence=0.93, decisions=(), anchors=(),
+            stable_prefix="")
+        ns = load_definitions(
+            "finish_and_process",
+            "collapse_repeats",
+            "extract_tone_override",
+            "needs_llm_cleanup",
+            "quick_clean",
+            "is_hallucination",
+            "weak_whisper_evidence",
+            "strip_context_echo",
+            assignments={
+                "TONE", "TONE_OVERRIDE_RE", "TONE_ALIASES", "CONT_END",
+            } | CleanupGuardTests.HALLUCINATION_GUARD,
+            extra={
+                "np": np,
+                "time": SimpleNamespace(
+                    perf_counter=lambda: 10.0, time=lambda: 10.0,
+                    time_ns=lambda: 10),
+                "NUMBER_WORDS": NUMBER_WORDS,
+                "compile_cleanup": compile_cleanup,
+                "release_should_wait_for_tail": lambda _rec: False,
+                "can_reuse_speculation": lambda *_args: False,
+                "ASR_POOL": SimpleNamespace(
+                    submit=lambda *_args, **_kwargs: SimpleNamespace()),
+                "BoundedRecognitionFuture": lambda *_args: SimpleNamespace(),
+                "transcribe_detailed": object(),
+                "SAMPLE_RATE": 16_000,
+                "MIN_SECONDS": 0.25,
+                "GATE_PEAK_RMS": 0.002,
+                "peak_rms": lambda _audio: 0.1,
+                "audio_gate_measurements": lambda _audio: (1.0, 0.1),
+                "assemble_raw": lambda *_args: recognition or Recognition(
+                    spoken, confidence=0.86, engine="turbo",
+                    audio_duration=1.0),
+                "Recognition": Recognition,
+                "looks_like_prompt_echo": lambda _text: False,
+                "consume_risky_action_confirmation_voice":
+                    lambda _text: False,
+                "clear_retained_consequence_spans": lambda: None,
+                "compile_voice_evidence": lambda *_args, **_kwargs: (
+                    SimpleNamespace(
+                        context=SimpleNamespace(candidates=())),
+                    compiled),
+                "runtime_consequence_evidence":
+                    lambda *_args, **_kwargs: 0.0,
+                "active_consequence_verifier": lambda: None,
+                "runtime_context_firewall_evidence": lambda *_args: 0.0,
+                "learned_alternatives": lambda _text, _bundle: [],
+                "PIPELINE_STATE": {},
+                "CAPTION": {},
+                "queue_voice_object_command": lambda *_args: False,
+                "apply_spoken_edit_command": lambda *_args: False,
+                "match_snippet": lambda _text: None,
+                "_load_snippet_map": lambda: {},
+                "_mask_snippets_inline": lambda text, _snippets: (text, {}),
+                "is_verbatim_app": lambda _bundle: False,
+                "cursor_context": lambda: field,
+                "tone_for": lambda _bundle: "default",
+                "apply_vocabulary_casing": lambda text: text,
+                "focused_snapshot": lambda: SimpleNamespace(),
+                "make_paste_receipt": lambda *_args: SimpleNamespace(),
+                "commit_insertion": commit,
+                "play": lambda _sound: None,
+                "report_dictation_problem": (
+                    lambda _rec, _hud, caption, log, **_kwargs:
+                    problems.append((caption, log))),
+                "dictation_feedback_delay": lambda _rec: 0.0,
+                "schedule_dictation_feedback_dismissal":
+                    lambda _rec, _hud, _active: None,
+                "DICTATION_PROCESS_ORDER": SimpleNamespace(
+                    wait=lambda _ticket: None),
+                "print": lambda *_args: None,
+                "LAST_USE": {},
+                "AppHelper": SimpleNamespace(callAfter=lambda *_args: None),
+            },
+        )
+        recorder = SimpleNamespace(
+            released_at=1.0,
+            speculative_future=None,
+            speculative_invalid=False,
+            speculative_start=0,
+            speculative_end=0,
+            prompt=None,
+            language=language,
+            process_ticket=None,
+            recording=False,
+            uncertain=False,
+            mode=mode,
+            bundle_at_press="com.apple.TextEdit",
+            context_terms=(),
+            context_pack=None,
+            utterance_id="take-1",
+            insertion_lease=None,
+            insertion_receipt=None,
+            focus_at_press=SimpleNamespace(
+                selected_text=selected, text=selected,
+                selection=(0, len(selected))),
+            stop=lambda: np.ones(16_000, dtype=np.float32),
+            cut_samples=8_000,
+            chunks=[],
+        )
+        if rewrite is not None:
+            ns["llm_clean_with_edits"] = rewrite
+            ns["cleanup_model_installed"] = lambda: model_installed
+        ns["finish_and_process"](recorder, SimpleNamespace(), {})
+        return pasted, problems
+
+    def test_rewrite_modes_never_paste_the_instruction_without_the_model(self):
+        # The cleanup model is English-only. In another language Edit used
+        # to fall through to plain cleanup and paste the spoken instruction
+        # over the text it was meant to change.
+        for mode, spoken in (
+            ("edit", "mach das formeller"),
+            ("reply", "sag ihr dass ich zustimme"),
+            ("compose", "kurze absage an das team"),
+        ):
+            with self.subTest(mode=mode):
+                pasted, problems = self._release(mode, "de", spoken)
+                self.assertEqual(pasted, [])
+                self.assertEqual(len(problems), 1)
+                caption, log = problems[0]
+                self.assertIn("nothing changed", caption)
+                self.assertIn(mode.capitalize(), caption)
+                self.assertNotIn(spoken, log)
+
+    def test_rewrite_modes_insert_only_what_the_model_rewrote(self):
+        # In English the model is asked. When it cannot answer, the spoken
+        # instruction is all there is, and it is never the thing to insert.
+        for mode, spoken in (
+            ("edit", "Make this more formal."),
+            ("reply", "Tell her I agree with the plan."),
+            ("compose", "Write a short note declining the meeting."),
+        ):
+            for installed, reason in (
+                (False, "needs the cleanup model"),
+                (True, "got no rewrite from the cleanup model"),
+            ):
+                with self.subTest(mode=mode, installed=installed):
+                    pasted, problems = self._release(
+                        mode, "en", spoken, selected="Hi all",
+                        rewrite=lambda *_args: (None, []),
+                        model_installed=installed)
+                    self.assertEqual(pasted, [])
+                    self.assertEqual(len(problems), 1)
+                    caption, log = problems[0]
+                    self.assertEqual(
+                        caption,
+                        f"{mode.capitalize()} mode {reason} — "
+                        "nothing changed")
+                    self.assertNotIn(spoken, log)
+                    self.assertNotIn("Hi all", log)
+            with self.subTest(mode=mode, rewritten=True):
+                pasted, _problems = self._release(
+                    mode, "en", spoken, selected="Hi all",
+                    rewrite=lambda *_args: ("Good morning, everyone.", []),
+                    model_installed=True)
+                self.assertEqual(pasted, ["Good morning, everyone."])
+
+    def test_plain_dictation_in_another_language_is_still_inserted(self):
+        pasted, _problems = self._release(
+            "capture", "de", "wir treffen uns morgen")
+        self.assertEqual(pasted, ["wir treffen uns morgen"])
+
+    def test_a_field_tail_is_stripped_from_the_paste_only_as_whole_words(self):
+        # The field ends in "to", which is also how "Tomorrow" starts. The
+        # old prefix strip pasted "morrow works for me."
+        pasted, _problems = self._release(
+            "capture", "en", "Tomorrow works for me.", field="to")
+        self.assertEqual(len(pasted), 1)
+        self.assertEqual(pasted[0].casefold(), " tomorrow works for me.")
+        # A real repeat of the field's own tail is still removed.
+        pasted, _problems = self._release(
+            "capture", "en", "See you at six thirty.", field="see you at")
+        self.assertEqual(pasted, [" six thirty."])
+
+    def test_a_short_reply_is_dropped_only_on_a_weak_whisper_decode(self):
+        pasted, _problems = self._release(
+            "capture", "en", "Thank you.", recognition=Recognition(
+                "Thank you.", confidence=0.93, engine="parakeet-unified",
+                audio_duration=1.2))
+        self.assertEqual(pasted, ["Thank you."])
+        # The same words from Whisper, unsure of itself, are its filler for
+        # silence. The take is refused with the cue and nothing is pasted.
+        pasted, problems = self._release(
+            "capture", "en", "Thank you.", recognition=Recognition(
+                "Thank you.", confidence=0.34, engine="turbo",
+                audio_duration=3.0))
+        self.assertEqual(pasted, [])
+        self.assertEqual(problems, [(
+            "I couldn't understand that — try again",
+            "[dropped] ASR hallucination detected",
+        )])
+
     def test_failed_chunk_downgrades_surviving_word_timing(self):
         class Future:
             def __init__(self, value=None, error=None):
@@ -6658,7 +10492,7 @@ class ReleasePlanTests(unittest.TestCase):
                 "ASR_POOL": SimpleNamespace(),
                 "transcribe_detailed": None,
                 "peak_rms": lambda _audio: 0.0,
-                "is_hallucination": lambda _text, _language="en": False,
+                "is_hallucination": lambda *_args: False,
                 "Recognition": Recognition,
                 "RecognitionWord": RecognitionWord,
             },
@@ -6716,7 +10550,7 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertEqual(result.text, "tiny")
         self.assertEqual(pool.calls, ["tiny"])
 
-    def test_mac_parakeet_route_verifies_even_confident_tiny(self):
+    def test_mac_parakeet_route_runs_parakeet_even_when_tiny_is_confident(self):
         class ImmediatePool:
             def __init__(self):
                 self.calls = []
@@ -6763,7 +10597,9 @@ class ReleasePlanTests(unittest.TestCase):
 
         self.assertEqual(result.text, "parakeet-or-whisper-fallback")
         self.assertEqual(result.alternative, "tiny")
-        self.assertTrue(result.verified)
+        # Tiny contradicted Parakeet and no third engine settled it, so the
+        # transcript stands unverified: the cascade said so.
+        self.assertFalse(result.verified)
         self.assertEqual(pool.calls, ["tiny", "parakeet-or-whisper-fallback"])
         # The speculative Tiny hypothesis rides along so the Parakeet route
         # can derive agreement confidence without a second Tiny decode.
@@ -6784,9 +10620,12 @@ class ReleasePlanTests(unittest.TestCase):
 
         pool = ImmediatePool()
 
+        verified_by_decoder = []
+
         def detailed(audio, prompt, verify, model,
                      crosscheck_text=None, language="en"):
-            return Recognition(model, 0.5 if model == "tiny" else 0.9)
+            return Recognition(model, 0.5 if model == "tiny" else 0.9,
+                               verified=verified_by_decoder[-1])
 
         ns = load_definitions(
             "_speculative_frames",
@@ -6803,12 +10642,19 @@ class ReleasePlanTests(unittest.TestCase):
                 "PARAKEET_HELPER": Path("missing"),
             },
         )
-        result = ns["_speculative_frames"](
-            [np.ones((100, 1), dtype=np.float32)], still_valid=lambda: True)
-        self.assertEqual(result.text, "large")
-        self.assertEqual(result.alternative, "tiny")
-        self.assertTrue(result.verified)
-        self.assertEqual(pool.calls, ["tiny", "large"])
+        # Escalating is not verifying: whether the accurate decode was
+        # confirmed is the decoder's answer, kept as it returned it.
+        for verified in (False, True):
+            with self.subTest(verified=verified):
+                pool.calls.clear()
+                verified_by_decoder.append(verified)
+                result = ns["_speculative_frames"](
+                    [np.ones((100, 1), dtype=np.float32)],
+                    still_valid=lambda: True)
+                self.assertEqual(result.text, "large")
+                self.assertEqual(result.alternative, "tiny")
+                self.assertIs(result.verified, verified)
+                self.assertEqual(pool.calls, ["tiny", "large"])
 
 
 class ConsequenceRuntimeProjectionTests(unittest.TestCase):
@@ -7114,6 +10960,95 @@ class AcousticTimeMachineRuntimeTests(unittest.TestCase):
         self.assertEqual(state["span_ids"], [])
 
 
+class RecognitionContextPrivacyTests(unittest.TestCase):
+    """Context capture leaves secrets alone."""
+
+    @staticmethod
+    def mac(*, clipboard_types=(), role="AXTextArea", subrole=None):
+        from voice_compiler import ContextObservation, ContextRouter
+
+        clipboard = "Quixotrel"
+        snapshot = SimpleNamespace(
+            element="focused-field", text="Draft for Zorblax Dynamics",
+            selection=(0, 0), selected_text="", window_title="Notes",
+            document=None)
+        pasteboard = SimpleNamespace(
+            types=lambda: ["public.utf8-plain-text", *clipboard_types],
+            stringForType_=lambda kind: clipboard)
+        return load_definitions(
+            "capture_recognition_context", "pasteboard_is_private",
+            assignments=("PASTEBOARD_MARKER_TYPES",),
+            extra={
+                "IS_WINDOWS": False,
+                "focused_snapshot": lambda: snapshot,
+                "NSWorkspace": SimpleNamespace(sharedWorkspace=lambda:
+                    SimpleNamespace(frontmostApplication=lambda:
+                        SimpleNamespace(localizedName=lambda: "Notes"))),
+                "NSPasteboard": SimpleNamespace(
+                    generalPasteboard=lambda: pasteboard),
+                "NSPasteboardTypeString": "public.utf8-plain-text",
+                "_ax_attribute": lambda element, attribute: {
+                    "AXRole": role, "AXSubrole": subrole}.get(attribute),
+                "ContextObservation": ContextObservation,
+                "CONTEXT_ROUTER": ContextRouter(),
+                "urllib": __import__("urllib.parse"),
+                "Path": Path,
+            },
+        )["capture_recognition_context"]
+
+    def test_an_ordinary_clipboard_and_field_are_used(self):
+        _, words, _ = self.mac()()
+        self.assertIn("Quixotrel", words)
+        self.assertIn("Zorblax", words)
+
+    def test_a_concealed_or_transient_clipboard_is_never_read(self):
+        for marker in ("org.nspasteboard.ConcealedType",
+                       "org.nspasteboard.TransientType"):
+            with self.subTest(marker=marker):
+                _, words, pack = self.mac(clipboard_types=(marker,))()
+                self.assertNotIn("Quixotrel", words)
+                self.assertNotIn(
+                    "Quixotrel", [c.text for c in pack.candidates])
+                self.assertIn("Zorblax", words)
+
+    def test_a_secure_text_field_yields_no_context_at_all(self):
+        snapshot, words, pack = self.mac(
+            role="AXTextField", subrole="AXSecureTextField")()
+        self.assertEqual(words, [])
+        # Only the application's own name, which is not the user's secret.
+        self.assertEqual({c.source for c in pack.candidates}, {"app"})
+        # The insertion lease still needs to know where focus is.
+        self.assertEqual(snapshot.element, "focused-field")
+
+    def test_windows_skips_a_clipboard_marked_private(self):
+        from voice_compiler import ContextObservation, ContextRouter
+
+        for available, expected in ((set(), True), ({"private"}, False)):
+            with self.subTest(marked=bool(available)):
+                ns = load_definitions(
+                    "capture_recognition_context",
+                    "windows_clipboard_is_private",
+                    assignments=("WINDOWS_PRIVATE_CLIPBOARD_FORMATS",),
+                    extra={
+                        "IS_WINDOWS": True,
+                        "windows_foreground_title": lambda: "Vault",
+                        "pyperclip": SimpleNamespace(
+                            paste=lambda: "Quixotrel"),
+                        "win32clipboard": SimpleNamespace(
+                            RegisterClipboardFormat=lambda name: (
+                                "private" if name ==
+                                "ExcludeClipboardContentFromMonitorProcessing"
+                                else name),
+                            IsClipboardFormatAvailable=lambda kind:
+                                kind in available),
+                        "ContextObservation": ContextObservation,
+                        "CONTEXT_ROUTER": ContextRouter(),
+                    },
+                )
+                _, words, _ = ns["capture_recognition_context"]()
+                self.assertEqual("Quixotrel" in words, expected)
+
+
 class ContextFirewallRuntimeProjectionTests(unittest.TestCase):
     def _namespace(self):
         pipeline = {}
@@ -7210,11 +11145,12 @@ class CustomVocabularyTests(unittest.TestCase):
         manual = [f"Term{i}" for i in range(70)]
         gloss = {"lock": threading.Lock()}
         ns = load_definitions(
-            "refresh_glossary",
+            "refresh_glossary", "corrected_away_words", "term_occurs",
             extra={
                 "parse_dictionary": lambda: (list(manual), set()),
+                "PersonalRegressionLab": PersonalRegressionLab,
                 "load_learned": lambda: {
-                    "counts": {}, "fixes": {}, "confusions": {}},
+                    "counts": {"swift": 3}, "fixes": {}, "confusions": {}},
                 "write_auto_section": lambda _promoted: None,
                 "personal_regression_lab": lambda _state: object(),
                 "ContextPack": ContextPack,
@@ -7240,10 +11176,14 @@ class CustomVocabularyTests(unittest.TestCase):
 
         self.assertEqual(len(gloss["terms"]), 60)   # prompt cap unchanged
         anchor_texts = {c.text for c in gloss["anchor_pack"].candidates}
-        self.assertEqual(len(anchor_texts), 70)
+        self.assertEqual(len(anchor_texts), 71)
         for term in manual:
             self.assertIn(term, anchor_texts)
             self.assertEqual(gloss["vocabulary"][term.casefold()], term)
+        # A learned term is protected, but only a term the user wrote sets
+        # casing: nobody chose the case a learned term was first seen in.
+        self.assertIn("swift", anchor_texts)
+        self.assertEqual(len(gloss["vocabulary"]), 70)
         # A term beyond the 60-term prompt cap is still protected and normalized.
         self.assertNotIn("Term65", gloss["terms"])
         self.assertIn("Term65", anchor_texts)
@@ -7269,6 +11209,12 @@ class CustomVocabularyTests(unittest.TestCase):
         self.assertEqual(casing("i pushed to GitHub"), "i pushed to GitHub")
         # An unlisted (or banned, hence absent) term is untouched.
         self.assertEqual(casing("switch to qwen now"), "switch to qwen now")
+        # Casing only raises letters. A lowercase term never takes the
+        # capital off a sentence start, and capitals are not lowered to fit.
+        gloss["vocabulary"].update({"kubectl": "kubectl", "iphone": "iPhone"})
+        self.assertEqual(
+            casing("Kubectl is installed. Github and GITHUB. Iphone, iphone."),
+            "Kubectl is installed. GitHub and GITHUB. Iphone, iPhone.")
 
 
 class DelayedCleanupRuntimeTests(unittest.TestCase):
@@ -7487,7 +11433,8 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
             proof_text = "clean github"
 
             def verify_edits(
-                    self, original, proposals, candidates, *, mode):
+                    self, original, proposals, candidates, *, mode,
+                    self_correction):
                 verified.append(
                     (original, tuple(proposals), candidates, mode))
                 return SimpleNamespace(text=self.proof_text)
@@ -7536,6 +11483,74 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
             namespace["build_delayed_cleanup_proposal"](
                 "raw github", "tone", voice_ir, **kwargs))
 
+    def test_delayed_proposal_corrects_only_for_a_user_who_asked(self):
+        compiled = "The invoice says 400, actually 450."
+        namespace = load_definitions(
+            "build_delayed_cleanup_proposal",
+            extra={
+                "VOICE_COMPILER": VoiceCompiler(),
+                "EditProposal": EditProposal,
+                "llm_clean_with_edits": lambda *_args: (
+                    "The invoice says 450.",
+                    (SimpleNamespace(
+                        kind="self_correction",
+                        before="400, actually 450", after="450"),),
+                ),
+                "quick_clean": lambda text, **_kwargs: text,
+                "strip_casual_period": lambda text: text,
+                "apply_vocabulary_casing": lambda text: text,
+                "_restore_snippet_sentinels": lambda text, _restore: text,
+            },
+        )
+        voice_ir = SimpleNamespace(context=SimpleNamespace(candidates=()))
+
+        def propose():
+            return namespace["build_delayed_cleanup_proposal"](
+                compiled, "tone", voice_ir, continuing=False,
+                context_tail="", context_text=None, tone_key="default",
+                snippet_restore={})
+
+        self.assertIs(namespace["PREFERENCES"]["self_correction"], False)
+        self.assertIsNone(propose())
+        namespace["PREFERENCES"]["self_correction"] = True
+        self.assertEqual(propose(), "The invoice says 450.")
+
+    def test_delayed_proposal_keeps_a_word_that_starts_with_the_field(self):
+        class Compiler:
+            def verify_edits(self, original, proposals, candidates, *, mode,
+                             self_correction):
+                return SimpleNamespace(text="tomorrow works for me")
+
+        namespace = load_definitions(
+            "build_delayed_cleanup_proposal",
+            "strip_context_echo",
+            extra={
+                "VOICE_COMPILER": Compiler(),
+                "EditProposal": lambda kind, before, after:
+                    SimpleNamespace(
+                        kind=kind, before=before, after=after),
+                "llm_clean_with_edits": lambda *_args: (
+                    "tomorrow works for me", ()),
+                "quick_clean": lambda text, **_kwargs: text,
+                "strip_casual_period": lambda text: text,
+                "apply_vocabulary_casing": lambda text: text,
+                "_restore_snippet_sentinels": lambda text, _restore: text,
+            },
+        )
+        voice_ir = SimpleNamespace(
+            context=SimpleNamespace(candidates=()))
+
+        def propose(field):
+            return namespace["build_delayed_cleanup_proposal"](
+                "tomorrow works for me", "tone", voice_ir,
+                continuing=True, context_tail=field, context_text=field,
+                tone_key="default", snippet_restore={})
+
+        # The field holds "to": a prefix of the first word, not an echo.
+        self.assertEqual(propose("to"), " tomorrow works for me")
+        # The model repeated the field before continuing it.
+        self.assertEqual(propose("tomorrow"), " works for me")
+
     def test_finish_schedules_only_after_verified_commit(self):
         source = (ROOT / "dictate.py").read_text(encoding="utf-8")
         finish = next(
@@ -7576,6 +11591,7 @@ class ReadbackEdgeWhitespaceTests(unittest.TestCase):
         from insertion_integrity import ReadbackResult
         return load_definitions(
             "insertion_readback", "classify_readback_conflict",
+            assignments={"READBACK_TIMEOUT"},
             extra={"ReadbackResult": ReadbackResult, "re": re,
                    "unicodedata": unicodedata},
         )
@@ -7701,13 +11717,14 @@ class OllamaChatTransportTests(unittest.TestCase):
     """Structured-output schema and streamed generation deadlines."""
 
     @staticmethod
-    def namespace(post):
+    def namespace(post, installed=True):
         return load_definitions(
             "ollama_chat", "_ollama_stream_reply",
             extra={
                 "OLLAMA_MODEL": "test-model",
-                "OLLAMA_URL": "http://localhost:11434/api/chat",
-                "requests": SimpleNamespace(post=post),
+                "OLLAMA_URL": "http://127.0.0.1:11434/api/chat",
+                "LOCAL_MODEL_SESSION": SimpleNamespace(post=post),
+                "cleanup_model_installed": lambda: installed,
                 "time": time,
             },
         )
@@ -7722,6 +11739,38 @@ class OllamaChatTransportTests(unittest.TestCase):
             close=lambda: None,
             raise_for_status=lambda: None,
         )
+
+    def test_nothing_is_sent_when_the_cleanup_model_is_not_installed(self):
+        # The default install has no cleanup model. Cleanup, warm-up,
+        # keep-warm and the learning pass all reach the model through
+        # ollama_chat, so none of them may put text on the wire.
+        posted = []
+        ns = load_definitions(
+            "ollama_chat", "_ollama_stream_reply", "cleanup_model_installed",
+            assignments=("OLLAMA_MODEL",),
+            extra={
+                "os": os,
+                "Path": Path,
+                "time": time,
+                "OLLAMA_URL": "http://127.0.0.1:11434/api/chat",
+                "LOCAL_MODEL_SESSION": SimpleNamespace(
+                    post=lambda *a, **k: posted.append(k) or self.response(
+                        body={"message": {"content": "ok"}})),
+            },
+        )
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.dict(os.environ, {"OLLAMA_MODELS": td}):
+            with self.assertRaises(RuntimeError):
+                ns["ollama_chat"](None, "Send the contract to Priya.")
+            self.assertEqual(posted, [])
+
+            manifest = (Path(td) / "manifests" / "registry.ollama.ai" /
+                        "library" / "qwen3.5" / "4b")
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text("{}")
+            out, _ = ns["ollama_chat"](None, "Send the contract to Priya.")
+        self.assertEqual(out, "ok")
+        self.assertEqual(len(posted), 1)
 
     def test_schema_is_sent_and_non_streaming_path_is_unchanged(self):
         posted = []
@@ -7902,7 +11951,7 @@ class ParakeetCrosscheckTests(unittest.TestCase):
                                      model_repo="turbo",
                                      crosscheck_text=None,
                                      _skip_parakeet=False,
-                                     language="en"):
+                                     language="en", _prepared=False):
             # Record the language rather than merely tolerating it. The
             # cross-check is only meaningful against Parakeet's English, and
             # the caller's `except Exception` would otherwise swallow a
@@ -7915,6 +11964,8 @@ class ParakeetCrosscheckTests(unittest.TestCase):
         ns = load_definitions(
             "_parakeet_crosschecked",
             "_clean_native_processing_s",
+            "crosscheck_agreement",
+            assignments={"CROSSCHECK_MAJORITY_AGREEMENT"},
             extra={
                 "PARAKEET_IO_POOL": ImmediatePool(),
                 "PARAKEET": SimpleNamespace(
@@ -7973,18 +12024,249 @@ class ParakeetCrosscheckTests(unittest.TestCase):
             parakeet_result=None, tiny_text="anything")
         self.assertIsNone(recognition)
 
-    def test_severe_disagreement_escalates_once_and_keeps_the_winner(self):
+    def test_severe_disagreement_escalates_once_and_keeps_the_majority(self):
+        # Turbo's confidence is deliberately the lowest number in play: the
+        # vote is on what was heard, never on scores from different scales.
         fallback = Recognition(
-            text="completely different words", confidence=0.9,
-            engine="turbo")
+            text="One two three four.", confidence=0.2, engine="turbo")
         recognition, calls = self.crosschecked(
-            parakeet_result=("alpha beta gamma delta", 0.05),
+            parakeet_result=("Alpha beta gamma delta.", 0.05),
             tiny_text="one two three four",
             fallback=fallback)
+        self.assertEqual(
+            [repo for repo, _skip, _lang in calls],
+            ["tiny-repo", "turbo-repo"])
         self.assertIn(("turbo-repo", True, "en"), calls)
-        self.assertEqual(recognition.text, "completely different words")
+        self.assertEqual(recognition.text, "One two three four.")
+        self.assertEqual(recognition.engine, "turbo")
         self.assertTrue(recognition.verified)
-        self.assertEqual(recognition.alternative, "alpha beta gamma delta")
+        self.assertEqual(recognition.alternative, "Alpha beta gamma delta.")
+
+    def test_turbo_agreeing_with_parakeet_keeps_parakeet_verified(self):
+        # Turbo out-scores Parakeet's agreement-derived number here. It still
+        # only gets a vote, and it votes for the words Parakeet heard.
+        fallback = Recognition(
+            text="ping Priya about Qwen", confidence=0.97, engine="turbo")
+        recognition, _ = self.crosschecked(
+            parakeet_result=("Ping Priya about Qwen.", 0.05),
+            tiny_text="Being pre-about Gwen.",
+            fallback=fallback)
+        self.assertEqual(recognition.text, "Ping Priya about Qwen.")
+        self.assertEqual(recognition.engine, "parakeet-unified")
+        self.assertTrue(recognition.verified)
+        # Two engines agree, so the route confidence is no longer the one
+        # Tiny's dissent produced.
+        self.assertAlmostEqual(recognition.confidence, 0.93)
+        self.assertEqual(recognition.alternative, "ping Priya about Qwen")
+
+    def test_three_way_disagreement_keeps_parakeet_unverified(self):
+        fallback = Recognition(
+            text="Red green blue pink.", confidence=0.97, engine="turbo")
+        recognition, _ = self.crosschecked(
+            parakeet_result=("Alpha beta gamma delta.", 0.05),
+            tiny_text="One two three four.",
+            fallback=fallback)
+        self.assertEqual(recognition.text, "Alpha beta gamma delta.")
+        self.assertEqual(recognition.engine, "parakeet-unified")
+        self.assertFalse(recognition.verified)
+        self.assertLess(recognition.confidence, 0.52)
+        self.assertEqual(recognition.alternative, "Red green blue pink.")
+
+    def test_agreement_ignores_case_punctuation_and_digit_grouping(self):
+        # The same words written two ways are not two hearings: no lowered
+        # confidence, no escalation, no Turbo decode.
+        for parakeet_text, tiny_text in (
+                ("Don\u2019t ship 1,500 units.", "don't ship 1500 units"),
+                ("Okay, let's go.", "okay lets go"),
+                ("Looks good.", "LOOKS GOOD!"),
+        ):
+            with self.subTest(parakeet=parakeet_text):
+                recognition, calls = self.crosschecked(
+                    parakeet_result=(parakeet_text, 0.05),
+                    tiny_text=tiny_text,
+                    fallback=Recognition(
+                        text="something else", confidence=0.99,
+                        engine="turbo"))
+                self.assertEqual(recognition.text, parakeet_text)
+                self.assertAlmostEqual(recognition.confidence, 0.93)
+                self.assertEqual(
+                    [repo for repo, _skip, _lang in calls], ["tiny-repo"])
+
+    @staticmethod
+    def cascade(*, parakeet_text=None, scripted, cached, parakeet=None,
+                audio=None, levels=None, definitions=(), overrides=None):
+        """Run the production cascade against scripted model outputs.
+
+        ``cached`` is the set of Whisper snapshots on disk and ``scripted``
+        maps a snapshot to ``(text, confidence)``. Model selection, the
+        cross-check, the escalation and the arbitration are all production
+        code; only the three recognizers are scripted. ``levels`` collects
+        the peak level each recognizer was handed.
+        """
+        import math
+        from parrot_core import (
+            confidence_from_segments,
+            hypothesis_agreement,
+            parakeet_confidence_from_agreement,
+            recognition_words_from_segments,
+            should_escalate_uncertain,
+        )
+        decodes = []
+
+        class ImmediatePool:
+            def submit(self, fn, *args, **kwargs):
+                return SimpleNamespace(result=lambda: fn(*args, **kwargs))
+
+        def heard(name, samples):
+            if levels is not None:
+                levels[name] = round(float(np.max(np.abs(samples))), 4)
+
+        def parakeet_transcribe(samples):
+            heard("parakeet", samples)
+            return (parakeet_text, 0.05)
+
+        def mlx_transcribe(_audio, *, path_or_hf_repo, **_kwargs):
+            decodes.append(path_or_hf_repo)
+            heard(path_or_hf_repo, _audio)
+            text, confidence = scripted[path_or_hf_repo]
+            return {"text": f" {text}", "segments": [{
+                "text": text, "start": 0.0, "end": 2.0,
+                "avg_logprob": math.log(confidence)}]}
+
+        def resolve(repo):
+            if repo not in cached:
+                raise FileNotFoundError("snapshot is not cached")
+            return repo
+
+        ns = load_definitions(
+            "transcribe_detailed", "_parakeet_crosschecked",
+            "_clean_native_processing_s", "crosscheck_agreement",
+            "asr_decode_target", *definitions,
+            assignments={"ASR_DEGRADED_NOTICES",
+                         "CROSSCHECK_MAJORITY_AGREEMENT"},
+            extra={
+                "np": np,
+                "Recognition": Recognition,
+                "GLOSS": {"lock": threading.Lock(), "prompt": None},
+                "IS_MACOS": True,
+                "PARAKEET_ENABLED": True,
+                "PARAKEET": parakeet or SimpleNamespace(
+                    transcribe=parakeet_transcribe),
+                "PARAKEET_IO_POOL": ImmediatePool(),
+                "PARAKEET_CROSSCHECK": True,
+                "PARAKEET_CROSSCHECK_MAX_SECONDS": 90.0,
+                "PARAKEET_ROUTE_CONFIDENCE": 0.84,
+                "SAMPLE_RATE": 16_000,
+                "MIN_SECONDS": 0.4,
+                "LOW_CONFIDENCE": 0.52,
+                "WHISPER_REPO": "turbo-repo",
+                "FAST_WHISPER_REPO": "tiny-repo",
+                "asr_model_is_cached": lambda repo: repo in cached,
+                "resolve_asr_model": resolve,
+                "prepare_asr_audio": lambda audio: audio,
+                "mlx_whisper": SimpleNamespace(transcribe=mlx_transcribe),
+                "hypothesis_agreement": hypothesis_agreement,
+                "parakeet_confidence_from_agreement":
+                    parakeet_confidence_from_agreement,
+                "should_escalate_uncertain": should_escalate_uncertain,
+                "confidence_from_segments": confidence_from_segments,
+                "recognition_words_from_segments":
+                    recognition_words_from_segments,
+                "mark_model_warm_path_observed": lambda _provider: None,
+                "WHISPER_TINY_PROFILE": SimpleNamespace(provider_id="tiny"),
+                "WHISPER_LARGE_TURBO_PROFILE": SimpleNamespace(
+                    provider_id="turbo"),
+                "print": lambda *args, **kwargs: None,
+                **(overrides or {}),
+            },
+        )
+        if audio is None:
+            audio = np.full(16_000 * 2, 0.3, dtype=np.float32)
+        recognition = ns["transcribe_detailed"](audio, language="en")
+        return recognition, decodes
+
+    def test_default_install_never_lets_tiny_overrule_parakeet(self):
+        # A default install has Parakeet and Tiny only. Tiny's own confidence
+        # beats the number its disagreement leaves Parakeet with in every row,
+        # and it must not matter.
+        for parakeet_text, tiny_text, tiny_confidence in (
+                ("Qwen.", "Gwen.", 0.70),
+                ("Thanks.", "Thank you.", 0.70),
+                ("Ship the Kubernetes patch.",
+                 "Shipped a cube and his patch.", 0.55),
+                ("Call Dr. Nguyen.", "Call Doctor Win.", 0.72),
+        ):
+            with self.subTest(parakeet=parakeet_text):
+                recognition, decodes = self.cascade(
+                    parakeet_text=parakeet_text,
+                    scripted={"tiny-repo": (tiny_text, tiny_confidence)},
+                    cached={"tiny-repo"})
+                self.assertEqual(recognition.text, parakeet_text)
+                self.assertEqual(recognition.engine, "parakeet-unified")
+                self.assertFalse(recognition.verified)
+                self.assertEqual(recognition.alternative, tiny_text)
+                # One cross-check decode. "Escalating" to a Turbo that is
+                # not installed used to decode the same audio with Tiny again.
+                self.assertEqual(decodes, ["tiny-repo"])
+
+    def test_default_install_compiles_parakeet_as_the_primary_hypothesis(self):
+        # The compiler ranks the delivered transcript first and demotes the
+        # alternative. Parakeet must be the one it ranks first.
+        recognition, _ = self.cascade(
+            parakeet_text="Ping Priya about Qwen.",
+            scripted={"tiny-repo": ("Being pre-about Gwen.", 0.71)},
+            cached={"tiny-repo"})
+        ns = load_definitions(
+            "compile_voice_evidence",
+            extra={
+                "np": np,
+                "WordEvidence": WordEvidence,
+                "RecognitionHypothesis": RecognitionHypothesis,
+                "ContextCandidate": ContextCandidate,
+                "ContextPack": ContextPack,
+                "VoiceIR": VoiceIR,
+                "VOICE_COMPILER": VoiceCompiler(),
+                "GLOSS": {"lock": threading.Lock(), "anchor_pack": None},
+                "learned_alternatives": lambda _text, _bundle: [],
+                "compiler_personal_priors": lambda _bundle: (),
+                "analyze_prosody": lambda *_args: (),
+                "SAMPLE_RATE": 16_000,
+            },
+        )
+        voice, compiled = ns["compile_voice_evidence"](recognition)
+        self.assertEqual(compiled.text, "Ping Priya about Qwen.")
+        primary, alternative = voice.hypotheses
+        self.assertEqual(
+            (primary.text, primary.engine),
+            ("Ping Priya about Qwen.", "parakeet-unified"))
+        self.assertEqual(alternative.text, "Being pre-about Gwen.")
+        self.assertGreater(primary.confidence, alternative.confidence)
+
+    def test_full_install_escalates_to_the_real_turbo_and_takes_the_vote(self):
+        recognition, decodes = self.cascade(
+            parakeet_text="Ping Priya about Qwen.",
+            scripted={
+                "tiny-repo": ("Being pre-about Gwen.", 0.71),
+                "turbo-repo": ("Ping Priya about Qwen.", 0.40),
+            },
+            cached={"tiny-repo", "turbo-repo"})
+        self.assertEqual(decodes, ["tiny-repo", "turbo-repo"])
+        self.assertEqual(recognition.text, "Ping Priya about Qwen.")
+        self.assertEqual(recognition.engine, "parakeet-unified")
+        self.assertTrue(recognition.verified)
+
+        recognition, decodes = self.cascade(
+            parakeet_text="Being pre-about Gwen.",
+            scripted={
+                "tiny-repo": ("Ping Priya about Qwen.", 0.71),
+                "turbo-repo": ("Ping Priya about Qwen.", 0.40),
+            },
+            cached={"tiny-repo", "turbo-repo"})
+        self.assertEqual(decodes, ["tiny-repo", "turbo-repo"])
+        self.assertEqual(recognition.text, "Ping Priya about Qwen.")
+        self.assertEqual(recognition.engine, "turbo")
+        self.assertTrue(recognition.verified)
+        self.assertEqual(recognition.alternative, "Being pre-about Gwen.")
 
     def test_escalation_failure_keeps_the_primary_transcript(self):
         # A raising Turbo fallback must not turn a working dictation into a
@@ -8002,6 +12284,8 @@ class ParakeetCrosscheckTests(unittest.TestCase):
         ns = load_definitions(
             "_parakeet_crosschecked",
             "_clean_native_processing_s",
+            "crosscheck_agreement",
+            assignments={"CROSSCHECK_MAJORITY_AGREEMENT"},
             extra={
                 "PARAKEET_IO_POOL": ImmediatePool(),
                 "PARAKEET": SimpleNamespace(
@@ -8030,8 +12314,32 @@ class ParakeetCrosscheckTests(unittest.TestCase):
         audio = np.zeros(16_000 * 4, dtype=np.float32)
         recognition = ns["_parakeet_crosschecked"](audio, None, verify=True)
         self.assertEqual(recognition.text, "alpha beta gamma delta")
-        self.assertTrue(recognition.verified)
+        # No third decode came back, so nothing verified this transcript.
+        self.assertFalse(recognition.verified)
         self.assertEqual(recognition.alternative, "one two three four")
+
+    def test_quiet_speech_gain_reaches_every_recognizer_once(self):
+        # A whisper-level take is lifted by the capped gain before decoding.
+        # The cross-check and the escalation decode the same prepared audio;
+        # preparing it again lifted it past the cap for Whisper alone.
+        levels = {}
+        self.cascade(
+            parakeet_text="Ping Priya about Qwen.",
+            scripted={
+                "tiny-repo": ("Being pre-about Gwen.", 0.71),
+                "turbo-repo": ("Ping Priya about Qwen.", 0.40),
+            },
+            cached={"tiny-repo", "turbo-repo"},
+            audio=np.full(16_000 * 2, 0.004, dtype=np.float32),
+            levels=levels,
+            definitions=("prepare_asr_audio",),
+            overrides={
+                "active_calibration_settings": lambda: None,
+                "CalibrationSettings": type("CalibrationSettings", (), {}),
+            })
+        self.assertEqual(
+            levels,
+            {"parakeet": 0.1, "tiny-repo": 0.1, "turbo-repo": 0.1})
 
     def test_low_confidence_escalation_loser_stays_inspectable(self):
         fallback = Recognition(
@@ -8042,7 +12350,7 @@ class ParakeetCrosscheckTests(unittest.TestCase):
             fallback=fallback)
         self.assertIn(("turbo-repo", True, "en"), calls)
         self.assertEqual(recognition.text, "alpha beta gamma delta")
-        self.assertTrue(recognition.verified)
+        self.assertFalse(recognition.verified)
         self.assertEqual(recognition.alternative, "different words")
 
     def test_speculative_crosscheck_text_skips_the_extra_tiny_decode(self):
@@ -8066,6 +12374,8 @@ class ParakeetCrosscheckTests(unittest.TestCase):
         ns = load_definitions(
             "_parakeet_crosschecked",
             "_clean_native_processing_s",
+            "crosscheck_agreement",
+            assignments={"CROSSCHECK_MAJORITY_AGREEMENT"},
             extra={
                 "PARAKEET_IO_POOL": ImmediatePool(),
                 "PARAKEET": SimpleNamespace(
@@ -8139,6 +12449,7 @@ class HotkeyBindingTests(unittest.TestCase):
         return load_definitions(
             "normalize_hotkey", "hotkey_label_for", "hotkey_shared_modes",
             "hotkey_binding_decision", "modifier_pressed_by",
+            "hotkey_matches",
             assignments={"HOTKEY_CHOICES", "HOTKEY_DEFAULT",
                          "HOTKEY_MODIFIER_FAMILY",
                          "HOTKEY_MODES_BY_MODIFIER"},
@@ -8251,6 +12562,192 @@ class HotkeyBindingTests(unittest.TestCase):
         self.assertEqual(contributes("cmd_r", "shift_r", families), "command")
         self.assertIsNone(contributes("alt_r", "alt_r", families))
         self.assertIsNone(contributes("f13", "alt_r", families))
+
+    class _Win32KeyCode:
+        """pynput 1.8.2 ``keyboard._base.KeyCode`` equality, with the
+        ``_flags``/``_scan`` platform extensions ``keyboard._win32`` adds.
+
+        pynput itself is not a test dependency; this keeps exactly the
+        comparison its enum members use.
+        """
+
+        _PLATFORM_EXTENSIONS = ("_flags", "_scan")
+
+        def __init__(self, vk=None, char=None, _flags=None, _scan=None):
+            self.vk, self.char, self.is_dead = vk, char, False
+            self._flags, self._scan = _flags, _scan
+
+        def __repr__(self):
+            return repr(self.char) if self.char is not None else (
+                "<%d>" % self.vk)
+
+        def __eq__(self, other):
+            if not isinstance(other, self.__class__):
+                return False
+            if self.char is not None and other.char is not None:
+                return (self.char == other.char
+                        and self.is_dead == other.is_dead)
+            return self.vk == other.vk and all(
+                getattr(self, name) == getattr(other, name)
+                for name in self._PLATFORM_EXTENSIONS)
+
+        def __hash__(self):
+            return hash(repr(self))
+
+    def win32_keyboard(self):
+        """The Windows Key table as pynput 1.8.2 defines and delivers it."""
+        code = self._Win32KeyCode
+        extended = 1   # KEYBDINPUT.EXTENDEDKEY, as KeyCode._from_ext sets
+        key = enum.Enum("Key", [
+            ("alt", code(0x12)),
+            ("alt_l", code(0xA4)),
+            ("alt_r", code(0xA5, _flags=extended)),
+            ("alt_gr", code(0xA5)),
+            ("cmd", code(0x5B)),
+            ("cmd_l", code(0x5B)),
+            ("cmd_r", code(0x5C)),
+            ("ctrl", code(0x11)),
+            ("ctrl_l", code(0xA2)),
+            ("ctrl_r", code(0xA3, _flags=extended)),
+            ("shift", code(0xA0)),
+            ("shift_l", code(0xA0)),
+            ("shift_r", code(0xA1)),
+            ("f13", code(0x7C)),
+        ])
+        # keyboard._win32.Listener._SPECIAL_KEYS: the later member wins.
+        delivered = {member.value.vk: member for member in key}
+        return SimpleNamespace(Key=key), delivered
+
+    def win32_namespace(self, keyboard):
+        return load_definitions(
+            "normalize_hotkey", "hotkey_key_object", "hotkey_matches",
+            "modifier_pressed_by", "windows_hotkey_event_filter",
+            assignments={"HOTKEY_CHOICES", "HOTKEY_DEFAULT",
+                         "WINDOWS_VK_LCONTROL",
+                         "WINDOWS_ALTGR_SYNTHETIC_CTRL_SCAN"},
+            extra={"IS_MACOS": False, "IS_WINDOWS": True,
+                   "keyboard": keyboard},
+        )
+
+    def test_windows_right_alt_starts_the_default_capture_key(self):
+        keyboard, delivered = self.win32_keyboard()
+        ns = self.win32_namespace(keyboard)
+        bound = ns["hotkey_key_object"]("alt_r")
+        right_alt = delivered[0xA5]
+
+        # The library shape behind the defect: Right Alt is delivered as a
+        # member that is not equal to the one the default binding names.
+        self.assertIs(right_alt, keyboard.Key.alt_gr)
+        self.assertNotEqual(right_alt, bound)
+
+        self.assertTrue(ns["hotkey_matches"](right_alt, bound))
+        for other in (0xA4, 0xA2, 0xA3, 0xA0, 0xA1, 0x5B, 0x7C):
+            with self.subTest(vk=hex(other)):
+                self.assertFalse(ns["hotkey_matches"](delivered[other], bound))
+        self.assertFalse(ns["hotkey_matches"](right_alt, None))
+        # Every other bindable Windows key is still matched by itself only.
+        for name in ("alt_l", "ctrl_r", "ctrl_l", "shift_r", "cmd_r", "f13"):
+            with self.subTest(name=name):
+                key = ns["hotkey_key_object"](name)
+                self.assertTrue(ns["hotkey_matches"](
+                    delivered[key.value.vk], key))
+                self.assertFalse(ns["hotkey_matches"](right_alt, key))
+
+    def test_altgr_layouts_start_capture_not_reply(self):
+        keyboard, delivered = self.win32_keyboard()
+        ns = self.win32_namespace(keyboard)
+        Key = keyboard.Key
+
+        class KBDLLHOOKSTRUCT(ctypes.Structure):
+            _fields_ = [
+                ("vkCode", ctypes.c_uint32),
+                ("scanCode", ctypes.c_uint32),
+                ("flags", ctypes.c_uint32),
+                ("time", ctypes.c_uint32),
+                ("dwExtraInfo", ctypes.c_void_p),
+            ]
+
+        families = (
+            ("shift", {Key.shift, Key.shift_l, Key.shift_r}),
+            ("command", {Key.cmd, Key.cmd_l, Key.cmd_r}),
+            ("control", {Key.ctrl, Key.ctrl_l, Key.ctrl_r}),
+        )
+        bound = ns["hotkey_key_object"]("alt_r")
+        # German, French and Spanish layouts: Right Alt is AltGr, and Windows
+        # sends a synthetic Left Ctrl (scan 0x21D) first.
+        events = (KBDLLHOOKSTRUCT(0xA2, 0x21D), KBDLLHOOKSTRUCT(0xA5, 0x38))
+        modifiers = set()
+        started = []
+        for data in events:
+            if ns["windows_hotkey_event_filter"](0x0104, data) is False:
+                continue
+            key = delivered[data.vkCode]
+            modifier = ns["modifier_pressed_by"](key, bound, families)
+            if modifier is not None:
+                modifiers.add(modifier)
+            if ns["hotkey_matches"](key, bound):
+                started.append(mode_from_modifiers(
+                    "shift" in modifiers, "command" in modifiers,
+                    "control" in modifiers))
+
+        self.assertEqual(started, ["capture"])
+        # A real Left Ctrl (scan 0x1D) still reaches the listener, so Reply
+        # stays reachable by holding it on purpose.
+        self.assertTrue(ns["windows_hotkey_event_filter"](
+            0x0100, KBDLLHOOKSTRUCT(0xA2, 0x1D)))
+
+    def settings_namespace(self, path):
+        return load_definitions(
+            "set_hotkey", "set_undo_hotkey", "apply_hotkey_bindings",
+            "normalize_hotkey", "hotkey_key_object", "save_preferences",
+            "normalize_sound_theme", "hotkey_binding_decision",
+            "hotkey_label_for", "hotkey_shared_modes",
+            assignments={
+                "PREFERENCES", "HOTKEY_CHOICES", "HOTKEY_DEFAULT",
+                "HOTKEY_MODIFIER_FAMILY", "HOTKEY_MODES_BY_MODIFIER",
+                "SOUND_THEMES", "SOUND_THEME_DEFAULT",
+            },
+            extra={
+                "IS_MACOS": True,
+                "PREFERENCES_FILE": path,
+                "keyboard": SimpleNamespace(Key=SimpleNamespace(
+                    alt_r="alt_r", f13="f13", f14="f14")),
+                "current_face": lambda: "parrot",
+                "print": lambda *_a, **_k: None,
+                "atomic_write_text": lambda target, value:
+                    target.write_text(value, encoding="utf-8"),
+            },
+        )
+
+    def test_the_capture_key_cannot_take_the_undo_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "preferences.json"
+            ns = self.settings_namespace(path)
+            self.assertTrue(ns["set_undo_hotkey"]("f14")["accepted"])
+
+            verdict = ns["set_hotkey"]("f14")
+
+            self.assertFalse(verdict["accepted"])
+            self.assertEqual(verdict["reason"], "conflicts_with_undo")
+            stored = json.loads(path.read_text())
+            self.assertEqual(
+                (stored["hotkey"], stored["undo_hotkey"]), ("alt_r", "f14"))
+            self.assertEqual(ns["HOTKEY"], "alt_r")
+            self.assertEqual(ns["UNDO_HOTKEY"], "f14")
+            # Any other key is still accepted.
+            self.assertTrue(ns["set_hotkey"]("f13")["accepted"])
+
+    def test_a_stored_undo_key_equal_to_the_capture_key_is_dropped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "preferences.json"
+            ns = self.settings_namespace(path)
+            ns["PREFERENCES"].update(hotkey="f14", undo_hotkey="f14")
+
+            self.assertEqual(ns["apply_hotkey_bindings"](), ("f14", ""))
+
+            self.assertEqual(ns["HOTKEY"], "f14")
+            self.assertIsNone(ns["UNDO_HOTKEY"])
+            self.assertEqual(ns["PREFERENCES"]["undo_hotkey"], "")
 
 
 class RecentDictationTests(unittest.TestCase):
@@ -8378,7 +12875,7 @@ class UndoLastDictationTests(unittest.TestCase):
             "utterance_was_undone", "build_undoable_insertion",
             "bounded_focus_text", "destination_observation",
             "insertion_readback", "classify_readback_conflict",
-            "FocusSnapshot",
+            "FocusSnapshot", "grapheme_count", "_grapheme_attaches",
             extra={
                 "dataclass": dataclass,
                 "time": time,
@@ -8389,6 +12886,10 @@ class UndoLastDictationTests(unittest.TestCase):
                 "ReadbackResult": ReadbackResult,
                 "ReceiptState": ReceiptState,
                 "INSERTION_COORDINATOR": InsertionCoordinator(),
+                "UNDO_COORDINATOR": InsertionCoordinator(),
+                # A field that does not take a selection through
+                # Accessibility, so undo selects with the keyboard.
+                "_ax_select_text_range": lambda *_args: None,
                 "UNDOABLE_INSERTION": {"record": None,
                                        "lock": threading.RLock()},
                 "UNDONE_UTTERANCES": __import__("collections").deque(
@@ -8408,7 +12909,7 @@ class UndoLastDictationTests(unittest.TestCase):
                     else None),
                 "focus_destination_matches": lambda *_a: True,
                 "opaque_focus_context": lambda _snapshot: "",
-                "readback_timeout_for_frontmost": lambda: 0.0,
+                "READBACK_TIMEOUT": 0.0,
                 "_ax_text": lambda _element: state["text"],
                 "print": lambda *_a, **_k: None,
                 "paste": paste,
@@ -8527,13 +13028,267 @@ class UndoLastDictationTests(unittest.TestCase):
             snapshot_reader=lambda: self._snapshot(ns))
         self.assertTrue(first["undone"])
 
-        # Re-arming the same utterance cannot produce a second undo: the
-        # coordinator already holds a terminal entry for that id.
+        # Re-arming the same utterance cannot produce a second undo, even
+        # against a field that looks exactly as it did after the insertion:
+        # the coordinator already holds a terminal entry for that id.
+        ns["_state"]["text"] = self.BEFORE + self.INSERTED
+        keys_before = list(ns["_state"]["keys"])
         ns["record_undoable_insertion"](self._record(ns))
         second = ns["undo_last_dictation"](
-            snapshot_reader=lambda: self._snapshot(ns, text=self.BEFORE))
+            snapshot_reader=lambda: self._snapshot(ns))
         self.assertFalse(second["undone"])
         self.assertEqual(second["reason"], "already_undone")
+        self.assertEqual(ns["_state"]["keys"], keys_before)
+
+    def test_a_refusal_before_any_keystroke_keeps_the_undo(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._record(ns))
+        refused = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns, caret=(3, 0)))
+
+        self.assertEqual(refused["reason"], "selection_drift")
+        self.assertTrue(ns["undoable_insertion_status"]()["available"])
+        # The caret is back where the dictation left it: the same undo runs.
+        retried = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns))
+        self.assertTrue(retried["undone"])
+        self.assertEqual(ns["_state"]["text"], self.BEFORE)
+
+    def test_a_refused_undo_never_reaches_the_voice_outbox(self):
+        for name, kwargs in (
+                ("focus", {"bundle_reader": lambda: "com.other.app"}),
+                ("caret", {"caret": (3, 0)}),
+                ("unreadable", {"unreadable": True})):
+            with self.subTest(name):
+                ns = self.namespace()
+                ns["record_undoable_insertion"](self._record(ns))
+                caret = kwargs.get("caret")
+                reader = (lambda: None) if kwargs.get("unreadable") \
+                    else (lambda: self._snapshot(ns, caret=caret))
+                result = ns["undo_last_dictation"](
+                    snapshot_reader=reader,
+                    bundle_reader=kwargs.get("bundle_reader"))
+
+                self.assertFalse(result["undone"])
+                self.assertEqual(ns["INSERTION_COORDINATOR"].recoverable(), ())
+                self.assertEqual(ns["UNDO_COORDINATOR"].recoverable(), ())
+                self.assertEqual(ns["_state"]["keys"], [])
+
+    def test_an_unproven_undo_leaves_the_voice_outbox_as_it_was(self):
+        from insertion_integrity import (
+            DestinationObservation,
+            InsertionCoordinator,
+            InsertionLease,
+            ReadbackResult,
+        )
+
+        capacity = load_definitions(
+            assignments={"VOICE_OUTBOX_MAX_ITEMS"})["VOICE_OUTBOX_MAX_ITEMS"]
+        # The dictation replaced words the user had selected, so what undo
+        # stages is the user's own text and never a blank.
+        replaced = "it's \"great\" news."
+        for name in ("the app rewrote what undo pasted",
+                     "the selection was never confirmed"):
+            with self.subTest(name):
+                ns = self.namespace()
+                # A full Voice Outbox: dictations that never reached a field.
+                outbox = InsertionCoordinator(max_recoverable=capacity)
+                ns["INSERTION_COORDINATOR"] = outbox
+                elsewhere = DestinationObservation.capture(
+                    "com.apple.Notes:field-9", (0, 0), "")
+                for number in range(capacity):
+                    lease = InsertionLease.capture(
+                        f"waiting-{number}", "com.apple.mail:mail:field-1",
+                        (0, 0), "")
+                    outbox.stage(lease, f"See you at {number + 1}.")
+                    outbox.commit(lease.utterance_id, elsewhere,
+                                  lambda _text: None, ReadbackResult.verified)
+                waiting = outbox.recoverable()
+                self.assertEqual(len(waiting), capacity)
+
+                record = ns["UndoableInsertion"](
+                    element=ns["_element"], bundle="com.apple.mail",
+                    destination_id="com.apple.mail:mail:field-1",
+                    utterance_id="utterance-3", inserted=self.INSERTED,
+                    before=self.BEFORE + replaced,
+                    selection=(len(self.BEFORE), len(replaced)))
+                ns["record_undoable_insertion"](record)
+                ns["_state"]["text"] = record.expected
+
+                def smart_quotes(text):
+                    ns["_state"]["text"] = self.BEFORE + text.replace(
+                        "'", "’").replace("\"", "”")
+
+                attempt = ({"paster": smart_quotes}
+                           if name.startswith("the app")
+                           else {"selector": lambda *_args: False})
+                result = ns["undo_last_dictation"](
+                    snapshot_reader=lambda: ns["FocusSnapshot"](
+                        element=ns["_element"], text=ns["_state"]["text"],
+                        selection=record.caret),
+                    **attempt)
+
+                self.assertFalse(result["undone"])
+                self.assertEqual(outbox.recoverable(), waiting)
+                self.assertEqual(ns["UNDO_COORDINATOR"].recoverable(), ())
+
+    def test_undo_selects_through_accessibility_when_the_field_allows_it(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._record(ns))
+        requests = []
+
+        def select(element, text, selection, expected):
+            requests.append((element, text, selection, expected))
+            return True
+
+        result = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns), selector=select)
+
+        self.assertTrue(result["undone"])
+        self.assertEqual(requests, [(
+            ns["_element"], self.BEFORE + self.INSERTED,
+            (len(self.BEFORE), len(self.INSERTED)), self.INSERTED)])
+        self.assertEqual(ns["_state"]["keys"], [("backspace",)])
+        self.assertEqual(ns["_state"]["text"], self.BEFORE)
+
+    def test_an_unconfirmed_selection_deletes_nothing(self):
+        ns = self.namespace()
+        ns["record_undoable_insertion"](self._record(ns))
+        result = ns["undo_last_dictation"](
+            snapshot_reader=lambda: self._snapshot(ns),
+            selector=lambda *_args: False)
+
+        self.assertFalse(result["undone"])
+        self.assertEqual(ns["_state"]["keys"], [])
+        self.assertEqual(ns["_state"]["text"], self.BEFORE + self.INSERTED)
+        self.assertEqual(ns["INSERTION_COORDINATOR"].recoverable(), ())
+        self.assertEqual(ns["UNDO_COORDINATOR"].recoverable(), ())
+
+    def test_keyboard_selection_never_reaches_the_users_own_text(self):
+        # What the user sees as one character each: a heart with its
+        # presentation selector, a flag, a skin-toned ZWJ profession, an
+        # accented letter written with a combining mark.
+        user = "Dear Sam, "
+        inserted = ["t", "h", "a", "n", "k", "s", " ", "❤️", " ",
+                    "\U0001F1FA\U0001F1F8", " ",
+                    "\U0001F469\U0001F3FD‍\U0001F4BB", " ",
+                    "é", "!"]
+        field = {"characters": list(user) + inserted, "anchor": None}
+        ns = self.namespace()
+        ns["_state"]["text"] = "".join(field["characters"])
+
+        def press(*keys):
+            names = tuple(getattr(key, "name", key) for key in keys)
+            ns["_state"]["keys"].append(names)
+            end = len(field["characters"])
+            if names == ("shift", "left"):
+                # The system extends a selection by one whole character.
+                field["anchor"] = max(0, (end if field["anchor"] is None
+                                          else field["anchor"]) - 1)
+            elif names == ("backspace",):
+                del field["characters"][field["anchor"]:]
+                field["anchor"] = None
+            ns["_state"]["text"] = "".join(field["characters"])
+
+        record = ns["UndoableInsertion"](
+            element=ns["_element"], bundle="com.apple.mail",
+            destination_id="com.apple.mail:mail:field-1",
+            utterance_id="utterance-emoji", inserted="".join(inserted),
+            before=user, selection=(len(user), 0))
+        ns["record_undoable_insertion"](record)
+        result = ns["undo_last_dictation"](
+            snapshot_reader=lambda: ns["FocusSnapshot"](
+                element=ns["_element"], text=ns["_state"]["text"],
+                selection=record.caret),
+            presser=press)
+
+        self.assertTrue(result["undone"])
+        self.assertEqual(ns["_state"]["text"], user)
+        self.assertEqual(ns["_state"]["keys"].count(("shift", "left")),
+                         len(inserted))
+
+    def _accessibility_selection(self, text, caret, *, settable, applies):
+        state = {"range": (len(text[:caret].encode("utf-16-le")) // 2, 0),
+                 "selected": "", "writes": []}
+
+        def set_value(_element, _attribute, value):
+            state["writes"].append(value)
+            if applies:
+                start, length = value
+                encoded = text.encode("utf-16-le")
+                state["range"] = value
+                state["selected"] = encoded[
+                    2 * start:2 * (start + length)].decode("utf-16-le")
+            return 0
+
+        services = SimpleNamespace(
+            AXUIElementIsAttributeSettable=lambda *_args: (0, settable),
+            AXUIElementSetAttributeValue=set_value,
+            AXValueCreate=lambda _kind, value: value,
+            AXValueGetType=lambda _value: None,
+            AXValueGetValue=lambda *_args: None,
+            kAXSelectedTextAttribute="AXSelectedText",
+            kAXSelectedTextRangeAttribute="AXSelectedTextRange",
+            kAXValueCFRangeType=4,
+        )
+        now = [0.0]
+        ns = load_definitions(
+            "_ax_select_text_range", "code_points_to_utf16_range",
+            "_ax_reported_range", "_coerce_range",
+            assignments={"READBACK_TIMEOUT"},
+            extra={
+                "time": SimpleNamespace(
+                    monotonic=lambda: now[0],
+                    sleep=lambda delay: now.__setitem__(0, now[0] + delay)),
+                "_ax_attribute": lambda _element, attribute: (
+                    state["range"] if attribute == "AXSelectedTextRange"
+                    else state["selected"]),
+            },
+        )
+        with mock.patch.dict(sys.modules, {"ApplicationServices": services}):
+            result = ns["_ax_select_text_range"](
+                object(), text, (5, 7), "thanks!")
+        return result, state["writes"]
+
+    def test_accessibility_selection_is_written_in_utf16_and_confirmed(self):
+        text = "Ok \U0001F44D thanks!"
+        result, writes = self._accessibility_selection(
+            text, len(text), settable=True, applies=True)
+
+        self.assertIs(result, True)
+        self.assertEqual(writes, [(6, 7)])
+
+    def test_a_field_without_settable_selection_leaves_the_keyboard(self):
+        text = "Ok \U0001F44D thanks!"
+        result, writes = self._accessibility_selection(
+            text, len(text), settable=False, applies=False)
+
+        self.assertIsNone(result)
+        self.assertEqual(writes, [])
+
+    def test_a_selection_request_the_field_ignores_is_not_confirmed(self):
+        text = "Ok \U0001F44D thanks!"
+        result, writes = self._accessibility_selection(
+            text, len(text), settable=True, applies=False)
+
+        self.assertIs(result, False)
+        self.assertEqual(writes, [(6, 7)])
+
+    def test_whole_characters_are_counted_as_the_caret_moves(self):
+        count = self.namespace()["grapheme_count"]
+        for text, expected in (
+                ("thanks", 6),
+                ("\U0001F44D\U0001F3FD", 1),
+                ("\U0001F468‍\U0001F469‍\U0001F467", 1),
+                ("\U0001F1FA\U0001F1F8\U0001F1EC\U0001F1E7", 2),
+                ("1️⃣", 1),
+                ("é", 1),
+                ("\r\n", 1),
+                ("각", 1),
+                ("क्ष", 1),
+                ("", 0)):
+            with self.subTest(text=text):
+                self.assertEqual(count(text), expected)
 
     def test_nothing_to_undo_is_a_refusal_not_a_crash(self):
         ns = self.namespace()
@@ -8613,8 +13368,9 @@ class CorrectionLearningUndoSuppressionTests(unittest.TestCase):
     def namespace(self, undone, *, revised="Hello Qwen world"):
         recorded = []
         return load_definitions(
-            "learn_from_corrections",
+            "learn_from_corrections", "_learned_count",
             extra={
+                "PersonalRegressionLab": PersonalRegressionLab,
                 "observe_paste_outcome": lambda _receipt: revised,
                 "record_paste_outcome":
                     lambda *args: recorded.append(args),
@@ -8632,6 +13388,8 @@ class CorrectionLearningUndoSuppressionTests(unittest.TestCase):
                     "history": [], "regression_lab": {}},
                 "save_learned": lambda _state: None,
                 "personal_regression_lab": lambda _state: SimpleNamespace(
+                    promoted=(),
+                    record_revert=lambda *_a, **_k: False,
                     record_correction=lambda *_a, **_k: None,
                     propose=lambda *_a, **_k: SimpleNamespace(passed=True),
                     to_dict=lambda: {}),
@@ -8853,7 +13611,8 @@ class DictationLanguageTests(unittest.TestCase):
 
     def test_non_latin_transcripts_survive_the_hallucination_guard(self):
         ns = load_definitions(
-            "is_hallucination", assignments={"HALLUCINATIONS"})
+            "is_hallucination", "weak_whisper_evidence",
+            assignments=CleanupGuardTests.HALLUCINATION_GUARD)
         guard = ns["is_hallucination"]
         # The old ASCII-only token class matched nothing here, so every
         # correct transcript in these scripts was dropped as a hallucination.
@@ -8870,8 +13629,11 @@ class DictationLanguageTests(unittest.TestCase):
         self.assertTrue(guard("\u3002\u3002\u3002", "ja"))
         self.assertTrue(guard("  ...  ", "en"))
         # The phrase list is English, so it only fires for English.
-        self.assertTrue(guard("Thank you for watching.", "en"))
-        self.assertFalse(guard("Thank you for watching.", "de"))
+        weak = Recognition(
+            "Thank you for watching.", confidence=0.3, engine="turbo",
+            audio_duration=2.0)
+        self.assertTrue(guard("Thank you for watching.", "en", weak))
+        self.assertFalse(guard("Thank you for watching.", "de", weak))
 
     def test_english_only_text_rules_leave_other_languages_alone(self):
         ns = load_definitions(

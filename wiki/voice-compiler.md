@@ -32,8 +32,9 @@ metrics. It never touches I/O, the clipboard, or an application
   fusion is implemented by `VoiceCompiler._fuse`: per-token candidates
   scored by primary confidence plus engine bonuses, cross-hypothesis
   agreement (SequenceMatcher alignment, +0.07), context candidates
-  (single-token, distinctive, phonetically similar, and only below 0.70
-  primary confidence), and personal priors. The only in-code trace of
+  (single-token, distinctive, phonetically similar, only at or below 0.70
+  primary confidence, and only for a token the recognizer wrote as a name
+  or identifier), and personal priors. The only in-code trace of
   the name is `Decision(source="span-graph", ...)`.
 - **Anchors raise the bar.** A replacement needs a score delta of 0.12
   normally, 0.18 for anchors backed by exact context or a prior, 0.24
@@ -50,11 +51,26 @@ metrics. It never touches I/O, the clipboard, or an application
 
 ## Examples
 
-- "Tuesday — actually Wednesday" → the self-correction is a provable
-  edit; just "Wednesday" survives.
-- A context term from the focused document can replace a
-  similar-sounding token only when it clears the anchor-aware
-  threshold; every swap emits an inspectable Decision.
+- "Tuesday, actually Wednesday" → with the `self_correction` preference
+  on, the typed self-correction is a provable edit and just "Wednesday"
+  survives. With it off, which is the default, the sentence stays as
+  spoken and no edit is accepted as a self-correction. "I didn't actually
+  finish", "From 9 to 5, actually 6" and "Not Tuesday, actually
+  Wednesday" are not corrections and stay as spoken either way.
+- A context term from the selection, the open document, the repository,
+  the focused field or the clipboard can only repair a name. The
+  recognizer must have been unsure (confidence 0.70 or lower) and must
+  itself have written the token as a name or identifier: capitalized
+  other than at a sentence start, or containing a digit, an underscore
+  or an inner capital. Neither the spoken word nor the screen term may be
+  a common word (`personal_regression.is_common_word`). So "Ask Gwen to
+  review it." with "Qwen" selected becomes "Ask Qwen to review it.",
+  while "Looks good." with "Open Code now" selected stays as spoken. A
+  name written in lower case, or capitalized only because it starts the
+  sentence, is left alone. Every repair emits an inspectable Decision.
+  App names, window titles, and dictionary terms are anchor-only: they
+  bias the prompt and are protected, but never replace a recognized word
+  (November 2026).
 
 ## Related Concepts
 

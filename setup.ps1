@@ -7,12 +7,23 @@ Set-StrictMode -Version Latest
 
 $Repo = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Repo
+# Every uv call here, and the login task, runs on this one interpreter. Left
+# to itself uv takes the newest CPython it can find or download, and the lock
+# has no ctranslate2 or onnxruntime wheels for one newer than dictate.py
+# allows.
+$PythonVersion = "3.12"
+$env:UV_PYTHON = $PythonVersion
 $Mode = "full"
 $VerifyOnly = $false
 $Uninstall = $false
 $AssumeYes = $false
 $RemoveModels = $false
 $RemovePersonalData = $false
+# Set before anything can throw: the failure trap below covers the whole
+# script, argument errors included, and strict mode refuses to read an unset
+# variable, which would replace the real reason with its own.
+$script:TranscriptPath = ""
+$script:TranscriptActive = $false
 
 foreach ($Argument in $Args) {
     switch ($Argument) {
@@ -78,12 +89,68 @@ function Require-Winget {
     }
 }
 
+$script:WingetFailures = @()
+
 function Install-WingetPackage([string]$Id) {
     Require-Winget
-    & winget install --id $Id --exact --source winget --silent `
-        --accept-package-agreements --accept-source-agreements
-    if ($LASTEXITCODE -ne 0) { throw "winget could not install $Id" }
+    $WingetExit = Invoke-NativeStep "winget" @(
+        "install", "--id", $Id, "--exact", "--source", "winget", "--silent",
+        "--accept-package-agreements", "--accept-source-agreements")
+    # winget answers "already installed" and "no applicable update" with a
+    # non-zero code. Both mean the tool is present, which is the only thing
+    # this installer needs, so the code alone must not end the run. Whether
+    # the executable is findable afterwards is what decides, and every caller
+    # is followed by the Get-InstalledTools probe that settles it.
+    if ($WingetExit -ne 0) {
+        $script:WingetFailures += ("{0} exited {1}" -f $Id, $WingetExit)
+        Write-Host ("== winget returned {0} for {1}; probing for the tool anyway" -f
+            $WingetExit, $Id)
+    }
     Refresh-ProcessPath
+}
+
+# Every native command in this file runs through one of the two functions
+# below and is judged by its exit code alone. Windows PowerShell 5.1 turns a
+# native command's stderr into error records whenever that stream is
+# redirected -- by this script, a transcript, or a host without a console --
+# and $ErrorActionPreference = "Stop" makes the first one terminating. uv,
+# winget, and ollama all write routine progress and expected answers there.
+function Invoke-Native([string]$FilePath, [string[]]$CommandArguments) {
+    # Silent probe: `ollama show` writes to stderr for a model that is merely
+    # absent, which is the expected answer during a first install.
+    $Previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    # A command that cannot start sets no exit code; never report the last
+    # command's success for it.
+    $global:LASTEXITCODE = -1
+    try {
+        & $FilePath @CommandArguments 2>&1 | Out-Null
+        return $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $Previous
+    }
+}
+
+function Invoke-NativeStep([string]$FilePath, [string[]]$CommandArguments,
+        [switch]$HideOutput) {
+    # A visible step. Standard output goes to the host, which also puts it in
+    # the transcript, instead of into this function's return value; standard
+    # error is never redirected.
+    $Previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    # A command that cannot start sets no exit code; never report the last
+    # command's success for it.
+    $global:LASTEXITCODE = -1
+    try {
+        if ($HideOutput) {
+            & $FilePath @CommandArguments | Out-Null
+        } else {
+            & $FilePath @CommandArguments | Out-Host
+        }
+        return $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $Previous
+    }
 }
 
 function Test-Endpoint([string]$Uri) {
@@ -188,6 +255,66 @@ $LauncherReceipt = Join-Path $LauncherDir "launch.sha256"
 $Log = Join-Path $Repo "dictate.log"
 $OllamaLog = Join-Path $Repo "ollama.log"
 $OllamaErrorLog = Join-Path $Repo "ollama-error.log"
+$InstallLog = Join-Path $Repo "install.log"
+
+# --- Installer log -----------------------------------------------------------
+# A failed install used to lose the one line that explained it. winget, a
+# 3.4 GB model pull, and up to 180 readiness dots emit far more output than a
+# console window keeps, so by the time setup stopped, the reason had scrolled
+# out of the buffer. Recording a transcript means the error survives on disk
+# and can be attached to a bug report. The transcript header names this
+# machine and account, so it is ACL-locked exactly like the runtime logs.
+# Not while uninstalling: an open transcript holds install.log against its own
+# removal, and an uninstall prints a short plan that never scrolls anyway. Not
+# for --verify either, which promises to change nothing.
+if (-not $Uninstall -and -not $VerifyOnly) {
+    try {
+        Set-PrivateFile $InstallLog
+        Start-Transcript -LiteralPath $InstallLog -Append -Force | Out-Null
+        $script:TranscriptPath = $InstallLog
+        $script:TranscriptActive = $true
+    } catch {
+        Write-Host "== continuing without an install log: $($_.Exception.Message)"
+    }
+}
+
+function Stop-InstallLog {
+    # A transcript outlives the script that started it. Run from an open
+    # PowerShell window, it would go on recording that window's later
+    # commands into the file users are asked to attach to a bug report.
+    # Only the recording stops; $script:TranscriptPath still names the file
+    # for the failure banner, whichever of the two runs first.
+    if ($script:TranscriptActive) {
+        $script:TranscriptActive = $false
+        try { Stop-Transcript | Out-Null } catch { }
+    }
+}
+
+# PowerShell prints a terminating error wherever the console happens to be,
+# which is what made the failure unreadable. Repeat it last, with the log path,
+# so the final thing on screen is the reason and where to read it again.
+trap {
+    Write-Host ""
+    Write-Host "!! ---------------------------------------------------------"
+    Write-Host "!! Whisper Face setup failed."
+    Write-Host ("!! {0}" -f $_.Exception.Message)
+    if ($null -ne $_.InvocationInfo) {
+        Write-Host ("!! setup.ps1 line {0}" -f $_.InvocationInfo.ScriptLineNumber)
+    }
+    if (-not [string]::IsNullOrEmpty($script:TranscriptPath)) {
+        Write-Host ("!! Full log: {0}" -f $script:TranscriptPath)
+        Write-Host "!! Attach that file to a bug report; it holds every step."
+    }
+    Write-Host "!! ---------------------------------------------------------"
+    Write-Host ""
+    break
+}
+
+# Everything below runs inside this try so that the finally at the end of the
+# file stops the transcript on every way out: an exit, a failure (after the
+# trap above has printed its banner), or Ctrl+C. The body is deliberately not
+# indented; try does not open a new scope, so nothing below changes meaning.
+try {
 
 # --- Uninstall ---------------------------------------------------------------
 # Removal works from the explicit inventory below and never from a wildcard.
@@ -313,8 +440,7 @@ function Remove-CleanupModel {
             "if qwen3.5:4b is installed, remove it with: ollama rm qwen3.5:4b"
         return
     }
-    & $OllamaExe show "qwen3.5:4b" *> $null
-    if ($LASTEXITCODE -ne 0) {
+    if ((Invoke-Native $OllamaExe @("show", "qwen3.5:4b")) -ne 0) {
         Write-UninstallLine "not present" "ollama model qwen3.5:4b" ""
         $script:UninstallAbsent++
         return
@@ -325,8 +451,7 @@ function Remove-CleanupModel {
         $script:UninstallPending++
         return
     }
-    & $OllamaExe rm "qwen3.5:4b" *> $null
-    if ($LASTEXITCODE -eq 0) {
+    if ((Invoke-Native $OllamaExe @("rm", "qwen3.5:4b")) -eq 0) {
         Write-UninstallLine "removed" "ollama model qwen3.5:4b" ""
         $script:UninstallRemoved++
     } else {
@@ -372,7 +497,8 @@ function Invoke-Uninstall {
         "demonstrations.json", "acoustic_keyword_memory.json",
         "delayed_cleanup_activation.json", "acoustic_keyword_activation.json",
         "acoustic_calibration_activation.json", "relisten_activation.json",
-        "dictate.log", "ollama.log", "ollama-error.log"
+        "phone_token.txt",
+        "dictate.log", "ollama.log", "ollama-error.log", "install.log"
     )) {
         Remove-InstalledPath $RemovePersonalData `
             (Join-Path $Repo $PersonalName) "personal file"
@@ -549,6 +675,7 @@ function Confirm-TaskLauncherBinding {
     $EscapedScript = (Join-Path $Repo "dictate.py").Replace("'", "''")
     $EscapedLog = $Log.Replace("'", "''")
     foreach ($RequiredLauncherText in @(
+            ('$env:UV_PYTHON = "' + $PythonVersion + '"'),
             "Set-Location '$EscapedRepo'",
             "run --locked --script '$EscapedScript'",
             "*>> '$EscapedLog'")) {
@@ -606,15 +733,22 @@ function Confirm-Installation {
     if ($Task.State -ne "Running") {
         throw "Windows login task is not running (state: $($Task.State))"
     }
-    & $Uv lock --check --script (Join-Path $Repo "dictate.py") | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "dictate.py.lock does not match dictate.py" }
-    & $Uv sync --locked --script (Join-Path $Repo "dictate.py") --check | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "locked Python environment is incomplete" }
-    & $Uv run --locked --script (Join-Path $Repo "dictate.py") `
-        --verify-ollama-model | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Qwen model manifest verification failed" }
-    & $Ollama show "qwen3.5:4b" *> $null
-    if ($LASTEXITCODE -ne 0) { throw "qwen3.5:4b is not installed" }
+    $DictateScript = Join-Path $Repo "dictate.py"
+    if ((Invoke-NativeStep $Uv @("lock", "--check", "--script", $DictateScript) `
+            -HideOutput) -ne 0) {
+        throw "dictate.py.lock does not match dictate.py"
+    }
+    if ((Invoke-NativeStep $Uv @("sync", "--locked", "--script", $DictateScript,
+            "--check") -HideOutput) -ne 0) {
+        throw "locked Python environment is incomplete"
+    }
+    if ((Invoke-NativeStep $Uv @("run", "--locked", "--script", $DictateScript,
+            "--verify-ollama-model") -HideOutput) -ne 0) {
+        throw "Qwen model manifest verification failed"
+    }
+    if ((Invoke-Native $Ollama @("show", "qwen3.5:4b")) -ne 0) {
+        throw "qwen3.5:4b is not installed"
+    }
     $ModelFiles = @(Get-ChildItem (Join-Path $Repo ".models") `
         -Filter "model.bin" -File -Recurse -ErrorAction SilentlyContinue)
     if ($ModelFiles.Count -lt 2) {
@@ -659,7 +793,15 @@ if (-not $Ollama) {
 }
 Get-InstalledTools
 if (-not $Uv -or -not $Ffmpeg -or -not $Ollama) {
-    throw "A dependency installed but was not found on PATH; restart Windows and rerun Install.cmd"
+    $Missing = @()
+    if (-not $Uv) { $Missing += "uv" }
+    if (-not $Ffmpeg) { $Missing += "ffmpeg" }
+    if (-not $Ollama) { $Missing += "ollama" }
+    $Detail = "not on PATH: " + ($Missing -join ", ")
+    if ($script:WingetFailures.Count -gt 0) {
+        $Detail += "; winget reported " + ($script:WingetFailures -join ", ")
+    }
+    throw "A dependency is missing after installation ($Detail). Restart Windows and rerun Install.cmd; if it persists, install the named tool by hand and rerun."
 }
 
 Write-Step "starting the local Ollama service"
@@ -682,24 +824,29 @@ for ($Attempt = 0; $Attempt -lt 60; $Attempt++) {
 }
 if (-not $OllamaReady) { throw "Ollama did not become ready; inspect ollama-error.log" }
 
-& $Ollama show "qwen3.5:4b" *> $null
-if ($LASTEXITCODE -ne 0) {
+if ((Invoke-Native $Ollama @("show", "qwen3.5:4b")) -ne 0) {
     Write-Step "downloading qwen3.5:4b (~3.4 GB)"
-    & $Ollama pull "qwen3.5:4b"
-    if ($LASTEXITCODE -ne 0) { throw "Ollama could not download qwen3.5:4b" }
+    if ((Invoke-NativeStep $Ollama @("pull", "qwen3.5:4b")) -ne 0) {
+        throw "Ollama could not download qwen3.5:4b"
+    }
 } else {
     Write-Host "== qwen3.5:4b already present"
 }
 
 Write-Step "installing the locked Windows Python environment"
-& $Uv sync --locked --script (Join-Path $Repo "dictate.py")
-if ($LASTEXITCODE -ne 0) { throw "uv could not install the locked environment" }
-& $Uv run --locked --script (Join-Path $Repo "dictate.py") `
-    --verify-ollama-model
-if ($LASTEXITCODE -ne 0) { throw "Qwen model manifest verification failed" }
+$DictateScript = Join-Path $Repo "dictate.py"
+if ((Invoke-NativeStep $Uv @("sync", "--locked", "--script", $DictateScript)) -ne 0) {
+    throw "uv could not install the locked environment"
+}
+if ((Invoke-NativeStep $Uv @("run", "--locked", "--script", $DictateScript,
+        "--verify-ollama-model")) -ne 0) {
+    throw "Qwen model manifest verification failed"
+}
 Write-Step "downloading Whisper Tiny and large-v3-turbo"
-& $Uv run --locked --script (Join-Path $Repo "dictate.py") --preload-models
-if ($LASTEXITCODE -ne 0) { throw "Whisper model preload failed" }
+if ((Invoke-NativeStep $Uv @("run", "--locked", "--script", $DictateScript,
+        "--preload-models")) -ne 0) {
+    throw "Whisper model preload failed"
+}
 
 Write-Step "creating private per-machine files (existing files are preserved)"
 $PrivateTemplates = @{
@@ -714,17 +861,21 @@ foreach ($DestinationName in $PrivateTemplates.Keys) {
     if (-not (Test-Path $Destination)) {
         Copy-Item (Join-Path $Repo $PrivateTemplates[$DestinationName]) $Destination
     }
-    & icacls $Destination /inheritance:r /grant:r "${env:USERNAME}:(F)" /Q | Out-Null
+    Set-PrivateFile $Destination
 }
+# The same list the Mac installer locks down, transcripts and learned terms
+# included. Set-PrivateFile grants by SID and verifies the result, where the
+# bare-username icacls call it replaces could fail without anyone noticing.
 foreach ($PrivateStateName in @(
+    "transcripts.jsonl", "learned.json",
     "voice_inbox.json", "demonstrations.json",
     "delayed_cleanup_activation.json",
     "acoustic_keyword_activation.json", "acoustic_calibration_activation.json",
     "relisten_activation.json"
 )) {
     $PrivateState = Join-Path $Repo $PrivateStateName
-    if (Test-Path $PrivateState) {
-        & icacls $PrivateState /inheritance:r /grant:r "${env:USERNAME}:(F)" /Q | Out-Null
+    if (Test-Path -LiteralPath $PrivateState) {
+        Set-PrivateFile $PrivateState
     }
 }
 Write-Step "installing the Windows login task"
@@ -735,16 +886,16 @@ $EscapedScript = (Join-Path $Repo "dictate.py").Replace("'", "''")
 $EscapedLog = $Log.Replace("'", "''")
 $LauncherBody = @"
 `$env:PYTHONUNBUFFERED = "1"
+`$env:PYTHONUTF8 = "1"
+`$env:UV_PYTHON = "$PythonVersion"
 Set-Location '$($Repo.Replace("'", "''"))'
 & '$EscapedUv' run --locked --script '$EscapedScript'$ExtraArgument *>> '$EscapedLog'
+exit `$LASTEXITCODE
 "@
 Set-Content -Path $Launcher -Value $LauncherBody -Encoding UTF8
 $LauncherDigest = Get-LauncherDigest $Launcher
 Set-Content -Path $LauncherReceipt -Value $LauncherDigest -Encoding ascii -NoNewline
-& icacls $LauncherReceipt /inheritance:r /grant:r "${env:USERNAME}:(F)" /Q | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    throw "could not apply the private Windows launcher receipt ACL"
-}
+Set-PrivateFile $LauncherReceipt
 
 foreach ($ExistingName in @($TaskName, $LegacyTaskName)) {
     $ExistingTask = Get-ScheduledTask -TaskName $ExistingName -ErrorAction SilentlyContinue
@@ -756,8 +907,13 @@ foreach ($ExistingName in @($TaskName, $LegacyTaskName)) {
 $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument `
     "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Launcher`""
 $Trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+# Task Scheduler's defaults do not fit an always-on service: a task does not
+# start on battery and is stopped when a laptop is unplugged, and priority 7
+# runs it below normal. The launcher exits with uv's code, so a crash counts
+# as a failure and the restart policy applies.
 $Settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) `
-    -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Priority 4
 Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger `
     -Settings $Settings -Description "Local Whisper Face dictation" `
     -User $env:USERNAME -RunLevel Limited -Force | Out-Null
@@ -784,5 +940,14 @@ if ($Mode -eq "full") {
     Write-Host "== The Whisper Face tray menu controls character, pause, Flight Recorder, logs, and quit."
 } else {
     Write-Host "== server-only installation is ready."
+    Write-Host "== A client must send the bearer token as"
+    Write-Host "== 'Authorization: Bearer <token>'. It is kept in"
+    Write-Host "== $(Join-Path $Repo 'phone_token.txt')"
+    Write-Host "== and survives restarts. To replace it, delete that file and"
+    Write-Host "== restart the service."
 }
 Write-Host "== Logs: $Log"
+
+} finally {
+    Stop-InstallLog
+}
