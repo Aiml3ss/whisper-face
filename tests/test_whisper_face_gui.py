@@ -3663,6 +3663,69 @@ class SettingsPagesContractTests(unittest.TestCase):
         self.assertIn("trailing=hint", build)
         self.assertNotIn("face_row.addSubview_(hint)", build)
 
+    def test_the_model_checks_note_says_what_it_found(self):
+        import re
+        from whisper_face_gui import INTERNAL_STATUS_WORDS, model_checks_note
+        information_only = (
+            "for information only; they never change which model runs.")
+        # The runtime's own sentence carries counts; the page keeps them.
+        evidence = localized_string(
+            "models.wallet.evidence", resolved=3, warm=2)
+        self.assertEqual(
+            model_checks_note(evidence),
+            "Model files found on this Mac: 3 of 4 · warmed up: 2 of 4. "
+            "These checks are " + information_only)
+        for resolved in range(5):
+            for warm in range(5):
+                with self.subTest(resolved=resolved, warm=warm):
+                    note = model_checks_note(localized_string(
+                        "models.wallet.evidence", resolved=resolved,
+                        warm=warm))
+                    self.assertIn(
+                        f"found on this Mac: {resolved} of 4 · "
+                        f"warmed up: {warm} of 4.", note)
+        # No receipt, or one that failed validation.
+        unavailable = (
+            "Model file checks are not available on this Mac yet. They are "
+            + information_only)
+        self.assertEqual(
+            model_checks_note(localized_string("models.wallet.unavailable")),
+            unavailable)
+        self.assertEqual(
+            model_checks_note(
+                gui_module.GUIState().model_wallet_advisory), unavailable)
+        self.assertEqual(
+            model_checks_note(normalize_snapshot(
+                {"model_wallet_shadow": {"mode": "anything"}}
+            ).model_wallet_advisory), unavailable)
+        # Anything else claims nothing.
+        informational = "Model checks are " + information_only
+        for other in (localized_string("models.wallet.informational"),
+                      "", "Exact files resolved 9/4"):
+            self.assertEqual(model_checks_note(other), informational)
+        # Whatever it says, it says in plain words.
+        for note in (model_checks_note(evidence), unavailable, informational):
+            with self.subTest(note=note):
+                self.assertTrue(note.endswith(information_only))
+                self.assertFalse(
+                    [word for word in INTERNAL_STATUS_WORDS
+                     if word.casefold() in note.casefold()])
+                self.assertIsNone(re.search(
+                    r"shadow|advisory|wallet|attested|\bpin", note,
+                    re.IGNORECASE))
+        self.assertIn("wallet", INTERNAL_STATUS_WORDS)
+        # The runtime's value and its wording are untouched, and the page
+        # goes through this function.
+        self.assertIn("Exact files resolved 3/4", evidence)
+        controller = _gui_class("WhisperFaceWindowController")
+        self.assertIn("model_checks_note", _called_names(
+            _gui_function("_render_advanced", controller)))
+        self.assertNotIn(
+            "models.accessibility.wallet", ast.unparse(controller))
+        self.assertIn(
+            "pages.models.advisory.label",
+            native_appkit_smoke_contract().accessibility_catalog_keys)
+
     def test_model_states_are_shown_in_words_with_a_tone(self):
         from whisper_face_gui import ModelStatus, model_status_display
         models = normalize_snapshot({"models": [

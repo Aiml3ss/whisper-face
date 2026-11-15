@@ -1075,6 +1075,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "pages.advanced.support": "Support",
         "pages.models.status.unavailable": "Not available",
         "pages.models.advisory": "Model checks are for information only; they never change which model runs.",
+        "pages.models.advisory.evidence": "Model files found on this Mac: {found} of {total} · warmed up: {warm} of {total}. These checks are for information only; they never change which model runs.",
+        "pages.models.advisory.unavailable": "Model file checks are not available on this Mac yet. They are for information only; they never change which model runs.",
+        "pages.models.advisory.label": "Model checks",
         "pages.relisten.detail": "Rechecks names and numbers it was unsure of · {status}",
         "pages.relisten.status.off": "Off",
         "pages.relisten.status.ready": "On",
@@ -1288,7 +1291,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "settings.dialog.keywords.chooser.label",
             "results.accessibility.audio",
             "models.accessibility.guidance",
-            "models.accessibility.wallet",
+            "pages.models.advisory.label",
             "models.accessibility.relisten",
             "diagnostics.accessibility.verification",
             "diagnostics.accessibility.open_system_settings",
@@ -2852,7 +2855,7 @@ STATUS_TONES = ("good", "neutral", "warn")
 INTERNAL_STATUS_WORDS = (
     "RESOLVED", "UNAVAILABLE", "attested", "shadow", "advisory",
     "consequential", "spans", "evidence", "Regression", "mapping",
-    "pinned", "quarantined", "verifier", "receipt",
+    "pinned", "quarantined", "verifier", "receipt", "wallet",
 )
 
 
@@ -2885,6 +2888,33 @@ def model_detail_display(model: ModelStatus) -> str:
     if model.install_state == "unknown":
         return model.role
     return " · ".join(part for part in (model.role, model.detail) if part)
+
+
+def model_checks_note(advisory: str, *, locale: str = "en") -> str:
+    """The note under Models on Advanced, for the runtime's model checks.
+
+    ``advisory`` is the sentence the runtime's receipt was reduced to
+    (``GUIState.model_wallet_advisory``), which keeps its own wording for
+    the tests and the support snapshot. The page says what it found in
+    plain words: how many of the models' files are on this Mac and how
+    many have warmed up, or that the checks are not available yet. A
+    sentence that is neither claims nothing: the checks are for
+    information only.
+    """
+    total = len(MODEL_WALLET_PROVIDER_IDS)
+    for resolved in range(total + 1):
+        for warm in range(total + 1):
+            if advisory == localized_string(
+                    "models.wallet.evidence", locale=locale,
+                    resolved=resolved, warm=warm):
+                return localized_string(
+                    "pages.models.advisory.evidence", locale=locale,
+                    found=resolved, warm=warm, total=total)
+    if advisory == localized_string(
+            "models.wallet.unavailable", locale=locale):
+        return localized_string(
+            "pages.models.advisory.unavailable", locale=locale)
+    return localized_string("pages.models.advisory", locale=locale)
 
 
 def relisten_status_display(status: str, *, locale: str = "en") -> str:
@@ -10074,10 +10104,10 @@ if APPKIT_AVAILABLE:
                 model_status_views.append(status)
             model_guidance = self._page_note(self._l("models.guidance"))
             # The receipt's own wording stays the runtime's; the page says
-            # what it means in one plain sentence.
+            # what it found in plain words.
             advisory = self._page_note(
                 self._l("pages.models.advisory"),
-                accessibility_label=self._l("models.accessibility.wallet"))
+                accessibility_label=self._l("pages.models.advisory.label"))
             document.add_section(
                 self._section_header(self._l("pages.advanced.models")),
                 self._settings_group(group_rows),
@@ -11004,11 +11034,11 @@ if APPKIT_AVAILABLE:
                             "models.accessibility.status",
                             name=self._l("models.waiting")))
             # The runtime's advisory receipt keeps its own wording for the
-            # tests and the support snapshot; the page says what it means.
+            # tests and the support snapshot; the page says what it found.
             set_accessible_text(
                 self.dynamic["model_wallet_advisory"],
-                self._l("pages.models.advisory"),
-                label=self._l("models.accessibility.wallet"),
+                model_checks_note(state.model_wallet_advisory, locale=locale),
+                label=self._l("pages.models.advisory.label"),
             )
             relisten_status = relisten_status_display(
                 state.selective_relisten_status, locale=locale)
@@ -15168,6 +15198,48 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             and contrast_ratio(warn_symbol, light_surface) >= 3.0,
             "a health warning keeps a warning symbol that stands out")
 
+        # The note under Models says what the runtime's model checks
+        # found, in plain words, and the page is laid out again for it.
+        before_notes = model.state
+        advisory_note = controller.dynamic["model_wallet_advisory"]
+        for found, expected in (
+                (localized_string(
+                    "models.wallet.evidence", resolved=3, warm=2),
+                 localized_string(
+                     "pages.models.advisory.evidence", found=3, warm=2,
+                     total=len(MODEL_WALLET_PROVIDER_IDS))),
+                (localized_string("models.wallet.unavailable"),
+                 localized_string("pages.models.advisory.unavailable")),
+                (localized_string("models.wallet.informational"),
+                 localized_string("pages.models.advisory"))):
+            model.state = replace(
+                before_notes, section="Advanced",
+                model_wallet_advisory=found)
+            controller.render()
+            root_view.layoutSubtreeIfNeeded()
+            note_frame = advisory_note.frame()
+            require(
+                str(advisory_note.stringValue()) == expected
+                == model_checks_note(found)
+                and not bool(advisory_note.isHidden())
+                and not any(word.casefold() in expected.casefold()
+                            for word in INTERNAL_STATUS_WORDS)
+                and accessible_value(advisory_note, "accessibilityLabel")
+                == localized_string("pages.models.advisory.label")
+                and advisory_note.cell().cellSizeForBounds_(NSMakeRect(
+                    0, 0, note_frame.size.width, 10_000.0)).height
+                <= note_frame.size.height + 1.0,
+                f"the model checks note says what was found: {expected!r}")
+        require(
+            "3 of 4" in model_checks_note(localized_string(
+                "models.wallet.evidence", resolved=3, warm=2))
+            and "2 of 4" in model_checks_note(localized_string(
+                "models.wallet.evidence", resolved=3, warm=2)),
+            "the model checks note carries the counts")
+        model.state = before_notes
+        controller.render()
+        root_view.layoutSubtreeIfNeeded()
+
         # The face grid's chips, from what they draw: the chosen one is
         # amber with the ink outline and its hard shadow, the others are
         # a faint tile, and a press on one of those shows before it is
@@ -15509,6 +15581,7 @@ __all__ = [
     "home_review_due",
     "home_review_in_row",
     "face_grid",
+    "model_checks_note",
     "setup_rows",
     "setup_rows_turned_good",
     "setup_waits_on_a_row",
