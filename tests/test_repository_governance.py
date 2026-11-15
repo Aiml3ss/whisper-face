@@ -149,13 +149,8 @@ class RepositoryGovernanceTests(unittest.TestCase):
     def test_cla_check_runs_the_base_copy_and_never_pull_request_code(self):
         source = self.read(".github/workflows/cla-check.yml")
         # The base branch's copy of this file decides; a pull request cannot
-        # rewrite the check it is meant to pass. pull_request is here for one
-        # merge only: main's copy listens to nothing else yet, so without it
-        # the pull request that introduces pull_request_target gets no run at
-        # all. The next pull request removes it, and this assertion goes back
-        # to pull_request_target alone.
-        self.assertEqual(workflow_triggers(source),
-                         {"pull_request_target", "pull_request"})
+        # rewrite the check it is meant to pass.
+        self.assertEqual(workflow_triggers(source), {"pull_request_target"})
         refs = re.findall(r"(?m)^\s+ref:\s*(.+?)\s*$", source)
         self.assertEqual(refs, ["${{ github.event.pull_request.base.sha }}"])
         for forbidden in ("pull_request.head", "github.head_ref",
