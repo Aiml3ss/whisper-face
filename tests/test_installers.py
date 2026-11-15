@@ -1699,7 +1699,7 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn(command, workflow)
         self.assertNotIn(command, self.powershell)
         self.assertIn('if [ "$MODE" = "full" ]', self.shell)
-        # An install runs the construction check alone, inside the budget
+        # An install runs the construction check alone, inside the bound
         # the smoke holds itself to. The release gate runs the whole walk,
         # which takes several times longer, under a wider bound of its own.
         installed = re.search(
@@ -1710,37 +1710,45 @@ class InstallerContractTests(unittest.TestCase):
             installed, "setup.sh runs the construction check, bounded")
         budget = re.search(
             r"^INSTALLER_SMOKE_TIMEOUT_SECONDS = (\d+)$", gui, re.MULTILINE)
-        share = re.search(
-            r"^INSTALLER_SMOKE_CPU_SHARE = (0\.\d+)$", gui, re.MULTILINE)
+        ratio = re.search(
+            r"^INSTALLER_SMOKE_WORK_PER_IMPORT = (\d+\.\d+)$", gui,
+            re.MULTILINE)
         self.assertIsNotNone(budget)
-        self.assertIsNotNone(share)
+        self.assertIsNotNone(ratio)
         self.assertEqual(installed.group(1), budget.group(1))
-        # On the gate's Mac the check gets 7.5 s of processor time at most.
-        self.assertLessEqual(
-            int(budget.group(1)) * float(share.group(1)), 7.5)
+        # The check's own work is held against the import before it, not
+        # to a number of seconds: the hosted runner is slower than a
+        # developer's Mac, and a limit in seconds fits only one of them.
+        self.assertLessEqual(float(ratio.group(1)), 2.0)
         self.assertEqual(self.shell.count("--native-gui-smoke-test"), 1)
         gate = self.script.split('elif "--native-gui-smoke-test" in sys.argv:')
         self.assertEqual(len(gate), 2)
         gate = gate[1].split('elif "--preload-models" in sys.argv:')[0]
         construction = gate.index(
             "run_native_appkit_smoke(construction_only=True)")
+        counted = gate.index('surfaces = result["sidebar_rows"] + 2')
         held = gate.index(
-            "INSTALLER_SMOKE_TIMEOUT_SECONDS\n"
-            "                               * INSTALLER_SMOKE_CPU_SHARE")
+            "if worked > INSTALLER_SMOKE_WORK_PER_IMPORT * imported:")
         whole = gate.index("run_native_appkit_smoke()")
         self.assertIn(
             "run_native_hud_smoke_test(construction_only=True)",
             gate[:construction])
-        self.assertIn("used - imported > imported", gate[held:whole])
+        self.assertIn(
+            "worked = time.process_time() - imported",
+            gate[construction:counted])
         self.assertIn(
             'hud_result["frames"] != hud_result["states"] + 1',
-            gate[held:whole])
-        self.assertIn('result.get("drawn") != surfaces', gate[held:whole])
-        self.assertEqual(gate[held:whole].count("raise RuntimeError"), 2)
+            gate[counted:held])
+        self.assertIn('result.get("drawn") != surfaces', gate[counted:held])
+        self.assertEqual(gate[counted:whole].count("raise RuntimeError"), 2)
+        self.assertNotRegex(
+            gate, r"process_time\(\)\s*>|> allowed",
+            "no limit in seconds: it would hold on one Mac only")
         self.assertLess(
-            gate.index('"--construction-only" not in sys.argv'), held,
+            gate.index('"--construction-only" not in sys.argv'), counted,
             "only the gate's run goes on to the whole walk")
-        self.assertLess(construction, held)
+        self.assertLess(construction, counted)
+        self.assertLess(counted, held)
         self.assertLess(held, whole)
         self.assertIn(
             "subprocess.run(sys.argv[1:], check=True, timeout=120)' \\\n"

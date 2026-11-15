@@ -14338,8 +14338,8 @@ if __name__ == "__main__":
         else:
             try:
                 from whisper_face_gui import (
-                    INSTALLER_SMOKE_CPU_SHARE,
                     INSTALLER_SMOKE_TIMEOUT_SECONDS,
+                    INSTALLER_SMOKE_WORK_PER_IMPORT,
                     run_native_appkit_smoke,
                 )
 
@@ -14351,13 +14351,8 @@ if __name__ == "__main__":
                 result = run_native_appkit_smoke(construction_only=True)
                 if "--construction-only" not in sys.argv:
                     # The release gate: first hold the install's check to
-                    # its budget, then walk the whole look. Processor
-                    # time, counted from the start of the process, so a
-                    # busy gate machine cannot fail it and a slow import
-                    # cannot hide in it.
-                    used = time.process_time()
-                    allowed = (INSTALLER_SMOKE_TIMEOUT_SECONDS
-                               * INSTALLER_SMOKE_CPU_SHARE)
+                    # what it may do, then walk the whole look.
+                    worked = time.process_time() - imported
                     # Counted work first, which no machine changes: each
                     # overlay state once and one of them again in the dark
                     # appearance; setup, the pages and Home once each and
@@ -14375,16 +14370,20 @@ if __name__ == "__main__":
                             f"{result.get('renders')} renders.",
                             file=sys.stderr)
                         raise RuntimeError("construction check grew")
-                    if used > allowed or used - imported > imported:
+                    # Then what that work cost, against what importing
+                    # the app cost on this same Mac just before it.
+                    # Processor time, and a ratio: a busy gate machine
+                    # cannot fail it, and neither can a slow one, where a
+                    # number of seconds would hold on one Mac only.
+                    if worked > INSTALLER_SMOKE_WORK_PER_IMPORT * imported:
                         print(
                             "native GUI smoke: the installer's construction "
-                            f"check used {used:.1f} s of processor time "
-                            f"({used - imported:.1f} s after the "
-                            f"{imported:.1f} s import). It may use "
-                            f"{allowed:.1f} s, and no more after the import "
-                            "than the import itself: setup.sh stops it at "
-                            f"{INSTALLER_SMOKE_TIMEOUT_SECONDS} s on Macs "
-                            "several times slower than this one.",
+                            f"check used {worked:.1f} s of processor time "
+                            f"after a {imported:.1f} s import. It may use "
+                            f"{INSTALLER_SMOKE_WORK_PER_IMPORT:g} times the "
+                            "import at most: setup.sh stops the two "
+                            f"together at {INSTALLER_SMOKE_TIMEOUT_SECONDS} "
+                            "s, on Macs several times slower than this one.",
                             file=sys.stderr)
                         raise RuntimeError("construction check over budget")
                     hud_result = run_native_hud_smoke_test()

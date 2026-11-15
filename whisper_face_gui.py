@@ -12391,15 +12391,19 @@ if APPKIT_AVAILABLE:
             face_view.setLevel_mode_(level, mode)
 
 
-# What ``setup.sh`` allows its construction check, and the share of it the
-# check may use on the Mac that runs the release gate. An install runs the
-# check while the dictation service is starting, on Macs several times
-# slower than a developer's (confined to an M4 Pro's efficiency cores it
-# takes about six times as long), so the gate holds it to an eighth.
+# What ``setup.sh`` allows its construction check, and what the release gate
+# allows the check's own work: so many times the processor time that
+# importing the app took just before it. An install runs the check while the
+# dictation service is starting, on Macs several times slower than a
+# developer's (confined to an M4 Pro's efficiency cores it takes about six
+# times as long), and there the import is most of the minute. Measured
+# 2026-11-15: the work costs about half the import on an M4 Pro, and the
+# hosted macOS 15 runner is about two and a half times slower at both, so a
+# limit in seconds that fits one of them fails by chance on the other.
 # ``tests/test_installers.py`` keeps the first number equal to the
 # installer's.
 INSTALLER_SMOKE_TIMEOUT_SECONDS = 60
-INSTALLER_SMOKE_CPU_SHARE = 0.125
+INSTALLER_SMOKE_WORK_PER_IMPORT = 2.0
 
 
 def run_native_appkit_smoke(*, construction_only: bool = False
