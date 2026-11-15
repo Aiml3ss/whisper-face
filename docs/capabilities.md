@@ -103,6 +103,26 @@ Qwen3.5-4B, and has no Parakeet.
   shape, so "I thought it was Tuesday, actually Wednesday." becomes "I thought
   it was Wednesday." The same preference decides whether the cleanup model's
   proof may claim a self-correction.
+- **Restart repair (on by default).** A phrase said twice in a row by
+  accident is typed once: "I have nothing I have nothing going on" becomes
+  "I have nothing going on". The rule (`parrot_core.find_restart`) is
+  deterministic and English-only, and runs before the optional cleanup model
+  sees the text; each repair is recorded as a `remove_repeat` cleanup edit.
+  Three or more words said twice are repaired where the sentence goes on
+  after them; two words only when they open like a restart (a subject
+  pronoun or its contraction, an article or a preposition: "we can we can do
+  it", "in the in the morning") and the sentence goes straight on; one word
+  only from `i`, `the`, `a`, `an`, `to`, `of`, `and`, `we`, `my`. A comma,
+  dash or ellipsis at the restart point goes with the removed copy. Never
+  repaired: anything said three or more times ("no way no way no way", "on
+  and on and on"), anything across a sentence end or a line break, quoted
+  text, runs of numbers, snippet expansions, spoken commands, a capitalised
+  small word in mid-sentence ("Plan A a day"), "in in" ("log in in the
+  morning"), a pair said twice at the end of a sentence ("I love you, I love
+  you."), and "he said he said it"-style reports. Code mode and verbatim
+  apps are never repaired. The preference `remove_repeats` turns it off: the
+  Repeated words switch under Settings → Controls on Mac, or
+  `"remove_repeats": false` in `preferences.json` on Windows.
 - **Snippets.** Say "insert my email", alone or inside a sentence, and saved
   text arrives. A bare snippet name is never expanded, nor is a negated cue
   ("do not insert my email"), and an unfilled

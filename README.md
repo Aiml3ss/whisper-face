@@ -169,6 +169,16 @@ are never Supporter-only features.
   actually Wednesday." stay as spoken. It is off by default because a sentence
   that contrasts two things has the same shape and is changed too: "I thought
   it was Tuesday, actually Wednesday." becomes "I thought it was Wednesday."
+  A phrase said twice by accident is typed once, **on by default**: "I have
+  nothing I have nothing going on" becomes "I have nothing going on". Only a
+  restart is repaired: three or more words said twice where the sentence goes
+  on, two words that open like a restart ("in the in the morning", "we can we
+  can do it"), or one of a few small words nobody doubles on purpose ("the
+  the", "I I"). Anything said three times, across a sentence end, in
+  quotation marks or made of numbers stays as spoken, and so do code mode and
+  verbatim apps. Turn it off under Settings → Controls → **Repeated words**
+  (on Windows, set `"remove_repeats": false` in `preferences.json` and
+  restart).
   Safe edits are compiled
   deterministically; the optional local model (Qwen3.5-4B) is used only for
   semantic cleanup and the explicit writing modes. Its strict JSON edit plan

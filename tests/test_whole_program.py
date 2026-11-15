@@ -372,6 +372,66 @@ class FreshInstallDictationTests(unittest.TestCase):
             dictate.PREFERENCES_FILE.read_text())["self_correction"], False)
         self.assertEqual(typed(spoken), spoken)
 
+    def test_a_phrase_said_twice_by_accident_is_typed_once(self):
+        # The owner's text to their wife, exactly as it came out, through
+        # the whole program into Messages on a fresh install.
+        mac = booted()
+        dictate = mac.dictate
+        spoken = "Of course I can. I have nothing I have nothing going on"
+
+        def typed(sentence, bundle="com.apple.MobileSMS", modifiers=()):
+            field = TextField(bundle=bundle)
+            return mac.dictate_sentence(
+                sentence, field=field, modifiers=modifiers).text
+
+        # A fresh install starts from the shipped template, which says on.
+        self.assertIs(json.loads(
+            (ROOT / "preferences.template.json").read_text())[
+                "remove_repeats"], True)
+        self.assertIs(dictate.PREFERENCES["remove_repeats"], True)
+        self.assertIs(dictate.gui_settings_snapshot()["remove_repeats"],
+                      True)
+        self.assertEqual(typed(spoken),
+                         "Of course I can. I have nothing going on")
+        # Counted like every other cleanup edit, for the evidence inspector.
+        self.assertEqual(dictate.PIPELINE_STATE["last_cleanup_edits"],
+                         ["remove_repeat"])
+        self.assertEqual(
+            dictate.runtime_status_snapshot()["last_cleanup_edits"],
+            ["remove_repeat"])
+        # Three times is emphasis and arrives whole (a chat app drops only
+        # the closing full stop).
+        self.assertEqual(typed("No way, no way, no way."),
+                         "No way, no way, no way")
+        # A verbatim app and code mode get the words as they were said.
+        self.assertEqual(
+            typed("I I think so", bundle="com.apple.Terminal"),
+            "I I think so")
+        self.assertEqual(
+            typed("the the cat", bundle="com.apple.TextEdit",
+                  modifiers=(Key.shift, Key.ctrl)),
+            "the the cat")
+
+        actions = dictate.STATUS["bar"].gui.view_model.actions
+        try:
+            # The window's switch reaches the runtime and the file.
+            self.assertIs(actions.set_remove_repeats(False), False)
+            self.assertIs(dictate.PREFERENCES["remove_repeats"], False)
+            self.assertIs(json.loads(
+                dictate.PREFERENCES_FILE.read_text())["remove_repeats"],
+                False)
+            self.assertIs(actions.settings_snapshot()["remove_repeats"],
+                          False)
+            self.assertEqual(typed(spoken), spoken)
+            self.assertEqual(dictate.PIPELINE_STATE["last_cleanup_edits"],
+                             [])
+        finally:
+            self.assertIs(actions.set_remove_repeats(True), True)
+        self.assertIs(json.loads(
+            dictate.PREFERENCES_FILE.read_text())["remove_repeats"], True)
+        self.assertEqual(typed(spoken),
+                         "Of course I can. I have nothing going on")
+
     def test_a_recognizer_stuck_on_one_word_is_cut_short(self):
         mac = booted()
         field = mac.dictate_sentence(

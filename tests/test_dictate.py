@@ -2849,6 +2849,7 @@ class FacePreferenceTests(unittest.TestCase):
                 "sounds": "system",
                 "recent_dictations": False,
                 "self_correction": False,
+                "remove_repeats": True,
                 "language": "en",
             })
 
@@ -2968,6 +2969,78 @@ class FacePreferenceTests(unittest.TestCase):
                 encoding="utf-8"))["self_correction"], False)
             self.assertEqual(ns["quick_clean"](spoken), spoken)
             self.assertEqual(ns["phone_clean"](spoken), spoken)
+
+    def test_remove_repeats_is_on_unless_the_file_says_false(self):
+        with tempfile.TemporaryDirectory() as directory:
+            preferences = Path(directory) / "preferences.json"
+            ns = load_definitions(
+                "normalize_face", "current_face", "load_preferences",
+                "save_preferences", "normalize_hotkey",
+                "normalize_sound_theme", "set_remove_repeats",
+                "quick_clean", "needs_llm_cleanup", "phone_clean",
+                "collapse_repeats", "extract_tone_override",
+                assignments={
+                    "FACE_CHOICES", "DEFAULT_FACE", "PREFERENCES",
+                    "HOTKEY_CHOICES", "HOTKEY_DEFAULT",
+                    "SOUND_THEMES", "SOUND_THEME_DEFAULT",
+                    "TONE", "TONE_OVERRIDE_RE", "TONE_ALIASES",
+                },
+                extra={
+                    "PREFERENCES_FILE": preferences,
+                    "IS_MACOS": True,
+                    "ACOUSTIC_TIME_MACHINE": AcousticTimeMachine(),
+                    "json": json,
+                    "apply_hotkey_bindings": lambda: None,
+                    "atomic_write_text": lambda path, value:
+                        path.write_text(value, encoding="utf-8"),
+                    "compile_cleanup": compile_cleanup,
+                    "NUMBER_WORDS": NUMBER_WORDS,
+                    "is_hallucination": lambda *_args: False,
+                    "looks_like_prompt_echo": lambda _raw: False,
+                    "apply_learned_fixes": lambda raw: raw,
+                    "apply_vocabulary_casing": lambda text: text,
+                },
+            )
+            spoken = "Of course I can. I have nothing I have nothing going on"
+            repaired = "Of course I can. I have nothing going on."
+            self.assertIs(ns["PREFERENCES"]["remove_repeats"], True)
+            # An install from before the key existed, and every value that
+            # is not the JSON literal false, keeps the repair on.
+            for stored in ({}, {"self_correction": True},
+                           {"remove_repeats": "false"},
+                           {"remove_repeats": 0},
+                           {"remove_repeats": None},
+                           {"remove_repeats": True}):
+                with self.subTest(stored=stored):
+                    ns["PREFERENCES"]["remove_repeats"] = False
+                    preferences.write_text(
+                        json.dumps(stored), encoding="utf-8")
+                    ns["load_preferences"]()
+                    self.assertIs(ns["PREFERENCES"]["remove_repeats"], True)
+                    self.assertEqual(ns["quick_clean"](spoken), repaired)
+                    self.assertEqual(ns["phone_clean"](spoken), repaired)
+
+            preferences.write_text(
+                json.dumps({"remove_repeats": False}), encoding="utf-8")
+            ns["load_preferences"]()
+            self.assertIs(ns["PREFERENCES"]["remove_repeats"], False)
+            self.assertEqual(ns["quick_clean"](spoken), spoken + ".")
+            self.assertEqual(ns["phone_clean"](spoken), spoken + ".")
+
+            self.assertIs(ns["set_remove_repeats"](True), True)
+            self.assertIs(json.loads(preferences.read_text(
+                encoding="utf-8"))["remove_repeats"], True)
+            self.assertEqual(ns["quick_clean"](spoken), repaired)
+            # A tone command for verbatim keeps the words as spoken.
+            self.assertEqual(
+                ns["phone_clean"]("Verbatim mode, I I think so"), "I I think so")
+            self.assertIs(ns["set_remove_repeats"](False), False)
+            self.assertIs(json.loads(preferences.read_text(
+                encoding="utf-8"))["remove_repeats"], False)
+            ns["PREFERENCES"]["remove_repeats"] = True
+            ns["load_preferences"]()
+            self.assertIs(ns["PREFERENCES"]["remove_repeats"], False)
+            self.assertEqual(ns["quick_clean"]("the the cat"), "The the cat.")
 
     def test_privacy_preferences_are_mac_only_and_default_off(self):
         for is_macos, acoustic, voice_objects, expected in (
