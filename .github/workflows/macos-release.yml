@@ -30,7 +30,9 @@ concurrency:
 
 jobs:
   package-macos:
-    runs-on: macos-14
+    # macos-15 is the oldest image GitHub still hosts. GitHub retired the
+    # macos-14 image on 2 November 2026; a job that names it never starts.
+    runs-on: macos-15
     timeout-minutes: 45
     permissions:
       contents: read

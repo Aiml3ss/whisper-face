@@ -12,7 +12,11 @@ jobs:
     # The full release gate, including the macOS-only suites, on a hosted Mac
     # for every pull request. The command list is read from AGENTS.md at run
     # time rather than copied here, so this job cannot drift from it.
-    runs-on: macos-14
+    #
+    # macos-15 is the oldest image GitHub still hosts, and so the closest to
+    # the macOS 14 minimum the installer accepts. GitHub retired the macos-14
+    # image on 2 November 2026; a job that names it fails before it starts.
+    runs-on: macos-15
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
