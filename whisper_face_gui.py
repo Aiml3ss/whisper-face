@@ -5842,6 +5842,10 @@ if APPKIT_AVAILABLE:
             bodies share what is left once that is set aside.
             """
             width = width - BRAND_SHAPES["face_chip"].shadow_right
+            # One row until the chips would crowd. Sixteen at the 40pt
+            # floor need 790pt with their gaps, more than the widest
+            # column, so the roster wraps at eight a row and the chips grow
+            # into the room that leaves.
             count = max(1, len(self.chips))
             columns = min(self.COLUMNS, count)
             chip = self.CHIP_MIN
