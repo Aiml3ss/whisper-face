@@ -5866,10 +5866,10 @@ if APPKIT_AVAILABLE:
     # Home, top to bottom: the stage, the three stat stickers, a section
     # header and one group of rows. The gaps are the least each may be; a
     # taller window lets the first two breathe, up to HOME_GAP_STRETCH more.
-    HOME_STAGE_GAP = 12.0           # under the stage's hard shadow
+    HOME_STAGE_GAP = 8.0            # under the stage's hard shadow
     HOME_STICKER_GAP = 16.0         # between two stickers
     HOME_GROUP_GAP = 8.0            # stickers to the section header
-    HOME_GAP_STRETCH = 8.0
+    HOME_GAP_STRETCH = 12.0
 
     # Inside a speech bubble: padding round the copy, headline to
     # instruction, instruction to the buttons, and one button to the next.
@@ -5899,14 +5899,23 @@ if APPKIT_AVAILABLE:
     # grows upward into the column's bottom padding rather than pushing the
     # page and clipping its last row at the window minimum.
     NOTICE_LINE_HEIGHT = 16.0
-    # Advanced is the tallest page (536pt). It sits under the 52pt title
-    # strip and over the 32pt notice band, which leaves 28pt to spare and
-    # room for a two-line notice. The width is the sidebar, the column's
-    # minimum and CONTENT_EDGE_MIN on both sides of it. The native smoke
-    # fails if any page's content falls below its page at this minimum.
+    # The window minimum. Its width is the sidebar, the column's minimum
+    # and CONTENT_INSET on both sides of it. Its height is what Home, the
+    # one page that cannot scroll, needs under the 52pt title strip with
+    # everything it can show at once and room left for a two-line notice.
+    # The native smoke fails if any page's content does not fit there.
     WINDOW_MIN_SIZE = (880.0, 648.0)
     WINDOW_DEFAULT_SIZE = (1000.0, 680.0)
     NOTICE_WRAPPED_HEIGHT = 28.0
+    # The page column stops NOTICE_GAP above a one-line notice. A second
+    # line rises through that gap and into the column's foot. A scrolling
+    # page ends NOTICE_CLEARANCE above the notice, whatever its height; a
+    # page that cannot scroll (Home) keeps NOTICE_RISE of its foot free at
+    # all times, so a two-line notice never lands on its last group.
+    NOTICE_GAP = 6.0
+    NOTICE_CLEARANCE = 4.0
+    NOTICE_RISE = (NOTICE_WRAPPED_HEIGHT - NOTICE_LINE_HEIGHT - NOTICE_GAP
+                   + NOTICE_CLEARANCE)
 
     # Mirrored from GUIState by render() so jelly springs on native controls
     # honor Reduce Motion exactly like the HUD path, without every control
@@ -8292,13 +8301,16 @@ if APPKIT_AVAILABLE:
             Stage, stat stickers, the section header and the group of rows.
             Everything is placed from the page's own width, so the column's
             narrowest and widest both come out of the same arithmetic, and
-            a taller window only opens the two gaps a little.
+            a taller window only opens the two gaps a little. Home cannot
+            scroll, so the foot of the page is left free for a notice
+            that takes a second line.
             """
             home = self.dynamic.get("home_cluster")
             if home is None or "home_rows" not in self.dynamic:
                 return
             size = home.bounds().size
-            width, height = float(size.width), float(size.height)
+            width = float(size.width)
+            height = max(0.0, float(size.height) - NOTICE_RISE)
             if width <= 0.0:
                 return
             stage_height = STAGE_HEIGHT + BRAND_SHAPES["stage"].shadow_down
@@ -9003,7 +9015,7 @@ if APPKIT_AVAILABLE:
                     content_area.bottomAnchor(), -10.0),
                 column.bottomAnchor().constraintEqualToAnchor_constant_(
                     content_area.bottomAnchor(),
-                    -(10.0 + NOTICE_LINE_HEIGHT + 6.0)),
+                    -(10.0 + NOTICE_LINE_HEIGHT + NOTICE_GAP)),
             ])
             self.dynamic.update(
                 content_side=content_area,
@@ -9673,7 +9685,7 @@ if APPKIT_AVAILABLE:
                 constraints.append(
                     scroll.bottomAnchor()
                     .constraintLessThanOrEqualToAnchor_constant_(
-                        notice.topAnchor(), -4.0))
+                        notice.topAnchor(), -NOTICE_CLEARANCE))
             NSLayoutConstraint.activateConstraints_(constraints)
             self.dynamic.setdefault("page_documents", {})[name] = document
             self.dynamic.setdefault("page_scrolls", {})[name] = scroll
@@ -13306,9 +13318,21 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             controller.sidebar_rows[0],
             "keyboard entry starts at the sidebar, on the selected row")
 
+        permissions_row = controller.dynamic["open_system_settings_row"]
+        support_group = permissions_row.superview()
+
+        def support_rows_shown() -> list[str]:
+            return [str(row.title.stringValue())
+                    for row in support_group.visible_rows()]
+
         require(
             not bool(controller.dynamic[
-                "open_system_settings_button"].isHidden()),
+                "open_system_settings_button"].isHidden())
+            and not bool(permissions_row.isHidden())
+            and localized_string("pages.support.permissions")
+            in support_rows_shown()
+            and len(support_group.separators)
+            == len(support_group.visible_rows()) - 1,
             "permission recovery visible")
         require(
             accessible_value(
@@ -13373,9 +13397,17 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         model.refresh()
         controller.render()
         require(
-            bool(controller.dynamic[
-                "open_system_settings_button"].isHidden()),
-            "permission recovery hidden")
+            not model.permission_recovery_needed()
+            and bool(controller.dynamic[
+                "open_system_settings_button"].isHidden())
+            and bool(permissions_row.isHidden())
+            and permissions_row not in support_group.visible_rows()
+            and localized_string("pages.support.permissions")
+            not in support_rows_shown()
+            and len(support_group.separators)
+            == len(support_group.visible_rows()) - 1,
+            "permission recovery hidden: with nothing missing the "
+            "Permissions row is gone, and takes no room")
         require(
             next(step for step in model.state.onboarding_steps
                  if not step.complete).key == "hotkey",
@@ -13473,6 +13505,13 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             and all(bool(marker.isHidden()) for marker in
                     controller.dynamic["onboarding_step_cards"]),
             "every confirmed step is listed once, with its check mark")
+        require(
+            all(not str(row["caption"].stringValue())
+                and abs(float(row["view"].frame().size.height)
+                        - ROW_CAPTION_MIN_HEIGHT) < 0.01
+                for row in setup_row_views),
+            "a setup row with no caption to show keeps the height of a "
+            "row with one")
         controller.continueSetup_(None)
         require(
             model.state.onboarding_acknowledged,
@@ -14863,6 +14902,56 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             return [leaf for child in children
                     for leaf in visible_leaves(child)]
 
+        def page_leaves(view: Any) -> list[Any]:
+            # A control is one thing, whatever its private parts are.
+            children = [child for child in view.subviews()
+                        if not bool(child.isHidden())]
+            if not children or bool(view.respondsToSelector_("cell")):
+                return [view]
+            return [leaf for child in children
+                    for leaf in page_leaves(child)]
+
+        def page_frames(document: Any) -> list[tuple[Any, ...]]:
+            """Where everything a page shows is, and how tall the page
+            is: what a layout of it comes to."""
+            size = document.frame().size
+            placed: list[tuple[Any, ...]] = [
+                ("page", round(float(size.width), 2),
+                 round(float(size.height), 2))]
+            for leaf in page_leaves(document):
+                rect = document.convertRect_fromView_(
+                    leaf.frame(), leaf.superview())
+                placed.append((
+                    type(leaf).__name__,
+                    round(float(rect.origin.x), 2),
+                    round(float(rect.origin.y), 2),
+                    round(float(rect.size.width), 2),
+                    round(float(rect.size.height), 2)))
+            return placed
+
+        def check_rows(name: str, groups: Sequence[Any]) -> None:
+            """Every row keeps the spec's minimum height (44 pt, 50 with
+            a caption), and every key cap that shows names a key."""
+            for group in groups:
+                for row in group.visible_rows():
+                    height = float(row.frame().size.height)
+                    floor = (0.0 if row.custom is not None
+                             else ROW_CAPTION_MIN_HEIGHT
+                             if row.caption is not None
+                             else ROW_MIN_HEIGHT)
+                    require(
+                        height >= floor - 0.01,
+                        f"{name}: a row is {height:g} pt tall, under "
+                        f"the {floor:g} pt minimum")
+                    for view in row.accessories:
+                        if bool(view.isKindOfClass_(KeyCapView)) \
+                                and not bool(view.isHidden()):
+                            require(
+                                bool(view.key.strip())
+                                and view.frame().size.width
+                                >= BRAND_SHAPES["key_cap"].height,
+                                f"{name}: a key cap shows with no key")
+
         def check_grouped_pages(
                 size_name: str, *, may_scroll: Sequence[str] = ()) -> None:
             """The four settings pages at this window size.
@@ -14876,15 +14965,6 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             grid fills its group, and only at the window minimum while a
             two-line notice has taken the foot of the page.
             """
-            def page_leaves(view: Any) -> list[Any]:
-                # A control is one thing, whatever its private parts are.
-                children = [child for child in view.subviews()
-                            if not bool(child.isHidden())]
-                if not children or bool(view.respondsToSelector_("cell")):
-                    return [view]
-                return [leaf for child in children
-                        for leaf in page_leaves(child)]
-
             documents = controller.dynamic["page_documents"]
             scrolls = controller.dynamic["page_scrolls"]
             require(
@@ -14900,7 +14980,14 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                 for view in holders:
                     view.setHidden_(False)
                 root_view.layoutSubtreeIfNeeded()
+                # Measured as the last render left it. Laying it out again
+                # must then change nothing: a render that forgot to would
+                # leave a key cap over a title or a caption cut short.
+                left = page_frames(document)
                 document.arrange()
+                require(
+                    page_frames(document) == left,
+                    f"the render left {name} laid out at {size_name}")
                 clip = scroll.contentView()
                 width = float(clip.bounds().size.width)
                 scroll_frame = in_window(scroll)
@@ -14959,6 +15046,38 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                 groups = [view for view in document.subviews()
                           if bool(view.isKindOfClass_(GroupBoxView))
                           and not bool(view.isHidden())]
+                check_rows(f"{name} at {size_name}", groups)
+                if name == "Advanced":
+                    # A title-only row is exactly the minimum, and the
+                    # Permissions row shows only while one is missing.
+                    status_row = documents["Advanced"].sections[1][1] \
+                        .visible_rows()[0]
+                    recovery_row = controller.dynamic[
+                        "open_system_settings_row"]
+                    require(
+                        status_row.caption is None
+                        and abs(float(status_row.frame().size.height)
+                                - ROW_MIN_HEIGHT) < 0.01
+                        and bool(recovery_row.isHidden())
+                        != model.permission_recovery_needed()
+                        and bool(controller.dynamic[
+                            "open_system_settings_button"].isHidden())
+                        == bool(recovery_row.isHidden()),
+                        f"Advanced's rows are the minimum height, and "
+                        f"Permissions shows only when needed, at "
+                        f"{size_name}")
+                if name == "Controls":
+                    # The bound keys as key caps; no undo key, no cap.
+                    undo_cap = controller.dynamic["undo_hotkey_keycap"]
+                    capture_cap = controller.dynamic["hotkey_keycap"]
+                    require(
+                        not bool(capture_cap.isHidden())
+                        and capture_cap.key == model.state.hotkey_label
+                        and bool(undo_cap.isHidden())
+                        != bool(model.state.undo_hotkey_label)
+                        and undo_cap.key == model.state.undo_hotkey_label,
+                        f"Controls shows the keys that are bound, and no "
+                        f"cap for one that is not, at {size_name}")
                 visible = clip.documentVisibleRect()
                 first_group = min(groups, key=lambda view: view.frame().origin.y)
                 last_group = max(groups, key=lambda view: view.frame().origin.y)
@@ -15111,6 +15230,67 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             in_window(notice_view).size.height <= NOTICE_LINE_HEIGHT + 0.5,
             "no notice, no second line")
         check_grouped_pages("the window minimum")
+
+        # A render leaves a page laid out for the copy it just wrote.
+        # Each state below changes what rows say or which rows show; the
+        # page is measured straight after the render, with no layout
+        # pass in between, and must be where a fresh layout puts it.
+        calm_state = model.state
+
+        def left_laid_out(name: str, moves: bool, **changes: Any) -> None:
+            document = controller.dynamic["page_documents"][name]
+            before = page_frames(document)
+            model.state = replace(calm_state, **changes)
+            controller.render()
+            left = page_frames(document)
+            document.arrange()
+            require(
+                page_frames(document) == left,
+                f"a render leaves {name} laid out for its new copy")
+            require(
+                not moves or left != before,
+                f"{name}: the new copy moves its rows")
+            model.state = calm_state
+            controller.render()
+            require(
+                page_frames(document) == before,
+                f"a render leaves {name} laid out when the copy goes back")
+
+        require(
+            not calm_state.undo_hotkey_label,
+            "the smoke starts with no undo key bound")
+        left_laid_out(
+            "Controls", True, hotkey="ctrl_r", hotkey_label="Right Control",
+            hotkey_shared_modes=("reply", "command", "code"),
+            undo_hotkey="f14", undo_hotkey_label="F14", undo_available=True,
+            sound_theme="whisper",
+            settings=replace(calm_state.settings, self_correction=True))
+        left_laid_out("Personalize", False, face="fox", language="ja")
+        left_laid_out(
+            "Privacy", False, recent_dictations=True,
+            voice_object_commands=True, voice_object_inbox_status="Ready",
+            voice_object_inbox_count=3)
+        left_laid_out(
+            "Advanced", True, models=calm_state.models[:1],
+            model_wallet_advisory=localized_string(
+                "models.wallet.evidence", resolved=3, warm=2),
+            missing_permissions=("microphone",),
+            microphone_status="Unavailable")
+        # With an undo key bound its cap shows, with its key on it; and
+        # with a permission missing the Permissions row is back.
+        model.state = replace(
+            calm_state, undo_hotkey="f14", undo_hotkey_label="F14",
+            undo_available=True, missing_permissions=("microphone",))
+        controller.render()
+        root_view.layoutSubtreeIfNeeded()
+        check_grouped_pages("the window minimum, an undo key bound")
+        require(
+            not bool(controller.dynamic["undo_hotkey_keycap"].isHidden())
+            and controller.dynamic["undo_hotkey_keycap"].key == "F14"
+            and not bool(controller.dynamic[
+                "open_system_settings_row"].isHidden()),
+            "a bound undo key shows as a key cap, and a missing "
+            "permission brings the Permissions row back")
         model.state = noticed_state
         controller.render()
         root_view.layoutSubtreeIfNeeded()
@@ -15122,12 +15302,23 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         # outside the page, and all of it above a two-line notice.
         fitted_state = model.state
 
+        def groups_in(view: Any) -> list[Any]:
+            if bool(view.isHidden()):
+                return []
+            if bool(view.isKindOfClass_(GroupBoxView)):
+                return [view]
+            return [group for child in view.subviews()
+                    for group in groups_in(child)]
+
         def above_the_notice(page_view: Any) -> bool:
+            """Everything shown, and the edge of every group that holds
+            rows, stands clear of the notice below it."""
             notice_frame = frame_in_window(controller.dynamic["notice"])
             return min(
-                frame_in_window(leaf).origin.y
-                for leaf in leaf_views(page_view)
-            ) >= notice_frame.origin.y + notice_frame.size.height
+                frame_in_window(view).origin.y
+                for view in leaf_views(page_view) + groups_in(page_view)
+            ) >= (notice_frame.origin.y + notice_frame.size.height
+                  + NOTICE_CLEARANCE - 0.5)
 
         model.state = replace(
             fitted_state, section="Home", onboarding_acknowledged=True,
@@ -15243,6 +15434,8 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             and all(len(group.separators) >= 1 for group in every_group),
             "Home, setup and the settings pages hold their rows in the "
             "same group view")
+        check_rows("Home", [home_group])
+        check_rows("setup", [setup_group])
         for dark_look in (False, True):
             controller.window.setAppearance_(NSAppearance.appearanceNamed_(
                 NSAppearanceNameDarkAqua if dark_look
@@ -15408,6 +15601,18 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         # a faint tile, and a press on one of those shows before it is
         # chosen.
         face_picker = controller.dynamic["face_picker"]
+        before_faces = model.state
+        for other_face in ("fox", "olive", before_faces.face):
+            # Wherever the choice goes, the one amber chip goes with it.
+            model.state = replace(before_faces, face=other_face)
+            controller.render()
+            require(
+                [index for index, chip in enumerate(face_picker.chips)
+                 if chip.selected] == [FACES.index(other_face)]
+                and [accessible_value(chip.cell(), "accessibilityValue")
+                     for chip in face_picker.chips]
+                == ["1" if face == other_face else "0" for face in FACES],
+                f"the selection is on {other_face}'s chip and no other")
         chosen_index = FACES.index(model.state.face)
 
         def chip_look(chip: Any) -> tuple[Any, ...]:
