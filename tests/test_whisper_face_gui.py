@@ -3186,5 +3186,771 @@ class ControlSettingsViewModelTests(unittest.TestCase):
         self.assertEqual(model.reveal_recent_dictation("a"), "")
 
 
+GUI_SOURCE = (ROOT / "whisper_face_gui.py").read_text(encoding="utf-8")
+GUI_TREE = ast.parse(GUI_SOURCE)
+
+
+def _gui_class(name):
+    for node in ast.walk(GUI_TREE):
+        if isinstance(node, ast.ClassDef) and node.name == name:
+            return node
+    raise AssertionError(f"whisper_face_gui.py no longer defines {name}")
+
+
+def _gui_function(name, inside=None):
+    for node in ast.walk(inside or GUI_TREE):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"whisper_face_gui.py no longer defines {name}")
+
+
+def _method_names(node):
+    return {item.name for item in node.body
+            if isinstance(item, ast.FunctionDef)}
+
+
+def _called_names(node):
+    """Bare names and ``self.`` methods a piece of code calls, in order."""
+    calls = []
+    for item in ast.walk(node):
+        if not isinstance(item, ast.Call):
+            continue
+        target = item.func
+        if isinstance(target, ast.Name):
+            calls.append((item.lineno, item.col_offset, target.id))
+        elif (isinstance(target, ast.Attribute)
+              and isinstance(target.value, ast.Name)
+              and target.value.id == "self"):
+            calls.append((item.lineno, item.col_offset, target.attr))
+    return [name for _line, _column, name in sorted(calls)]
+
+
+def _gui_constants(*names):
+    """Evaluate simple module-level constants that sit behind the AppKit
+    guard, so the layout contract is checked where AppKit is absent."""
+    values = {}
+    for node in ast.walk(GUI_TREE):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if isinstance(target, ast.Name) and target.id in names:
+            values[target.id] = eval(  # noqa: S307 - our own constants
+                compile(ast.Expression(node.value), "<gui>", "eval"),
+                {}, dict(values))
+    missing = set(names) - set(values)
+    if missing:
+        raise AssertionError(f"missing layout constants: {sorted(missing)}")
+    return values
+
+
+class BrandGeometryTests(unittest.TestCase):
+    """The pure geometry every brand component draws from."""
+
+    def setUp(self):
+        import whisper_face_theme as theme
+        self.theme = theme
+
+    def test_hard_shadow_keeps_body_and_shadow_inside_the_footprint(self):
+        theme = self.theme
+        for name, shape in theme.BRAND_SHAPES.items():
+            with self.subTest(shape=name):
+                width, height = theme.hard_shadow_footprint(120.0, 40.0, shape)
+                self.assertEqual(
+                    (width, height),
+                    (120.0 + shape.shadow_right, 40.0 + shape.shadow_down))
+                body, shadow = theme.hard_shadow_frames(width, height, shape)
+                self.assertEqual(body, (0.0, 0.0, 120.0, 40.0))
+                self.assertEqual(
+                    shadow,
+                    (shape.shadow_right, shape.shadow_down, 120.0, 40.0))
+                for x, y, w, h in (body, shadow):
+                    self.assertGreaterEqual(x, 0.0)
+                    self.assertGreaterEqual(y, 0.0)
+                    self.assertLessEqual(x + w, width)
+                    self.assertLessEqual(y + h, height)
+
+    def test_pressing_moves_the_body_onto_its_shadow_and_leaves_a_sliver(
+            self):
+        theme = self.theme
+        for name in ("chunky_button", "chunky_button_small", "face_chip"):
+            shape = theme.BRAND_SHAPES[name]
+            width, height = theme.hard_shadow_footprint(90.0, 36.0, shape)
+            rest, shadow = theme.hard_shadow_frames(width, height, shape)
+            pressed, pressed_shadow = theme.hard_shadow_frames(
+                width, height, shape, pressed=True)
+            with self.subTest(shape=name):
+                self.assertEqual(shadow, pressed_shadow)
+                self.assertEqual(rest[2:], pressed[2:])
+                self.assertEqual(
+                    (pressed[0], pressed[1]),
+                    (shape.shadow_right - 1.0, shape.shadow_down - 1.0))
+                # Still inside the footprint: pressing never draws outside.
+                self.assertLessEqual(pressed[0] + pressed[2], width)
+                self.assertLessEqual(pressed[1] + pressed[3], height)
+        # An object without a shadow has nowhere to travel.
+        group = theme.BRAND_SHAPES["group"]
+        self.assertEqual(
+            theme.hard_shadow_frames(50.0, 20.0, group, pressed=True)[0],
+            (0.0, 0.0, 50.0, 20.0))
+
+    def test_a_tilted_tile_fits_the_upright_box_it_is_given(self):
+        theme = self.theme
+        for tilt in theme.STICKER_TILTS:
+            with self.subTest(tilt=tilt):
+                width, height = theme.tilted_inner_size(200.0, 76.0, tilt)
+                self.assertLess(width, 200.0)
+                self.assertLess(height, 76.0)
+                outer = theme.tilted_footprint(width, height, tilt)
+                self.assertAlmostEqual(outer[0], 200.0, places=6)
+                self.assertAlmostEqual(outer[1], 76.0, places=6)
+        self.assertEqual(theme.tilted_inner_size(200.0, 76.0, 0.0),
+                         (200.0, 76.0))
+        # A box too flat to hold the turned tile yields nothing, not a
+        # negative size.
+        self.assertEqual(theme.tilted_inner_size(200.0, 1.0, 20.0)[1], 0.0)
+
+    def test_stage_puts_the_face_left_and_the_content_beside_it(self):
+        theme = self.theme
+        shape = theme.BRAND_SHAPES["stage"]
+        # The widest and the narrowest the page column can be.
+        for column in (720.0, 632.0):
+            with self.subTest(column=column):
+                height = theme.STAGE_HEIGHT + shape.shadow_down
+                face, content = theme.stage_layout(column, height)
+                body_width = column - shape.shadow_right
+                self.assertEqual(face[2:], (200.0, 200.0))
+                self.assertEqual(face[0], theme.STAGE_PADDING_LEFT)
+                # Centred on the body, not on the footprint.
+                self.assertAlmostEqual(
+                    face[1] + face[3] / 2.0, theme.STAGE_HEIGHT / 2.0)
+                self.assertEqual(
+                    content[0], face[0] + face[2] + theme.STAGE_GAP)
+                self.assertAlmostEqual(
+                    content[0] + content[2],
+                    body_width - theme.STAGE_PADDING_RIGHT)
+                self.assertGreaterEqual(
+                    content[2], theme.STAGE_CONTENT_MIN_WIDTH)
+                self.assertGreaterEqual(content[1], theme.STAGE_PADDING_Y)
+                self.assertLessEqual(
+                    content[1] + content[3],
+                    theme.STAGE_HEIGHT - theme.STAGE_PADDING_Y)
+
+    def test_a_cramped_stage_shrinks_the_face_but_never_loses_it(self):
+        theme = self.theme
+        face, content = theme.stage_layout(330.0, 252.0)
+        self.assertLess(face[2], 200.0)
+        self.assertGreaterEqual(face[2], theme.STAGE_FACE_MIN_SIZE)
+        self.assertGreaterEqual(content[2], theme.STAGE_CONTENT_MIN_WIDTH)
+        face, content = theme.stage_layout(150.0, 252.0)
+        self.assertEqual(face[2], theme.STAGE_FACE_MIN_SIZE)
+        self.assertGreaterEqual(content[2], 0.0)
+        # A face smaller than the floor is honoured as asked.
+        self.assertEqual(
+            theme.stage_layout(150.0, 252.0, face_size=44.0)[0][2], 44.0)
+
+
+class NewLookFoundationContractTests(unittest.TestCase):
+    """What the next lanes rely on, checked without AppKit."""
+
+    COMPONENTS = {
+        # Controls: drawn, pressable, focusable.
+        "ChunkyButton": {
+            "configure", "drawRect_", "intrinsicContentSize", "is_pressed",
+            "drawFocusRingMask", "focusRingMaskBounds",
+            "viewDidChangeEffectiveAppearance"},
+        "FaceChipButton": {
+            "configure", "set_selected", "drawRect_", "is_pressed",
+            "drawFocusRingMask", "focusRingMaskBounds",
+            "viewDidChangeEffectiveAppearance"},
+        # Not controls: drawn and described, never focused.
+        "KeyCapView": {
+            "set_key", "drawRect_", "intrinsicContentSize",
+            "viewDidChangeEffectiveAppearance"},
+        "StickerTileView": {
+            "configure", "drawRect_", "intrinsicContentSize",
+            "viewDidChangeEffectiveAppearance"},
+        "StagePanelView": {
+            "set_face", "set_face_view", "set_content_view", "arrange",
+            "drawRect_", "viewDidChangeEffectiveAppearance"},
+    }
+    ROLES = {
+        "ChunkyButton": None,  # NSButton's own button role
+        "FaceChipButton": "NSAccessibilityRadioButtonRole",
+        "KeyCapView": "NSAccessibilityStaticTextRole",
+        "StickerTileView": "NSAccessibilityStaticTextRole",
+        "StagePanelView": "NSAccessibilityGroupRole",
+    }
+
+    def test_every_brand_component_is_defined_with_its_states(self):
+        shared = _gui_class("BrandButton")
+        for name, methods in self.COMPONENTS.items():
+            with self.subTest(component=name):
+                node = _gui_class(name)
+                defined = _method_names(node)
+                if [base.id for base in node.bases] == ["BrandButton"]:
+                    defined |= _method_names(shared)
+                self.assertFalse(
+                    methods - defined,
+                    f"{name} lost {sorted(methods - defined)}")
+                self.assertTrue(ast.get_docstring(node))
+        for name in ("ChunkyButton", "FaceChipButton"):
+            self.assertEqual(
+                [base.id for base in _gui_class(name).bases],
+                ["BrandButton"])
+        # Both ride the shared press spring, so Reduce Motion gates them
+        # exactly like every other jelly control.
+        self.assertEqual(
+            [base.id for base in shared.bases], ["JellyButton"])
+        # VoiceOver reads a button's cell, so what is set on the button
+        # must reach the cell.
+        self.assertLessEqual(
+            {"setAccessibilityLabel_", "setAccessibilityHelp_",
+             "setAccessibilityRole_", "setAccessibilityValue_"},
+            _method_names(shared))
+
+    def test_every_brand_component_draws_through_the_one_shadow_helper(self):
+        for name in self.COMPONENTS:
+            with self.subTest(component=name):
+                draw = _gui_function("drawRect_", _gui_class(name))
+                self.assertIn("draw_hard_shadow_shape", _called_names(draw))
+        helper = _gui_function("draw_hard_shadow_shape")
+        self.assertIn("hard_shadow_frames", _called_names(helper))
+
+    def test_every_brand_component_has_a_voiceover_role_and_label(self):
+        for name, role in self.ROLES.items():
+            with self.subTest(component=name):
+                text = ast.unparse(_gui_class(name))
+                if role is not None:
+                    self.assertIn(f"setAccessibilityRole_({role})", text)
+                self.assertTrue(
+                    "_accessible(" in text
+                    or "setAccessibilityLabel_(" in text
+                    or name == "StagePanelView",
+                    f"{name} sets no VoiceOver label")
+        # The chip says whether it is the chosen one.
+        self.assertIn(
+            "setAccessibilityValue_",
+            ast.unparse(_gui_function("set_selected",
+                                      _gui_class("FaceChipButton"))))
+
+    def test_brand_components_carry_no_colour_of_their_own(self):
+        start = GUI_SOURCE.index("# Brand components of the new look.")
+        end = GUI_SOURCE.index("class WhisperFaceWindowController(NSObject)")
+        block = GUI_SOURCE[start:end]
+        import re
+        self.assertEqual(re.findall(r"#[0-9A-Fa-f]{6}\b", block), [])
+        # Tokens are sRGB; the calibrated helper would lighten them.
+        self.assertNotIn("_theme_color(", block)
+        self.assertNotIn("colorWithCalibrated", block)
+
+    def test_layout_contract_adds_up_at_the_window_minimum(self):
+        values = _gui_constants(
+            "SIDEBAR_WIDTH", "CONTENT_WIDTH", "WINDOW_MIN_SIZE",
+            "TITLE_STRIP_HEIGHT", "CONTENT_INSET", "PAGE_COLUMN_MAX_WIDTH",
+            "PAGE_COLUMN_MIN_WIDTH", "ROW_MIN_HEIGHT",
+            "ROW_CAPTION_MIN_HEIGHT", "ROW_INSET", "SIDEBAR_ROW_HEIGHT",
+            "SIDEBAR_FACE_SIZE", "GROUP_HEADER_GAP", "GROUP_GAP")
+        # Sidebar, two insets and the narrowest column fill the minimum
+        # window exactly, so no page is ever asked to be narrower.
+        self.assertEqual(
+            values["SIDEBAR_WIDTH"] + 2 * values["CONTENT_INSET"]
+            + values["PAGE_COLUMN_MIN_WIDTH"],
+            values["WINDOW_MIN_SIZE"][0])
+        self.assertEqual(values["SIDEBAR_WIDTH"], 200.0)
+        self.assertEqual(
+            values["PAGE_COLUMN_MAX_WIDTH"], values["CONTENT_WIDTH"])
+        self.assertLess(
+            values["PAGE_COLUMN_MIN_WIDTH"], values["PAGE_COLUMN_MAX_WIDTH"])
+        self.assertEqual(values["ROW_MIN_HEIGHT"], 44.0)
+        self.assertEqual(values["ROW_CAPTION_MIN_HEIGHT"], 50.0)
+        self.assertEqual(values["SIDEBAR_ROW_HEIGHT"], 32.0)
+        self.assertEqual(values["SIDEBAR_FACE_SIZE"], 44.0)
+        self.assertEqual(values["TITLE_STRIP_HEIGHT"], 52.0)
+
+    def test_string_catalog_reserves_a_place_for_each_later_lane(self):
+        markers = (
+            "# --- new look: shell",
+            "# --- new look: pages",
+            "# --- new look: home and setup",
+        )
+        lines = GUI_SOURCE.splitlines()
+        positions = []
+        for marker in markers:
+            found = [index for index, line in enumerate(lines)
+                     if line.strip() == marker]
+            self.assertEqual(len(found), 1, marker)
+            self.assertEqual(lines[found[0] + 1], "", marker)
+            positions.append(found[0])
+        self.assertEqual(positions, sorted(positions))
+        # They close the ``en`` catalog: nothing but markers, blank lines
+        # and whatever later lanes add sits between the first marker and
+        # the end of the dictionary.
+        closing = next(
+            index for index in range(positions[0], len(lines))
+            if lines[index] == "}")
+        self.assertEqual(lines[closing + 1],
+                         "SUPPORTED_LOCALES = tuple(STRING_CATALOGS)")
+        self.assertEqual(SUPPORTED_LOCALES, ("en",))
+        # Reserving the places added no string.
+        for line in lines[positions[0]:closing]:
+            self.assertFalse(line.strip().startswith('"'), line)
+
+    RENDER_ORDER = [
+        "_render_shell", "_render_home", "_render_onboarding",
+        "_render_settings_shell", "_render_settings_personalize",
+        "_render_settings_controls", "_render_settings_privacy",
+        "_render_advanced", "_render_notices", "_render_finish",
+    ]
+
+    def test_render_calls_one_method_per_surface_in_a_fixed_order(self):
+        controller = _gui_class("WhisperFaceWindowController")
+        render = _gui_function("render", controller)
+        self.assertEqual(
+            [name for name in _called_names(render)
+             if name.startswith("_render")], self.RENDER_ORDER)
+        self.assertLess(
+            render.end_lineno - render.lineno, 30,
+            "render() is growing back into one method for every surface")
+        for name in self.RENDER_ORDER:
+            _gui_function(name, controller)
+        # The finish depends on what every surface enabled and hid.
+        finish = _called_names(_gui_function("_render_finish", controller))
+        self.assertEqual(
+            [name for name in finish if name.startswith("_")],
+            ["_restyle_secondary_buttons", "_sync_face_clock",
+             "_configure_key_view_loop"])
+
+    def test_each_settings_pane_has_its_own_builder(self):
+        controller = _gui_class("WhisperFaceWindowController")
+        build = _gui_function("_build_settings", controller)
+        self.assertEqual(
+            [name for name in _called_names(build)
+             if name.startswith("_build_settings_")],
+            ["_build_settings_personalize", "_build_settings_controls",
+             "_build_settings_privacy"])
+        self.assertEqual(SETTINGS_PANES, ("Personalize", "Controls",
+                                          "Privacy"))
+
+
+@unittest.skipUnless(
+    APPKIT_AVAILABLE,
+    "needs AppKit: run with "
+    "uv run --with pyobjc-framework-Cocoa --with pyobjc-framework-Quartz "
+    "tests/test_whisper_face_gui.py BrandComponentAppKitTests")
+class BrandComponentAppKitTests(unittest.TestCase):
+    """The components themselves, drawn off screen. Never shows a window."""
+
+    @classmethod
+    def setUpClass(cls):
+        import AppKit
+        cls.AppKit = AppKit
+        cls.app = AppKit.NSApplication.sharedApplication()
+        cls.window = AppKit.NSWindow.alloc() \
+            .initWithContentRect_styleMask_backing_defer_(
+                AppKit.NSMakeRect(0, 0, 400, 300), 0,
+                AppKit.NSBackingStoreBuffered, False)
+
+    def setUp(self):
+        self.set_appearance(dark=False)
+        contrast = patch.object(
+            gui_module, "_increase_contrast", lambda: False)
+        contrast.start()
+        self.addCleanup(contrast.stop)
+
+    def set_appearance(self, *, dark):
+        AppKit = self.AppKit
+        appearance = AppKit.NSAppearance.appearanceNamed_(
+            AppKit.NSAppearanceNameDarkAqua if dark
+            else AppKit.NSAppearanceNameAqua)
+        self.app.setAppearance_(appearance)
+        self.window.setAppearance_(appearance)
+
+    def show(self, view):
+        """Put a view in the off-screen window and return its bitmap."""
+        AppKit = self.AppKit
+        root = AppKit.NSView.alloc().initWithFrame_(
+            AppKit.NSMakeRect(0, 0, 400, 300))
+        self.window.setContentView_(root)
+        root.addSubview_(view)
+        view.setNeedsDisplay_(True)
+        bounds = view.bounds()
+        rep = view.bitmapImageRepForCachingDisplayInRect_(bounds)
+        view.cacheDisplayInRect_toBitmapImageRep_(bounds, rep)
+        srgb = rep.bitmapImageRepByConvertingToColorSpace_renderingIntent_(
+            AppKit.NSColorSpace.sRGBColorSpace(), 0)
+        # Converting drops the point size; ``pixel`` needs it back.
+        srgb.setSize_(bounds.size)
+        return srgb
+
+    def pixel(self, rep, x, y):
+        """sRGB colour at a point, measured in points from the top left."""
+        scale = rep.pixelsWide() / rep.size().width
+        color = rep.colorAtX_y_(int(x * scale), int(y * scale))
+        return (color.redComponent(), color.greenComponent(),
+                color.blueComponent())
+
+    def assertColor(self, actual, expected, message=""):
+        for got, want in zip(actual, expected):
+            self.assertAlmostEqual(got, want, delta=0.02, msg=message)
+
+    def frame(self, width=10, height=10):
+        return self.AppKit.NSMakeRect(0, 0, width, height)
+
+    def chunky(self, title, **kwargs):
+        button = gui_module.ChunkyButton.alloc().initWithFrame_(
+            self.frame()).configure(title, **kwargs)
+        size = button.intrinsicContentSize()
+        button.setFrame_(self.frame(size.width, size.height))
+        return button
+
+    def test_chunky_button_sizes_itself_around_its_title_and_shadow(self):
+        from whisper_face_theme import BRAND_SHAPES
+
+        regular = self.chunky("Pause")
+        small = self.chunky("Pause", small=True)
+        self.assertEqual(
+            regular.frame().size.height,
+            BRAND_SHAPES["chunky_button"].height
+            + BRAND_SHAPES["chunky_button"].shadow_down)
+        self.assertEqual(
+            small.frame().size.height,
+            BRAND_SHAPES["chunky_button_small"].height
+            + BRAND_SHAPES["chunky_button_small"].shadow_down)
+        self.assertLess(small.frame().size.width,
+                        regular.frame().size.width)
+        self.assertGreater(
+            self.chunky("Copy & Dismiss").frame().size.width,
+            regular.frame().size.width)
+        # The hit target clears the 28pt a Mac control should offer.
+        self.assertGreaterEqual(small.body_rect().size.height, 28.0)
+        with self.assertRaises(ValueError):
+            self.chunky("Pause", variant="rainbow")
+
+    def test_chunky_button_is_a_labelled_button_with_a_focus_ring(self):
+        button = self.chunky("Pause")
+        self.assertEqual(str(button.accessibilityLabel()), "Pause")
+        # VoiceOver reads the cell: it is the element, it is a button, and
+        # it carries whatever label and help the button was given.
+        element = self.AppKit.NSAccessibilityUnignoredDescendant(button)
+        self.assertIs(element, button.cell())
+        self.assertTrue(element.isAccessibilityElement())
+        self.assertEqual(
+            str(element.accessibilityRole()),
+            str(self.AppKit.NSAccessibilityButtonRole))
+        self.assertEqual(str(element.accessibilityLabel()), "Pause")
+        gui_module._accessible(button, "Pause dictation", "Stops listening")
+        self.assertEqual(
+            str(element.accessibilityLabel()), "Pause dictation")
+        self.assertEqual(str(element.accessibilityHelp()), "Stops listening")
+        body = button.body_rect()
+        ring = button.focusRingMaskBounds()
+        self.assertEqual(
+            (ring.origin.x, ring.origin.y, ring.size.width,
+             ring.size.height),
+            (body.origin.x, body.origin.y, body.size.width,
+             body.size.height))
+        # The ring hugs the body, not the shadow under it.
+        self.assertLess(ring.size.height, button.bounds().size.height)
+        self.assertNotEqual(
+            int(button.focusRingType()),
+            int(self.AppKit.NSFocusRingTypeNone))
+        fired = []
+        target = _ClickTarget.alloc().init()
+        target.fired = fired
+        button.setTarget_(target)
+        button.setAction_("clicked:")
+        button.performClick_(None)
+        self.assertEqual(fired, ["clicked"])
+
+    def test_chunky_button_draws_amber_and_plain_in_both_appearances(self):
+        from whisper_face_theme import (
+            DARK_PALETTE, LIGHT_PALETTE, STICKER_INK)
+
+        for dark, palette in ((False, LIGHT_PALETTE), (True, DARK_PALETTE)):
+            self.set_appearance(dark=dark)
+            for variant, fill in (("amber", palette.accent),
+                                  ("plain", palette.surface)):
+                with self.subTest(dark=dark, variant=variant):
+                    button = self.chunky("M", variant=variant)
+                    rep = self.show(button)
+                    body = button.body_rect()
+                    # Just inside the outline, clear of the title.
+                    self.assertColor(
+                        self.pixel(rep, body.origin.x + 6.0,
+                                   body.size.height / 2.0),
+                        fill, "fill")
+                    # The outline, on the body's left edge.
+                    self.assertColor(
+                        self.pixel(rep, 1.0, body.size.height / 2.0),
+                        palette.line, "outline")
+                    # The hard shadow, under the body's bottom edge.
+                    self.assertColor(
+                        self.pixel(rep, body.size.width / 2.0,
+                                   button.bounds().size.height - 1.0),
+                        palette.line, "shadow")
+        self.assertEqual(STICKER_INK, (42 / 255, 33 / 255, 28 / 255))
+
+    def test_chunky_button_pressed_and_disabled_states_are_visible(self):
+        from whisper_face_theme import BRAND_SHAPES, LIGHT_PALETTE
+
+        shape = BRAND_SHAPES["chunky_button"]
+        button = self.chunky("Pause")
+        rest = button.body_rect()
+        self.assertEqual((rest.origin.x, rest.origin.y), (0.0, 0.0))
+        self.assertFalse(button.is_pressed())
+        button.highlight_(True)
+        self.assertTrue(button.is_pressed())
+        pressed = button.body_rect()
+        self.assertEqual(
+            (pressed.origin.x, pressed.origin.y),
+            (shape.shadow_right - 1.0, shape.shadow_down - 1.0))
+        rep = self.show(button)
+        # Where the body's top-left corner used to be is now the window.
+        self.assertEqual(rep.colorAtX_y_(0, 0).alphaComponent(), 0.0)
+        button.highlight_(False)
+
+        button.setEnabled_(False)
+        self.assertFalse(button.is_pressed())
+        rep = self.show(button)
+        # No shadow under a disabled button, and a faded body.
+        height = button.bounds().size.height
+        scale = rep.pixelsWide() / rep.size().width
+        shadow = rep.colorAtX_y_(
+            int(rest.size.width / 2.0 * scale), int((height - 1.0) * scale))
+        self.assertEqual(shadow.alphaComponent(), 0.0)
+        fill = rep.colorAtX_y_(
+            int(6.0 * scale), int(rest.size.height / 2.0 * scale))
+        self.assertLess(fill.alphaComponent(), 0.6)
+        self.assertGreater(fill.alphaComponent(), 0.3)
+        self.assertIsNotNone(LIGHT_PALETTE)
+
+    def test_increase_contrast_gives_dark_fills_a_light_edge(self):
+        from whisper_face_theme import DARK_PALETTE
+
+        self.set_appearance(dark=True)
+        with patch.object(gui_module, "_increase_contrast", lambda: True):
+            plain = self.chunky("M", variant="plain")
+            rep = self.show(plain)
+            self.assertColor(
+                self.pixel(rep, 1.0, plain.body_rect().size.height / 2.0),
+                DARK_PALETTE.ink, "dark fill gets the light outline")
+            amber = self.chunky("M")
+            rep = self.show(amber)
+            self.assertColor(
+                self.pixel(rep, 1.0, amber.body_rect().size.height / 2.0),
+                DARK_PALETTE.line, "bright fill keeps the dark outline")
+
+    def test_key_cap_reads_as_a_named_key_and_fits_its_legend(self):
+        from whisper_face_theme import BRAND_SHAPES, LIGHT_PALETTE
+
+        cap = gui_module.KeyCapView.alloc().initWithFrame_(
+            self.frame()).set_key("Right Option")
+        self.assertEqual(str(cap.accessibilityLabel()), "Right Option")
+        self.assertEqual(
+            str(cap.accessibilityRole()),
+            str(self.AppKit.NSAccessibilityStaticTextRole))
+        self.assertEqual(str(cap.accessibilityRoleDescription()), "key")
+        self.assertTrue(cap.isAccessibilityElement())
+        self.assertFalse(cap.acceptsFirstResponder())
+        shape = BRAND_SHAPES["key_cap"]
+        size = cap.intrinsicContentSize()
+        self.assertEqual(size.height, shape.height + shape.shadow_down)
+        short = gui_module.KeyCapView.alloc().initWithFrame_(
+            self.frame()).set_key("⌘")
+        # A one-glyph key is at least as wide as it is tall.
+        self.assertGreaterEqual(
+            short.intrinsicContentSize().width, shape.height)
+        self.assertLess(short.intrinsicContentSize().width, size.width)
+        cap.setFrame_(self.frame(size.width, size.height))
+        rep = self.show(cap)
+        self.assertColor(
+            self.pixel(rep, 3.0, shape.height / 2.0),
+            LIGHT_PALETTE.surface, "cap fill")
+        self.assertColor(
+            self.pixel(rep, size.width / 2.0, size.height - 0.5),
+            LIGHT_PALETTE.line, "cap shadow")
+
+    def test_sticker_tile_takes_its_tint_and_tilt_from_its_place(self):
+        from whisper_face_theme import (
+            STICKER_TILTS, STICKER_TINTS, color_token)
+
+        for dark in (False, True):
+            self.set_appearance(dark=dark)
+            for index in range(4):
+                with self.subTest(dark=dark, index=index):
+                    tile = gui_module.StickerTileView.alloc() \
+                        .initWithFrame_(self.frame(200, 10)).configure(
+                            "714", "Words today", index)
+                    place = index % 3
+                    self.assertEqual(tile.tilt(), STICKER_TILTS[place])
+                    height = tile.intrinsicContentSize().height
+                    self.assertGreater(height, 60.0)
+                    self.assertLess(height, 90.0)
+                    tile.setFrame_(self.frame(200, height))
+                    width, tall = tile.tile_size()
+                    self.assertLess(width, 200.0)
+                    self.assertLess(tall, height)
+                    rep = self.show(tile)
+                    # Right of the text, in the middle of the tile.
+                    self.assertColor(
+                        self.pixel(rep, 150.0, height / 2.0),
+                        color_token(STICKER_TINTS[place], dark).color)
+        self.assertEqual(str(tile.accessibilityLabel()), "Words today")
+        self.assertEqual(str(tile.accessibilityValue()), "714")
+        self.assertEqual(
+            str(tile.accessibilityRole()),
+            str(self.AppKit.NSAccessibilityStaticTextRole))
+
+    def test_sticker_number_gets_smaller_before_it_gets_cut(self):
+        from whisper_face_theme import TYPE_SPECS
+
+        tile = gui_module.StickerTileView.alloc().initWithFrame_(
+            self.frame(200, 76)).configure("714", "Words today", 1)
+        full = TYPE_SPECS["stat_number"].size
+        self.assertEqual(tile.number_font(160.0).pointSize(), full)
+        tile.configure("0.93s · 9 words", "Last dictation", 0)
+        fitted = tile.number_font(160.0)
+        self.assertLess(fitted.pointSize(), full)
+        self.assertGreaterEqual(
+            fitted.pointSize(), tile.NUMBER_MIN_SIZE)
+        self.assertLessEqual(
+            gui_module._text_size(tile.number, fitted)[0], 160.0)
+        tile.configure("an impossibly long value that cannot fit", "x", 0)
+        self.assertEqual(
+            tile.number_font(160.0).pointSize(), tile.NUMBER_MIN_SIZE)
+
+    def test_stage_lays_out_a_leaning_face_and_its_content(self):
+        from whisper_face_theme import (
+            STAGE_FACE_TILT, STAGE_FOR_FACE, color_token, stage_layout)
+
+        AppKit = self.AppKit
+        stage = gui_module.StagePanelView.alloc().initWithFrame_(
+            self.frame(380, 252))
+        face = AppKit.NSView.alloc().initWithFrame_(self.frame())
+        content = AppKit.NSView.alloc().initWithFrame_(self.frame())
+        stage.set_face_view(face).set_content_view(content)
+        expected_face, expected_content = stage_layout(380.0, 252.0)
+        self.assertEqual(face.superview(), stage)
+        self.assertEqual(
+            (face.frame().size.width, face.frame().size.height),
+            expected_face[2:])
+        self.assertEqual(face.frameCenterRotation(), STAGE_FACE_TILT)
+        got = content.frame()
+        self.assertEqual(
+            (got.origin.x, got.origin.y, got.size.width, got.size.height),
+            expected_content)
+        # Resizing the stage re-lays both.
+        stage.setFrameSize_((330.0, 252.0))
+        self.assertEqual(
+            content.frame().size.width, stage_layout(330.0, 252.0)[1][2])
+        # Replacing the face removes the old one.
+        other = AppKit.NSView.alloc().initWithFrame_(self.frame())
+        stage.set_face_view(other, 120.0)
+        self.assertIsNone(face.superview())
+        self.assertLessEqual(other.frame().size.width, 120.0)
+
+        self.assertEqual(
+            str(stage.accessibilityRole()),
+            str(AppKit.NSAccessibilityGroupRole))
+        gui_module._accessible(stage, "Fox, ready")
+        self.assertEqual(str(stage.accessibilityLabel()), "Fox, ready")
+
+        for dark in (False, True):
+            self.set_appearance(dark=dark)
+            for name in ("fox", "parrot"):
+                with self.subTest(dark=dark, face=name):
+                    plain = gui_module.StagePanelView.alloc() \
+                        .initWithFrame_(self.frame(380, 252)).set_face(name)
+                    rep = self.show(plain)
+                    # Clear of all three circles and of the outline.
+                    self.assertColor(
+                        self.pixel(rep, 230.0, 60.0),
+                        color_token(STAGE_FOR_FACE[name], dark).color)
+
+    def test_face_chip_is_a_radio_button_that_shows_its_selection(self):
+        from whisper_face_theme import LIGHT_PALETTE
+
+        AppKit = self.AppKit
+        chip = gui_module.FaceChipButton.alloc().initWithFrame_(
+            self.frame(74, 75)).configure(None, "Fox")
+        self.assertEqual(str(chip.accessibilityLabel()), "Fox")
+        self.assertEqual(str(chip.toolTip()), "Fox")
+        self.assertEqual(
+            str(chip.accessibilityRole()),
+            str(AppKit.NSAccessibilityRadioButtonRole))
+        self.assertEqual(int(chip.accessibilityValue()), 0)
+        # The cell is what VoiceOver reads, so it says the same.
+        element = AppKit.NSAccessibilityUnignoredDescendant(chip)
+        self.assertIs(element, chip.cell())
+        self.assertEqual(
+            str(element.accessibilityRole()),
+            str(AppKit.NSAccessibilityRadioButtonRole))
+        self.assertEqual(str(element.accessibilityLabel()), "Fox")
+        self.assertEqual(int(element.accessibilityValue()), 0)
+        rest = chip.body_rect()
+        rep = self.show(chip)
+        # Unselected: no outline, no shadow, a faint tile.
+        self.assertEqual(
+            rep.colorAtX_y_(
+                rep.pixelsWide() - 1, rep.pixelsHigh() - 1).alphaComponent(),
+            0.0)
+        self.assertLess(
+            rep.colorAtX_y_(rep.pixelsWide() // 2,
+                            rep.pixelsHigh() // 2).alphaComponent(), 0.2)
+
+        chip.set_selected(True)
+        self.assertEqual(int(chip.accessibilityValue()), 1)
+        self.assertEqual(int(element.accessibilityValue()), 1)
+        selected = chip.body_rect()
+        # Choosing a face never nudges the art.
+        self.assertEqual(
+            (rest.origin.x, rest.origin.y, rest.size.width,
+             rest.size.height),
+            (selected.origin.x, selected.origin.y, selected.size.width,
+             selected.size.height))
+        rep = self.show(chip)
+        self.assertColor(
+            self.pixel(rep, 36.0, 36.0), LIGHT_PALETTE.accent, "amber")
+        self.assertColor(
+            self.pixel(rep, 1.0, 36.0), LIGHT_PALETTE.line, "outline")
+        self.assertColor(
+            self.pixel(rep, 36.0, 74.0), LIGHT_PALETTE.line, "shadow")
+        ring = chip.focusRingMaskBounds()
+        self.assertEqual(
+            (ring.size.width, ring.size.height),
+            (selected.size.width, selected.size.height))
+        # A small chip keeps a tile's corners instead of becoming a circle.
+        small = gui_module.FaceChipButton.alloc().initWithFrame_(
+            self.frame(46, 47))
+        self.assertLess(small.corner_radius(), 44.0 / 2.0)
+        self.assertLess(small.corner_radius(), chip.corner_radius())
+
+    def test_role_fonts_follow_the_type_tokens(self):
+        from whisper_face_theme import TYPE_SPECS
+
+        for role, spec in TYPE_SPECS.items():
+            with self.subTest(role=role):
+                font = gui_module._role_font(role)
+                self.assertEqual(font.pointSize(), spec.size)
+        rounded = gui_module._role_font("page_title")
+        plain = gui_module._role_font("row_title")
+        self.assertNotEqual(
+            str(rounded.fontDescriptor().postscriptName()),
+            str(plain.fontDescriptor().postscriptName()))
+        # Tabular figures: every digit takes the same room.
+        stat = gui_module._role_font("stat_number")
+        widths = {gui_module._text_size(digit * 4, stat)[0]
+                  for digit in "0123456789"}
+        self.assertEqual(len(widths), 1)
+
+
+if APPKIT_AVAILABLE:
+    from Foundation import NSObject as _NSObject
+
+    class _ClickTarget(_NSObject):
+        def clicked_(self, _sender):
+            self.fired.append("clicked")
+
+
 if __name__ == "__main__":
     unittest.main()

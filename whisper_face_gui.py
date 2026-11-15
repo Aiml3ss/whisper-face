@@ -5139,6 +5139,55 @@ if APPKIT_AVAILABLE:
         BRAND_TEXT_ON_LIGHT,
     )
 
+    # What the new look's brand components draw with. Imported here, beside
+    # the code that uses it, rather than in the window's main AppKit import.
+    from AppKit import (
+        NSAccessibilityGroupRole,
+        NSAccessibilityRadioButtonRole,
+        NSAccessibilityStaticTextRole,
+        NSAffineTransform,
+        NSCompositingOperationSourceOver,
+        NSFontFeatureSelectorIdentifierKey,
+        NSFontFeatureSettingsAttribute,
+        NSFontFeatureTypeIdentifierKey,
+        NSGraphicsContext,
+        NSInsetRect,
+        NSLineBreakByTruncatingTail,
+        NSMakeSize,
+        NSMutableParagraphStyle,
+        NSParagraphStyleAttributeName,
+        NSTextAlignmentCenter,
+        NSTextAlignmentLeft,
+        NSViewNoIntrinsicMetric,
+        NSZeroRect,
+    )
+    from Quartz import (
+        CGContextBeginTransparencyLayer,
+        CGContextEndTransparencyLayer,
+        CGContextRestoreGState,
+        CGContextSaveGState,
+        CGContextSetAlpha,
+    )
+    from whisper_face_theme import (
+        BRAND_SHAPES,
+        DISABLED_ALPHA,
+        STAGE_CIRCLES,
+        STAGE_FACE_SIZE,
+        STAGE_FACE_TILT,
+        STICKER_LABEL_ALPHA,
+        STICKER_TILTS,
+        STICKER_TINTS,
+        TYPE_SPECS,
+        BrandShape,
+        color_token,
+        hard_shadow_footprint,
+        hard_shadow_frames,
+        stage_layout,
+        stage_token_for_face,
+        tilted_footprint,
+        tilted_inner_size,
+    )
+
     # Quiet work surfaces per the design language: hairline border, radius 12,
     # no offset shadow. Sticker offsets stay reserved for the playful objects.
     CARD_RADIUS = 12.0
@@ -5699,6 +5748,730 @@ if APPKIT_AVAILABLE:
             box.setCornerRadius_(CARD_RADIUS)
             box.setWantsLayer_(True)
         return box
+
+    # ------------------------------------------------------------------
+    # Brand components of the new look. NOT USED YET: nothing in the window
+    # is built from these until the pages that need them are rebuilt.
+    #
+    # Each one draws itself from the tokens in ``whisper_face_theme`` and
+    # asks its own appearance for light or dark while drawing, so it follows
+    # an appearance flip without waiting for the next render. Outline and
+    # hard shadow always go through ``draw_hard_shadow_shape``.
+    # ------------------------------------------------------------------
+
+    def _srgb_color(
+            color: tuple[float, float, float], alpha: float = 1.0) -> Any:
+        """A theme colour as the sRGB value its hex names.
+
+        The brand components draw with this rather than ``_theme_color``,
+        which reads the same numbers as calibrated RGB and so renders every
+        mid-tone lighter than its hex. Here the colour on screen is the
+        colour the contrast tests measured.
+        """
+        return NSColor.colorWithSRGBRed_green_blue_alpha_(
+            color[0], color[1], color[2], alpha)
+
+    def _increase_contrast() -> bool:
+        """Whether the person asked the system to increase contrast."""
+        try:
+            return bool(
+                NSWorkspace.sharedWorkspace()
+                .accessibilityDisplayShouldIncreaseContrast())
+        except Exception:
+            return False
+
+    def _token_color(name: str, dark: bool) -> Any:
+        """A named colour token for this appearance and contrast setting."""
+        shade = color_token(name, dark, _increase_contrast())
+        return _srgb_color(shade.color, shade.alpha)
+
+    def _outline_ink(dark: bool, *, on_bright: bool = False) -> Any:
+        """The ink for an object's outline and hard shadow.
+
+        Increase Contrast turns the dark appearance's outline light, which
+        gives dark fills a real edge against a dark window. A bright fill
+        (amber, the stage) already stands off the window and would lose
+        its edge to a light outline, so it keeps the ordinary ink.
+        """
+        shade = color_token(
+            "ink_outline", dark,
+            _increase_contrast() and not (dark and on_bright))
+        return _srgb_color(shade.color, shade.alpha)
+
+    def _role_font(role: str) -> Any:
+        """The font for one named type role in ``TYPE_SPECS``."""
+        spec = TYPE_SPECS[role]
+        font = NSFont.systemFontOfSize_weight_(spec.size, spec.weight)
+        try:
+            descriptor = font.fontDescriptor()
+            if spec.rounded:
+                rounded = descriptor.fontDescriptorWithDesign_(
+                    NSFontDescriptorSystemDesignRounded)
+                if rounded is not None:
+                    descriptor = rounded
+            if spec.tabular:
+                # Number spacing (6), monospaced numbers (0): the feature
+                # pair behind ``monospacedDigitSystemFont``, which cannot
+                # be combined with the rounded design any other way.
+                descriptor = descriptor.fontDescriptorByAddingAttributes_({
+                    NSFontFeatureSettingsAttribute: [{
+                        NSFontFeatureTypeIdentifierKey: 6,
+                        NSFontFeatureSelectorIdentifierKey: 0,
+                    }]})
+            styled = NSFont.fontWithDescriptor_size_(descriptor, spec.size)
+            if styled is not None:
+                font = styled
+        except Exception:
+            pass
+        return font
+
+    def _text_size(text: str, font: Any) -> tuple[float, float]:
+        size = NSAttributedString.alloc().initWithString_attributes_(
+            text, {NSFontAttributeName: font}).size()
+        return float(size.width), float(size.height)
+
+    def _draw_text(text: str, font: Any, color: Any, rect: Any,
+                   *, centered: bool = False) -> None:
+        """Draw one truncating line, vertically centred in ``rect``.
+
+        For flipped views only: every brand component is flipped, so its
+        geometry reads top-down like the tokens that describe it.
+        """
+        style = NSMutableParagraphStyle.alloc().init()
+        style.setLineBreakMode_(NSLineBreakByTruncatingTail)
+        style.setAlignment_(
+            NSTextAlignmentCenter if centered else NSTextAlignmentLeft)
+        attributed = NSAttributedString.alloc().initWithString_attributes_(
+            text, {
+                NSFontAttributeName: font,
+                NSForegroundColorAttributeName: color,
+                NSParagraphStyleAttributeName: style,
+            })
+        height = float(attributed.size().height)
+        attributed.drawInRect_(NSMakeRect(
+            rect.origin.x,
+            rect.origin.y + (rect.size.height - height) / 2.0,
+            rect.size.width, height))
+
+    def hard_shadow_body_rect(bounds: Any, shape: BrandShape,
+                              *, pressed: bool = False) -> Any:
+        """The rectangle an object's body takes inside a flipped ``bounds``.
+
+        The bounds are the whole footprint, shadow included. Content, focus
+        rings and hit areas use this rectangle, so they follow the body
+        when it is pressed down onto its shadow.
+        """
+        body, _shadow = hard_shadow_frames(
+            bounds.size.width, bounds.size.height, shape, pressed=pressed)
+        return NSMakeRect(
+            bounds.origin.x + body[0], bounds.origin.y + body[1],
+            body[2], body[3])
+
+    def hard_shadow_path(rect: Any, shape: BrandShape,
+                         *, radius: float | None = None) -> Any:
+        """Rounded outline of an object's body, for fills, clips and masks."""
+        corner = shape.radius if radius is None else radius
+        corner = max(0.0, min(
+            corner, rect.size.width / 2.0, rect.size.height / 2.0))
+        return NSBezierPath \
+            .bezierPathWithRoundedRect_xRadius_yRadius_(rect, corner, corner)
+
+    def draw_hard_shadow_shape(bounds: Any, shape: BrandShape, *, fill: Any,
+                               ink: Any, pressed: bool = False,
+                               shadow: bool = True,
+                               radius: float | None = None) -> Any:
+        """Draw one ink-outlined object with its hard shadow; return its body.
+
+        The one place the sticker treatment is drawn, so every brand object
+        gets the same outline and the same shadow. Call it from a flipped
+        view's ``drawRect_`` with the view's bounds: the shadow is the body's
+        own shape in the ink colour, offset right and down with no blur, and
+        the outline is stroked inside the body's edge so nothing is drawn
+        outside ``bounds``.
+        """
+        body, cast = hard_shadow_frames(
+            bounds.size.width, bounds.size.height, shape, pressed=pressed)
+        body_rect = NSMakeRect(
+            bounds.origin.x + body[0], bounds.origin.y + body[1],
+            body[2], body[3])
+        if shadow and (shape.shadow_right or shape.shadow_down):
+            ink.setFill()
+            hard_shadow_path(NSMakeRect(
+                bounds.origin.x + cast[0], bounds.origin.y + cast[1],
+                cast[2], cast[3]), shape, radius=radius).fill()
+        fill.setFill()
+        hard_shadow_path(body_rect, shape, radius=radius).fill()
+        if shape.outline > 0.0:
+            inset = shape.outline / 2.0
+            corner = shape.radius if radius is None else radius
+            outline = hard_shadow_path(
+                NSInsetRect(body_rect, inset, inset), shape,
+                radius=max(0.0, corner - inset))
+            outline.setLineWidth_(shape.outline)
+            ink.setStroke()
+            outline.stroke()
+        return body_rect
+
+    def _begin_faded(alpha: float) -> Any:
+        """Start drawing a group that fades as one piece, not per stroke."""
+        context = NSGraphicsContext.currentContext().CGContext()
+        CGContextSaveGState(context)
+        CGContextSetAlpha(context, alpha)
+        CGContextBeginTransparencyLayer(context, None)
+        return context
+
+    def _end_faded(context: Any) -> None:
+        CGContextEndTransparencyLayer(context)
+        CGContextRestoreGState(context)
+
+    class BrandButton(JellyButton):
+        """What the brand's custom buttons share.
+
+        They are NSButtons, so target, action, key equivalents, the Tab
+        loop and Space all behave as on any button, and they ride the same
+        press spring as every jelly control. They draw themselves, top-down.
+
+        VoiceOver talks to a button's cell rather than to the button, so
+        every accessibility property set here is handed to the cell too:
+        the label, help, role and value a caller sets are the ones read.
+        """
+
+        def isFlipped(self):
+            return True
+
+        def wantsUpdateLayer(self):
+            # Always drawn by drawRect_, never by a cell-provided layer.
+            return False
+
+        def viewDidChangeEffectiveAppearance(self):
+            self.setNeedsDisplay_(True)
+
+        @objc.python_method
+        def is_pressed(self) -> bool:
+            try:
+                return bool(self.isEnabled()) and bool(
+                    self.cell().isHighlighted())
+            except Exception:
+                return False
+
+        def setAccessibilityLabel_(self, label):
+            objc.super(BrandButton, self).setAccessibilityLabel_(label)
+            if self.cell() is not None:
+                self.cell().setAccessibilityLabel_(label)
+
+        def setAccessibilityHelp_(self, text):
+            objc.super(BrandButton, self).setAccessibilityHelp_(text)
+            if self.cell() is not None:
+                self.cell().setAccessibilityHelp_(text)
+
+        def setAccessibilityRole_(self, role):
+            objc.super(BrandButton, self).setAccessibilityRole_(role)
+            if self.cell() is not None:
+                self.cell().setAccessibilityRole_(role)
+
+        def setAccessibilityValue_(self, value):
+            objc.super(BrandButton, self).setAccessibilityValue_(value)
+            if self.cell() is not None:
+                self.cell().setAccessibilityValue_(value)
+
+    class ChunkyButton(BrandButton):
+        """The brand's push button: ink outline, hard shadow, heavy title.
+
+        ``configure(title, variant="amber" | "plain", small=False)`` sets it
+        up; target, action, key equivalent and enabled state are NSButton's
+        own. Amber is the one primary action a surface may carry; plain is
+        the secondary beside it. The view's frame is the whole footprint:
+        use ``intrinsicContentSize`` (or Auto Layout) and the body leaves
+        room for its own shadow. Pressed, the body travels onto the shadow;
+        disabled, it fades and the shadow goes.
+        """
+
+        def initWithFrame_(self, frame):
+            self = objc.super(ChunkyButton, self).initWithFrame_(frame)
+            if self is None:
+                return None
+            self.variant = "amber"
+            self.small = False
+            self.setBordered_(False)
+            self.setTitle_("")
+            return self
+
+        @objc.python_method
+        def configure(self, title: str, *, variant: str = "amber",
+                      small: bool = False) -> Any:
+            if variant not in ("amber", "plain"):
+                raise ValueError(f"unknown chunky button variant: {variant}")
+            self.variant = variant
+            self.small = bool(small)
+            self.setTitle_(title)
+            _accessible(self, title)
+            self.invalidateIntrinsicContentSize()
+            self.setNeedsDisplay_(True)
+            return self
+
+        @objc.python_method
+        def shape(self) -> BrandShape:
+            return BRAND_SHAPES[
+                "chunky_button_small" if self.small else "chunky_button"]
+
+        @objc.python_method
+        def title_font(self) -> Any:
+            return _role_font(
+                "chunky_button_small" if self.small else "chunky_button")
+
+        @objc.python_method
+        def body_rect(self) -> Any:
+            return hard_shadow_body_rect(
+                self.bounds(), self.shape(), pressed=self.is_pressed())
+
+        def intrinsicContentSize(self):
+            shape = self.shape()
+            width, _height = _text_size(
+                str(self.title()), self.title_font())
+            return NSMakeSize(*hard_shadow_footprint(
+                math.ceil(width) + 2.0 * shape.padding_x, shape.height,
+                shape))
+
+        def drawRect_(self, _rect):
+            dark = _uses_dark_appearance(self)
+            palette = palette_for_appearance(dark)
+            enabled = bool(self.isEnabled())
+            amber = self.variant == "amber"
+            context = None if enabled else _begin_faded(DISABLED_ALPHA)
+            body = draw_hard_shadow_shape(
+                self.bounds(), self.shape(),
+                fill=_srgb_color(
+                    palette.accent if amber else palette.surface),
+                ink=_outline_ink(dark, on_bright=amber),
+                pressed=self.is_pressed(), shadow=enabled)
+            _draw_text(
+                str(self.title()), self.title_font(),
+                _token_color("on_amber_ink", dark) if amber
+                else _srgb_color(palette.ink),
+                NSInsetRect(body, self.shape().outline + 2.0, 0.0),
+                centered=True)
+            if context is not None:
+                _end_faded(context)
+
+        def focusRingMaskBounds(self):
+            return self.body_rect()
+
+        def drawFocusRingMask(self):
+            hard_shadow_path(self.body_rect(), self.shape()).fill()
+
+    class KeyCapView(NSView):
+        """A key, drawn as a key cap, wherever copy names one.
+
+        ``set_key("Right Option")`` sets the legend. It is text, not a
+        control: VoiceOver reads the key's name as static text described as
+        a key, and it takes no focus.
+        """
+
+        def initWithFrame_(self, frame):
+            self = objc.super(KeyCapView, self).initWithFrame_(frame)
+            if self is None:
+                return None
+            self.key = ""
+            try:
+                self.setAccessibilityElement_(True)
+                self.setAccessibilityRole_(NSAccessibilityStaticTextRole)
+                self.setAccessibilityRoleDescription_("key")
+            except Exception:
+                pass
+            return self
+
+        @objc.python_method
+        def set_key(self, key: str) -> Any:
+            self.key = str(key)
+            try:
+                self.setAccessibilityLabel_(self.key)
+                self.setAccessibilityValue_(self.key)
+            except Exception:
+                pass
+            self.invalidateIntrinsicContentSize()
+            self.setNeedsDisplay_(True)
+            return self
+
+        def isFlipped(self):
+            return True
+
+        def intrinsicContentSize(self):
+            shape = BRAND_SHAPES["key_cap"]
+            width, _height = _text_size(self.key, _role_font("key_cap"))
+            return NSMakeSize(*hard_shadow_footprint(
+                max(shape.height,
+                    math.ceil(width) + 2.0 * shape.padding_x),
+                shape.height, shape))
+
+        def viewDidChangeEffectiveAppearance(self):
+            self.setNeedsDisplay_(True)
+
+        def drawRect_(self, _rect):
+            dark = _uses_dark_appearance(self)
+            palette = palette_for_appearance(dark)
+            body = draw_hard_shadow_shape(
+                self.bounds(), BRAND_SHAPES["key_cap"],
+                fill=_srgb_color(palette.surface),
+                ink=_outline_ink(dark))
+            _draw_text(
+                self.key, _role_font("key_cap"), _srgb_color(palette.ink),
+                NSInsetRect(body, 3.0, 0.0), centered=True)
+
+    class StickerTileView(NSView):
+        """One stat as a tilted sticker: the number large, its label under.
+
+        ``configure(number, label, index)`` picks the tint and the tilt for
+        the tile's place in the row (0, 1 or 2). The frame is the upright
+        box the tilted tile is drawn inside, so neighbours never overlap;
+        ``intrinsicContentSize`` gives the height a tile needs. VoiceOver
+        reads it as one piece of text: the label, then the number.
+        """
+
+        PADDING_TOP = 9.0
+        PADDING_BOTTOM = 10.0
+        NUMBER_MIN_SIZE = 17.0
+
+        def initWithFrame_(self, frame):
+            self = objc.super(StickerTileView, self).initWithFrame_(frame)
+            if self is None:
+                return None
+            self.number = ""
+            self.label = ""
+            self.index = 0
+            try:
+                self.setAccessibilityElement_(True)
+                self.setAccessibilityRole_(NSAccessibilityStaticTextRole)
+            except Exception:
+                pass
+            return self
+
+        @objc.python_method
+        def configure(self, number: str, label: str,
+                      index: int = 0) -> Any:
+            self.number = str(number)
+            self.label = str(label)
+            self.index = int(index) % len(STICKER_TINTS)
+            try:
+                self.setAccessibilityLabel_(self.label)
+                self.setAccessibilityValue_(self.number)
+            except Exception:
+                pass
+            self.setNeedsDisplay_(True)
+            return self
+
+        @objc.python_method
+        def tilt(self) -> float:
+            return STICKER_TILTS[self.index]
+
+        @objc.python_method
+        def tile_size(self) -> tuple[float, float]:
+            """Upright size of the tile, shadow included, before tilting."""
+            bounds = self.bounds().size
+            return tilted_inner_size(
+                bounds.width, bounds.height, self.tilt())
+
+        @objc.python_method
+        def number_font(self, width: float) -> Any:
+            """The stat font, stepped down until the number fits ``width``.
+
+            A long value gets smaller before it gets cut: the tile keeps
+            its height and the font stops at ``NUMBER_MIN_SIZE``, after
+            which the line truncates.
+            """
+            font = _role_font("stat_number")
+            size = TYPE_SPECS["stat_number"].size
+            while (size > self.NUMBER_MIN_SIZE
+                   and _text_size(self.number, font)[0] > width):
+                size -= 1.0
+                font = NSFont.fontWithDescriptor_size_(
+                    font.fontDescriptor(), size) or font
+            return font
+
+        @objc.python_method
+        def body_height(self) -> float:
+            _w, number = _text_size("0", _role_font("stat_number"))
+            _w, label = _text_size("0", _role_font("stat_label"))
+            return (self.PADDING_TOP + math.ceil(number) + math.ceil(label)
+                    + self.PADDING_BOTTOM)
+
+        def isFlipped(self):
+            return True
+
+        def intrinsicContentSize(self):
+            shape = BRAND_SHAPES["sticker"]
+            width = float(self.bounds().size.width) or 200.0
+            _w, height = hard_shadow_footprint(
+                0.0, self.body_height(), shape)
+            return NSMakeSize(NSViewNoIntrinsicMetric, math.ceil(
+                tilted_footprint(width, height, self.tilt())[1]))
+
+        def viewDidChangeEffectiveAppearance(self):
+            self.setNeedsDisplay_(True)
+
+        def drawRect_(self, _rect):
+            dark = _uses_dark_appearance(self)
+            shape = BRAND_SHAPES["sticker"]
+            bounds = self.bounds()
+            width, height = self.tile_size()
+            if width <= 0.0 or height <= 0.0:
+                return
+            NSGraphicsContext.saveGraphicsState()
+            turn = NSAffineTransform.transform()
+            turn.translateXBy_yBy_(
+                bounds.origin.x + bounds.size.width / 2.0,
+                bounds.origin.y + bounds.size.height / 2.0)
+            # Flipped view: a positive angle turns clockwise on screen,
+            # which is the sense the tilts are written in.
+            turn.rotateByDegrees_(self.tilt())
+            turn.concat()
+            body = draw_hard_shadow_shape(
+                NSMakeRect(-width / 2.0, -height / 2.0, width, height),
+                shape,
+                fill=_token_color(STICKER_TINTS[self.index], dark),
+                ink=_outline_ink(dark))
+            ink = color_token("sticker_ink", dark, _increase_contrast())
+            number_font = _role_font("stat_number")
+            label_font = _role_font("stat_label")
+            _w, number_height = _text_size("0", number_font)
+            _w, label_height = _text_size("0", label_font)
+            text_x = body.origin.x + shape.padding_x
+            text_width = max(0.0, body.size.width - 2.0 * shape.padding_x)
+            top = body.origin.y + max(
+                shape.outline,
+                (body.size.height - self.body_height()) / 2.0
+                + self.PADDING_TOP)
+            _draw_text(
+                self.number, self.number_font(text_width),
+                _srgb_color(ink.color),
+                NSMakeRect(text_x, top, text_width,
+                           math.ceil(number_height)))
+            _draw_text(
+                self.label, label_font,
+                _srgb_color(ink.color, STICKER_LABEL_ALPHA),
+                NSMakeRect(text_x, top + math.ceil(number_height),
+                           text_width, math.ceil(label_height)))
+            NSGraphicsContext.restoreGraphicsState()
+
+    class StagePanelView(NSView):
+        """The stage: a coloured panel the face stands on, content beside it.
+
+        ``set_face("fox")`` picks the stage colour that sets the face off.
+        ``set_face_view(view)`` and ``set_content_view(view)`` hand it the
+        two things it lays out: the face on the left, leaning a little, and
+        the content (the speech bubble) filling the rest. The frame is the
+        whole footprint, hard shadow included. It is a group for VoiceOver;
+        give it a label with ``_accessible``.
+        """
+
+        def initWithFrame_(self, frame):
+            self = objc.super(StagePanelView, self).initWithFrame_(frame)
+            if self is None:
+                return None
+            self.stage_token = stage_token_for_face("")
+            self.face_view = None
+            self.content_view = None
+            self.face_size = STAGE_FACE_SIZE
+            try:
+                self.setAccessibilityElement_(True)
+                self.setAccessibilityRole_(NSAccessibilityGroupRole)
+            except Exception:
+                pass
+            return self
+
+        @objc.python_method
+        def set_face(self, face: str) -> Any:
+            self.stage_token = stage_token_for_face(face)
+            self.setNeedsDisplay_(True)
+            return self
+
+        @objc.python_method
+        def set_face_view(self, view: Any,
+                          size: float = STAGE_FACE_SIZE) -> Any:
+            if self.face_view is not None and self.face_view is not view:
+                self.face_view.removeFromSuperview()
+            self.face_view = view
+            self.face_size = float(size)
+            if view is not None:
+                self.addSubview_(view)
+            self.arrange()
+            return self
+
+        @objc.python_method
+        def set_content_view(self, view: Any) -> Any:
+            if (self.content_view is not None
+                    and self.content_view is not view):
+                self.content_view.removeFromSuperview()
+            self.content_view = view
+            if view is not None:
+                self.addSubview_(view)
+            self.arrange()
+            return self
+
+        @objc.python_method
+        def arrange(self) -> None:
+            """Place the face and the content for the current size."""
+            size = self.bounds().size
+            face, content = stage_layout(
+                size.width, size.height, face_size=self.face_size)
+            if self.face_view is not None:
+                try:
+                    self.face_view.setFrameCenterRotation_(0.0)
+                except Exception:
+                    pass
+                self.face_view.setFrame_(NSMakeRect(*face))
+                try:
+                    # In a flipped view a positive angle is clockwise on
+                    # screen, the sense the tilt token is written in.
+                    self.face_view.setFrameCenterRotation_(STAGE_FACE_TILT)
+                except Exception:
+                    pass
+            if self.content_view is not None:
+                self.content_view.setFrame_(NSMakeRect(*content))
+
+        def isFlipped(self):
+            return True
+
+        def resizeSubviewsWithOldSize_(self, _old_size):
+            self.arrange()
+
+        def layout(self):
+            # Under Auto Layout the stage is sized by constraints and never
+            # sees a frame-driven resize, so it arranges here as well.
+            objc.super(StagePanelView, self).layout()
+            self.arrange()
+
+        def viewDidChangeEffectiveAppearance(self):
+            self.setNeedsDisplay_(True)
+
+        def drawRect_(self, _rect):
+            dark = _uses_dark_appearance(self)
+            shape = BRAND_SHAPES["stage"]
+            ink = _outline_ink(dark, on_bright=True)
+            body = draw_hard_shadow_shape(
+                self.bounds(), shape,
+                fill=_token_color(self.stage_token, dark), ink=ink)
+            # The circles belong to the stage's surface, so they are
+            # clipped to it and the outline is stroked again over them.
+            NSGraphicsContext.saveGraphicsState()
+            hard_shadow_path(body, shape).addClip()
+            for circle in STAGE_CIRCLES:
+                x = (body.origin.x + body.size.width - circle.inset_x
+                     - circle.diameter if circle.from_right
+                     else body.origin.x + circle.inset_x)
+                y = (body.origin.y + body.size.height - circle.inset_y
+                     - circle.diameter if circle.from_bottom
+                     else body.origin.y + circle.inset_y)
+                wash = 1.0 if circle.lighten else 0.0
+                _srgb_color((wash, wash, wash), circle.alpha).setFill()
+                NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(
+                    x, y, circle.diameter, circle.diameter)).fill()
+            NSGraphicsContext.restoreGraphicsState()
+            inset = shape.outline / 2.0
+            outline = hard_shadow_path(
+                NSInsetRect(body, inset, inset), shape,
+                radius=shape.radius - inset)
+            outline.setLineWidth_(shape.outline)
+            ink.setStroke()
+            outline.stroke()
+
+    class FaceChipButton(BrandButton):
+        """One face in the picker grid.
+
+        ``configure(image, name, selected=False)`` sets the art and the
+        VoiceOver name; ``set_selected`` flips the choice. At rest the chip
+        is a faint tile; selected it is amber with the ink outline and hard
+        shadow. It is a radio button for VoiceOver, with its name as the
+        label and the selection as the value. The body keeps the same place
+        in both states, so choosing a face never nudges the art.
+        """
+
+        ART_INSET = 6.0
+
+        def initWithFrame_(self, frame):
+            self = objc.super(FaceChipButton, self).initWithFrame_(frame)
+            if self is None:
+                return None
+            self.face_image = None
+            self.selected = False
+            self.setBordered_(False)
+            self.setTitle_("")
+            try:
+                self.setAccessibilityRole_(NSAccessibilityRadioButtonRole)
+            except Exception:
+                pass
+            return self
+
+        @objc.python_method
+        def configure(self, image: Any, name: str,
+                      *, selected: bool = False) -> Any:
+            self.face_image = image
+            self.setToolTip_(name)
+            _accessible(self, name)
+            return self.set_selected(selected)
+
+        @objc.python_method
+        def set_selected(self, selected: bool) -> Any:
+            self.selected = bool(selected)
+            try:
+                self.setAccessibilityValue_(1 if self.selected else 0)
+            except Exception:
+                pass
+            self.setNeedsDisplay_(True)
+            return self
+
+        @objc.python_method
+        def corner_radius(self) -> float:
+            # Small chips keep the tile's proportions rather than its
+            # radius, so a 44pt chip is not rounded into a circle.
+            side = min(self.bounds().size.width, self.bounds().size.height)
+            return min(BRAND_SHAPES["face_chip"].radius, side * 0.28)
+
+        @objc.python_method
+        def body_rect(self) -> Any:
+            return hard_shadow_body_rect(
+                self.bounds(), BRAND_SHAPES["face_chip"],
+                pressed=self.selected and self.is_pressed())
+
+        def drawRect_(self, _rect):
+            dark = _uses_dark_appearance(self)
+            palette = palette_for_appearance(dark)
+            shape = BRAND_SHAPES["face_chip"]
+            radius = self.corner_radius()
+            body = self.body_rect()
+            if self.selected:
+                draw_hard_shadow_shape(
+                    self.bounds(), shape,
+                    fill=_srgb_color(palette.accent),
+                    ink=_outline_ink(dark, on_bright=True),
+                    pressed=self.is_pressed(), radius=radius)
+            else:
+                tile = hard_shadow_path(body, shape, radius=radius)
+                _token_color("chip_rest", dark).setFill()
+                tile.fill()
+                if self.is_pressed():
+                    _token_color("chip_rest", dark).setFill()
+                    tile.fill()
+                if _increase_contrast():
+                    edge = hard_shadow_path(
+                        NSInsetRect(body, 0.5, 0.5), shape,
+                        radius=radius - 0.5)
+                    edge.setLineWidth_(1.0)
+                    _token_color("hairline", dark).setStroke()
+                    edge.stroke()
+            if self.face_image is not None:
+                inset = self.ART_INSET
+                self.face_image \
+                    .drawInRect_fromRect_operation_fraction_respectFlipped_hints_(
+                        NSInsetRect(body, inset, inset), NSZeroRect,
+                        NSCompositingOperationSourceOver, 1.0, True, None)
+
+        def focusRingMaskBounds(self):
+            return self.body_rect()
+
+        def drawFocusRingMask(self):
+            hard_shadow_path(
+                self.body_rect(), BRAND_SHAPES["face_chip"],
+                radius=self.corner_radius()).fill()
 
     class WhisperFaceWindowController(NSObject):
         """One-window AppKit controller; created lazily by ``WhisperFaceGUI``."""

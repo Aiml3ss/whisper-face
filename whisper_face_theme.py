@@ -474,6 +474,8 @@ STAGE_PADDING_LEFT = 12.0
 STAGE_PADDING_RIGHT = 26.0
 STAGE_PADDING_Y = 18.0
 STAGE_GAP = 8.0
+STAGE_CONTENT_MIN_WIDTH = 160.0
+STAGE_FACE_MIN_SIZE = 96.0
 
 
 @dataclass(frozen=True)
@@ -542,6 +544,20 @@ def tilted_footprint(width: float, height: float,
             width * math.sin(angle) + height * math.cos(angle))
 
 
+def tilted_inner_size(width: float, height: float,
+                      degrees: float) -> tuple[float, float]:
+    """Size of the largest rectangle that, turned ``degrees``, still fits an
+    upright ``width`` by ``height`` box: the inverse of ``tilted_footprint``.
+    """
+    angle = math.radians(abs(degrees))
+    cos, sin = math.cos(angle), math.sin(angle)
+    spread = cos * cos - sin * sin
+    if spread <= 0.0:
+        return (0.0, 0.0)
+    return (max(0.0, (width * cos - height * sin) / spread),
+            max(0.0, (height * cos - width * sin) / spread))
+
+
 def stage_layout(width: float, height: float, *,
                  face_size: float = STAGE_FACE_SIZE) -> tuple[Rect, Rect]:
     """Where the face and the content sit on a stage of this footprint.
@@ -550,14 +566,17 @@ def stage_layout(width: float, height: float, *,
     stage's footprint, both inside its body and clear of its hard shadow.
     The face keeps a square on the left, centred on the body; the content
     takes the rest. On a stage too narrow for both, the face shrinks before
-    the content loses its last 160 points.
+    the content loses its last ``STAGE_CONTENT_MIN_WIDTH`` points, but never
+    below ``STAGE_FACE_MIN_SIZE``: the face is the point of the stage.
     """
     body, _shadow = hard_shadow_frames(width, height, BRAND_SHAPES["stage"])
     _x, _y, body_width, body_height = body
     inner_height = max(0.0, body_height - 2.0 * STAGE_PADDING_Y)
     room = (body_width - STAGE_PADDING_LEFT - STAGE_PADDING_RIGHT
-            - STAGE_GAP - 160.0)
-    side = max(0.0, min(face_size, body_height, room))
+            - STAGE_GAP - STAGE_CONTENT_MIN_WIDTH)
+    side = max(0.0, min(
+        face_size, body_height,
+        max(room, min(face_size, STAGE_FACE_MIN_SIZE))))
     face = (STAGE_PADDING_LEFT, (body_height - side) / 2.0, side, side)
     content_x = STAGE_PADDING_LEFT + side + STAGE_GAP
     content = (content_x, STAGE_PADDING_Y,
