@@ -7,6 +7,7 @@
 
 import json
 import math
+import re
 import sys
 import ast
 import unittest
@@ -4124,6 +4125,14 @@ class EditorSheetContractTests(unittest.TestCase):
                     and "_end_sheet" in _called_names(
                         ast.Module(body=item.finalbody, type_ignores=[]))]
                 self.assertEqual(len(closing), 1)
+        # One editor at a time: a second is refused before it is built.
+        opening = ast.unparse(_gui_function("_new_sheet", controller))
+        self.assertIn(
+            "if self._sheet is not None:\n        raise RuntimeError(",
+            opening)
+        self.assertLess(
+            opening.index("raise RuntimeError("),
+            opening.index("EditorSheet()"))
         # The form is the open sheet filled again, not a second sheet.
         form = _called_names(_gui_function("_edit_snippet", controller))
         self.assertNotIn("_new_sheet", form)
@@ -4216,7 +4225,7 @@ class EditorSheetContractTests(unittest.TestCase):
             {name for name in classes if name.startswith(("Sheet", "Editor"))
              or name == "FaceChipView"},
             {"EditorSheet", "FaceChipView", "SheetContentView",
-             "SheetTextField", "SheetTextView", "SheetWindow"})
+             "SheetTextView", "SheetWindow"})
         # A sheet's labels are themed with the sheet, not the window.
         fill = ast.unparse(_gui_function("_sheet_fill", controller))
         self.assertIn("self._theme_sink = sheet.themed", fill)
@@ -4293,10 +4302,32 @@ class EditorSheetContractTests(unittest.TestCase):
         self.assertLess(
             run.index("return self.tag"),
             run.index("beginSheet_completionHandler_"))
-        self.assertIn("runModalForWindow_(self.window)", run)
+        self.assertIn(
+            "NSApplication.sharedApplication().runModalForWindow_("
+            "self.window)", run)
         self.assertIn("finally:\n        self.running = False", run)
+        self.assertLess(
+            run.index("self.running = True"),
+            run.index("runModalForWindow_"))
+        self.assertIn(
+            "if self.parent is None and parent is not None and "
+            "bool(parent.isVisible())", run)
+        # A button stops the session the run is in, with its own answer.
+        choose = ast.unparse(_gui_function("choose", sheet))
+        self.assertIn(
+            "if self.running:\n        "
+            "NSApplication.sharedApplication().stopModalWithCode_(int(tag))",
+            choose)
+        # An open sheet is resized about its middle: where AppKit holds a
+        # sheet, which since macOS 11 is the middle of its window.
+        layout = ast.unparse(_gui_function(
+            "_sheet_layout", _gui_class("WhisperFaceWindowController")))
+        self.assertIn(
+            "old.origin.y + (old.size.height - new.size.height) / 2.0",
+            layout)
+        self.assertIn("window.setTitle_(title)", layout)
         end = ast.unparse(_gui_function("end", sheet))
-        self.assertIn("endSheet_", end)
+        self.assertIn("self.parent.endSheet_(self.window)", end)
         self.assertIn("orderOut_", end)
         # A press goes through the button's own target and action, and a
         # button that cannot be clicked cannot be pressed.
@@ -4383,6 +4414,129 @@ class EditorSheetContractTests(unittest.TestCase):
                     f"'{key}'" in used or f"'{stem}." in used
                     or f"{stem}." in used,
                     f"{key} is in the catalog and nothing shows it")
+
+    @staticmethod
+    def _runtime_snippets():
+        """The runtime's own snippet matching, read out of dictate.py:
+        ``whole(said, name)`` for a dictation that is only the phrase,
+        ``inside(said, name)`` for the phrase in a longer sentence."""
+        tree = ast.parse((ROOT / "dictate.py").read_text(encoding="utf-8"))
+        wanted = {"snippet_name_key", "_compile_snippet_pattern",
+                  "_snippet_is_placeholder", "expand_snippets_inline"}
+        body = [
+            node for node in tree.body
+            if (isinstance(node, ast.FunctionDef) and node.name in wanted)
+            or (isinstance(node, ast.Assign) and any(
+                getattr(target, "id", "") == "SNIPPET_RE"
+                for target in node.targets))]
+        found = {getattr(node, "name", "SNIPPET_RE") for node in body}
+        if found != wanted | {"SNIPPET_RE"}:
+            raise AssertionError(
+                f"dictate.py no longer defines {wanted - found}")
+        runtime = {"re": re}
+        exec(compile(ast.Module(body=body, type_ignores=[]),
+                     "dictate.py", "exec"), runtime)
+
+        def whole(said, name):
+            match = runtime["SNIPPET_RE"].match(said)
+            return bool(match) and runtime["snippet_name_key"](
+                match.group(1)) == runtime["snippet_name_key"](name)
+
+        def inside(said, name):
+            sentence = f"please {said} thanks"
+            return runtime["expand_snippets_inline"](
+                sentence, {name: "TYPED"}) == "please TYPED thanks"
+
+        return whole, inside
+
+    def test_what_a_sheet_says_to_say_is_what_the_runtime_answers(self):
+        whole, inside = self._runtime_snippets()
+        # The runtime's own example, to hold this test to the runtime.
+        self.assertTrue(whole("insert my email", "email"))
+        self.assertTrue(inside("insert my email", "email"))
+        self.assertFalse(whole("insert my email", "my email"))
+        self.assertFalse(inside("insert my email", "my email"))
+        # The form gives a name and the phrase that goes with it.
+        speak = localized_string("sheets.snippet.speak")
+        example = re.search(r"named “([^”]+)” is “([^”]+)”", speak)
+        self.assertIsNotNone(example, speak)
+        name, said = example.groups()
+        self.assertTrue(
+            whole(said, name),
+            f"said alone, {said!r} does not type the snippet {name!r}")
+        self.assertTrue(
+            inside(said, name),
+            f"inside a sentence, {said!r} does not type the snippet "
+            f"{name!r}")
+        # Both sheets name the cue that works both ways, in full.
+        cue = "“insert my”"
+        self.assertIn(cue, speak)
+        self.assertIn(cue, localized_string("sheets.snippets.message"))
+        self.assertEqual(said, f"insert my {name}")
+        # The pictures the owner is shown follow the same rule: every
+        # snippet in the probe's fixture is typed by "insert my" and its
+        # name, so none is named with a "my" the runtime would swallow.
+        tree = ast.parse((ROOT / "scripts" / "window_render_probe.py")
+                         .read_text(encoding="utf-8"))
+        fixture = next(
+            ast.literal_eval(node.value) for node in tree.body
+            if isinstance(node, ast.Assign)
+            and getattr(node.targets[0], "id", "") == "SHEET_SETTINGS")
+        names = [item["name"] for item in fixture["snippets"]]
+        self.assertIn(name, names)
+        for snippet in names:
+            with self.subTest(snippet=snippet):
+                self.assertTrue(whole(f"insert my {snippet}", snippet))
+                self.assertTrue(inside(f"insert my {snippet}", snippet))
+
+    def test_the_keyword_sheet_claims_no_more_than_the_runtime_does(self):
+        # A keyword that was tested and approved separately is given
+        # priority in the recognizer's prompt; one that was not, is not.
+        activation = (ROOT / "acoustic_keyword_activation.py").read_text(
+            encoding="utf-8")
+        runtime = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        self.assertIn('RUNTIME_EFFECT = "prompt-priority"', activation)
+        self.assertIn('"prompt-priority" if measured else "none"', runtime)
+        message = localized_string("sheets.keywords.message")
+        # So the sheet may say a keyword changes nothing on its own, and
+        # must not say that keywords never change what is recognized.
+        self.assertRegex(
+            message,
+            r"On their own they do not change what is recognized; "
+            r"only a name you test and approve separately can\.$")
+        self.assertIn("kept on this Mac", message)
+
+    def test_a_refused_save_says_what_cancel_cannot_take_back(self):
+        controller = _gui_class("WhisperFaceWindowController")
+        save = ast.unparse(_gui_function("editTone_", controller))
+        # The app that was refused is named, and so is every app saved
+        # before it: those stay saved whatever is pressed next.
+        self.assertIn("'sheets.tones.refused', app=item.name", save)
+        self.assertIn(
+            "'sheets.tones.saved_before', apps=', '.join(saved)", save)
+        self.assertLess(save.index("break"), save.index("saved.append"))
+        self.assertEqual(
+            localized_string(
+                "sheets.tones.refused", app="Code", reason="No."),
+            "Code: No.")
+        self.assertEqual(
+            localized_string("sheets.tones.saved_before", apps="Mail, Notes"),
+            "Already saved: Mail, Notes.")
+        # A name that was not typed is asked for in the form's own
+        # words, before anything is sent to be saved.
+        form = ast.unparse(_gui_function("_edit_snippet", controller))
+        self.assertLess(
+            form.index("if not typed_name.strip():"),
+            form.index("self.view_model.save_snippet("))
+        self.assertIn("self._l('validation.snippet.required')", form)
+        # No sentence says "A excluded".
+        for key in ("validation.vocabulary.preferred",
+                    "validation.vocabulary.excluded"):
+            said = localized_string(
+                "validation.vocabulary.reserved",
+                label=localized_string(key))
+            self.assertNotRegex(said, r"\bA [aeiou]")
+            self.assertIn(localized_string(key), said)
 
     def test_a_learned_correction_says_where_it_stands_in_a_line(self):
         def one(**fields):
@@ -4483,6 +4637,21 @@ class EditorSheetContractTests(unittest.TestCase):
         self.assertIn("f'sheet-{picture}-{suffix}'", render)
         self.assertIn("f'sheet-tones-empty-{suffix}'", render)
         self.assertIn("f'sheet-in-window-{picture}-{suffix}'", render)
+        # A sheet is drawn as it is when it has the keyboard (the default
+        # button as the default), over the window at its minimum size.
+        self.assertIn("gui.SheetWindow = KeySheetWindow", render)
+        self.assertIn("window.setContentSize_(gui.WINDOW_MIN_SIZE)", render)
+        key_window = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef)
+            and node.name == "KeySheetWindow")
+        self.assertEqual(ast.unparse(key_window.bases[0]), "gui.SheetWindow")
+        self.assertEqual(
+            _method_names(key_window),
+            {"isKeyWindow", "hasKeyAppearance", "_hasKeyAppearance"})
+        # In the middle of the window, where AppKit puts a sheet.
+        placed = ast.unparse(functions["sheet_in_window"])
+        self.assertIn("(height - size.height) / 2.0", placed)
         # Increase Contrast is put back however the render ends.
         self.assertIn("finally:\n        gui._increase_contrast = ", render)
         # Both appearances, and without the option the probe writes what
@@ -7230,13 +7399,57 @@ class EditorSheetAppKitTests(unittest.TestCase):
         # It stopped at the refusal: Mail, after Code, was never tried.
         self.assertEqual(self.calls, [])
 
+    def test_a_refused_tone_says_which_app_and_what_was_already_saved(self):
+        self.fail_tone_for = "com.example.code"
+        notices = []
+
+        def choose(sheet):
+            for bundle in ("com.apple.finder", "com.example.code",
+                           "com.example.mail"):
+                sheet.controls[f"tone:{bundle}"].selectItemAtIndex_(
+                    gui_module.TONE_CHOICES.index("casual"))
+            return "save"
+
+        def refused(sheet):
+            notices.append(str(sheet.controls["notice"].stringValue()))
+            return "cancel"
+
+        self.drive("editTone_", choose, refused)
+        # Finder was saved before Code was refused, and stays saved
+        # after Cancel: the sheet says so. Mail was never tried.
+        self.assertEqual(
+            self.calls, [("tone", "com.apple.finder", "casual")])
+        self.assertTrue(notices[0].startswith("Code: "), notices[0])
+        self.assertIn("read-only", notices[0])
+        self.assertTrue(
+            notices[0].endswith(" Already saved: Finder."), notices[0])
+        # With nothing saved before it, nothing is said to be.
+        self.calls.clear()
+        self.fail_tone_for = "com.apple.finder"
+
+        def choose_first(sheet):
+            sheet.controls["tone:com.apple.finder"].selectItemAtIndex_(
+                gui_module.TONE_CHOICES.index("formal"))
+            return "save"
+
+        self.drive("editTone_", choose_first, refused)
+        self.assertEqual(self.calls, [])
+        self.assertTrue(notices[1].startswith("Finder: "), notices[1])
+        self.assertNotIn("Already saved", notices[1])
+
     def test_adding_a_snippet_is_a_form_in_the_same_sheet(self):
         def fill(sheet):
             self.assertEqual(
                 str(sheet.title.stringValue()),
                 localized_string("settings.dialog.snippet.add"))
             self.assertEqual(sorted(sheet.buttons), ["cancel", "save"])
-            sheet.controls["name"].setStringValue_("my email")
+            # The name field is the first group, and has the keyboard.
+            name = sheet.controls["name"]
+            self.assertIs(
+                name.superview(), sheet.document.sections[0][1].rows[0])
+            self.assertIn(sheet.window.firstResponder(),
+                          (name, name.currentEditor()))
+            name.setStringValue_("email")
             sheet.controls["text"].setString_("hello@example.com")
             return "save"
 
@@ -7244,13 +7457,13 @@ class EditorSheetAppKitTests(unittest.TestCase):
             self.assertEqual(
                 [str(row.title.stringValue())
                  for row in sheet.document.sections[0][1].rows],
-                ["signature", "my email"])
+                ["signature", "email"])
             return "done"
 
         dialogs = self.drive("editSnippets_", "add", fill, listed)
         self.assertEqual(len({id(dialog) for dialog in dialogs}), 1)
         self.assertEqual(self.calls, [
-            ("save_snippet", "my email", None, "hello@example.com")])
+            ("save_snippet", "email", None, "hello@example.com")])
 
     def test_a_refused_snippet_keeps_the_form_and_what_was_typed(self):
         def blank(sheet):
@@ -7263,18 +7476,88 @@ class EditorSheetAppKitTests(unittest.TestCase):
                 str(sheet.controls["name"].stringValue()), "signature")
             note = sheet.controls["notice"]
             self.assertIn("1–4000", str(note.stringValue()))
-            # Right under the fields, before the line on how to say it.
-            notes = sheet.document.sections[0][2]
-            self.assertIs(notes[0], note)
+            # Under the text it is about, with the keyboard in the text;
+            # how to say the snippet stays under its name.
+            named, texted = sheet.document.sections
+            self.assertEqual(list(texted[2]), [note])
             self.assertEqual(
-                str(notes[1].stringValue()),
-                localized_string("sheets.snippet.speak"))
-            self.assertLess(
-                note.frame().origin.y, notes[1].frame().origin.y)
+                [str(line.stringValue()) for line in named[2]],
+                [localized_string("sheets.snippet.speak")])
+            self.assertIs(
+                sheet.window.firstResponder(), sheet.controls["text"])
             return "cancel"
 
         self.drive(
             "editSnippets_", "edit:signature", blank, refused, "done")
+        self.assertEqual(self.calls, [])
+
+    def test_a_snippet_with_no_name_is_asked_for_one(self):
+        def unnamed(sheet):
+            sheet.controls["text"].setString_("hello@example.com")
+            return "save"
+
+        def asked(sheet):
+            note = sheet.controls["notice"]
+            self.assertEqual(
+                str(note.stringValue()),
+                localized_string("validation.snippet.required"))
+            named = sheet.document.sections[0]
+            self.assertIs(named[2][0], note)
+            self.assertEqual(
+                str(sheet.controls["text"].string()), "hello@example.com")
+            name = sheet.controls["name"]
+            self.assertIn(sheet.window.firstResponder(),
+                          (name, name.currentEditor()))
+            return "cancel"
+
+        self.drive("editSnippets_", "add", unnamed, asked, "done")
+        self.assertEqual(self.calls, [])
+
+    def test_a_field_fills_its_group_with_no_border_of_its_own(self):
+        AppKit = self.AppKit
+        for dark in (False, True):
+            self.controller.window.setAppearance_(
+                AppKit.NSAppearance.appearanceNamed_(
+                    AppKit.NSAppearanceNameDarkAqua if dark
+                    else AppKit.NSAppearanceNameAqua))
+            self.controller.render()
+
+            def look(sheet, dark=dark):
+                palette = gui_module.palette_for_appearance(dark)
+                for name in ("terms", "bans"):
+                    editor = sheet.controls[name]
+                    scroll = editor.enclosingScrollView()
+                    self.assertEqual(scroll.borderType(), AppKit.NSNoBorder)
+                    self.assertFalse(scroll.drawsBackground())
+                    self.assertFalse(editor.drawsBackground())
+                    self.assertAlmostEqual(
+                        editor.textColor().redComponent(), palette.ink[0],
+                        places=2)
+                    row = scroll.superview()
+                    self.assertEqual(
+                        scroll.frame().size.width,
+                        row.frame().size.width - 2.0)
+                return "cancel"
+
+            with self.subTest(dark=dark):
+                self.drive("editVocabulary_", look)
+
+    def test_a_refusal_puts_the_keyboard_in_the_list_it_is_about(self):
+        def exclude(sheet):
+            sheet.controls["bans"].setString_("#Gwen")
+            return "save"
+
+        def refused(sheet):
+            note = sheet.controls["notice"]
+            self.assertIn(note, sheet.document.sections[1][2])
+            self.assertIn(
+                "A term in your excluded vocabulary",
+                str(note.stringValue()))
+            self.assertIs(
+                sheet.window.firstResponder(), sheet.controls["bans"])
+            return "cancel"
+
+        self.drive("editVocabulary_", exclude, refused)
         self.assertEqual(self.calls, [])
 
     def test_deleting_and_forgetting_ask_first_with_a_safe_default(self):
@@ -7315,6 +7598,177 @@ class EditorSheetAppKitTests(unittest.TestCase):
 
         self.drive("inspectKeywords_", "export", copied, 1000, forgotten)
         self.assertEqual(self.calls, [("export",), ("forget_all",)])
+
+    def test_with_no_keyword_there_is_nothing_to_copy_or_forget(self):
+        def listed(sheet):
+            self.assertTrue(sheet.buttons["export"].isEnabled())
+            self.assertTrue(sheet.buttons["forget_all"].isEnabled())
+            return "done"
+
+        self.drive("inspectKeywords_", listed)
+        self.keywords["candidates"] = []
+
+        def empty(sheet):
+            self.assertFalse(sheet.buttons["export"].isEnabled())
+            self.assertFalse(sheet.buttons["forget_all"].isEnabled())
+            with self.assertRaises(ValueError):
+                sheet.press("forget_all")
+            self.assertEqual(
+                str(sheet.window.title()),
+                localized_string("settings.dialog.keywords.title"))
+            return "done"
+
+        self.drive("inspectKeywords_", empty)
+        self.assertEqual(self.calls, [])
+
+    def test_what_a_sheet_comes_to_is_said_aloud_once(self):
+        said = []
+        with patch.object(
+                self.AppKit, "NSAccessibilityPostNotificationWithUserInfo",
+                lambda element, name, info: said.append(
+                    (element, str(name), dict(info)))):
+            (sheet, _again) = self.drive("inspectKeywords_", "export", "done")
+        said = [entry for entry in said if entry[1] == str(
+            self.AppKit.NSAccessibilityAnnouncementRequestedNotification)]
+        self.assertEqual(len(said), 1)
+        element, _name, info = said[0]
+        self.assertIs(element, sheet.window)
+        self.assertEqual(
+            info[self.AppKit.NSAccessibilityAnnouncementKey],
+            localized_string("settings.notice.keyword_exported"))
+        self.assertEqual(
+            info[self.AppKit.NSAccessibilityPriorityKey],
+            self.AppKit.NSAccessibilityPriorityHigh)
+
+    def test_a_click_ends_a_real_run_and_the_sheet_leaves_its_window(self):
+        """The path with no responder: on the window as a sheet, a modal
+        session, a button that stops it, and the sheet taken down. The
+        window is a stand-in, and so is the application the window
+        module asks for as long as the test lasts, so nothing is shown
+        and no real modal session can start, whatever is broken."""
+        log = []
+
+        class HostWindow:
+            def isVisible(self):
+                return True
+
+            def beginSheet_completionHandler_(self, window, handler):
+                log.append(("begin", window, handler))
+
+            def endSheet_(self, window):
+                log.append(("end", window))
+
+        class Session:
+            sheet, answers = None, []
+
+            @classmethod
+            def sharedApplication(cls):
+                return cls
+
+            @classmethod
+            def runModalForWindow_(cls, window):
+                log.append(("run", window, cls.sheet.running))
+                answer = cls.answers.pop(0) if cls.answers else None
+                if answer:
+                    cls.sheet.press(answer)
+                return cls.sheet.tag
+
+            @classmethod
+            def stopModalWithCode_(cls, code):
+                log.append(("stop", code, cls.sheet.running))
+
+        application = patch.object(gui_module, "NSApplication", Session)
+        application.start()
+        self.addCleanup(application.stop)
+        controller, host = self.controller, HostWindow()
+        sheet = controller._new_sheet()
+        try:
+            Session.sheet = sheet
+            controller._sheet_fill(sheet, lambda: controller._vocabulary_page(
+                sheet, "Qwen", "Gwen", ""))
+            Session.answers = ["save"]
+            tag = sheet.run(host, None)
+            self.assertEqual(log, [
+                ("begin", sheet.window, None),
+                ("run", sheet.window, True),
+                ("stop", sheet.buttons["save"].tag(), True)])
+            self.assertEqual(tag, sheet.buttons["save"].tag())
+            self.assertEqual(sheet.choice, ("save", None))
+            self.assertIs(sheet.parent, host)
+            self.assertFalse(sheet.running)
+            # Taller while it is up: it stays in the middle, where AppKit
+            # holds a sheet.
+            before = sheet.window.frame()
+            controller._sheet_fill(sheet, lambda: controller._vocabulary_page(
+                sheet, "Qwen", "Gwen", "A line that makes it taller."))
+            after = sheet.window.frame()
+            self.assertGreater(
+                after.size.height, before.size.height + 4.0)
+            # (To the half point a window's frame is rounded to.)
+            self.assertAlmostEqual(
+                after.origin.y + after.size.height / 2.0,
+                before.origin.y + before.size.height / 2.0, delta=0.5)
+            # Run again by the window, with no responder: it is not begun
+            # twice, and a session that ends with no button is Cancel.
+            Session.answers = [None]
+            self.assertEqual(
+                controller._run_sheet(sheet), ("cancel", None))
+            self.assertEqual(log[3:], [("run", sheet.window, True)])
+            # One editor at a time. (Were a second opened, the responder
+            # would answer it.)
+            opened = []
+            controller.modal_responder = lambda dialog: (
+                opened.append(dialog), "cancel")[1]
+            with self.assertRaises(RuntimeError):
+                controller.editTone_(None)
+            self.assertEqual(opened, [])
+            self.assertIs(controller._sheet, sheet)
+        finally:
+            controller.modal_responder = None
+            controller._end_sheet(sheet)
+        self.assertEqual(log[4:], [("end", sheet.window)])
+        self.assertIsNone(sheet.parent)
+        self.assertIsNone(controller._sheet)
+        self.assertEqual(self.calls, [])
+
+    def test_a_list_filled_again_keeps_the_keyboard_in_its_place(self):
+        self.settings["corrections"] = [
+            {"key": key, "source": key, "target": target, "count": 3,
+             "kind": "correction"}
+            for key, target in (("teh", "the"), ("adn", "and"),
+                                ("wich", "which"))]
+        self.model.load_settings()
+
+        def forget(key):
+            self.calls.append(("forget", key))
+            self.settings["corrections"] = [
+                item for item in self.settings["corrections"]
+                if item["key"] != key]
+
+        self.model.actions = replace(
+            self.model.actions, forget_correction=forget)
+
+        def on_the_second_row(sheet):
+            self.assertTrue(sheet.window.makeFirstResponder_(
+                sheet.buttons["forget:correction:adn"]))
+            return "forget:correction:adn"
+
+        def next_row_has_it(sheet):
+            self.assertIs(
+                sheet.window.firstResponder(),
+                sheet.buttons["forget:correction:wich"])
+            return "done"
+
+        self.drive("reviewCorrections_", on_the_second_row, 1000,
+                   next_row_has_it)
+        self.assertEqual(self.calls, [("forget", "adn")])
+        # With the keyboard on nothing, it is put on nothing.
+        def nowhere(sheet):
+            self.assertIs(sheet.window.firstResponder(), sheet.window)
+            return "done"
+
+        self.drive("reviewCorrections_", "forget:correction:teh", 1001,
+                   nowhere)
 
     def test_a_long_list_stops_at_the_cap_and_scrolls(self):
         self.settings["app_tones"] = [

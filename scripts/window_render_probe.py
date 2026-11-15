@@ -41,11 +41,15 @@ instead of a person, and writes what the sheet drew as
 sheet-{name}-{light,dark}.png: each editor filled from the fixture below,
 the snippet form, a refused save, a list too long for the sheet, each
 editor's empty state, and one under Increase Contrast. A sheet's picture is
-its own content, exactly as the window draws it. The
-sheet-in-window-{name}-{light,dark}.png pictures put the same content over
-the Personalize page so its size can be judged; the dimming, the corners
-and the shadow round it there are the probe's stand-in for what the system
-draws round a real sheet.
+its own content, exactly as the window draws it while the sheet has the
+keyboard: the default button in the system's accent colour, the insertion
+point in the first field. The sheet-in-window-{name}-{light,dark}.png
+pictures put the same content over the Personalize page, with the window at
+its minimum size (unless ``--size`` says otherwise), so the room it leaves
+can be judged. The sheet is in the middle of the window there because that
+is where AppKit puts one: since macOS 11 a sheet is a card centred on its
+window, not a panel hung from the title bar. The dimming, the corners and
+the shadow round it are the probe's stand-in for what the system draws.
 
 Pass ``--overlay`` to review the recording overlay instead of the window:
 
@@ -539,7 +543,7 @@ SHEET_SETTINGS = {
          "tone": "verbatim"},
     ],
     "snippets": [
-        {"name": "my email", "text": "hello@example.com"},
+        {"name": "email", "text": "hello@example.com"},
         {"name": "signature", "text": "Kind regards,\nSam Rivera"},
         {"name": "standup", "text": (
             "Yesterday I finished the review and wrote up what we found, "
@@ -699,11 +703,34 @@ def type_into(sheet, **typed):
             control.setStringValue_(text)
 
 
+class KeySheetWindow(gui.SheetWindow):
+    """A sheet's window, saying it has the keyboard. An open sheet always
+    does, and only then does the system draw its default button in the
+    accent colour and the insertion point in its first field; a window
+    that is never shown never has it. ``hasKeyAppearance`` is what the
+    controls ask; it is not in AppKit's headers, so on a system that
+    asks something else the pictures only lose the accent."""
+
+    def isKeyWindow(self):
+        return True
+
+    def hasKeyAppearance(self):
+        return True
+
+    def _hasKeyAppearance(self):
+        return True
+
+
 def render_sheets(suffix: str) -> None:
     """Every Personalize editor, as the window draws it, in this
     appearance. Each is opened by the action its button calls and
     answered through the window's own seam, so the pictures are of the
     sheets the app shows and of nothing made for the probe."""
+    # The window a sheet sits on, at the smallest it can be: the size a
+    # sheet has to fit.
+    if SIZE is None:
+        window.setContentSize_(gui.WINDOW_MIN_SIZE)
+    gui.SheetWindow = KeySheetWindow
     settings = {key: [dict(item) if isinstance(item, dict) else item
                       for item in value]
                 for key, value in SHEET_SETTINGS.items()}

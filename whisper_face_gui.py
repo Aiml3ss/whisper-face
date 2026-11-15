@@ -899,7 +899,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "validation.vocabulary.excluded": "excluded vocabulary",
         "validation.vocabulary.list": "Your {label} could not be read as a list of terms. Put one term per line and save again.",
         "validation.vocabulary.term_length": "Every {label} term must be at most 80 characters. Shorten the long one and save again.",
-        "validation.vocabulary.reserved": "A {label} term cannot start with the reserved '-' or '#'. Remove that first character and save again.",
+        "validation.vocabulary.reserved": "A term in your {label} cannot start with the reserved '-' or '#'. Remove that first character and save again.",
         "validation.vocabulary.maximum": "Your {label} holds at most 500 terms. Remove a few and save again.",
         "validation.vocabulary.overlap": "A term cannot also be excluded. Remove it from one of the two lists and save again.",
         "validation.correction.kind": "That is not a kind of learned correction Whisper Face stores. Reopen Learned corrections and pick one from the list.",
@@ -1104,7 +1104,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "sheets.notice.result.label": "Result",
         "sheets.tones.message": "Choose how cleanup should sound in each app.",
         "sheets.tones.choice.label": "Cleanup tone for {app}",
-        "sheets.snippets.message": "Say “insert” and a snippet’s name, and its text is typed for you.",
+        "sheets.tones.refused": "{app}: {reason}",
+        "sheets.tones.saved_before": "Already saved: {apps}.",
+        "sheets.snippets.message": "Say “insert my” and a snippet’s name, and its text is typed for you.",
         "sheets.snippets.add": "Add Snippet…",
         "sheets.snippets.edit.label": "Edit snippet {name}",
         "sheets.snippets.delete.label": "Delete snippet {name}",
@@ -1112,11 +1114,11 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "sheets.snippet.message.edit": "Change the text this snippet types. Its name stays as it is.",
         "sheets.snippet.name": "Name",
         "sheets.snippet.text": "Text",
-        "sheets.snippet.speak": "To use it, say “insert” and then its name. Named “my email”, it is “insert my email”.",
+        "sheets.snippet.speak": "To use it, say “insert my” and then its name. A snippet named “email” is “insert my email”.",
         "sheets.vocabulary.message": "Words to get right, and words to leave alone.",
         "sheets.vocabulary.terms.note": "Names and words to spell exactly this way. One per line.",
         "sheets.vocabulary.bans.note": "Words Whisper Face should never pick up by itself. One per line.",
-        "sheets.corrections.message": "What Whisper Face now fixes for you, learned from your own corrections.",
+        "sheets.corrections.message": "Fixes Whisper Face has learned from your own corrections, and whether each one is on yet.",
         "sheets.corrections.words": "Words and names",
         "sheets.corrections.snippets": "Snippet edits",
         "sheets.corrections.count": "{count}×",
@@ -1130,7 +1132,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "sheets.corrections.forget.label": "Forget the correction {source} to {target}",
         "sheets.corrections.forget.title": "Forget this correction?",
         "sheets.corrections.forget.message": "“{source}” will no longer be changed to “{target}”.",
-        "sheets.keywords.message": "Names picked up from your corrections. For now they are only kept on this Mac; they do not change what is recognized.",
+        "sheets.keywords.message": "Names picked up from your corrections, kept on this Mac. On their own they do not change what is recognized; only a name you test and approve separately can.",
         "sheets.keywords.caption": "{observations} · {confirmations} · {status} · {scope}",
         "sheets.keywords.status.eligible": "seen often enough",
         "sheets.keywords.status.gathering": "still learning",
@@ -2728,7 +2730,9 @@ def correction_row_caption(
         f"sheets.corrections.standing.{standing}", locale=locale,
         **({"apps": ", ".join(active_apps)} if standing == "apps" else {}))]
     seen = ", ".join(
-        f"{scope.name} {scope.count}×" for scope in correction.app_scopes)
+        scope.name + " " + localized_string(
+            "sheets.corrections.count", locale=locale, count=scope.count)
+        for scope in correction.app_scopes)
     if seen:
         lines.append(localized_string(
             "sheets.corrections.seen", locale=locale, apps=seen))
@@ -8222,8 +8226,11 @@ if APPKIT_AVAILABLE:
     SHEET_WINDOW_MARGIN = 48.0
     SHEET_MAX_HEIGHT = WINDOW_MIN_SIZE[1] - 2.0 * SHEET_WINDOW_MARGIN
     SHEET_APP_ICON_SIZE = 28.0
-    SHEET_FIELD_WIDTH = 300.0
+    # A multi-line field's text, top to bottom, before it scrolls.
     SHEET_EDITOR_HEIGHT = 96.0
+    # A multi-line field's own text is set in from its edge by this much
+    # (an NSTextView's line fragment padding).
+    SHEET_EDITOR_TEXT_PADDING = 5.0
     SHEET_EMPTY_PADDING = 24.0  # an empty list's sentence, above and below
     # The sidebar's face sits 4 points inside its 44 point chip; a chip of
     # another size keeps the proportion.
@@ -8412,17 +8419,6 @@ if APPKIT_AVAILABLE:
                 pass
             return objc.super(SheetWindow, self).performKeyEquivalent_(event)
 
-    class SheetTextField(NSTextField):
-        """A text field in a row: as wide as it was made, the system's
-        height. A plain text field has no width of its own to give the
-        row that lays it out."""
-
-        def intrinsicContentSize(self):
-            size = objc.super(SheetTextField, self).intrinsicContentSize()
-            return NSMakeSize(
-                float(getattr(self, "field_width", SHEET_FIELD_WIDTH)),
-                size.height)
-
     class SheetTextView(NSTextView):
         """A multi-line field in a sheet. Tab and Shift-Tab move through
         the sheet instead of typing a tab (Option-Tab still types one),
@@ -8478,6 +8474,9 @@ if APPKIT_AVAILABLE:
             self.parent: Any = None
             self.running = False
             self.next_tag = SHEET_FIRST_TAG
+            # Where the keyboard was on each page the sheet has shown, by
+            # the page's title: a list filled again keeps its place.
+            self.focus_index: dict[str, int] = {}
 
         def register(self, name: str, button: Any, item: Any = None) -> int:
             """Name a button and what it acts on; return its tag."""
@@ -11774,12 +11773,19 @@ if APPKIT_AVAILABLE:
         @objc.python_method
         def _text_editor(self, frame: Any, value: str, *,
                          label: str, help_text: str,
-                         text_view: Any = None) -> tuple[Any, Any]:
+                         text_view: Any = None,
+                         bordered: bool = True) -> tuple[Any, Any]:
+            """A multi-line field in its scroll view. In an alert it has
+            the system's line border and fill; a sheet asks for neither,
+            because there the group it fills is its frame."""
             scroll = NSScrollView.alloc().initWithFrame_(frame)
             scroll.setHasVerticalScroller_(True)
-            scroll.setBorderType_(1)
+            scroll.setBorderType_(1 if bordered else NSNoBorder)
             editor = (text_view or NSTextView).alloc().initWithFrame_(
                 NSMakeRect(0, 0, frame.size.width, frame.size.height))
+            if not bordered:
+                scroll.setDrawsBackground_(False)
+                editor.setDrawsBackground_(False)
             # Editors hold exact strings (vocabulary the spell checker does
             # not know, code and shell snippets), so nothing rewrites them.
             editor.setRichText_(False)
@@ -11900,8 +11906,9 @@ if APPKIT_AVAILABLE:
             if face not in self._face_icons:
                 self._face_icons[face] = face_chip_icon(
                     self._face_image(face, talk=False), face)
+            icon = self._face_icons[face]
             try:
-                alert.setIcon_(self._face_icons[face])
+                alert.setIcon_(icon)
             except Exception:
                 pass
 
@@ -11948,7 +11955,13 @@ if APPKIT_AVAILABLE:
             The header is here once: the chosen face on its chip, the
             title and the line under it. ``_sheet_fill`` gives it a body
             and a footer, as often as the editor needs.
+
+            One editor is open at a time: every button on a sheet answers
+            through ``sheetChose_``, which knows the open sheet and no
+            other, so a second one is refused, not opened over the first.
             """
+            if self._sheet is not None:
+                raise RuntimeError("an editor sheet is already open")
             sheet = EditorSheet()
             window = SheetWindow.alloc() \
                 .initWithContentRect_styleMask_backing_defer_(
@@ -12064,6 +12077,15 @@ if APPKIT_AVAILABLE:
             ``_sheet_layout`` takes. Labels it makes are themed with the
             sheet, not with the window.
             """
+            # Where the keyboard is, if it is on one of the page's
+            # controls: a list that is filled again (a row forgotten, a
+            # form closed) gets it back in the same place, not nowhere.
+            page = str(sheet.title.stringValue())
+            responder = sheet.window.firstResponder()
+            if responder in sheet.key_views:
+                sheet.focus_index[page] = sheet.key_views.index(responder)
+            else:
+                sheet.focus_index.pop(page, None)
             for button in sheet.footer:
                 button.removeFromSuperview()
             sheet.footer, sheet.key_views = [], []
@@ -12148,6 +12170,7 @@ if APPKIT_AVAILABLE:
                 SHEET_INSET, body_top, body_width, body_height))
             document.arrange(force=True)
             document.scrollPoint_((0.0, 0.0))
+            self._tip_what_is_cut(document)
             body_foot = body_top + body_height
             sheet.rule.setFrame_(NSMakeRect(0, body_foot, SHEET_WIDTH, 1.0))
             sheet.rule.setHidden_(content_height <= body_height + 0.5)
@@ -12175,9 +12198,15 @@ if APPKIT_AVAILABLE:
             for button in sheet.footer:
                 sheet.content.addSubview_(button)
 
-            # ---- Size. An open sheet grows and shrinks about its middle.
+            # ---- Size. Since macOS 11 a sheet is a card in the middle
+            # of its window, and AppKit puts it back there whenever its
+            # frame changes. So an open sheet grows and shrinks about its
+            # middle: it is resized where AppKit is about to put it, with
+            # no jump in between.
             height = top + button_height + SHEET_INSET
             window = sheet.window
+            # VoiceOver names the sheet by what it is, not by the app.
+            window.setTitle_(title)
             if sheet.parent is None:
                 window.setContentSize_(NSMakeSize(SHEET_WIDTH, height))
             else:
@@ -12191,6 +12220,8 @@ if APPKIT_AVAILABLE:
 
             # ---- Keyboard: Tab runs top to bottom, then the footer in
             # reading order; the first field that takes typing has focus.
+            # A page with no field puts the keyboard back where it was
+            # when the page was last up, on the control now in that place.
             key_views.extend(sheet.footer)
             for view, following in zip(
                     key_views, key_views[1:] + key_views[:1]):
@@ -12198,7 +12229,27 @@ if APPKIT_AVAILABLE:
             sheet.key_views = key_views
             window.setInitialFirstResponder_(
                 focus or (key_views[0] if key_views else None))
+            was_at = sheet.focus_index.get(title)
+            if focus is None and was_at is not None and key_views:
+                focus = key_views[min(was_at, len(key_views) - 1)]
             window.makeFirstResponder_(focus)
+
+        @objc.python_method
+        def _tip_what_is_cut(self, document: Any) -> None:
+            """A row's title or caption that is cut to one line shows all
+            of its words as its tooltip, ahead of any help it already has
+            (an app's row has its bundle identifier there)."""
+            for _header, group, _notes, _trailing in document.sections:
+                for row in group.rows:
+                    for label in (row.title, row.caption):
+                        if label is None or bool(label.cell().wraps()):
+                            continue
+                        if float(label.cell().cellSize().width) \
+                                <= float(label.frame().size.width) + 1.0:
+                            continue
+                        words, tip = str(label.stringValue()), label.toolTip()
+                        label.setToolTip_(
+                            f"{words}\n{tip}" if tip else words)
 
         @objc.python_method
         def _sheet_button(self, sheet: Any, name: str, title: str, *,
@@ -12282,17 +12333,25 @@ if APPKIT_AVAILABLE:
         @objc.python_method
         def _sheet_editor_row(self, sheet: Any, name: str, value: str, *,
                               label: str, help_text: str,
-                              title: str = "",
                               height: float = SHEET_EDITOR_HEIGHT) -> Any:
-            """A row that is one bordered multi-line field, with its name
-            over it when ``title`` is given. The field is the same exact
-            editor every dialog uses; here it also hands Tab on."""
+            """A row that is one multi-line field and nothing else.
+
+            The field has no border and no fill of its own: the group it
+            is in is its frame, in the group's colour, and the section
+            header over the group is its name. Its text starts where a
+            row's title starts. It is the same exact editor every dialog
+            uses; here it also hands Tab on.
+            """
             scroll, editor = self._text_editor(
                 NSMakeRect(0, 0, SHEET_WIDTH, height), value,
-                label=label, help_text=help_text, text_view=SheetTextView)
+                label=label, help_text=help_text, text_view=SheetTextView,
+                bordered=False)
             scroll.setAutohidesScrollers_(True)
             editor.setFont_(NSFont.systemFontOfSize_(13.0))
-            editor.setTextContainerInset_(NSMakeSize(3.0, 5.0))
+            editor.setTextContainerInset_(NSMakeSize(
+                ROW_INSET - 1.0 - SHEET_EDITOR_TEXT_PADDING, 0.0))
+            editor.textContainer().setLineFragmentPadding_(
+                SHEET_EDITOR_TEXT_PADDING)
             # The field wraps to its own width and grows down as it is
             # typed into; its scroll view does the scrolling.
             editor.setMinSize_(NSMakeSize(0.0, height))
@@ -12301,39 +12360,69 @@ if APPKIT_AVAILABLE:
             editor.setHorizontallyResizable_(False)
             editor.setAutoresizingMask_(NSViewWidthSizable)
             editor.textContainer().setWidthTracksTextView_(True)
-            title_label = None
-            if title:
-                title_label = self._ink(
-                    title, NSMakeRect(0, 0, 240, 16), size=13,
-                    weight="semibold", truncate=True)
+            # Typed in the pages' ink, on the group's own colour.
+            self._register("ink", editor)
             row = SettingsRowView.alloc().initWithFrame_(
                 NSMakeRect(0, 0, SHEET_WIDTH, height))
-            for view in (title_label, scroll):
-                if view is not None:
-                    row.addSubview_(view)
-
-            def field_top() -> float:
-                if title_label is None:
-                    return ROW_INSET
-                return (ROW_PADDING_Y + float(
-                    title_label.fittingSize().height)
-                    + ROW_CONTROL_PADDING_Y)
+            row.addSubview_(scroll)
 
             def tall(_width: float) -> float:
-                return field_top() + height + ROW_INSET
+                return height + 2.0 * ROW_PADDING_Y
 
             def layout(width: float, _tall: float) -> None:
-                inner = width - 2.0 * ROW_INSET
-                if title_label is not None:
-                    title_label.setFrame_(NSMakeRect(
-                        ROW_INSET, ROW_PADDING_Y, inner,
-                        float(title_label.fittingSize().height)))
+                # One point inside the group's edge at each side, and
+                # clear of its corners above and below.
                 scroll.setFrame_(NSMakeRect(
-                    ROW_INSET, field_top(), inner, height))
+                    1.0, ROW_PADDING_Y, width - 2.0, height))
 
             row.configure(custom=(tall, layout))
             row.key_views = [editor]
             sheet.controls[name] = editor
+            return row
+
+        @objc.python_method
+        def _sheet_field_row(self, sheet: Any, name: str, value: str, *,
+                             label: str, help_text: str,
+                             editable: bool = True) -> Any:
+            """A row that is one single-line field and nothing else, made
+            the way the multi-line one is: no border, the group for its
+            frame, the section header for its name. One that cannot be
+            edited shows its words in the secondary ink."""
+            field = NSTextField.alloc().initWithFrame_(
+                NSMakeRect(0, 0, 240, 17))
+            field.setStringValue_(value)
+            field.setFont_(_font(13))
+            field.setBezeled_(False)
+            field.setBordered_(False)
+            field.setDrawsBackground_(False)
+            field.setEditable_(editable)
+            field.setSelectable_(True)
+            # Like the multi-line field, it shows the keyboard is in it
+            # by its insertion point; a ring round one line of text in
+            # the middle of a group would be a box in a box again.
+            field.setFocusRingType_(1)
+            field.setUsesSingleLineMode_(True)
+            field.setLineBreakMode_(NSLineBreakByTruncatingTail)
+            if editable:
+                field.cell().setScrollable_(True)
+            self._register("ink" if editable else "ink_soft", field)
+            _accessible(field, label, help_text)
+            row = SettingsRowView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, SHEET_WIDTH, ROW_MIN_HEIGHT))
+            row.addSubview_(field)
+
+            def tall(_width: float) -> float:
+                return ROW_MIN_HEIGHT
+
+            def layout(width: float, height: float) -> None:
+                line = float(math.ceil(field.cell().cellSize().height))
+                field.setFrame_(NSMakeRect(
+                    ROW_INSET, (height - line) / 2.0,
+                    width - 2.0 * ROW_INSET, line))
+
+            row.configure(custom=(tall, layout))
+            row.key_views = [field] if editable else []
+            sheet.controls[name] = field
             return row
 
         @objc.python_method
@@ -12442,7 +12531,7 @@ if APPKIT_AVAILABLE:
                         for item, popup in sheet.listed}
                     # Save applies every tone that changed, one app at a
                     # time, and stops at the first that is refused.
-                    notice = ""
+                    notice, saved = "", []
                     for index, item in enumerate(tones):
                         if chosen[item.bundle] == tone_for_app_index(
                                 tones, index, locale=self.view_model.locale):
@@ -12452,10 +12541,21 @@ if APPKIT_AVAILABLE:
                                 item.bundle, chosen[item.bundle])
                         except ValueError as refusal:
                             notice = str(refusal)
+                        else:
+                            if state.notice_level == "error":
+                                notice = state.notice
+                        if notice:
+                            # Which app it was, and what Cancel can no
+                            # longer take back: the tones saved before it.
+                            notice = self._l(
+                                "sheets.tones.refused", app=item.name,
+                                reason=notice)
+                            if saved:
+                                notice += " " + self._l(
+                                    "sheets.tones.saved_before",
+                                    apps=", ".join(saved))
                             break
-                        if state.notice_level == "error":
-                            notice = state.notice
-                            break
+                        saved.append(item.name)
                     self.render()
                     if not notice:
                         return
@@ -12490,7 +12590,6 @@ if APPKIT_AVAILABLE:
                 row, title, _caption = self._sheet_row(
                     snippet.name, caption=first_line,
                     accessories=(edit, delete), wrap=False)
-                title.setToolTip_(snippet.name)
                 rows.append(row)
             if not rows:
                 rows = [self._sheet_empty_row(
@@ -12509,34 +12608,26 @@ if APPKIT_AVAILABLE:
         def _snippet_form(self, sheet: Any, snippet: SnippetSetting | None,
                           typed_name: str, typed_text: str,
                           notice: str) -> Mapping[str, Any]:
-            """One snippet as a form: its name, its text, how to say it."""
-            name = SheetTextField.alloc().initWithFrame_(
-                NSMakeRect(0, 0, SHEET_FIELD_WIDTH, 22))
-            name.setStringValue_(typed_name)
-            name.setFont_(_font(13))
+            """One snippet as a form: its name and its text, each a field
+            in its own group, and how to say it under the name."""
             # A saved snippet keeps its name: the name is what is said.
-            name.setEditable_(snippet is None)
-            if snippet is not None:
-                name.setBezeled_(False)
-                name.setDrawsBackground_(False)
-                name.setSelectable_(True)
-                name.setAlignment_(int(NSTextAlignmentRight))
-                name.setLineBreakMode_(NSLineBreakByTruncatingTail)
-                self._register("ink_soft", name)
-            _accessible(
-                name,
-                self._l("settings.dialog.snippet.name"),
-                self._l("settings.dialog.snippet.name.help"))
-            sheet.controls["name"] = name
-            name_row, _title, _caption = self._sheet_row(
-                self._l("sheets.snippet.name"), accessories=(name,),
-                keys=(name,) if snippet is None else ())
+            name_row = self._sheet_field_row(
+                sheet, "name", typed_name,
+                label=self._l("settings.dialog.snippet.name"),
+                help_text=self._l("settings.dialog.snippet.name.help"),
+                editable=snippet is None)
             text_row = self._sheet_editor_row(
                 sheet, "text", typed_text,
-                title=self._l("sheets.snippet.text"),
                 label=self._l("settings.dialog.snippet.value"),
                 help_text=self._l("settings.dialog.snippet.value.help"),
                 height=132.0)
+            # A refusal goes under the field it is about, and the
+            # keyboard goes into that field.
+            about_name = bool(notice) and any(
+                self._l(key) in notice for key in (
+                    "validation.snippet.name",
+                    "validation.snippet.required"))
+            refusal = [self._sheet_notice(sheet, notice)]
             return {
                 "title": self._l(
                     "settings.dialog.snippet.edit" if snippet else
@@ -12544,12 +12635,17 @@ if APPKIT_AVAILABLE:
                 "message": self._l(
                     "sheets.snippet.message.edit" if snippet else
                     "sheets.snippet.message.add"),
-                # The refusal sits right under the fields it is about.
-                "sections": [(None, [name_row, text_row], [
-                    self._sheet_notice(sheet, notice),
-                    self._page_note(self._l("sheets.snippet.speak"))])],
+                "sections": [
+                    (self._l("sheets.snippet.name"), [name_row], [
+                        *(refusal if about_name else []),
+                        self._page_note(self._l("sheets.snippet.speak"))]),
+                    (self._l("sheets.snippet.text"), [text_row],
+                     [] if about_name else refusal),
+                ],
                 "buttons": self._sheet_footer(sheet, save=True),
-                "focus": name if snippet is None else sheet.controls["text"],
+                "focus": sheet.controls[
+                    "name" if snippet is None and (about_name or not notice)
+                    else "text"],
             }
 
         @objc.python_method
@@ -12569,6 +12665,11 @@ if APPKIT_AVAILABLE:
                     return
                 typed_name = str(sheet.controls["name"].stringValue())
                 typed_text = str(sheet.controls["text"].string())
+                if not typed_name.strip():
+                    # Nothing to shorten and nothing to send: the form
+                    # asks for the name that is missing.
+                    notice = self._l("validation.snippet.required")
+                    continue
                 state = self.view_model.save_snippet(
                     typed_name, typed_text,
                     expected_original=(snippet.text if snippet else None))
@@ -12640,7 +12741,8 @@ if APPKIT_AVAILABLE:
                             "sheets.vocabulary.bans.note"))]),
                 ],
                 "buttons": self._sheet_footer(sheet, save=True),
-                "focus": sheet.controls["terms"],
+                "focus": sheet.controls[
+                    "terms" if about_terms or not notice else "bans"],
             }
 
         def editVocabulary_(self, _sender: Any) -> None:
@@ -12701,8 +12803,13 @@ if APPKIT_AVAILABLE:
                         item=item)
                     count = self._value_label(self._l(
                         "sheets.corrections.count", count=item.count))
+                    # The runtime names a snippet edit "Snippet: name";
+                    # under the "Snippet edits" header the name is enough.
+                    source = (item.key if kind == "snippet"
+                              and item.source.endswith(f": {item.key}")
+                              else item.source)
                     row, title, caption = self._sheet_row(
-                        f"{item.source} → {item.target}",
+                        f"{source} → {item.target}",
                         caption=correction_row_caption(
                             item, locale=self.view_model.locale),
                         accessories=(count, forget), keys=(forget,))
@@ -12802,19 +12909,23 @@ if APPKIT_AVAILABLE:
             if not rows:
                 rows = [self._sheet_empty_row(
                     self._l("sheets.keywords.empty"))]
+            whole_list = [
+                self._sheet_button(
+                    sheet, "export", self._l("settings.action.export")),
+                self._sheet_button(
+                    sheet, "forget_all",
+                    self._l("sheets.keywords.forget_all")),
+            ]
+            for button in whole_list:
+                # With no keyword there is nothing to copy or to forget.
+                button.setEnabled_(bool(candidates))
             return {
                 "title": self._l("settings.dialog.keywords.title"),
                 "message": self._l("sheets.keywords.message"),
                 "sections": [(None, rows,
                               [self._sheet_notice(sheet, *notice)])],
                 "buttons": self._sheet_footer(sheet, save=False),
-                "leading": [
-                    self._sheet_button(
-                        sheet, "export", self._l("settings.action.export")),
-                    self._sheet_button(
-                        sheet, "forget_all",
-                        self._l("sheets.keywords.forget_all")),
-                ],
+                "leading": whole_list,
             }
 
         def inspectKeywords_(self, _sender: Any) -> None:
@@ -13643,7 +13754,7 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         runtime["flight_recorder"] = enabled
 
     def set_tone(bundle: str, tone: str) -> None:
-        if (bundle, tone) == ("com.example.code", "verbatim"):
+        if tone == "verbatim":
             raise OSError("the tones file is read-only")
         calls.append(("tone", bundle, tone))
         for item in private_settings["app_tones"]:
@@ -16117,6 +16228,10 @@ def run_native_appkit_smoke(*, construction_only: bool = False
             [("tone", "com.example.mail", "casual")]
             and model.state.settings.app_tones[0].tone == "casual",
             "saving the app tones applies the one that changed, and only it")
+        require(
+            str(controller.dynamic["notice"].stringValue()) ==
+            localized_string("settings.notice.tone_saved"),
+            "the page under the sheet is drawn again after a save")
 
         def refuse_a_tone(sheet: Any) -> str:
             sheet.controls["tone:com.example.mail"].selectItemAtIndex_(
@@ -16127,15 +16242,19 @@ def run_native_appkit_smoke(*, construction_only: bool = False
 
         def tone_was_refused(sheet: Any) -> str:
             require(
-                "read-only" in notice_of(sheet)
+                notice_of(sheet).startswith("Code: ")
+                and notice_of(sheet).endswith(" " + localized_string(
+                    "sheets.tones.saved_before", apps="Mail"))
+                and "read-only" in notice_of(sheet)
                 and int(sheet.controls["tone:com.example.code"]
                         .indexOfSelectedItem()) ==
                 TONE_CHOICES.index("verbatim")
                 and int(sheet.controls["tone:com.example.mail"]
                         .indexOfSelectedItem()) ==
                 TONE_CHOICES.index("formal"),
-                "a refused tone keeps the sheet up with every choice and "
-                "says why")
+                "a refused tone keeps the sheet up with every choice, "
+                "and says which app it was, why, and what was already "
+                "saved")
             return "cancel"
 
         refused = drive(controller.editTone_, refuse_a_tone, tone_was_refused)
@@ -16147,6 +16266,35 @@ def run_native_appkit_smoke(*, construction_only: bool = False
                 ("tone", "com.example.mail", "formal")]
             and model.state.settings.app_tones[1].tone == "code",
             "a refused tone stops the save there, in the same sheet")
+
+        # The first app refused, with another changed after it: the save
+        # stops there, so the one after is never tried and nothing was
+        # saved before it to speak of.
+        def refuse_the_first(sheet: Any) -> str:
+            sheet.controls["tone:com.example.mail"].selectItemAtIndex_(
+                TONE_CHOICES.index("verbatim"))
+            sheet.controls["tone:com.example.code"].selectItemAtIndex_(
+                TONE_CHOICES.index("casual"))
+            return "save"
+
+        def first_was_refused(sheet: Any) -> str:
+            already = localized_string(
+                "sheets.tones.saved_before", apps="").split(":")[0]
+            require(
+                notice_of(sheet).startswith("Mail: ")
+                and "read-only" in notice_of(sheet)
+                and bool(already) and already not in notice_of(sheet),
+                "a tone refused before any was saved says which app, "
+                "and claims nothing was saved")
+            return "cancel"
+
+        tone_calls_before = len(calls_of("tone"))
+        tone_dialogs += drive(
+            controller.editTone_, refuse_the_first, first_was_refused)
+        require(
+            len(calls_of("tone")) == tone_calls_before
+            and model.state.settings.app_tones[1].tone == "code",
+            "a refused tone stops the save: the app after it is not tried")
         model.set_app_tone("com.example.mail", "casual")
 
         # Snippets: a list with Edit and Delete on each row, and the same
@@ -18289,6 +18437,14 @@ def run_native_appkit_smoke(*, construction_only: bool = False
                     f"a snippet's {action} button says what it does to "
                     "which snippet")
             check_sheet(sheet, "snippets", cut=(long_row.caption,))
+            require(
+                str(long_row.caption.toolTip()) ==
+                str(long_row.caption.stringValue())
+                and long_row.title.toolTip() is None
+                and rows[0].title.toolTip() is None
+                and rows[0].caption.toolTip() is None,
+                "a line that is cut shows all of it as its tooltip, and "
+                "a line that fits has none")
             try:
                 sheet.press("edit:nothing")
             except KeyError:
@@ -18302,11 +18458,55 @@ def run_native_appkit_smoke(*, construction_only: bool = False
                 pass
             else:
                 require(False, "a disabled button cannot be pressed")
+            # The keyboard is on this row's Edit when it is pressed.
+            require(
+                bool(sheet.window.makeFirstResponder_(
+                    sheet.buttons["edit:address"])),
+                "a row's button can hold the keyboard")
             return "edit:address"
+
+        def bare_field(editor: Any) -> bool:
+            """A multi-line field with no border and no fill of its own,
+            filling its row to the group's edge at each side."""
+            scroll = editor.enclosingScrollView()
+            row = scroll.superview()
+            return (
+                int(scroll.borderType()) == int(NSNoBorder)
+                and not bool(scroll.drawsBackground())
+                and not bool(editor.drawsBackground())
+                and type(row) is SettingsRowView
+                and len(row.superview().rows) == 1
+                and abs(float(scroll.frame().origin.x) - 1.0) < 0.01
+                and abs(float(scroll.frame().size.width)
+                        - (float(row.frame().size.width) - 2.0)) < 0.01
+                and abs(float(editor.textContainerInset().width)
+                        + float(editor.textContainer().lineFragmentPadding())
+                        + 1.0 - ROW_INSET) < 0.01)
 
         def snippet_form(sheet: Any) -> Any:
             check_sheet(sheet, "snippet form")
             text, cancel = sheet.controls["text"], sheet.buttons["cancel"]
+            name = sheet.controls["name"]
+            named, texted = sheet.document.sections
+            require(
+                [str(section[0].stringValue())
+                 for section in (named, texted)] == [
+                    localized_string("sheets.snippet.name"),
+                    localized_string("sheets.snippet.text")]
+                and name.superview() == named[1].rows[0]
+                and not bool(name.isBezeled())
+                and not bool(name.drawsBackground())
+                and not bool(name.isEditable())
+                and abs(float(name.frame().origin.x) - ROW_INSET) < 0.01
+                and bare_field(text)
+                and [str(note.stringValue()) for note in named[2]
+                     if not bool(note.isHidden())] == [
+                    localized_string("sheets.snippet.speak")]
+                and str(sheet.window.title()) ==
+                localized_string("settings.dialog.snippet.edit"),
+                "the form is two fields, each filling its own group under "
+                "its name, with no border of its own; how to say the "
+                "snippet is under its name")
             require(
                 type(text) is SheetTextView
                 and sheet.window.firstResponder() == text
@@ -18332,6 +18532,10 @@ def run_native_appkit_smoke(*, construction_only: bool = False
                 localized_string("settings.personalize.snippets")
                 and "add" in sheet.buttons,
                 "cancelling the form goes back to the list")
+            require(
+                sheet.window.firstResponder() ==
+                sheet.buttons["edit:address"],
+                "back in the list, the keyboard is where it was")
             sheet.window.cancelOperation_(None)
             require(sheet.choice == ("done", None),
                     "Escape is Done in a sheet with no Cancel")
@@ -18343,8 +18547,55 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         require(
             snippets_escaped[0].choice == ("done", None),
             "Escape is Done in a sheet with no Cancel")
-        drive(controller.editSnippets_, "add",
-              checked("new snippet form", "cancel"), "done")
+        def new_snippet_form(sheet: Any) -> Any:
+            check_sheet(sheet, "new snippet form")
+            name = sheet.controls["name"]
+            require(
+                bool(name.isEditable()) and not bool(name.isBezeled())
+                and not bool(name.drawsBackground())
+                and name.superview() == sheet.document.sections[0][1].rows[0]
+                and sheet.window.firstResponder() in (
+                    name, name.currentEditor())
+                and name.nextKeyView() == sheet.controls["text"],
+                "a new snippet's name is a field that fills its group, "
+                "and has the keyboard")
+            sheet.controls["text"].setString_("Typed text")
+            return "save"
+
+        def name_is_asked_for(sheet: Any) -> Any:
+            named = sheet.document.sections[0]
+            require(
+                notice_of(sheet) ==
+                localized_string("validation.snippet.required")
+                and sheet.controls["notice"] in named[2]
+                and str(sheet.controls["text"].string()) == "Typed text"
+                and sheet.window.firstResponder() in (
+                    sheet.controls["name"],
+                    sheet.controls["name"].currentEditor()),
+                "a snippet saved with no name is asked for one, under "
+                "the name, with the keyboard in it and the text kept")
+            sheet.controls["name"].setStringValue_("greeting")
+            sheet.controls["text"].setString_("   ")
+            return "save"
+
+        def text_is_asked_for(sheet: Any) -> Any:
+            named, texted = sheet.document.sections
+            require(
+                "1–4000" in notice_of(sheet)
+                and sheet.controls["notice"] in texted[2]
+                and sheet.controls["notice"] not in named[2]
+                and sheet.window.firstResponder() == sheet.controls["text"]
+                and str(sheet.controls["name"].stringValue()) == "greeting",
+                "a snippet refused for its text says so under the text, "
+                "with the keyboard in it and the name kept")
+            return "cancel"
+
+        saves_before = len(calls_of("save_snippet"))
+        drive(controller.editSnippets_, "add", new_snippet_form,
+              name_is_asked_for, text_is_asked_for, "done")
+        require(
+            len(calls_of("save_snippet")) == saves_before,
+            "a snippet with no name, or no text, saves nothing")
 
         # Vocabulary: Tab moves from one list to the other instead of
         # typing a tab, and Shift-Tab back.
@@ -18362,6 +18613,12 @@ def run_native_appkit_smoke(*, construction_only: bool = False
                         in sheet.document.sections),
                 "each vocabulary list is a field in its own group, with "
                 "a header and a line that says what it is for")
+            require(
+                bare_field(terms) and bare_field(bans)
+                and str(sheet.window.title()) ==
+                localized_string("settings.dialog.vocabulary.title"),
+                "a vocabulary list fills its group with no border of its "
+                "own, and the sheet's window is named for the sheet")
             terms.insertTab_(None)
             moved = sheet.window.firstResponder() == bans
             bans.insertBacktab_(None)
@@ -18373,6 +18630,24 @@ def run_native_appkit_smoke(*, construction_only: bool = False
             return "cancel"
 
         drive(controller.editVocabulary_, vocabulary_fields)
+
+        def exclude_a_reserved_term(sheet: Any) -> Any:
+            sheet.controls["bans"].setString_("#Gwen")
+            return "save"
+
+        def keyboard_is_in_the_second_list(sheet: Any) -> Any:
+            require(
+                sheet.controls["notice"] in sheet.document.sections[1][2]
+                and sheet.window.firstResponder() == sheet.controls["bans"]
+                and "A excluded" not in notice_of(sheet)
+                and localized_string("validation.vocabulary.excluded")
+                in notice_of(sheet),
+                "a refusal about the excluded terms is under that list, "
+                "with the keyboard in it")
+            return "cancel"
+
+        drive(controller.editVocabulary_, exclude_a_reserved_term,
+              keyboard_is_in_the_second_list)
 
         # Return starts a new line in a multi-line field, so Command-Return
         # presses the default button from there.
@@ -18433,9 +18708,38 @@ def run_native_appkit_smoke(*, construction_only: bool = False
                 "a learned correction's row says what is written for "
                 "what, and where it stands; its group says what is "
                 "stored")
+            require(
+                str(edits[1].rows[0].title.stringValue()) ==
+                "signature → Kind regards,"
+                and accessible_value(
+                    sheet.buttons["forget:snippet:signature"].cell(),
+                    "accessibilityLabel") == localized_string(
+                        "sheets.corrections.forget.label",
+                        source="Snippet: signature",
+                        target="Kind regards,"),
+                "a snippet edit's row names the snippet once; its button "
+                "still says in full what it forgets")
+            # The keyboard is on the first row's Forget when it is pressed.
+            require(
+                bool(sheet.window.makeFirstResponder_(
+                    sheet.buttons["forget:correction:gwen"])),
+                "a row's button can hold the keyboard")
+            return "forget:correction:gwen"
+
+        def keyboard_is_on_the_next_row(sheet: Any) -> Any:
+            require(
+                "forget:correction:gwen" not in sheet.buttons
+                and sheet.window.firstResponder() ==
+                sheet.buttons["forget:correction:teh"],
+                "after a row is forgotten the keyboard is on the row "
+                "now in its place")
             return "done"
 
-        drive(controller.reviewCorrections_, correction_rows)
+        corrections_kept = private_settings["corrections"]
+        drive(controller.reviewCorrections_, correction_rows, 1000,
+              keyboard_is_on_the_next_row)
+        private_settings["corrections"] = corrections_kept
+        model.load_settings()
 
         def keyword_rows(sheet: Any) -> Any:
             check_sheet(sheet, "pronunciation keywords")
@@ -18461,6 +18765,9 @@ def run_native_appkit_smoke(*, construction_only: bool = False
                     localized_string("settings.action.done")],
                 "a keyword's row says what was seen of it, and the "
                 "footer copies them out or forgets them all")
+            require(
+                all(bool(button.isEnabled()) for button in sheet.footer),
+                "with keywords listed, every footer button is on")
             return "done"
 
         drive(controller.inspectKeywords_, keyword_rows)
@@ -18498,7 +18805,12 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         drive(controller.inspectKeywords_, lambda sheet: (
             require(says(sheet, "sheets.keywords.empty"),
                     "an empty keyword list says so"),
-            checked("no keywords", "done")(sheet))[1])
+            require(
+                [bool(button.isEnabled()) for button in sheet.footer]
+                == [False, False, True],
+                "with no keyword there is nothing to copy or forget: "
+                "only Done is on"),
+            checked("no keywords", "done")(sheet))[2])
         private_keyword_export["candidates"] = kept_candidates
 
         # A list too long for the sheet: the sheet stops at its cap and
@@ -18531,6 +18843,26 @@ def run_native_appkit_smoke(*, construction_only: bool = False
             return "cancel"
 
         drive(controller.editTone_, long_list)
+        long_name = "Notes for the Customer Success Team " * 3
+        private_settings["app_tones"] = filled["app_tones"] + [
+            {"bundle": "com.example.long", "name": long_name.strip(),
+             "tone": "auto"}]
+        model.load_settings()
+
+        def long_app_name(sheet: Any) -> Any:
+            rows = sheet.document.sections[0][1].rows
+            require(
+                not text_fits(rows[-1].title)
+                and str(rows[-1].title.toolTip()) ==
+                f"{long_name.strip()}\ncom.example.long"
+                and str(rows[0].title.toolTip()) == "com.apple.finder"
+                and abs(float(rows[-1].frame().size.height)
+                        - float(rows[0].frame().size.height)) < 0.01,
+                "an app name too long for its row is cut to one line, "
+                "with all of it ahead of the bundle identifier as help")
+            return "cancel"
+
+        drive(controller.editTone_, long_app_name)
         private_settings["app_tones"] = filled["app_tones"]
         model.load_settings()
 
@@ -18611,11 +18943,43 @@ def run_native_appkit_smoke(*, construction_only: bool = False
                 return "cancel"
             return step
 
+        # A field in a sheet has no surface of its own: where nothing is
+        # typed it shows the group it fills, and what is typed is in the
+        # pages' ink. (A system text view left to itself is a neutral
+        # grey in the dark appearance, darker than the sheet round it.)
+        def field_look(dark_look: bool) -> Callable:
+            def step(sheet: Any) -> Any:
+                palette = palette_for_appearance(dark_look)
+                drawn = rendered(sheet.content)
+                for name in ("terms", "bans"):
+                    editor = sheet.controls[name]
+                    scroll = editor.enclosingScrollView()
+                    box = sheet.content.convertRect_fromView_(
+                        scroll.bounds(), scroll)
+                    foot = float(box.origin.y + box.size.height) - 6.0
+                    ink = editor.textColor()
+                    require(
+                        near(pixel(drawn, float(box.origin.x) + 6.0, foot),
+                             palette.surface, 0.01)
+                        and near(pixel(drawn, float(
+                            box.origin.x + box.size.width) - 40.0, foot),
+                            palette.surface, 0.01)
+                        and near((float(ink.redComponent()),
+                                  float(ink.greenComponent()),
+                                  float(ink.blueComponent())),
+                                 palette.ink, 0.01),
+                        f"a field in a sheet is the colour of the group "
+                        f"it fills, typed in the pages' ink, in the "
+                        f"{'dark' if dark_look else 'light'} appearance")
+                return "cancel"
+            return step
+
         for dark_look in (False, True):
             controller.window.setAppearance_(NSAppearance.appearanceNamed_(
                 NSAppearanceNameDarkAqua if dark_look
                 else NSAppearanceNameAqua))
             controller.render()
+            drive(controller.editVocabulary_, field_look(dark_look))
             for contrast in (False, True):
                 look = lambda: drive(
                     controller.editTone_, sheet_look(dark_look, contrast))
@@ -18643,6 +19007,155 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         drive(controller.editTone_, flip)
         controller.window.setAppearance_(None)
         controller.render()
+
+        # ---- The path a real click takes. With no responder a sheet is
+        # put on its window and a modal session runs until a button stops
+        # it. Nothing may be shown here, and a check that fails must
+        # still end, so for as long as this lasts the application the
+        # window module asks is a stand-in (as NSEvent was above): no
+        # real modal session can start, whatever is broken. The window
+        # the sheet hangs from is a stand-in too. Both write down what
+        # they are asked, and the session presses a button the way a
+        # click does.
+        modal_log: list[tuple[Any, ...]] = []
+
+        class HostWindow:
+            def isVisible(self) -> bool:
+                return True
+
+            def beginSheet_completionHandler_(
+                    self, window: Any, handler: Any) -> None:
+                modal_log.append(("begin", window, handler))
+
+            def endSheet_(self, window: Any) -> None:
+                modal_log.append(("end", window))
+
+        class ModalSession:
+            sheet: Any = None
+            answers: list[Any] = []
+
+            @classmethod
+            def sharedApplication(cls) -> Any:
+                return cls
+
+            @classmethod
+            def runModalForWindow_(cls, window: Any) -> int:
+                modal_log.append(("run", window, cls.sheet.running))
+                answer = cls.answers.pop(0) if cls.answers else None
+                if answer is not None:
+                    cls.sheet.press(answer)
+                return cls.sheet.tag
+
+            @classmethod
+            def stopModalWithCode_(cls, code: int) -> None:
+                modal_log.append(("stop", code, cls.sheet.running))
+
+        def refused_page(sheet: Any, notice: str) -> Callable:
+            return lambda: controller._vocabulary_page(
+                sheet, "Qwen", "Gwen", notice)
+
+        host = HostWindow()
+        second_editors: list[Any] = []
+        appkit_application = NSApplication
+        globals()["NSApplication"] = ModalSession
+        sheet = controller._new_sheet()
+        try:
+            ModalSession.sheet = sheet
+            controller._sheet_fill(sheet, refused_page(sheet, ""))
+            ModalSession.answers = ["save"]
+            answered = sheet.run(host, None)
+            save_tag = int(sheet.buttons["save"].tag())
+            require(
+                modal_log == [
+                    ("begin", sheet.window, None),
+                    ("run", sheet.window, True),
+                    ("stop", save_tag, True)]
+                and answered == save_tag and sheet.choice == ("save", None)
+                and sheet.parent is host and not sheet.running,
+                "a sheet is put on its window, runs a modal session, and "
+                "a button stops the session with its own answer")
+            # Filled again while it is up, it stays on the window and
+            # stays in the middle of it, where AppKit holds a sheet.
+            before = sheet.window.frame()
+            controller._sheet_fill(sheet, refused_page(
+                sheet, "One line of refusal, to make the sheet taller."))
+            after = sheet.window.frame()
+            require(
+                float(after.size.height) > float(before.size.height) + 4.0
+                # (To the half point a window's frame is rounded to.)
+                and abs(float(after.origin.y + after.size.height / 2.0)
+                        - float(before.origin.y + before.size.height / 2.0))
+                <= 0.5
+                and abs(float(after.origin.x + after.size.width / 2.0)
+                        - float(before.origin.x + before.size.width / 2.0))
+                <= 0.5,
+                "an open sheet that grows stays where it is, about its "
+                "middle")
+            # Run again through the window's own seam: no second sheet
+            # is begun, and a session that ends with no button pressed
+            # is Escape.
+            ModalSession.answers = [None]
+            answer = controller._run_sheet(sheet)
+            require(
+                modal_log[3:] == [("run", sheet.window, True)]
+                and answer == ("cancel", None)
+                and sheet.tag == int(sheet.buttons["cancel"].tag())
+                and controller._sheet is sheet,
+                "a sheet that is already up is run again where it is, "
+                "and a run that ends with no answer is Cancel")
+            # One editor at a time: a second is refused, not opened. (If
+            # one were opened, the responder would answer it.)
+            refused_second = False
+            controller.modal_responder = lambda dialog: (
+                second_editors.append(dialog), "cancel")[1]
+            try:
+                controller.editVocabulary_(None)
+            except Exception:
+                refused_second = True
+            finally:
+                controller.modal_responder = None
+            require(
+                refused_second and not second_editors
+                and controller._sheet is sheet and len(modal_log) == 4,
+                "a second editor is refused while one is open")
+        finally:
+            controller.modal_responder = None
+            controller._end_sheet(sheet)
+            globals()["NSApplication"] = appkit_application
+        require(
+            modal_log[4:] == [("end", sheet.window)]
+            and sheet.parent is None and controller._sheet is None
+            and not bool(sheet.window.isVisible()),
+            "closing an editor takes its sheet off the window it is on")
+
+        # A refusal is said aloud as it appears: it is under a group,
+        # where the keyboard is not.
+        import AppKit as _appkit_for_announcing
+        announced: list[tuple[Any, ...]] = []
+        post = _appkit_for_announcing.NSAccessibilityPostNotificationWithUserInfo
+        _appkit_for_announcing.NSAccessibilityPostNotificationWithUserInfo = (
+            lambda element, name, info: announced.append(
+                (element, str(name), dict(info))))
+        try:
+            said_in = drive(
+                controller.editVocabulary_, type_reserved_term, "cancel")
+        finally:
+            _appkit_for_announcing \
+                .NSAccessibilityPostNotificationWithUserInfo = post
+        refusal_said = [
+            entry for entry in announced
+            if entry[1] == str(_appkit_for_announcing
+                               .NSAccessibilityAnnouncementRequestedNotification)]
+        require(
+            len(refusal_said) == 1
+            and refusal_said[0][0] == said_in[0].window
+            and "reserved" in refusal_said[0][2][
+                _appkit_for_announcing.NSAccessibilityAnnouncementKey]
+            and refusal_said[0][2][
+                _appkit_for_announcing.NSAccessibilityPriorityKey] ==
+            _appkit_for_announcing.NSAccessibilityPriorityHigh,
+            "a refusal in a sheet is announced to VoiceOver, once, with "
+            "its words")
 
         # The alerts that are left carry the face too: its chip, drawn as
         # the icon, in the place of the folder.
