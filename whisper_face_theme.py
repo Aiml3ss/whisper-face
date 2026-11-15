@@ -62,8 +62,10 @@ DARK_PALETTE = ThemePalette(
     error=_hex_color("#F0907E"),
 )
 
-# Chibi-clay pastels: every chip color is the old hue relaxed toward cream so
-# the characters read as soft vinyl toys instead of stickers.
+# Pastel grounds: every chip color is a hue relaxed toward cream. The sticker
+# characters wear these same hues at full strength, from their own palette in
+# whisper_face_characters; the chip stays soft so the face standing on it is
+# the loud thing.
 #
 # Hue does the naming, because a chip has to be findable at a glance in a
 # sixteen-chip picker: every animal through penguin claimed a hue family the
