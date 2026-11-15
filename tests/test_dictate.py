@@ -2279,9 +2279,19 @@ class VoiceOutboxMenuTests(unittest.TestCase):
         for word in ("recover", "unverified", "fail", "error", "attention",
                      "review", "!"):
             self.assertNotIn(word, calm.casefold())
-        # One entry that still needs a home keeps today's wording for all.
-        self.assertEqual(title(5, 1), "Voice Outbox — 5 recoverable")
+        # Entries that still need a home are the recoverable ones, and the
+        # count says so: the copies beside them are counted as copies, so
+        # the row never says six need recovering when one does.
+        self.assertEqual(
+            title(5, 1), "Voice Outbox — 1 recoverable, 4 pasted")
+        self.assertEqual(
+            title(6, 5), "Voice Outbox — 5 recoverable, 1 pasted")
+        self.assertEqual(
+            title(1000, 3), "Voice Outbox — 3 recoverable, 17 pasted")
         self.assertEqual(title(5, 5), "Voice Outbox — 5 recoverable")
+        self.assertEqual(title(5, 99), "Voice Outbox — 5 recoverable")
+        self.assertEqual(
+            title(5, -1), "Voice Outbox — 5 pasted, not double-checked")
         # A count that is missing or is not a count is never read as "none
         # needs a home".
         for unknown in (None, False, True, "0", 0.0, [], "none"):
@@ -2315,15 +2325,19 @@ class VoiceOutboxMenuTests(unittest.TestCase):
         init_source = ast.unparse(methods["init"])
         self.assertIn("self.voice_outbox_item.setEnabled_(False)", init_source)
         refresh_source = ast.unparse(methods["menuWillOpen_"])
-        self.assertIn("INSERTION_COORDINATOR.recoverable_count()",
-                      refresh_source)
+        # Both counts come from one payload-free read of the queue, so an
+        # entry that settles while the menu opens is never counted as the
+        # wrong kind. (This was ``recoverable_count()`` alone before the
+        # row told the two kinds apart.)
+        self.assertIn(
+            "outbox_count, outbox_needs_home = "
+            "INSERTION_COORDINATOR.recoverable_counts()", refresh_source)
         self.assertNotIn("INSERTION_COORDINATOR.recoverable()",
                          refresh_source)
-        # The row's wording comes from how many entries still need a home,
-        # read the same payload-free way.
+        self.assertNotIn("needs_home_count()", refresh_source)
         self.assertIn(
-            "voice_outbox_menu_title(outbox_count, "
-            "INSERTION_COORDINATOR.needs_home_count())", refresh_source)
+            "voice_outbox_menu_title(outbox_count, outbox_needs_home)",
+            refresh_source)
 
 
 class FakeStream:

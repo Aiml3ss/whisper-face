@@ -1013,6 +1013,19 @@ class RuntimeStatusWindowContractTests(unittest.TestCase):
                         ("shell.state.recovery", "attention"))
                     self.assertEqual(state.outbox_unchecked, 5)
                     self.assertEqual(state.outbox_summary, summary)
+                    # Home's row and the menu count the one that needs a
+                    # home apart from the five copies, as the headline
+                    # does.
+                    key, values = home_outbox_line(state)
+                    self.assertEqual(
+                        localized_string(key, **values),
+                        f"Voice Outbox: 1 recoverable, 5 pasted · {summary}")
+                    self.assertEqual(
+                        menu(outbox.recoverable_count(),
+                             outbox.needs_home_count()),
+                        "Voice Outbox — 1 recoverable, 5 pasted")
+                    self.assertEqual(
+                        outbox.recoverable_counts(), (6, 1))
 
     def test_an_outbox_of_real_failures_is_exactly_as_before(self):
         from whisper_face_gui import localized_string

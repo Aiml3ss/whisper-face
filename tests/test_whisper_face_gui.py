@@ -1131,12 +1131,30 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(
             line(outbox_count=1, outbox_unchecked=1),
             "Voice Outbox: 1 pasted, not double-checked")
-        # Anything that still needs a home keeps the recoverable line, for
-        # the whole outbox, with the summary of what needs it.
+        # Anything that still needs a home keeps the recoverable line and
+        # the summary of what needs it. The copies beside it are counted
+        # as copies, so the row and the headline ("1 dictation needs…")
+        # never disagree about how many need a review.
         self.assertEqual(
             line(outbox_count=5, outbox_unchecked=4,
                  outbox_summary="Not pasted — destination changed"),
-            "Voice Outbox: 5 recoverable · Not pasted — destination changed")
+            "Voice Outbox: 1 recoverable, 4 pasted · "
+            "Not pasted — destination changed")
+        self.assertEqual(
+            line(outbox_count=20, outbox_unchecked=1,
+                 outbox_summary="Paste may have landed — verify before "
+                 "reusing"),
+            "Voice Outbox: 19 recoverable, 1 pasted · "
+            "Paste may have landed — verify before reusing")
+        # A count of copies that does not fit the outbox is never taken
+        # further than the outbox holds, in either direction.
+        self.assertEqual(
+            line(outbox_count=2, outbox_unchecked=-3,
+                 outbox_summary="Not pasted — destination changed"),
+            "Voice Outbox: 2 recoverable · Not pasted — destination changed")
+        self.assertEqual(
+            line(outbox_count=2, outbox_unchecked=9),
+            "Voice Outbox: 2 pasted, not double-checked")
         self.assertEqual(
             line(outbox_count=2,
                  outbox_summary="Paste may have landed — verify before "
@@ -1169,6 +1187,16 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(
             catalog["overview.outbox.pending"],
             "Voice Outbox: {count} recoverable · {summary}")
+        self.assertEqual(
+            catalog["overview.outbox.mixed"],
+            "Voice Outbox: {count} recoverable, {unchecked} pasted · "
+            "{summary}")
+        # Copy & Dismiss acts on whatever the outbox holds, so neither its
+        # help nor its notice calls an unchecked copy "recoverable".
+        for key in ("overview.action.copy_outbox.help",
+                    "overview.notice.outbox.copied"):
+            self.assertNotIn("recoverable", catalog[key])
+            self.assertIn("Voice Outbox", catalog[key])
 
     def test_error_text_meets_aa_on_light_surfaces(self):
         from whisper_face_theme import LIGHT_PALETTE, contrast_ratio
@@ -2463,6 +2491,33 @@ class ViewModelTests(unittest.TestCase):
         self.assertIn(("license",), self.calls)
         self.assertIn(("outbox",), self.calls)
         self.assertEqual(state.verification, "Mac installation verified")
+
+    def test_pausing_and_resuming_leave_unchecked_copies_calm(self):
+        # The pause toggle works out the phase without waiting for the
+        # runtime. An outbox of unchecked copies must not flash the
+        # recovery phase on resume until the next refresh corrects it.
+        self.model.state = replace(
+            self.model.state, service_status="Running",
+            outbox_count=5, outbox_unchecked=5)
+        paused = self.model.set_paused(True)
+        self.assertEqual(paused.status_phase, "paused")
+        resumed = self.model.set_paused(False)
+        self.assertEqual(resumed.status_phase, "ready")
+        self.assertEqual(
+            resumed.status_title,
+            localized_string("overview.status.ready.title"))
+        self.assertEqual(
+            (resumed.outbox_count, resumed.outbox_unchecked), (5, 5))
+        # One that still needs a home is the recovery phase at once, and
+        # for that one dictation, not for all six.
+        self.model.state = replace(
+            self.model.state, outbox_count=6, outbox_unchecked=5)
+        self.model.set_paused(True)
+        mixed = self.model.set_paused(False)
+        self.assertEqual(mixed.status_phase, "recovery")
+        self.assertEqual(
+            mixed.status_detail,
+            localized_string("overview.status.recovery.detail.one"))
 
     def test_copy_and_dismiss_takes_what_needs_a_home_first(self):
         # The runtime copies an entry that needs a home before any copy of
@@ -5108,7 +5163,7 @@ class HomeAndSetupTests(unittest.TestCase):
             ["ready", "ready-empty", "ready-long-key", "ready-fox",
              "ready-replay", "ready-replay-held", "paused", "listening",
              "working", "starting", "outbox", "outbox-unchecked",
-             "needs-attention-permission", "needs-attention-model",
+             "outbox-mixed", "needs-attention-permission", "needs-attention-model",
              "outbox-and-attention", "paused-outbox-attention"])
         variants = next(
             node.value for node in tree.body
@@ -6410,6 +6465,14 @@ class HomeAppKitTests(unittest.TestCase):
                 "ready", outbox_count=20, outbox_unchecked=20,
                 outbox_summary=localized_string(
                     "overview.outbox.summary.pasted_unchecked")),
+            # The longest row there is: both kinds, two-digit counts and
+            # the longer of the two summaries.
+            "outbox, one of twenty needs a home": self.phase(
+                "recovery", status_detail=localized_string(
+                    "overview.status.recovery.detail.one"),
+                outbox_count=20, outbox_unchecked=19,
+                outbox_summary=localized_string(
+                    "overview.outbox.summary.paste_attempted")),
             "needs attention": self.phase(
                 "degraded", status_detail=self.ISSUE.detail,
                 degraded_issues=(self.ISSUE,)),
@@ -6507,8 +6570,12 @@ class HomeAppKitTests(unittest.TestCase):
             localized_string("shell.state.recovery"))
         self.assertEqual(
             str(dynamic["overview_outbox"].stringValue()),
-            "Voice Outbox: 5 recoverable · "
+            "Voice Outbox: 1 recoverable, 4 pasted · "
             "Not pasted — destination changed")
+        # The headline asks for the same one dictation the row counts.
+        self.assertEqual(
+            str(dynamic["overview_detail"].stringValue()),
+            localized_string("overview.status.recovery.detail.one"))
         self.assertNotEqual(
             str(dynamic["window_state_dot"].layer().backgroundColor()),
             str(empty_dot))

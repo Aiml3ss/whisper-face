@@ -2305,19 +2305,23 @@ def voice_inbox_menu_title(status) -> str:
 def voice_outbox_menu_title(count, needs_home=None) -> str:
     """Render only the bounded recoverable count for the outbox shortcut.
 
-    ``needs_home`` is how many of them are more than a paste that could not
-    be read back. When none is, the row says what the copies are instead of
-    calling them recoverable. Left out, every entry counts as needing a
-    home, which is the careful reading.
+    ``needs_home`` is how many of them are more than a paste sent into an
+    app that hides its text. When none is, the row says what the copies are
+    instead of calling them recoverable; when some are, each kind is
+    counted as what it is. Left out, every entry counts as needing a home,
+    which is the careful reading.
     """
     if not isinstance(count, int) or isinstance(count, bool):
         count = 0
     count = min(max(count, 0), VOICE_OUTBOX_MAX_ITEMS)
     if count == 0:
         return "Voice Outbox"
-    if (isinstance(needs_home, int) and not isinstance(needs_home, bool)
-            and needs_home <= 0):
-        return f"Voice Outbox — {count} pasted, not double-checked"
+    if isinstance(needs_home, int) and not isinstance(needs_home, bool):
+        if needs_home <= 0:
+            return f"Voice Outbox — {count} pasted, not double-checked"
+        if needs_home < count:
+            return (f"Voice Outbox — {needs_home} recoverable, "
+                    f"{count - needs_home} pasted")
     return f"Voice Outbox — {count} recoverable"
 
 
@@ -3929,9 +3933,12 @@ class StatusBar(NSObject):
         self.voice_inbox_item.setEnabled_(self.gui is not None)
         outbox_count = 0
         try:
-            outbox_count = INSERTION_COORDINATOR.recoverable_count()
+            # Both counts in one read, so the row cannot count an entry
+            # that arrived between two of them as the wrong kind.
+            outbox_count, outbox_needs_home = (
+                INSERTION_COORDINATOR.recoverable_counts())
             self.voice_outbox_item.setTitle_(voice_outbox_menu_title(
-                outbox_count, INSERTION_COORDINATOR.needs_home_count()))
+                outbox_count, outbox_needs_home))
         except Exception:
             self.voice_outbox_item.setTitle_("Voice Outbox")
         self.voice_outbox_item.setHidden_(outbox_count <= 0)

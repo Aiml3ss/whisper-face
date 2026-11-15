@@ -430,6 +430,12 @@ def home_states() -> dict[str, GUIState]:
         "outbox-unchecked": home_phase(
             "ready", outbox_count=5, outbox_unchecked=5,
             outbox_summary=copy("overview.outbox.summary.pasted_unchecked")),
+        # One of twenty still needs a home, and it is the longest line the
+        # row can be asked to hold.
+        "outbox-mixed": home_phase(
+            "recovery", outbox_count=20, outbox_unchecked=19,
+            outbox_summary=copy("overview.outbox.summary.paste_attempted"),
+            detail=copy("overview.status.recovery.detail.one")),
         "needs-attention-permission": home_phase(
             "degraded", degraded_issues=(microphone,),
             detail=microphone.detail, microphone_status="Unavailable",

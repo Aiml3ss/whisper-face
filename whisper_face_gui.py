@@ -354,6 +354,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "overview.outbox.empty": "Voice Outbox: all clear",
         "overview.outbox.pending": "Voice Outbox: {count} recoverable · {summary}",
         "overview.outbox.unchecked": "Voice Outbox: {count} pasted, not double-checked",
+        "overview.outbox.mixed": "Voice Outbox: {count} recoverable, {unchecked} pasted · {summary}",
         "overview.outbox.summary.paste_attempted": "Paste may have landed — verify before reusing",
         "overview.outbox.summary.not_pasted": "Not pasted — destination changed",
         "overview.outbox.summary.pasted_unchecked": "Pasted, not double-checked",
@@ -363,7 +364,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "overview.action.review": "Review Setup",
         "overview.action.review.help": "Show the most useful recovery guidance.",
         "overview.action.copy_outbox": "Copy & Dismiss",
-        "overview.action.copy_outbox.help": "Copy the latest recoverable dictation, then remove it from the Voice Outbox.",
+        "overview.action.copy_outbox.help": "Copy the latest dictation kept in the Voice Outbox, then remove it from there.",
         "overview.action.pause.state.paused": "Dictation paused",
         "overview.action.pause.state.active": "Dictation active",
         "overview.action.pause.label": "{action} dictation",
@@ -391,7 +392,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "overview.accessibility.onboarding.face": "{face} face, first-run guide",
         "overview.accessibility.onboarding.steps": "First run setup walkthrough",
         "overview.accessibility.onboarding.step": "Setup step {step}: {status}",
-        "overview.notice.outbox.copied": "Latest recoverable dictation copied and dismissed",
+        "overview.notice.outbox.copied": "Latest Voice Outbox dictation copied and dismissed",
         "overview.notice.outbox.error": "Could not copy Voice Outbox: {error}",
         "overview.notice.capture.error": "Could not change capture state: {error}",
         "overview.notice.status.error": "Status unavailable: {error}",
@@ -3328,12 +3329,19 @@ def home_outbox_line(state: GUIState) -> tuple[str, dict[str, Any]]:
 
     An empty outbox says so. One that holds only copies of pastes that
     could not be read back counts them for what they are. Anything that
-    still needs a home keeps the recoverable count and its summary.
+    still needs a home keeps the recoverable count and its summary, and
+    when both kinds are there each is counted as what it is, so the row
+    and the headline agree on how many dictations need a review.
     """
     if not state.outbox_count:
         return "overview.outbox.empty", {}
-    if state.outbox_unchecked >= state.outbox_count:
+    unchecked = min(max(0, state.outbox_unchecked), state.outbox_count)
+    if unchecked >= state.outbox_count:
         return "overview.outbox.unchecked", {"count": state.outbox_count}
+    if unchecked:
+        return "overview.outbox.mixed", {
+            "count": state.outbox_count - unchecked, "unchecked": unchecked,
+            "summary": state.outbox_summary}
     return "overview.outbox.pending", {
         "count": state.outbox_count, "summary": state.outbox_summary}
 
