@@ -14551,5 +14551,277 @@ class AutoreleasePoolTests(unittest.TestCase):
         self.assertIn("with cocoa_pool():\n                try:", source)
 
 
+class OpaqueDestinationEvidenceTests(unittest.TestCase):
+    """Why a destination could not be read, without reading it.
+
+    The record may carry categories and Accessibility role names. It may
+    never carry a title, a value, a label or any other text from the app.
+    """
+
+    SECRETS = ("Dinner at 8? — Sam", "hunter2 is my password",
+               "Messages — Sam Rivera", "AX Sam's secret role")
+
+    def _ns(self):
+        return load_definitions(
+            "opaque_destination_evidence", "ax_value_kind", "ax_role_name",
+            "FocusSnapshot",
+            assignments={
+                "AX_ERROR_KINDS", "AX_VALUE_TYPE_KINDS", "AX_VALUE_KINDS",
+                "AX_ROLE_NAME_RE", "OPAQUE_DESTINATION_REASONS"},
+            extra={"dataclass": dataclass})
+
+    def evidence(self, ns, snapshot, *, answers=None, focused=(0, object()),
+                 reported=None, opaque=True):
+        lease = (InsertionLease.capture_opaque("u1", "bundle:1", "context")
+                 if opaque else InsertionLease.capture(
+                     "u1", "bundle:1", (0, 0), "context"))
+        answers = answers or {}
+        return ns["opaque_destination_evidence"](
+            snapshot, lease,
+            read=lambda _element, attribute: answers.get(
+                attribute, (-25205, None)),
+            focused=lambda: focused,
+            reported_range=lambda _element: reported)
+
+    def test_a_readable_destination_has_nothing_to_explain(self):
+        ns = self._ns()
+        snapshot = ns["FocusSnapshot"](
+            element=object(), text="Hi", selection=(2, 0))
+
+        self.assertIsNone(self.evidence(ns, snapshot, opaque=False))
+        self.assertIsNone(ns["opaque_destination_evidence"](snapshot, None))
+
+    def test_it_names_which_part_was_missing_and_what_each_answered(self):
+        ns = self._ns()
+        snapshot = ns["FocusSnapshot"]
+        element = object()
+        cases = (
+            # No focused element at all, and what the system said instead.
+            (None, {}, (-25204, None), None, {
+                "reason": "no-focused-element", "focus": "cannot-complete",
+                "role": None, "subrole": None, "value": None,
+                "selection": None}),
+            (None, {}, (-25211, None), None, {
+                "reason": "no-focused-element", "focus": "api-disabled",
+                "role": None, "subrole": None, "value": None,
+                "selection": None}),
+            # An element whose value is absent: empty, or not offered.
+            (snapshot(element=element, text=None, selection=None),
+             {"AXRole": (0, "AXTextArea"), "AXValue": (-25212, None)},
+             (0, element), None, {
+                "reason": "value-unreadable", "focus": "element",
+                "role": "AXTextArea", "subrole": "none",
+                "value": "no-value", "selection": "unsupported"}),
+            # A value of a type the runtime does not read as text, and a
+            # selection it does report.
+            (snapshot(element=element, text=None, selection=(3, 0)),
+             {"AXRole": (0, "AXGroup"), "AXSubrole": (0, "AXContentList"),
+              "AXValue": (0, 7)},
+             (0, element), (3, 0), {
+                "reason": "value-unreadable", "focus": "element",
+                "role": "AXGroup", "subrole": "AXContentList",
+                "value": "number", "selection": "range"}),
+            # Text, and a range that does not fit it.
+            (snapshot(element=element, text="Hi", selection=None),
+             {"AXRole": (0, "AXTextField"), "AXValue": (0, "Hi")},
+             (0, element), (40, 2), {
+                "reason": "selection-unreadable", "focus": "element",
+                "role": "AXTextField", "subrole": "none",
+                "value": "string", "selection": "range"}),
+            (snapshot(element=element, text="Hi", selection=(9, 0)),
+             {"AXRole": (0, "AXTextField"), "AXValue": (0, "Hi")},
+             (0, element), (9, 0), {
+                "reason": "selection-outside-text", "focus": "element",
+                "role": "AXTextField", "subrole": "none",
+                "value": "string", "selection": "range"}),
+        )
+        for at_press, answers, focused, reported, expected in cases:
+            with self.subTest(expected=expected["reason"],
+                              value=expected["value"]):
+                got = self.evidence(
+                    ns, at_press, answers=answers, focused=focused,
+                    reported=reported)
+                self.assertEqual(got, expected)
+                self.assertIn(
+                    got["reason"], ns["OPAQUE_DESTINATION_REASONS"])
+
+    def test_values_are_named_by_kind_from_a_closed_set(self):
+        ns = self._ns()
+        kind = ns["ax_value_kind"]
+
+        class NSConcreteAttributedString:
+            pass
+
+        class AXValueRef:
+            pass
+
+        class AXTextMarkerRangeRef:
+            pass
+
+        class AXTextMarkerRef:
+            pass
+
+        class AXUIElementRef:
+            pass
+
+        class Surprise:
+            def __repr__(self):
+                return OpaqueDestinationEvidenceTests.SECRETS[0]
+
+        for error, value, expected in (
+            (0, None, "none"),
+            (0, "anything at all", "string"),
+            (0, "", "string"),
+            (0, True, "boolean"),
+            (0, 3, "number"),
+            (0, 2.5, "number"),
+            (0, ["a"], "array"),
+            (0, ("a",), "array"),
+            (0, {"a": 1}, "dictionary"),
+            (0, NSConcreteAttributedString(), "attributed-string"),
+            (0, AXValueRef(), "ax-value"),
+            (0, AXTextMarkerRangeRef(), "text-marker-range"),
+            (0, AXTextMarkerRef(), "text-marker"),
+            (0, AXUIElementRef(), "element"),
+            (0, Surprise(), "other"),
+            (-25205, None, "unsupported"),
+            (-25212, None, "no-value"),
+            (-25204, None, "cannot-complete"),
+            (-25202, None, "invalid-element"),
+            (-25211, None, "api-disabled"),
+            (-25208, None, "not-implemented"),
+            (-25200, None, "failure"),
+            (-1, None, "error"),
+            (-99999, "ignored when the read failed", "error"),
+            ("not a number", None, "error"),
+        ):
+            with self.subTest(error=error, expected=expected):
+                got = kind(error, value)
+                self.assertEqual(got, expected)
+                self.assertIn(got, ns["AX_VALUE_KINDS"])
+        self.assertIn("range", ns["AX_VALUE_KINDS"])
+
+    def test_a_role_is_a_name_or_a_category_never_free_text(self):
+        ns = self._ns()
+        role = ns["ax_role_name"]
+
+        for name in ("AXTextArea", "AXTextField", "AXWebArea", "AXGroup",
+                     "AXSearchField", "AXSecureTextField"):
+            self.assertEqual(role(name), name)
+        self.assertEqual(role(None), "none")
+        self.assertEqual(role(7), "not-a-name")
+        self.assertEqual(role(["AXTextArea"]), "not-a-name")
+        for invented in (*self.SECRETS, "", "AX", "TextArea", "axTextArea",
+                         "AXText Area", "AXTextArea\n", "AXTextArea;drop",
+                         "AX" + "a" * 41, "AXMotDePassé"):
+            with self.subTest(invented=invented):
+                self.assertEqual(role(invented), "nonstandard")
+
+    def test_nothing_the_app_displays_can_reach_the_record(self):
+        ns = self._ns()
+        title, typed, window, role = self.SECRETS
+        element = object()
+        # An app that answers every read with its own text, including for
+        # its role, and a snapshot that holds all of it.
+        answers = {
+            "AXRole": (0, role), "AXSubrole": (0, title),
+            "AXValue": (0, typed), "AXSelectedTextRange": (0, typed),
+        }
+        for at_press in (
+            ns["FocusSnapshot"](
+                element=element, text=None, selection=None,
+                selected_text=typed, window_title=window, document=title),
+            ns["FocusSnapshot"](
+                element=element, text=typed, selection=None,
+                selected_text=typed, window_title=window, document=title),
+            None,
+        ):
+            got = self.evidence(
+                ns, at_press, answers=answers, focused=(0, typed))
+            written = json.dumps(got)
+            for secret in self.SECRETS:
+                self.assertNotIn(secret, written)
+            self.assertEqual(set(got), {
+                "reason", "focus", "role", "subrole", "value", "selection"})
+            self.assertIn(got["reason"], ns["OPAQUE_DESTINATION_REASONS"])
+            self.assertIn(got["focus"], ns["AX_VALUE_KINDS"] | {"element"})
+            for key in ("value", "selection"):
+                self.assertIn(got[key], ns["AX_VALUE_KINDS"] | {None})
+            for key in ("role", "subrole"):
+                self.assertIn(got[key], {None, "nonstandard"})
+
+    def test_a_failing_read_costs_nothing_and_keeps_what_it_has(self):
+        ns = self._ns()
+        snapshot = ns["FocusSnapshot"](
+            element=object(), text=None, selection=None)
+        lease = InsertionLease.capture_opaque("u1", "bundle:1", "context")
+        calls = []
+
+        def read(_element, attribute):
+            calls.append(attribute)
+            if attribute == "AXValue":
+                raise RuntimeError("the app went away")
+            return 0, "AXTextArea"
+
+        got = ns["opaque_destination_evidence"](
+            snapshot, lease, read=read, focused=lambda: (0, object()),
+            reported_range=lambda _element: None)
+
+        self.assertEqual(got["reason"], "value-unreadable")
+        self.assertEqual(got["role"], "AXTextArea")
+        self.assertIsNone(got["value"])
+        self.assertIsNone(got["selection"])
+        # It read the role, the subrole and the value, and nothing else:
+        # never a title, a label, a description or a document.
+        self.assertEqual(calls, ["AXRole", "AXSubrole", "AXValue"])
+
+    def test_only_role_value_and_selection_are_ever_asked_for(self):
+        function = next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "opaque_destination_evidence")
+        asked = {
+            node.value for node in ast.walk(function)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str) and node.value.startswith("AX")}
+        self.assertEqual(
+            asked, {"AXRole", "AXSubrole", "AXValue", "AXSelectedTextRange"})
+        source = ast.unparse(function)
+        for forbidden in ("window_title", "selected_text", "document",
+                          "AXTitle", "AXDescription", "AXHelp",
+                          "AXPlaceholderValue", "AXLabel", "print("):
+            self.assertNotIn(forbidden, source)
+
+    def test_the_runtime_gathers_it_at_key_down_on_the_mac_only(self):
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "                        rec.insertion_opaque_evidence = (\n"
+            "                            opaque_destination_evidence(\n"
+            "                                rec.focus_at_press, "
+            "rec.insertion_lease)\n"
+            "                            if IS_MACOS else None\n"
+            "                        )\n", source)
+        # A recorder starts every take without any, so one dictation can
+        # never write another's.
+        recorder = next(
+            node for node in TREE.body
+            if isinstance(node, ast.ClassDef) and node.name == "Recorder")
+        for method in ("__init__", "start"):
+            body = ast.unparse(next(
+                node for node in recorder.body
+                if isinstance(node, ast.FunctionDef)
+                and node.name == method))
+            self.assertIn("self.insertion_opaque_evidence = None", body)
+        # Capability buckets and what counts as readable are untouched:
+        # the lease is decided before the evidence is gathered, from the
+        # snapshot alone.
+        lease = ast.unparse(next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "capture_insertion_lease"))
+        self.assertNotIn("opaque_destination_evidence", lease)
+        self.assertNotIn("_ax_attribute_read", lease)
+
+
 if __name__ == "__main__":
     unittest.main()

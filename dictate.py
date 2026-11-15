@@ -5423,6 +5423,7 @@ class Recorder:
         self.utterance_id = ""
         self.insertion_lease = None
         self.insertion_receipt = None
+        self.insertion_opaque_evidence = None
         self.process_ticket = None
         self.input_signature_at_press = None
         self.context_terms = []
@@ -5467,6 +5468,7 @@ class Recorder:
         self.utterance_id = f"{time.time_ns():x}-{id(self):x}"
         self.insertion_lease = None
         self.insertion_receipt = None
+        self.insertion_opaque_evidence = None
         self.process_ticket = None
         self.input_signature_at_press = None
         self.recording = True
@@ -9833,6 +9835,157 @@ def capture_insertion_lease(snapshot: FocusSnapshot | None, bundle: str,
         return None
 
 
+# Why a destination could not be read, for the private per-dictation record.
+# Everything here is a category from a closed set or an Accessibility role
+# name: never a title, a value, a label or any other text from the app. The
+# point is that one dictation into an app that hides its text says what the
+# app does expose, so that reading it properly can be designed from evidence.
+AX_ERROR_KINDS = {
+    -25200: "failure",            # kAXErrorFailure
+    -25202: "invalid-element",    # kAXErrorInvalidUIElement
+    -25204: "cannot-complete",    # kAXErrorCannotComplete
+    -25205: "unsupported",        # kAXErrorAttributeUnsupported
+    -25208: "not-implemented",    # kAXErrorNotImplemented
+    -25211: "api-disabled",       # kAXErrorAPIDisabled
+    -25212: "no-value",           # kAXErrorNoValue
+}
+# Bridged Accessibility values by what their type is called, most specific
+# first. The name itself is never recorded, only the category it maps to.
+AX_VALUE_TYPE_KINDS = (
+    ("AttributedString", "attributed-string"),
+    ("AXTextMarkerRange", "text-marker-range"),
+    ("AXTextMarker", "text-marker"),
+    ("AXValue", "ax-value"),
+    ("AXUIElement", "element"),
+    ("Array", "array"),
+    ("Dictionary", "dictionary"),
+    ("Number", "number"),
+    ("String", "string"),
+    ("URL", "url"),
+    ("Data", "data"),
+)
+AX_VALUE_KINDS = frozenset(
+    {"none", "error", "string", "boolean", "number", "array", "dictionary",
+     "range", "other"}
+    | set(AX_ERROR_KINDS.values())
+    | {kind for _marker, kind in AX_VALUE_TYPE_KINDS})
+OPAQUE_DESTINATION_REASONS = frozenset({
+    "no-focused-element",       # Accessibility named no focused element
+    "value-unreadable",         # its value is missing or is not plain text
+    "selection-unreadable",     # text, but no usable selection range
+    "selection-outside-text",   # a range that does not fit the text
+})
+AX_ROLE_NAME_RE = re.compile(r"AX[A-Za-z]{1,40}\Z")
+
+
+def ax_value_kind(error, value) -> str:
+    """Name what one Accessibility read returned, never what it held."""
+    if error:
+        try:
+            return AX_ERROR_KINDS.get(int(error), "error")
+        except (TypeError, ValueError):
+            return "error"
+    if value is None:
+        return "none"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, (list, tuple)):
+        return "array"
+    if isinstance(value, dict):
+        return "dictionary"
+    name = type(value).__name__
+    for marker, kind in AX_VALUE_TYPE_KINDS:
+        if marker in name:
+            return kind
+    return "other"
+
+
+def ax_role_name(value) -> str:
+    """An Accessibility role or subrole as a name, or why it is not one.
+
+    Role names are API constants such as ``AXTextArea``. Anything that is
+    not shaped like one is replaced by a category, so a role an app made up
+    out of its own text can never reach the record.
+    """
+    if value is None:
+        return "none"
+    if not isinstance(value, str):
+        return "not-a-name"
+    return value if AX_ROLE_NAME_RE.match(value) else "nonstandard"
+
+
+def _ax_attribute_read(element, attribute):
+    """One Accessibility read as ``(error, value)``, keeping the error."""
+    try:
+        from ApplicationServices import AXUIElementCopyAttributeValue
+        error, value = AXUIElementCopyAttributeValue(element, attribute, None)
+        return int(error or 0), (None if error else value)
+    except Exception:
+        return -1, None
+
+
+def _ax_focused_element_read():
+    """The system-wide focused element read as ``(error, value)``."""
+    try:
+        from ApplicationServices import (
+            AXUIElementCreateSystemWide,
+            kAXFocusedUIElementAttribute,
+        )
+        return _ax_attribute_read(
+            AXUIElementCreateSystemWide(), kAXFocusedUIElementAttribute)
+    except Exception:
+        return -1, None
+
+
+def opaque_destination_evidence(snapshot: FocusSnapshot | None,
+                                lease: InsertionLease | None, *,
+                                read=None, focused=None,
+                                reported_range=None) -> dict | None:
+    """Why this destination got an opaque lease, in categories only.
+
+    None for a readable destination, which needs no explanation. The reason
+    comes from the same snapshot the lease was decided on; the kinds name
+    what the focused element, its value and its selection range each
+    answered, and the role and subrole say what kind of element it is. The
+    reads repeat ones the snapshot already made and keep only a category,
+    and they change nothing about what counts as readable.
+    """
+    if lease is None or not lease.opaque:
+        return None
+    read = read or _ax_attribute_read
+    focused = focused or _ax_focused_element_read
+    reported_range = reported_range or _ax_reported_range
+    evidence = {
+        "reason": "no-focused-element", "focus": "none", "role": None,
+        "subrole": None, "value": None, "selection": None}
+    try:
+        if snapshot is None:
+            evidence["focus"] = ax_value_kind(*focused())
+            return evidence
+        evidence["focus"] = "element"
+        if snapshot.text is None:
+            evidence["reason"] = "value-unreadable"
+        elif snapshot.selection is None:
+            evidence["reason"] = "selection-unreadable"
+        else:
+            evidence["reason"] = "selection-outside-text"
+        element = snapshot.element
+        evidence["role"] = ax_role_name(read(element, "AXRole")[1])
+        evidence["subrole"] = ax_role_name(read(element, "AXSubrole")[1])
+        evidence["value"] = ax_value_kind(*read(element, "AXValue"))
+        evidence["selection"] = (
+            "range" if reported_range(element) is not None
+            else ax_value_kind(*read(element, "AXSelectedTextRange")))
+    except Exception:
+        # A diagnostic may never cost a dictation; what it has is kept.
+        pass
+    return evidence
+
+
 def seal_opaque_window_lease(rec) -> None:
     """Seal only when the press-time input counters remain unchanged."""
     lease = getattr(rec, "insertion_lease", None)
@@ -13128,6 +13281,10 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         # dictations can never publish each other's destination capabilities.
         insertion_capabilities = getattr(
             rec, "insertion_capabilities", None) or {}
+        # Why the destination was opaque, when it was: categories and role
+        # names recorded at key-down, never anything the app displayed.
+        opaque_evidence = getattr(
+            rec, "insertion_opaque_evidence", None) or {}
         now = time.perf_counter()
         release_total = now - released_at
         press_total = now - rec.press_at if rec.press_at else release_total
@@ -13288,6 +13445,15 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "insertion_target": insertion_capabilities.get("target"),
             "insertion_paste": insertion_capabilities.get("paste"),
             "insertion_readback": insertion_capabilities.get("readback"),
+            # Absent (None) for a readable destination. Otherwise which of
+            # the focused element, its value and its selection could not
+            # be used, what each answered, and the element's role.
+            "insertion_opaque_reason": opaque_evidence.get("reason"),
+            "insertion_focus_kind": opaque_evidence.get("focus"),
+            "insertion_focus_role": opaque_evidence.get("role"),
+            "insertion_focus_subrole": opaque_evidence.get("subrole"),
+            "insertion_value_kind": opaque_evidence.get("value"),
+            "insertion_selection_kind": opaque_evidence.get("selection"),
             "delayed_cleanup_scheduled": delayed_cleanup_scheduled,
         }, event_id=event_id, language=rec.language)
     except Exception as error:
@@ -14188,6 +14354,13 @@ def main():
                                 rec.bundle_at_press,
                                 rec.utterance_id,
                             ) if IS_MACOS else None
+                        )
+                        # Content-free, and only for a destination that
+                        # could not be read: what it did expose.
+                        rec.insertion_opaque_evidence = (
+                            opaque_destination_evidence(
+                                rec.focus_at_press, rec.insertion_lease)
+                            if IS_MACOS else None
                         )
                         with GLOSS["lock"]:
                             stable_terms = [
