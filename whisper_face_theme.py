@@ -375,9 +375,25 @@ STICKER_INK: Color = _hex_color("#2A211C")
 # - ``hairline`` is a whisper by design; Increase Contrast lifts it to 3:1.
 # - ``switch_on`` is 2.7:1 on the light surface, like the system's own
 #   green; Increase Contrast darkens it past 4:1.
+# - ``control_edge`` is the outline of a control whose own fill is dark in
+#   the dark appearance (the plain chunky button, the key cap). The dark
+#   ink would leave it with no edge there, so it is the light ink at
+#   ``CONTROL_EDGE_DARK_ALPHA``; Increase Contrast makes it the whole light
+#   ink. In the light appearance it is the ordinary outline.
+
+# The lowest opacity, in hundredths, at which the light ink laid over the
+# dark surface measures 3:1 against that surface: the edge a control needs
+# when it sits on a card or in the bubble, which are the colour of its own
+# fill. Against the darker window field the same edge is stronger still.
+CONTROL_EDGE_DARK_ALPHA = 0.39
+
 COLOR_TOKENS: Mapping[str, ColorToken] = {
     "ink_outline": ColorToken(
         Shade(LIGHT_PALETTE.line), Shade(DARK_PALETTE.line),
+        Shade(_hex_color("#14110D")), Shade(DARK_PALETTE.ink)),
+    "control_edge": ColorToken(
+        Shade(LIGHT_PALETTE.line),
+        Shade(DARK_PALETTE.ink, CONTROL_EDGE_DARK_ALPHA),
         Shade(_hex_color("#14110D")), Shade(DARK_PALETTE.ink)),
     "hairline": ColorToken(
         Shade(LIGHT_PALETTE.line, 0.15), Shade(DARK_PALETTE.ink, 0.13),
@@ -478,6 +494,10 @@ STAGE_PADDING_Y = 18.0
 STAGE_GAP = 8.0
 STAGE_CONTENT_MIN_WIDTH = 160.0
 STAGE_FACE_MIN_SIZE = 96.0
+# Clear room a face that leans inside its own view keeps on every side of
+# its box: 6% of the full-size face, twice the 3% the art asks for, so the
+# lean, the loudest squash and the hard shadow all stay inside the view.
+STAGE_FACE_BLEED = 12.0
 
 
 @dataclass(frozen=True)

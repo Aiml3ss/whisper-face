@@ -182,6 +182,7 @@ except Exception:  # pragma: no cover
 
 if RENDER_APPKIT_AVAILABLE:
     from whisper_face_characters import (
+        FRAMES,
         Arc,
         Curve,
         Ellipse,
@@ -273,6 +274,15 @@ if RENDER_APPKIT_AVAILABLE:
         draws a correct static frame whenever the timer is off.  Visibility
         callers use ``startLiving``/``stopLiving``; feeding a level via
         ``setLevel_mode_`` is how recording reaches the mouth.
+
+        A surface says how the face stands on it.  ``setShadow_`` asks for
+        the sticker's hard shadow and ``setWhispers_(False)`` leaves the
+        speech puffs out, for a stage that shows the level some other way.
+        ``setTilt_`` leans the drawing inside the view, so the view itself is
+        never rotated and a spring on its layer has nothing to fight, and
+        ``setBleed_`` keeps that many points on every side clear of the art
+        so the lean, the squash and the shadow are never clipped.
+        ``setPose_`` names the exported frame a face without a clock holds.
         """
 
         def initWithFrame_(self, frame):
@@ -287,6 +297,11 @@ if RENDER_APPKIT_AVAILABLE:
             self.life = IdleLifeDriver()
             self._timer = None
             self._wobble_hook = None
+            self.tilt = 0.0
+            self.bleed = 0.0
+            self.shadow = False
+            self.whispers = True
+            self.pose = "idle"
             return self
 
         def isFlipped(self):
@@ -321,6 +336,47 @@ if RENDER_APPKIT_AVAILABLE:
         def setWobbleHook_(self, hook):
             """Install the controller's spring callback for rare shrugs."""
             self._wobble_hook = hook
+
+        # -- placement on a surface -------------------------------------
+
+        def setTilt_(self, degrees):
+            """Lean the drawing; positive is clockwise on screen."""
+            degrees = float(degrees)
+            if degrees != self.tilt:
+                self.tilt = degrees
+                self.setNeedsDisplay_(True)
+
+        def setBleed_(self, points):
+            """Keep this much of every edge clear of the art."""
+            points = max(0.0, float(points))
+            if points != self.bleed:
+                self.bleed = points
+                self.setNeedsDisplay_(True)
+
+        def setShadow_(self, flag):
+            flag = bool(flag)
+            if flag != self.shadow:
+                self.shadow = flag
+                self.setNeedsDisplay_(True)
+
+        def setWhispers_(self, flag):
+            flag = bool(flag)
+            if flag != self.whispers:
+                self.whispers = flag
+                self.setNeedsDisplay_(True)
+
+        def setPose_(self, pose):
+            """The frame a face without a clock holds: ``idle`` or ``talk``."""
+            pose = pose if pose in FRAMES else "idle"
+            if pose != self.pose:
+                self.pose = pose
+                self.setNeedsDisplay_(True)
+
+        def art_side(self):
+            """Side of the square the character is drawn in, in points."""
+            bounds = self.bounds().size
+            return max(
+                0.0, min(bounds.width, bounds.height) - 2.0 * self.bleed)
 
         # -- clock ------------------------------------------------------
 
@@ -357,7 +413,7 @@ if RENDER_APPKIT_AVAILABLE:
 
         def drawRect_(self, _rect):
             bounds = self.bounds().size
-            side = min(bounds.width, bounds.height)
+            side = self.art_side()
             if side <= 0:
                 return
             animate = not self.reduce_motion and self._timer is not None
@@ -365,6 +421,9 @@ if RENDER_APPKIT_AVAILABLE:
 
             mouth = self.life.mouth(
                 lv, animate and self.mode == "recording")
+            if not animate and self.pose != "idle":
+                # A still face holds the exported frame it was asked for.
+                mouth, lv = FRAMES[self.pose]
             blink = self.life.blink(animate)
             gaze = self.life.gaze(animate and self.mode == "idle")
             mood = mood_overrides(self.mode)
@@ -386,12 +445,14 @@ if RENDER_APPKIT_AVAILABLE:
             ctx.saveGraphicsState()
             transform = NSAffineTransform.transform()
             transform.translateXBy_yBy_(
-                (bounds.width - side) / 2.0, (bounds.height - side) / 2.0)
+                bounds.width / 2.0, bounds.height / 2.0)
+            # Flipped view: a positive angle turns clockwise on screen.
+            transform.rotateByDegrees_(self.tilt)
             transform.scaleBy_(side / 256.0)
-            transform.translateXBy_yBy_(128.0, 128.0)
             transform.scaleXBy_yBy_(scale_x, scale_y)
             transform.translateXBy_yBy_(-128.0, -128.0)
             transform.concat()
             replay_ops(character_ops(
-                self.face, mouth, lv, blink, gaze=gaze))
+                self.face, mouth, lv, blink, gaze=gaze,
+                shadow=self.shadow, whispers=self.whispers))
             ctx.restoreGraphicsState()
