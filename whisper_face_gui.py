@@ -15122,7 +15122,14 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                         >= header_frame.origin.x + header_frame.size.width
                         and hint_frame.origin.y + hint_frame.size.height
                         <= first_group.frame().origin.y
-                        and hint_frame.origin.y >= header_frame.origin.y,
+                        and hint_frame.origin.y >= header_frame.origin.y
+                        and abs(
+                            hint_frame.origin.y
+                            + hint.firstBaselineOffsetFromTop()
+                            - header_frame.origin.y
+                            - header.firstBaselineOffsetFromTop()) < 0.51
+                        and float(hint.font().pointSize())
+                        < float(header.font().pointSize()),
                         f"the chosen face is named on the header's line "
                         f"at {size_name}")
                 if name in SETTINGS_PANES and name not in may_scroll:
@@ -15415,6 +15422,30 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             "same group view")
         check_rows("Home", [home_group])
         check_rows("setup", [setup_group])
+        # Over each of them is a section header that VoiceOver reads as a
+        # heading, as on a settings page, and Home's and setup's groups
+        # keep the names VoiceOver met them by.
+        headers = (
+            controller.dynamic["home_group_header"],
+            controller.dynamic["onboarding_status"],
+            controller.dynamic["page_documents"]["Controls"].sections[0][0])
+        require(
+            all(accessible_value(header.cell(), "accessibilityRole")
+                == "AXHeading" and header.font() == headers[2].font()
+                for header in headers)
+            and all(abs(float(header.frame().origin.x)
+                        - SECTION_HEADER_INSET) < 0.01
+                    for header in headers)
+            and bool(home_group.isAccessibilityElement())
+            and accessible_value(home_group, "accessibilityRole")
+            == "AXGroup"
+            and accessible_value(home_group, "accessibilityLabel")
+            == localized_string("home.group.dictation")
+            and bool(setup_group.isAccessibilityElement())
+            and accessible_value(setup_group, "accessibilityLabel")
+            == localized_string("onboarding.rows.accessibility.label"),
+            "Home's and setup's groups sit under a section header like "
+            "any other, and keep their VoiceOver names")
         for dark_look in (False, True):
             controller.window.setAppearance_(NSAppearance.appearanceNamed_(
                 NSAppearanceNameDarkAqua if dark_look
@@ -15460,9 +15491,47 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                 and abs(titled.text_origin() - (
                     ROW_INSET if titled.leading is None else
                     ROW_INSET + titled.leading.frame().size.width
-                    + ROW_CONTROL_GAP)) < 0.01,
+                    + ROW_CONTROL_GAP)) < 0.01
+                and abs(float(titled.title.frame().origin.x)
+                        - titled.text_origin()) < 0.01
+                and abs(float(titled.caption.frame().origin.x)
+                        - titled.text_origin()) < 0.01
+                and (titled.leading is None or (
+                    abs(float(titled.leading.frame().origin.x) - ROW_INSET)
+                    < 0.01
+                    and abs(float(titled.leading.frame().origin.y)
+                            + float(titled.leading.frame().size.height) / 2.0
+                            - float(titled.frame().size.height) / 2.0)
+                    < 0.01)),
                 f"{name}'s rows are set in the same type, from the same "
                 "inset, as a settings row")
+        # What stands at a row's end is the same make too: Home's value
+        # is a value label like Advanced's, a setup row's state is the
+        # status view a model's state is, in the same two colours, and
+        # the three headers are one colour.
+        mode_value = controller.dynamic["result_mode"]
+        plain_value = controller.dynamic["diag_motion"]
+        setup_state = controller.dynamic["onboarding_rows"][0]["state"]
+        model_state = controller.dynamic["model_status_views"][0]
+        require(
+            mode_value.font() == plain_value.font()
+            and bool(mode_value.textColor().isEqual_(
+                plain_value.textColor()))
+            and mode_value in controller.dynamic[
+                "result_inspect_button"].superview().accessories
+            and type(setup_state) is type(model_state) is StatusLabelView
+            and setup_state.tone == model_state.tone == "good"
+            and setup_state.text.font() == model_state.text.font()
+            and bool(setup_state.text.textColor().isEqual_(
+                model_state.text.textColor()))
+            and bool(setup_state.icon.contentTintColor().isEqual_(
+                model_state.icon.contentTintColor()))
+            and bool(setup_state.icon.contentTintColor().isEqual_(
+                _token_color("brand_ink", controller._dark)))
+            and all(bool(header.textColor().isEqual_(
+                headers[2].textColor())) for header in headers),
+            "a value, a state and a section header look the same on "
+            "Home and in setup as on a settings page")
 
         # In light appearance, read the colours the window actually draws: a
         # default install's optional model is quiet, not amber, and error
@@ -15592,6 +15661,16 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                      for chip in face_picker.chips]
                 == ["1" if face == other_face else "0" for face in FACES],
                 f"the selection is on {other_face}'s chip and no other")
+            # The sidebar's face is a picture; the button over it is
+            # what VoiceOver stops on, and it says which face it is.
+            mascot = controller.dynamic["window_face_button"].cell()
+            require(
+                accessible_value(mascot, "accessibilityLabel")
+                == localized_string("app.face_chip.label")
+                and accessible_value(mascot, "accessibilityValue")
+                == localized_string(f"settings.face.{other_face}")
+                and controller.dynamic["window_face"].image() is not None,
+                f"the sidebar's face button says it is the {other_face}")
         chosen_index = FACES.index(model.state.face)
 
         def chip_look(chip: Any) -> tuple[Any, ...]:
