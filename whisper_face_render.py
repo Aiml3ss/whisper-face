@@ -193,7 +193,10 @@ if RENDER_APPKIT_AVAILABLE:
     from whisper_face_theme import jelly_face_scale
 
     def _render_rgb(r, g, b, a=1.0):
-        NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, a).set()
+        # sRGB, like the exported SVGs and the site: the calibrated space
+        # draws the same numbers visibly paler, and the two renderers would
+        # disagree about every color in the spec.
+        NSColor.colorWithSRGBRed_green_blue_alpha_(r, g, b, a).set()
 
     def _render_poly(points):
         path = NSBezierPath.bezierPath()
