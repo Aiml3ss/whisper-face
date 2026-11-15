@@ -3704,6 +3704,13 @@ class ShellNavigationTests(unittest.TestCase):
             self.assertIn(f"command-{index + 1}:{row.key}", equivalents)
         self.assertIn("command-d:advanced", equivalents)
 
+    def test_shell_accessibility_labels_are_in_the_smoke_contract(self):
+        keys = native_appkit_smoke_contract().accessibility_catalog_keys
+        self.assertIn("shell.sidebar.accessibility.label", keys)
+        self.assertIn("shell.state.accessibility.label", keys)
+        # The pane switch is gone, and so is the label only it carried.
+        self.assertNotIn("settings.accessibility.category.label", keys)
+
     def test_shell_structure_is_the_systems(self):
         controller = _gui_class("WhisperFaceWindowController")
         build = ast.unparse(_gui_function("_build_window", controller))
@@ -3715,16 +3722,33 @@ class ShellNavigationTests(unittest.TestCase):
         self.assertIn("NSWindowStyleMaskFullSizeContentView", build)
         self.assertIn("setTitlebarAppearsTransparent_(True)", build)
         self.assertIn("setTitleVisibility_(NSWindowTitleHidden)", build)
+        # Read from the code the shell is built by, not from the module's
+        # text, so a comment or another surface elsewhere cannot trip it.
+        shell = build + ast.unparse(
+            _gui_function("_build_sidebar", controller))
         for hand_made in ("NSVisualEffectView", "NSToolbar"):
-            self.assertNotIn(hand_made, GUI_SOURCE)
+            self.assertNotIn(hand_made, shell)
         self.assertEqual(
             [base.id for base in _gui_class(
                 "ShellSplitViewController").bases],
             ["NSSplitViewController"])
-        # The old in-window header and pane switch are gone for good.
+        # The old in-window header and pane switch are gone for good: no
+        # attribute, function or dynamic key still goes by their names.
+        names = set()
+        for node in ast.walk(GUI_TREE):
+            if isinstance(node, ast.Attribute):
+                names.add(node.attr)
+            elif isinstance(node, ast.FunctionDef):
+                names.add(node.name)
+            elif isinstance(node, ast.keyword) and node.arg:
+                names.add(node.arg)
+            elif isinstance(node, ast.Constant) and isinstance(
+                    node.value, str):
+                names.add(node.value)
         for gone in ("topbar", "settings_pane_control",
-                     "settingsPaneChanged", "sectionChanged"):
-            self.assertNotIn(gone, GUI_SOURCE)
+                     "settingsPaneChanged_", "settingsPaneChanged:",
+                     "sectionChanged_", "sectionChanged:"):
+            self.assertNotIn(gone, names)
 
     def test_shell_names_are_imported_inside_the_appkit_guard(self):
         # One missing AppKit name outside the guard would stop the module
@@ -3753,10 +3777,19 @@ class ShellNavigationTests(unittest.TestCase):
         self.assertLessEqual(
             {"configure", "set_selected", "drawRect_", "keyDown_",
              "mouseDown_", "hitTest_", "canBecomeKeyView",
-             "drawFocusRingMask",
+             "takes_tab_stop", "drawFocusRingMask",
              "focusRingMaskBounds", "viewDidChangeEffectiveAppearance"},
             _method_names(row))
         text = ast.unparse(row)
+        # One Tab stop for the whole sidebar: only the selected row, and
+        # only where the system lets a button take one. The rule is its
+        # own method so it can be checked where that setting is off.
+        self.assertIn(
+            "takes_tab_stop",
+            _called_names(_gui_function("canBecomeKeyView", row)))
+        self.assertEqual(
+            ast.unparse(_gui_function("takes_tab_stop", row).body[-1]),
+            "return bool(self.selected) and bool(buttons_take_tab)")
         # Selected, for VoiceOver as well as for the eye.
         self.assertIn("setAccessibilitySelected_", text)
         self.assertIn("'sidebar_selection'", text)
@@ -4408,6 +4441,14 @@ class ShellAppKitTests(unittest.TestCase):
                 [bool(row.canBecomeKeyView()) for row in rows],
                 [buttons_take_tab and position == index + 1
                  for position in range(len(rows))])
+            # The same rule with the system setting taken out of it.
+            self.assertEqual(
+                [row.takes_tab_stop(True) for row in rows],
+                [position == index + 1 for position in range(len(rows))])
+            self.assertFalse(any(row.takes_tab_stop(False) for row in rows))
+            # Keyboard entry starts on that row too.
+            self.assertEqual(
+                self.window.initialFirstResponder(), rows[index + 1])
         rows[4].keyDown_(down)
         self.assertEqual(self.model.state.section, "Advanced")
         rows[4].keyDown_(up)
@@ -4478,6 +4519,39 @@ class ShellAppKitTests(unittest.TestCase):
                     self.in_window(title).origin.x
                     + title.alignmentRectInsets().left,
                     column.origin.x, delta=0.5)
+
+    def test_homes_action_buttons_stand_apart_at_every_width(self):
+        # The sidebar takes the column narrower than the old pages were
+        # ever laid out. Home's three action buttons keep their order and
+        # their gaps, centred on the column, down to the window minimum.
+        self.model.state = replace(
+            self.model.state, section="Home", outbox_count=1,
+            outbox_summary="Paste may have landed",
+            degraded_issues=(gui_module.DegradedIssue(
+                "microphone", "Microphone unavailable",
+                "Check the microphone"),))
+        self.controller.render()
+        keys = ("review_issue_button", "pause_button", "copy_outbox_button")
+        for window_width in (880.0, 900.0, 920.0, 944.0, 1000.0, 1400.0):
+            with self.subTest(window=window_width):
+                self.layout(window_width, 648.0)
+                column = self.in_window(self.controller.dynamic["page_column"])
+                buttons = [self.controller.dynamic[key] for key in keys]
+                self.assertFalse(any(b.isHidden() for b in buttons))
+                review, pause, copy = (self.in_window(b) for b in buttons)
+                self.assertAlmostEqual(
+                    pause.origin.x - review.origin.x - review.size.width,
+                    8.0, delta=0.5)
+                self.assertAlmostEqual(
+                    copy.origin.x - pause.origin.x - pause.size.width,
+                    8.0, delta=0.5)
+                self.assertAlmostEqual(
+                    pause.origin.x + pause.size.width / 2.0,
+                    column.origin.x + column.size.width / 2.0, delta=0.5)
+                self.assertGreaterEqual(review.origin.x, column.origin.x)
+                self.assertLessEqual(
+                    copy.origin.x + copy.size.width,
+                    column.origin.x + column.size.width)
 
     def test_the_sidebar_keeps_its_foot_and_its_top_as_the_window_grows(self):
         for height in (648.0, 680.0, 1000.0):

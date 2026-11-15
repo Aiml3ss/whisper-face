@@ -1192,7 +1192,8 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "overview.accessibility.onboarding.step",
             "onboarding.accessibility.progress_track",
             "settings.accessibility.sections.label",
-            "settings.accessibility.category.label",
+            "shell.sidebar.accessibility.label",
+            "shell.state.accessibility.label",
             "settings.accessibility.face.label",
             "settings.accessibility.language.label",
             "settings.accessibility.flight.label",
@@ -5248,7 +5249,6 @@ try:  # The view-model above remains usable in headless test environments.
         NSStackView,
         NSUserInterfaceLayoutOrientationHorizontal,
         NSViewController,
-        NSViewHeightSizable,
         NSWindowCloseButton,
         NSWindowMiniaturizeButton,
         NSWindowStyleMaskFullSizeContentView,
@@ -6772,12 +6772,19 @@ if APPKIT_AVAILABLE:
             self.sync_icon()
             self.setNeedsDisplay_(True)
 
+        @objc.python_method
+        def takes_tab_stop(self, buttons_take_tab: bool) -> bool:
+            """One Tab stop for the whole sidebar: the row that is showing.
+
+            Whether a button may take a Tab stop at all stays the system's
+            decision (its keyboard-navigation setting), passed in here so
+            the rule can be checked on a machine where it is off.
+            """
+            return bool(self.selected) and bool(buttons_take_tab)
+
         def canBecomeKeyView(self):
-            # One Tab stop for the whole sidebar: the row that is showing.
-            # Whether a button may take a Tab stop at all stays the
-            # system's decision (its keyboard-navigation setting).
-            return bool(self.selected) and bool(
-                objc.super(SidebarRowButton, self).canBecomeKeyView())
+            return self.takes_tab_stop(bool(
+                objc.super(SidebarRowButton, self).canBecomeKeyView()))
 
         def hitTest_(self, point):
             # The icon is a picture, not a second target inside the row.
@@ -7784,7 +7791,6 @@ if APPKIT_AVAILABLE:
                     self.dynamic["source_button"],
                 ),
             }
-            self.window.setInitialFirstResponder_(self.sidebar_rows[0])
             self.render()
 
         @objc.python_method
@@ -8050,28 +8056,34 @@ if APPKIT_AVAILABLE:
 
             # One chunky CTA, recovery actions only when they earn a spot.
             actions = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, 42))
-            center_x = width / 2.0
+            # The three buttons are one group of their own width, centred
+            # in the row, so they keep their 8pt gaps at any column width.
+            # Centring each button by itself spreads a width change over
+            # its two margins in proportion, which walks the outer two into
+            # the primary once the column is narrower than it was built.
+            group_width = 150.0 + 2.0 * (8.0 + 136.0)
+            group = NSView.alloc().initWithFrame_(NSMakeRect(
+                (width - group_width) / 2.0, 0, group_width, 42))
+            group.setAutoresizingMask_(NSViewMinXMargin | NSViewMaxXMargin)
+            center_x = group_width / 2.0
             pause = self._primary_button(
                 self._l("overview.action.pause"),
                 NSMakeRect(center_x - 75, 0, 150, 40), "pauseChanged:",
                 help_text=self._l("overview.action.pause.help"))
-            pause.setAutoresizingMask_(NSViewMinXMargin | NSViewMaxXMargin)
             fix = _button(
                 self._l("overview.action.review"),
                 NSMakeRect(center_x - 75 - 8 - 136, 6, 136, 28),
                 self, "reviewIssue:",
                 help_text=self._l("overview.action.review.help"))
-            fix.setAutoresizingMask_(NSViewMinXMargin | NSViewMaxXMargin)
             copy_outbox = _button(
                 self._l("overview.action.copy_outbox"),
                 NSMakeRect(center_x + 75 + 8, 6, 136, 28),
                 self, "copyOutbox:",
                 help_text=self._l("overview.action.copy_outbox.help"))
-            copy_outbox.setAutoresizingMask_(
-                NSViewMinXMargin | NSViewMaxXMargin)
-            actions.addSubview_(pause)
-            actions.addSubview_(fix)
-            actions.addSubview_(copy_outbox)
+            group.addSubview_(pause)
+            group.addSubview_(fix)
+            group.addSubview_(copy_outbox)
+            actions.addSubview_(group)
             self._stack(cluster, actions, below=hero, gap=4, height=42)
 
             outbox = self._ink(
@@ -9087,8 +9099,9 @@ if APPKIT_AVAILABLE:
 
             # Sidebar, then the title strip's items for this page, then
             # the page itself.
-            row = SIDEBAR_ROWS[sidebar_row_index(
-                state.section, state.settings_pane)]
+            row_index = sidebar_row_index(
+                state.section, state.settings_pane)
+            row = SIDEBAR_ROWS[row_index]
             controls = [view for row_key, view, _visible in self.title_items
                         if row_key == row.key]
             controls.extend(self.key_views_by_section[state.section])
@@ -9114,6 +9127,11 @@ if APPKIT_AVAILABLE:
                 if visible_and_enabled(control))
             for current, following in zip(chain, chain[1:] + chain[:1]):
                 current.setNextKeyView_(following)
+            # Keyboard entry starts where the sidebar's one Tab stop is:
+            # the row that is showing, or the page when there is no sidebar.
+            first = (chain[0] if self.setup_mode and chain
+                     else self.sidebar_rows[row_index])
+            self.window.setInitialFirstResponder_(first)
             return len(chain)
 
         def render(self) -> None:
@@ -11412,9 +11430,10 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             controller.sidebar_rows[0].nextKeyView() is not None,
             "initial next key view")
         require(
-            controller.window.initialFirstResponder() ==
+            bool(controller.sidebar_rows[0].selected)
+            and controller.window.initialFirstResponder() ==
             controller.sidebar_rows[0],
-            "keyboard entry starts at the sidebar")
+            "keyboard entry starts at the sidebar, on the selected row")
 
         require(
             not bool(controller.dynamic[
@@ -11691,20 +11710,37 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             "the sidebar is a projection of the view model")
         model.select_settings_pane("Privacy")
         controller.render()
-        # Up and Down move through the rows and stop at the ends.
+        # Up and Down move through the rows and stop at the ends. The key
+        # events are handed to the focused row itself, as the window would
+        # hand them; they are made here and never posted to the system.
+        def arrow(row: Any, key_code: int) -> None:
+            key_down = 10  # NSEventTypeKeyDown
+            row.keyDown_(NSEvent
+                         .keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(  # noqa: E501
+                             key_down, (0.0, 0.0), 0, 0.0,
+                             window.windowNumber(), None, "", "", False,
+                             key_code))
+
+        down = SidebarRowButton.KEY_DOWN_ARROW
+        up = SidebarRowButton.KEY_UP_ARROW
+        arrow(controller.sidebar_rows[3], down)
         require(
-            controller.move_sidebar_focus(controller.sidebar_rows[3], 1)
-            and model.state.section == "Advanced",
-            "Down moves to the next row")
+            model.state.section == "Advanced"
+            and bool(controller.sidebar_rows[4].selected)
+            and window.firstResponder() == controller.sidebar_rows[4],
+            "Down moves to the next row and shows its page")
+        arrow(controller.sidebar_rows[4], down)
         require(
-            not controller.move_sidebar_focus(controller.sidebar_rows[4], 1)
-            and model.state.section == "Advanced",
+            model.state.section == "Advanced"
+            and not controller.move_sidebar_focus(
+                controller.sidebar_rows[4], 1),
             "Down stops at the last row")
+        arrow(controller.sidebar_rows[4], up)
         require(
-            controller.move_sidebar_focus(controller.sidebar_rows[4], -1)
-            and model.state.section == "Settings"
-            and model.state.settings_pane == "Privacy",
-            "Up moves to the previous row")
+            model.state.section == "Settings"
+            and model.state.settings_pane == "Privacy"
+            and window.firstResponder() == controller.sidebar_rows[3],
+            "Up moves to the previous row and shows its page")
         require(
             not controller.move_sidebar_focus(controller.sidebar_rows[0], -1),
             "Up stops at the first row")
@@ -11733,8 +11769,16 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             controller.dynamic["window_face_button"].canBecomeKeyView())
         require(
             [bool(row.canBecomeKeyView()) for row in controller.sidebar_rows]
-            == [False, False, False, buttons_take_tab, False],
+            == [False, False, False, buttons_take_tab, False]
+            and [row.takes_tab_stop(True) for row in controller.sidebar_rows]
+            == [False, False, False, True, False]
+            and not any(row.takes_tab_stop(False)
+                        for row in controller.sidebar_rows),
             "the selected row is the sidebar's one Tab stop")
+        require(
+            controller.window.initialFirstResponder() ==
+            controller.sidebar_rows[3],
+            "keyboard entry follows the selected row")
         require(
             controller.sidebar_rows[-1].nextKeyView() ==
             controller.dynamic["settings_key_views"]["Privacy"][0],
@@ -11830,7 +11874,9 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                 controller.dynamic["settings_key_views"]["Controls"][0])
                 for row in controller.sidebar_rows)
             and not any(bool(row.canBecomeKeyView())
-                        for row in controller.sidebar_rows),
+                        for row in controller.sidebar_rows)
+            and controller.window.initialFirstResponder() ==
+            controller.dynamic["settings_key_views"]["Controls"][0],
             "setup mode leaves the hidden sidebar out of the Tab loop")
         controller.set_setup_mode(False)
         root_view.layoutSubtreeIfNeeded()
@@ -12517,6 +12563,40 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             require(
                 lowest >= notice_frame.origin.y + notice_frame.size.height,
                 f"{page_name} fits at the window minimum")
+        # Fitting is also sideways. The sidebar takes the column down to
+        # CONTENT_MIN_WIDTH, narrower than the pages were ever laid out
+        # before it, so Home's action row is checked with every button it
+        # can show: the three stand apart, in order, inside the column,
+        # with the primary one on the column's middle.
+        fitted_state = model.state
+        model.state = replace(
+            fitted_state, section="Home", onboarding_acknowledged=True,
+            outbox_count=1, outbox_summary="Paste may have landed",
+            degraded_issues=(DegradedIssue(
+                "microphone", "Microphone unavailable",
+                "Check the microphone"),))
+        controller.render()
+        root_view.layoutSubtreeIfNeeded()
+        action_row = [controller.dynamic[key] for key in (
+            "review_issue_button", "pause_button", "copy_outbox_button")]
+        action_frames = [in_window(button) for button in action_row]
+        require(
+            not any(bool(button.isHidden()) for button in action_row)
+            and not bool(controller.dynamic["overview_actions"].isHidden())
+            and action_frames[0].origin.x >= minimum_column.origin.x
+            and abs(action_frames[1].origin.x
+                    + action_frames[1].size.width / 2.0
+                    - minimum_column.origin.x
+                    - minimum_column.size.width / 2.0) < 0.5
+            and all(
+                left.origin.x + left.size.width + 4.0 <= right.origin.x
+                for left, right in zip(action_frames, action_frames[1:]))
+            and action_frames[-1].origin.x + action_frames[-1].size.width
+            <= minimum_column.origin.x + minimum_column.size.width,
+            "Home's action buttons stand apart at the window minimum")
+        model.state = fitted_state
+        controller.render()
+        root_view.layoutSubtreeIfNeeded()
         controller.window.setContentSize_(WINDOW_DEFAULT_SIZE)
         root_view.layoutSubtreeIfNeeded()
         default_column = in_window(controller.dynamic["page_column"])
