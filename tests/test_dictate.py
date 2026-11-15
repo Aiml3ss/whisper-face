@@ -3017,7 +3017,7 @@ class RecordingOverlayTests(unittest.TestCase):
 
         return load_definitions(
             "hud_slot_width", "hud_pill_width", "hud_pill_frame", "hud_face_matrix",
-            "hud_face_point", "hud_bar_heights", "hud_edge_alpha",
+            "hud_face_point", "hud_bar_heights",
             "hud_pill_shades", "hud_caption_text",
             assignments=self.CONSTANTS,
             extra={
@@ -3027,7 +3027,6 @@ class RecordingOverlayTests(unittest.TestCase):
                 "Shade": theme.Shade,
                 "LIGHT_PALETTE": theme.LIGHT_PALETTE,
                 "color_token": theme.color_token,
-                "contrast_ratio": theme.contrast_ratio,
                 "palette_for_appearance": theme.palette_for_appearance,
             })
 
@@ -3183,10 +3182,21 @@ class RecordingOverlayTests(unittest.TestCase):
             palette = DARK_PALETTE if dark else LIGHT_PALETTE
             listening = shades("recording", dark)
             working = shades("processing", dark)
-            self.assertEqual(listening["fill"], Shade(palette.surface))
+            # Porcelain in both appearances: the pill is a sticker, not a
+            # piece of window chrome, and it does not go dark with the Mac.
+            self.assertEqual(listening["fill"], Shade(LIGHT_PALETTE.surface))
             self.assertEqual(working["fill"], listening["fill"])
+            self.assertEqual(listening["ink"], Shade(LIGHT_PALETTE.ink))
+            self.assertEqual(listening["soft"], Shade(LIGHT_PALETTE.ink_soft))
             self.assertEqual(listening["level"],
                              color_token("switch_on", dark))
+            # On porcelain the bars take the light appearance's stronger
+            # green under Increase Contrast, whatever the Mac is set to.
+            self.assertEqual(shades("recording", dark, True)["level"],
+                             color_token("switch_on", False, True))
+            self.assertGreaterEqual(contrast_ratio(
+                shades("recording", dark, True)["level"].color,
+                listening["fill"].color), 4.5)
             # The transcript is dimmed while it is tidied; still text.
             self.assertGreaterEqual(contrast_ratio(
                 Shade(working["ink"].color, 0.75).over(
@@ -3200,44 +3210,44 @@ class RecordingOverlayTests(unittest.TestCase):
                 for shade in shades(mode, dark).values():
                     self.assertNotEqual(shade.color, palette.accent)
 
-    def test_dark_fills_get_a_light_edge_and_bright_fills_keep_the_ink(self):
+    def test_the_face_never_sits_on_a_dark_pill(self):
+        from whisper_face_characters import INK
         from whisper_face_theme import color_token, contrast_ratio
 
         ns = self._overlay()
         shades = ns["hud_pill_shades"]
 
-        # A dark pill outlined in the dark ink has no edge at all...
-        dark_fill = DARK_PALETTE.surface
-        self.assertLess(
-            contrast_ratio(DARK_PALETTE.line, dark_fill), 1.5)
-        # ...so it takes the light ink, no stronger than an edge needs.
-        outline = shades("recording", True)["outline"]
-        self.assertEqual(outline.color, DARK_PALETTE.ink)
-        self.assertEqual(
-            outline.alpha,
-            ns["hud_edge_alpha"](DARK_PALETTE.ink, dark_fill))
-        self.assertLess(outline.alpha, 0.5)
-        measured = contrast_ratio(outline.over(dark_fill), dark_fill)
-        self.assertGreaterEqual(measured, 3.0)
-        self.assertLess(measured, 3.3)
-        weaker = type(outline)(outline.color, outline.alpha - 0.01)
-        self.assertLess(
-            contrast_ratio(weaker.over(dark_fill), dark_fill), 3.0)
-        # Increase Contrast gives it the whole light ink.
-        self.assertEqual(
-            shades("recording", True, True)["outline"],
-            color_token("ink_outline", True, True))
-        # Bright fills keep the dark ink in both appearances, with and
-        # without Increase Contrast; a light outline would lose their edge.
-        for mode in ("done", "error"):
-            for contrast in (False, True):
-                self.assertEqual(
-                    shades(mode, True, contrast)["outline"],
-                    color_token("ink_outline", True))
-            self.assertEqual(shades(mode, False)["outline"],
-                             color_token("ink_outline", False))
-        self.assertEqual(shades("recording", False)["outline"],
-                         color_token("ink_outline", False))
+        # The face's sticker outline is ink, and the half of it that lies
+        # over the pill has nothing else to read against. On the dark
+        # surface colour it measures about 1.2:1, which is why no state in
+        # either appearance may fill the pill with it.
+        self.assertLess(contrast_ratio(INK, DARK_PALETTE.surface), 1.5)
+        for mode in ("recording", "processing", "done", "error"):
+            for dark in (False, True):
+                for contrast in (False, True):
+                    with self.subTest(
+                            mode=mode, dark=dark, contrast=contrast):
+                        got = shades(mode, dark, contrast)
+                        self.assertGreaterEqual(
+                            contrast_ratio(INK, got["fill"].color), 4.5)
+                        # A bright fill keeps the dark ink for its outline
+                        # and its hard shadow, in both appearances; Increase
+                        # Contrast may only make that ink darker.
+                        self.assertEqual(got["outline"].alpha, 1.0)
+                        self.assertGreaterEqual(contrast_ratio(
+                            got["outline"].color, got["fill"].color), 4.5)
+                        self.assertEqual(
+                            got["outline"],
+                            color_token("ink_outline", dark,
+                                        contrast and not dark))
+                        self.assertEqual(
+                            got["shadow"], color_token("ink_outline", dark))
+        # One edge rule for the whole pill: nothing computes an opacity for
+        # a light outline here. Controls with a dark fill get theirs from
+        # the window's shared helpers, not from the overlay.
+        self.assertFalse(any(
+            isinstance(node, ast.FunctionDef)
+            and node.name == "hud_edge_alpha" for node in TREE.body))
 
     def test_caption_keeps_its_newest_words(self):
         ns = self._overlay()
@@ -3256,13 +3266,17 @@ class RecordingOverlayTests(unittest.TestCase):
         self.assertTrue(shown.endswith("newest words"))
 
     def test_state_changes_wobble_once_and_reduce_motion_stops_them(self):
-        wobbles = []
+        wobbles, mouths, fed = [], [], []
         ns = load_definitions(
             "HUD",
             extra={
                 "NSObject": object,
                 "LEVELS": [0.4],
-                "STATUS": {"bar": None},
+                "STATUS": {"bar": SimpleNamespace(
+                    setMouthLevel_=lambda level: mouths.append(level),
+                    gui=SimpleNamespace(
+                        feed_level=lambda level, mode: fed.append(
+                            (level, mode))))},
                 "_add_jelly_animation":
                     lambda layer, name: wobbles.append(name),
             })
@@ -3281,6 +3295,9 @@ class RecordingOverlayTests(unittest.TestCase):
         hud.tick_(None)
         self.assertEqual(wobbles, [])
         self.assertEqual(hud.wave.raw, 0.4)
+        # The same tick still feeds the menu-bar mouth and the window face.
+        self.assertEqual(mouths, [0.4, 0.4])
+        self.assertEqual(fed, [(0.4, "recording"), (0.4, "recording")])
         hud.wave.mode = "processing"     # the key was let go
         hud.tick_(None)
         hud.tick_(None)
@@ -3291,7 +3308,10 @@ class RecordingOverlayTests(unittest.TestCase):
 
         visible[0] = False               # dismissed, then shown again
         self.assertEqual(hud.wave.pill_width, 300.0)
+        self.assertEqual(fed[-1], (0.4, "error"))
+        ticks = len(fed)
         hud.tick_(None)
+        self.assertEqual(len(fed), ticks)     # hidden: nothing is fed
         # The next showing starts at its own width instead of easing from
         # the last one's.
         self.assertIsNone(hud.wave.pill_width)
@@ -3358,9 +3378,16 @@ class RecordingOverlayTests(unittest.TestCase):
         self.assertIn("gaze", keywords)
 
     def test_the_overlay_is_drawn_in_srgb_like_the_faces(self):
-        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
-        self.assertNotIn("colorWithCalibratedRed", source)
-        self.assertIn("colorWithSRGBRed_green_blue_alpha_", source)
+        # Only the overlay's own code: the rest of dictate.py may colour
+        # things as it likes.
+        overlay = "\n".join(
+            ast.unparse(node) for node in TREE.body
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef))
+            and (node.name in ("WaveView", "HUD", "_srgb")
+                 or node.name.startswith(("hud_", "_hud_"))))
+        self.assertIn("class WaveView", overlay)
+        self.assertNotIn("colorWithCalibratedRed", overlay)
+        self.assertIn("colorWithSRGBRed_green_blue_alpha_", overlay)
 
     def test_smoke_covers_every_state_and_the_probe_can_ask_for_frames(self):
         ns = load_definitions(

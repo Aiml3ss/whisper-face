@@ -2999,55 +2999,41 @@ def hud_bar_heights(level: float, frame: int) -> tuple[float, ...]:
         for index in range(HUD_LEVEL_BARS))
 
 
-def hud_edge_alpha(ink, fill, floor: float = 3.0) -> float:
-    """The lowest opacity at which ``ink`` drawn on ``fill`` is an edge.
-
-    A dark pill in the dark appearance has no visible outline in the dark
-    ink, so it is outlined in the light ink instead, no stronger than it
-    takes to measure ``floor``:1 against the pill's own fill.
-    """
-    for step in range(1, 101):
-        alpha = step / 100.0
-        if contrast_ratio(Shade(ink, alpha).over(fill), fill) >= floor:
-            return alpha
-    return 1.0
-
-
 def hud_pill_shades(mode: str, dark: bool,
                     increased_contrast: bool = False) -> dict:
     """Every colour the pill is drawn in, for one state and appearance.
 
-    Listening and working sit on the surface colour: porcelain in the light
-    appearance, the dark surface in the dark one. Done is the stage emerald
-    and an error is the theme's coral, in both appearances. A bright fill
-    keeps the dark ink for its outline; a dark fill takes the light ink at
-    the lowest opacity that is still an edge. The hard shadow is always the
-    dark ink. Increase Contrast swaps in each token's stronger value.
+    The pill is a sticker, and a sticker is bright in both appearances:
+    porcelain while listening and working, the stage emerald when done, the
+    theme's coral for an error. It does not go dark with the Mac, because
+    the face leans over it and the face's ink outline is all but invisible
+    on the dark surface colour (about 1.2:1). So the text, the outline and
+    the hard shadow are dark inks everywhere, and the appearance only picks
+    the theme's own shade of the emerald and of the outline ink. Increase
+    Contrast swaps in a token's stronger value where that value is darker.
     """
     palette = palette_for_appearance(dark)
-    shadow = color_token("ink_outline", dark)
     if mode in ("done", "error"):
         fill = (color_token("stage_emerald", dark, increased_contrast)
                 if mode == "done" else Shade(palette.error))
         ink = color_token("on_amber_ink", dark, increased_contrast)
         soft = ink
-        outline = color_token(
-            "ink_outline", dark, increased_contrast and not dark)
     else:
-        fill = Shade(palette.surface)
-        ink = Shade(palette.ink)
-        soft = Shade(palette.ink_soft)
-        outline = color_token("ink_outline", dark, increased_contrast)
-        if dark and not increased_contrast:
-            outline = Shade(
-                palette.ink, hud_edge_alpha(palette.ink, palette.surface))
+        fill = Shade(LIGHT_PALETTE.surface)
+        ink = Shade(LIGHT_PALETTE.ink)
+        soft = Shade(LIGHT_PALETTE.ink_soft)
     return {
         "fill": fill,
-        "outline": outline,
-        "shadow": shadow,
+        # The dark appearance's stronger outline is the light ink, which is
+        # for dark fills; a bright pill keeps the dark one.
+        "outline": color_token(
+            "ink_outline", dark, increased_contrast and not dark),
+        "shadow": color_token("ink_outline", dark),
         "ink": ink,
         "soft": soft,
-        "level": color_token("switch_on", dark, increased_contrast),
+        # The bars sit on porcelain in both appearances, so they take the
+        # light appearance's green and its stronger value.
+        "level": color_token("switch_on", False, increased_contrast),
         # The disc behind the check and the exclamation mark is porcelain in
         # both appearances: it only ever sits on a bright pill.
         "mark": Shade(LIGHT_PALETTE.surface),
@@ -3223,6 +3209,7 @@ class WaveView(NSView):
         self.last_accessibility_value = ""
         self.pill_width = None       # eased toward what the text needs
         self.face_matrix = None      # where the last frame put the face
+        self.text_boxes = {}         # and each piece of its text
         self.fitted_caption = ("", "")
         # Left as None these follow the system and the saved preference. The
         # smoke test pins them so every variant is drawn and checked.
@@ -3352,6 +3339,8 @@ class WaveView(NSView):
             width - 2.0 * HUD_PILL.outline, height - 2.0 * HUD_PILL.outline,
             HUD_PILL.radius - HUD_PILL.outline).addClip()
         headline.drawAtPoint_((text_x, top))
+        self.text_boxes = {"headline": (
+            text_x, top, headline_size.width, headline_size.height)}
         if confidence is not None:
             headline_font = _rounded_font(
                 TYPE_SPECS["hud_headline"].size,
@@ -3359,12 +3348,18 @@ class WaveView(NSView):
             confidence_font = _rounded_font(
                 TYPE_SPECS["hud_confidence"].size,
                 TYPE_SPECS["hud_confidence"].weight)
-            confidence.drawAtPoint_((
+            confidence_at = (
                 text_x + headline_size.width + 8.0,
-                top + headline_font.ascender() - confidence_font.ascender()))
+                top + headline_font.ascender() - confidence_font.ascender())
+            confidence.drawAtPoint_(confidence_at)
+            confidence_size = confidence.size()
+            self.text_boxes["confidence"] = (
+                *confidence_at, confidence_size.width, confidence_size.height)
         if caption:
             caption[0].drawInRect_(NSMakeRect(
                 text_x, top + headline_size.height, HUD_TEXT_MAX, caption[2]))
+            self.text_boxes["caption"] = (
+                text_x, top + headline_size.height, caption[1], caption[2])
         ctx.restoreGraphicsState()
 
         # The selected face, last, so it leans out over the pill's edge.
@@ -13594,6 +13589,28 @@ def _hud_smoke_find(bitmap, shade, left, top, right, bottom, backdrop=None):
     return False
 
 
+def _hud_smoke_inked(bitmap, fill, box, floor=3.0):
+    """Whether anything opaque in a box of the panel, given as ``(x, y,
+    width, height)``, reads against ``fill`` at ``floor``:1 or better.
+
+    Small text is all soft edges, so it is looked for by contrast with the
+    pill instead of by its exact colour.
+    """
+    left, top, width, height = box
+    step = 1.0 / HUD_SMOKE_SCALE
+    y = top
+    while y < top + height:
+        x = left
+        while x < left + width:
+            pixel = _hud_smoke_pixel(bitmap, x, y)
+            if pixel[3] > 0.98 and contrast_ratio(
+                    pixel[:3], fill.color) >= floor:
+                return True
+            x += step
+        y += step
+    return False
+
+
 def _hud_smoke_check_edges(name, bitmap):
     """Nothing reaches the panel's edge, so nothing was clipped by it: not
     the pill, not its shadow, not a face at its loudest squash."""
@@ -13679,6 +13696,38 @@ def _hud_smoke_check_frame(name, wave, bitmap, shades):
             text_x + 60.0, middle + 4.0):
         fail("the headline is missing")
 
+    # The confidence read-out beside it, whenever the state has one.
+    boxes = wave.text_boxes
+    if wave._presentation().confidence and not (
+            "confidence" in boxes and _hud_smoke_inked(
+                bitmap, shades["fill"], boxes["confidence"])):
+        fail("the confidence read-out is missing")
+
+    # The caption under it, on every line it was given. A caption too long
+    # for one line must come out as two, with words on the second: the half
+    # of "Paste unverified — check target; saved in Voice Outbox" that says
+    # what to do is on that line.
+    shown = hud_caption_text(CAPTION["text"])
+    if shown:
+        if "caption" not in boxes:
+            fail("the caption is missing")
+        left, top, wide, high = boxes["caption"]
+        if top < y + HUD_PILL.outline \
+                or top + high > y + height - HUD_PILL.outline:
+            fail("the caption does not fit inside the pill")
+        one_line = _hud_line(shown, "hud_caption", shades["ink"]).size()
+        line = one_line.height
+        if not _hud_smoke_inked(
+                bitmap, shades["fill"], (left, top, wide, line)):
+            fail("the caption is missing")
+        if one_line.width > HUD_TEXT_MAX:
+            if high < 2.0 * line - 1.0:
+                fail("a long caption was not given a second line")
+            if not _hud_smoke_inked(
+                    bitmap, shades["fill"],
+                    (left, top + line + 2.0, wide, line - 4.0)):
+                fail("the caption's second line is missing")
+
     # The face, whichever it is. Walking in from the panel's left edge along
     # the row through the face's middle, the first solid pixel is the outer
     # edge of its sticker outline: ink, and left of the pill. That stretch
@@ -13697,6 +13746,22 @@ def _hud_smoke_check_frame(name, wave, bitmap, shades):
     if not _hud_smoke_matches(
             _hud_smoke_pixel(bitmap, reach + step, row), Shade(INK)):
         fail("the face has no ink outline")
+    # The other half of that outline lies over the pill, and there the pill
+    # is all it has to read against. Walking back from the level slot, the
+    # pill's fill ends at the outline: ink, and ink that can be told from
+    # the fill. A dark pill fails here; the ink on it is about 1.2:1.
+    back = slot_x - step
+    ground = _hud_smoke_pixel(bitmap, back, row)
+    if not _hud_smoke_matches(ground, shades["fill"]):
+        fail("the face reaches the level slot")
+    while back > x and _hud_smoke_matches(
+            _hud_smoke_pixel(bitmap, back, row), shades["fill"]):
+        back -= step
+    if not _hud_smoke_matches(
+            _hud_smoke_pixel(bitmap, back - 2.0 * step, row), Shade(INK)):
+        fail("the face has no ink outline over the pill")
+    if contrast_ratio(INK, ground[:3]) < 3.0:
+        fail("the face's ink outline does not read against the pill")
     if wave.face != "parrot":
         return
 
@@ -13761,6 +13826,10 @@ def run_native_hud_smoke_test() -> dict[str, int]:
             "stable_prefix": stable,
         })
         wave.syncAccessibilityState()
+        if str(wave.accessibilityValue() or "") \
+                != wave._presentation().accessibility_value:
+            raise RuntimeError(
+                f"HUD smoke frame {name}: VoiceOver is not told the state")
         # A few frames, so the mouth has opened to the level it is given.
         for _ in range(4):
             bitmap = _hud_smoke_bitmap(wave)
