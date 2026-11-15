@@ -7038,7 +7038,26 @@ if APPKIT_AVAILABLE:
                 ])
                 panes[name] = pane
 
-            personalize = panes["Personalize"]
+            # One builder per pane, so a pane can be rebuilt without touching
+            # its neighbours. Each returns its controls in Tab order.
+            self.dynamic.update(
+                settings_pane_control=pane_control,
+                settings_panes=panes,
+                settings_key_views={
+                    "Personalize": self._build_settings_personalize(
+                        panes["Personalize"]),
+                    "Controls": self._build_settings_controls(
+                        panes["Controls"]),
+                    "Privacy": self._build_settings_privacy(
+                        panes["Privacy"]),
+                },
+            )
+
+        @objc.python_method
+        def _build_settings_personalize(
+                self, personalize: Any) -> tuple[Any, ...]:
+            """Personalize: the face picker over the personal-data rows."""
+            width = CONTENT_WIDTH
             # The card budgets exactly the rows the picker will wrap to at
             # this width; a stale per-row guess left a dead band under the
             # chips when the picker packed them tighter than the estimate.
@@ -7133,10 +7152,16 @@ if APPKIT_AVAILABLE:
             self._stack(personalize, group, below=face_card, gap=16,
                         height=44.0 * len(rows))
 
+            self.dynamic.update(face_picker=picker)
+            return tuple(personalize_key_views)
+
+        @objc.python_method
+        def _build_settings_controls(self, controls: Any) -> tuple[Any, ...]:
+            """Controls: keys and sounds, then the spoken-correction switch."""
             # ---- Controls: which keys drive dictation, and what it sounds
             # like. Both were fixed constants until now; Option is the macOS
             # accent key, and there was no way at all to mute the app.
-            controls = panes["Controls"]
+            width = CONTENT_WIDTH
             control_rows = (
                 ("hotkey", "settings.controls.hotkey", "changeHotkey:",
                  "settings.controls.action.change",
@@ -7248,7 +7273,19 @@ if APPKIT_AVAILABLE:
             self._stack(controls, correction_group, below=controls_group,
                         gap=16, height=correction_height)
 
-            privacy = panes["Privacy"]
+            self.dynamic.update(
+                sound_theme_control=sound_control,
+                sound_preview_button=sound_preview,
+                sound_theme_detail=sound_detail,
+                self_correction_toggle=correction_switch,
+                self_correction_detail=correction_detail,
+            )
+            return tuple(control_key_views)
+
+        @objc.python_method
+        def _build_settings_privacy(self, privacy: Any) -> tuple[Any, ...]:
+            """Privacy: one switch per thing that may be kept."""
+            width = CONTENT_WIDTH
             privacy_rows = (
                 ("voice_objects", "settings.privacy.voice_objects",
                  "voiceObjectCommandsChanged:",
@@ -7327,30 +7364,18 @@ if APPKIT_AVAILABLE:
                         height=44.0 * len(privacy_rows))
 
             self.dynamic.update(
-                settings_pane_control=pane_control,
-                settings_panes=panes,
-                settings_key_views={
-                    "Personalize": tuple(personalize_key_views),
-                    "Controls": tuple(control_key_views),
-                    "Privacy": (
-                        voice_objects, inspect_voice_objects, flight,
-                        acoustic, browse_recent, recent),
-                },
-                sound_theme_control=sound_control,
-                sound_preview_button=sound_preview,
-                sound_theme_detail=sound_detail,
                 recent_dictations_toggle=recent,
                 recent_dictations_detail=recent_detail,
-                self_correction_toggle=correction_switch,
-                self_correction_detail=correction_detail,
                 recent_dictations_browse=browse_recent,
-                face_picker=picker,
                 flight_toggle=flight,
                 acoustic_time_machine_toggle=acoustic,
                 voice_object_commands_toggle=voice_objects,
                 voice_object_commands_status=voice_object_status,
                 voice_object_inspect_button=inspect_voice_objects,
             )
+            return (
+                voice_objects, inspect_voice_objects, flight,
+                acoustic, browse_recent, recent)
 
         def _build_advanced(self, page: Any) -> None:
             width = CONTENT_WIDTH
@@ -7702,6 +7727,24 @@ if APPKIT_AVAILABLE:
             # Jelly controls read this gate on every press so Reduce Motion
             # silences the springs exactly like the HUD path.
             _REDUCE_MOTION = bool(state.prefers_reduced_motion)
+            # One method per surface, always in this order. The shell goes
+            # first because it resolves the appearance every other surface
+            # reads back as ``self._dark``; the finish goes last because it
+            # depends on what the surfaces enabled and hid.
+            self._render_shell(state)
+            self._render_home(state)
+            self._render_onboarding(state)
+            self._render_settings_shell(state)
+            self._render_settings_personalize(state)
+            self._render_settings_controls(state)
+            self._render_settings_privacy(state)
+            self._render_advanced(state)
+            self._render_notices(state)
+            self._render_finish(state)
+
+        @objc.python_method
+        def _render_shell(self, state: GUIState) -> None:
+            """Window chrome: palette, visible page, header face."""
             self._apply_window_theme(state)
             for section, page in self.pages.items():
                 page.setHidden_(section != state.section)
@@ -7711,6 +7754,12 @@ if APPKIT_AVAILABLE:
             sync_accessibility(
                 self.dynamic["window_face"], state.status_title,
                 label=face_name)
+            self._animate_section_change(state)
+
+        @objc.python_method
+        def _render_home(self, state: GUIState) -> None:
+            """Home: the living face, status, stats and the last dictation."""
+            face_name = self._l(f"settings.face.{state.face}")
             face_view = self.dynamic["home_face_view"]
             face_view.setFace_(state.face)
             face_view.setReduceMotion_(bool(state.prefers_reduced_motion))
@@ -7723,7 +7772,6 @@ if APPKIT_AVAILABLE:
             }.get(state.status_phase, "idle"))
             sync_accessibility(
                 face_view, state.status_title, label=face_name)
-            self._animate_section_change(state)
 
             phase_keys = {
                 "ready": "overview.phase.ready",
@@ -7826,6 +7874,54 @@ if APPKIT_AVAILABLE:
                     label=self._l(label_key),
                 )
 
+            result = state.last_result
+            self.dynamic["result_inspect_button"].setEnabled_(result.available)
+            if result.available:
+                self.dynamic["result_summary"].setStringValue_(result.summary)
+                self.dynamic["result_engine"].setStringValue_(
+                    self._l("results.engine.session", engine=result.engine))
+            else:
+                # The friendly empty copy moves onto the compact card now
+                # that the playful full-page empty state is gone.
+                self.dynamic["result_summary"].setStringValue_(
+                    self._l("results.empty.title"))
+                self.dynamic["result_engine"].setStringValue_(
+                    self._l("results.empty.detail"))
+            self.dynamic["result_mode"].setStringValue_(result.mode)
+            self._set_pill_tone(self.dynamic["result_mode"], "good", dark)
+            self._fit_pill(self.dynamic["result_mode"])
+            if not result.acoustic_replay_enabled:
+                replay_copy = self._l("results.audio.off")
+            elif result.retained_span_count == 0:
+                replay_copy = self._l("results.audio.empty")
+            elif result.retained_span_count == 1:
+                replay_copy = self._l("results.audio.available.one")
+            else:
+                replay_copy = self._l(
+                    "results.audio.available.many",
+                    count=result.retained_span_count)
+            self.dynamic["result_audio"].setStringValue_(replay_copy)
+            has_replay = (
+                result.acoustic_replay_enabled
+                and result.retained_span_count > 0)
+            self.dynamic["result_play_audio_button"].setEnabled_(has_replay)
+            self.dynamic["result_clear_audio_button"].setEnabled_(has_replay)
+            for key, label_key in (
+                ("result_summary", "results.accessibility.summary"),
+                ("result_engine", "results.accessibility.engine"),
+                ("result_mode", "results.accessibility.mode"),
+                ("result_audio", "results.accessibility.audio"),
+            ):
+                sync_accessibility(
+                    self.dynamic[key],
+                    str(self.dynamic[key].stringValue()),
+                    label=self._l(label_key),
+                )
+
+        @objc.python_method
+        def _render_onboarding(self, state: GUIState) -> None:
+            """First-run poster, and hiding Home while it is up."""
+            face_name = self._l(f"settings.face.{state.face}")
             presentation = onboarding_presentation(
                 state.onboarding_steps,
                 acknowledged=state.onboarding_acknowledged,
@@ -7917,53 +8013,27 @@ if APPKIT_AVAILABLE:
             self._animate_onboarding_face(presentation)
             self._animate_onboarding_steps(state)
 
-            result = state.last_result
-            self.dynamic["result_inspect_button"].setEnabled_(result.available)
-            if result.available:
-                self.dynamic["result_summary"].setStringValue_(result.summary)
-                self.dynamic["result_engine"].setStringValue_(
-                    self._l("results.engine.session", engine=result.engine))
-            else:
-                # The friendly empty copy moves onto the compact card now
-                # that the playful full-page empty state is gone.
-                self.dynamic["result_summary"].setStringValue_(
-                    self._l("results.empty.title"))
-                self.dynamic["result_engine"].setStringValue_(
-                    self._l("results.empty.detail"))
-            self.dynamic["result_mode"].setStringValue_(result.mode)
-            self._set_pill_tone(self.dynamic["result_mode"], "good", dark)
-            self._fit_pill(self.dynamic["result_mode"])
-            if not result.acoustic_replay_enabled:
-                replay_copy = self._l("results.audio.off")
-            elif result.retained_span_count == 0:
-                replay_copy = self._l("results.audio.empty")
-            elif result.retained_span_count == 1:
-                replay_copy = self._l("results.audio.available.one")
-            else:
-                replay_copy = self._l(
-                    "results.audio.available.many",
-                    count=result.retained_span_count)
-            self.dynamic["result_audio"].setStringValue_(replay_copy)
-            has_replay = (
-                result.acoustic_replay_enabled
-                and result.retained_span_count > 0)
-            self.dynamic["result_play_audio_button"].setEnabled_(has_replay)
-            self.dynamic["result_clear_audio_button"].setEnabled_(has_replay)
-            for key, label_key in (
-                ("result_summary", "results.accessibility.summary"),
-                ("result_engine", "results.accessibility.engine"),
-                ("result_mode", "results.accessibility.mode"),
-                ("result_audio", "results.accessibility.audio"),
-            ):
-                sync_accessibility(
-                    self.dynamic[key],
-                    str(self.dynamic[key].stringValue()),
-                    label=self._l(label_key),
-                )
+        @objc.python_method
+        def _render_settings_shell(self, state: GUIState) -> None:
+            """Settings: which pane is showing."""
             self.dynamic["settings_pane_control"].setSelectedSegment_(
                 SETTINGS_PANES.index(state.settings_pane))
             for pane, view in self.dynamic["settings_panes"].items():
                 view.setHidden_(pane != state.settings_pane)
+
+        @objc.python_method
+        def _render_setting_summaries(
+                self, summaries: Mapping[str, str]) -> None:
+            """Write the one-line summaries under settings rows."""
+            for key, value in summaries.items():
+                set_accessible_text(
+                    self.dynamic[f"settings_{key}_detail"], value,
+                    label=self._l(
+                        f"settings.accessibility.{key}_summary.label"))
+
+        @objc.python_method
+        def _render_settings_personalize(self, state: GUIState) -> None:
+            """Settings, Personalize: face, language and personal data."""
             settings = state.settings
             # An empty personalization row is an invitation, not a zero: the
             # count only earns the line once there is something to count.
@@ -8001,23 +8071,8 @@ if APPKIT_AVAILABLE:
                     "settings.personalize.corrections.empty"),
                 "keywords": self._l(
                     "settings.personalize.keywords.detail"),
-                # Every reference to the shortcut reads the key that is
-                # actually bound, not the key that used to be hardcoded.
-                "modes": self._l(
-                    "settings.personalize.modes.detail",
-                    hotkey=state.hotkey_label),
-                "hotkey": hotkey_row_detail(state, locale=self.view_model.locale),
-                "undo_hotkey": (
-                    self._l("settings.controls.undo.detail",
-                            hotkey=state.undo_hotkey_label)
-                    if state.undo_hotkey_label
-                    else self._l("settings.controls.undo.unset")),
             }
-            for key, value in setting_summaries.items():
-                set_accessible_text(
-                    self.dynamic[f"settings_{key}_detail"], value,
-                    label=self._l(
-                        f"settings.accessibility.{key}_summary.label"))
+            self._render_setting_summaries(setting_summaries)
             # One quiet line, stated the same way every time: English gets
             # the fast native recognizer, everything else gets Whisper.
             language_name = self._l(f"settings.language.{state.language}")
@@ -8034,6 +8089,37 @@ if APPKIT_AVAILABLE:
             sync_accessibility(
                 self.dynamic["settings_language_popup"], language_name,
                 label=self._l("settings.accessibility.language.label"))
+            self.dynamic["settings_tones_button"].setEnabled_(
+                bool(settings.app_tones))
+            self.dynamic["settings_snippets_button"].setEnabled_(True)
+            self.dynamic["settings_corrections_button"].setEnabled_(
+                bool(settings.corrections))
+            self.dynamic["face_picker"].setSelectedSegment_(FACES.index(state.face))
+            sync_accessibility(
+                self.dynamic["face_picker"],
+                self._l(f"settings.face.{state.face}"),
+                label=self._l(
+                    "settings.accessibility.face.label"),
+            )
+
+        @objc.python_method
+        def _render_settings_controls(self, state: GUIState) -> None:
+            """Settings, Controls: keys, sounds and spoken corrections."""
+            settings = state.settings
+            setting_summaries = {
+                # Every reference to the shortcut reads the key that is
+                # actually bound, not the key that used to be hardcoded.
+                "modes": self._l(
+                    "settings.personalize.modes.detail",
+                    hotkey=state.hotkey_label),
+                "hotkey": hotkey_row_detail(state, locale=self.view_model.locale),
+                "undo_hotkey": (
+                    self._l("settings.controls.undo.detail",
+                            hotkey=state.undo_hotkey_label)
+                    if state.undo_hotkey_label
+                    else self._l("settings.controls.undo.unset")),
+            }
+            self._render_setting_summaries(setting_summaries)
             set_accessible_text(
                 self.dynamic["sound_theme_detail"],
                 self._l(f"settings.controls.sound.detail.{state.sound_theme}"),
@@ -8047,6 +8133,25 @@ if APPKIT_AVAILABLE:
             # Nothing to preview when the answer is silence.
             self.dynamic["sound_preview_button"].setEnabled_(
                 state.sound_theme != "silent")
+            self_correction = settings.self_correction
+            self.dynamic["self_correction_toggle"].setState_(
+                NSControlStateValueOn if self_correction
+                else NSControlStateValueOff)
+            set_accessible_text(
+                self.dynamic["self_correction_detail"],
+                self._l("settings.controls.self_correction.on"
+                        if self_correction
+                        else "settings.controls.self_correction.off"),
+                label=self._l("settings.accessibility.self_correction.label"))
+            sync_accessibility(
+                self.dynamic["self_correction_toggle"],
+                self._l("settings.state.enabled") if self_correction
+                else self._l("settings.state.disabled"),
+                label=self._l("settings.accessibility.self_correction.label"))
+
+        @objc.python_method
+        def _render_settings_privacy(self, state: GUIState) -> None:
+            """Settings, Privacy: what is kept, and for how long."""
             self.dynamic["recent_dictations_toggle"].setState_(
                 NSControlStateValueOn if state.recent_dictations
                 else NSControlStateValueOff)
@@ -8064,33 +8169,6 @@ if APPKIT_AVAILABLE:
                 label=self._l("settings.accessibility.recent.label"))
             self.dynamic["recent_dictations_browse"].setEnabled_(
                 state.recent_dictations)
-            self_correction = settings.self_correction
-            self.dynamic["self_correction_toggle"].setState_(
-                NSControlStateValueOn if self_correction
-                else NSControlStateValueOff)
-            set_accessible_text(
-                self.dynamic["self_correction_detail"],
-                self._l("settings.controls.self_correction.on"
-                        if self_correction
-                        else "settings.controls.self_correction.off"),
-                label=self._l("settings.accessibility.self_correction.label"))
-            sync_accessibility(
-                self.dynamic["self_correction_toggle"],
-                self._l("settings.state.enabled") if self_correction
-                else self._l("settings.state.disabled"),
-                label=self._l("settings.accessibility.self_correction.label"))
-            self.dynamic["settings_tones_button"].setEnabled_(
-                bool(settings.app_tones))
-            self.dynamic["settings_snippets_button"].setEnabled_(True)
-            self.dynamic["settings_corrections_button"].setEnabled_(
-                bool(settings.corrections))
-            self.dynamic["face_picker"].setSelectedSegment_(FACES.index(state.face))
-            sync_accessibility(
-                self.dynamic["face_picker"],
-                self._l(f"settings.face.{state.face}"),
-                label=self._l(
-                    "settings.accessibility.face.label"),
-            )
             self.dynamic["flight_toggle"].setState_(
                 NSControlStateValueOn if state.flight_recorder
                 else NSControlStateValueOff)
@@ -8126,6 +8204,10 @@ if APPKIT_AVAILABLE:
                 label=self._l("settings.accessibility.voice_objects.label"),
             )
 
+        @objc.python_method
+        def _render_advanced(self, state: GUIState) -> None:
+            """Advanced: models, selective re-listen and diagnostics."""
+            dark = getattr(self, "_dark", False)
             for index, (row, name, detail, status_label) in enumerate(
                     self.dynamic["model_rows"]):
                 if index < len(state.models):
@@ -8232,7 +8314,6 @@ if APPKIT_AVAILABLE:
                     "diagnostics.issue", title=first_issue.title,
                     detail=first_issue.detail)
                 if first_issue else self._l("diagnostics.ready"))
-            self.dynamic["notice"].setStringValue_(state.notice)
             for key, label_key in (
                 ("diag_service", "diagnostics.accessibility.service"),
                 ("diag_microphone", "diagnostics.accessibility.microphone"),
@@ -8242,13 +8323,23 @@ if APPKIT_AVAILABLE:
                 ("diag_version", "diagnostics.accessibility.build"),
                 ("verification", "diagnostics.accessibility.verification"),
                 ("diag_guidance", "diagnostics.accessibility.guidance"),
-                ("notice", "diagnostics.accessibility.notice"),
             ):
                 sync_accessibility(
                     self.dynamic[key],
                     str(self.dynamic[key].stringValue()),
                     label=self._l(label_key),
                 )
+
+        @objc.python_method
+        def _render_notices(self, state: GUIState) -> None:
+            """The notice line under every page."""
+            dark = getattr(self, "_dark", False)
+            self.dynamic["notice"].setStringValue_(state.notice)
+            sync_accessibility(
+                self.dynamic["notice"],
+                str(self.dynamic["notice"].stringValue()),
+                label=self._l("diagnostics.accessibility.notice"),
+            )
             notice_palette = palette_for_appearance(dark)
             notice_color = (
                 _error_text_color(dark)
@@ -8258,6 +8349,11 @@ if APPKIT_AVAILABLE:
                 else _theme_color(notice_palette.ink_soft))
             self.dynamic["notice"].setTextColor_(notice_color)
             self._animate_notice(state)
+
+        @objc.python_method
+        def _render_finish(self, state: GUIState) -> None:
+            """What depends on every surface having rendered."""
+            dark = getattr(self, "_dark", False)
             self._restyle_secondary_buttons(dark)
             self._sync_face_clock()
             self._configure_key_view_loop(state)
