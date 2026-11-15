@@ -13792,8 +13792,16 @@ def _hud_smoke_check_frame(name, wave, bitmap, shades):
         fail("the face is not drawn inside its outline")
 
 
-def run_native_hud_smoke_test() -> dict[str, int]:
-    """Exercise Phase 1 AppKit surfaces without showing UI or reading state."""
+def run_native_hud_smoke_test(*, construction_only: bool = False
+                              ) -> dict[str, int]:
+    """Exercise Phase 1 AppKit surfaces without showing UI or reading state.
+
+    ``construction_only`` is what an install runs: build the overlay and
+    the menu-bar face and draw every state, one of them in the dark
+    appearance too. The
+    walk without it is the release gate's, and adds Increase Contrast,
+    Reduce Motion and every face at its loudest.
+    """
     if not IS_MACOS:
         raise RuntimeError("native HUD smoke requires macOS")
 
@@ -13866,12 +13874,17 @@ def run_native_hud_smoke_test() -> dict[str, int]:
         _hud_smoke_bitmap(hud.wave)
 
         for dark in (False, True):
-            for contrast in (False, True):
+            for contrast in ((False,) if construction_only
+                             else (False, True)):
                 suffix = ("dark" if dark else "light") + (
                     "-contrast" if contrast else "")
                 for state in HUD_SMOKE_STATES:
                     draw(f"state-{state[0]}-{suffix}", *state[1:],
                          dark=dark, contrast=contrast)
+                    if construction_only and dark:
+                        break
+            if construction_only:
+                continue
             # Reduce Motion: no level, no squash, still every part drawn.
             suffix = "dark" if dark else "light"
             for state in HUD_SMOKE_STATES[:1] + HUD_SMOKE_STATES[4:5]:
@@ -14324,10 +14337,58 @@ if __name__ == "__main__":
             print("Whisper Face native GUI smoke skipped on non-macOS.")
         else:
             try:
-                from whisper_face_gui import run_native_appkit_smoke
+                from whisper_face_gui import (
+                    INSTALLER_SMOKE_CPU_SHARE,
+                    INSTALLER_SMOKE_TIMEOUT_SECONDS,
+                    run_native_appkit_smoke,
+                )
 
-                hud_result = run_native_hud_smoke_test()
-                result = run_native_appkit_smoke()
+                # What an install runs, and all it runs: can AppKit build
+                # and draw the overlay, the menu-bar face and the window
+                # on this Mac.
+                imported = time.process_time()
+                hud_result = run_native_hud_smoke_test(construction_only=True)
+                result = run_native_appkit_smoke(construction_only=True)
+                if "--construction-only" not in sys.argv:
+                    # The release gate: first hold the install's check to
+                    # its budget, then walk the whole look. Processor
+                    # time, counted from the start of the process, so a
+                    # busy gate machine cannot fail it and a slow import
+                    # cannot hide in it.
+                    used = time.process_time()
+                    allowed = (INSTALLER_SMOKE_TIMEOUT_SECONDS
+                               * INSTALLER_SMOKE_CPU_SHARE)
+                    # Counted work first, which no machine changes: each
+                    # overlay state once and one of them again in the dark
+                    # appearance; setup, the pages and Home once each and
+                    # Home again in the dark appearance.
+                    surfaces = result["sidebar_rows"] + 2
+                    if (hud_result["frames"] != hud_result["states"] + 1
+                            or result.get("drawn") != surfaces
+                            or not 0 < result.get("renders", 0)
+                            <= 3 * surfaces):
+                        print(
+                            "native GUI smoke: the installer's construction "
+                            "check draws more than its list: "
+                            f"{hud_result['frames']} overlay frames, "
+                            f"{result.get('drawn')} window surfaces, "
+                            f"{result.get('renders')} renders.",
+                            file=sys.stderr)
+                        raise RuntimeError("construction check grew")
+                    if used > allowed or used - imported > imported:
+                        print(
+                            "native GUI smoke: the installer's construction "
+                            f"check used {used:.1f} s of processor time "
+                            f"({used - imported:.1f} s after the "
+                            f"{imported:.1f} s import). It may use "
+                            f"{allowed:.1f} s, and no more after the import "
+                            "than the import itself: setup.sh stops it at "
+                            f"{INSTALLER_SMOKE_TIMEOUT_SECONDS} s on Macs "
+                            "several times slower than this one.",
+                            file=sys.stderr)
+                        raise RuntimeError("construction check over budget")
+                    hud_result = run_native_hud_smoke_test()
+                    result = run_native_appkit_smoke()
             except Exception:
                 print("Whisper Face native GUI smoke failed.", file=sys.stderr)
                 raise SystemExit(1)

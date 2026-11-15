@@ -1698,10 +1698,56 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn(command, self.shell)
         self.assertIn(command, workflow)
         self.assertNotIn(command, self.powershell)
-        self.assertIn("run_with_timeout 30", self.shell)
         self.assertIn('if [ "$MODE" = "full" ]', self.shell)
-        self.assertIn("subprocess.run(sys.argv[1:], check=True, timeout=30)",
-                      workflow)
+        # An install runs the construction check alone, inside the budget
+        # the smoke holds itself to. The release gate runs the whole walk,
+        # which takes several times longer, under a wider bound of its own.
+        installed = re.search(
+            r'run_with_timeout (\d+) "\$uv_bin" run --locked \\\n'
+            r'\s+--script "\$DIR/dictate\.py" --native-gui-smoke-test \\\n'
+            r'\s+--construction-only >/dev/null', self.shell)
+        self.assertIsNotNone(
+            installed, "setup.sh runs the construction check, bounded")
+        budget = re.search(
+            r"^INSTALLER_SMOKE_TIMEOUT_SECONDS = (\d+)$", gui, re.MULTILINE)
+        share = re.search(
+            r"^INSTALLER_SMOKE_CPU_SHARE = (0\.\d+)$", gui, re.MULTILINE)
+        self.assertIsNotNone(budget)
+        self.assertIsNotNone(share)
+        self.assertEqual(installed.group(1), budget.group(1))
+        # On the gate's Mac the check gets 7.5 s of processor time at most.
+        self.assertLessEqual(
+            int(budget.group(1)) * float(share.group(1)), 7.5)
+        self.assertEqual(self.shell.count("--native-gui-smoke-test"), 1)
+        gate = self.script.split('elif "--native-gui-smoke-test" in sys.argv:')
+        self.assertEqual(len(gate), 2)
+        gate = gate[1].split('elif "--preload-models" in sys.argv:')[0]
+        construction = gate.index(
+            "run_native_appkit_smoke(construction_only=True)")
+        held = gate.index(
+            "INSTALLER_SMOKE_TIMEOUT_SECONDS\n"
+            "                               * INSTALLER_SMOKE_CPU_SHARE")
+        whole = gate.index("run_native_appkit_smoke()")
+        self.assertIn(
+            "run_native_hud_smoke_test(construction_only=True)",
+            gate[:construction])
+        self.assertIn("used - imported > imported", gate[held:whole])
+        self.assertIn(
+            'hud_result["frames"] != hud_result["states"] + 1',
+            gate[held:whole])
+        self.assertIn('result.get("drawn") != surfaces', gate[held:whole])
+        self.assertEqual(gate[held:whole].count("raise RuntimeError"), 2)
+        self.assertLess(
+            gate.index('"--construction-only" not in sys.argv'), held,
+            "only the gate's run goes on to the whole walk")
+        self.assertLess(construction, held)
+        self.assertLess(held, whole)
+        self.assertIn(
+            "subprocess.run(sys.argv[1:], check=True, timeout=120)' \\\n"
+            "            uv run --locked --script dictate.py "
+            "--native-gui-smoke-test\n",
+            workflow)
+        self.assertNotIn("--construction-only", workflow)
         self.assertIn("native_appkit_smoke_contract", gui)
         self.assertIn("allowed_side_effects: tuple[str, ...] = ()", gui)
         self.assertIn("run_native_hud_smoke_test", self.script)

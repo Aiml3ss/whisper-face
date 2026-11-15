@@ -12256,12 +12256,31 @@ if APPKIT_AVAILABLE:
             face_view.setLevel_mode_(level, mode)
 
 
-def run_native_appkit_smoke() -> Mapping[str, int]:
+# What ``setup.sh`` allows its construction check, and the share of it the
+# check may use on the Mac that runs the release gate. An install runs the
+# check while the dictation service is starting, on Macs several times
+# slower than a developer's (confined to an M4 Pro's efficiency cores it
+# takes about six times as long), so the gate holds it to an eighth.
+# ``tests/test_installers.py`` keeps the first number equal to the
+# installer's.
+INSTALLER_SMOKE_TIMEOUT_SECONDS = 60
+INSTALLER_SMOKE_CPU_SHARE = 0.125
+
+
+def run_native_appkit_smoke(*, construction_only: bool = False
+                            ) -> Mapping[str, int]:
     """Construct and exercise the native UI without touching user state.
 
     This deliberately does not call ``show``, run an event loop, query
     permissions, load models/audio/services, read private settings, or use
     ``NSUserDefaults``. The installer invokes it only on macOS.
+
+    ``construction_only`` is what an install runs: build the window, draw
+    setup, every page and Home, Home in both appearances, and close. It asks
+    whether AppKit can build and draw the window on this Mac. The walk
+    without it is the release gate's: every measurement of the look, the
+    keyboard and what VoiceOver reads, none of which differs from one Mac
+    to the next.
     """
 
     if not APPKIT_AVAILABLE:
@@ -12748,6 +12767,71 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             finally:
                 for holder in hidden:
                     holder.setHidden_(True)
+
+        if construction_only:
+            root = window.contentView()
+
+            drawn_surfaces: list[str] = []
+
+            def draw(what: str, *appearances: Any) -> None:
+                for name in appearances or (NSAppearanceNameAqua,):
+                    drawn_surfaces.append(what)
+                    window.setAppearance_(
+                        NSAppearance.appearanceNamed_(name))
+                    controller.render()
+                    root.layoutSubtreeIfNeeded()
+                    drawn = rendered(root)
+                    require(
+                        drawn is not None and int(drawn.pixelsWide()) > 0,
+                        f"construction: {what} draws")
+
+            require(
+                model.state.section == "Home" and controller.setup_mode,
+                "construction: a first run opens in setup")
+            draw("first-run setup")
+            for index in range(1, len(SIDEBAR_ROWS)):
+                controller._select_sidebar_row(index)
+                require(
+                    model.state.section != "Home"
+                    and not controller.setup_mode,
+                    f"construction: page {index} shows")
+                draw(f"page {index}")
+            controller._select_sidebar_row(0)
+            # Setup, finished: permissions, the key tried, the models
+            # ready, a first dictation, and the last step acknowledged.
+            runtime.update(
+                service_status="Running",
+                microphone_status="Ready",
+                accessibility_status="Granted",
+                input_monitoring_status="Granted",
+                capture_state="Listening",
+            )
+            model.refresh()
+            runtime["capture_state"] = "Ready"
+            runtime["models"][0].update(
+                install_state="installed", warm=True, status="RESOLVED")
+            model.refresh()
+            runtime["last_word_count"] = 4
+            model.refresh()
+            controller.render()
+            controller.continueSetup_(None)
+            require(
+                model.state.section == "Home" and not controller.setup_mode
+                and not bool(
+                    controller.dynamic["home_cluster"].isHidden()),
+                "construction: Home shows once setup is finished")
+            draw("Home", NSAppearanceNameAqua, NSAppearanceNameDarkAqua)
+            window.setAppearance_(None)
+            controller.window.close()
+            return {
+                "sections": len(SECTIONS),
+                "sidebar_rows": len(controller.sidebar_rows),
+                "settings_panes": len(SETTINGS_PANES),
+                "onboarding_steps": len(model.state.onboarding_steps),
+                # What the check cost, for the release gate to hold it to.
+                "drawn": len(drawn_surfaces),
+                "renders": controller.renders,
+            }
 
         # ---- First run: the render itself puts the window in setup mode,
         # because setup is what Home is showing.
