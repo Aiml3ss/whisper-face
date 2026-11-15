@@ -23,6 +23,12 @@ The release produces:
   artifact size and SHA-256, and rollback target;
 - `SHA256SUMS`, covering the bundle and the update manifest.
 
+The shallow Git metadata holds the commit's objects loose, never as a pack, for
+the reason [the Mac runbook](macos-release.md) gives: a fetched pack's bytes
+vary between builds, and `PACKAGE-CONTENTS.json` hashes `.git` along with
+everything else. Two builds of one revision on one build host therefore record
+the same digest; a different host's zlib may yield a different one.
+
 ## What the artifact proves, and what it does not
 
 | Claim | Held by |
