@@ -636,7 +636,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.controls.self_correction": "“Actually” corrections",
         "settings.controls.self_correction.off": "Off. When on, “Meet at 3 pm, actually 4 pm” types “Meet at 4 pm” for numbers, days, months\u00a0and\u00a0times.",
         "settings.controls.self_correction.on": "On. “Meet at 3 pm, actually 4 pm” types “Meet at 4 pm” for numbers, days, months\u00a0and\u00a0times.",
-        "settings.controls.self_correction.cost": "A real contrast changes too: “I thought it was Tuesday, actually Wednesday” loses “Tuesday”.",
+        "settings.controls.self_correction.cost": "With “Actually” on, a real contrast changes too: “I thought it was Tuesday, actually Wednesday” loses “Tuesday”.",
         "settings.controls.action.change": "Change…",
         "settings.controls.action.preview": "Preview",
         "settings.dialog.hotkey.title": "Choose your capture key",
