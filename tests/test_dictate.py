@@ -3171,13 +3171,52 @@ class WhisperFaceThemeTests(unittest.TestCase):
             SURFACE_SPECS["work"].border_width,
         )
 
+    HUD_TYPE_ROLES = {"hud_eyebrow", "hud_confidence", "hud_caption"}
+    # Size, weight, rounded, tabular for every window role of the new look.
+    WINDOW_TYPE_ROLES = {
+        "page_title": (17.0, 0.40, True, False),
+        "section_header": (13.0, 0.40, True, False),
+        "bubble_headline": (27.0, 0.56, True, False),
+        "stat_number": (25.0, 0.56, True, True),
+        "stat_label": (12.5, 0.30, False, False),
+        "chunky_button": (14.0, 0.56, True, False),
+        "chunky_button_small": (13.0, 0.56, True, False),
+        "key_cap": (12.5, 0.40, True, False),
+        "row_title": (13.0, 0.30, False, False),
+        "row_caption": (12.0, 0.0, False, False),
+    }
+
     def test_hud_type_tokens_use_compact_rounded_chrome_sizes(self):
+        # The key set grew with the new look's window roles; the HUD roles
+        # and what is asserted about them are unchanged.
         self.assertEqual(
             set(TYPE_SPECS),
-            {"hud_eyebrow", "hud_confidence", "hud_caption"},
+            self.HUD_TYPE_ROLES | set(self.WINDOW_TYPE_ROLES),
         )
         self.assertLess(TYPE_SPECS["hud_eyebrow"].size, 10.0)
         self.assertLessEqual(TYPE_SPECS["hud_caption"].size, 12.0)
+        for role in self.HUD_TYPE_ROLES:
+            # The HUD renderer draws these rounded without asking.
+            self.assertTrue(TYPE_SPECS[role].rounded, role)
+            self.assertFalse(TYPE_SPECS[role].tabular, role)
+
+    def test_window_type_roles_keep_rounded_for_the_brand_voice(self):
+        for role, expected in self.WINDOW_TYPE_ROLES.items():
+            spec = TYPE_SPECS[role]
+            self.assertEqual(
+                (spec.size, spec.weight, spec.rounded, spec.tabular),
+                expected, role)
+            # Nothing a person reads in the window goes under 10 points.
+            self.assertGreaterEqual(spec.size, 10.0, role)
+        # Rows are SF Pro; only brand moments speak in the rounded design.
+        self.assertEqual(
+            {role for role in self.WINDOW_TYPE_ROLES
+             if not TYPE_SPECS[role].rounded},
+            {"row_title", "row_caption", "stat_label"})
+        # A stat that changes must not jiggle its neighbours.
+        self.assertEqual(
+            {role for role in TYPE_SPECS if TYPE_SPECS[role].tabular},
+            {"stat_number"})
 
     def test_hud_copy_distinguishes_stable_listening_and_processing(self):
         listening = hud_presentation(
@@ -3226,6 +3265,228 @@ class WhisperFaceThemeTests(unittest.TestCase):
             for surface in (LIGHT_PALETTE.bg, LIGHT_PALETTE.surface):
                 self.assertGreaterEqual(
                     contrast_ratio(ink, surface), 4.5, f"{ink} on {surface}")
+
+    # ---- The new look's vocabulary ------------------------------------
+
+    @staticmethod
+    def _hex(value):
+        return tuple(int(value[i:i + 2], 16) / 255.0 for i in (1, 3, 5))
+
+    def test_new_look_color_tokens_are_named_once_with_the_agreed_values(
+            self):
+        from whisper_face_theme import (
+            COLOR_TOKENS, STICKER_INK, STICKER_TINTS, color_token)
+
+        self.assertEqual(set(COLOR_TOKENS), {
+            "ink_outline", "hairline", "stage_amber", "stage_emerald",
+            "switch_on", "brand_ink", "sticker_teal", "sticker_butter",
+            "sticker_rose", "sticker_ink", "on_amber_ink", "chip_rest",
+            "sidebar_selection",
+        })
+        for name, light, dark in (
+                ("stage_amber", "#F6BE55", "#D9A23F"),
+                ("stage_emerald", "#43C79C", "#2FA37E"),
+                ("switch_on", "#22B07F", "#22B07F"),
+                ("brand_ink", "#0B7A57", "#7FE3C2"),
+                ("sticker_teal", "#BFF3E7", "#2F5E55"),
+                ("sticker_butter", "#FBE3B0", "#5E5132"),
+                ("sticker_rose", "#F8C4B8", "#62423B")):
+            with self.subTest(token=name):
+                for is_dark, value in ((False, light), (True, dark)):
+                    shade = color_token(name, is_dark)
+                    self.assertEqual(shade.color, self._hex(value))
+                    self.assertEqual(shade.alpha, 1.0)
+        # The outline is the palette's own line, never a second ink.
+        self.assertEqual(
+            color_token("ink_outline", False).color, LIGHT_PALETTE.line)
+        self.assertEqual(
+            color_token("ink_outline", True).color, DARK_PALETTE.line)
+        hairline_light = color_token("hairline", False)
+        hairline_dark = color_token("hairline", True)
+        self.assertEqual(
+            (hairline_light.color, hairline_light.alpha),
+            (LIGHT_PALETTE.line, 0.15))
+        self.assertEqual(
+            (hairline_dark.color, hairline_dark.alpha),
+            (DARK_PALETTE.ink, 0.13))
+        for dark in (False, True):
+            selection = color_token("sidebar_selection", dark)
+            self.assertEqual(
+                (selection.color, selection.alpha),
+                (LIGHT_PALETTE.brand, 0.38))
+        self.assertEqual(STICKER_INK, self._hex("#2A211C"))
+        self.assertEqual(
+            STICKER_TINTS,
+            ("sticker_teal", "sticker_butter", "sticker_rose"))
+        # A token with no stronger value answers Increase Contrast with
+        # its ordinary one rather than with nothing.
+        self.assertEqual(
+            color_token("stage_amber", False, True),
+            color_token("stage_amber", False))
+
+    def test_every_face_has_a_stage_that_sets_it_off(self):
+        from whisper_face_characters import FACE_ORDER
+        from whisper_face_theme import (
+            COLOR_TOKENS, STAGE_FOR_FACE, stage_token_for_face)
+
+        self.assertEqual(set(STAGE_FOR_FACE), set(FACE_ORDER))
+        self.assertEqual(
+            {face for face, stage in STAGE_FOR_FACE.items()
+             if stage == "stage_emerald"},
+            {"fox", "bear", "tiger", "dog", "hedgehog", "pickles", "olive",
+             "pig", "rabbit"})
+        self.assertEqual(
+            {face for face, stage in STAGE_FOR_FACE.items()
+             if stage == "stage_amber"},
+            {"parrot", "frog", "owl", "cat", "wolf", "panda", "penguin"})
+        for face in FACE_ORDER:
+            self.assertIn(stage_token_for_face(face), COLOR_TOKENS)
+        # A face added before its stage is chosen still gets a stage.
+        self.assertEqual(stage_token_for_face("axolotl"), "stage_amber")
+
+    def test_brand_shapes_carry_the_agreed_radii_outlines_and_shadows(self):
+        from whisper_face_theme import (
+            BRAND_SHAPES, STAGE_FACE_TILT, STICKER_TILTS)
+
+        expected = {
+            # radius, outline, shadow right, shadow down, height
+            "group": (13.0, 1.0, 0.0, 0.0, 0.0),
+            "stage": (24.0, 2.5, 5.0, 6.0, 246.0),
+            "bubble": (22.0, 2.5, 4.0, 5.0, 0.0),
+            "chunky_button": (12.0, 2.0, 3.0, 4.0, 36.0),
+            "chunky_button_small": (10.0, 2.0, 2.0, 3.0, 30.0),
+            "sticker": (16.0, 2.0, 3.0, 4.0, 0.0),
+            "key_cap": (7.0, 1.5, 0.0, 2.0, 21.0),
+            "face_chip": (16.0, 2.0, 2.0, 3.0, 0.0),
+        }
+        self.assertEqual(set(BRAND_SHAPES), set(expected))
+        for name, values in expected.items():
+            shape = BRAND_SHAPES[name]
+            self.assertEqual(
+                (shape.radius, shape.outline, shape.shadow_right,
+                 shape.shadow_down, shape.height), values, name)
+        # Work surfaces stay quiet; only brand objects cast a hard shadow.
+        self.assertEqual(
+            {name for name, shape in BRAND_SHAPES.items()
+             if not (shape.shadow_right or shape.shadow_down)}, {"group"})
+        self.assertEqual(STICKER_TILTS, (-1.4, 1.0, -0.6))
+        self.assertEqual(STAGE_FACE_TILT, -4.0)
+
+    def test_new_look_text_meets_aa_on_every_fill_it_sits_on(self):
+        from whisper_face_theme import (
+            COLOR_TOKENS, STICKER_LABEL_ALPHA, STICKER_TINTS, Shade,
+            color_token, contrast_ratio)
+
+        # The sidebar is a system material; these are the mock-up's opaque
+        # stand-ins for it, plus the window field it may fall back to.
+        sidebars = {False: self._hex("#E9E2D2"), True: self._hex("#262E29")}
+        for dark, palette in ((False, LIGHT_PALETTE), (True, DARK_PALETTE)):
+            for contrast in (False, True):
+                where = f"dark={dark} contrast={contrast}"
+                # Emerald as text or icon colour, on both work surfaces.
+                brand_ink = color_token("brand_ink", dark, contrast).color
+                for surface in (palette.bg, palette.surface):
+                    self.assertGreaterEqual(
+                        contrast_ratio(brand_ink, surface), 4.5, where)
+                # Chunky amber button and the selected face chip.
+                self.assertGreaterEqual(
+                    contrast_ratio(
+                        color_token("on_amber_ink", dark, contrast).color,
+                        palette.accent), 4.5, where)
+                # Stat stickers: the number, and the label at its opacity.
+                ink = color_token("sticker_ink", dark, contrast).color
+                for tint_name in STICKER_TINTS:
+                    tint = color_token(tint_name, dark, contrast).color
+                    self.assertGreaterEqual(
+                        contrast_ratio(ink, tint), 4.5,
+                        f"{tint_name} {where}")
+                    label = Shade(ink, STICKER_LABEL_ALPHA).over(tint)
+                    self.assertGreaterEqual(
+                        contrast_ratio(label, tint), 4.5,
+                        f"{tint_name} label {where}")
+                # The selected sidebar row keeps the ordinary label ink.
+                selection = color_token("sidebar_selection", dark, contrast)
+                for under in (sidebars[dark], palette.bg):
+                    self.assertGreaterEqual(
+                        contrast_ratio(palette.ink, selection.over(under)),
+                        4.5, where)
+        self.assertIn("sticker_ink", COLOR_TOKENS)
+
+    def test_new_look_edges_reach_three_to_one_where_they_are_the_edge(
+            self):
+        """Outlines, hairlines and the switch green, measured as edges.
+
+        Two values in the design contract are below 3:1 in the ordinary
+        appearance and are pinned here at what they measure, so they
+        cannot get worse without this test saying so; Increase Contrast
+        answers both. The dark ink outline is darker than the window
+        behind it, which is the sticker look rather than an edge, and the
+        switch green on a light surface is 2.7:1, like the system's own.
+        """
+        from whisper_face_theme import (
+            STICKER_TINTS, color_token, contrast_ratio)
+
+        def fills(dark, palette, contrast=False):
+            return {
+                "bg": palette.bg, "surface": palette.surface,
+                "amber": palette.accent,
+                **{name: color_token(name, dark, contrast).color
+                   for name in ("stage_amber", "stage_emerald",
+                                *STICKER_TINTS)},
+            }
+
+        # Light: the outline is an edge against everything it touches.
+        outline = color_token("ink_outline", False).color
+        for name, fill in fills(False, LIGHT_PALETTE).items():
+            self.assertGreaterEqual(
+                contrast_ratio(outline, fill), 3.0, f"light {name}")
+
+        # Dark: the bright fills stand off both the outline and the window,
+        # so the amber button, the selected chip and the stage have edges.
+        outline = color_token("ink_outline", True).color
+        dark_fills = fills(True, DARK_PALETTE)
+        for name in ("amber", "stage_amber", "stage_emerald"):
+            self.assertGreaterEqual(
+                contrast_ratio(outline, dark_fills[name]), 3.0,
+                f"dark {name}")
+            self.assertGreaterEqual(
+                contrast_ratio(dark_fills[name], DARK_PALETTE.bg), 3.0,
+                f"dark {name} on the window")
+        # Dark, ordinary contrast: pinned, not passed.
+        self.assertGreaterEqual(
+            contrast_ratio(outline, DARK_PALETTE.surface), 1.3)
+        # Dark with Increase Contrast: the outline becomes a light edge
+        # against the window and every dark fill it wraps.
+        strong = color_token("ink_outline", True, True).color
+        for name in ("bg", "surface", *STICKER_TINTS):
+            self.assertGreaterEqual(
+                contrast_ratio(strong, fills(True, DARK_PALETTE, True)[name]),
+                3.0, f"dark increased {name}")
+        # Light with Increase Contrast only gets darker.
+        self.assertGreater(
+            contrast_ratio(color_token("ink_outline", False, True).color,
+                           LIGHT_PALETTE.bg),
+            contrast_ratio(color_token("ink_outline", False).color,
+                           LIGHT_PALETTE.bg))
+
+        for dark, palette in ((False, LIGHT_PALETTE), (True, DARK_PALETTE)):
+            for surface in (palette.bg, palette.surface):
+                # A hairline is visible, and a real edge when asked.
+                quiet = color_token("hairline", dark).over(surface)
+                self.assertGreaterEqual(
+                    contrast_ratio(quiet, surface), 1.25, f"dark={dark}")
+                loud = color_token("hairline", dark, True).over(surface)
+                self.assertGreaterEqual(
+                    contrast_ratio(loud, surface), 3.0, f"dark={dark}")
+                # Level bars and the switch tint.
+                green = color_token("switch_on", dark).color
+                self.assertGreaterEqual(
+                    contrast_ratio(green, surface),
+                    3.0 if dark else 2.4, f"dark={dark}")
+                self.assertGreaterEqual(
+                    contrast_ratio(
+                        color_token("switch_on", dark, True).color, surface),
+                    3.0, f"dark={dark} increased")
 
 
 class IdleLifeDriverTests(unittest.TestCase):
