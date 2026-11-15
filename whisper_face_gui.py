@@ -23,7 +23,6 @@ from whisper_face_theme import (
     FACE_CHIP_COLORS,
     LIGHT_PALETTE,
     MOTION_SPECS,
-    SURFACE_SPECS,
     contrast_ratio,
     palette_for_appearance,
 )
@@ -5539,8 +5538,6 @@ try:  # The view-model above remains usable in headless test environments.
         NSBackingStoreBuffered,
         NSBezelStyleRounded,
         NSBezierPath,
-        NSBox,
-        NSBoxCustom,
         NSButton,
         NSColor,
         NSColorSpace,
@@ -5567,12 +5564,10 @@ try:  # The view-model above remains usable in headless test environments.
         NSImageScaleProportionallyUpOrDown,
         NSImageView,
         NSLayoutConstraint,
-        NSLineBorder,
         NSMakeRect,
         NSMenu,
         NSMenuItem,
         NSNoBorder,
-        NSNoTitle,
         NSProgressIndicator,
         NSPopUpButton,
         NSSavePanel,
@@ -5637,10 +5632,7 @@ if APPKIT_AVAILABLE:
 
     # AA text inks live beside the palettes so their contrast can be tested
     # headlessly; see whisper_face_theme.BRAND_TEXT_ON_LIGHT.
-    from whisper_face_theme import (
-        AMBER_TEXT_ON_LIGHT,
-        BRAND_TEXT_ON_LIGHT,
-    )
+    from whisper_face_theme import BRAND_TEXT_ON_LIGHT
 
     # What the new look's brand components draw with. Imported here, beside
     # the code that uses it, rather than in the window's main AppKit import.
@@ -5692,11 +5684,6 @@ if APPKIT_AVAILABLE:
         tilted_footprint,
         tilted_inner_size,
     )
-
-    # Quiet work surfaces per the design language: hairline border, radius 12,
-    # no offset shadow. Sticker offsets stay reserved for the playful objects.
-    CARD_RADIUS = 12.0
-    CARD_BORDER_ALPHA = 0.16
 
     # Window skeleton: a full-height sidebar of fixed width in the system's
     # sidebar material, and beside it the content side: a title strip over
@@ -5768,9 +5755,6 @@ if APPKIT_AVAILABLE:
     HOME_STICKER_GAP = 16.0         # between two stickers
     HOME_GROUP_GAP = 8.0            # stickers to the section header
     HOME_GAP_STRETCH = 8.0
-    HOME_HEADER_HEIGHT = 16.0
-    HOME_ROW_BUTTON_HEIGHT = 24.0
-    HOME_ROW_BUTTON_GAP = 8.0
 
     # Inside a speech bubble: padding round the copy, headline to
     # instruction, instruction to the buttons, and one button to the next.
@@ -5787,7 +5771,6 @@ if APPKIT_AVAILABLE:
     # the route across the four steps and the one Continue button.
     SETUP_STAGE_HEIGHT = 200.0
     SETUP_FACE_SIZE = 150.0
-    SETUP_ROW_HEIGHT = ROW_CAPTION_MIN_HEIGHT
     SETUP_ROW_COUNT = SETUP_ROW_LIMIT   # the most rows any step shows
     SETUP_ICON_SIZE = 34.0
     SETUP_ICON_RADIUS = 10.0
@@ -6339,10 +6322,6 @@ if APPKIT_AVAILABLE:
         palette = palette_for_appearance(dark)
         return _theme_color(palette.brand if dark else BRAND_TEXT_ON_LIGHT)
 
-    def _amber_text_color(dark: bool) -> Any:
-        palette = palette_for_appearance(dark)
-        return _theme_color(palette.accent if dark else AMBER_TEXT_ON_LIGHT)
-
     def _error_text_color(dark: bool) -> Any:
         palette = palette_for_appearance(dark)
         return _theme_color(palette.error if dark else ERROR_TEXT_ON_LIGHT)
@@ -6487,61 +6466,6 @@ if APPKIT_AVAILABLE:
                 pass
         return view
 
-    def _silence_group(view: Any) -> Any:
-        """Keep a view that is only drawing (a separator) from showing up
-        to VoiceOver as an empty group."""
-        try:
-            view.setAccessibilityElement_(False)
-        except Exception:
-            pass
-        return view
-
-    def _hairline(frame: Any) -> Any:
-        """One-pixel separator; themed to the palette line at low alpha."""
-        line = NSBox.alloc().initWithFrame_(frame)
-        line.setBoxType_(NSBoxCustom)
-        line.setBorderType_(NSNoBorder)
-        line.setTitlePosition_(NSNoTitle)
-        line.setBorderWidth_(0.0)
-        line.setCornerRadius_(0.0)
-        return line
-
-    def _card(frame: Any, treatment: str = "card") -> Any:
-        if treatment == "group":
-            # A settings group: one rounded surface with a hairline edge,
-            # drawn by the view itself in whichever appearance it is in.
-            return GroupBoxView.alloc().initWithFrame_(frame)
-        box = NSBox.alloc().initWithFrame_(frame)
-        box.setBoxType_(NSBoxCustom)
-        box.setBorderType_(NSLineBorder)
-        box.setTitlePosition_(NSNoTitle)
-        palette = palette_for_appearance(
-            _uses_dark_appearance(NSApplication.sharedApplication()))
-        box.setFillColor_(_theme_color(palette.surface))
-        if treatment in ("playful", "control"):
-            spec = SURFACE_SPECS[treatment]
-            box.setBorderColor_(_theme_color(palette.line))
-            box.setBorderWidth_(spec.border_width)
-            box.setCornerRadius_(spec.radius)
-            box.setWantsLayer_(True)
-            layer = box.layer()
-            if layer is not None and (spec.shadow_x or spec.shadow_y):
-                try:
-                    layer.setShadowColor_(
-                        _theme_color(palette.line).CGColor())
-                    layer.setShadowOpacity_(0.94)
-                    layer.setShadowRadius_(0.0)
-                    layer.setShadowOffset_((spec.shadow_x, spec.shadow_y))
-                except Exception:
-                    pass
-        else:
-            box.setBorderColor_(
-                _theme_color(palette.line, CARD_BORDER_ALPHA))
-            box.setBorderWidth_(1.0)
-            box.setCornerRadius_(CARD_RADIUS)
-            box.setWantsLayer_(True)
-        return box
-
     # ------------------------------------------------------------------
     # Settings pages, laid out the way System Settings lays out a pane:
     # section headers over groups of rows, each row its label and caption
@@ -6614,10 +6538,8 @@ if APPKIT_AVAILABLE:
                 NSMakeRect(0, 0, STATUS_SYMBOL_SIZE, STATUS_SYMBOL_SIZE))
             self.icon.setImageScaling_(NSImageScaleProportionallyUpOrDown)
             self.icon.setEditable_(False)
-            try:
-                self.icon.setAccessibilityElement_(False)
-            except Exception:
-                pass
+            # The phrase says the state; the symbol only repeats its tone.
+            _silence_image(self.icon)
             self.text = _label("", NSMakeRect(0, 0, 10, 16), size=12)
             self.addSubview_(self.icon)
             self.addSubview_(self.text)
@@ -6693,10 +6615,16 @@ if APPKIT_AVAILABLE:
         Title and caption on the left, wrapping to the room the controls
         leave; the controls on the right, each at its own system size, in
         reading order, ``ROW_CONTROL_GAP`` apart and centred on the row. A
-        control that is hidden takes no room. A row may instead hold one
-        custom piece of content (the face grid) through ``custom``, a pair
-        of functions: its height at a width, and its layout at a size.
-        Hiding the row hides everything in it and closes the gap.
+        control that is hidden takes no room. ``leading`` is one view ahead
+        of the text (an icon, a setup step's icon tile), kept at the size
+        it was made. A row may instead hold one custom piece of content
+        (the face grid) through ``custom``, a pair of functions: its height
+        at a width, and its layout at a size. Hiding the row hides
+        everything in it and closes the gap.
+
+        Every group in the window is made of these, Home's and first-run
+        setup's included, so a row has the same inset, padding and minimum
+        height wherever it is.
         """
 
         def initWithFrame_(self, frame):
@@ -6707,6 +6635,7 @@ if APPKIT_AVAILABLE:
             self.caption = None
             self.accessories = []
             self.custom = None
+            self.leading = None
             return self
 
         def isFlipped(self):
@@ -6715,15 +6644,25 @@ if APPKIT_AVAILABLE:
         @objc.python_method
         def configure(self, title: Any = None, caption: Any = None,
                       accessories: Sequence[Any] = (),
-                      custom: Any = None) -> Any:
+                      custom: Any = None, leading: Any = None) -> Any:
             self.title = title
             self.caption = caption
             self.accessories = list(accessories)
             self.custom = custom
-            for view in (title, caption, *self.accessories):
+            self.leading = leading
+            for view in (leading, title, caption, *self.accessories):
                 if view is not None:
                     self.addSubview_(view)
             return self
+
+        @objc.python_method
+        def text_origin(self) -> float:
+            """Where the row's text starts: the row inset, and past the
+            leading view when the row has one."""
+            if self.leading is None or bool(self.leading.isHidden()):
+                return ROW_INSET
+            return (ROW_INSET + float(self.leading.frame().size.width)
+                    + ROW_CONTROL_GAP)
 
         @objc.python_method
         def text_width(self, width: float) -> float:
@@ -6731,7 +6670,8 @@ if APPKIT_AVAILABLE:
                      if not bool(view.isHidden())]
             controls = sum(_natural_size(view)[0] for view in shown)
             controls += ROW_CONTROL_GAP * len(shown)
-            return max(40.0, width - 2.0 * ROW_INSET - controls)
+            return max(
+                40.0, width - self.text_origin() - ROW_INSET - controls)
 
         @objc.python_method
         def arrange(self, width: float) -> float:
@@ -6743,27 +6683,34 @@ if APPKIT_AVAILABLE:
             shown = [view for view in self.accessories
                      if not bool(view.isHidden())]
             sizes = [_natural_size(view) for view in shown]
+            text_x = self.text_origin()
             text_width = self.text_width(width)
             title_height = (_text_height(self.title, text_width)
                             if self.title is not None else 0.0)
             caption_height = (_text_height(self.caption, text_width)
                               if self.caption is not None
                               and str(self.caption.stringValue()) else 0.0)
-            text_height = title_height + (
-                ROW_TEXT_GAP + caption_height if caption_height else 0.0)
+            gap = ROW_TEXT_GAP if title_height and caption_height else 0.0
+            text_height = title_height + gap + caption_height
             controls_height = max((h for _w, h in sizes), default=0.0)
+            lead_height = (float(self.leading.frame().size.height)
+                           if text_x > ROW_INSET else 0.0)
             height = max(
                 ROW_CAPTION_MIN_HEIGHT if self.caption is not None
                 else ROW_MIN_HEIGHT,
                 text_height + 2.0 * ROW_PADDING_Y,
-                controls_height + 2.0 * ROW_CONTROL_PADDING_Y)
+                controls_height + 2.0 * ROW_CONTROL_PADDING_Y,
+                lead_height + 2.0 * ROW_CONTROL_PADDING_Y)
             top = (height - text_height) / 2.0
+            if lead_height:
+                self.leading.setFrameOrigin_(
+                    (ROW_INSET, (height - lead_height) / 2.0))
             if self.title is not None:
                 self.title.setFrame_(NSMakeRect(
-                    ROW_INSET, top, text_width, title_height))
+                    text_x, top, text_width, title_height))
             if self.caption is not None:
                 self.caption.setFrame_(NSMakeRect(
-                    ROW_INSET, top + title_height + ROW_TEXT_GAP,
+                    text_x, top + title_height + gap,
                     text_width, caption_height))
             x = width - ROW_INSET
             for view, (w, h) in reversed(list(zip(shown, sizes))):
@@ -6777,9 +6724,10 @@ if APPKIT_AVAILABLE:
 
         It draws its fill, edge and the hairlines between its visible rows
         itself, in whichever appearance it is in, so it follows a light or
-        dark flip without waiting for a render. It is not flipped, so the
-        older frame-based ``_group_row`` keeps working on it; its own rows
-        are laid out top-down by ``arrange``.
+        dark flip, and Increase Contrast, without waiting for a render.
+        Its rows are laid out top-down by ``arrange``. This is the one
+        group in the window: the settings pages, Home and first-run setup
+        all hold their rows in it.
         """
 
         def initWithFrame_(self, frame):
@@ -6788,6 +6736,20 @@ if APPKIT_AVAILABLE:
                 return None
             self.rows = []
             self.separators = []
+            return self
+
+        def isFlipped(self):
+            return True
+
+        @objc.python_method
+        def name_for_voiceover(self, label: str) -> Any:
+            """Have VoiceOver meet the group as a group with this name."""
+            try:
+                self.setAccessibilityElement_(True)
+                self.setAccessibilityRole_(NSAccessibilityGroupRole)
+                self.setAccessibilityLabel_(label)
+            except Exception:
+                pass
             return self
 
         @objc.python_method
@@ -6803,18 +6765,16 @@ if APPKIT_AVAILABLE:
         @objc.python_method
         def arrange(self, width: float) -> float:
             """Stack the visible rows top-down; return the group height."""
-            placed = [(row, row.arrange(width)) for row in self.visible_rows()]
-            total = sum(height for _row, height in placed)
             top = 0.0
             self.separators = []
-            for index, (row, height) in enumerate(placed):
-                row.setFrame_(NSMakeRect(
-                    0, total - top - height, width, height))
+            for index, row in enumerate(self.visible_rows()):
+                height = row.arrange(width)
+                row.setFrame_(NSMakeRect(0, top, width, height))
                 if index:
-                    self.separators.append(total - top)
+                    self.separators.append(top)
                 top += height
             self.setNeedsDisplay_(True)
-            return total
+            return top
 
         def viewDidChangeEffectiveAppearance(self):
             self.setNeedsDisplay_(True)
@@ -6835,18 +6795,74 @@ if APPKIT_AVAILABLE:
             outline.stroke()
             hairline.setFill()
             for y in self.separators:
+                # The first point of the row below: one whole row of
+                # pixels at any scale, never half of two.
                 NSBezierPath.fillRect_(NSMakeRect(
-                    ROW_INSET, y - 0.5, bounds.size.width - ROW_INSET, 1.0))
+                    ROW_INSET, math.floor(y),
+                    bounds.size.width - ROW_INSET, 1.0))
+
+    def arrange_section(header: Any, trailing: Any, group: Any,
+                        notes: Sequence[Any], y: float,
+                        width: float) -> float:
+        """Lay one section out from ``y`` down in a flipped parent, at
+        ``width``; return where it ends.
+
+        The header, with ``trailing`` (small print, when it has any) at
+        the far end of the header's line and sitting on its baseline, then
+        the group, then each note that has text. The settings pages, Home
+        and first-run setup all place their groups through this, so the
+        header's inset and its distance from the group are the same
+        everywhere.
+        """
+        inner = width - 2.0 * SECTION_HEADER_INSET
+        if header is not None:
+            noted = trailing is not None and bool(
+                str(trailing.stringValue()))
+            if trailing is not None:
+                trailing.setHidden_(not noted)
+            header_width = inner
+            if noted:
+                header_width = min(inner / 2.0, math.ceil(_text_size(
+                    str(header.stringValue()), header.font())[0]) + 6.0)
+            height = _text_height(header, header_width)
+            header.setFrame_(NSMakeRect(
+                SECTION_HEADER_INSET, y, header_width, height))
+            if noted:
+                x = SECTION_HEADER_INSET + header_width + ROW_CONTROL_GAP
+                note_height = _text_height(trailing, inner)
+                try:
+                    drop = (float(header.firstBaselineOffsetFromTop())
+                            - float(trailing.firstBaselineOffsetFromTop()))
+                except Exception:
+                    drop = height - note_height
+                trailing.setFrame_(NSMakeRect(
+                    x, y + drop,
+                    max(0.0, width - SECTION_HEADER_INSET - x),
+                    note_height))
+            y += height + GROUP_HEADER_GAP
+        height = group.arrange(width)
+        group.setFrame_(NSMakeRect(0, y, width, height))
+        y += height
+        for note in notes:
+            has_text = bool(str(note.stringValue()))
+            note.setHidden_(not has_text)
+            if has_text:
+                height = _text_height(note, inner)
+                note.setFrame_(NSMakeRect(
+                    SECTION_HEADER_INSET, y + NOTE_GAP, inner, height))
+                y += NOTE_GAP + height
+        return y
 
     class GroupedPageView(NSView):
         """A settings page's scrolling document: headers, groups, notes.
 
         ``add_section`` appends a header (optional), a group and the notes
-        under it; a section whose rows are all hidden takes no room, and a
-        note with no text takes none either. ``arrange`` lays everything out
-        at the width of the clip view it sits in and sizes itself to its
-        content, which is what lets the scroll view scroll exactly as far
-        as there is something to see.
+        under it, and optionally the small print at the trailing end of
+        the header's line; a section whose rows are all hidden takes no
+        room, and a note with no text takes none either. ``arrange`` lays
+        everything out at the width of the clip view it sits in and sizes
+        itself to its content, which is what lets the scroll view scroll
+        exactly as far as there is something to see.
         """
 
         def initWithFrame_(self, frame):
@@ -6862,11 +6878,12 @@ if APPKIT_AVAILABLE:
 
         @objc.python_method
         def add_section(self, header: Any, group: Any,
-                        notes: Sequence[Any] = ()) -> Any:
-            for view in (header, group, *notes):
+                        notes: Sequence[Any] = (),
+                        *, trailing: Any = None) -> Any:
+            for view in (header, trailing, group, *notes):
                 if view is not None:
                     self.addSubview_(view)
-            self.sections.append((header, group, tuple(notes)))
+            self.sections.append((header, group, tuple(notes), trailing))
             return group
 
         @objc.python_method
@@ -6885,9 +6902,9 @@ if APPKIT_AVAILABLE:
                 width = self.content_width()
                 y = PAGE_TOP
                 first = True
-                for header, group, notes in self.sections:
+                for header, group, notes, trailing in self.sections:
                     shown = bool(group.visible_rows())
-                    for view in (header, group, *notes):
+                    for view in (header, trailing, group, *notes):
                         if view is not None:
                             view.setHidden_(not shown)
                     if not shown:
@@ -6895,25 +6912,8 @@ if APPKIT_AVAILABLE:
                     if not first:
                         y += GROUP_GAP
                     first = False
-                    if header is not None:
-                        text = width - 2.0 * SECTION_HEADER_INSET
-                        height = _text_height(header, text)
-                        header.setFrame_(NSMakeRect(
-                            SECTION_HEADER_INSET, y, text, height))
-                        y += height + GROUP_HEADER_GAP
-                    height = group.arrange(width)
-                    group.setFrame_(NSMakeRect(0, y, width, height))
-                    y += height
-                    for note in notes:
-                        has_text = bool(str(note.stringValue()))
-                        note.setHidden_(not has_text)
-                        if has_text:
-                            text = width - 2.0 * SECTION_HEADER_INSET
-                            height = _text_height(note, text)
-                            note.setFrame_(NSMakeRect(
-                                SECTION_HEADER_INSET, y + NOTE_GAP, text,
-                                height))
-                            y += NOTE_GAP + height
+                    y = arrange_section(
+                        header, trailing, group, notes, y, width)
                 y += CONTENT_INSET
                 if (abs(float(self.frame().size.width) - width) > 0.25
                         or abs(float(self.frame().size.height) - y) > 0.25):
@@ -7949,7 +7949,7 @@ if APPKIT_AVAILABLE:
             self.pages: dict[str, Any] = {}
             self.dynamic: dict[str, Any] = {}
             # Views that must re-read the palette when the appearance flips.
-            # Roles: card, hairline, ink, ink_soft, brand, pill.
+            # Roles: ink, ink_soft, brand.
             self.themed: dict[str, list[Any]] = {}
             self.timer = None
             self.defaults = None
@@ -8014,61 +8014,6 @@ if APPKIT_AVAILABLE:
             label = _label(text, frame, **kwargs)
             self._register("ink_soft", label)
             return label
-
-        @objc.python_method
-        def _pill(self, text: str, frame: Any, *, size: float = 11,
-                  accessibility_label: str = "") -> Any:
-            """Small tinted status capsule; colors arrive at render time."""
-            # NSTextAlignmentCenter is 1 in the unified enum this SDK ships;
-            # 2 is right-alignment and pushed the copy against the capsule's
-            # trailing edge instead of centering it between the paddings.
-            pill = _label(
-                text, frame, size=size, weight="semibold", alignment=1,
-                truncate=True,
-                accessibility_label=accessibility_label or text)
-            pill.setWantsLayer_(True)
-            layer = pill.layer()
-            if layer is not None:
-                layer.setCornerRadius_(frame.size.height / 2.0)
-            return pill
-
-        @objc.python_method
-        def _fit_pill(self, pill: Any) -> None:
-            """Hug the capsule to its text, keeping the right edge pinned."""
-            try:
-                frame = pill.frame()
-                superview = pill.superview()
-                if superview is None:
-                    return
-                pill.sizeToFit()
-                fitted = pill.frame().size.width
-                width = min(200.0, max(56.0, fitted + 24.0))
-                right = superview.bounds().size.width - 16.0
-                pill.setFrame_(NSMakeRect(
-                    right - width, frame.origin.y, width,
-                    frame.size.height))
-            except Exception:
-                pass
-
-        @objc.python_method
-        def _set_pill_tone(self, pill: Any, tone: str, dark: bool) -> None:
-            palette = palette_for_appearance(dark)
-            fill = (palette.brand if tone == "good"
-                    else palette.ink_soft if tone == "neutral"
-                    else palette.accent)
-            text_color = (
-                _brand_text_color(dark) if tone == "good"
-                else _theme_color(palette.ink_soft) if tone == "neutral"
-                else _amber_text_color(dark))
-            # A quiet pill draws grey ink on a grey tint; at the 16% light
-            # tint that pair falls just under AA, 12% clears it.
-            alpha = (0.30 if dark
-                     else 0.12 if tone == "neutral" else 0.16)
-            layer = pill.layer()
-            if layer is not None:
-                layer.setBackgroundColor_(
-                    _theme_color(fill, alpha).CGColor())
-            pill.setTextColor_(text_color)
 
         @objc.python_method
         def _chunky(self, title: str, action: str, *,
@@ -8277,13 +8222,12 @@ if APPKIT_AVAILABLE:
                     1.0, float(tile.frame().size.height))))
                 tile_height = max(
                     tile_height, float(tile.intrinsicContentSize().height))
-            rows = [row for row in self.dynamic["home_rows"]
-                    if not bool(row.isHidden())]
-            rows_height = sum(float(row.frame().size.height) for row in rows)
-            card = self.dynamic["home_result_card"]
-            card_height = rows_height + 2.0
-            group_height = (HOME_HEADER_HEIGHT + GROUP_HEADER_GAP
-                            + card_height)
+            # The header and the group of rows, placed inside their own
+            # container by the layout every settings page uses.
+            group_height = arrange_section(
+                self.dynamic["home_group_header"],
+                self.dynamic["overview_engine"],
+                self.dynamic["home_result_card"], (), 0.0, width)
             fixed = (stage_height + HOME_STAGE_GAP + tile_height
                      + HOME_GROUP_GAP + group_height)
             stretch = max(0.0, min(HOME_GAP_STRETCH, (height - fixed) / 3.0))
@@ -8299,125 +8243,9 @@ if APPKIT_AVAILABLE:
                     index * (tile_width + HOME_STICKER_GAP), 0,
                     tile_width, tile_height))
             y += tile_height + HOME_GROUP_GAP + stretch
-            group = self.dynamic["home_group"]
-            group.setFrame_(NSMakeRect(0, y, width, group_height))
-            header = self.dynamic["home_group_header"]
-            header_width = min(
-                width / 2.0,
-                _text_size(str(header.stringValue()), header.font())[0]
-                + 8.0)
-            header.setFrame_(NSMakeRect(
-                2.0, 0, header_width, HOME_HEADER_HEIGHT))
-            self.dynamic["overview_engine"].setFrame_(NSMakeRect(
-                header_width + 12.0, 0,
-                max(0.0, width - header_width - 12.0 - 2.0),
-                HOME_HEADER_HEIGHT))
-            card.setFrame_(NSMakeRect(
-                0, HOME_HEADER_HEIGHT + GROUP_HEADER_GAP, width,
-                card_height))
-            self._layout_home_rows(rows)
+            self.dynamic["home_group"].setFrame_(
+                NSMakeRect(0, y, width, group_height))
             self._layout_home_bubble()
-
-        @objc.python_method
-        def _layout_home_rows(self, rows: Sequence[Any]) -> None:
-            """Stack the visible rows in the group and fit each one's text
-            between the row's inset and its trailing controls."""
-            host = self.dynamic["home_rows_host"]
-            width = float(host.bounds().size.width)
-            if width <= 0.0:
-                return
-            lines = self.dynamic["home_row_lines"]
-            y = 0.0
-            for index, row in enumerate(rows):
-                row_height = float(row.frame().size.height)
-                if index:
-                    line = lines[index - 1]
-                    line.setHidden_(False)
-                    line.setFrame_(NSMakeRect(
-                        ROW_INSET, y, width - ROW_INSET, 1.0))
-                row.setFrame_(NSMakeRect(0, y, width, row_height))
-                y += row_height
-            for line in lines[max(0, len(rows) - 1):]:
-                line.setHidden_(True)
-
-            def trailing(row: Any, *buttons: Any) -> float:
-                """Right-align the row's shown buttons; return the x where
-                the text has to stop."""
-                row_height = float(row.frame().size.height)
-                x = width - ROW_INSET
-                for button in reversed(buttons):
-                    if bool(button.isHidden()):
-                        continue
-                    size = button.frame().size
-                    x -= float(size.width)
-                    button.setFrame_(NSMakeRect(
-                        x, (row_height - float(size.height)) / 2.0,
-                        size.width, size.height))
-                    x -= HOME_ROW_BUTTON_GAP
-                return x - (12.0 - HOME_ROW_BUTTON_GAP)
-
-            def centred(label: Any, row: Any, x: float, right: float,
-                        text_height: float | None = None) -> None:
-                row_height = float(row.frame().size.height)
-                label_height = float(
-                    label.frame().size.height
-                    if text_height is None else text_height)
-                label.setFrame_(NSMakeRect(
-                    x, (row_height - label_height) / 2.0,
-                    max(0.0, right - x), label_height))
-
-            dynamic = self.dynamic
-            # Review, when the bubble's one secondary place is taken.
-            attention = dynamic["home_attention_row"]
-            right = trailing(attention, dynamic["review_issue_row_button"])
-            icon = dynamic["home_attention_icon"]
-            icon.setFrame_(NSMakeRect(
-                ROW_INSET,
-                (float(attention.frame().size.height) - 16.0) / 2.0,
-                16.0, 16.0))
-            centred(dynamic["home_attention_title"], attention,
-                    ROW_INSET + 16.0 + 8.0, right)
-
-            # The last dictation: summary and engine, the mode beside the
-            # summary, and the evidence reveal.
-            result = dynamic["home_result_row"]
-            right = trailing(result, dynamic["result_inspect_button"])
-            summary = dynamic["result_summary"]
-            pill = dynamic["result_mode"]
-            pill_width = float(pill.frame().size.width)
-            text_width = min(
-                math.ceil(_text_size(
-                    str(summary.stringValue()), summary.font())[0]) + 6.0,
-                max(0.0, right - ROW_INSET - pill_width - 8.0))
-            frame = summary.frame()
-            summary.setFrame_(NSMakeRect(
-                ROW_INSET, frame.origin.y, text_width, frame.size.height))
-            pill.setFrame_(NSMakeRect(
-                ROW_INSET + text_width + 8.0,
-                frame.origin.y + (float(frame.size.height)
-                                  - float(pill.frame().size.height)) / 2.0,
-                pill_width, pill.frame().size.height))
-            frame = dynamic["result_engine"].frame()
-            dynamic["result_engine"].setFrame_(NSMakeRect(
-                ROW_INSET, frame.origin.y,
-                max(0.0, right - ROW_INSET), frame.size.height))
-
-            # What is held for replay: one quiet line that may wrap once.
-            replay = dynamic["home_replay_row"]
-            right = trailing(
-                replay, dynamic["result_play_audio_button"],
-                dynamic["result_clear_audio_button"])
-            audio = dynamic["result_audio"]
-            audio_width = max(0.0, right - ROW_INSET)
-            line = math.ceil(_text_size("Xg", audio.font())[1])
-            needed = math.ceil(self._wrapped_height(audio, audio_width))
-            centred(audio, replay, ROW_INSET, right,
-                    float(min(2 * line, max(line, needed))))
-
-            # The Voice Outbox, in its own words.
-            outbox = dynamic["home_outbox_row"]
-            centred(dynamic["overview_outbox"], outbox, ROW_INSET,
-                    width - ROW_INSET)
 
         @objc.python_method
         def _layout_setup_bubble(self) -> None:
@@ -8450,44 +8278,29 @@ if APPKIT_AVAILABLE:
             dynamic = self.dynamic
             stage_height = (SETUP_STAGE_HEIGHT
                             + BRAND_SHAPES["stage"].shadow_down)
-            rows = [row for row in dynamic["onboarding_rows"]
-                    if not bool(row["view"].isHidden())]
-            header_height = HOME_HEADER_HEIGHT + GROUP_HEADER_GAP
             foot_height = (SETUP_PROGRESS_HEIGHT + 12.0 + SETUP_FOOT_HEIGHT)
+            # The header and the group of rows, placed inside their own
+            # container by the layout every settings page uses. The room
+            # kept for them is what the most rows a step has would take.
+            card = dynamic["onboarding_rows_card"]
+            shown_height = arrange_section(
+                dynamic["onboarding_status"], None, card, (), 0.0, width)
+            rows = card.visible_rows()
+            row_height = max(
+                (float(row.frame().size.height) for row in rows),
+                default=ROW_CAPTION_MIN_HEIGHT)
+            group_height = (shown_height - float(card.frame().size.height)
+                            + SETUP_ROW_COUNT * row_height)
+            block = (stage_height + SETUP_GAP + group_height + SETUP_GAP
+                     + foot_height + 10.0 + SETUP_KICKER_HEIGHT)
 
-            def block(count: int) -> float:
-                return (stage_height + SETUP_GAP + header_height
-                        + count * SETUP_ROW_HEIGHT + 2.0 + SETUP_GAP
-                        + foot_height + 10.0 + SETUP_KICKER_HEIGHT)
-
-            y = max(0.0, math.floor((height - block(SETUP_ROW_COUNT)) / 2.0))
+            y = max(0.0, math.floor((height - block) / 2.0))
             dynamic["onboarding_stage"].setFrame_(
                 NSMakeRect(0, y, width, stage_height))
             y += stage_height + SETUP_GAP
-
-            dynamic["onboarding_status"].setFrame_(NSMakeRect(
-                2.0, y, width - 4.0, HOME_HEADER_HEIGHT))
-            y += header_height
-
-            card = dynamic["onboarding_rows_card"]
-            card_height = len(rows) * SETUP_ROW_HEIGHT + 2.0
-            card.setFrame_(NSMakeRect(0, y, width, card_height))
-            host = dynamic["onboarding_rows_host"]
-            row_width = float(host.bounds().size.width) or width
-            lines = dynamic["onboarding_row_lines"]
-            text_x = ROW_INSET + SETUP_ICON_SIZE + 12.0
-            for index, row in enumerate(rows):
-                top = index * SETUP_ROW_HEIGHT
-                row["view"].setFrame_(NSMakeRect(
-                    0, top, row_width, SETUP_ROW_HEIGHT))
-                if index:
-                    lines[index - 1].setHidden_(False)
-                    lines[index - 1].setFrame_(NSMakeRect(
-                        text_x, top, row_width - text_x, 1.0))
-                self._layout_setup_row(row, row_width)
-            for line in lines[max(0, len(rows) - 1):]:
-                line.setHidden_(True)
-            y += (SETUP_ROW_COUNT * SETUP_ROW_HEIGHT + 2.0) + SETUP_GAP
+            dynamic["onboarding_group"].setFrame_(
+                NSMakeRect(0, y, width, group_height))
+            y += group_height + SETUP_GAP
 
             foot = dynamic["onboarding_foot"]
             foot.setFrame_(NSMakeRect(0, y, width, foot_height))
@@ -8528,64 +8341,6 @@ if APPKIT_AVAILABLE:
             self._layout_setup_bubble()
 
         @objc.python_method
-        def _layout_setup_row(self, row: Mapping[str, Any],
-                              width: float) -> None:
-            """One setup row: icon, title and caption, then whatever the
-            row ends with (a key cap, a check mark and its words, or the
-            button to a permission's pane)."""
-            height = SETUP_ROW_HEIGHT
-            tile = row["tile"]
-            tile.setFrame_(NSMakeRect(
-                ROW_INSET, (height - SETUP_ICON_SIZE) / 2.0,
-                SETUP_ICON_SIZE, SETUP_ICON_SIZE))
-            x = width - ROW_INSET
-            button = row["button"]
-            if not bool(button.isHidden()):
-                size = button.intrinsicContentSize()
-                x -= float(size.width)
-                button.setFrame_(NSMakeRect(
-                    x, (height - size.height) / 2.0,
-                    size.width, size.height))
-                x -= 10.0
-            status = row["status"]
-            if not bool(status.isHidden()):
-                status_width = math.ceil(_text_size(
-                    str(status.stringValue()), status.font())[0]) + 6.0
-                x -= status_width
-                status.setFrame_(NSMakeRect(
-                    x, (height - 18.0) / 2.0, status_width, 18.0))
-                x -= 4.0
-            check = row["check"]
-            if not bool(check.isHidden()):
-                x -= 16.0
-                check.setFrame_(NSMakeRect(
-                    x, (height - 16.0) / 2.0, 16.0, 16.0))
-                x -= 10.0
-            cap = row["cap"]
-            if not bool(cap.isHidden()):
-                size = cap.intrinsicContentSize()
-                x -= float(size.width)
-                cap.setFrame_(NSMakeRect(
-                    x, (height - size.height) / 2.0 + 1.0,
-                    size.width, size.height))
-                x -= 10.0
-            text_x = ROW_INSET + SETUP_ICON_SIZE + 12.0
-            text_width = max(0.0, x - 2.0 - text_x)
-            title, caption = row["title"], row["caption"]
-            frame = title.frame()
-            if bool(caption.isHidden()):
-                title.setFrame_(NSMakeRect(
-                    text_x, (height - float(frame.size.height)) / 2.0,
-                    text_width, frame.size.height))
-            else:
-                title.setFrame_(NSMakeRect(
-                    text_x, row["title_y"], text_width, frame.size.height))
-                frame = caption.frame()
-                caption.setFrame_(NSMakeRect(
-                    text_x, row["caption_y"], text_width,
-                    frame.size.height))
-
-        @objc.python_method
         def _apply_onboarding_theme(
                 self, state: GUIState,
                 presentation: OnboardingPresentation) -> None:
@@ -8600,9 +8355,6 @@ if APPKIT_AVAILABLE:
             dynamic["onboarding_title"].setTextColor_(ink)
             dynamic["onboarding_detail"].setTextColor_(soft)
             dynamic["onboarding_face_kicker"].setTextColor_(soft)
-            dynamic["onboarding_status"].setTextColor_(
-                brand_ink if presentation.complete
-                else _amber_text_color(dark))
             track_layer = dynamic["onboarding_progress_track"].layer()
             if track_layer is not None:
                 track_layer.setBackgroundColor_(_srgb_color(
@@ -8623,14 +8375,8 @@ if APPKIT_AVAILABLE:
                         _srgb_color(palette.brand, 0.30).CGColor())
                 try:
                     row["icon"].setContentTintColor_(ink)
-                    row["check"].setContentTintColor_(brand_ink)
                 except Exception:
                     pass
-                tone = row.get("tone", "quiet")
-                row["status"].setTextColor_(
-                    brand_ink if tone == "good"
-                    else _amber_text_color(dark) if tone == "attention"
-                    else soft)
             for index, (step, control, icon) in enumerate(zip(
                     state.onboarding_steps, dynamic["onboarding_steps"],
                     dynamic["onboarding_step_icons"])):
@@ -8729,26 +8475,8 @@ if APPKIT_AVAILABLE:
             if field.layer() is not None:
                 field.layer().setBackgroundColor_(
                     _theme_color(palette.bg).CGColor())
-            for box in self.themed.get("card", ()):
-                box.setFillColor_(_theme_color(palette.surface))
-                # Depth comes from one soft ambient shadow; the hairline
-                # drops to a whisper so the edge reads, not the border.
-                box.setBorderColor_(_theme_color(
-                    palette.line, 0.20 if dark else 0.10))
-                box.setWantsLayer_(True)
-                layer = box.layer()
-                if layer is not None:
-                    try:
-                        layer.setShadowColor_(
-                            _theme_color(palette.line).CGColor())
-                        layer.setShadowOpacity_(0.16 if dark else 0.07)
-                        layer.setShadowRadius_(16.0)
-                        layer.setShadowOffset_((0.0, -5.0))
-                        layer.setMasksToBounds_(False)
-                    except Exception:
-                        pass
-            for line in self.themed.get("hairline", ()):
-                line.setFillColor_(_theme_color(palette.line, 0.14))
+            # Groups draw their own fill, edge and separators from the
+            # tokens and follow the appearance on their own.
             for label in self.themed.get("ink", ()):
                 label.setTextColor_(_theme_color(palette.ink))
             for label in self.themed.get("ink_soft", ()):
@@ -9473,32 +9201,15 @@ if APPKIT_AVAILABLE:
                 self.dynamic[key] = tile
             home.addSubview_(strip)
 
-            # ---- The last dictation and what is waiting, as plain rows.
+            # ---- The last dictation and what is waiting, as plain rows:
+            # a section header over one group, as on every settings page.
             group = FlowView.alloc().initWithFrame_(
                 NSMakeRect(0, 0, width, 180))
-            header = self._soft(
-                self._l("home.group.dictation"),
-                NSMakeRect(0, 0, 200, HOME_HEADER_HEIGHT))
-            header.setFont_(_role_font("section_header"))
-            engine = self._soft(
-                "", NSMakeRect(0, 0, 300, HOME_HEADER_HEIGHT), size=12,
-                truncate=True,
-                alignment=int(_appkit_name("NSTextAlignmentRight")))
-            card = _card(NSMakeRect(0, 0, width, 190))
-            self._register("card", card)
-            # VoiceOver meets the card as a group: it says what the
-            # header over it says.
-            _accessible(card, self._l("home.group.dictation"))
-            rows_host = self._rows_host(card)
-            for view in (header, engine, card):
-                group.addSubview_(view)
-            home.addSubview_(group)
+            header = self._section_header(self._l("home.group.dictation"))
+            engine = self._header_note()
 
             # Review Setup, as a row, only while the bubble's one secondary
             # place is taken by Copy & Dismiss.
-            attention, attention_title, attention_detail = self._home_row(
-                rows_host, ROW_MIN_HEIGHT)
-            attention_detail.setHidden_(True)
             attention_icon = NSImageView.alloc().initWithFrame_(
                 NSMakeRect(0, 0, 16, 16))
             attention_icon.setImageScaling_(
@@ -9512,35 +9223,40 @@ if APPKIT_AVAILABLE:
                 attention_icon.setAccessibilityElement_(False)
             except Exception:
                 pass
-            attention.addSubview_(attention_icon)
             review_row = _button(
-                self._l("overview.action.review"),
-                NSMakeRect(0, 0, 124, HOME_ROW_BUTTON_HEIGHT),
+                self._l("overview.action.review"), NSMakeRect(0, 0, 60, 28),
                 self, "reviewIssue:",
                 help_text=self._l("overview.action.review.help"))
-            attention.addSubview_(review_row)
+            attention, attention_title, _caption = self._settings_row(
+                "", accessories=(review_row,), leading=attention_icon,
+                wrap=False)
 
-            result_row, result_summary, result_engine = self._home_row(
-                rows_host, ROW_CAPTION_MIN_HEIGHT,
-                title=self._l("results.summary.empty"))
-            result_engine.setStringValue_(self._l("results.engine.waiting"))
-            result_mode = self._pill(
-                self._l("results.mode.capture"), NSMakeRect(0, 0, 96, 20),
-                accessibility_label=self._l("results.accessibility.mode"))
+            # How the last dictation was taken: a quiet value at the row's
+            # end, like every other value in the window.
+            result_mode = self._value_label(self._l("results.mode.capture"))
+            _accessible(result_mode, self._l("results.accessibility.mode"))
             inspect_evidence = _button(
-                self._l("results.inspect.action"),
-                NSMakeRect(0, 0, 160, HOME_ROW_BUTTON_HEIGHT),
+                self._l("results.inspect.action"), NSMakeRect(0, 0, 60, 28),
                 self, "inspectResultEvidence:",
                 symbol="doc.text.magnifyingglass",
                 help_text=self._l("results.inspect.action.help"),
             )
-            result_row.addSubview_(result_mode)
-            result_row.addSubview_(inspect_evidence)
+            result_row, result_summary, result_engine = self._settings_row(
+                self._l("results.summary.empty"),
+                caption=self._l("results.engine.waiting"),
+                accessories=(result_mode, inspect_evidence), wrap=False)
 
-            replay_row, replay_title, result_audio = self._home_row(
-                rows_host, ROW_CAPTION_MIN_HEIGHT)
-            replay_title.setHidden_(True)
-            result_audio.setStringValue_(self._l("results.audio.off"))
+            play_audio = _button(
+                self._l("results.audio.play"), NSMakeRect(0, 0, 60, 28),
+                self, "playRetainedSpan:", symbol="play.fill",
+                help_text=self._l("results.audio.play.help"))
+            clear_audio = _button(
+                self._l("results.audio.clear"), NSMakeRect(0, 0, 60, 28),
+                self, "clearRetainedSpans:", symbol="xmark.bin",
+                help_text=self._l("results.audio.clear.help"))
+            replay_row, _title, result_audio = self._settings_row(
+                None, caption=self._l("results.audio.off"),
+                accessories=(play_audio, clear_audio), wrap=False)
             # The one line of this row may wrap once instead of being cut.
             result_audio.setUsesSingleLineMode_(False)
             result_audio.setMaximumNumberOfLines_(2)
@@ -9550,32 +9266,18 @@ if APPKIT_AVAILABLE:
                 result_audio.cell().setTruncatesLastVisibleLine_(True)
             except Exception:
                 pass
-            play_audio = _button(
-                self._l("results.audio.play"),
-                NSMakeRect(0, 0, 116, HOME_ROW_BUTTON_HEIGHT),
-                self, "playRetainedSpan:", symbol="play.fill",
-                help_text=self._l("results.audio.play.help"))
-            clear_audio = _button(
-                self._l("results.audio.clear"),
-                NSMakeRect(0, 0, 92, HOME_ROW_BUTTON_HEIGHT),
-                self, "clearRetainedSpans:", symbol="xmark.bin",
-                help_text=self._l("results.audio.clear.help"))
-            replay_row.addSubview_(play_audio)
-            replay_row.addSubview_(clear_audio)
 
-            outbox_row, outbox, outbox_detail = self._home_row(
-                rows_host, ROW_MIN_HEIGHT,
-                title=self._l("overview.outbox.empty"))
-            outbox_detail.setHidden_(True)
+            outbox_row, outbox, _caption = self._settings_row(
+                self._l("overview.outbox.empty"), wrap=False)
 
             rows = (attention, result_row, replay_row, outbox_row)
-            lines = []
-            for _ in rows[1:]:
-                line = _hairline(NSMakeRect(0, 0, width, 1))
-                self._register("hairline", line)
-                _silence_group(line)
-                rows_host.addSubview_(line)
-                lines.append(line)
+            # VoiceOver meets the group as a group: it says what the
+            # header over it says.
+            card = self._settings_group(rows).name_for_voiceover(
+                self._l("home.group.dictation"))
+            for view in (header, engine, card):
+                group.addSubview_(view)
+            home.addSubview_(group)
 
             self.dynamic.update(
                 home_cluster=home,
@@ -9599,9 +9301,7 @@ if APPKIT_AVAILABLE:
                 home_group=group,
                 home_group_header=header,
                 home_result_card=card,
-                home_rows_host=rows_host,
                 home_rows=rows,
-                home_row_lines=tuple(lines),
                 home_attention_row=attention,
                 home_attention_icon=attention_icon,
                 home_attention_title=attention_title,
@@ -9626,42 +9326,6 @@ if APPKIT_AVAILABLE:
                 pause, fix, copy_outbox, review_row, inspect_evidence,
                 play_audio, clear_audio,
             )
-
-        @objc.python_method
-        def _rows_host(self, card: Any) -> Any:
-            """A top-down container filling a group card, for its rows."""
-            try:
-                # The rows run edge to edge inside the card's border.
-                card.setContentViewMargins_((0.0, 0.0))
-            except Exception:
-                pass
-            inside = card
-            try:
-                inside = card.contentView() or card
-            except Exception:
-                pass
-            host = FlowView.alloc().initWithFrame_(inside.bounds())
-            host.setAutoresizingMask_(
-                NSViewWidthSizable | int(_appkit_name("NSViewHeightSizable")))
-            card.addSubview_(host)
-            return host
-
-        @objc.python_method
-        def _home_row(self, host: Any, height: float,
-                      *, title: str = "") -> tuple[Any, Any, Any]:
-            """One row for a group on Home or in setup: its container and
-            the title and caption labels ``_group_row`` makes for it.
-
-            Each row is its own view, so rows of different heights stack
-            and a row can come and go; its labels come from the shared row
-            helper, so they are styled like every other row in the window.
-            """
-            row = NSView.alloc().initWithFrame_(
-                NSMakeRect(0, 0, CONTENT_WIDTH, height))
-            title_label, detail, _y = self._group_row(
-                row, index=0, count=1, row_height=height, title=title)
-            host.addSubview_(row)
-            return row, title_label, detail
 
         @objc.python_method
         def _build_setup(self, page: Any) -> None:
@@ -9726,10 +9390,7 @@ if APPKIT_AVAILABLE:
             setup.addSubview_(stage)
 
             # How the step stands is the header over its rows.
-            onboarding_status = _label(
-                "", NSMakeRect(0, 0, 300, HOME_HEADER_HEIGHT), truncate=True)
-            onboarding_status.setFont_(_role_font("section_header"))
-            setup.addSubview_(onboarding_status)
+            onboarding_status = self._section_header("")
             # The progress in words is the bar's VoiceOver value; the field
             # keeps the value and is not drawn.
             onboarding_progress = _label(
@@ -9738,16 +9399,11 @@ if APPKIT_AVAILABLE:
             onboarding_progress.setHidden_(True)
             setup.addSubview_(onboarding_progress)
 
-            card = _card(NSMakeRect(
-                0, 0, width, SETUP_ROW_COUNT * SETUP_ROW_HEIGHT + 2.0))
-            self._register("card", card)
-            _accessible(card, self._l("onboarding.rows.accessibility.label"))
-            rows_host = self._rows_host(card)
-            setup.addSubview_(card)
+            # One row for each thing the step is waiting on: its icon on a
+            # tile, what it is and why, then how it stands (a key cap, its
+            # state in words, or the button to a permission's pane).
             rows: list[dict[str, Any]] = []
             for index in range(SETUP_ROW_COUNT):
-                row, title, caption = self._home_row(
-                    rows_host, SETUP_ROW_HEIGHT)
                 tile = NSView.alloc().initWithFrame_(NSMakeRect(
                     0, 0, SETUP_ICON_SIZE, SETUP_ICON_SIZE))
                 tile.setWantsLayer_(True)
@@ -9757,43 +9413,33 @@ if APPKIT_AVAILABLE:
                     8, 8, SETUP_ICON_SIZE - 16, SETUP_ICON_SIZE - 16))
                 icon.setImageScaling_(NSImageScaleProportionallyUpOrDown)
                 icon.setEditable_(False)
+                _silence_image(icon)
                 tile.addSubview_(icon)
-                check = NSImageView.alloc().initWithFrame_(
-                    NSMakeRect(0, 0, 16, 16))
-                check.setImageScaling_(NSImageScaleProportionallyUpOrDown)
-                check.setEditable_(False)
-                image = _symbol_image(
-                    "checkmark.circle.fill", size=15.0, weight="semibold")
-                if image is not None:
-                    check.setImage_(image)
-                status = _label(
-                    "", NSMakeRect(0, 0, 120, 18), size=13,
-                    weight="semibold", rounded=True)
+                state = self._status_label()
                 cap = KeyCapView.alloc().initWithFrame_(
                     NSMakeRect(0, 0, 40, 23))
                 button = self._chunky(
                     self._l("onboarding.action.open_system_settings"),
                     "openPermissionSettings:", variant="plain", small=True)
                 button.setTag_(index)
-                for view in (icon, check):
-                    _silence_image(view)
-                for view in (tile, cap, check, status, button):
-                    row.addSubview_(view)
+                row, title, caption = self._settings_row(
+                    "", caption="", accessories=(cap, state, button),
+                    leading=tile, wrap=False)
                 rows.append({
                     "view": row, "tile": tile, "icon": icon, "title": title,
-                    "caption": caption, "check": check, "status": status,
-                    "cap": cap, "button": button, "key": "", "tone": "quiet",
-                    "permission": "",
-                    "title_y": float(title.frame().origin.y),
-                    "caption_y": float(caption.frame().origin.y),
+                    "caption": caption, "state": state, "check": state.icon,
+                    "status": state.text, "cap": cap, "button": button,
+                    "key": "", "tone": "quiet", "permission": "",
                 })
-            lines = []
-            for _ in rows[1:]:
-                line = _hairline(NSMakeRect(0, 0, width, 1))
-                self._register("hairline", line)
-                _silence_group(line)
-                rows_host.addSubview_(line)
-                lines.append(line)
+            card = self._settings_group(
+                [row["view"] for row in rows]).name_for_voiceover(
+                    self._l("onboarding.rows.accessibility.label"))
+            step_group = FlowView.alloc().initWithFrame_(NSMakeRect(
+                0, 0, width,
+                SETUP_ROW_COUNT * ROW_CAPTION_MIN_HEIGHT + 24.0))
+            step_group.addSubview_(onboarding_status)
+            step_group.addSubview_(card)
+            setup.addSubview_(step_group)
 
             # The foot: how far along, the route, and the one way forward.
             foot = FlowView.alloc().initWithFrame_(NSMakeRect(
@@ -9872,47 +9518,15 @@ if APPKIT_AVAILABLE:
                 onboarding_title=onboarding_title,
                 onboarding_detail=onboarding_detail,
                 onboarding_status=onboarding_status,
+                onboarding_group=step_group,
                 onboarding_rows_card=card,
-                onboarding_rows_host=rows_host,
                 onboarding_rows=tuple(rows),
-                onboarding_row_lines=tuple(lines),
                 onboarding_foot=foot,
                 onboarding_action=onboarding_action,
                 onboarding_steps=tuple(onboarding_steps),
                 onboarding_step_cards=tuple(step_markers),
                 onboarding_step_icons=tuple(step_icons),
             )
-
-        @objc.python_method
-        def _group_row(self, group: Any, *, index: int, count: int,
-                       row_height: float, title: str, title_size: float = 13,
-                       detail_size: float = 12,
-                       detail_width: float = 470) -> Any:
-            """One hairline-separated row inside a grouped card, by frame.
-
-            The settings pages lay their rows out with ``SettingsRowView``;
-            this is for a fixed-height list on a card, and draws the same
-            row: a 13pt semibold title and a 12pt caption in the secondary
-            colour, inset ``ROW_INSET``, hairlines inset the same.
-            """
-            width = CONTENT_WIDTH
-            y = (count - 1 - index) * row_height
-            title_label = self._ink(
-                title, NSMakeRect(ROW_INSET, y + row_height / 2 - 1, 300, 18),
-                size=title_size, weight="semibold", truncate=True)
-            detail = self._soft(
-                "", NSMakeRect(ROW_INSET, y + row_height / 2 - 17,
-                               detail_width, 15),
-                size=detail_size, truncate=True)
-            group.addSubview_(title_label)
-            group.addSubview_(detail)
-            if index < count - 1:
-                separator = _hairline(NSMakeRect(
-                    ROW_INSET, y, width - ROW_INSET, 1))
-                separator.setAutoresizingMask_(NSViewWidthSizable)
-                self._register("hairline", separator)
-                group.addSubview_(separator)
-            return title_label, detail, y
 
         @objc.python_method
         def _switch(self, frame: Any, action: str, *, label: str,
@@ -9999,28 +9613,48 @@ if APPKIT_AVAILABLE:
                 wrap=True, **kwargs)
 
         @objc.python_method
-        def _settings_row(self, title: str, *, caption: str | None = None,
-                          accessories: Sequence[Any] = ()) -> Any:
+        def _settings_row(self, title: str | None, *,
+                          caption: str | None = None,
+                          accessories: Sequence[Any] = (),
+                          leading: Any = None, wrap: bool = True) -> Any:
             """A row's title, optional caption and controls, as one view.
 
-            Returns ``(row, title_label, caption_label)``; the caption is
-            None for a row without one.
+            Returns ``(row, title_label, caption_label)``; a label is None
+            for a row made without it. Every row in the window comes from
+            here, so the title and the caption are the same type wherever
+            they are. Text wraps and the row grows with it; ``wrap=False``
+            is for a page that cannot scroll (Home, first-run setup), where
+            a line that does not fit is cut instead.
             """
-            title_label = self._ink(
-                title, NSMakeRect(0, 0, 240, 16), size=13,
-                weight="semibold", wrap=True)
+            fit = {"wrap": True} if wrap else {"truncate": True}
+            title_label = None
+            if title is not None:
+                title_label = self._ink(
+                    title, NSMakeRect(0, 0, 240, 16), size=13,
+                    weight="semibold", **fit)
             caption_label = None
             if caption is not None:
                 caption_label = self._soft(
-                    caption, NSMakeRect(0, 0, 240, 15), size=12, wrap=True)
+                    caption, NSMakeRect(0, 0, 240, 15), size=12, **fit)
             row = SettingsRowView.alloc().initWithFrame_(
                 NSMakeRect(0, 0, CONTENT_WIDTH, ROW_MIN_HEIGHT))
-            row.configure(title_label, caption_label, accessories)
+            row.configure(
+                title_label, caption_label, accessories, leading=leading)
             return row, title_label, caption_label
 
         @objc.python_method
+        def _header_note(self, text: str = "") -> Any:
+            """Small print at the far end of a section header's line."""
+            return self._soft(
+                text, NSMakeRect(0, 0, 240, 15), size=12, truncate=True,
+                alignment=int(_appkit_name("NSTextAlignmentRight")))
+
+        @objc.python_method
         def _settings_group(self, rows: Sequence[Any]) -> Any:
-            group = _card(NSMakeRect(0, 0, CONTENT_WIDTH, 100), "group")
+            """A group of rows: the one rounded surface with a hairline
+            edge that every page, Home and first-run setup hold rows in."""
+            group = GroupBoxView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, CONTENT_WIDTH, 100))
             for row in rows:
                 group.add_row(row)
             return group
@@ -10891,12 +10525,6 @@ if APPKIT_AVAILABLE:
                 self.dynamic["result_engine"].setStringValue_(
                     self._l("results.empty.detail"))
             self.dynamic["result_mode"].setStringValue_(result.mode)
-            self._set_pill_tone(self.dynamic["result_mode"], "good", dark)
-            pill = self.dynamic["result_mode"]
-            pill.setFrameSize_((
-                min(200.0, max(56.0, math.ceil(_text_size(
-                    result.mode, pill.font())[0]) + 24.0)),
-                pill.frame().size.height))
             if not result.acoustic_replay_enabled:
                 replay_copy = self._l("results.audio.off")
             elif result.retained_span_count == 0:
@@ -11076,9 +10704,13 @@ if APPKIT_AVAILABLE:
                 row["title"].setStringValue_(spec.title)
                 row["caption"].setStringValue_(spec.caption)
                 row["caption"].setHidden_(not spec.caption)
-                row["status"].setStringValue_(spec.status)
-                row["status"].setHidden_(not spec.status)
-                row["check"].setHidden_(spec.tone != "good")
+                # How the row stands, said the way every page says a
+                # state: a symbol for the tone, then the words.
+                row["state"].setHidden_(not spec.status)
+                self._show_status(
+                    row["state"], spec.status,
+                    {"good": "good", "attention": "warn"}.get(
+                        spec.tone, "neutral"))
                 row["cap"].setHidden_(not spec.key_cap)
                 if spec.key_cap:
                     row["cap"].set_key(spec.key_cap, locale=locale)
@@ -12884,13 +12516,9 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             return view.convertRect_toView_(view.bounds(), None)
 
         def leaf_views(view: Any) -> list[Any]:
-            """The shown views with nothing shown inside them. A box is
-            looked into through its content view only: what it draws its
-            own fill and border with is not something laid out."""
+            """The shown views with nothing shown inside them."""
             inside = view
-            if bool(view.isKindOfClass_(NSBox)):
-                inside = view.contentView()
-            elif bool(view.isKindOfClass_(NSButton)) or bool(
+            if bool(view.isKindOfClass_(NSButton)) or bool(
                     view.isKindOfClass_(NSTextField)):
                 # A control is one thing, whatever it is built from.
                 inside = None
@@ -12932,7 +12560,10 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             bounds = frame_in_window(container)
             placed = []
             for leaf in leaf_views(container):
-                rect = frame_in_window(leaf)
+                # Where a control is, is its alignment rectangle: a system
+                # button's frame is wider than the bezel it draws.
+                rect = leaf.superview().convertRect_toView_(
+                    leaf.alignmentRectForFrame_(leaf.frame()), None)
                 require(text_fits(leaf), f"{label}: no text is cut short")
                 require(
                     rect.origin.x >= bounds.origin.x - 0.5
@@ -13047,8 +12678,7 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             primary = index == 0
             require(
                 not bool(row["button"].isHidden())
-                and bool(row["check"].isHidden())
-                and bool(row["status"].isHidden())
+                and bool(row["state"].isHidden())
                 and bool(row["button"].isKindOfClass_(ChunkyButton))
                 and row["button"].variant == (
                     "amber" if primary else "plain")
@@ -13121,7 +12751,7 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         # What only decorates stays out of VoiceOver's way: an image view
         # is read through its cell, so both are told; a separator is not
         # an empty group; the bubble's copy is read where it stands.
-        quiet = [setup_bubble, *controller.dynamic["onboarding_row_lines"]]
+        quiet = [setup_bubble]
         for image_view in (
                 *(row["icon"] for row in setup_row_views),
                 *(row["check"] for row in setup_row_views),
@@ -13130,8 +12760,8 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         require(
             not any(bool(element.isAccessibilityElement())
                     for element in quiet),
-            "setup's symbols, separators and bubble are not VoiceOver "
-            "stops of their own")
+            "setup's symbols and bubble are not VoiceOver stops of their "
+            "own")
 
         # A permission granted while the step is showing: its row trades
         # the button for the check mark and the word, live, and the
@@ -13145,8 +12775,11 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         check_frame = frame_in_window(granted_row["check"])
         row_frame = frame_in_window(granted_row["view"])
         require(
-            not bool(granted_row["check"].isHidden())
+            not bool(granted_row["state"].isHidden())
+            and granted_row["state"].tone == "good"
+            and bool(granted_row["state"].isKindOfClass_(StatusLabelView))
             and granted_row["check"].image() is not None
+            and not bool(granted_row["check"].isHidden())
             and check_frame.size.width >= 12.0
             and check_frame.size.height >= 12.0
             and row_frame.origin.x <= check_frame.origin.x
@@ -13156,6 +12789,7 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             and check_frame.origin.y + check_frame.size.height
             <= row_frame.origin.y + row_frame.size.height
             and not bool(granted_row["status"].isHidden())
+            and granted_row["status"].superview() == granted_row["state"]
             and str(granted_row["status"].stringValue())
             == localized_string("onboarding.permission.granted")
             and bool(granted_row["button"].isHidden())
@@ -13177,7 +12811,7 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         model.refresh()
         controller.render()
         require(
-            bool(granted_row["check"].isHidden())
+            bool(granted_row["state"].isHidden())
             and not bool(granted_row["button"].isHidden())
             and granted_row["button"].variant == "amber",
             "a permission taken away again loses its check mark")
@@ -13524,8 +13158,10 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                     for row in setup_row_views),
             "a permission still being checked offers no System Settings")
         require(
-            [bool(row["check"].isHidden()) for row in setup_row_views[:3]]
-            == [True, False, False]
+            not any(bool(row["state"].isHidden())
+                    for row in setup_row_views[:3])
+            and [row["state"].tone for row in setup_row_views[:3]]
+            == ["neutral", "good", "good"]
             and [str(row["status"].stringValue())
                  for row in setup_row_views[:3]] == [
                 localized_string("onboarding.permission.checking"),
@@ -13635,7 +13271,9 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         require(
             [row["key"] for row in setup_row_views] == list(
                 step.key for step in model.state.onboarding_steps)
-            and not any(bool(row["check"].isHidden())
+            and not any(bool(row["state"].isHidden())
+                        or row["state"].tone != "good"
+                        or row["check"].image() is None
                         for row in setup_row_views)
             and all(bool(marker.isHidden()) for marker in
                     controller.dynamic["onboarding_step_cards"]),
@@ -15236,6 +14874,106 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             abs(default_column.size.width - CONTENT_WIDTH) < 0.5
             and default_column.origin.x - SIDEBAR_WIDTH >= CONTENT_INSET,
             "the default window gives the column its full width and inset")
+
+        # ---- One look for a group of rows. Home's group and setup's are
+        # the group every settings page has: the same view, so the same
+        # fill, hairline edge, corners and separators in both appearances
+        # and under Increase Contrast, and rows of the same make.
+        def shown_while(view: Any, measure: Callable[[], Any]) -> Any:
+            """Run ``measure`` with ``view`` and what holds it showing."""
+            hidden = [holder for holder in ancestors_of(view)
+                      if bool(holder.isHidden())]
+            for holder in hidden:
+                holder.setHidden_(False)
+            try:
+                root_view.layoutSubtreeIfNeeded()
+                return measure()
+            finally:
+                for holder in hidden:
+                    holder.setHidden_(True)
+
+        def group_look(group: Any) -> tuple[Any, ...]:
+            """What a group draws where no row draws: the fill, the top
+            edge, just outside a corner, a separator, and the fill where
+            a separator has not started yet."""
+            rep = rendered(group)
+            width = float(group.bounds().size.width)
+            line = math.floor(group.separators[0]) + 0.5
+            return (
+                pixel(rep, width - 3.0, line - 4.0),
+                pixel(rep, width / 2.0, 0.5),
+                pixel(rep, 1.5, 1.5),
+                pixel(rep, ROW_INSET + 2.0, line),
+                pixel(rep, ROW_INSET - 3.0, line))
+
+        def with_increased_contrast(measure: Callable[[], Any]) -> Any:
+            saved = globals()["_increase_contrast"]
+            globals()["_increase_contrast"] = lambda: True
+            try:
+                return measure()
+            finally:
+                globals()["_increase_contrast"] = saved
+
+        home_group = controller.dynamic["home_result_card"]
+        setup_group = controller.dynamic["onboarding_rows_card"]
+        page_group = controller.dynamic["page_documents"]["Controls"] \
+            .sections[0][1]
+        every_group = (home_group, setup_group, page_group)
+        require(
+            all(type(group) is GroupBoxView for group in every_group)
+            and all(type(row) is SettingsRowView
+                    for group in every_group for row in group.rows)
+            and all(len(group.separators) >= 1 for group in every_group),
+            "Home, setup and the settings pages hold their rows in the "
+            "same group view")
+        for dark_look in (False, True):
+            controller.window.setAppearance_(NSAppearance.appearanceNamed_(
+                NSAppearanceNameDarkAqua if dark_look
+                else NSAppearanceNameAqua))
+            controller.render()
+            surface = palette_for_appearance(dark_look).surface
+            for contrast in (False, True):
+                def looks() -> list[tuple[Any, ...]]:
+                    return [shown_while(group, lambda: group_look(group))
+                            for group in every_group]
+                home_look, setup_look, page_look = (
+                    with_increased_contrast(looks) if contrast else looks())
+                where = (f"{'dark' if dark_look else 'light'} appearance"
+                         + (", Increase Contrast" if contrast else ""))
+                edge = color_token("hairline", dark_look, contrast).over(
+                    surface)
+                fill, top_edge, corner, separator, before = page_look
+                require(
+                    near(fill, surface) and fill[3] > 0.99
+                    and near(separator, edge) and near(before, surface)
+                    and corner[3] < 0.05
+                    and not near(top_edge, surface, 0.01),
+                    f"a group is the surface with a hairline edge, round "
+                    f"corners and separators from the row inset, in {where}")
+                for name, look in (("Home", home_look),
+                                   ("setup", setup_look)):
+                    require(
+                        all(near(drawn, expected, 0.01)
+                            for drawn, expected in zip(look, page_look)),
+                        f"{name}'s group draws what a settings group "
+                        f"draws, in {where}")
+        controller.window.setAppearance_(None)
+        controller.render()
+        # The rows in them are the same make: title and caption in the
+        # same type, text from the same inset, the same minimum heights.
+        page_row = page_group.rows[0]
+        for name, group in (("Home", home_group), ("setup", setup_group)):
+            titled = next(row for row in group.rows
+                          if row.title is not None and row.caption is not None)
+            require(
+                titled.title.font() == page_row.title.font()
+                and titled.caption.font() == page_row.caption.font()
+                and abs(titled.text_origin() - (
+                    ROW_INSET if titled.leading is None else
+                    ROW_INSET + titled.leading.frame().size.width
+                    + ROW_CONTROL_GAP)) < 0.01,
+                f"{name}'s rows are set in the same type, from the same "
+                "inset, as a settings row")
 
         # In light appearance, read the colours the window actually draws: a
         # default install's optional model is quiet, not amber, and error

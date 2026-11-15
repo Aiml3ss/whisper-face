@@ -4366,12 +4366,28 @@ class HomeAndSetupTests(unittest.TestCase):
             # On a stage the face has its hard shadow and no speech puffs.
             self.assertIn("setShadow_(True)", text)
             self.assertIn("setWhispers_(False)", text)
-            # Rows come from the shared row helper.
-            self.assertIn("self._home_row(", text)
+            # One look for a group of rows: the header, the rows and the
+            # group that holds them are the settings pages' own, and
+            # nothing is a boxed card with separator views of its own.
+            for helper in ("self._section_header(", "self._settings_row(",
+                           "self._settings_group("):
+                self.assertIn(helper, text)
+            for old in ("_card(", "_hairline(", "NSBox"):
+                self.assertNotIn(old, text)
             self.assertNotIn("_face_image(", text)
         self.assertIn("StickerTileView.alloc()", home)
-        self.assertIn(
-            "_group_row", _called_names(_gui_function("_home_row", controller)))
+        # Both place that header and group through the one section
+        # layout every settings page uses.
+        page = _called_names(
+            _gui_function("arrange", _gui_class("GroupedPageView")))
+        self.assertIn("arrange_section", page)
+        for name in ("_layout_home", "_layout_onboarding"):
+            self.assertIn("arrange_section", _called_names(
+                _gui_function(name, controller)))
+        # A setup row's state is the status view every page uses.
+        self.assertIn("self._status_label()", setup)
+        self.assertIn("_show_status", _called_names(
+            _gui_function("_render_setup_rows", controller)))
         # The old blob backdrop and the layer-styled amber button are gone.
         names = {node.attr for node in ast.walk(GUI_TREE)
                  if isinstance(node, ast.Attribute)} | {
@@ -4380,7 +4396,12 @@ class HomeAndSetupTests(unittest.TestCase):
             node.value for node in ast.walk(GUI_TREE)
             if isinstance(node, ast.Constant) and isinstance(node.value, str)}
         for gone in ("home_blobs", "home_stat_badges", "_primary_button",
-                     "_set_cta_title", "onboarding_face_chip"):
+                     "_set_cta_title", "onboarding_face_chip",
+                     # ... and so are the card, its separator views and
+                     # the row layouts Home and setup used to keep.
+                     "_home_row", "_group_row", "_rows_host",
+                     "_layout_home_rows", "_layout_setup_row",
+                     "home_row_lines", "onboarding_row_lines"):
             self.assertNotIn(gone, names)
         # One Continue button; per-permission buttons are plain.
         self.assertEqual(setup.count("'continueSetup:'"), 1)
@@ -5219,7 +5240,10 @@ class ShellAppKitTests(unittest.TestCase):
                 self.assertFalse(dynamic["home_attention_row"].isHidden())
                 pause = self.in_window(dynamic["pause_button"])
                 copy = self.in_window(dynamic["copy_outbox_button"])
-                review = self.in_window(dynamic["review_issue_row_button"])
+                review_button = dynamic["review_issue_row_button"]
+                review = review_button.superview().convertRect_toView_(
+                    review_button.alignmentRectForFrame_(
+                        review_button.frame()), None)
                 room = bubble.convertRect_toView_(bubble.content_rect(), None)
                 self.assertAlmostEqual(
                     pause.origin.x, room.origin.x, delta=0.5)
@@ -5232,7 +5256,7 @@ class ShellAppKitTests(unittest.TestCase):
                 self.assertAlmostEqual(
                     review.origin.x + review.size.width,
                     column.origin.x + column.size.width
-                    - gui_module.ROW_INSET - 1.0, delta=1.5)
+                    - gui_module.ROW_INSET, delta=0.5)
                 self.assertGreaterEqual(review.origin.x, column.origin.x)
 
     def test_the_sidebar_keeps_its_foot_and_its_top_as_the_window_grows(self):
@@ -5543,10 +5567,8 @@ class HomeAppKitTests(unittest.TestCase):
     def leaves(self, view):
         AppKit = self.AppKit
         inside = view
-        if view.isKindOfClass_(AppKit.NSBox):
-            inside = view.contentView()
-        elif (view.isKindOfClass_(AppKit.NSButton)
-              or view.isKindOfClass_(AppKit.NSTextField)):
+        if (view.isKindOfClass_(AppKit.NSButton)
+                or view.isKindOfClass_(AppKit.NSTextField)):
             inside = None
         children = [] if inside is None else [
             child for child in inside.subviews() if not child.isHidden()]
@@ -5561,7 +5583,10 @@ class HomeAppKitTests(unittest.TestCase):
         bounds = self.in_window(container)
         placed = []
         for leaf in self.leaves(container):
-            rect = self.in_window(leaf)
+            # Where a control is, is its alignment rectangle: a system
+            # button's frame is wider than the bezel it draws.
+            rect = leaf.superview().convertRect_toView_(
+                leaf.alignmentRectForFrame_(leaf.frame()), None)
             if leaf.isKindOfClass_(AppKit.NSTextField):
                 size = leaf.frame().size
                 if leaf.cell().wraps():
@@ -5728,15 +5753,16 @@ class HomeAppKitTests(unittest.TestCase):
         self.assertTrue(self.controller.setup_mode)
         checking, missing, granted, unused = dynamic["onboarding_rows"]
         self.assertTrue(unused["view"].isHidden())
-        # Still being checked: words only.
+        # Still being checked: its state in words, in the neutral tone.
         self.assertTrue(checking["button"].isHidden())
-        self.assertTrue(checking["check"].isHidden())
+        self.assertFalse(checking["state"].isHidden())
+        self.assertEqual(checking["state"].tone, "neutral")
         self.assertEqual(str(checking["status"].stringValue()), "Checking…")
         # Missing: its own button, and it opens that pane. It is the
         # first missing permission, so it is the step's primary action:
         # the one amber button, and the one that answers Return.
         self.assertFalse(missing["button"].isHidden())
-        self.assertTrue(missing["check"].isHidden())
+        self.assertTrue(missing["state"].isHidden())
         self.assertEqual(missing["button"].variant, "amber")
         self.assertEqual(str(missing["button"].keyEquivalent()), "\r")
         self.assertEqual(
@@ -5756,7 +5782,8 @@ class HomeAppKitTests(unittest.TestCase):
             localized_string("onboarding.action.waiting.help"))
         # Granted: the check mark and the word.
         self.assertTrue(granted["button"].isHidden())
-        self.assertFalse(granted["check"].isHidden())
+        self.assertFalse(granted["state"].isHidden())
+        self.assertEqual(granted["state"].tone, "good")
         self.assertEqual(str(granted["status"].stringValue()), "Allowed")
         self.assertIsNotNone(granted["check"].image())
         for width in (880.0, 1000.0):
@@ -5768,7 +5795,8 @@ class HomeAppKitTests(unittest.TestCase):
         self.runtime["accessibility_status"] = "Granted"
         self.model.refresh()
         self.show()
-        self.assertFalse(missing["check"].isHidden())
+        self.assertFalse(missing["state"].isHidden())
+        self.assertEqual(missing["state"].tone, "good")
         self.assertTrue(missing["button"].isHidden())
         self.assertEqual(str(missing["button"].keyEquivalent()), "")
         # Nothing is missing any more, so the step has moved on and the
