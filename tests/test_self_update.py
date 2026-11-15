@@ -230,8 +230,10 @@ class CheckForUpdateTests(unittest.TestCase):
             archive = subprocess.run(
                 ["git", "archive", revision], cwd=source,
                 capture_output=True, check=True).stdout
-            subprocess.run(["tar", "-x", "-C", str(bundle)], input=archive,
-                           check=True)
+            # "-f -" is not optional: without it the tar that ships with
+            # Windows reads a tape drive, not the pipe.
+            subprocess.run(["tar", "-x", "-f", "-", "-C", str(bundle)],
+                           input=archive, check=True)
             git("init", "-q", cwd=bundle)
             git("fetch", "-q", "--depth", "1", str(source), revision,
                 cwd=bundle)

@@ -138,6 +138,10 @@ relisten seams — because a Windows runner cannot execute what they describe.
 Do not add a gate to the Windows workflow without first confirming it passes
 with no macOS runtime present.
 
+`tests/test_installers.py` is in that subset because most of it reads the two
+installers. The tests in it that run `setup.sh` functions need `/bin/bash`, so
+on a Windows runner they are skipped, not failed.
+
 ## Which of those gates GitHub actually blocks a merge on
 
 The list above is what a release must pass. It is not what GitHub blocks a

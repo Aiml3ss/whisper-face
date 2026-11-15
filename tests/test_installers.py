@@ -108,6 +108,13 @@ def _shell_quote(value) -> str:
     return "'" + str(value).replace("'", "'\\''") + "'"
 
 
+# setup.sh is the Mac installer, and these tests run its functions under the
+# shell it is written for. A Windows runner has no /bin/bash, so there they
+# are skipped; the tests that only read the two installers still run.
+needs_bash = unittest.skipUnless(
+    Path("/bin/bash").exists(), "runs setup.sh functions under /bin/bash")
+
+
 class InstallerContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -804,6 +811,7 @@ class InstallerContractTests(unittest.TestCase):
         "ollama_port_holder", "retire_ollama_service", "start_ollama_service",
     )
 
+    @needs_bash
     def test_a_default_install_brings_no_ollama(self):
         # Ollama exists only to serve the optional cleanup model. A default
         # install must not install, load, or verify it.
@@ -846,6 +854,7 @@ class InstallerContractTests(unittest.TestCase):
             self.assertEqual(result.stdout.strip(), "verify_qwen=0")
             self.assertNotIn("refused", result.stderr)
 
+    @needs_bash
     def test_the_cleanup_model_is_looked_for_where_the_service_keeps_it(self):
         # com.berg.ollama.plist sets no OLLAMA_MODELS, so the service stores
         # models in Ollama's default place. A value exported in the user's
@@ -872,6 +881,7 @@ class InstallerContractTests(unittest.TestCase):
             # Nor does the manifest check dictate.py runs read another store.
             self.assertEqual(exported, "0")
 
+    @needs_bash
     def test_setup_never_stops_or_fights_someone_elses_ollama(self):
         with tempfile.TemporaryDirectory() as directory:
             variables, stubs = self.ollama_sandbox(directory, listener=4242)
@@ -906,6 +916,7 @@ class InstallerContractTests(unittest.TestCase):
             self.assertFalse(Path(directory, "loaded").exists())
             self.assertFalse(variables["ollama_plist"].exists())
 
+    @needs_bash
     def test_an_ollama_service_that_never_becomes_ready_is_unloaded(self):
         # KeepAlive would otherwise restart it every ten seconds, at every
         # login, for as long as the plist stayed in ~/Library/LaunchAgents.
@@ -925,6 +936,7 @@ class InstallerContractTests(unittest.TestCase):
             self.assertFalse(variables["ollama_plist"].exists())
             self.assertFalse(variables["ollama_service_receipt"].exists())
 
+    @needs_bash
     def test_a_republished_cleanup_model_is_set_aside_by_models(self):
         # ./setup.sh --models pulls qwen3.5:4b by a tag its publisher can
         # move. A copy that fails the manifest audit must not leave a loaded
@@ -1029,6 +1041,7 @@ class InstallerContractTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, self.powershell)
 
+    @needs_bash
     def test_install_log_records_the_run_and_the_reason_comes_first(self):
         # The log is written by rerunning setup.sh behind a plain pipeline.
         # Under the earlier `exec > >(tee ...)`, bash 3.2 could not wait for
@@ -1086,6 +1099,7 @@ class InstallerContractTests(unittest.TestCase):
             self.assertIn("exit status 4", result.stdout)
             self.assertEqual(result.stderr, "")
 
+    @needs_bash
     def test_a_failed_verify_reports_its_reason_where_the_app_reads_it(self):
         # verify_mac_installation shows the last line --verify prints on
         # standard output; before, that was "== verifying installation".
@@ -1146,6 +1160,7 @@ class InstallerContractTests(unittest.TestCase):
                     result.stdout.strip().splitlines()[-1].startswith(reason),
                     result.stdout)
 
+    @needs_bash
     def test_install_command_names_the_log_only_when_this_run_wrote_it(self):
         # A copy of the shim drives a stand-in setup.sh, so nothing installs.
         for writes_log, expected in (
@@ -1176,6 +1191,7 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2)
                 self.assertIn(expected, result.stdout)
 
+    @needs_bash
     def test_an_install_waiting_for_permissions_is_not_called_complete(self):
         # On a first install macOS has granted nothing, so the service stops
         # at "Waiting for permissions" with no hotkey listener and nothing
@@ -1204,6 +1220,7 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("Hold Right Option, speak, and release to paste.",
                       ready.stdout)
 
+    @needs_bash
     def test_a_server_only_install_says_where_the_bearer_token_is(self):
         # The endpoint refuses every request without the token. The runtime
         # keeps it in one private file across restarts and never logs it, so
@@ -1264,6 +1281,7 @@ class InstallerContractTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, self.powershell)
 
+    @needs_bash
     def test_running_from_the_disk_image_says_so_instead_of_disk_space(self):
         # A mounted image has a few megabytes free, so checking space first
         # told people with hundreds of gigabytes free that they needed 5 GB.
@@ -1305,6 +1323,7 @@ class InstallerContractTests(unittest.TestCase):
                 if read_only:
                     self.assertNotIn("free disk space", result.stderr)
 
+    @needs_bash
     def test_missing_build_tools_and_old_macos_fail_before_any_download(self):
         # /usr/bin/swift and swiftc are shims on every Mac, so the old
         # `command -v` check could not fail; a missing toolchain surfaced

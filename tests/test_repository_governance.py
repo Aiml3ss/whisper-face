@@ -216,8 +216,10 @@ class RepositoryGovernanceTests(unittest.TestCase):
         archive = subprocess.run(
             ["git", "archive", "--worktree-attributes", "HEAD"],
             cwd=ROOT, capture_output=True, check=True).stdout
+        # "-f -" is not optional: without it the tar that ships with Windows
+        # reads a tape drive, not the pipe.
         listing = subprocess.run(
-            ["tar", "-t"], input=archive, capture_output=True,
+            ["tar", "-t", "-f", "-"], input=archive, capture_output=True,
             check=True).stdout.decode("utf-8").splitlines()
         self.assertIn("dictate.py", listing)
         for prefix in (".probe-", ".raw/", "wiki/.llm-wiki/", ".wrangler/",
