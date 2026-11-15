@@ -257,7 +257,10 @@ def hud_presentation(
     # character would say it. It is never set in capitals and never sits
     # under a smaller label.
     if mode == "error":
-        headline = "Try again"
+        # Most of the messages under it end "— try again" and a few are not
+        # about retrying at all, so the headline only says something went
+        # wrong and leaves what to do to the message.
+        headline = "Uh-oh"
         confidence_copy = ""
         accent = "error"
         phase = "Dictation needs another try"

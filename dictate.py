@@ -12764,7 +12764,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             and compiler_result.confidence < 0.65)
         if rec.uncertain:
             CAPTION["text"] = (
-                f"Uncertain ({compiler_result.confidence:.0%}): {raw} · Alt: "
+                f"Uncertain: {raw} · Alt: "
                 f"{PIPELINE_STATE['last_alternatives'][0]}")
         else:
             CAPTION["text"] = raw        # full transcript during processing
@@ -13521,7 +13521,7 @@ HUD_SMOKE_STATES = (
      "has to wrap it and then drop its oldest words", 0.87, True, 0.35),
     ("working", "processing", "Local smoke transcript", 0.61, True, 0.0),
     ("uncertain", "processing",
-     "Uncertain (58%): meet at for · Alt: meet at four", 0.58, True, 0.0),
+     "Uncertain: meet at for · Alt: meet at four", 0.58, True, 0.0),
     ("done", "done", "Typed 9 words", None, False, 0.0),
     ("error", "error", "I couldn't understand that — try again",
      None, False, 0.0),

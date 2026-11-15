@@ -3678,15 +3678,18 @@ class WhisperFaceThemeTests(unittest.TestCase):
             "error", "I couldn't understand that — try again", 0.61,
             stable_prefix=True)
 
-        # The same four states and the same words as before the pill; they
-        # are now the pill's headline, so they are set as a sentence instead
-        # of in capitals.
+        # The same four states as before the pill; they are now the pill's
+        # headline, so they are set as a sentence instead of in capitals.
+        # The error headline does not repeat the message under it, which
+        # already says what to do.
         self.assertEqual(listening.headline, "Heard you")
         self.assertEqual(listening.confidence, "Recognition 91%")
         self.assertIn("hello world", listening.accessibility_value)
         self.assertEqual(processing.headline, "Tidying up…")
         self.assertEqual(processing.accent, "accent")
-        self.assertEqual(error.headline, "Try again")
+        self.assertEqual(error.headline, "Uh-oh")
+        self.assertNotIn(
+            error.headline.lower(), "i couldn't understand that — try again")
         self.assertEqual(error.confidence, "")
         self.assertEqual(error.accent, "error")
         self.assertIn(

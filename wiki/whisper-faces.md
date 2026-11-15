@@ -67,7 +67,7 @@ the HUD and the window's `LiveFaceView` so the two cannot drift apart.
   with a hard shadow, porcelain in both appearances, with the face
   leaning out of its left end. It also draws a short row of level bars,
   the [[stable-prefix]] caption, and honest status copy as one headline
-  (Listening… / Heard you / Tidying up… / Try again), with accessibility
+  (Listening… / Heard you / Tidying up… / Uh-oh), with accessibility
   values kept in sync.
 
 > 📝 **Updated for the chibi-clay rebuild (#120)**: the face anchors the
