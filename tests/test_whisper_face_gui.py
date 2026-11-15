@@ -3897,10 +3897,16 @@ class SettingsPagesContractTests(unittest.TestCase):
         # Each of these wrapped with its last word alone on a line, or with
         # a button's name split across two, at a width the window takes.
         catalog = STRING_CATALOGS["en"]
+        # Every sentence the bubble speaks, on Home and in setup, and the
+        # captions and notes that were seen to wrap badly.
+        spoken = [
+            key for key in catalog
+            if (key.startswith("overview.status.") and ".detail" in key)
+            or (key.startswith("onboarding.") and key.endswith(".detail")
+                and key.count(".") == 2)]
+        self.assertGreaterEqual(len(spoken), 12)
         for key in (
-                "overview.status.recovery.detail.one",
-                "overview.status.recovery.detail.many",
-                "onboarding.first_dictation.detail",
+                *spoken,
                 "settings.controls.self_correction.off",
                 "settings.controls.self_correction.on",
                 "pages.models.advisory",
