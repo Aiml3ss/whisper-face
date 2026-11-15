@@ -1036,6 +1036,7 @@ class SnapshotTests(unittest.TestCase):
         recovery = normalize_snapshot({**common, "outbox_count": 2})
         self.assertEqual(recovery.status_phase, "recovery")
         self.assertIn("2 dictations", recovery.status_detail)
+        self.assertEqual(recovery.outbox_unchecked, 0)
 
         degraded = normalize_snapshot({
             **common,
@@ -1052,6 +1053,86 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(microphone_failed.status_phase, "degraded")
         self.assertEqual(microphone_failed.degraded_issues[0].key, "microphone")
         self.assertNotIn("not blocked", microphone_failed.status_title.casefold())
+
+    def test_copies_of_unchecked_pastes_do_not_ask_for_recovery(self):
+        common = {
+            "service_status": "Running",
+            "microphone_status": "Ready",
+            "accessibility_status": "Granted",
+            "input_monitoring_status": "Granted",
+            "models": [READY_MODEL],
+        }
+        ready = normalize_snapshot(common)
+        # Five kept copies, none of which needs a home: the phase, the
+        # headline and the instruction are those of an empty outbox.
+        calm = normalize_snapshot({
+            **common, "outbox_count": 5, "outbox_needs_home": 0,
+            "outbox_summary": "Pasted, not double-checked"})
+        self.assertEqual(calm.status_phase, "ready")
+        self.assertEqual(calm.status_title, ready.status_title)
+        self.assertEqual(calm.status_detail, ready.status_detail)
+        self.assertEqual(calm.outbox_count, 5)
+        self.assertEqual(calm.outbox_unchecked, 5)
+        self.assertEqual(
+            calm.outbox_summary,
+            localized_string("overview.outbox.summary.pasted_unchecked"))
+        self.assertEqual(
+            sidebar_state(calm.status_phase, setting_up=False),
+            ("shell.state.ready", "good"))
+        # They do not hide a real problem either: a missing permission is
+        # still the degraded phase.
+        degraded = normalize_snapshot({
+            **common, "accessibility_status": "Needs attention",
+            "outbox_count": 5, "outbox_needs_home": 0})
+        self.assertEqual(degraded.status_phase, "degraded")
+
+        # Two of five still need a home: recovery, for those two.
+        mixed = normalize_snapshot({
+            **common, "outbox_count": 5, "outbox_needs_home": 2})
+        self.assertEqual(mixed.status_phase, "recovery")
+        self.assertIn("2 dictations", mixed.status_detail)
+        self.assertEqual(mixed.outbox_unchecked, 3)
+
+        # A count that is missing, is not a count, or does not fit the
+        # outbox is never read as "nothing needs a home".
+        for reported in (None, True, False, "0", 0.0, [], {}):
+            with self.subTest(reported=reported):
+                careful = normalize_snapshot({
+                    **common, "outbox_count": 5,
+                    "outbox_needs_home": reported})
+                self.assertEqual(careful.status_phase, "recovery")
+                self.assertEqual(careful.outbox_unchecked, 0)
+        negative = normalize_snapshot({
+            **common, "outbox_count": 5, "outbox_needs_home": -3})
+        self.assertEqual(negative.status_phase, "ready")
+        self.assertEqual(negative.outbox_unchecked, 5)
+        beyond = normalize_snapshot({
+            **common, "outbox_count": 5, "outbox_needs_home": 99})
+        self.assertEqual(beyond.status_phase, "recovery")
+        self.assertEqual(beyond.outbox_unchecked, 0)
+        self.assertIn("5 dictations", beyond.status_detail)
+        # A state built with a count and nothing else needs a home too.
+        self.assertEqual(
+            gui_module.GUIState(outbox_count=3).outbox_unchecked, 0)
+
+    def test_the_calm_outbox_copy_counts_without_calling_it_a_problem(self):
+        catalog = STRING_CATALOGS["en"]
+        row = localized_string("overview.outbox.unchecked", count=5)
+        self.assertEqual(row, "Voice Outbox: 5 pasted, not double-checked")
+        for text in (row, catalog["overview.outbox.summary.pasted_unchecked"]):
+            for nag in ("recover", "review", "attention", "verify", "needs",
+                        "fail", "error", "unverified", "problem", "!"):
+                self.assertNotIn(nag, text.casefold())
+        # The two strings that do describe a problem are as they were.
+        self.assertEqual(
+            catalog["overview.outbox.summary.paste_attempted"],
+            "Paste may have landed — verify before reusing")
+        self.assertEqual(
+            catalog["overview.outbox.summary.not_pasted"],
+            "Not pasted — destination changed")
+        self.assertEqual(
+            catalog["overview.outbox.pending"],
+            "Voice Outbox: {count} recoverable · {summary}")
 
     def test_error_text_meets_aa_on_light_surfaces(self):
         from whisper_face_theme import LIGHT_PALETTE, contrast_ratio
@@ -2346,6 +2427,22 @@ class ViewModelTests(unittest.TestCase):
         self.assertIn(("license",), self.calls)
         self.assertIn(("outbox",), self.calls)
         self.assertEqual(state.verification, "Mac installation verified")
+
+    def test_copy_and_dismiss_takes_what_needs_a_home_first(self):
+        # The runtime copies an entry that needs a home before any copy of
+        # an unchecked paste, and the window's own count follows it until
+        # the next refresh.
+        self.model.state = replace(
+            self.model.state, outbox_count=4, outbox_unchecked=3)
+        state = self.model.copy_latest_outbox()
+        self.assertEqual((state.outbox_count, state.outbox_unchecked), (3, 3))
+        state = self.model.copy_latest_outbox()
+        self.assertEqual((state.outbox_count, state.outbox_unchecked), (2, 2))
+        self.model.copy_latest_outbox()
+        state = self.model.copy_latest_outbox()
+        self.assertEqual((state.outbox_count, state.outbox_unchecked), (0, 0))
+        state = self.model.copy_latest_outbox()
+        self.assertEqual((state.outbox_count, state.outbox_unchecked), (0, 0))
 
     def test_support_snapshot_failure_becomes_user_visible_notice(self):
         def fail(_payload):
@@ -4974,9 +5071,9 @@ class HomeAndSetupTests(unittest.TestCase):
             [key.value for key in returned.keys],
             ["ready", "ready-empty", "ready-long-key", "ready-fox",
              "ready-replay", "ready-replay-held", "paused", "listening",
-             "working", "starting", "outbox", "needs-attention-permission",
-             "needs-attention-model", "outbox-and-attention",
-             "paused-outbox-attention"])
+             "working", "starting", "outbox", "outbox-unchecked",
+             "needs-attention-permission", "needs-attention-model",
+             "outbox-and-attention", "paused-outbox-attention"])
         variants = next(
             node.value for node in tree.body
             if isinstance(node, ast.Assign)
@@ -6273,6 +6370,10 @@ class HomeAppKitTests(unittest.TestCase):
             "starting": self.phase("starting"),
             "outbox": self.phase(
                 "recovery", status_detail=recovery, **outbox),
+            "outbox, unchecked copies only": self.phase(
+                "ready", outbox_count=20, outbox_unchecked=20,
+                outbox_summary=localized_string(
+                    "overview.outbox.summary.pasted_unchecked")),
             "needs attention": self.phase(
                 "degraded", status_detail=self.ISSUE.detail,
                 degraded_issues=(self.ISSUE,)),
@@ -6324,6 +6425,57 @@ class HomeAppKitTests(unittest.TestCase):
                         if not dynamic[key].isHidden()]
                     self.assertLessEqual(len(shown), 2)
                     self.assertEqual(shown[0], "pause_button")
+
+    def test_unchecked_copies_are_counted_on_a_calm_home(self):
+        dynamic = self.controller.dynamic
+        # Five dictations into an app that hides its text, as the runtime
+        # reports them.
+        self.runtime.update({
+            "outbox_count": 5, "outbox_needs_home": 0,
+            "outbox_summary": "Pasted, not double-checked"})
+        self.model.refresh()
+        self.controller.render()
+        ready = localized_string("shell.state.ready")
+        row = "Voice Outbox: 5 pasted, not double-checked"
+
+        self.assertEqual(self.model.state.status_phase, "ready")
+        self.assertEqual(str(dynamic["window_state"].stringValue()), ready)
+        self.assertEqual(
+            str(dynamic["overview_status"].stringValue()),
+            localized_string("overview.status.ready.title"))
+        self.assertEqual(str(dynamic["overview_outbox"].stringValue()), row)
+        self.assertEqual(
+            str(dynamic["overview_outbox"].accessibilityValue()), row)
+        # The copy is still one click away, and nothing asks for a review.
+        self.assertFalse(dynamic["copy_outbox_button"].isHidden())
+        self.assertTrue(dynamic["review_issue_button"].isHidden())
+        self.assertTrue(dynamic["home_attention_row"].isHidden())
+        # The dot is the one a Mac with an empty outbox shows.
+        calm_dot = dynamic["window_state_dot"].layer().backgroundColor()
+        self.runtime.update({"outbox_count": 0, "outbox_needs_home": 0,
+                             "outbox_summary": ""})
+        self.model.refresh()
+        self.controller.render()
+        empty_dot = dynamic["window_state_dot"].layer().backgroundColor()
+        self.assertEqual(str(calm_dot), str(empty_dot))
+
+        # One of them needs a home: today's treatment, in full.
+        self.runtime.update({
+            "outbox_count": 5, "outbox_needs_home": 1,
+            "outbox_summary": "Not pasted — destination changed"})
+        self.model.refresh()
+        self.controller.render()
+        self.assertEqual(self.model.state.status_phase, "recovery")
+        self.assertEqual(
+            str(dynamic["window_state"].stringValue()),
+            localized_string("shell.state.recovery"))
+        self.assertEqual(
+            str(dynamic["overview_outbox"].stringValue()),
+            "Voice Outbox: 5 recoverable · "
+            "Not pasted — destination changed")
+        self.assertNotEqual(
+            str(dynamic["window_state_dot"].layer().backgroundColor()),
+            str(empty_dot))
 
     def test_the_headline_steps_down_before_it_wraps(self):
         from whisper_face_theme import TYPE_SPECS

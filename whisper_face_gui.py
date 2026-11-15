@@ -353,8 +353,10 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "overview.engine.active": "Active engine: {engine}",
         "overview.outbox.empty": "Voice Outbox: all clear",
         "overview.outbox.pending": "Voice Outbox: {count} recoverable · {summary}",
+        "overview.outbox.unchecked": "Voice Outbox: {count} pasted, not double-checked",
         "overview.outbox.summary.paste_attempted": "Paste may have landed — verify before reusing",
         "overview.outbox.summary.not_pasted": "Not pasted — destination changed",
+        "overview.outbox.summary.pasted_unchecked": "Pasted, not double-checked",
         "overview.action.pause": "Pause",
         "overview.action.resume": "Resume",
         "overview.action.pause.help": "Pause or resume the global dictation hotkey.",
@@ -1866,6 +1868,11 @@ class GUIState:
     words_today: int = 0
     minutes_saved: float = 0.0
     outbox_count: int = 0
+    # How many of ``outbox_count`` are copies of a paste that was sent and
+    # could not be read back. They are kept and counted and are not a
+    # problem; only the rest still need a home. Zero unless the runtime
+    # says otherwise, so an entry is never taken for one by default.
+    outbox_unchecked: int = 0
     outbox_summary: str = ""
     regression_cases: int = 0
     regression_quarantined: int = 0
@@ -3795,6 +3802,7 @@ def _localized_runtime_overview_copy(
         "outbox": (
             "overview.outbox.summary.paste_attempted",
             "overview.outbox.summary.not_pasted",
+            "overview.outbox.summary.pasted_unchecked",
         ),
     }.get(kind, ())
     key = next((
@@ -3857,6 +3865,13 @@ def normalize_snapshot(
         active_engine = localized_string(
             "overview.engine.waiting", locale=locale)
     outbox_count = _nonnegative_int(source.get("outbox_count"))
+    # Entries that still need a home. A runtime that does not say counts
+    # every entry as one, which is the careful reading.
+    outbox_needs_home = outbox_count
+    reported_needs_home = source.get("outbox_needs_home")
+    if isinstance(reported_needs_home, int) \
+            and not isinstance(reported_needs_home, bool):
+        outbox_needs_home = min(outbox_count, max(0, reported_needs_home))
     relisten = source.get("selective_relisten")
     relisten = relisten if isinstance(relisten, Mapping) else {}
     relisten_status = str(
@@ -3920,7 +3935,9 @@ def normalize_snapshot(
         capture_state=capture_state,
         paused=paused,
         hotkey_label=hotkey_label,
-        outbox_count=outbox_count,
+        # Only what still needs a home asks for a review. Copies of pastes
+        # that could not be read back leave the phase as it would be.
+        outbox_count=outbox_needs_home,
         service_status=service_status,
         degraded_issues=degraded_issues,
         models_preparing=(
@@ -3954,6 +3971,7 @@ def normalize_snapshot(
         words_today=_nonnegative_int(source.get("words_today")),
         minutes_saved=max(0.0, minutes_saved or 0.0),
         outbox_count=outbox_count,
+        outbox_unchecked=outbox_count - outbox_needs_home,
         outbox_summary=_localized_runtime_overview_copy(
             source.get("outbox_summary"), kind="outbox", locale=locale),
         regression_cases=_nonnegative_int(source.get("regression_cases")),
@@ -5295,7 +5313,8 @@ class WhisperFaceViewModel:
                 capture_state=capture_state,
                 paused=desired,
                 hotkey_label=self.state.hotkey_label,
-                outbox_count=self.state.outbox_count,
+                outbox_count=(self.state.outbox_count
+                              - self.state.outbox_unchecked),
                 service_status=self.state.service_status,
                 degraded_issues=self.state.degraded_issues,
                 locale=self.locale,
@@ -5472,8 +5491,12 @@ class WhisperFaceViewModel:
     def copy_latest_outbox(self) -> GUIState:
         try:
             self.actions.copy_latest_outbox()
+            remaining = max(0, self.state.outbox_count - 1)
             self.state = replace(
-                self.state, outbox_count=max(0, self.state.outbox_count - 1),
+                self.state, outbox_count=remaining,
+                # What still needs a home is copied first, so the unchecked
+                # copies only start to go once nothing else is left.
+                outbox_unchecked=min(self.state.outbox_unchecked, remaining),
                 notice=self.localized("overview.notice.outbox.copied"),
                 notice_level="success")
         except Exception as error:
@@ -10646,11 +10669,16 @@ if APPKIT_AVAILABLE:
             self.dynamic["overview_engine"].setStringValue_(
                 self._l(
                     "overview.engine.active", engine=state.active_engine))
-            outbox = (
-                self._l(
+            if not state.outbox_count:
+                outbox = self._l("overview.outbox.empty")
+            elif state.outbox_unchecked >= state.outbox_count:
+                # Nothing here needs a home: say what the copies are.
+                outbox = self._l(
+                    "overview.outbox.unchecked", count=state.outbox_count)
+            else:
+                outbox = self._l(
                     "overview.outbox.pending", count=state.outbox_count,
                     summary=state.outbox_summary)
-                if state.outbox_count else self._l("overview.outbox.empty"))
             self.dynamic["overview_outbox"].setStringValue_(outbox)
             for key, label_key, value in (
                 ("overview_phase", "overview.accessibility.phase", phase),

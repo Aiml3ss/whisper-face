@@ -425,6 +425,11 @@ def home_states() -> dict[str, GUIState]:
             "recovery", outbox_count=1,
             outbox_summary=copy("overview.outbox.summary.paste_attempted"),
             detail=copy("overview.status.recovery.detail.one")),
+        # Five dictations into an app that hides its text: copies kept,
+        # nothing to review, nothing red.
+        "outbox-unchecked": home_phase(
+            "ready", outbox_count=5, outbox_unchecked=5,
+            outbox_summary=copy("overview.outbox.summary.pasted_unchecked")),
         "needs-attention-permission": home_phase(
             "degraded", degraded_issues=(microphone,),
             detail=microphone.detail, microphone_status="Unavailable",

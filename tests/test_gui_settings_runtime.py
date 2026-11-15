@@ -665,7 +665,7 @@ class RuntimeStatusWindowContractTests(unittest.TestCase):
 
     def snapshot(self, *, installed=None, warm=None, receipt=True,
                  input_monitoring=True, post_events=True,
-                 microphone="Ready"):
+                 microphone="Ready", outbox=None):
         from model_wallet import (
             CURRENT_PROVIDER_PROFILES, Capability, MAX_LATENCY_BOUND_MS,
             ModelRequest, PARAKEET_PROFILE, QWEN_CLEANUP_PROFILE,
@@ -730,7 +730,7 @@ class RuntimeStatusWindowContractTests(unittest.TestCase):
                 "PREFERENCES": {
                     "flight_recorder": False, "sounds": "system",
                     "recent_dictations": False},
-                "INSERTION_COORDINATOR": SimpleNamespace(
+                "INSERTION_COORDINATOR": outbox or SimpleNamespace(
                     recoverable=lambda: []),
                 "acoustic_keyword_memory_status_snapshot": lambda: {},
                 "acoustic_calibration_status_snapshot": lambda: {},
@@ -880,6 +880,137 @@ class RuntimeStatusWindowContractTests(unittest.TestCase):
              "com.apple.preference.security?Privacy_ListenEvent"],
             ["open", "-a", "System Settings"],
         ])
+
+    def outbox(self, *outcomes):
+        """A real coordinator after one dictation per named outcome."""
+        from insertion_integrity import (
+            DestinationObservation, InsertionCoordinator, InsertionLease,
+            ReadbackResult)
+
+        coordinator = InsertionCoordinator()
+        for index, outcome in enumerate(outcomes):
+            utterance = f"take-{index}"
+            coordinator.stage(InsertionLease.capture_opaque(
+                utterance, "com.apple.MobileSMS:7", "Chat"), "Ship it")
+            coordinator.commit(
+                utterance,
+                DestinationObservation.capture(
+                    "com.apple.Notes:9" if outcome == "not-pasted"
+                    else "com.apple.MobileSMS:7", (0, 0), "Chat"),
+                lambda _text: None,
+                (lambda: ReadbackResult.conflict("divergent"))
+                if outcome == "conflict" else ReadbackResult.unverifiable)
+        return coordinator
+
+    # Words that would tell the person something needs them.
+    NAGS = ("recover", "review", "attention", "verify", "needs", "fail",
+            "error", "unverified", "problem", "action needed", "!")
+
+    def test_five_unchecked_pastes_in_a_row_leave_the_window_calm(self):
+        from whisper_face_gui import (
+            home_bubble_actions, home_review_due, home_review_in_row,
+            localized_string, sidebar_state)
+
+        outbox = self.outbox(*["unchecked"] * 5)
+        snapshot = self.snapshot(outbox=outbox)
+
+        # The copies are all there, and none of them needs a home.
+        self.assertEqual(snapshot["outbox_count"], 5)
+        self.assertEqual(snapshot["outbox_needs_home"], 0)
+        self.assertEqual(
+            snapshot["outbox_summary"], "Pasted, not double-checked")
+
+        state = self.window(snapshot)
+        # The phase a Mac with an empty outbox would be in, word for word.
+        idle = self.window(self.snapshot())
+        self.assertEqual(state.status_phase, "ready")
+        self.assertEqual(state.status_phase, idle.status_phase)
+        self.assertEqual(state.status_title, idle.status_title)
+        self.assertEqual(state.status_detail, idle.status_detail)
+        self.assertEqual(state.degraded_issues, ())
+        # The sidebar's state word and its dot: Ready, and green.
+        self.assertEqual(
+            sidebar_state(state.status_phase, setting_up=False),
+            ("shell.state.ready", "good"))
+        # Home still counts them and still offers the copy; they add no
+        # review of their own to what an empty outbox would show.
+        self.assertEqual(state.outbox_count, 5)
+        self.assertEqual(state.outbox_unchecked, 5)
+        self.assertEqual(
+            home_bubble_actions(state), ("pause", "copy_outbox"))
+        self.assertEqual(home_review_due(state), home_review_due(idle))
+        self.assertEqual(
+            home_review_in_row(state), home_review_due(idle))
+        row = localized_string("overview.outbox.unchecked", count=5)
+        self.assertEqual(
+            row, "Voice Outbox: 5 pasted, not double-checked")
+        shown = (state.status_title, state.status_detail,
+                 state.outbox_summary, row,
+                 localized_string(sidebar_state(
+                     state.status_phase, setting_up=False)[0]))
+        for text in shown:
+            for nag in self.NAGS:
+                self.assertNotIn(nag, text.casefold(), text)
+
+        # The menu bar says the same thing the same way.
+        menu = load_definitions(
+            "voice_outbox_menu_title",
+            extra={"VOICE_OUTBOX_MAX_ITEMS": 20})["voice_outbox_menu_title"]
+        title = menu(outbox.recoverable_count(), outbox.needs_home_count())
+        self.assertEqual(
+            title, "Voice Outbox — 5 pasted, not double-checked")
+        for nag in self.NAGS:
+            self.assertNotIn(nag, title.casefold())
+
+    def test_one_entry_that_needs_a_home_keeps_todays_treatment(self):
+        from whisper_face_gui import localized_string, sidebar_state
+
+        for outcome, summary in (
+            ("not-pasted", "Not pasted — destination changed"),
+            ("conflict", "Paste may have landed — verify before reusing"),
+        ):
+            with self.subTest(outcome=outcome):
+                # Its place in the queue does not matter: buried under
+                # calm copies or the newest entry, it is what is shown.
+                for order in (
+                    [outcome] + ["unchecked"] * 5,
+                    ["unchecked"] * 5 + [outcome],
+                    ["unchecked"] * 2 + [outcome] + ["unchecked"] * 3,
+                ):
+                    outbox = self.outbox(*order)
+                    snapshot = self.snapshot(outbox=outbox)
+                    self.assertEqual(snapshot["outbox_count"], 6)
+                    self.assertEqual(snapshot["outbox_needs_home"], 1)
+                    self.assertEqual(snapshot["outbox_summary"], summary)
+                    state = self.window(snapshot)
+                    self.assertEqual(state.status_phase, "recovery")
+                    self.assertEqual(
+                        state.status_title, localized_string(
+                            "overview.status.recovery.title"))
+                    # One dictation needs the review, not six.
+                    self.assertEqual(
+                        state.status_detail, localized_string(
+                            "overview.status.recovery.detail.one"))
+                    self.assertEqual(
+                        sidebar_state(state.status_phase, setting_up=False),
+                        ("shell.state.recovery", "attention"))
+                    self.assertEqual(state.outbox_unchecked, 5)
+                    self.assertEqual(state.outbox_summary, summary)
+
+    def test_an_outbox_of_real_failures_is_exactly_as_before(self):
+        from whisper_face_gui import localized_string
+
+        outbox = self.outbox("not-pasted", "conflict", "not-pasted")
+        snapshot = self.snapshot(outbox=outbox)
+        self.assertEqual(snapshot["outbox_count"], 3)
+        self.assertEqual(snapshot["outbox_needs_home"], 3)
+        self.assertEqual(
+            snapshot["outbox_summary"], "Not pasted — destination changed")
+        state = self.window(snapshot)
+        self.assertEqual(state.status_phase, "recovery")
+        self.assertEqual(state.outbox_unchecked, 0)
+        self.assertEqual(state.status_detail, localized_string(
+            "overview.status.recovery.detail.many", count=3))
 
     def test_support_snapshot_names_healthy_models(self):
         from whisper_face_gui import support_snapshot_text
