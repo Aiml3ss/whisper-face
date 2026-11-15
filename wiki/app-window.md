@@ -209,18 +209,32 @@ and Drop-to-Target view-model layers are covered in
   for a form and one Done for a list that applies as it goes, with any
   action on the whole list ("Add Snippet…", "Copy Export", "Forget All…")
   at its leading end. *App tones* lists every app with its own icon and
-  its tone as a pop-up, and Save applies each tone that changed.
+  its tone as a pop-up, and Save applies each tone that changed; a tone
+  that is refused stops the save there, and the sheet names the app and
+  the apps already saved, which Cancel does not take back.
   *Snippets* is a list with Edit and Delete on every row; adding or
-  editing turns the same sheet into a form, and a refused save keeps the
-  form up with what was typed and the reason under the fields.
-  *Vocabulary* is its two lists, each a field in its own group. *Learned
+  editing turns the same sheet into a form of two fields, Name and Text,
+  and a refused save keeps the form up with what was typed, the reason
+  under the field it is about and the keyboard in that field. The form
+  teaches the phrase the runtime answers, "insert my" and the name, and
+  a test holds its example to `SNIPPET_RE` and the inline cue.
+  *Vocabulary* is its two lists, each a field in its own group. A field
+  in a sheet has no border or fill of its own: it fills its group, which
+  is its frame, under the section header that names it. *Learned
   corrections* and *Pronunciation keywords* are rows that say where each
-  item stands, each with Forget. Deleting and forgetting still ask first,
+  item stands, each with Forget; with no keyword listed, Copy Export and
+  Forget All… are off. Deleting and forgetting still ask first,
   in a system alert whose safe button is the default. Return presses the
   primary button, Escape cancels (or is Done), Tab runs top to bottom and
-  leaves a multi-line field, and Command-Return saves from inside one.
+  leaves a multi-line field, and Command-Return saves from inside one. A
+  list that is filled again (a row forgotten, a form closed) keeps the
+  keyboard on the control now in its place, and a line that is cut to
+  fit its row shows all of it as its tooltip.
   An editor is a straight line in code: `_new_sheet`, then `_sheet_fill`
-  and `_run_sheet` as often as it needs, then `_end_sheet`. The dialogs
+  and `_run_sheet` as often as it needs, then `_end_sheet`; one is open
+  at a time. Since macOS 11 AppKit shows a sheet as a card in the middle
+  of its window and puts it back there when its frame changes, so an
+  open sheet is resized about its middle. The dialogs
   that are still system alerts (key capture, voice modes, recent
   dictations, the Voice Inbox, the evidence inspector and the
   confirmations) all run through `_run_modal`, which gives each the
@@ -236,8 +250,10 @@ and Drop-to-Target view-model layers are covered in
   first-run steps (78 PNGs in all), `--sheets` draws the Personalize
   editors instead (each one filled, the snippet form, a refused save, a
   list too long for the sheet, each empty state, and two under Increase
-  Contrast, as `sheet-*.png`, plus `sheet-in-window-*.png` with the
-  sheet placed over the page), and `--overlay` draws the recording pill
+  Contrast, as `sheet-*.png`, drawn as a sheet is while it has the
+  keyboard, plus `sheet-in-window-*.png` with the sheet in the middle of
+  the page at the window's minimum size), and `--overlay` draws the
+  recording pill
   instead ([[whisper-faces]]).
 - **The window's own check**: `dictate.py --native-gui-smoke-test` builds
   the window headless and measures the look, the keyboard and what
@@ -268,14 +284,14 @@ and Drop-to-Target view-model layers are covered in
 ## References
 
 - whisper_face_gui.py (`SECTIONS`/`SETTINGS_PANES` :35-41,
-  `SIDEBAR_ROWS` :65, key equivalents :1334, `model_checks_note`
-  :2978, `face_grid` :3390, `result_evidence_text` :3576,
-  `SettingsRowView` :6781, `GroupBoxView` :6918, `arrange_section`
-  :7012, `EditorSheet` :8441, `_build_window` :9393,
-  `_build_sidebar` :9630, `_build_home` :9775, `_build_setup`
-  :9985, `_build_settings` :10346, `_build_advanced` :10671,
-  `_install_main_menu` :11797, `_run_modal` :11860, `_new_sheet`
-  :11945);
+  `SIDEBAR_ROWS` :65, key equivalents :1336, `model_checks_note`
+  :2982, `face_grid` :3394, `result_evidence_text` :3580,
+  `SettingsRowView` :6785, `GroupBoxView` :6922, `arrange_section`
+  :7016, `EditorSheet` :8437, `_build_window` :9392,
+  `_build_sidebar` :9629, `_build_home` :9774, `_build_setup`
+  :9984, `_build_settings` :10345, `_build_advanced` :10670,
+  `_install_main_menu` :11803, `_run_modal` :11866, `_new_sheet`
+  :11952);
   whisper_face_render.py (`LiveFaceView`);
   scripts/window_render_probe.py; README "Native Mac window"
 - [[2026-07-26-interface-rebuild-research]]
