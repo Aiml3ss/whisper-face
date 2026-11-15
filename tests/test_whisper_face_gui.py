@@ -3498,12 +3498,12 @@ class NewLookFoundationContractTests(unittest.TestCase):
         self.assertEqual(lines[closing + 1],
                          "SUPPORTED_LOCALES = tuple(STRING_CATALOGS)")
         self.assertEqual(SUPPORTED_LOCALES, ("en",))
-        # The shell lane has filled its place; the two after it are still
-        # only reserved, so nothing follows their markers yet.
+        # The shell and pages lanes have filled their places; the one after
+        # them is still only reserved, so nothing follows its marker yet.
         self.assertTrue(any(
             line.strip().startswith('"shell.')
             for line in lines[positions[0]:positions[1]]))
-        for line in lines[positions[1]:closing]:
+        for line in lines[positions[2]:closing]:
             self.assertFalse(line.strip().startswith('"'), line)
 
     RENDER_ORDER = [
@@ -3541,6 +3541,107 @@ class NewLookFoundationContractTests(unittest.TestCase):
              "_build_settings_privacy"])
         self.assertEqual(SETTINGS_PANES, ("Personalize", "Controls",
                                           "Privacy"))
+
+
+class SettingsPagesContractTests(unittest.TestCase):
+    """The four settings pages, checked without AppKit."""
+
+    PAGE_BUILDERS = (
+        "_build_settings_personalize", "_build_settings_controls",
+        "_build_settings_privacy", "_build_advanced")
+
+    def test_each_page_is_a_grouped_scrolling_page_without_a_title(self):
+        controller = _gui_class("WhisperFaceWindowController")
+        for name in self.PAGE_BUILDERS + ("_build_settings",):
+            with self.subTest(builder=name):
+                called = _called_names(_gui_function(name, controller))
+                # The title strip names the page; nothing repeats it.
+                self.assertNotIn("_page_header", called)
+                if name != "_build_settings":
+                    self.assertIn("_grouped_page", called)
+                    self.assertIn("_section_header", called)
+                    self.assertIn("_settings_group", called)
+                    # Groups are drawn by the group view, never an NSBox
+                    # card with its ambient shadow.
+                    self.assertNotIn("_card", called)
+                    self.assertNotIn("_pill", called)
+
+    def test_buttons_are_system_push_buttons_read_through_their_cells(self):
+        button = _gui_function("_button")
+        text = ast.unparse(button)
+        self.assertIn("PushButton.alloc()", text)
+        self.assertIn("setBezelStyle_(NSBezelStyleRounded)", text)
+        # The system draws the bezel: no layer paint, no fixed corners.
+        for banned in ("setCornerRadius_", "setBordered_(False)",
+                       "_SECONDARY_BUTTONS.append"):
+            self.assertNotIn(banned, text)
+        forwarded = _method_names(_gui_class("PushButton"))
+        self.assertLessEqual(
+            {"setAccessibilityLabel_", "setAccessibilityHelp_",
+             "setAccessibilityValue_"}, forwarded)
+
+    def test_the_face_picker_is_a_grid_of_face_chips(self):
+        picker = _gui_class("ArtFacePicker")
+        populate = ast.unparse(_gui_function("populate", picker))
+        self.assertIn("FaceChipButton.alloc()", populate)
+        self.assertLessEqual(
+            {"setSelectedSegment_", "selectedSegment", "chipPicked_",
+             "height_for_width", "arrange"}, _method_names(picker))
+        self.assertIn(
+            "chip.set_selected(",
+            ast.unparse(_gui_function("_paint_selection", picker)))
+
+    def test_model_states_are_shown_in_words_with_a_tone(self):
+        from whisper_face_gui import ModelStatus, model_status_display
+        models = normalize_snapshot({"models": [
+            READY_MODEL, PREPARING_MODEL,
+            {**READY_MODEL, "install_state": "not_installed",
+             "required": False, "warm": False},
+            {**READY_MODEL, "install_state": "failed", "warm": False},
+        ]}).models
+        self.assertEqual(
+            [model_status_display(model) for model in models],
+            [("Ready", "good"), ("Checking", "neutral"),
+             ("Optional", "neutral"), ("Needs repair", "warn")])
+        # A row the runtime did not classify keeps none of its words.
+        for word, expected in (("RESOLVED", ("Installed", "good")),
+                               ("UNAVAILABLE", ("Not available", "warn")),
+                               ("shadow-only", ("Unknown", "neutral"))):
+            with self.subTest(word=word):
+                model = ModelStatus("Whisper Tiny", role="Preview",
+                                    status=word, detail="Exact pinned")
+                self.assertEqual(model_status_display(model), expected)
+                self.assertEqual(
+                    gui_module.model_detail_display(model), "Preview")
+
+    def test_no_state_phrase_uses_an_internal_word(self):
+        from whisper_face_gui import (
+            INTERNAL_STATUS_WORDS, relisten_status_display,
+            system_status_tone, voice_inbox_status_display)
+        phrases = [
+            relisten_status_display(status) for status in (
+                "off", "ready", "warming", "enabled-not-ready",
+                "evidence-required", "receipt-invalid", "anything")]
+        phrases += [voice_inbox_status_display(status, count)
+                    for status in ("Off", "Ready", "Unavailable", "odd")
+                    for count in (0, 1, 3)]
+        phrases += [value for key, value in STRING_CATALOGS["en"].items()
+                    if key.startswith("pages.")]
+        for phrase in phrases:
+            with self.subTest(phrase=phrase):
+                self.assertFalse(
+                    [word for word in INTERNAL_STATUS_WORDS
+                     if word.casefold() in phrase.casefold()])
+        # The reasons it cannot turn on all read the same way.
+        self.assertEqual(relisten_status_display("evidence-required"),
+                         relisten_status_display("receipt-invalid"))
+        self.assertIn("1 draft waiting",
+                      voice_inbox_status_display("Ready", 1))
+        self.assertEqual(
+            [system_status_tone(word) for word in (
+                "Running", "Granted", "Unavailable", "Needs attention",
+                "Starting")],
+            ["good", "good", "warn", "warn", "neutral"])
 
 
 class ShellNavigationTests(unittest.TestCase):
@@ -4666,6 +4767,115 @@ class ShellAppKitTests(unittest.TestCase):
         self.assertTrue(first.isHidden())
         self.assertFalse(elsewhere.isHidden())
         self.assertEqual(rows[-1].nextKeyView(), elsewhere)
+
+
+@unittest.skipUnless(
+    APPKIT_AVAILABLE,
+    "needs AppKit: run with "
+    "uv run --with pyobjc-framework-Cocoa --with pyobjc-framework-Quartz "
+    "tests/test_whisper_face_gui.py SettingsPagesAppKitTests")
+class SettingsPagesAppKitTests(unittest.TestCase):
+    """The pages' pieces in an off-screen window that is never shown."""
+
+    @classmethod
+    def setUpClass(cls):
+        import AppKit
+        cls.AppKit = AppKit
+        cls.app = AppKit.NSApplication.sharedApplication()
+        cls.window = AppKit.NSWindow.alloc() \
+            .initWithContentRect_styleMask_backing_defer_(
+                AppKit.NSMakeRect(0, 0, 800, 400), 0,
+                AppKit.NSBackingStoreBuffered, False)
+
+    def test_a_button_label_reaches_the_element_voiceover_reads(self):
+        AppKit = self.AppKit
+        button = gui_module._button(
+            "Edit", AppKit.NSMakeRect(0, 0, 40, 28), None, "edit:",
+            help_text="Edit the list")
+        gui_module._accessible(button, "Edit vocabulary", "Opens it")
+        self.window.contentView().addSubview_(button)
+        element = AppKit.NSAccessibilityUnignoredDescendant(button)
+        self.assertIs(element, button.cell())
+        self.assertEqual(str(element.accessibilityLabel()), "Edit vocabulary")
+        self.assertEqual(str(element.accessibilityHelp()), "Opens it")
+        # The system's bezel and size: never narrower than its title.
+        self.assertEqual(int(button.bezelStyle()),
+                         int(AppKit.NSBezelStyleRounded))
+        self.assertGreaterEqual(
+            button.frame().size.width, button.fittingSize().width)
+
+    def test_the_face_grid_fills_its_width_in_rows_of_eight(self):
+        AppKit = self.AppKit
+        picker = gui_module.ArtFacePicker.alloc().initWithFrame_(
+            AppKit.NSMakeRect(0, 0, 604, 140))
+        picker.populate(FACES, [None] * len(FACES),
+                        [face.title() for face in FACES], None, None)
+        for width in (604.0, 692.0):
+            with self.subTest(width=width):
+                columns, chip, gap, rows = picker.grid(width)
+                self.assertEqual((columns, rows), (8, 2))
+                self.assertGreaterEqual(gap, picker.GAP_MIN)
+                self.assertLessEqual(chip, picker.CHIP_MAX)
+                picker.setFrameSize_((width, picker.height_for_width(width)))
+                picker.arrange()
+                last = picker.chips[-1].frame()
+                self.assertAlmostEqual(
+                    last.origin.x + last.size.width, width, delta=0.5)
+                self.assertAlmostEqual(
+                    last.origin.y + last.size.height,
+                    picker.height_for_width(width), delta=0.5)
+        picker.setSelectedSegment_(3)
+        self.assertEqual(
+            [chip.selected for chip in picker.chips].index(True), 3)
+        self.assertEqual(picker.selectedSegment(), 3)
+
+    def test_a_row_wraps_its_caption_beside_its_controls(self):
+        AppKit = self.AppKit
+        title = gui_module._label("Capture key", AppKit.NSMakeRect(
+            0, 0, 100, 16), wrap=True)
+        caption = gui_module._label(
+            "Hold Right Control to dictate · Reply, Command, Code need "
+            "the other Control key, which is a long line on purpose",
+            AppKit.NSMakeRect(0, 0, 100, 15), size=12, wrap=True)
+        button = gui_module._button(
+            "Change…", AppKit.NSMakeRect(0, 0, 40, 28), None, "change:")
+        row = gui_module.SettingsRowView.alloc().initWithFrame_(
+            AppKit.NSMakeRect(0, 0, 632, 50)).configure(
+                title, caption, [button])
+        narrow = row.arrange(420.0)
+        wide = row.arrange(720.0)
+        self.assertGreaterEqual(wide, gui_module.ROW_CAPTION_MIN_HEIGHT)
+        self.assertGreater(narrow, wide)
+        row.arrange(632.0)
+        text_right = caption.frame().origin.x + caption.frame().size.width
+        self.assertLessEqual(
+            text_right + gui_module.ROW_CONTROL_GAP,
+            button.alignmentRectForFrame_(button.frame()).origin.x + 0.5)
+        needed = caption.cell().cellSizeForBounds_(AppKit.NSMakeRect(
+            0, 0, caption.frame().size.width, 10_000.0))
+        self.assertLessEqual(needed.height, caption.frame().size.height)
+        # A hidden control gives its room back to the text.
+        button.setHidden_(True)
+        self.assertGreater(row.text_width(632.0), text_right)
+
+    def test_a_status_shows_its_whole_phrase_and_tone(self):
+        AppKit = self.AppKit
+        view = gui_module.StatusLabelView.alloc().initWithFrame_(
+            AppKit.NSMakeRect(0, 0, 10, 10))
+        ink = gui_module._srgb_color((0.2, 0.2, 0.2))
+        view.set_status("Needs repair", "warn", symbol_color=ink,
+                        text_color=ink)
+        size = view.intrinsicContentSize()
+        view.setFrame_(AppKit.NSMakeRect(0, 0, size.width, size.height))
+        text = view.text
+        needed = text.cell().cellSizeForBounds_(
+            AppKit.NSMakeRect(0, 0, 10_000.0, 10_000.0))
+        self.assertGreaterEqual(text.frame().size.width, needed.width)
+        self.assertIsNotNone(view.icon.image())
+        self.assertEqual(view.tone, "warn")
+        view.set_status("Ready", "nonsense", symbol_color=ink,
+                        text_color=ink)
+        self.assertEqual(view.tone, "neutral")
 
 
 if APPKIT_AVAILABLE:
