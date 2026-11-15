@@ -1058,7 +1058,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
 
         "key_cap.accessibility.role": "key",
         "home.stage.accessibility.label": "Whisper Face on Home",
-        "home.group.last_dictation": "Last dictation",
+        "home.group.dictation": "Dictation",
         "home.attention.accessibility.label": "Setup needs a review",
         "home.attention.fallback": "Setup is not finished",
         "onboarding.stage.accessibility.label": "Whisper Face, first-run guide",
@@ -1071,13 +1071,13 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "onboarding.permission.input_monitoring.why": "So I notice the key you hold to talk",
         "onboarding.permission.granted": "Allowed",
         "onboarding.permission.checking": "Checking…",
-        "onboarding.permission.open": "Open Settings",
         "onboarding.permission.open.label": "Open {permission} settings",
         "onboarding.permission.open.help": "Open System Settings › Privacy & Security › {permission}. Whisper Face does not change permissions.",
         "onboarding.row.hotkey.caption": "Hold it, say a few words, then let go",
         "onboarding.row.models.caption": "Waiting for the first local model to report in",
         "onboarding.row.first_dictation.caption": "Click into a text field, hold your key and say one sentence",
         "onboarding.row.accessibility.status": "{row} status",
+        "onboarding.action.waiting.help": "Available once every permission above is allowed in System Settings.",
 
     },
 }
@@ -1221,6 +1221,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "onboarding.rows.accessibility.label",
             "onboarding.permission.open.label",
             "onboarding.row.accessibility.status",
+            "onboarding.action.waiting.help",
             "settings.accessibility.sections.label",
             "shell.sidebar.accessibility.label",
             "shell.state.accessibility.label",
@@ -2957,6 +2958,8 @@ class SetupRow:
     tone: str = "quiet"
     # Set when the row offers its own button to that permission's pane.
     permission: str = ""
+    # Set on the one row whose button is the step's primary action.
+    primary: bool = False
     # A key shown as a key cap beside the status.
     key_cap: str = ""
 
@@ -2983,6 +2986,10 @@ def setup_rows(state: GUIState, *, locale: str = "en") -> tuple[SetupRow, ...]:
     every step is confirmed, the four steps with their check marks. A
     permission the runtime reports as missing is the only row that carries
     a button; one still being checked has nothing to grant yet.
+
+    The first missing permission's button is the step's primary action:
+    it opens the pane the step's single button always opened, so it is
+    the amber one and answers Return, and no second button repeats it.
     """
 
     def copy(key: str, **values: Any) -> str:
@@ -3011,6 +3018,8 @@ def setup_rows(state: GUIState, *, locale: str = "en") -> tuple[SetupRow, ...]:
             accessibility_status=state.accessibility_status,
             input_monitoring_status=state.input_monitoring_status)
         rows = []
+        first_missing = next(
+            (key for key in PERMISSIONS if states[key] == "missing"), "")
         for key in PERMISSIONS:
             granted = states[key] == "granted"
             missing = states[key] == "missing"
@@ -3022,7 +3031,8 @@ def setup_rows(state: GUIState, *, locale: str = "en") -> tuple[SetupRow, ...]:
                     "onboarding.permission.granted" if granted
                     else "onboarding.permission.checking"),
                 "good" if granted else "attention" if missing else "quiet",
-                permission=key if missing else ""))
+                permission=key if missing else "",
+                primary=key == first_missing))
         return tuple(rows)
     if current.key == "hotkey":
         return (step_row(
@@ -3035,15 +3045,69 @@ def setup_rows(state: GUIState, *, locale: str = "en") -> tuple[SetupRow, ...]:
             return (step_row(
                 current, caption=copy("onboarding.row.models.caption")),)
         return tuple(
+            # Keyed by the model, not by where it sits in the list, so a
+            # reordered list never reads as a row that just turned good.
             SetupRow(
-                f"model-{index}", SETUP_ROW_SYMBOLS["models"], model.name,
-                model.role, model.status,
+                f"model:{model.name}", SETUP_ROW_SYMBOLS["models"],
+                model.name, model.role, model.status,
                 {"good": "good", "warn": "attention"}.get(
                     model_pill_tone(model), "quiet"))
-            for index, model in enumerate(models[:SETUP_ROW_LIMIT]))
+            for model in models[:SETUP_ROW_LIMIT])
     return (step_row(
         current, caption=copy("onboarding.row.first_dictation.caption"),
         key_cap=state.hotkey_label),)
+
+
+def setup_waits_on_a_row(rows: Sequence[SetupRow]) -> bool:
+    """Whether the step's primary action is in one of its rows.
+
+    While it is, the foot's Continue has nothing to continue to: it shows
+    disabled until the runtime stops reporting a permission as missing.
+    """
+    return any(row.primary for row in rows)
+
+
+def setup_rows_turned_good(
+    previous: tuple[str, frozenset[str]] | None,
+    stage: str,
+    good: frozenset[str],
+    newly_completed: frozenset[str],
+) -> frozenset[str]:
+    """Which setup rows earn a pop on this render.
+
+    ``previous`` is the stage and the good rows of the last render. A row
+    pops when it turns good while its step is still showing (a permission
+    being granted). When the stage itself changes every row is new, so
+    nothing pops, except on the completion step, where the one step that
+    was just confirmed does.
+    """
+    if previous is None:
+        return frozenset()
+    previous_stage, previous_good = previous
+    if stage == previous_stage:
+        return good - previous_good
+    if stage == "complete":
+        return good & newly_completed
+    return frozenset()
+
+
+def home_dictation_landed(
+    previous: tuple[Any, ...] | None,
+    landed: tuple[Any, ...],
+    *,
+    available: bool,
+    section: str,
+) -> bool:
+    """Whether Home's one signature reaction is due on this render.
+
+    ``landed`` is what a dictation leaves behind (its latency, its words,
+    the day's count, its summary). The face reacts only when that changed
+    since the last render, a result is there to show, and Home is the page
+    in front: never on the first render, and never on a refresh that
+    changed nothing.
+    """
+    return (previous is not None and previous != landed
+            and bool(available) and section == "Home")
 
 
 def home_review_due(state: GUIState) -> bool:
@@ -5606,6 +5670,7 @@ if APPKIT_AVAILABLE:
     SETUP_PROGRESS_HEIGHT = 6.0
     SETUP_FOOT_HEIGHT = 40.0
     SETUP_KICKER_HEIGHT = 16.0
+    SETUP_DETAIL_SIZE = 13.0
 
     # The notice band reserves one 11pt line; a two-line failure message
     # grows upward into the column's bottom padding rather than pushing the
@@ -6232,6 +6297,28 @@ if APPKIT_AVAILABLE:
         button.setAction_(action)
         _SECONDARY_BUTTONS.append(button)
         return _accessible(button, title, help_text)
+
+    def _silence_image(view: Any) -> Any:
+        """Keep a decorative image view out of the VoiceOver tree.
+
+        VoiceOver talks to an image view's cell, which names an SF Symbol
+        by its own description, so both the view and the cell are told.
+        """
+        for element in (view, view.cell()):
+            try:
+                element.setAccessibilityElement_(False)
+            except Exception:
+                pass
+        return view
+
+    def _silence_group(view: Any) -> Any:
+        """Keep a view that is only drawing (a separator) from showing up
+        to VoiceOver as an empty group."""
+        try:
+            view.setAccessibilityElement_(False)
+        except Exception:
+            pass
+        return view
 
     def _hairline(frame: Any) -> Any:
         """One-pixel separator; themed to the palette line at low alpha."""
@@ -7299,7 +7386,8 @@ if APPKIT_AVAILABLE:
             self._onboarding_stage: str | None = None
             self._onboarding_presentation: OnboardingPresentation | None = None
             self._onboarding_completed: frozenset[str] = frozenset()
-            self._onboarding_granted: frozenset[str] = frozenset()
+            self._onboarding_good: (
+                tuple[str, frozenset[str]] | None) = None
             self._home_landed: tuple[Any, ...] | None = None
             self._rendered_row: int | None = None
             self._rendered_notice: str | None = None
@@ -7423,11 +7511,13 @@ if APPKIT_AVAILABLE:
             return _accessible(button, title, help_text)
 
         @objc.python_method
-        def _set_chunky_title(self, button: Any, title: str) -> None:
-            """Retitle a chunky button and let it take its new width."""
-            if str(button.title()) != title:
-                button.configure(
-                    title, variant=button.variant, small=button.small)
+        def _set_chunky_title(self, button: Any, title: str,
+                              variant: str = "") -> None:
+            """Retitle a chunky button, and restyle it when a variant is
+            given, and let it take its new width."""
+            variant = variant or button.variant
+            if str(button.title()) != title or button.variant != variant:
+                button.configure(title, variant=variant, small=button.small)
                 button.setFrameSize_(button.intrinsicContentSize())
 
         @objc.python_method
@@ -7773,8 +7863,9 @@ if APPKIT_AVAILABLE:
             The stage, the header and rows of the step that is showing,
             then the foot: the progress bar, the route across the four
             steps and the one Continue button. The block is placed as if
-            every step had the most rows a step can have, so the stage
-            does not move when the next step has fewer.
+            every step had the most rows a step can have, and the foot
+            stays where that puts it, so neither the stage nor the way
+            forward moves when the next step has fewer rows.
             """
             setup = self.dynamic.get("onboarding_card")
             if setup is None or "onboarding_rows" not in self.dynamic:
@@ -7823,7 +7914,7 @@ if APPKIT_AVAILABLE:
                 self._layout_setup_row(row, row_width)
             for line in lines[max(0, len(rows) - 1):]:
                 line.setHidden_(True)
-            y += card_height + SETUP_GAP
+            y += (SETUP_ROW_COUNT * SETUP_ROW_HEIGHT + 2.0) + SETUP_GAP
 
             foot = dynamic["onboarding_foot"]
             foot.setFrame_(NSMakeRect(0, y, width, foot_height))
@@ -7945,8 +8036,10 @@ if APPKIT_AVAILABLE:
                     palette.brand, 0.26 if dark else 0.20).CGColor())
             fill_layer = dynamic["onboarding_progress_fill"].layer()
             if fill_layer is not None:
-                fill_layer.setBackgroundColor_(
-                    _token_color("switch_on", dark).CGColor())
+                # The emerald that reads as text: it measures over 3:1 on
+                # the field in both appearances, which the switch green
+                # does not in the light one.
+                fill_layer.setBackgroundColor_(brand_ink.CGColor())
             sync_accessibility(
                 dynamic["onboarding_progress_track"], presentation.progress,
                 label=self._l("onboarding.accessibility.progress_track"))
@@ -7984,10 +8077,6 @@ if APPKIT_AVAILABLE:
                     icon.setImage_(image)
                 try:
                     icon.setContentTintColor_(tint)
-                    # The marker's own text already says the step and its
-                    # status, so the glyph stays out of the VoiceOver tree
-                    # rather than repeating it.
-                    icon.setAccessibilityElement_(False)
                 except Exception:
                     pass
 
@@ -8011,14 +8100,19 @@ if APPKIT_AVAILABLE:
             check mark of a permission the moment it is granted."""
             completed = frozenset(
                 step.key for step in state.onboarding_steps if step.complete)
-            granted = frozenset(
+            good = frozenset(
                 row["key"] for row in self.dynamic["onboarding_rows"]
                 if row.get("tone") == "good"
                 and not bool(row["view"].isHidden()))
+            stage = ("complete" if len(completed) == len(
+                state.onboarding_steps) else next(
+                    (step.key for step in state.onboarding_steps
+                     if not step.complete), ""))
             newly = completed - self._onboarding_completed
-            newly_granted = granted - self._onboarding_granted
+            newly_granted = setup_rows_turned_good(
+                self._onboarding_good, stage, good, newly)
             self._onboarding_completed = completed
-            self._onboarding_granted = granted
+            self._onboarding_good = (stage, good)
             if not bool(self.window.isVisible()):
                 return
             reduced = state.prefers_reduced_motion
@@ -8040,10 +8134,11 @@ if APPKIT_AVAILABLE:
                       state.words_today, state.last_result.summary)
             previous = self._home_landed
             self._home_landed = landed
-            if (previous is None or previous == landed
-                    or not state.last_result.available
-                    or state.section != "Home"
-                    or not bool(self.window.isVisible())):
+            if not home_dictation_landed(
+                    previous, landed,
+                    available=state.last_result.available,
+                    section=state.section) or not bool(
+                        self.window.isVisible()):
                 return
             add_jelly_motion(
                 self.dynamic["home_face_view"], "pop",
@@ -8809,7 +8904,7 @@ if APPKIT_AVAILABLE:
             group = FlowView.alloc().initWithFrame_(
                 NSMakeRect(0, 0, width, 180))
             header = self._soft(
-                self._l("home.group.last_dictation"),
+                self._l("home.group.dictation"),
                 NSMakeRect(0, 0, 200, HOME_HEADER_HEIGHT))
             header.setFont_(_role_font("section_header"))
             engine = self._soft(
@@ -8818,6 +8913,9 @@ if APPKIT_AVAILABLE:
                 alignment=int(_appkit_name("NSTextAlignmentRight")))
             card = _card(NSMakeRect(0, 0, width, 190))
             self._register("card", card)
+            # VoiceOver meets the card as a group: it says what the
+            # header over it says.
+            _accessible(card, self._l("home.group.dictation"))
             rows_host = self._rows_host(card)
             for view in (header, engine, card):
                 group.addSubview_(view)
@@ -8902,6 +9000,7 @@ if APPKIT_AVAILABLE:
             for _ in rows[1:]:
                 line = _hairline(NSMakeRect(0, 0, width, 1))
                 self._register("hairline", line)
+                _silence_group(line)
                 rows_host.addSubview_(line)
                 lines.append(line)
 
@@ -9028,13 +9127,21 @@ if APPKIT_AVAILABLE:
             host.on_layout = self._layout_setup_bubble
             bubble = SpeechBubbleView.alloc().initWithFrame_(
                 NSMakeRect(0, 0, 400, 140))
+            try:
+                # Home's bubble carries the phase to VoiceOver. This one
+                # has nothing of its own to say: its title and detail are
+                # read where they stand, not inside an unnamed group.
+                bubble.setAccessibilityElement_(False)
+            except Exception:
+                pass
             host.addSubview_(bubble)
             onboarding_title = _label(
                 self._l("onboarding.permissions.title"),
                 NSMakeRect(0, 0, 360, 34), wrap=True, lines=2)
             onboarding_title.setFont_(_role_font("bubble_headline"))
             onboarding_detail = _label(
-                "", NSMakeRect(0, 0, 360, 68), size=13, wrap=True)
+                "", NSMakeRect(0, 0, 360, 68), size=SETUP_DETAIL_SIZE,
+                wrap=True)
             try:
                 onboarding_detail.cell().setTruncatesLastVisibleLine_(True)
             except Exception:
@@ -9092,14 +9199,11 @@ if APPKIT_AVAILABLE:
                 cap = KeyCapView.alloc().initWithFrame_(
                     NSMakeRect(0, 0, 40, 23))
                 button = self._chunky(
-                    self._l("onboarding.permission.open"),
+                    self._l("onboarding.action.open_system_settings"),
                     "openPermissionSettings:", variant="plain", small=True)
                 button.setTag_(index)
                 for view in (icon, check):
-                    try:
-                        view.setAccessibilityElement_(False)
-                    except Exception:
-                        pass
+                    _silence_image(view)
                 for view in (tile, cap, check, status, button):
                     row.addSubview_(view)
                 rows.append({
@@ -9114,6 +9218,7 @@ if APPKIT_AVAILABLE:
             for _ in rows[1:]:
                 line = _hairline(NSMakeRect(0, 0, width, 1))
                 self._register("hairline", line)
+                _silence_group(line)
                 rows_host.addSubview_(line)
                 lines.append(line)
 
@@ -9152,6 +9257,8 @@ if APPKIT_AVAILABLE:
                 step_icon.setImageScaling_(
                     NSImageScaleProportionallyUpOrDown)
                 step_icon.setEditable_(False)
+                # The marker's own text says the step and how it stands.
+                _silence_image(step_icon)
                 step = _label(
                     self._l(f"onboarding.step.{step_key}"),
                     NSMakeRect(24, 5, 80, 30),
@@ -9843,8 +9950,10 @@ if APPKIT_AVAILABLE:
             except Exception:
                 occluded = False
             state = self.view_model.state
+            # Home's face is hidden while setup has the page.
             live = (bool(self.window.isVisible()) and not occluded
                     and state.section == "Home"
+                    and not self.setup_mode
                     and not state.prefers_reduced_motion)
             if live:
                 face_view.startLiving()
@@ -10215,6 +10324,10 @@ if APPKIT_AVAILABLE:
             self.dynamic["home_result_card"].setHidden_(presentation.visible)
             for card in self.dynamic["overview_metric_cards"]:
                 card.setHidden_(presentation.visible)
+            # Once every step is confirmed the rows list the four steps
+            # with their check marks, so the route does not say it again.
+            for marker in self.dynamic["onboarding_step_cards"]:
+                marker.setHidden_(presentation.complete)
             for control, step in zip(
                     self.dynamic["onboarding_steps"], state.onboarding_steps):
                 step_label = self._l(f"onboarding.step.{step.key}")
@@ -10235,16 +10348,36 @@ if APPKIT_AVAILABLE:
                 presentation.progress)
             self.dynamic["onboarding_title"].setStringValue_(
                 presentation.title)
-            self.dynamic["onboarding_detail"].setStringValue_(
-                presentation.detail)
+            # The bubble shows the capture key that is bound as a key cap
+            # where the step's copy names it, as Home's bubble does.
+            detail = self.dynamic["onboarding_detail"]
+            detail.setAttributedStringValue_(copy_with_key_cap(
+                presentation.detail,
+                state.hotkey_label
+                if presentation.current_key == "hotkey" else "",
+                font=_font(SETUP_DETAIL_SIZE),
+                color=_srgb_color(palette_for_appearance(
+                    getattr(self, "_dark", False)).ink_soft)))
             # How the step stands is the header over its rows.
             self.dynamic["onboarding_status"].setStringValue_(
                 presentation.status)
+            # One way forward per step. While a permission is missing the
+            # way forward is that permission's pane, and the button to it
+            # is in its row; the foot's Continue waits, disabled, until
+            # the runtime stops reporting one as missing.
+            rows = setup_rows(state, locale=self.view_model.locale)
+            waiting = setup_waits_on_a_row(rows)
+            action = self.dynamic["onboarding_action"]
+            action_title = (self._l("onboarding.action.continue")
+                            if waiting else presentation.action_title)
             self._set_chunky_title(
-                self.dynamic["onboarding_action"], presentation.action_title)
+                action, action_title, "plain" if waiting else "amber")
+            action.setEnabled_(not waiting)
+            action.setKeyEquivalent_("" if waiting else "\r")
             try:
-                self.dynamic["onboarding_action"].setAccessibilityHelp_(
-                    presentation.action_help)
+                action.setAccessibilityHelp_(
+                    self._l("onboarding.action.waiting.help")
+                    if waiting else presentation.action_help)
             except Exception:
                 pass
             # The character opens its mouth exactly where the copy asks the
@@ -10280,27 +10413,30 @@ if APPKIT_AVAILABLE:
                 self.dynamic["onboarding_status"], presentation.status,
                 label=presentation.status,
             )
+            # The key cap stands in for the key's name in the drawn line;
+            # VoiceOver reads the cell, which is given the whole sentence.
             sync_accessibility(
-                self.dynamic["onboarding_action"], presentation.status,
-                label=presentation.action_title,
-            )
-            self._render_setup_rows(state)
+                detail.cell(), presentation.detail,
+                label=self._l("overview.accessibility.onboarding.detail"))
+            sync_accessibility(
+                action, presentation.status, label=action_title)
+            self._render_setup_rows(rows)
             self._layout_onboarding()
             self._apply_onboarding_theme(state, presentation)
             self._animate_onboarding_face(presentation)
             self._animate_onboarding_steps(state)
 
         @objc.python_method
-        def _render_setup_rows(self, state: GUIState) -> None:
+        def _render_setup_rows(self, specs: Sequence[SetupRow]) -> None:
             """Fill the setup rows with what this step is waiting on."""
             locale = self.view_model.locale
-            specs = setup_rows(state, locale=locale)
             for index, row in enumerate(self.dynamic["onboarding_rows"]):
                 spec = specs[index] if index < len(specs) else None
                 row["view"].setHidden_(spec is None)
                 if spec is None:
                     row.update(key="", tone="quiet", permission="")
                     row["button"].setHidden_(True)
+                    row["button"].setKeyEquivalent_("")
                     continue
                 row.update(
                     key=spec.key, tone=spec.tone, permission=spec.permission)
@@ -10318,6 +10454,13 @@ if APPKIT_AVAILABLE:
                     row["cap"].set_key(spec.key_cap, locale=locale)
                 button = row["button"]
                 button.setHidden_(not spec.permission)
+                # The step's primary action is the first missing
+                # permission's own button: the one amber button, and the
+                # one that answers Return.
+                self._set_chunky_title(
+                    button, str(button.title()),
+                    "amber" if spec.primary else "plain")
+                button.setKeyEquivalent_("\r" if spec.primary else "")
                 if spec.permission:
                     _accessible(
                         button,
@@ -12242,7 +12385,8 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                         for row in setup_row_views[:3])
             and bool(setup_row_views[3]["view"].isHidden()),
             "setup shows one row for each permission")
-        for row, permission in zip(setup_row_views, PERMISSIONS):
+        for index, (row, permission) in enumerate(
+                zip(setup_row_views, PERMISSIONS)):
             name = localized_string(f"onboarding.permission.{permission}")
             require(
                 str(row["title"].stringValue()) == name
@@ -12250,16 +12394,22 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                     f"onboarding.permission.{permission}.why")
                 and row["icon"].image() is not None,
                 f"the {permission} row names it and says why")
+            # The first missing permission's button is the step's primary
+            # action: amber, and the one that answers Return.
+            primary = index == 0
             require(
                 not bool(row["button"].isHidden())
                 and bool(row["check"].isHidden())
                 and bool(row["status"].isHidden())
                 and bool(row["button"].isKindOfClass_(ChunkyButton))
-                and row["button"].variant == "plain"
+                and row["button"].variant == (
+                    "amber" if primary else "plain")
+                and str(row["button"].keyEquivalent()) == (
+                    "\r" if primary else "")
                 and str(row["button"].action())
                 == "openPermissionSettings:"
                 and str(row["button"].title()) == localized_string(
-                    "onboarding.permission.open")
+                    "onboarding.action.open_system_settings")
                 and accessible_value(
                     row["button"].cell(), "accessibilityLabel")
                 == localized_string(
@@ -12270,7 +12420,9 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             require(
                 calls[before:] == [("open_system_settings", permission)],
                 f"the {permission} row opens that permission's pane")
-        # One way forward, and it is never called Allow.
+        # One way forward at a time, and it is never called Allow. While a
+        # permission is missing the way forward is its row's button, so
+        # the foot's Continue waits, disabled, and nothing repeats a row.
         setup_buttons = [
             leaf for leaf in leaf_views(setup)
             if bool(leaf.isKindOfClass_(NSButton))]
@@ -12279,24 +12431,108 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             [button for button in setup_buttons
              if str(button.action()) == "continueSetup:"] == [action]
             and bool(action.isKindOfClass_(ChunkyButton))
-            and action.variant == "amber"
+            and action.variant == "plain"
+            and not bool(action.isEnabled())
+            and str(action.keyEquivalent()) == ""
+            and str(action.title()) == localized_string(
+                "onboarding.action.continue")
+            and accessible_value(action.cell(), "accessibilityHelp")
+            == localized_string("onboarding.action.waiting.help"),
+            "setup has one Continue button, and it waits while a "
+            "permission is missing")
+        require(
+            [button for button in setup_buttons
+             if isinstance(button, ChunkyButton)
+             and button.variant == "amber"] == [setup_row_views[0]["button"]]
             and [button for button in setup_buttons
-                 if isinstance(button, ChunkyButton)
-                 and button.variant == "amber"] == [action]
+                 if str(button.keyEquivalent()) == "\r"]
+            == [setup_row_views[0]["button"]]
+            and [button for button in setup_buttons
+                 if bool(button.isEnabled())]
+            == [row["button"] for row in setup_row_views[:3]]
             and not any("allow" in str(button.title()).casefold()
                         for button in setup_buttons),
-            "setup has one Continue button, the only amber one, and no "
-            "button called Allow")
+            "one amber button answers Return, the rows' own buttons are "
+            "the only ones to press, and no button is called Allow")
         require(
             controller.window.initialFirstResponder()
             == setup_row_views[0]["button"]
-            and action in key_views_from(setup_row_views[0]["button"])
-            and not any(row in key_views_from(action)
+            and all(row["button"] in key_views_from(
+                setup_row_views[0]["button"])
+                for row in setup_row_views[:3])
+            and action not in key_views_from(setup_row_views[0]["button"])
+            and not any(row in key_views_from(setup_row_views[0]["button"])
                         for row in controller.sidebar_rows),
-            "in setup, Tab runs through the rows to Continue and never "
-            "into the hidden sidebar")
+            "in setup, Tab runs through the rows' buttons and never into "
+            "the hidden sidebar or the waiting Continue")
         laid_out(setup, "setup, permissions", over=(
             controller.dynamic["onboarding_progress_fill"],))
+        require(
+            controller.dynamic["onboarding_face"].pose == "idle",
+            "the setup face keeps its mouth shut on the permissions step")
+        # What only decorates stays out of VoiceOver's way: an image view
+        # is read through its cell, so both are told; a separator is not
+        # an empty group; the bubble's copy is read where it stands.
+        quiet = [setup_bubble, *controller.dynamic["onboarding_row_lines"]]
+        for image_view in (
+                *(row["icon"] for row in setup_row_views),
+                *(row["check"] for row in setup_row_views),
+                *controller.dynamic["onboarding_step_icons"]):
+            quiet.extend((image_view, image_view.cell()))
+        require(
+            not any(bool(element.isAccessibilityElement())
+                    for element in quiet),
+            "setup's symbols, separators and bubble are not VoiceOver "
+            "stops of their own")
+
+        # A permission granted while the step is showing: its row trades
+        # the button for the check mark and the word, live, and the
+        # primary action moves to the next permission still missing.
+        runtime["microphone_status"] = "Ready"
+        model.refresh()
+        controller.render()
+        root = window.contentView()
+        root.layoutSubtreeIfNeeded()
+        granted_row, next_row, last_row = setup_row_views[:3]
+        check_frame = frame_in_window(granted_row["check"])
+        row_frame = frame_in_window(granted_row["view"])
+        require(
+            not bool(granted_row["check"].isHidden())
+            and granted_row["check"].image() is not None
+            and check_frame.size.width >= 12.0
+            and check_frame.size.height >= 12.0
+            and row_frame.origin.x <= check_frame.origin.x
+            and check_frame.origin.x + check_frame.size.width
+            <= row_frame.origin.x + row_frame.size.width
+            and row_frame.origin.y <= check_frame.origin.y
+            and check_frame.origin.y + check_frame.size.height
+            <= row_frame.origin.y + row_frame.size.height
+            and not bool(granted_row["status"].isHidden())
+            and str(granted_row["status"].stringValue())
+            == localized_string("onboarding.permission.granted")
+            and bool(granted_row["button"].isHidden())
+            and str(granted_row["button"].keyEquivalent()) == "",
+            "a granted permission shows its check mark and the word, and "
+            "no button")
+        require(
+            next_row["button"].variant == "amber"
+            and str(next_row["button"].keyEquivalent()) == "\r"
+            and last_row["button"].variant == "plain"
+            and str(last_row["button"].keyEquivalent()) == ""
+            and controller.window.initialFirstResponder()
+            == next_row["button"]
+            and not bool(action.isEnabled()),
+            "the primary action moves to the next missing permission")
+        laid_out(setup, "setup, one permission granted", over=(
+            controller.dynamic["onboarding_progress_fill"],))
+        runtime["microphone_status"] = "Unavailable"
+        model.refresh()
+        controller.render()
+        require(
+            bool(granted_row["check"].isHidden())
+            and not bool(granted_row["button"].isHidden())
+            and granted_row["button"].variant == "amber",
+            "a permission taken away again loses its check mark")
         # The shell is checked next, with the sidebar showing.
         controller.set_setup_mode(False)
 
@@ -12553,8 +12789,10 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             model.state.onboarding_steps[0].key == "permissions",
             "first-run permissions")
         require(
-            str(controller.dynamic["onboarding_action"].keyEquivalent()) ==
-            "\r", "onboarding key equivalent")
+            str(setup_row_views[0]["button"].keyEquivalent()) == "\r"
+            and str(controller.dynamic[
+                "onboarding_action"].keyEquivalent()) == "",
+            "onboarding key equivalent")
         require(
             accessible_value(
                 controller.dynamic["onboarding_card"],
@@ -12601,14 +12839,23 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                 "accessibilityLabel") == localized_string(
                     "diagnostics.accessibility.open_system_settings"),
             "permission recovery accessibility")
+        # The button that answers Return is the first missing
+        # permission's own; the action behind the foot's Continue still
+        # opens that same pane if anything sends it.
+        before = len(calls)
+        setup_row_views[0]["button"].performClick_(None)
         controller.continueSetup_(None)
         require(
-            ("open_system_settings", "microphone") in calls,
+            calls[before:] == [("open_system_settings", "microphone")] * 2,
             "permission recovery opens the missing permission's pane")
         require(model.state.section == "Home", "permission recovery route")
         require(
-            str(controller.dynamic["onboarding_action"].title()) ==
-            localized_string("onboarding.action.open_system_settings"),
+            str(setup_row_views[0]["button"].title()) ==
+            localized_string("onboarding.action.open_system_settings")
+            and str(controller.dynamic["onboarding_action"].title()) ==
+            localized_string("onboarding.action.continue")
+            and not bool(
+                controller.dynamic["onboarding_action"].isEnabled()),
             "a missing permission offers System Settings")
         runtime.update(
             microphone_status="Starting",
@@ -12617,10 +12864,27 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         )
         model.refresh()
         controller.render()
+        onboarding_action = controller.dynamic["onboarding_action"]
         require(
-            str(controller.dynamic["onboarding_action"].title()) ==
-            localized_string("onboarding.action.continue"),
+            str(onboarding_action.title()) ==
+            localized_string("onboarding.action.continue")
+            and bool(onboarding_action.isEnabled())
+            and onboarding_action.variant == "amber"
+            and str(onboarding_action.keyEquivalent()) == "\r"
+            and all(bool(row["button"].isHidden())
+                    and str(row["button"].keyEquivalent()) == ""
+                    for row in setup_row_views),
             "a permission still being checked offers no System Settings")
+        require(
+            [bool(row["check"].isHidden()) for row in setup_row_views[:3]]
+            == [True, False, False]
+            and [str(row["status"].stringValue())
+                 for row in setup_row_views[:3]] == [
+                localized_string("onboarding.permission.checking"),
+                localized_string("onboarding.permission.granted"),
+                localized_string("onboarding.permission.granted")],
+            "each permission row says how it stands")
+        onboarding_face = controller.dynamic["onboarding_face"]
         runtime.update(
             service_status="Running",
             microphone_status="Ready",
@@ -12644,20 +12908,54 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                 step=localized_string("onboarding.step.permissions"),
                 status=localized_string("onboarding.status.done")),
             "onboarding walkthrough evidence")
+        # The bubble shows the key that is bound as a key cap, and
+        # VoiceOver still hears the whole sentence, key included.
+        setup_detail = controller.dynamic["onboarding_detail"]
+        setup_copy = str(setup_detail.attributedStringValue().string())
+        require(
+            setup_copy.count("\ufffc") == 1
+            and model.state.hotkey_label not in setup_copy
+            and setup_copy.replace("\ufffc", model.state.hotkey_label)
+            == localized_string(
+                "onboarding.hotkey.detail", hotkey=model.state.hotkey_label)
+            and accessible_value(setup_detail.cell(), "accessibilityValue")
+            == localized_string(
+                "onboarding.hotkey.detail", hotkey=model.state.hotkey_label),
+            "the setup bubble names the bound key with a key cap")
+        # The face opens its mouth exactly where the copy asks the person
+        # to speak, and again for the celebration; nowhere else.
+        require(
+            onboarding_face.pose == "idle"
+            and bool(onboarding_action.isEnabled())
+            and onboarding_action.variant == "amber"
+            and str(onboarding_action.keyEquivalent()) == "\r",
+            "the setup face listens while the key is tried")
         runtime["capture_state"] = "Listening"
         model.refresh()
+        controller.render()
         require(
             next(step for step in model.state.onboarding_steps
                  if not step.complete).key == "models",
             "model readiness")
+        require(
+            onboarding_face.pose == "idle",
+            "the setup face waits while the models get ready")
         runtime["capture_state"] = "Ready"
         runtime["models"][0].update(
             install_state="installed", warm=True, status="RESOLVED")
         model.refresh()
+        controller.render()
         require(
             next(step for step in model.state.onboarding_steps
                  if not step.complete).key == "first_dictation",
             "first dictation")
+        require(
+            onboarding_face.pose == "talk",
+            "the setup face talks where the copy asks for the first words")
+        require(
+            not any(bool(marker.isHidden()) for marker in
+                    controller.dynamic["onboarding_step_cards"]),
+            "the route shows while a step is still open")
         runtime["last_word_count"] = 4
         model.refresh()
         controller.render()
@@ -12683,6 +12981,17 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             str(controller.dynamic["onboarding_action"].title()) ==
             localized_string("onboarding.action.finish"),
             "onboarding completion action")
+        require(
+            onboarding_face.pose == "talk",
+            "the setup face talks for the celebration")
+        require(
+            [row["key"] for row in setup_row_views] == list(
+                step.key for step in model.state.onboarding_steps)
+            and not any(bool(row["check"].isHidden())
+                        for row in setup_row_views)
+            and all(bool(marker.isHidden()) for marker in
+                    controller.dynamic["onboarding_step_cards"]),
+            "every confirmed step is listed once, with its check mark")
         controller.continueSetup_(None)
         require(
             model.state.onboarding_acknowledged,
@@ -14226,6 +14535,14 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                 contrast_ratio(drawn_rgb(ink), light.surface) >= 4.5,
                 f"{key} meets AA on the bubble in light appearance")
 
+        def progress_fill_rgb() -> tuple[float, float, float]:
+            return drawn_rgb(NSColor.colorWithCGColor_(controller.dynamic[
+                "onboarding_progress_fill"].layer().backgroundColor()))
+
+        require(
+            contrast_ratio(progress_fill_rgb(), light.bg) >= 3.0,
+            "setup's progress fill stands off the field in light appearance")
+
         # ---- Edges in the dark appearance. A bright fill keeps the dark
         # ink. A control whose own fill is dark there (the plain chunky
         # button, the key cap) gets a light edge that measures 3:1 against
@@ -14235,6 +14552,9 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         controller.render()
         root_view.layoutSubtreeIfNeeded()
         night = palette_for_appearance(True)
+        require(
+            contrast_ratio(progress_fill_rgb(), night.bg) >= 3.0,
+            "setup's progress fill stands off the field in dark appearance")
         plain_button = controller.dynamic["review_issue_button"]
         require(
             not bool(plain_button.isHidden())
@@ -14434,9 +14754,12 @@ __all__ = [
     "native_appkit_smoke_contract",
     "onboarding_presentation",
     "home_bubble_actions",
+    "home_dictation_landed",
     "home_review_due",
     "home_review_in_row",
     "setup_rows",
+    "setup_rows_turned_good",
+    "setup_waits_on_a_row",
     "plural_key",
     "normalize_snapshot",
     "normalize_acoustic_keyword_inspection",

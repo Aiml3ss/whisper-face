@@ -4055,9 +4055,149 @@ class HomeAndSetupTests(unittest.TestCase):
         self.assertNotIn(
             "allow ", " ".join(
                 localized_string(key).casefold() for key in (
-                    "onboarding.permission.open",
                     "onboarding.action.open_system_settings",
                     "onboarding.action.continue")))
+
+    def test_the_first_missing_permission_carries_the_steps_primary_action(
+            self):
+        def primaries(**statuses):
+            rows = setup_rows(normalize_snapshot(
+                {**self.RUNTIME, **statuses}))
+            return rows, [row.key for row in rows if row.primary]
+
+        # One missing: its row is the primary, and Continue waits.
+        rows, primary = primaries()
+        self.assertEqual(primary, ["accessibility"])
+        self.assertTrue(gui_module.setup_waits_on_a_row(rows))
+        # Several missing: only the first, the pane the step's single
+        # button has always opened.
+        rows, primary = primaries(
+            microphone_status="Unavailable",
+            input_monitoring_status="Needs attention")
+        self.assertEqual(primary, ["microphone"])
+        self.assertEqual(
+            primary[0], normalize_snapshot({
+                **self.RUNTIME, "microphone_status": "Unavailable",
+                "input_monitoring_status": "Needs attention",
+            }).missing_permissions[0])
+        self.assertEqual(
+            [row.permission for row in rows],
+            ["microphone", "accessibility", "input_monitoring"])
+        # Nothing missing, only still being checked: no row carries it,
+        # and the foot's Continue is the way forward.
+        rows, primary = primaries(accessibility_status="Unknown")
+        self.assertEqual(primary, [])
+        self.assertFalse(gui_module.setup_waits_on_a_row(rows))
+        # No other step ever puts its primary action in a row.
+        granted = {**self.RUNTIME, "microphone_status": "Ready",
+                   "accessibility_status": "Granted"}
+        for runtime in (
+                granted, {**granted, "hotkey_practiced": True},
+                {**granted, "hotkey_practiced": True,
+                 "models": [READY_MODEL]},
+                {**granted, "hotkey_practiced": True,
+                 "models": [READY_MODEL], "last_word_count": 3}):
+            self.assertFalse(gui_module.setup_waits_on_a_row(
+                setup_rows(normalize_snapshot(runtime))))
+
+    def test_the_window_gives_the_primary_row_the_amber_button_and_return(
+            self):
+        controller = _gui_class("WhisperFaceWindowController")
+        rows = ast.unparse(_gui_function("_render_setup_rows", controller))
+        self.assertIn("'amber' if spec.primary else 'plain'", rows)
+        self.assertIn(
+            "button.setKeyEquivalent_('\\r' if spec.primary else '')", rows)
+        onboarding = ast.unparse(
+            _gui_function("_render_onboarding", controller))
+        self.assertIn("waiting = setup_waits_on_a_row(rows)", onboarding)
+        self.assertIn("action.setEnabled_(not waiting)", onboarding)
+        self.assertIn(
+            "action.setKeyEquivalent_('' if waiting else '\\r')", onboarding)
+        # The action itself is unchanged: sent while a permission is
+        # missing, it still opens the first missing permission's pane.
+        proceed = ast.unparse(_gui_function("continueSetup_", controller))
+        self.assertIn(
+            "    elif self.view_model.permission_recovery_needed():\n"
+            "        self.view_model.open_system_settings()\n", proceed)
+
+    def test_only_what_just_turned_good_pops(self):
+        turned = gui_module.setup_rows_turned_good
+        none = frozenset()
+        # The first render pops nothing.
+        self.assertEqual(
+            turned(None, "permissions", frozenset({"microphone"}), none),
+            none)
+        # A permission granted while its step is showing.
+        self.assertEqual(
+            turned(("permissions", frozenset({"microphone"})), "permissions",
+                   frozenset({"microphone", "accessibility"}), none),
+            frozenset({"accessibility"}))
+        # A new step: every row is new, nothing pops.
+        self.assertEqual(
+            turned(("hotkey", none), "models",
+                   frozenset({"model:Parakeet"}), frozenset({"hotkey"})),
+            none)
+        # Completion: only the step that was just confirmed.
+        steps = frozenset(native_appkit_smoke_contract().onboarding_steps)
+        self.assertEqual(
+            turned(("first_dictation", none), "complete", steps,
+                   frozenset({"first_dictation"})),
+            frozenset({"first_dictation"}))
+        # A refresh that changed nothing.
+        self.assertEqual(
+            turned(("complete", steps), "complete", steps, none), none)
+
+    def test_model_rows_are_keyed_by_the_model_not_its_place(self):
+        granted = {
+            **self.RUNTIME, "microphone_status": "Ready",
+            "accessibility_status": "Granted", "hotkey_practiced": True}
+        models = [PREPARING_MODEL, {
+            "name": "Optional", "install_state": "installed"}]
+        first = setup_rows(normalize_snapshot({**granted, "models": models}))
+        second = setup_rows(normalize_snapshot(
+            {**granted, "models": models[::-1]}))
+        self.assertEqual(
+            {row.key: row.tone for row in first},
+            {row.key: row.tone for row in second})
+        self.assertEqual(
+            {row.key for row in first},
+            {f"model:{model['name']}" for model in models})
+
+    def test_the_face_pops_only_when_a_dictation_lands(self):
+        landed = gui_module.home_dictation_landed
+        before, after = (930.0, 9, 714, "9 words"), (810.0, 4, 718, "4 words")
+        self.assertTrue(
+            landed(before, after, available=True, section="Home"))
+        # Not on the first render, and not on a refresh that changed
+        # nothing (the window renders every two seconds).
+        self.assertFalse(landed(None, after, available=True, section="Home"))
+        self.assertFalse(
+            landed(after, after, available=True, section="Home"))
+        # Not without a result to show, and not behind another page.
+        self.assertFalse(
+            landed(before, after, available=False, section="Home"))
+        self.assertFalse(
+            landed(before, after, available=True, section="Advanced"))
+        # Every spring Home and setup add is gated by Reduce Motion.
+        controller = _gui_class("WhisperFaceWindowController")
+        for name in ("_animate_home_landing", "_animate_onboarding_face",
+                     "_animate_onboarding_steps", "_entrance_stagger"):
+            function = _gui_function(name, controller)
+            calls = [
+                node for node in ast.walk(function)
+                if isinstance(node, ast.Call)
+                and getattr(node.func, "id", "") == "add_jelly_motion"]
+            self.assertTrue(calls, name)
+            for call in calls:
+                gates = [ast.unparse(keyword.value)
+                         for keyword in call.keywords
+                         if keyword.arg == "reduced_motion"]
+                self.assertEqual(len(gates), 1, name)
+                self.assertIn("reduced", gates[0], name)
+                self.assertNotIn(gates[0], ("False", "True"), name)
+        self.assertIn(
+            "home_dictation_landed",
+            _called_names(_gui_function("_animate_home_landing", controller)))
 
     def test_setup_rows_follow_the_step_and_the_key_that_is_bound(self):
         granted = {
@@ -4183,7 +4323,8 @@ class HomeAndSetupTests(unittest.TestCase):
                     "onboarding.stage.accessibility.label",
                     "onboarding.rows.accessibility.label",
                     "onboarding.permission.open.label",
-                    "onboarding.row.accessibility.status"):
+                    "onboarding.row.accessibility.status",
+                    "onboarding.action.waiting.help"):
             self.assertIn(key, keys)
             self.assertIn(key, STRING_CATALOGS["en"])
         # What the phase label carried still has its VoiceOver label.
@@ -5380,11 +5521,28 @@ class HomeAppKitTests(unittest.TestCase):
         self.assertTrue(checking["button"].isHidden())
         self.assertTrue(checking["check"].isHidden())
         self.assertEqual(str(checking["status"].stringValue()), "Checking…")
-        # Missing: its own button, and it opens that pane.
+        # Missing: its own button, and it opens that pane. It is the
+        # first missing permission, so it is the step's primary action:
+        # the one amber button, and the one that answers Return.
         self.assertFalse(missing["button"].isHidden())
         self.assertTrue(missing["check"].isHidden())
+        self.assertEqual(missing["button"].variant, "amber")
+        self.assertEqual(str(missing["button"].keyEquivalent()), "\r")
+        self.assertEqual(
+            str(missing["button"].title()), "Open System Settings")
+        self.assertEqual(
+            self.window.initialFirstResponder(), missing["button"])
         missing["button"].performClick_(None)
         self.assertEqual(self.opened, ["accessibility"])
+        # The foot's Continue waits: plain, disabled, not on Return.
+        action = dynamic["onboarding_action"]
+        self.assertEqual(str(action.title()), "Keep Going")
+        self.assertEqual(action.variant, "plain")
+        self.assertFalse(action.isEnabled())
+        self.assertEqual(str(action.keyEquivalent()), "")
+        self.assertEqual(
+            str(action.cell().accessibilityHelp()),
+            localized_string("onboarding.action.waiting.help"))
         # Granted: the check mark and the word.
         self.assertTrue(granted["button"].isHidden())
         self.assertFalse(granted["check"].isHidden())
@@ -5401,6 +5559,60 @@ class HomeAppKitTests(unittest.TestCase):
         self.show()
         self.assertFalse(missing["check"].isHidden())
         self.assertTrue(missing["button"].isHidden())
+        self.assertEqual(str(missing["button"].keyEquivalent()), "")
+        # Nothing is missing any more, so the step has moved on and the
+        # foot's button is the way forward again.
+        self.assertTrue(action.isEnabled())
+        self.assertEqual(action.variant, "amber")
+        self.assertEqual(str(action.keyEquivalent()), "\r")
+
+    def test_several_missing_permissions_share_one_primary_action(self):
+        self.runtime.clear()
+        self.runtime.update({
+            **self.SETUP, "microphone_status": "Unavailable",
+            "input_monitoring_status": "Needs attention"})
+        self.model.acknowledge_onboarding(False)
+        self.model.refresh()
+        self.show(section="Home")
+        rows = self.controller.dynamic["onboarding_rows"][:3]
+        self.assertEqual(
+            [row["button"].variant for row in rows],
+            ["amber", "plain", "plain"])
+        self.assertEqual(
+            [str(row["button"].keyEquivalent()) for row in rows],
+            ["\r", "", ""])
+        for row, permission in zip(rows, gui_module.PERMISSIONS):
+            row["button"].performClick_(None)
+            self.assertEqual(self.opened[-1], permission)
+        # Granting the first hands the primary action to the next.
+        self.runtime["microphone_status"] = "Ready"
+        self.model.refresh()
+        self.show()
+        self.assertEqual(
+            [row["button"].variant for row in rows[1:]], ["amber", "plain"])
+        self.assertTrue(rows[0]["button"].isHidden())
+        self.assertFalse(rows[0]["check"].isHidden())
+        self.assertEqual(
+            self.window.initialFirstResponder(), rows[1]["button"])
+
+    def test_the_setup_bubble_shows_the_bound_key_as_a_key_cap(self):
+        granted = {
+            **self.SETUP, "microphone_status": "Ready",
+            "accessibility_status": "Granted", "hotkey_label": "F13"}
+        self.runtime.clear()
+        self.runtime.update(granted)
+        self.model.acknowledge_onboarding(False)
+        self.model._hotkey_practiced = False
+        self.model.refresh()
+        self.show(section="Home")
+        detail = self.controller.dynamic["onboarding_detail"]
+        plain = str(detail.attributedStringValue().string())
+        self.assertEqual(plain.count("\ufffc"), 1)
+        self.assertNotIn("F13", plain)
+        whole = localized_string("onboarding.hotkey.detail", hotkey="F13")
+        self.assertEqual(plain.replace("\ufffc", "F13"), whole)
+        # VoiceOver reads the cell, and hears the key's name.
+        self.assertEqual(str(detail.cell().accessibilityValue()), whole)
 
     def test_every_setup_step_fits_and_shows_the_key_that_is_bound(self):
         dynamic = self.controller.dynamic
@@ -5445,6 +5657,11 @@ class HomeAppKitTests(unittest.TestCase):
                         dynamic["onboarding_face"].pose,
                         "talk" if current in ("first_dictation", None)
                         else "idle")
+                    # The route is there until the rows say it all.
+                    self.assertEqual(
+                        [marker.isHidden() for marker in
+                         dynamic["onboarding_step_cards"]],
+                        [current is None] * 4)
         # Finishing leaves setup mode and shows Home.
         self.controller.continueSetup_(None)
         self.assertFalse(self.controller.setup_mode)
