@@ -226,10 +226,12 @@ def application_build_version() -> str:
             timeout=2,
         )
         if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip().upper()
+            # As git writes it. The sidebar's foot is a quiet line of
+            # small print; in capitals it read as debug output.
+            return result.stdout.strip().lower()
     except (OSError, subprocess.SubprocessError):
         pass
-    return "LOCAL"
+    return "local"
 SELECTIVE_RELISTEN_STATUSES = frozenset({
     "off", "ready", "warming", "enabled-not-ready", "receipt-missing",
     "receipt-invalid", "receipt-policy-mismatch",
@@ -299,6 +301,10 @@ MODEL_WALLET_ELIGIBILITIES = frozenset({
 
 # Stable semantic keys are intentionally separate from AppKit. Additional
 # catalogs can be added without rewriting view logic or persistence schemas.
+#
+# A no-break space (written \u00a0) keeps a button's name on one line
+# inside a sentence, and keeps a sentence that wraps from leaving its last
+# word alone on a line. VoiceOver reads it as a space.
 STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
     "en": {
         "nav.home": "Home",
@@ -320,7 +326,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "advanced.accessibility.shortcut": "Advanced section shortcut",
         "advanced.accessibility.shortcut.help": "Show the Advanced section (Command-D).",
         "app.subtitle": "Private, fast voice input on your Mac",
-        "app.version": "BUILD {version}",
+        "app.version": "Build {version}",
         "overview.phase.ready": "READY",
         "overview.phase.recording": "RECORDING",
         "overview.phase.processing": "PROCESSING",
@@ -335,8 +341,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "overview.status.processing.title": "Making your words useful…",
         "overview.status.processing.detail": "Recognizing locally, protecting names and numbers, then checking the destination.",
         "overview.status.recovery.title": "Your words are safe",
-        "overview.status.recovery.detail.one": "1 dictation needs an explicit Copy & Dismiss review.",
-        "overview.status.recovery.detail.many": "{count} dictations need an explicit Copy & Dismiss review.",
+        "overview.status.recovery.detail.one": "1 dictation needs an explicit Copy\u00a0&\u00a0Dismiss\u00a0review.",
+        "overview.status.recovery.detail.many": "{count} dictations need an explicit Copy\u00a0&\u00a0Dismiss\u00a0review.",
         "overview.status.degraded.title": "One setup item needs attention",
         "overview.status.paused.title": "Dictation is paused",
         "overview.status.paused.detail": "Resume whenever you are ready. Settings and recovery still work.",
@@ -394,7 +400,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "onboarding.models.title": "Getting your models ready",
         "onboarding.models.detail": "The recognition models unpack here the first time you run. One ready engine is all you need; the rest can keep warming in the background.",
         "onboarding.first_dictation.title": "Say something",
-        "onboarding.first_dictation.detail": "Click into any text field, hold your key, and speak one sentence. If the focus moves before it lands, your words wait in the Voice Outbox under Copy & Dismiss.",
+        "onboarding.first_dictation.detail": "Click into any text field, hold your key, and speak one sentence. If the focus moves before it lands, your words wait in the Voice Outbox under Copy\u00a0&\u00a0Dismiss.",
         "onboarding.status.done": "Done",
         "onboarding.status.attention": "Needs attention",
         "onboarding.status.try": "Try it now",
@@ -622,8 +628,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.controls.sound.detail.whisper": "Short first-party cues for start, finish, and trouble",
         "settings.controls.sound.detail.silent": "No sound at all",
         "settings.controls.self_correction": "“Actually” corrections",
-        "settings.controls.self_correction.off": "Off. When on, “Meet at 3 pm, actually 4 pm” types “Meet at 4 pm” for numbers, days, months and times.",
-        "settings.controls.self_correction.on": "On. “Meet at 3 pm, actually 4 pm” types “Meet at 4 pm” for numbers, days, months and times.",
+        "settings.controls.self_correction.off": "Off. When on, “Meet at 3 pm, actually 4 pm” types “Meet at 4 pm” for numbers, days, months\u00a0and\u00a0times.",
+        "settings.controls.self_correction.on": "On. “Meet at 3 pm, actually 4 pm” types “Meet at 4 pm” for numbers, days, months\u00a0and\u00a0times.",
         "settings.controls.self_correction.cost": "A real contrast changes too: “I thought it was Tuesday, actually Wednesday” loses “Tuesday”.",
         "settings.controls.action.change": "Change…",
         "settings.controls.action.preview": "Preview",
@@ -1061,9 +1067,9 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "pages.advanced.status": "Status",
         "pages.advanced.support": "Support",
         "pages.models.status.unavailable": "Not available",
-        "pages.models.advisory": "Model checks are for information only; they never change which model runs.",
-        "pages.models.advisory.evidence": "Model files found on this Mac: {found} of {total} · warmed up: {warm} of {total}. These checks are for information only; they never change which model runs.",
-        "pages.models.advisory.unavailable": "Model file checks are not available on this Mac yet. They are for information only; they never change which model runs.",
+        "pages.models.advisory": "Model checks are for information only; they never change which\u00a0model\u00a0runs.",
+        "pages.models.advisory.evidence": "Model files found on this Mac: {found} of {total} · warmed up: {warm} of {total}. These checks are for information only; they never change which\u00a0model\u00a0runs.",
+        "pages.models.advisory.unavailable": "Model file checks are not available on this Mac yet. They are for information only; they never change which\u00a0model\u00a0runs.",
         "pages.models.advisory.label": "Model checks",
         "pages.relisten.detail": "Rechecks names and numbers it was unsure of · {status}",
         "pages.relisten.status.off": "Off",
@@ -5901,6 +5907,23 @@ if APPKIT_AVAILABLE:
     # all times, so a two-line notice never lands on its last group.
     NOTICE_GAP = 6.0
     NOTICE_CLEARANCE = 4.0
+    # The notice sits NOTICE_FOOT above the window's bottom edge, and the
+    # band it needs is its one line, that foot and the gap above it. The
+    # band is kept only while a notice is showing: with none, a page that
+    # scrolls runs to the window's edge. Home and setup cannot scroll, so
+    # they lay themselves out above the band whether it is in use or not
+    # and stay still when a notice comes and goes.
+    NOTICE_FOOT = 10.0
+    # Every title setup's foot button takes. The step marks beside it are
+    # laid out for the widest, so they do not move from step to step.
+    SETUP_FOOT_ACTION_KEYS = (
+        "onboarding.action.continue",
+        "onboarding.action.hotkey",
+        "onboarding.action.models",
+        "onboarding.action.first_dictation",
+        "onboarding.action.finish",
+    )
+    NOTICE_BAND = NOTICE_FOOT + NOTICE_LINE_HEIGHT + NOTICE_GAP
     NOTICE_RISE = (NOTICE_WRAPPED_HEIGHT - NOTICE_LINE_HEIGHT - NOTICE_GAP
                    + NOTICE_CLEARANCE)
 
@@ -6742,8 +6765,35 @@ if APPKIT_AVAILABLE:
                 40.0, width - self.text_origin() - ROW_INSET - controls)
 
         @objc.python_method
+        def say_the_title_once(self) -> None:
+            """Keep VoiceOver from saying the title twice in a row.
+
+            A caption is often labelled with its row's title, so that it
+            says what it is about. VoiceOver then reads the title, and at
+            once the caption's label: the same words again. While that
+            is so the title itself is silent and the caption carries it.
+            """
+            if self.title is None:
+                return
+            carried = False
+            if (self.caption is not None
+                    and not bool(self.caption.isHidden())
+                    and str(self.caption.stringValue())):
+                try:
+                    label = self.caption.cell().accessibilityLabel()
+                except Exception:
+                    label = None
+                carried = (bool(label) and str(label).strip()
+                           == str(self.title.stringValue()).strip())
+            try:
+                self.title.cell().setAccessibilityElement_(not carried)
+            except Exception:
+                pass
+
+        @objc.python_method
         def arrange(self, width: float) -> float:
             """Lay the row out at ``width``; return its height."""
+            self.say_the_title_once()
             if self.custom is not None:
                 height = float(self.custom[0](width))
                 self.custom[1](width, height)
@@ -7978,8 +8028,11 @@ if APPKIT_AVAILABLE:
 
         @objc.python_method
         def title_font(self) -> Any:
+            # The selection fill is pale by design (about 1.2:1 against
+            # the sidebar in light), so the label carries the state too:
+            # bold on the page that is showing, medium on the others.
             return NSFont.systemFontOfSize_weight_(
-                13.0, NSFontWeightSemibold if self.selected
+                13.0, NSFontWeightBold if self.selected
                 else NSFontWeightMedium)
 
         @objc.python_method
@@ -8096,6 +8149,8 @@ if APPKIT_AVAILABLE:
             # have been.
             self._rendered_from: tuple[Any, ...] | None = None
             self.renders = 0
+            # Whether the last render saw Increase Contrast on.
+            self._contrast: bool | None = None
             # Trailing title-strip items: (row key, view, visible-when).
             self.title_items: list[tuple[str, Any, Any]] = []
             if read_system_state:
@@ -8324,6 +8379,38 @@ if APPKIT_AVAILABLE:
                 self.dynamic["overview_actions"])
 
         @objc.python_method
+        def _setup_action_reserve(self) -> float:
+            """The width of setup's foot button at its widest title."""
+            reserve = getattr(self, "_setup_reserve", None)
+            if reserve is None:
+                action = self.dynamic["onboarding_action"]
+                shape = action.shape()
+                widest = max(
+                    _text_size(self._l(key), action.title_font())[0]
+                    for key in SETUP_FOOT_ACTION_KEYS)
+                reserve = self._setup_reserve = float(hard_shadow_footprint(
+                    math.ceil(widest) + 2.0 * shape.padding_x, shape.height,
+                    shape)[0])
+            return reserve
+
+        @objc.python_method
+        def _reach_into_notice_band(self, view: Any) -> float:
+            """How far ``view`` reaches down into the band at the window's
+            foot that a notice takes. A page that cannot scroll leaves that
+            much of itself empty, so it looks the same with and without a
+            notice. Measured from where the views are, not from whether a
+            notice is showing, so it is right in the middle of a change."""
+            area = self.dynamic.get("content_side")
+            if area is None or view.window() is None:
+                return 0.0
+            # Window coordinates: y grows upward from the bottom edge.
+            foot = float(view.convertRect_toView_(
+                view.bounds(), None).origin.y)
+            band_top = float(area.convertRect_toView_(
+                area.bounds(), None).origin.y) + NOTICE_BAND
+            return max(0.0, min(NOTICE_BAND, band_top - foot))
+
+        @objc.python_method
         def _layout_home(self) -> None:
             """Home from the top down, for whatever size the page has.
 
@@ -8339,7 +8426,8 @@ if APPKIT_AVAILABLE:
                 return
             size = home.bounds().size
             width = float(size.width)
-            height = max(0.0, float(size.height) - NOTICE_RISE)
+            height = max(0.0, float(size.height)
+                         - self._reach_into_notice_band(home) - NOTICE_RISE)
             if width <= 0.0:
                 return
             stage_height = STAGE_HEIGHT + BRAND_SHAPES["stage"].shadow_down
@@ -8402,7 +8490,9 @@ if APPKIT_AVAILABLE:
             if setup is None or "onboarding_rows" not in self.dynamic:
                 return
             size = setup.bounds().size
-            width, height = float(size.width), float(size.height)
+            width = float(size.width)
+            height = max(0.0, float(size.height)
+                         - self._reach_into_notice_band(setup))
             if width <= 0.0:
                 return
             dynamic = self.dynamic
@@ -8439,11 +8529,6 @@ if APPKIT_AVAILABLE:
             state = self.view_model.state
             total = len(state.onboarding_steps) or 1
             done = sum(step.complete for step in state.onboarding_steps)
-            fraction = min(1.0, max(0.0, done / float(total)))
-            fill = dynamic["onboarding_progress_fill"]
-            fill.setFrame_(NSMakeRect(
-                0, 0, width * fraction, SETUP_PROGRESS_HEIGHT))
-            fill.setHidden_(fraction <= 0.0)
             action = dynamic["onboarding_action"]
             action_size = action.intrinsicContentSize()
             top = SETUP_PROGRESS_HEIGHT + 12.0
@@ -8452,8 +8537,19 @@ if APPKIT_AVAILABLE:
                 top + (SETUP_FOOT_HEIGHT - action_size.height) / 2.0,
                 action_size.width, action_size.height))
             markers = dynamic["onboarding_step_cards"]
-            route = max(0.0, width - action_size.width - 16.0)
+            # The steps keep their places from one step to the next: the
+            # room beside them is what the widest title the button takes
+            # needs, not what this step's title happens to need.
+            route = max(0.0, width - 16.0 - max(
+                float(action_size.width), self._setup_action_reserve()))
             marker_width = math.floor(route / max(1, len(markers)))
+            # The bar is filled as far as the step that is open, so its
+            # end sits over that step's mark; all the way when none is.
+            fill = dynamic["onboarding_progress_fill"]
+            fill.setFrame_(NSMakeRect(
+                0, 0, width if done >= total else done * marker_width,
+                SETUP_PROGRESS_HEIGHT))
+            fill.setHidden_(done <= 0)
             for index, (marker, icon, label) in enumerate(zip(
                     markers, dynamic["onboarding_step_icons"],
                     dynamic["onboarding_steps"])):
@@ -8795,6 +8891,13 @@ if APPKIT_AVAILABLE:
             """Size the notice to its copy, then fade a fresh one up."""
             notice = self.dynamic["notice"]
             text = state.notice
+            # The band at the window's foot is the notice's while there is
+            # one, and the page's when there is none.
+            foot = self.dynamic.get("column_foot")
+            if foot is not None:
+                foot.setConstant_(-NOTICE_BAND if text else 0.0)
+            for limit in self.dynamic.get("notice_limits", ()):
+                limit.setActive_(bool(text))
             constraint = self.dynamic.get("notice_height")
             if constraint is not None:
                 needed = self._wrapped_height(
@@ -8948,6 +9051,11 @@ if APPKIT_AVAILABLE:
 
             notice_height = notice.heightAnchor() \
                 .constraintEqualToConstant_(NOTICE_LINE_HEIGHT)
+            # The column ends at the window's edge until a notice shows;
+            # ``_animate_notice`` lifts it clear of the band then.
+            column_foot = column.bottomAnchor() \
+                .constraintEqualToAnchor_constant_(
+                    content_area.bottomAnchor(), 0.0)
             strip_height = strip.heightAnchor() \
                 .constraintEqualToConstant_(TITLE_STRIP_HEIGHT)
             preferred_width = column.widthAnchor() \
@@ -9000,14 +9108,13 @@ if APPKIT_AVAILABLE:
                     column.trailingAnchor()),
                 notice_height,
                 notice.bottomAnchor().constraintEqualToAnchor_constant_(
-                    content_area.bottomAnchor(), -10.0),
-                column.bottomAnchor().constraintEqualToAnchor_constant_(
-                    content_area.bottomAnchor(),
-                    -(10.0 + NOTICE_LINE_HEIGHT + NOTICE_GAP)),
+                    content_area.bottomAnchor(), -NOTICE_FOOT),
+                column_foot,
             ])
             self.dynamic.update(
                 content_side=content_area,
                 page_column=column,
+                column_foot=column_foot,
                 title_strip=strip,
                 title_strip_height=strip_height,
                 title_strip_items=items,
@@ -9103,8 +9210,7 @@ if APPKIT_AVAILABLE:
             text_width = width - text_x - 8.0
             title = _label(
                 APP_NAME, NSMakeRect(text_x, 4, text_width, 19),
-                size=15, weight="bold", rounded=True, truncate=True,
-                accessibility_label=self._l("app.subtitle"))
+                size=15, weight="bold", rounded=True, truncate=True)
             state_dot = ShellView.alloc().initWithFrame_(
                 NSMakeRect(text_x + 1.0, 29.5, 7.0, 7.0))
             state_dot.setWantsLayer_(True)
@@ -9663,13 +9769,14 @@ if APPKIT_AVAILABLE:
                     container.bottomAnchor()),
                 to_foot,
             ]
+            NSLayoutConstraint.activateConstraints_(constraints)
             notice = self.dynamic.get("notice")
             if notice is not None:
-                constraints.append(
+                # Only while a notice is showing; see ``_animate_notice``.
+                self.dynamic.setdefault("notice_limits", []).append(
                     scroll.bottomAnchor()
                     .constraintLessThanOrEqualToAnchor_constant_(
                         notice.topAnchor(), -NOTICE_CLEARANCE))
-            NSLayoutConstraint.activateConstraints_(constraints)
             self.dynamic.setdefault("page_documents", {})[name] = document
             self.dynamic.setdefault("page_scrolls", {})[name] = scroll
             return document
@@ -10429,8 +10536,28 @@ if APPKIT_AVAILABLE:
             self._render_advanced(state)
             self._render_notices(state)
             self._render_finish(state)
+            # A view that draws itself reads Increase Contrast when it
+            # draws, and AppKit promises no redraw when that setting
+            # flips. A page that is already laid out is not marked by its
+            # layout either, so say so here, once per flip.
+            contrast = _increase_contrast()
+            if self._contrast is not None and contrast != self._contrast:
+                self._redraw_everything()
+            self._contrast = contrast
             self._rendered_from = self._what_a_render_reads()
             self.renders += 1
+
+        @objc.python_method
+        def _redraw_everything(self) -> None:
+            """Mark every view in the window for drawing."""
+            def mark(view: Any) -> None:
+                if isinstance(view, GroupBoxView):
+                    view.marked += 1
+                view.setNeedsDisplay_(True)
+                for child in view.subviews():
+                    mark(child)
+
+            mark(self.window.contentView())
 
         @objc.python_method
         def _what_a_render_reads(self) -> tuple[Any, ...]:
@@ -10561,8 +10688,11 @@ if APPKIT_AVAILABLE:
                 label=self._l(
                     "overview.action.pause.label", action=pause_title),
             )
+            # A sticker is one big number. The first one shows how long the
+            # last dictation took; how many words it was is in the row
+            # under the stickers, and VoiceOver still hears both here.
             if state.last_latency_ms is None:
-                last = self._l("overview.metric.last.empty")
+                last = last_number = self._l("overview.metric.last.empty")
             else:
                 suffix = ""
                 if state.last_word_count is not None:
@@ -10572,24 +10702,29 @@ if APPKIT_AVAILABLE:
                         else "overview.metric.last.words.many")
                     suffix = self._l(
                         words_key, count=state.last_word_count)
+                seconds = f"{state.last_latency_ms / 1000:.2f}"
                 last = self._l(
                     "overview.metric.last.value",
-                    seconds=f"{state.last_latency_ms / 1000:.2f}",
-                    words=suffix)
-            for index, (key, heading_key, label_key, value) in enumerate((
+                    seconds=seconds, words=suffix)
+                last_number = self._l(
+                    "overview.metric.last.value", seconds=seconds, words="")
+            words = self._l(
+                "overview.metric.words.value",
+                count=f"{state.words_today:,}")
+            saved = self._l(
+                "overview.metric.saved.value",
+                minutes=f"{state.minutes_saved:,.0f}")
+            for index, (key, heading_key, label_key, number, value
+                        ) in enumerate((
                 ("overview_last", "overview.metric.last.heading",
-                 "overview.accessibility.last", last),
+                 "overview.accessibility.last", last_number, last),
                 ("overview_words", "overview.metric.words.heading",
-                 "overview.accessibility.words",
-                 self._l("overview.metric.words.value",
-                         count=f"{state.words_today:,}")),
+                 "overview.accessibility.words", words, words),
                 ("overview_saved", "overview.metric.saved.heading",
-                 "overview.accessibility.saved",
-                 self._l("overview.metric.saved.value",
-                         minutes=f"{state.minutes_saved:.0f}")),
+                 "overview.accessibility.saved", saved, saved),
             )):
                 self.dynamic[key].configure(
-                    value, self._l(heading_key), index)
+                    number, self._l(heading_key), index)
                 # The sticker shows the short heading; VoiceOver keeps the
                 # fuller label it always had.
                 sync_accessibility(
@@ -12712,6 +12847,11 @@ def run_native_appkit_smoke(*, construction_only: bool = False
             try:
                 stops = voiceover_stops(root)
                 said: dict[str, Any] = {}
+                # Every text on the page that VoiceOver reads out.
+                heard = {
+                    str(view.stringValue()) for view in stops
+                    if bool(view.isKindOfClass_(NSTextField))
+                    and unignored_descendant(view) is not None}
                 for view in stops:
                     element = unignored_descendant(view)
                     label = accessible_value(view, "accessibilityLabel")
@@ -12745,6 +12885,10 @@ def run_native_appkit_smoke(*, construction_only: bool = False
                         require(
                             not label or label != text,
                             f"{what}: the label only repeats the text")
+                        require(
+                            not label or label not in heard,
+                            f"{what}: the label says again what the text "
+                            f"{label!r} beside it has just said")
                         continue
                     require(bool(label), f"{what}: no VoiceOver label")
                     require(
@@ -12833,9 +12977,30 @@ def run_native_appkit_smoke(*, construction_only: bool = False
                 "renders": controller.renders,
             }
 
+        def setup_route() -> tuple[list[float], float | None, float]:
+            """Where setup's step marks start, where its bar's fill ends
+            (None while it has none), and where the bar itself ends."""
+            controller._layout_onboarding()
+            # All three start at the leading edge of setup's foot.
+            marks = [
+                round(float(marker.frame().origin.x), 1)
+                for marker in controller.dynamic["onboarding_step_cards"]]
+            fill = controller.dynamic["onboarding_progress_fill"]
+            track = controller.dynamic["onboarding_progress_track"]
+            return (
+                marks,
+                None if bool(fill.isHidden())
+                else round(float(fill.frame().size.width), 1),
+                round(float(track.frame().size.width), 1))
+
         # ---- First run: the render itself puts the window in setup mode,
         # because setup is what Home is showing.
         setup = controller.dynamic["onboarding_card"]
+        first_marks, first_fill, _track_end = setup_route()
+        require(
+            len(first_marks) == 4 and first_fill is None
+            and first_marks == sorted(set(first_marks)),
+            "setup's four step marks run left to right under an empty bar")
         require(
             model.state.section == "Home"
             and not model.state.onboarding_complete
@@ -13216,6 +13381,20 @@ def run_native_appkit_smoke(*, construction_only: bool = False
                 controller.dynamic["window_version"])),
             "the build label moved to the foot of the sidebar")
         require(
+            not any(
+                word.isalpha() and len(word) > 1 and word.isupper()
+                for word in str(controller.dynamic[
+                    "window_version"].stringValue()).split()),
+            "the build label is not set in capitals")
+        require(
+            str(controller.dynamic["window_title"].stringValue())
+            == APP_NAME
+            and accessible_value(
+                controller.dynamic["window_title"].cell(),
+                "accessibilityLabel") in ("", APP_NAME),
+            "VoiceOver hears the sidebar's title as the app's name, not "
+            "as a tagline that is not on screen")
+        require(
             str(controller.dynamic["window_state"].stringValue()) ==
             localized_string("shell.state.setup"),
             "the sidebar says setup is under way")
@@ -13263,6 +13442,14 @@ def run_native_appkit_smoke(*, construction_only: bool = False
                 and accessible_value(row.cell(), "accessibilityValue") == (
                     localized_string("nav.selected") if index == 0 else ""),
                 f"sidebar row {spec.key} selection at start")
+            require(
+                bool(row.title_font().isEqual_(
+                    NSFont.systemFontOfSize_weight_(
+                        13.0, NSFontWeightBold if index == 0
+                        else NSFontWeightMedium))),
+                f"sidebar row {spec.key}: the row that is showing is set "
+                "in bold and no other is, so the pale fill is not the "
+                "only sign of it")
         require(
             accessible_value(
                 controller.sidebar_rows[0], "accessibilityHelp") ==
@@ -13500,6 +13687,24 @@ def run_native_appkit_smoke(*, construction_only: bool = False
             next(step for step in model.state.onboarding_steps
                  if not step.complete).key == "models",
             "model readiness")
+        # A model the runtime could not install stands out on this step
+        # the way a fault does on every page: the warning symbol.
+        runtime["models"][0].update(install_state="not_installed")
+        model.refresh()
+        controller.render()
+        require(
+            setup_row_views[0]["key"].startswith("model:")
+            and setup_row_views[0]["tone"] == "attention"
+            and not bool(setup_row_views[0]["state"].isHidden())
+            and setup_row_views[0]["state"].tone == "warn",
+            "a required model that is not installed carries the warning "
+            "symbol on the models step")
+        runtime["models"][0].update(install_state="checking")
+        model.refresh()
+        controller.render()
+        require(
+            setup_row_views[0]["state"].tone == "neutral",
+            "a model still being checked carries no warning")
         require(
             onboarding_face.pose == "idle",
             "the setup face waits while the models get ready")
@@ -13519,9 +13724,23 @@ def run_native_appkit_smoke(*, construction_only: bool = False
             not any(bool(marker.isHidden()) for marker in
                     controller.dynamic["onboarding_step_cards"]),
             "the route shows while a step is still open")
+        # The foot button's title changes from step to step and the marks
+        # beside it stay where they were; the bar's fill ends over the
+        # mark of the step that is open.
+        marks, fill_end, _track_end = setup_route()
+        require(
+            str(controller.dynamic["onboarding_action"].title())
+            != localized_string("onboarding.action.continue")
+            and marks == first_marks and fill_end == marks[3],
+            "setup's step marks keep their places from step to step, and "
+            "the bar is filled as far as the open step's mark")
         runtime["last_word_count"] = 4
         model.refresh()
         controller.render()
+        marks, fill_end, track_end = setup_route()
+        require(
+            fill_end == track_end,
+            "the bar is full when every step is done")
         require(
             str(controller.dynamic["result_summary"].stringValue()) ==
             localized_string("results.summary.words.many", words=4),
@@ -13848,8 +14067,50 @@ def run_native_appkit_smoke(*, construction_only: bool = False
                 accessible_value(tile, "accessibilityLabel")
                 == localized_string(label_key)
                 and accessible_value(tile, "accessibilityValue")
-                == tile.number,
+                .startswith(tile.number),
                 f"sticker {index} keeps its VoiceOver label and value")
+        # One big number each. The last dictation's sticker shows how long
+        # it took and leaves the word count to the row under it and to
+        # VoiceOver; thousands are grouped the same way on every sticker.
+        sticker_numbers = {
+            key: runtime.get(key) for key in (
+                "last_latency_ms", "last_word_count", "words_today",
+                "minutes_saved")}
+        runtime.update(
+            last_latency_ms=930.0, last_word_count=9, words_today=123456,
+            minutes_saved=1234.0)
+        model.refresh()
+        controller.render()
+        require(
+            [tile.number for tile in tiles] == [
+                localized_string(
+                    "overview.metric.last.value", seconds="0.93", words=""),
+                localized_string(
+                    "overview.metric.words.value", count="123,456"),
+                localized_string(
+                    "overview.metric.saved.value", minutes="1,234")]
+            and not any(
+                separator in tiles[0].number for separator in "·,; ")
+            and accessible_value(tiles[0], "accessibilityValue")
+            == localized_string(
+                "overview.metric.last.value", seconds="0.93",
+                words=localized_string(
+                    "overview.metric.last.words.many", count=9))
+            and all(
+                tile.number_font(
+                    tile.tile_size()[0] - 8.0
+                    - 2.0 * BRAND_SHAPES["sticker"].padding_x)
+                .pointSize() == TYPE_SPECS["stat_number"].size
+                for tile in tiles),
+            "each sticker shows one number at full size; VoiceOver still "
+            "hears how many words the last dictation was")
+        for key, value in sticker_numbers.items():
+            if value is None:
+                runtime.pop(key, None)
+            else:
+                runtime[key] = value
+        model.refresh()
+        controller.render()
 
         # Every state Home can be in: the bubble carries the primary
         # action and at most one more, no action is out of reach, and
@@ -15390,6 +15651,19 @@ def run_native_appkit_smoke(*, construction_only: bool = False
             ) >= (notice_frame.origin.y + notice_frame.size.height
                   + NOTICE_CLEARANCE - 0.5)
 
+        def places() -> list[tuple[float, ...]]:
+            """Where Home's and setup's parts are in the window."""
+            controller._layout_home()
+            controller._layout_onboarding()
+            return [
+                tuple(round(float(number), 1) for number in (
+                    frame.origin.x, frame.origin.y,
+                    frame.size.width, frame.size.height))
+                for frame in (
+                    frame_in_window(controller.dynamic[key])
+                    for key in ("home_stage", "home_group",
+                                "onboarding_stage", "onboarding_foot"))]
+
         model.state = replace(
             fitted_state, section="Home", onboarding_acknowledged=True,
             outbox_count=1, outbox_summary=localized_string(
@@ -15397,6 +15671,21 @@ def run_native_appkit_smoke(*, construction_only: bool = False
             degraded_issues=(DegradedIssue(
                 "microphone", localized_string("issue.microphone.title"),
                 localized_string("issue.microphone.detail")),))
+        controller.render()
+        root_view.layoutSubtreeIfNeeded()
+        # Home cannot scroll: at its tightest fit it is in the same place
+        # with a notice showing and without one.
+        under_notice = places()
+        model.state = replace(model.state, notice="", notice_level="info")
+        controller.render()
+        root_view.layoutSubtreeIfNeeded()
+        require(
+            bool(fitted_state.notice) and places() == under_notice,
+            "Home, at the window minimum with everything showing, does "
+            "not move when a notice comes or goes")
+        model.state = replace(
+            model.state, notice=fitted_state.notice,
+            notice_level=fitted_state.notice_level)
         controller.render()
         root_view.layoutSubtreeIfNeeded()
         home = controller.dynamic["home_cluster"]
@@ -15444,9 +15733,33 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         controller.render()
         root_view.layoutSubtreeIfNeeded()
         check_grouped_pages("the default size")
+        # The band at the window's foot is the notice's only while there
+        # is one. With none, a page that scrolls runs to the window's
+        # bottom edge; Home and setup cannot scroll, so they keep clear of
+        # the band either way and do not move when a notice comes.
+
+        page_scrolls = controller.dynamic["page_scrolls"]
+        without_notice = places()
+        require(
+            len(page_scrolls) == 4 and all(
+                abs(float(frame_in_window(scroll).origin.y)) < 0.5
+                for scroll in page_scrolls.values()),
+            "with no notice showing, a page that scrolls runs to the "
+            "window's bottom edge")
         model.state = fitted_state
         controller.render()
         root_view.layoutSubtreeIfNeeded()
+        notice_now = frame_in_window(controller.dynamic["notice"])
+        require(
+            bool(fitted_state.notice)
+            and all(
+                float(frame_in_window(scroll).origin.y)
+                >= float(notice_now.origin.y + notice_now.size.height)
+                + NOTICE_CLEARANCE - 0.5
+                for scroll in page_scrolls.values())
+            and places() == without_notice,
+            "a notice takes the band at the window's foot back from a "
+            "page that scrolls, and Home and setup stay where they were")
         default_column = in_window(controller.dynamic["page_column"])
         require(
             abs(default_column.size.width - CONTENT_WIDTH) < 0.5
@@ -15563,9 +15876,90 @@ def run_native_appkit_smoke(*, construction_only: bool = False
                         f"draws, in {where}")
         controller.window.setAppearance_(None)
         controller.render()
+        # The comparisons above hold when all three change alike, so the
+        # look's own numbers are measured too. The corner: at 3.3 points
+        # in from both edges a radius of 13 has not started, and at 5
+        # points it is past its edge and into the fill. Anything under
+        # about 11 or over about 15 fails one of the two.
+        shape_rep = shown_while(page_group, lambda: rendered(page_group))
+        page_surface = palette_for_appearance(
+            _uses_dark_appearance(controller.window)).surface
+        require(
+            BRAND_SHAPES["group"].radius == 13.0
+            and pixel(shape_rep, 3.3, 3.3)[3] < 0.05
+            and near(pixel(shape_rep, 5.0, 5.0), page_surface)
+            and pixel(shape_rep, 5.0, 5.0)[3] > 0.99,
+            "a group's corners are drawn at a radius of 13 points")
+        # Type: a row's title is 13 point and its caption 12.
+        page_row = page_group.rows[0]
+        require(
+            float(page_row.title.font().pointSize()) == 13.0
+            and float(page_row.caption.font().pointSize()) == 12.0,
+            "a row's title is set at 13 points and its caption at 12")
+        # Rhythm: a header sits GROUP_HEADER_GAP over its group and a note
+        # NOTE_GAP under it, on every page that has one.
+        header_gaps, note_gaps = [], []
+        for document in controller.dynamic["page_documents"].values():
+            document.arrange(force=True)
+            for header, group, notes, _trailing in document.sections:
+                if bool(group.isHidden()):
+                    continue
+                top = float(group.frame().origin.y)
+                foot = top + float(group.frame().size.height)
+                if header is not None:
+                    header_gaps.append(round(top - float(
+                        header.frame().origin.y
+                        + header.frame().size.height), 2))
+                shown_notes = [note for note in notes
+                               if not bool(note.isHidden())]
+                if shown_notes:
+                    note_gaps.append(round(
+                        float(shown_notes[0].frame().origin.y) - foot, 2))
+        # A row that has one line of text has it on the row's middle.
+        off_centre = []
+        for group in [
+                section[1] for document in
+                controller.dynamic["page_documents"].values()
+                for section in document.sections] + [
+                    home_group, setup_group]:
+            for row in group.visible_rows():
+                lines = [text for text in (row.title, row.caption)
+                         if text is not None and str(text.stringValue())
+                         and not bool(text.isHidden())]
+                if row.custom is None and len(lines) == 1:
+                    frame = lines[0].frame()
+                    off_centre.append(abs(
+                        float(frame.origin.y + frame.size.height / 2.0)
+                        - float(row.frame().size.height) / 2.0))
+        require(
+            len(off_centre) >= 4 and max(off_centre) < 0.6,
+            "a row with a single line of text has it on the row's middle")
+        require(
+            len(header_gaps) >= 8 and len(note_gaps) >= 2
+            and GROUP_HEADER_GAP >= 6.0 and NOTE_GAP >= 6.0
+            and set(header_gaps) == {GROUP_HEADER_GAP}
+            and set(note_gaps) == {NOTE_GAP},
+            "a section header stands clear of its group, and a note clear "
+            "of the group over it, by the same gap on every page")
+        # Home's two gaps open up where the window gives them room: at
+        # the default size the stickers stand at least 16 points under
+        # the stage's shadow, not the 8 they keep at a tight fit.
+        size_before = controller.window.contentView().frame().size
+        controller.window.setContentSize_(WINDOW_DEFAULT_SIZE)
+        root_view.layoutSubtreeIfNeeded()
+        controller._layout_home()
+        home_stage_frame = controller.dynamic["home_stage"].frame()
+        require(
+            float(controller.dynamic["overview_metric_cards"][0]
+                  .frame().origin.y)
+            - float(home_stage_frame.origin.y + home_stage_frame.size.height)
+            >= 16.0,
+            "Home's gaps open up at the default window size")
+        controller.window.setContentSize_(size_before)
+        root_view.layoutSubtreeIfNeeded()
+        controller._layout_home()
         # The rows in them are the same make: title and caption in the
         # same type, text from the same inset, the same minimum heights.
-        page_row = page_group.rows[0]
         for name, group in (("Home", home_group), ("setup", setup_group)):
             titled = next(row for row in group.rows
                           if row.title is not None and row.caption is not None)
@@ -16111,10 +16505,24 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         controller.window.setAppearance_(None)
         controller.refreshTimer_(None)
         ticks = controller.renders
+
+        def group_marks() -> list[int]:
+            done = work_done()
+            return [mark for _name, marks in done[1] for mark in marks] \
+                + [done[2], done[3]]
+
+        marked_before = group_marks()
         with_increased_contrast(lambda: controller.refreshTimer_(None))
         require(
             controller.renders == ticks + 1,
             "a timer tick follows Increase Contrast")
+        # A group draws its hairline stronger under Increase Contrast, and
+        # nothing about its layout changed: the render marks it itself.
+        require(
+            len(marked_before) > 10
+            and group_marks() == [mark + 1 for mark in marked_before],
+            "a flip of Increase Contrast marks every group for drawing, "
+            "once")
         controller.refreshTimer_(None)
 
         # Close, then do what the next "Open Whisper Face" does short of

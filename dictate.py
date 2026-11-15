@@ -14389,7 +14389,12 @@ if __name__ == "__main__":
                         raise RuntimeError("construction check over budget")
                     hud_result = run_native_hud_smoke_test()
                     result = run_native_appkit_smoke()
-            except Exception:
+            except Exception as error:
+                # Which requirement, so the gate's log is enough to act
+                # on. The smoke runs on its own fixtures: nothing of the
+                # person's can be in the message.
+                print(f"native GUI smoke: {type(error).__name__}: {error}",
+                      file=sys.stderr)
                 print("Whisper Face native GUI smoke failed.", file=sys.stderr)
                 raise SystemExit(1)
             print(

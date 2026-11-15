@@ -1014,7 +1014,8 @@ class SnapshotTests(unittest.TestCase):
             step for step in state.onboarding_steps
             if step.key == "first_dictation")
         self.assertIn("Voice Outbox", first_dictation.detail)
-        self.assertIn("Copy & Dismiss", first_dictation.detail)
+        # The button's name, held on one line by no-break spaces.
+        self.assertIn("Copy\u00a0&\u00a0Dismiss", first_dictation.detail)
 
     def test_status_presentation_covers_capture_processing_recovery_and_degraded(self):
         common = {
@@ -3892,11 +3893,46 @@ class SettingsPagesContractTests(unittest.TestCase):
         self.assertIn("trailing=hint", build)
         self.assertNotIn("face_row.addSubview_(hint)", build)
 
+    def test_sentences_that_wrap_do_not_end_on_one_word(self):
+        # Each of these wrapped with its last word alone on a line, or with
+        # a button's name split across two, at a width the window takes.
+        catalog = STRING_CATALOGS["en"]
+        for key in (
+                "overview.status.recovery.detail.one",
+                "overview.status.recovery.detail.many",
+                "onboarding.first_dictation.detail",
+                "settings.controls.self_correction.off",
+                "settings.controls.self_correction.on",
+                "pages.models.advisory",
+                "pages.models.advisory.evidence",
+                "pages.models.advisory.unavailable"):
+            with self.subTest(key=key):
+                last = catalog[key].rsplit(" ", 1)[-1]
+                self.assertGreaterEqual(
+                    len(last.split("\u00a0")), 2,
+                    "the last two words stay on one line")
+        name = catalog["overview.action.copy_outbox"]
+        self.assertEqual(name, "Copy & Dismiss")
+        held = name.replace(" ", "\u00a0")
+        for key, text in catalog.items():
+            if key != "overview.action.copy_outbox":
+                with self.subTest(key=key):
+                    self.assertNotIn(
+                        name, text,
+                        "a button's name inside a sentence stays on one line")
+        for key in ("overview.status.recovery.detail.one",
+                    "overview.status.recovery.detail.many",
+                    "onboarding.first_dictation.detail"):
+            self.assertIn(held, catalog[key])
+
     def test_the_model_checks_note_says_what_it_found(self):
         import re
         from whisper_face_gui import INTERNAL_STATUS_WORDS, model_checks_note
+        # The last words are held together by no-break spaces, so the
+        # note never ends with one word alone on a line.
         information_only = (
-            "for information only; they never change which model runs.")
+            "for information only; they never change "
+            "which\u00a0model\u00a0runs.")
         # The runtime's own sentence carries counts; the page keeps them.
         evidence = localized_string(
             "models.wallet.evidence", resolved=3, warm=2)
