@@ -3271,6 +3271,7 @@ class RecordingOverlayTests(unittest.TestCase):
         hud.panel = SimpleNamespace(isVisible=lambda: visible[0])
         hud.wave = SimpleNamespace(
             mode="recording", reduce_motion=False, raw=0.0,
+            pill_width=300.0,
             syncAccessibilityState=lambda: False,
             setNeedsDisplay_=lambda flag: None,
             layer=lambda: object())
@@ -3289,7 +3290,11 @@ class RecordingOverlayTests(unittest.TestCase):
         self.assertEqual(wobbles, ["wobble", "wobble"])
 
         visible[0] = False               # dismissed, then shown again
+        self.assertEqual(hud.wave.pill_width, 300.0)
         hud.tick_(None)
+        # The next showing starts at its own width instead of easing from
+        # the last one's.
+        self.assertIsNone(hud.wave.pill_width)
         visible[0] = True
         hud.wave.mode = "recording"
         hud.tick_(None)

@@ -3512,7 +3512,10 @@ class HUD(NSObject):
 
     def tick_(self, timer):
         if not self.panel.isVisible():
+            # Hidden: the next showing starts fresh, at its own width and
+            # with the pop rather than a wobble.
             self.shown_mode = None
+            self.wave.pill_width = None
             return
         accessibility_changed = self.wave.syncAccessibilityState()
         if self.wave.reduce_motion:
