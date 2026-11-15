@@ -1109,7 +1109,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "onboarding.permission.input_monitoring": "Input Monitoring",
         "onboarding.permission.input_monitoring.why": "So I notice the key you hold to talk",
         "onboarding.permission.granted": "Allowed",
-        "onboarding.permission.checking": "Checking…",
+        "onboarding.permission.checking": "Checking",
         "onboarding.permission.open.label": "Open {permission} settings",
         "onboarding.permission.open.help": "Open System Settings › Privacy & Security › {permission}. Whisper Face does not change permissions.",
         "onboarding.row.hotkey.caption": "Hold it, say a few words, then let go",

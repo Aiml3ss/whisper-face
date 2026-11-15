@@ -4673,7 +4673,10 @@ class HomeAndSetupTests(unittest.TestCase):
         # Still being checked: nothing to grant yet, so no button.
         self.assertEqual(
             (checking.status, checking.tone, checking.permission),
-            ("Checking…", "quiet", ""))
+            ("Checking", "quiet", ""))
+        # One state, one phrase: a model being checked says it the same way.
+        self.assertEqual(
+            checking.status, STRING_CATALOGS["en"]["models.state.checking"])
         # Missing: the row's own button to that pane, and no status words.
         self.assertEqual(
             (missing.status, missing.tone, missing.permission),
@@ -6361,7 +6364,7 @@ class HomeAppKitTests(unittest.TestCase):
         self.assertTrue(checking["button"].isHidden())
         self.assertFalse(checking["state"].isHidden())
         self.assertEqual(checking["state"].tone, "neutral")
-        self.assertEqual(str(checking["status"].stringValue()), "Checking…")
+        self.assertEqual(str(checking["status"].stringValue()), "Checking")
         # Missing: its own button, and it opens that pane. It is the
         # first missing permission, so it is the step's primary action:
         # the one amber button, and the one that answers Return.
