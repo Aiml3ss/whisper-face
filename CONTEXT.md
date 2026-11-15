@@ -70,8 +70,12 @@ Only verified receipts may train Personal Priors.
 
 **Voice Outbox** — a bounded, in-memory recovery queue for text that was not
 proven delivered. It distinguishes text that was never pasted from text whose
-paste may have landed, and requires explicit copy-and-dismiss recovery. It
-never holds undo payloads or blank text. The same text is also written to the
+paste may have landed, and requires explicit copy-and-dismiss recovery. A
+paste that was sent into an app that hides its text, and so could not be read
+back, is kept here too as an **Unchecked Paste**: counted, never presented as
+a problem, and never treated as verified. Everything else in the queue still
+needs a home and keeps the recovery treatment. It never holds undo payloads
+or blank text. The same text is also written to the
 local transcript history, so the queue is RAM-only but the words are not.
 
 **Personal Regression Lab** — the bounded local suite of exact corrected spans

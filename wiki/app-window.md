@@ -75,7 +75,10 @@ Diagnostics) and the original panes (Modes, Personalize, Privacy) went in
   with the active engine beside the header: the last result's summary,
   mode and engine with **Inspect Evidence**, the retained-audio line with
   Play Span and Clear ([[acoustic-personalization]]), and the Voice
-  Outbox line.
+  Outbox line. An outbox that holds only copies of pastes that could not
+  be read back leaves Home in its ordinary phase and the line counts
+  them ("5 pasted, not double-checked"); only an entry that still needs
+  a home brings up the recovery headline ([[insertion-transaction]]).
 - **Personalize** = the face picker — all sixteen faces in a grid that
   fills its group, eight to a row on chips of up to 78 pt, the chosen one
   amber with its hard shadow and named beside the "Your face" header —

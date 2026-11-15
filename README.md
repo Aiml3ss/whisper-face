@@ -78,7 +78,11 @@ are never Supporter-only features.
   local `transcripts.jsonl` history, like every other dictation.) Undo
   payloads and blank results never enter the outbox. Apps that hide their text still bind the
   insertion to the original application/focused element and surface delivery
-  as unverified instead of training from an assumption; if macOS cannot identify any focused
+  as unverified instead of training from an assumption: the overlay says
+  **Pasted** and that this app could not be checked, a copy is kept in the
+  outbox, and nothing is shown as an error, because nothing is known to have
+  gone wrong. A readback that reads different text, a paste that was never
+  attempted, and a paste whose outcome is unknown remain errors. If macOS cannot identify any focused
   element at all, the insertion fails closed into the outbox. The count-only
   **Voice Outbox** menu entry routes directly to Home; only the existing
   explicit **Copy & Dismiss** control can recover content. When the field can

@@ -68,6 +68,25 @@ Outbox instead of the wrong field.
   warning line and the speech bubble carries the Copy & Dismiss control
   ([[app-window]]). Only
   *verified* receipts may train [[personalization]].
+- **Unchecked paste** (November 2026): a paste that was sent and that
+  the destination would not let be read back (receipt `unverifiable`
+  with a paste attempted, `InsertionReceipt.pasted_unchecked`) is no
+  longer reported as an error. The overlay shows its porcelain "Pasted"
+  pill with the ordinary cue, the menu-bar face stays as it is, and the
+  copy is kept in the outbox, where it is counted ("pasted, not
+  double-checked") but does not put the window into its recovery phase.
+  Nothing else changed: the receipt, the `outbox/` transcript path,
+  `insertion_verified: false`, no correction learning and no undo. A
+  readback conflict, an unknown paste outcome and a paste that was never
+  attempted still get the coral error, and Copy & Dismiss takes those
+  entries before any unchecked copy.
+- **Why a destination was opaque**: for an opaque lease the transcript
+  metrics also carry `insertion_opaque_reason`, `insertion_focus_kind`,
+  `insertion_focus_role`, `insertion_focus_subrole`,
+  `insertion_value_kind` and `insertion_selection_kind`: closed
+  categories and Accessibility role names recorded at key-down, never a
+  title, a value or a label, so that one dictation into an app says what
+  the app exposes.
 - Receipt states: verified, unverifiable, conflict, unresolved — with
   fixed reasons; the same vocabulary is reused by the in-process
   protocol ([[inert-foundations]]) and the compatibility fingerprint.
