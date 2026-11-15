@@ -83,7 +83,8 @@ Diagnostics) and the original panes (Modes, Personalize, Privacy) went in
   **Language** pop-up — it decides which recognizer runs, so it outranks
   everything below it ([[asr-cascade]]) — then App tones, Snippets,
   Vocabulary, Learned corrections ([[personalization]]), and
-  Pronunciation keywords.
+  Pronunciation keywords. Each of those five opens an **editor sheet**
+  on the window (see below), not a system alert.
 - **Controls** (#128, #135) = how you drive it. **Keys**: the capture key
   (shown as a key cap, with Change…), an optional **Undo key** that undoes
   the last dictation, and **Voice modes**, whose View dialog lists the six
@@ -199,6 +200,31 @@ and Drop-to-Target view-model layers are covered in
   (where the system's keyboard-navigation setting lets Tab reach buttons
   at all), and Up and Down move through the rows and show each page.
   VoiceOver finds the sidebar as one list, "Whisper Face pages".
+- **Editor sheets**: the five Personalize editors are sheets built from
+  the pages' own parts. The header is the chosen face on a 40 pt chip
+  (the sidebar's chip, still), the title and one line under it; the body
+  is the pages' grouped rows on the window's field colour and scrolls
+  when the sheet reaches its cap (552 pt, which keeps it inside the
+  window at its minimum); the footer is system buttons, Cancel then Save
+  for a form and one Done for a list that applies as it goes, with any
+  action on the whole list ("Add Snippet…", "Copy Export", "Forget All…")
+  at its leading end. *App tones* lists every app with its own icon and
+  its tone as a pop-up, and Save applies each tone that changed.
+  *Snippets* is a list with Edit and Delete on every row; adding or
+  editing turns the same sheet into a form, and a refused save keeps the
+  form up with what was typed and the reason under the fields.
+  *Vocabulary* is its two lists, each a field in its own group. *Learned
+  corrections* and *Pronunciation keywords* are rows that say where each
+  item stands, each with Forget. Deleting and forgetting still ask first,
+  in a system alert whose safe button is the default. Return presses the
+  primary button, Escape cancels (or is Done), Tab runs top to bottom and
+  leaves a multi-line field, and Command-Return saves from inside one.
+  An editor is a straight line in code: `_new_sheet`, then `_sheet_fill`
+  and `_run_sheet` as often as it needs, then `_end_sheet`. The dialogs
+  that are still system alerts (key capture, voice modes, recent
+  dictations, the Voice Inbox, the evidence inspector and the
+  confirmations) all run through `_run_modal`, which gives each the
+  chosen face on its chip as its icon in place of the generic folder.
 - **The render probe**: `scripts/window_render_probe.py` builds the
   controller through the no-system-state smoke path, never orders the
   window front, and writes twelve views (Home; Personalize, Controls,
@@ -207,8 +233,12 @@ and Drop-to-Target view-model layers are covered in
   appearances — 24 PNGs — into the gitignored `.probe-renders/`.
   `--size WIDTHxHEIGHT` lets the 880×648 minimum be reviewed directly,
   `--states` adds every state Home can be in and every variant of the
-  first-run steps (78 PNGs in all), and `--overlay` draws the recording
-  pill instead ([[whisper-faces]]).
+  first-run steps (78 PNGs in all), `--sheets` draws the Personalize
+  editors instead (each one filled, the snippet form, a refused save, a
+  list too long for the sheet, each empty state, and two under Increase
+  Contrast, as `sheet-*.png`, plus `sheet-in-window-*.png` with the
+  sheet placed over the page), and `--overlay` draws the recording pill
+  instead ([[whisper-faces]]).
 - **The window's own check**: `dictate.py --native-gui-smoke-test` builds
   the window headless and measures the look, the keyboard and what
   VoiceOver reads. An install runs only its first part
@@ -238,13 +268,14 @@ and Drop-to-Target view-model layers are covered in
 ## References
 
 - whisper_face_gui.py (`SECTIONS`/`SETTINGS_PANES` :35-41,
-  `SIDEBAR_ROWS` :65, key equivalents :1310, `model_checks_note`
-  :2902, `face_grid` :3314, `result_evidence_text` :3500,
-  `SettingsRowView` :6703, `GroupBoxView` :6840, `arrange_section`
-  :6934, `_build_window` :8931, `_build_sidebar` :9168,
-  `_build_home` :9313, `_build_setup` :9523, `_build_settings`
-  :9884, `_build_advanced` :10209, `_install_main_menu`
-  :11334);
+  `SIDEBAR_ROWS` :65, key equivalents :1334, `model_checks_note`
+  :2978, `face_grid` :3390, `result_evidence_text` :3576,
+  `SettingsRowView` :6781, `GroupBoxView` :6918, `arrange_section`
+  :7012, `EditorSheet` :8441, `_build_window` :9393,
+  `_build_sidebar` :9630, `_build_home` :9775, `_build_setup`
+  :9985, `_build_settings` :10346, `_build_advanced` :10671,
+  `_install_main_menu` :11797, `_run_modal` :11860, `_new_sheet`
+  :11945);
   whisper_face_render.py (`LiveFaceView`);
   scripts/window_render_probe.py; README "Native Mac window"
 - [[2026-07-26-interface-rebuild-research]]
