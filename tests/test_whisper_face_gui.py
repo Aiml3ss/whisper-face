@@ -4141,6 +4141,120 @@ class ShellNavigationTests(unittest.TestCase):
              "NSWindowTitleHidden", "NSAccessibilityListRole"}, guarded)
         # Newer than macOS 14, so looked up rather than imported.
         self.assertNotIn("NSAccessibilityHeadingRole", guarded)
+        # So are the names the brand components, Home and setup draw with.
+        self.assertLessEqual(
+            {"NSAccessibilityGroupRole", "NSAccessibilityImageRole",
+             "NSAffineTransform", "NSGraphicsContext", "NSTextAttachment",
+             "NSMutableAttributedString", "NSTextAlignmentRight",
+             "NSTextAlignmentCenter", "CGContextBeginTransparencyLayer"},
+            guarded)
+        # Nothing from a system framework is imported anywhere else at
+        # import time: outside the guard, only the project's own modules.
+        guarded_lines = {item.lineno for item in guard.body}
+        frameworks = {"AppKit", "Foundation", "Quartz", "objc", "CoreText"}
+
+        def top_level_imports(body):
+            for node in body:
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    yield node
+                elif isinstance(node, (ast.If, ast.Try)):
+                    yield from top_level_imports(node.body)
+                    yield from top_level_imports(node.orelse)
+
+        for node in top_level_imports(GUI_TREE.body):
+            module = (node.module if isinstance(node, ast.ImportFrom)
+                      else node.names[0].name)
+            if module.split(".")[0] in frameworks:
+                self.assertIn(
+                    node.lineno, guarded_lines,
+                    f"line {node.lineno} imports {module} outside the guard")
+        # No name is fetched from AppKit by string where it is used.
+        self.assertNotIn("_appkit_name", {
+            node.name for node in ast.walk(GUI_TREE)
+            if isinstance(node, ast.FunctionDef)})
+        self.assertNotIn("_appkit_name(", GUI_SOURCE)
+
+    def test_one_missing_appkit_name_leaves_the_module_importable(self):
+        # Import the module in a fresh interpreter against stand-in
+        # frameworks. With every name there, the import goes all the way
+        # through, so a name that is missing is the only thing in the
+        # way: the window is then unavailable, and the module, with the
+        # view model in it, still loads.
+        import subprocess
+        import textwrap
+        script = textwrap.dedent("""
+            import sys, types
+
+            class Anything:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                def __call__(self, *args, **kwargs):
+                    return Anything()
+
+                def __getattr__(self, name):
+                    if name.startswith("__"):
+                        raise AttributeError(name)
+                    return Anything()
+
+                def __mro_entries__(self, bases):
+                    return (object,)
+
+                def __or__(self, other):
+                    return self
+
+                __ror__ = __and__ = __rand__ = __or__
+
+                def __int__(self):
+                    return 0
+
+                def __float__(self):
+                    return 0.0
+
+                def __index__(self):
+                    return 0
+
+            class Framework(types.ModuleType):
+                missing = ()
+
+                def __getattr__(self, name):
+                    if name.startswith("__") or name in self.missing:
+                        raise AttributeError(name)
+                    return Anything()
+
+            for module in ("objc", "AppKit", "Foundation", "Quartz"):
+                sys.modules[module] = Framework(module)
+            if sys.argv[3]:
+                sys.modules[sys.argv[2]].missing = (sys.argv[3],)
+            sys.path.insert(0, sys.argv[1])
+            import whisper_face_gui
+            print("available" if whisper_face_gui.APPKIT_AVAILABLE
+                  else "unavailable")
+            whisper_face_gui.WhisperFaceViewModel(
+                whisper_face_gui.GUIActions())
+        """)
+        for module, name, expected in (
+                ("AppKit", "", "available"),
+                # Only the brand components draw with these.
+                ("AppKit", "NSAccessibilityRadioButtonRole", "unavailable"),
+                ("AppKit", "NSFontFeatureSettingsAttribute", "unavailable"),
+                ("AppKit", "NSMutableParagraphStyle", "unavailable"),
+                ("AppKit", "NSViewNoIntrinsicMetric", "unavailable"),
+                ("Quartz", "CGContextSetAlpha", "unavailable"),
+                # Home and setup used to fetch these by name at use.
+                ("AppKit", "NSTextAttachment", "unavailable"),
+                ("Foundation", "NSMutableAttributedString", "unavailable"),
+                # The window's own, as before.
+                ("AppKit", "NSSplitViewController", "unavailable"),
+                ("AppKit", "NSWindow", "unavailable")):
+            with self.subTest(missing=f"{module}.{name}"):
+                result = subprocess.run(
+                    [sys.executable, "-c", script, str(ROOT), module, name],
+                    capture_output=True, text=True, timeout=60)
+                self.assertEqual(
+                    result.returncode, 0,
+                    f"import failed without {name}:\n{result.stderr[-600:]}")
+                self.assertEqual(result.stdout.strip(), expected)
 
     def test_sidebar_row_has_every_state_a_custom_control_needs(self):
         row = _gui_class("SidebarRowButton")

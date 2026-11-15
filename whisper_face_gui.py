@@ -5724,11 +5724,45 @@ try:  # The view-model above remains usable in headless test environments.
         NSWindowTitleHidden,
         NSWindowZoomButton,
     )
+    # What the new look's brand components, Home and first-run setup draw
+    # with. Guarded like everything above: all of it has been in AppKit,
+    # Foundation or Core Graphics since macOS 10.12 or earlier, and one
+    # name missing here leaves the window unavailable rather than the
+    # module unimportable.
+    from AppKit import (
+        NSAccessibilityGroupRole,
+        NSAccessibilityImageRole,
+        NSAccessibilityRadioButtonRole,
+        NSAccessibilityStaticTextRole,
+        NSAffineTransform,
+        NSCompositingOperationSourceOver,
+        NSFontFeatureSelectorIdentifierKey,
+        NSFontFeatureSettingsAttribute,
+        NSFontFeatureTypeIdentifierKey,
+        NSGraphicsContext,
+        NSInsetRect,
+        NSLineBreakByTruncatingTail,
+        NSMakeSize,
+        NSMutableParagraphStyle,
+        NSParagraphStyleAttributeName,
+        NSTextAlignmentCenter,
+        NSTextAlignmentLeft,
+        NSTextAlignmentRight,
+        NSTextAttachment,
+        NSViewNoIntrinsicMetric,
+        NSZeroRect,
+    )
     from Foundation import (
-        NSAttributedString, NSLocale, NSObject, NSTimer, NSUserDefaults)
+        NSAttributedString, NSLocale, NSMutableAttributedString, NSObject,
+        NSTimer, NSUserDefaults)
     from Quartz import (
         CAMediaTimingFunction,
         CASpringAnimation,
+        CGContextBeginTransparencyLayer,
+        CGContextEndTransparencyLayer,
+        CGContextRestoreGState,
+        CGContextSaveGState,
+        CGContextSetAlpha,
         kCAMediaTimingFunctionEaseOut,
     )
 
@@ -5749,35 +5783,7 @@ if APPKIT_AVAILABLE:
     # headlessly; see whisper_face_theme.BRAND_TEXT_ON_LIGHT.
     from whisper_face_theme import BRAND_TEXT_ON_LIGHT
 
-    # What the new look's brand components draw with. Imported here, beside
-    # the code that uses it, rather than in the window's main AppKit import.
-    from AppKit import (
-        NSAccessibilityGroupRole,
-        NSAccessibilityRadioButtonRole,
-        NSAccessibilityStaticTextRole,
-        NSAffineTransform,
-        NSCompositingOperationSourceOver,
-        NSFontFeatureSelectorIdentifierKey,
-        NSFontFeatureSettingsAttribute,
-        NSFontFeatureTypeIdentifierKey,
-        NSGraphicsContext,
-        NSInsetRect,
-        NSLineBreakByTruncatingTail,
-        NSMakeSize,
-        NSMutableParagraphStyle,
-        NSParagraphStyleAttributeName,
-        NSTextAlignmentCenter,
-        NSTextAlignmentLeft,
-        NSViewNoIntrinsicMetric,
-        NSZeroRect,
-    )
-    from Quartz import (
-        CGContextBeginTransparencyLayer,
-        CGContextEndTransparencyLayer,
-        CGContextRestoreGState,
-        CGContextSaveGState,
-        CGContextSetAlpha,
-    )
+    # The tokens and geometry the new look's brand components draw from.
     from whisper_face_theme import (
         BRAND_SHAPES,
         DISABLED_ALPHA,
@@ -6091,17 +6097,6 @@ if APPKIT_AVAILABLE:
             objc.super(JellySegmentedControl, self).mouseDown_(event)
             add_jelly_motion(self, "release", reduced_motion=_REDUCE_MOTION)
 
-    def _appkit_name(name: str) -> Any:
-        """An AppKit or Foundation name, looked up where it is used.
-
-        Home and setup need a few names the window's guarded import does
-        not carry. Asking for them here, not importing them there, means a
-        name that is ever missing fails the one thing that draws with it
-        instead of leaving the whole window unavailable.
-        """
-        import AppKit as _appkit
-        return getattr(_appkit, name)
-
     class FlowView(NSView):
         """A container laid out from the top down by whoever built it.
 
@@ -6266,7 +6261,7 @@ if APPKIT_AVAILABLE:
 
         image = NSImage.imageWithSize_flipped_drawingHandler_(
             NSMakeSize(width, height), True, draw)
-        attachment = _appkit_name("NSTextAttachment").alloc().init()
+        attachment = NSTextAttachment.alloc().init()
         attachment.setImage_(image)
         shape = BRAND_SHAPES["key_cap"]
         middle = float(font.xHeight()) / 2.0
@@ -6285,7 +6280,7 @@ if APPKIT_AVAILABLE:
         }
         before, found, after = (
             text.partition(key) if key else (text, "", ""))
-        line = _appkit_name("NSMutableAttributedString").alloc().init()
+        line = NSMutableAttributedString.alloc().init()
 
         def add(piece: str) -> None:
             if piece:
@@ -9458,8 +9453,7 @@ if APPKIT_AVAILABLE:
                 # It took the place of an image view, and VoiceOver still
                 # finds it as the guide's picture.
                 face.setAccessibilityElement_(True)
-                face.setAccessibilityRole_(
-                    _appkit_name("NSAccessibilityImageRole"))
+                face.setAccessibilityRole_(NSAccessibilityImageRole)
             except Exception:
                 pass
             host = FlowView.alloc().initWithFrame_(NSMakeRect(0, 0, 400, 164))
@@ -9604,7 +9598,7 @@ if APPKIT_AVAILABLE:
                 self._l("onboarding.privacy"),
                 NSMakeRect(0, 0, width, SETUP_KICKER_HEIGHT),
                 size=11, weight="medium", rounded=True, truncate=True,
-                alignment=int(_appkit_name("NSTextAlignmentCenter")))
+                alignment=int(NSTextAlignmentCenter))
             setup.addSubview_(face_kicker)
 
             self.dynamic.update(
@@ -9749,7 +9743,7 @@ if APPKIT_AVAILABLE:
             """Small print at the far end of a section header's line."""
             return self._soft(
                 text, NSMakeRect(0, 0, 240, 15), size=12, truncate=True,
-                alignment=int(_appkit_name("NSTextAlignmentRight")))
+                alignment=int(NSTextAlignmentRight))
 
         @objc.python_method
         def _settings_group(self, rows: Sequence[Any]) -> Any:
