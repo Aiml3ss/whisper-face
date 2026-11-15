@@ -973,6 +973,7 @@ MUST_KEEP = (
     "the cake.",
     "Don't stop me now, don't stop me now, I'm having such a good time.",
     "Come in, come in, sit down.",
+    "Yes we can, yes we can, and we will.",
     # A quotation after a verb of saying, singing or chanting.
     "The crowd chanted we will, we will rock you.",
     "She whispered I love you, I love you over and over.",
@@ -992,6 +993,8 @@ MUST_KEEP = (
     "The code is X Y Z X Y Z then press enter.",
     "The plate is K L M K L M and it is red.",
     "Call foo bar baz foo bar baz in the loop.",
+    "Clap on one and two on one and two then stop.",
+    "The rhyme scheme is a b a b and so on.",
     # Said over and over, with the sentence going on after.
     "on and on and on we went",
     "over and over and over again",
