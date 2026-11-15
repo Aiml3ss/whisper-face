@@ -532,10 +532,11 @@ Settings → Privacy & Security and turn on **Whisper Face** under **Input
 Monitoring** (so it notices you holding the key), **Accessibility** (so it can
 paste), and **Microphone** (macOS asks the first time you dictate). The app
 starts listening by itself once the first two are on. While a permission is
-reported missing, Home and Advanced show an accessible **Open System
-Settings** action that opens that permission's own Privacy & Security pane;
-it never changes a permission, and it does not appear while permissions are
-still being checked.
+reported missing, first-run setup gives it its own accessible **Open System
+Settings** button, and afterwards Home's **Review Setup** leads to Advanced,
+which shows the same action. It opens that permission's own Privacy &
+Security pane; it never changes a permission, and it does not appear while
+permissions are still being checked.
 Only an explicit headless `--server-only` install needs trusted-LAN/firewall
 access for the experimental compatibility endpoint.
 
