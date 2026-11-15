@@ -6183,7 +6183,7 @@ if APPKIT_AVAILABLE:
             fill = _srgb_color(palette_for_appearance(dark).surface)
             ink = _outline_ink(dark)
             body = draw_hard_shadow_shape(
-                self.footprint(), shape, fill=fill, ink=ink)
+                self.footprint(), shape, fill=fill, ink=ink, dark=dark)
             # The tail is part of the body's edge: its fill covers the
             # stretch of outline it grows out of, and its two sides are
             # stroked in the same ink and width.
@@ -7105,6 +7105,10 @@ if APPKIT_AVAILABLE:
           shadow is drawn with the ``on_bright`` ink and stays dark.
         - Anything else (the bubble, the stat stickers): the ordinary ink,
           which Increase Contrast turns light in the dark appearance.
+
+        That is the outline. A hard shadow is never lighter than the
+        surface it falls on: ``draw_hard_shadow_shape`` draws every
+        shadow with the ``on_bright`` ink, whatever the outline is.
         """
         if control:
             shade = color_token("control_edge", dark, _increase_contrast())
@@ -7193,10 +7197,9 @@ if APPKIT_AVAILABLE:
             .bezierPathWithRoundedRect_xRadius_yRadius_(rect, corner, corner)
 
     def draw_hard_shadow_shape(bounds: Any, shape: BrandShape, *, fill: Any,
-                               ink: Any, pressed: bool = False,
+                               ink: Any, dark: bool, pressed: bool = False,
                                shadow: bool = True,
                                radius: float | None = None,
-                               shadow_ink: Any = None,
                                overlay: Callable[[Any], None] | None = None
                                ) -> Any:
         """Draw one ink-outlined object with its hard shadow; return its body.
@@ -7208,9 +7211,11 @@ if APPKIT_AVAILABLE:
         the outline is stroked inside the body's edge so nothing is drawn
         outside ``bounds``.
 
-        ``shadow_ink`` gives the shadow a different ink from the outline,
-        for a control whose outline is light in the dark appearance while
-        its shadow stays dark. ``overlay`` is called with the body's
+        ``ink`` is the outline's. The shadow has one ink of its own, the
+        dark one, in both appearances (``dark`` says which) and under
+        Increase Contrast: an outline may turn light to keep its edge on
+        a dark surface, but a shadow lighter than what it falls on reads
+        as a glow. ``overlay`` is called with the body's
         rectangle after the fill and before the outline, clipped to the
         body, for whatever belongs to the surface itself (the stage's
         circles): the outline is then drawn once, over it.
@@ -7221,7 +7226,7 @@ if APPKIT_AVAILABLE:
             bounds.origin.x + body[0], bounds.origin.y + body[1],
             body[2], body[3])
         if shadow and (shape.shadow_right or shape.shadow_down):
-            (ink if shadow_ink is None else shadow_ink).setFill()
+            _outline_ink(dark, on_bright=True).setFill()
             hard_shadow_path(NSMakeRect(
                 bounds.origin.x + cast[0], bounds.origin.y + cast[1],
                 cast[2], cast[3]), shape, radius=radius).fill()
@@ -7371,14 +7376,13 @@ if APPKIT_AVAILABLE:
             context = None if enabled else _begin_faded(DISABLED_ALPHA)
             # Amber stands off any window by itself. The plain button's
             # fill is dark in the dark appearance, so its outline is the
-            # control edge while its shadow stays the dark ink.
+            # control edge; its shadow, like every shadow, is the dark ink.
             body = draw_hard_shadow_shape(
                 self.bounds(), self.shape(),
                 fill=_srgb_color(
                     palette.accent if amber else palette.surface),
                 ink=_outline_ink(dark, on_bright=amber, control=not amber),
-                shadow_ink=_outline_ink(dark, on_bright=True),
-                pressed=self.is_pressed(), shadow=enabled)
+                dark=dark, pressed=self.is_pressed(), shadow=enabled)
             _draw_text(
                 str(self.title()), self.title_font(),
                 _token_color("on_amber_ink", dark) if amber
@@ -7414,8 +7418,7 @@ if APPKIT_AVAILABLE:
         body = draw_hard_shadow_shape(
             bounds, BRAND_SHAPES["key_cap"],
             fill=_srgb_color(palette.surface),
-            ink=_outline_ink(dark, control=True),
-            shadow_ink=_outline_ink(dark, on_bright=True))
+            ink=_outline_ink(dark, control=True), dark=dark)
         _draw_text(
             key, _role_font("key_cap"), _srgb_color(palette.ink),
             NSInsetRect(body, 3.0, 0.0), centered=True)
@@ -7581,7 +7584,7 @@ if APPKIT_AVAILABLE:
                 NSMakeRect(-width / 2.0, -height / 2.0, width, height),
                 shape,
                 fill=_token_color(STICKER_TINTS[self.index], dark),
-                ink=_outline_ink(dark))
+                ink=_outline_ink(dark), dark=dark)
             ink = color_token("sticker_ink", dark, _increase_contrast())
             number_font = _role_font("stat_number")
             label_font = _role_font("stat_label")
@@ -7759,7 +7762,8 @@ if APPKIT_AVAILABLE:
             draw_hard_shadow_shape(
                 self.bounds(), shape,
                 fill=_token_color(self.stage_token, dark),
-                ink=_outline_ink(dark, on_bright=True), overlay=circles)
+                ink=_outline_ink(dark, on_bright=True), dark=dark,
+                overlay=circles)
 
     class FaceChipButton(BrandButton):
         """One face in the picker grid.
@@ -7829,7 +7833,7 @@ if APPKIT_AVAILABLE:
                 draw_hard_shadow_shape(
                     self.bounds(), shape,
                     fill=_srgb_color(palette.accent),
-                    ink=_outline_ink(dark, on_bright=True),
+                    ink=_outline_ink(dark, on_bright=True), dark=dark,
                     pressed=self.is_pressed(), radius=radius)
             else:
                 tile = hard_shadow_path(body, shape, radius=radius)
@@ -15807,6 +15811,47 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             near(pixel(amber_rep, 0.75, plain_body.size.height / 2.0),
                  night.line),
             "dark appearance: the amber button keeps the dark ink")
+
+        # Increase Contrast in the dark appearance: the bubble's and the
+        # stickers' outline takes the light ink, and their hard shadow
+        # stays dark. A light shadow on a dark window reads as a glow.
+        home_bubble = controller.dynamic["home_bubble"]
+        sticker = controller.dynamic["home_stickers"][0]
+
+        def bubble_inks() -> tuple[Any, Any]:
+            """The bubble's outline, on its top edge, and its hard
+            shadow, under its bottom edge."""
+            rep = rendered(home_bubble)
+            size = home_bubble.bounds().size
+            return (pixel(rep, size.width / 2.0, 0.75),
+                    pixel(rep, size.width / 2.0, size.height - 0.75))
+
+        def sticker_inks() -> tuple[Any, Any]:
+            """The same two for a sticker, at its middle, where its tilt
+            moves nothing."""
+            rep = rendered(sticker)
+            size = sticker.bounds().size
+            _tile_width, tile_height = sticker.tile_size()
+            return (pixel(rep, size.width / 2.0,
+                          (size.height - tile_height) / 2.0 + 0.75),
+                    pixel(rep, size.width / 2.0,
+                          (size.height + tile_height) / 2.0 - 0.75))
+
+        for name, inks in (("bubble", bubble_inks),
+                           ("first sticker", sticker_inks)):
+            outline, cast = inks()
+            require(
+                near(outline, night.line) and near(cast, night.line)
+                and cast[3] > 0.99,
+                f"dark appearance: the {name} is outlined and shadowed "
+                "in the dark ink")
+            outline, cast = with_increased_contrast(inks)
+            require(
+                near(outline, night.ink) and near(cast, night.line)
+                and cast[3] > 0.99
+                and contrast_ratio(cast[:3], night.bg) < 1.5,
+                f"dark appearance, Increase Contrast: the {name}'s "
+                "outline turns light and its hard shadow stays dark")
         controller.window.setAppearance_(None)
 
         # ---- A render that changes nothing lays nothing out and marks

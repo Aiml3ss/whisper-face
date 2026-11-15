@@ -4524,21 +4524,56 @@ class HomeAndSetupTests(unittest.TestCase):
         self.assertIn("color_token('control_edge', dark", ink)
         chunky = ast.unparse(
             _gui_function("drawRect_", _gui_class("ChunkyButton")))
-        # Plain is the dark-filled control; amber keeps the dark ink; the
-        # shadow is the dark ink either way.
+        # Plain is the dark-filled control; amber keeps the dark ink.
         self.assertIn(
             "ink=_outline_ink(dark, on_bright=amber, control=not amber)",
             chunky)
-        self.assertIn(
-            "shadow_ink=_outline_ink(dark, on_bright=True)", chunky)
         cap = ast.unparse(_gui_function("draw_key_cap"))
         self.assertIn("ink=_outline_ink(dark, control=True)", cap)
-        self.assertIn("shadow_ink=_outline_ink(dark, on_bright=True)", cap)
         # Not controls: the bubble and the stickers keep the ordinary ink.
         for name in ("SpeechBubbleView", "StickerTileView"):
             draw = ast.unparse(_gui_function("drawRect_", _gui_class(name)))
             self.assertIn("_outline_ink(dark)", draw)
             self.assertNotIn("control=True", draw)
+
+    def test_a_hard_shadow_is_dark_whatever_its_outline_is(self):
+        # Increase Contrast turns the bubble's and the stickers' outline
+        # light in the dark appearance. Their shadow used to follow it
+        # and read as a glow. Every shadow is drawn in one place, in the
+        # ink a bright fill keeps: dark in both appearances.
+        helper = _gui_function("draw_hard_shadow_shape")
+        text = ast.unparse(helper)
+        self.assertIn("_outline_ink(dark, on_bright=True).setFill()", text)
+        self.assertNotIn("shadow_ink", GUI_SOURCE)
+        arguments = [argument.arg for argument in helper.args.kwonlyargs]
+        self.assertIn("dark", arguments)
+        # No default: a caller cannot forget which appearance it draws in.
+        position = arguments.index("dark")
+        self.assertIsNone(helper.args.kw_defaults[position])
+        # The ink it uses never takes the light Increase Contrast value
+        # in the dark appearance, and is the palette's dark line there.
+        theme = gui_module.__dict__.get("color_token") or __import__(
+            "whisper_face_theme").color_token
+        from whisper_face_theme import DARK_PALETTE, LIGHT_PALETTE
+        ink = ast.unparse(_gui_function("_outline_ink"))
+        self.assertIn(
+            "_increase_contrast() and (not (dark and on_bright))", ink)
+        self.assertEqual(
+            theme("ink_outline", True, False).color, DARK_PALETTE.line)
+        self.assertEqual(
+            theme("ink_outline", True, True).color, DARK_PALETTE.ink)
+        for increase in (False, True):
+            self.assertLess(
+                sum(theme("ink_outline", False, increase).color),
+                sum(LIGHT_PALETTE.surface) / 2.0)
+        # Every component hands the helper its appearance.
+        for name in (*NewLookFoundationContractTests.COMPONENTS,
+                     "SpeechBubbleView"):
+            draw = _gui_function("drawRect_", _gui_class(name))
+            if name == "KeyCapView":
+                draw = _gui_function("draw_key_cap")
+            with self.subTest(component=name):
+                self.assertIn("dark=dark", ast.unparse(draw))
 
     def test_key_cap_is_read_once_in_the_readers_language(self):
         cap = ast.unparse(_gui_class("KeyCapView"))
