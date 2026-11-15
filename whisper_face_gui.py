@@ -5341,17 +5341,15 @@ if APPKIT_AVAILABLE:
     # Window skeleton: a full-height sidebar of fixed width in the system's
     # sidebar material, and beside it the content side: a title strip over
     # a page column capped at a comfortable reading width and centered when
-    # the window grows wider. At the window minimum the column may shrink to
-    # CONTENT_MIN_WIDTH with slimmer margins; every card interior tolerates
-    # that via autoresizing.
+    # the window grows wider. At the window minimum the column shrinks to
+    # CONTENT_MIN_WIDTH, which is what the sidebar and a full CONTENT_INSET
+    # on each side leave over; every page must lay out at that width.
     SIDEBAR_WIDTH = 200.0
     CONTENT_WIDTH = 720.0
-    CONTENT_MIN_WIDTH = 656.0
-    # The narrowest margin the column may keep on the content side. The
-    # pages that predate the new look need CONTENT_MIN_WIDTH, which leaves
-    # exactly this much at the window minimum; wider windows get
-    # CONTENT_INSET. Once every page fits PAGE_COLUMN_MIN_WIDTH, set
-    # CONTENT_MIN_WIDTH to it and this margin stops being reached.
+    CONTENT_MIN_WIDTH = 632.0
+    # The narrowest margin the column may keep on the content side. With
+    # CONTENT_MIN_WIDTH at the layout contract's column minimum this is
+    # never reached: the margin is CONTENT_INSET at every window width.
     CONTENT_EDGE_MIN = 12.0
 
     # Layout contract for the new look. The shell uses SIDEBAR_WIDTH,
@@ -5777,7 +5775,10 @@ if APPKIT_AVAILABLE:
 
     def _theme_color(
             color: tuple[float, float, float], alpha: float = 1.0) -> Any:
-        return NSColor.colorWithCalibratedRed_green_blue_alpha_(
+        # sRGB, so the colour on screen is the hex the palette names and
+        # the contrast the tests measure. Calibrated RGB drew every
+        # mid-tone lighter than its hex.
+        return NSColor.colorWithSRGBRed_green_blue_alpha_(
             color[0], color[1], color[2], alpha)
 
     def _uses_dark_appearance(view: Any) -> bool:
@@ -12608,9 +12609,10 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
         # In light appearance, read the colours the window actually draws: a
         # default install's optional model is quiet, not amber, and error
         # text (the failure notice still shown, the degraded phase) is AA.
+        # Read them as sRGB, the space the palette's hexes are written in.
         def drawn_rgb(color: Any) -> tuple[float, float, float]:
             rgb = color.colorUsingColorSpace_(
-                NSColorSpace.genericRGBColorSpace())
+                NSColorSpace.sRGBColorSpace())
             return (float(rgb.redComponent()), float(rgb.greenComponent()),
                     float(rgb.blueComponent()))
 
