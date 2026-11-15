@@ -1134,6 +1134,11 @@ class InstallerContractTests(unittest.TestCase):
                 helper = root / "parrot-asr-helper"
                 helper.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
                 helper.chmod(0o755)
+                runtime = root / "parrot-speech-runtime"
+                runtime.write_text(
+                    "#!/bin/bash\necho '{\"ok\":true,\"protocol\":2}'\n",
+                    encoding="utf-8")
+                runtime.chmod(0o755)
                 logs = (root / "dictate.log", root / "ollama.log")
                 for log in logs:
                     log.write_text("", encoding="utf-8")
@@ -1150,6 +1155,8 @@ class InstallerContractTests(unittest.TestCase):
                     variables={
                         "VERIFY_ONLY": 1, "MODE": "server", "DIR": root,
                         "parakeet_helper": helper,
+                        "speech_runtime": runtime,
+                        "parakeet_model_dir": root / "models",
                         "dictate_plist": root / "com.berg.dictate.plist",
                         "dictate_log": logs[0], "ollama_log": logs[1],
                         "ollama_plist": root / "com.berg.ollama.plist",
@@ -1159,6 +1166,192 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertTrue(
                     result.stdout.strip().splitlines()[-1].startswith(reason),
                     result.stdout)
+
+    @needs_bash
+    def test_verify_checks_a_speech_runtime_only_when_one_is_installed(self):
+        # The runtime is off by default and optional: --verify passes its
+        # check when none is installed and says so. One that is present is
+        # asked for protocol 2 against the model folder Python verified; a
+        # present runtime that cannot run, fails, or predates protocol 2 each
+        # names itself.
+        cases = {
+            "absent": (None, None,
+                       "== speech runtime: not installed (optional"),
+            "not executable": ("echo '{\"ok\":true,\"protocol\":2}'",
+                               "!! speech runtime is present but cannot run",
+                               None),
+            "fails": ("echo '{\"error\":\"model load failed\",\"ok\":false}'"
+                      "\nexit 1", "!! speech runtime verification failed",
+                      None),
+            "protocol 1": ("echo '{\"ok\":true}'",
+                           "!! speech runtime is out of date", None),
+            "healthy": ('printf "%s\\n" "$*" > "$(dirname "$0")/args"\n'
+                        "echo '{\"ok\":true,\"protocol\":2}'", None,
+                        "== speech runtime: installed and working"),
+        }
+        for name, (body, reason, said) in cases.items():
+            with self.subTest(runtime=name), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                helper = root / "parrot-asr-helper"
+                helper.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+                helper.chmod(0o755)
+                runtime = root / "parrot-speech-runtime"
+                if body is not None:
+                    runtime.write_text(f"#!/bin/bash\n{body}\n",
+                                       encoding="utf-8")
+                    runtime.chmod(
+                        0o644 if name == "not executable" else 0o755)
+                # A runtime that passes (or is absent) gets past its own
+                # check; the missing LaunchAgent is then the first thing
+                # that fails.
+                result = run_setup_functions(
+                    ["fail", "step", "verify_install"], "verify_install\n",
+                    variables={
+                        "VERIFY_ONLY": 1, "MODE": "server", "DIR": root,
+                        "parakeet_helper": helper,
+                        "speech_runtime": runtime,
+                        "parakeet_model_dir": root / "Parakeet Models",
+                        "dictate_plist": root / "com.berg.dictate.plist",
+                    },
+                    stubs={"uv": "exit 0", "ffmpeg": "exit 0",
+                           "swift": "exit 0", "swiftc": "exit 0"})
+                self.assertEqual(result.returncode, 1, result.stderr)
+                last = result.stdout.strip().splitlines()[-1]
+                if reason is None:
+                    self.assertEqual(last, "!! dictation LaunchAgent is missing")
+                    self.assertIn(said, result.stdout)
+                    self.assertEqual(result.stdout.count("== speech runtime"),
+                                     1, result.stdout)
+                else:
+                    self.assertTrue(last.startswith(reason), result.stdout)
+                    self.assertNotIn("== speech runtime", result.stdout)
+                if name == "healthy":
+                    self.assertEqual(
+                        (root / "args").read_text(encoding="utf-8").strip(),
+                        f"--verify --protocol 2 --models {root}/Parakeet Models")
+
+    @needs_bash
+    def test_a_speech_runtime_that_will_not_build_or_load_does_not_stop_setup(
+            self):
+        # While the runtime is off by default, a failure in its build, its
+        # install or its preload costs the install nothing: one line says
+        # so, the partial binary is removed, and setup goes on. Each stand-in
+        # leaves a binary behind before failing, as a half-finished step can.
+        fake_runtime = ('printf "%s\\n" "$*" >> "$STUB_LOG"\n'
+                        'case "$*" in *--preload*) exit {preload};; esac')
+        install_body = ('cp "$3" "$4" 2>/dev/null || touch "$4"; '
+                        'chmod 755 "$4"; exit {status}')
+        cases = {
+            "build fails": (3, 0, 0, False),
+            "install fails": (0, 4, 0, False),
+            "preload fails": (0, 0, 5, False),
+            "all succeed": (0, 0, 0, True),
+        }
+        for name, (build, install, preload, kept) in cases.items():
+            with self.subTest(case=name), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                built = (root / ".models" / "swift-build-runtime" / "release"
+                         / "parrot-speech-runtime")
+                built.parent.mkdir(parents=True)
+                built.write_text(
+                    "#!/bin/bash\n" + fake_runtime.format(preload=preload)
+                    + "\n", encoding="utf-8")
+                built.chmod(0o755)
+                runtime = root / "bin" / "parrot-speech-runtime"
+                runtime.parent.mkdir()
+                if name == "build fails":
+                    # An earlier install's binary is not left to be found.
+                    runtime.write_text("#!/bin/bash\nexit 0\n",
+                                       encoding="utf-8")
+                    runtime.chmod(0o755)
+                result = run_setup_functions(
+                    ["step", "install_speech_runtime"],
+                    "install_speech_runtime\necho 'setup went on'\n",
+                    variables={"DIR": root, "speech_runtime": runtime,
+                               "parakeet_model_dir": root / "models"},
+                    stubs={"swift": f"exit {build}",
+                           "install": install_body.format(status=install)})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip().splitlines()[-1],
+                                 "setup went on")
+                self.assertEqual(runtime.exists(), kept)
+                warnings = [line for line in result.stderr.splitlines()
+                            if line.startswith("!!")]
+                if kept:
+                    self.assertEqual(warnings, [])
+                    self.assertIn("verifying the speech runtime",
+                                  result.stdout)
+                else:
+                    self.assertEqual(len(warnings), 1, result.stderr)
+                    self.assertIn("could not be built or checked",
+                                  warnings[0])
+                    self.assertIn("Parakeet helper", warnings[0])
+
+    def test_mac_installer_builds_verifies_and_removes_the_speech_runtime(self):
+        package = ROOT / "native" / "ParrotSpeechRuntime"
+        required = self.shell[self.shell.index("\nrequired=("):]
+        required = required[:required.index("\n)\n")]
+        # Every file the build reads is checked for before anything installs,
+        # so a partial checkout fails up front, not in the Swift build.
+        sources = sorted(
+            path.relative_to(ROOT).as_posix()
+            for path in (package / "Sources").rglob("*.swift"))
+        self.assertGreaterEqual(len(sources), 7)
+        for path in ("native/ParrotSpeechRuntime/Package.swift",
+                     "native/ParrotSpeechRuntime/LICENSE-Apache-2.0.txt",
+                     *sources):
+            with self.subTest(required=path):
+                self.assertIn(f"    {path}\n", required + "\n")
+        for expected in (
+            'speech_runtime="$DIR/.models/bin/parrot-speech-runtime"',
+            '--package-path "$DIR/native/ParrotSpeechRuntime"',
+            '--scratch-path "$DIR/.models/swift-build-runtime"',
+            '"$DIR/.models/swift-build-runtime/release/parrot-speech-runtime"',
+            '"$speech_runtime" --preload --protocol 2 --models '
+            '"$parakeet_model_dir"',
+            'remove_installed_path 1 "$speech_runtime"',
+            'remove_installed_path 1 "$DIR/.models/swift-build-runtime"',
+            # Core ML's compiled copy of the model, named after the program.
+            'speech_runtime_cache="$HOME/Library/Caches/'
+            'parrot-speech-runtime"',
+            'remove_installed_path 1 "$speech_runtime_cache"',
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, self.shell)
+        self.assertIn('"$speech_runtime_cache"', self.shell_uninstall())
+        # It is built after the FluidAudio helper, which stays the default.
+        self.assertLess(
+            self.shell.index('"$parakeet_helper" --preload'),
+            self.shell.index('"$speech_runtime" --preload'))
+        # Built, installed and preloaded inside one function whose every
+        # step is part of a single condition, so a failure anywhere goes to
+        # the clean-up branch instead of stopping a script that otherwise
+        # stops at the first failure. The FluidAudio helper above it stays at
+        # the top level: it is still required.
+        self.assertIn("set -euo pipefail", self.shell.splitlines()[:10])
+        body = shell_function("install_speech_runtime")
+        condition = body[body.index("    if "):body.index("; then")]
+        for step in ("swift build -c release", "install -m 755",
+                     '"$speech_runtime" --preload'):
+            with self.subTest(step=step):
+                self.assertIn(step, condition)
+        self.assertEqual(condition.count("&&"), 3)
+        failure = body[body.index("; then"):]
+        self.assertIn('rm -f "$speech_runtime"', failure)
+        self.assertEqual(failure.count("echo "), 1)
+        self.assertNotIn("fail ", failure)
+        self.assertNotIn("exit", failure)
+        self.assertIn("\ninstall_speech_runtime\n", self.shell)
+        helper = self.shell[self.shell.index(
+            'swift build -c release \\\n    --package-path "$DIR/native/'
+            'ParrotASRHelper"'):]
+        helper = helper[:helper.index('"$parakeet_helper" --preload\n')]
+        self.assertIn('install -m 755', helper)
+        for masking in ("||", "&&", "if ", "set +e", "trap"):
+            with self.subTest(helper_masking=masking):
+                self.assertNotIn(masking, helper)
 
     @needs_bash
     def test_install_command_names_the_log_only_when_this_run_wrote_it(self):
@@ -1687,6 +1880,9 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("Tiny -> Turbo", self.powershell)
         self.assertNotIn("swift build", self.powershell)
         self.assertNotIn("parrot-asr-helper", self.powershell)
+        # Neither Mac program that runs Parakeet exists on Windows.
+        self.assertNotIn("parrot-speech-runtime", self.powershell)
+        self.assertNotIn("ParrotSpeechRuntime", self.powershell)
 
     def test_native_gui_smoke_is_bounded_on_mac_and_static_on_windows(self):
         workflow = (
@@ -1774,6 +1970,10 @@ class InstallerContractTests(unittest.TestCase):
         # The restart repair ships on; an older preferences file without the
         # key is read as on by the runtime, so neither installer rewrites it.
         self.assertIn('"remove_repeats": true', template)
+        # Whisper Face's own speech runtime ships switched off; a file from
+        # before the key existed is read as off, so neither installer
+        # rewrites an existing preferences file to add it.
+        self.assertIn('"new_speech_runtime": false', template)
         # The dictation language ships defaulted to English, so an existing
         # install keeps the fast native recognizer without touching anything.
         self.assertIn('"language": "en"', template)

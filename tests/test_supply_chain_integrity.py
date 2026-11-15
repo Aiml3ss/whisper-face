@@ -19,6 +19,8 @@ These tests close that gap on every pull request:
   address rather than a moving tag;
 * every GitHub action any workflow runs is pinned to a full commit and
   recorded in the notices, and every workflow states its token permissions.
+* the Mac helper's Swift package resolves exactly the FluidAudio release and
+  commit the notices record, from one manifest on every toolchain.
 
 Everything here reads committed files. There is no network access, so a
 mirror, registry, or model host cannot influence the result.
@@ -26,7 +28,12 @@ mirror, registry, or model host cannot influence the result.
 
 import ast
 import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -75,6 +82,13 @@ WINDOWS_ASR_REPOSITORIES = {
 # absent from every runtime model constant. Naming it here keeps the
 # "documented revisions minus runtime revisions" comparison exact.
 FLUIDAUDIO_PACKAGE_REVISION = "19600a485baa4998812e4654b70d2bab8f2c9949"
+# The release that revision is. 0.15.5 has one 6.0 manifest, no dependencies
+# and no binary targets; later releases fetch a prebuilt binary to resolve
+# (native/ParrotASRHelper/PROTOCOL.md), so moving this is a licence and
+# supply-chain decision, not a version bump.
+FLUIDAUDIO_PACKAGE_VERSION = "0.15.5"
+FLUIDAUDIO_PACKAGE_URL = "https://github.com/FluidInference/FluidAudio"
+HELPER_PACKAGE = ROOT / "native" / "ParrotASRHelper"
 
 
 def _read(relative: str) -> str:
@@ -352,6 +366,185 @@ class ModelRevisionPinningTests(unittest.TestCase):
                         f"{module} pins revision {revision}, which the "
                         "runtime does not load; the verifier and the "
                         "recognizer must ship the same model")
+
+
+class HelperPackagePinTests(unittest.TestCase):
+    """The Mac helper builds exactly the FluidAudio release the notices name.
+
+    ``setup.sh`` resolves this package on every Mac install, so the manifest
+    and the resolved file are the helper's whole supply chain.
+    """
+
+    def test_the_resolved_file_pins_exactly_the_documented_release(self):
+        resolved = json.loads(_read(
+            "native/ParrotASRHelper/Package.resolved"))
+        self.assertEqual(resolved["pins"], [{
+            "identity": "fluidaudio",
+            "kind": "remoteSourceControl",
+            "location": FLUIDAUDIO_PACKAGE_URL,
+            "state": {"revision": FLUIDAUDIO_PACKAGE_REVISION,
+                      "version": FLUIDAUDIO_PACKAGE_VERSION},
+        }], "Package.resolved must pin FluidAudio alone, at the release and "
+            "commit THIRD_PARTY_NOTICES.md records")
+
+    def test_the_manifest_asks_for_exactly_that_release(self):
+        manifest = _read("native/ParrotASRHelper/Package.swift")
+        self.assertEqual(
+            manifest.splitlines()[0], "// swift-tools-version: 6.0",
+            "a different tools version changes which toolchains build the "
+            "helper and which package features resolution uses")
+        dependencies = re.findall(
+            r'\.package\(\s*url:\s*"([^"]+)"\s*,\s*([^)]*?)\s*\)',
+            manifest)
+        self.assertEqual(
+            dependencies,
+            [(FLUIDAUDIO_PACKAGE_URL, f'exact: "{FLUIDAUDIO_PACKAGE_VERSION}"')],
+            "the helper must depend on FluidAudio alone, by exact version")
+        self.assertEqual(manifest.count(".package("), 1)
+
+    def test_no_toolchain_can_pick_a_different_manifest(self):
+        # SwiftPM prefers Package@swift-X.Y.swift over Package.swift on a
+        # matching toolchain, which would let one Mac resolve another release.
+        self.assertEqual(
+            sorted(path.name for path in HELPER_PACKAGE.glob("Package*.swift")),
+            ["Package.swift"])
+
+    def test_the_notices_name_the_same_release_and_commit(self):
+        rows = [line for line in _read("THIRD_PARTY_NOTICES.md").splitlines()
+                if line.startswith("| FluidAudio |")]
+        self.assertEqual(len(rows), 1)
+        self.assertIn(
+            f"{FLUIDAUDIO_PACKAGE_VERSION} / `{FLUIDAUDIO_PACKAGE_REVISION}`",
+            rows[0])
+
+
+class SpeechRuntimePackageTests(unittest.TestCase):
+    """Whisper Face's own runtime has no supply chain beyond the toolchain.
+
+    ``setup.sh`` builds native/ParrotSpeechRuntime on every Mac install. It
+    must resolve nothing, so a build needs no network and nothing a third
+    party publishes can enter it, and it must build wherever the FluidAudio
+    helper builds.
+    """
+
+    PACKAGE = ROOT / "native" / "ParrotSpeechRuntime"
+
+    def manifest(self) -> str:
+        return (self.PACKAGE / "Package.swift").read_text(encoding="utf-8")
+
+    def test_the_package_depends_on_nothing(self):
+        # The manifest's code, without its comments.
+        manifest = "\n".join(line.split("//", 1)[0]
+                             for line in self.manifest().splitlines())
+        for forbidden in (".package(", "dependencies:", ".product(",
+                          "binaryTarget", ".plugin(", "plugins:",
+                          "unsafeFlags", "url:"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, manifest)
+        self.assertEqual(manifest.count(".executableTarget("), 1)
+        self.assertEqual(manifest.count("Target("), 1)
+
+    def test_it_builds_with_the_helpers_tools_and_platform(self):
+        manifest = self.manifest()
+        helper = _read("native/ParrotASRHelper/Package.swift")
+        self.assertEqual(manifest.splitlines()[0], helper.splitlines()[0])
+        self.assertEqual(manifest.splitlines()[0], "// swift-tools-version: 6.0")
+        self.assertIn("platforms: [.macOS(.v14)]", manifest)
+        self.assertIn("platforms: [.macOS(.v14)]", helper)
+
+    def test_nothing_is_resolved_and_no_toolchain_picks_another_manifest(self):
+        self.assertEqual(
+            sorted(path.name for path in self.PACKAGE.glob("Package*")),
+            ["Package.swift"])
+
+    STEP = "Build the speech runtime the installer builds, and check what it links"
+    # What otool -L and nm -u print for the runtime built on a Mac
+    # (abridged), the shape the hosted step reads.
+    CLEAN_LINKED = (
+        "parrot-speech-runtime:\n"
+        "\t/System/Library/Frameworks/Foundation.framework/Versions/C/"
+        "Foundation (compatibility version 300.0.0)\n"
+        "\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n"
+        "\t/System/Library/Frameworks/Accelerate.framework/Versions/A/"
+        "Accelerate (compatibility version 1.0.0)\n"
+        "\t/System/Library/Frameworks/CoreML.framework/Versions/A/CoreML "
+        "(compatibility version 1.0.0)\n")
+    CLEAN_IMPORTED = (
+        "_NSHomeDirectory\n_OBJC_CLASS_$_MLModel\n_OBJC_CLASS_$_NSFileHandle\n"
+        "_OBJC_CLASS_$_NSFileManager\n_cosf\n_exit\n_expf\n_logf\n_memcpy\n"
+        "_objc_msgSend\n_read\n_vDSP_DFT_Execute\n_vDSP_mmul\n")
+
+    def hosted_step(self) -> str:
+        workflow = _read(".github/workflows/macos-gate.yml")
+        self.assertIn(f"- name: {self.STEP}\n", workflow)
+        step = workflow.split(f"- name: {self.STEP}\n", 1)[1]
+        step = step.split("\n      - ", 1)[0]
+        self.assertIn("if: ${{ !cancelled() }}", step)
+        self.assertIn("shell: bash", step)
+        return textwrap.dedent(step.split("run: |\n", 1)[1])
+
+    def test_a_hosted_mac_builds_it_as_setup_sh_does(self):
+        script = self.hosted_step()
+        self.assertIn("set -euo pipefail", script)
+        self.assertIn("swift build -c release --package-path "
+                      "native/ParrotSpeechRuntime", script)
+        self.assertIn('binary="$scratch/release/parrot-speech-runtime"', script)
+        setup = _read("setup.sh")
+        self.assertIn('--package-path "$DIR/native/ParrotSpeechRuntime"', setup)
+        self.assertIn('"$DIR/.models/swift-build-runtime/release/'
+                      'parrot-speech-runtime"', setup)
+
+    @unittest.skipIf(os.name == "nt" or shutil.which("bash") is None,
+                     "runs the hosted Mac step's shell script")
+    def test_the_hosted_step_fails_on_a_runtime_that_could_reach_out(self):
+        script = self.hosted_step()
+        cases = {
+            "clean": (0, self.CLEAN_LINKED, self.CLEAN_IMPORTED, 0),
+            "does not compile": (1, self.CLEAN_LINKED, self.CLEAN_IMPORTED, 1),
+            "links CFNetwork": (0, self.CLEAN_LINKED + (
+                "\t/System/Library/Frameworks/CFNetwork.framework/Versions/A/"
+                "CFNetwork (compatibility version 1.0.0)\n"),
+                self.CLEAN_IMPORTED, 1),
+            "links Network": (0, self.CLEAN_LINKED + (
+                "\t/System/Library/Frameworks/Network.framework/Versions/A/"
+                "Network (compatibility version 1.0.0)\n"),
+                self.CLEAN_IMPORTED, 1),
+            "connects": (0, self.CLEAN_LINKED,
+                         self.CLEAN_IMPORTED + "_connect\n", 1),
+            "removes a file": (0, self.CLEAN_LINKED,
+                               self.CLEAN_IMPORTED + "_remove\n", 1),
+            "looks a class up by name": (0, self.CLEAN_LINKED,
+                                         self.CLEAN_IMPORTED
+                                         + "_NSClassFromString\n", 1),
+            "uses URLSession": (0, self.CLEAN_LINKED, self.CLEAN_IMPORTED
+                                + "_$s10Foundation10URLSessionC6sharedACvgZ\n",
+                                1),
+        }
+        for name, (build, linked, imported, expected) in cases.items():
+            with self.subTest(case=name), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                tools = root / "tools"
+                tools.mkdir()
+                (root / "linked.txt").write_text(linked, encoding="utf-8")
+                (root / "imported.txt").write_text(imported, encoding="utf-8")
+                for tool, body in (
+                        ("swift", f"exit {build}"),
+                        ("otool", f'cat "{root}/linked.txt"'),
+                        ("nm", f'cat "{root}/imported.txt"')):
+                    stub = tools / tool
+                    stub.write_text(f"#!/bin/bash\n{body}\n", encoding="utf-8")
+                    stub.chmod(0o755)
+                result = subprocess.run(
+                    ["bash", "-c", script], cwd=root, text=True,
+                    capture_output=True, timeout=60,
+                    env={**os.environ, "RUNNER_TEMP": str(root),
+                         "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}"})
+                self.assertEqual(result.returncode, expected,
+                                 result.stdout + result.stderr)
+                if expected and build == 0:
+                    self.assertIn("::error title=Speech runtime reach::",
+                                  result.stdout)
 
 
 class WorkflowSupplyChainTests(unittest.TestCase):

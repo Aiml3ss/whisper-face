@@ -57,3 +57,31 @@ jobs:
           print(f"{len(commands) - len(failed)} of {len(commands)} gate commands passed")
           sys.exit(1 if failed else 0)
           PY
+      - name: Build the speech runtime the installer builds, and check what it links
+        # setup.sh builds native/ParrotSpeechRuntime on every Mac install and
+        # stops if it does not compile, but no gate command can build Swift.
+        # It has no package dependencies, so this fetches nothing and needs
+        # no model. The binary must link no networking library and import no
+        # symbol that reaches the network, starts a program, changes a file
+        # or looks a class or symbol up by name.
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch="$RUNNER_TEMP/speech-runtime"
+          swift build -c release --package-path native/ParrotSpeechRuntime \
+            --scratch-path "$scratch"
+          binary="$scratch/release/parrot-speech-runtime"
+          linked="$(otool -L "$binary")"
+          imported="$(nm -u "$binary")"
+          printf '%s\n' "$linked"
+          bad="$(printf '%s\n' "$linked" \
+            | grep -E 'CFNetwork|/Network\.framework|libcurl' || true)"
+          bad="$bad$(printf '%s\n' "$imported" | grep -Ex '_(socket|connect|getaddrinfo|gethostbyname|open|openat|fopen|creat|unlink|unlinkat|remove|rename|renameat|rmdir|mkdir|truncate|ftruncate|posix_spawn|posix_spawnp|execve|execv|execvp|fork|system|popen|dlopen|dlsym|NSClassFromString|NSSelectorFromString|objc_getClass|objc_lookUpClass)' || true)"
+          bad="$bad$(printf '%s\n' "$imported" \
+            | grep -E 'URLSession|URLConnection|URLRequest|NWConnection|NSTask' || true)"
+          if [ -n "$bad" ]; then
+            echo "::error title=Speech runtime reach::$(printf '%s' "$bad" | tr '\n' ' ')"
+            exit 1
+          fi
+          echo "speech runtime: built; it links and imports nothing that reaches the network or changes a file"

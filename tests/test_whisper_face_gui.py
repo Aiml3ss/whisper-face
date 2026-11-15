@@ -553,6 +553,7 @@ class SnapshotTests(unittest.TestCase):
                 "operation.flight.update_failed",
                 "operation.self_correction.update_failed",
                 "operation.remove_repeats.update_failed",
+                "operation.speech_runtime.update_failed",
                 "operation.acoustic.update_failed",
                 "operation.relisten.update_failed",
                 "operation.acoustic.play_failed",
@@ -3389,6 +3390,93 @@ class ControlSettingsViewModelTests(unittest.TestCase):
         self.assertTrue(state.settings.remove_repeats)
         self.assertEqual(state.notice_level, "error")
         self.assertIn("Repeated words", state.notice)
+
+    def test_the_new_speech_runtime_is_off_unless_the_runtime_says_on(self):
+        self.assertFalse(GUIActions().set_new_speech_runtime(True))
+        self.assertFalse(normalize_snapshot({}).new_speech_runtime)
+        self.assertFalse(normalize_snapshot(
+            {"new_speech_runtime": "yes"}).new_speech_runtime)
+        self.assertTrue(normalize_snapshot(
+            {"new_speech_runtime": True}).new_speech_runtime)
+        # Only the two words the window has copy for survive.
+        for last, expected in (("new", "new"), ("previous", "previous"),
+                               ("", ""), ("fluidaudio", ""), (None, ""),
+                               ("parrot-speech-runtime-1", "")):
+            with self.subTest(last=last):
+                self.assertEqual(normalize_snapshot(
+                    {"new_speech_runtime_last": last})
+                    .new_speech_runtime_last, expected)
+
+    def test_the_new_speech_runtime_switch_shows_what_the_runtime_stored(
+            self):
+        self.runtime["new_speech_runtime"] = False
+
+        def set_new_speech_runtime(enabled):
+            self.calls.append(enabled)
+            self.runtime["new_speech_runtime"] = enabled
+            return enabled
+
+        model = self.model(set_new_speech_runtime=set_new_speech_runtime)
+        self.assertFalse(model.refresh().new_speech_runtime)
+        state = model.set_new_speech_runtime(True)
+        self.assertEqual(self.calls, [True])
+        self.assertTrue(state.new_speech_runtime)
+        self.assertTrue(model.refresh().new_speech_runtime)
+        self.assertFalse(model.set_new_speech_runtime(False)
+                         .new_speech_runtime)
+
+    def test_a_pinned_new_speech_runtime_shows_what_actually_runs(self):
+        # PARROT_ASR_RUNTIME set: the runtime answers with what runs, and
+        # the switch shows that rather than the click.
+        self.runtime["new_speech_runtime"] = False
+        model = self.model(set_new_speech_runtime=lambda _enabled: False)
+        self.assertFalse(
+            model.set_new_speech_runtime(True).new_speech_runtime)
+
+    def test_a_raising_new_speech_runtime_switch_reports_and_stays_off(self):
+        def explode(*_args, **_kwargs):
+            raise RuntimeError("private detail")
+
+        model = self.model(set_new_speech_runtime=explode)
+        state = model.set_new_speech_runtime(True)
+        self.assertFalse(state.new_speech_runtime)
+        self.assertEqual(state.notice_level, "error")
+        self.assertIn("New speech runtime", state.notice)
+
+    def test_the_new_speech_runtime_caption_is_plain_words(self):
+        from whisper_face_gui import speech_runtime_caption
+        on = localized_string("models.speech_runtime.on")
+        off = localized_string("models.speech_runtime.off")
+        self.assertEqual(speech_runtime_caption(True, ""), on)
+        self.assertEqual(speech_runtime_caption(False, ""), off)
+        self.assertEqual(speech_runtime_caption(True, "unknown"), on)
+        self.assertTrue(speech_runtime_caption(True, "new").startswith(on))
+        self.assertIn("new\u00a0one", speech_runtime_caption(True, "new"))
+        self.assertIn("previous\u00a0one",
+                      speech_runtime_caption(False, "previous"))
+        # What it does, in plain words: its own code, and it goes back by
+        # itself. No program, package or switch name is ever shown.
+        for text in (on, off, localized_string("models.speech_runtime.help")):
+            with self.subTest(text=text):
+                self.assertIn("its own code", text)
+                self.assertIn("goes back to the previous one by itself",
+                              text)
+        visible = [
+            localized_string(key) for key in (
+                "models.speech_runtime.label", "models.speech_runtime.on",
+                "models.speech_runtime.off", "models.speech_runtime.help",
+                "models.accessibility.speech_runtime")]
+        visible.append(localized_string(
+            "operation.speech_runtime.update_failed", error="busy"))
+        visible += [speech_runtime_caption(enabled, last)
+                    for enabled in (True, False)
+                    for last in ("new", "previous")]
+        for text in visible:
+            for word in ("FluidAudio", "fluidaudio", "parrot", "Parakeet",
+                         "PARROT_ASR_RUNTIME", "protocol", "helper",
+                         "restart", "own runtime"):
+                with self.subTest(text=text, word=word):
+                    self.assertNotIn(word, text)
 
     def test_a_runtime_that_raises_never_takes_the_window_down(self):
         def explode(*_args, **_kwargs):

@@ -1,0 +1,795 @@
+{
+ "schema_version": 1,
+ "recorded_from": "3cf27f7bcbc97b3a0e9d68d1d0ef81c0bafed240",
+ "about": "What origin/main typed, and the consequence route it chose, for every sentence in benchmarks/default_path_sentences.json (default:<id>) and benchmarks/recognizer_transcripts.json (replay:<id>), each dictated once in this order into a fresh field on the fake Mac of tests/fake_platform.py with its protocol 1 helper. tests/test_whole_program.py requires the same with a protocol 1 and a protocol 2 helper while the helper word-evidence switches are off. Record a new case here when one is added to either corpus; change an existing one only for a deliberate change in what is typed or routed.",
+ "cases": {
+  "default:plain-statement": {
+   "typed": "I finished the report.",
+   "route": "standard"
+  },
+  "default:plain-question": {
+   "typed": "Can you send me the Q3 numbers?",
+   "route": "review"
+  },
+  "default:plain-names": {
+   "typed": "Our CEO, Dana, approved the budget.",
+   "route": "review"
+  },
+  "default:plain-accents": {
+   "typed": "Meet me at the café on Rue de Rivoli.",
+   "route": "standard"
+  },
+  "default:plain-short-question": {
+   "typed": "Wait, what time is it?",
+   "route": "standard"
+  },
+  "default:plain-pr": {
+   "typed": "Please review the PR before lunch.",
+   "route": "standard"
+  },
+  "default:plain-minutes": {
+   "typed": "I'll be there in 5 minutes.",
+   "route": "review"
+  },
+  "default:plain-standup": {
+   "typed": "Can we move the standup to 9:15 tomorrow?",
+   "route": "review"
+  },
+  "default:plain-but": {
+   "typed": "The package arrived, but the box was damaged.",
+   "route": "standard"
+  },
+  "default:plain-reminder": {
+   "typed": "Remind me to call the dentist at 2.",
+   "route": "review"
+  },
+  "default:plain-late": {
+   "typed": "I'm running about ten minutes late.",
+   "route": "review"
+  },
+  "default:plain-anything-else": {
+   "typed": "Let me know if you need anything else.",
+   "route": "standard"
+  },
+  "default:actually-after-negation": {
+   "typed": "I didn't actually finish the report.",
+   "route": "standard"
+  },
+  "default:actually-before-adjective": {
+   "typed": "This is actually critical.",
+   "route": "standard"
+  },
+  "default:actually-before-verb": {
+   "typed": "I actually like the second option.",
+   "route": "review"
+  },
+  "default:actually-opening": {
+   "typed": "Actually, I think we should wait.",
+   "route": "standard"
+  },
+  "default:actually-after-never": {
+   "typed": "He never actually signed the contract.",
+   "route": "standard"
+  },
+  "default:actually-after-not": {
+   "typed": "We are not actually ready for launch.",
+   "route": "standard"
+  },
+  "default:actually-before-negation": {
+   "typed": "That's actually not what I said.",
+   "route": "standard"
+  },
+  "default:actually-after-doesnt": {
+   "typed": "She doesn't actually know about the move.",
+   "route": "standard"
+  },
+  "default:actually-closing": {
+   "typed": "The meeting is on Tuesday, actually.",
+   "route": "standard"
+  },
+  "default:actually-question": {
+   "typed": "Is it actually Tuesday?",
+   "route": "standard"
+  },
+  "default:actually-after-number": {
+   "typed": "I have 2 actually useful ideas.",
+   "route": "review"
+  },
+  "default:actually-before-number": {
+   "typed": "It was actually 3 people, not 4.",
+   "route": "review"
+  },
+  "default:actually-after-weekday": {
+   "typed": "Monday was actually fine.",
+   "route": "standard"
+  },
+  "default:actually-after-month": {
+   "typed": "March is actually busy.",
+   "route": "standard"
+  },
+  "default:actually-after-trailing-number": {
+   "typed": "I owe you 20, actually.",
+   "route": "review"
+  },
+  "default:correction-weekday": {
+   "typed": "Let's meet on Tuesday, actually Wednesday.",
+   "route": "standard"
+  },
+  "default:correction-amount": {
+   "typed": "The total is 45 dollars, actually 54.",
+   "route": "review"
+  },
+  "default:correction-time": {
+   "typed": "Call me at 3 pm, actually 4 pm.",
+   "route": "review"
+  },
+  "default:correction-inside-range": {
+   "typed": "The shop is open from 9 to 5, actually 9 to 6.",
+   "route": "review"
+  },
+  "default:correction-after-not": {
+   "typed": "It's not 5, actually 6.",
+   "route": "review"
+  },
+  "default:correction-after-leading-not": {
+   "typed": "Not Tuesday, actually Wednesday.",
+   "route": "review"
+  },
+  "default:correction-after-cant": {
+   "typed": "We can't do Friday, actually Saturday works.",
+   "route": "standard"
+  },
+  "default:contrast-thought-weekday": {
+   "typed": "I thought it was Tuesday, actually Wednesday.",
+   "route": "standard"
+  },
+  "default:contrast-invoice-amount": {
+   "typed": "The invoice says 400, actually 450.",
+   "route": "review"
+  },
+  "default:contrast-expected-count": {
+   "typed": "We expected 20, actually 12 showed up.",
+   "route": "review"
+  },
+  "default:contrast-guessed-month": {
+   "typed": "I guessed March, actually April.",
+   "route": "standard"
+  },
+  "default:contrast-assumed-weekday": {
+   "typed": "Everyone assumed Monday, actually Tuesday.",
+   "route": "standard"
+  },
+  "default:contrast-said-number": {
+   "typed": "She said five, actually six.",
+   "route": "review"
+  },
+  "default:contrast-out-of": {
+   "typed": "Out of ten, actually four past.",
+   "route": "review"
+  },
+  "default:snippet-email-word": {
+   "typed": "What is your email address?",
+   "route": "standard"
+  },
+  "default:snippet-email-subject": {
+   "typed": "My email is down again.",
+   "route": "standard"
+  },
+  "default:snippet-address-word": {
+   "typed": "Please send the address of the venue.",
+   "route": "review"
+  },
+  "default:snippet-signature-word": {
+   "typed": "Please check the signature on the contract.",
+   "route": "standard"
+  },
+  "default:snippet-email-verb": {
+   "typed": "Email Siobhan about the review.",
+   "route": "review"
+  },
+  "default:snippet-address-request": {
+   "typed": "Send me your address, please.",
+   "route": "review"
+  },
+  "default:snippet-unfilled-command": {
+   "typed": "Insert my email.",
+   "route": "standard"
+  },
+  "default:snippet-unfilled-inline": {
+   "typed": "Can you insert my signature at the bottom?",
+   "route": "standard"
+  },
+  "default:signoff-thank-you": {
+   "typed": "Thank you.",
+   "route": "standard"
+  },
+  "default:signoff-bye": {
+   "typed": "Bye.",
+   "route": "standard"
+  },
+  "default:signoff-thanks-for-watching": {
+   "typed": "Thanks for watching.",
+   "route": "standard"
+  },
+  "default:signoff-you": {
+   "typed": "You.",
+   "route": "standard"
+  },
+  "default:signoff-after-text": {
+   "typed": "Got it. Thank you.",
+   "route": "standard"
+  },
+  "default:signoff-casual-app": {
+   "typed": "Okay, bye",
+   "route": "standard"
+  },
+  "default:signoff-long": {
+   "typed": "Thank you so much for your help.",
+   "route": "standard"
+  },
+  "default:number-currency-grouped": {
+   "typed": "The invoice comes to $1,250.50.",
+   "route": "review"
+  },
+  "default:number-grouped": {
+   "typed": "We shipped 1,500 units in March.",
+   "route": "review"
+  },
+  "default:number-percent": {
+   "typed": "Growth was 3.5% last quarter.",
+   "route": "review"
+  },
+  "default:number-euro": {
+   "typed": "Pay €40 by Friday.",
+   "route": "review"
+  },
+  "default:number-two-numbers": {
+   "typed": "The flight number is 245 and the gate is 12.",
+   "route": "review"
+  },
+  "default:number-clock": {
+   "typed": "Set the timer for 10:30.",
+   "route": "review"
+  },
+  "default:number-pound-decimal": {
+   "typed": "It costs £3.99 a month.",
+   "route": "review"
+  },
+  "default:number-long-decimal": {
+   "typed": "Pi is roughly 3.14159.",
+   "route": "review"
+  },
+  "default:number-phone": {
+   "typed": "Call 415-555-0132 after 4 PM.",
+   "route": "review"
+  },
+  "default:number-millions": {
+   "typed": "The population is 8,100,000.",
+   "route": "review"
+  },
+  "default:scratch-that-verb-lets": {
+   "typed": "Let's scratch that idea and start over.",
+   "route": "standard"
+  },
+  "default:scratch-that-verb-should": {
+   "typed": "We should scratch that from the agenda.",
+   "route": "standard"
+  },
+  "default:scratch-that-own-sentence": {
+   "typed": "The launch is Wednesday.",
+   "route": "standard"
+  },
+  "default:scratch-that-inline": {
+   "typed": "Send it to sales.",
+   "route": "review"
+  },
+  "default:new-line-noun-of": {
+   "typed": "We launched a new line of products.",
+   "route": "standard"
+  },
+  "default:new-line-noun-items": {
+   "typed": "Add the new line items to the invoice.",
+   "route": "standard"
+  },
+  "default:new-line-noun-article": {
+   "typed": "The office got a new line for support.",
+   "route": "standard"
+  },
+  "default:new-line-command": {
+   "typed": "First item.\nSecond item.",
+   "route": "review"
+  },
+  "default:new-paragraph-command": {
+   "typed": "Hi team.\n\nThe build is green.",
+   "route": "standard"
+  },
+  "default:new-line-noun-counted": {
+   "typed": "We hired two new line cooks.",
+   "route": "review"
+  },
+  "default:new-line-noun-counted-digit": {
+   "typed": "The kitchen has 12 new line cooks this year.",
+   "route": "review"
+  },
+  "default:new-paragraph-noun-counted": {
+   "typed": "I drafted three new paragraph styles.",
+   "route": "review"
+  },
+  "default:new-line-noun-no": {
+   "typed": "There is no new line at the end of the file.",
+   "route": "standard"
+  },
+  "default:new-line-command-unpaused": {
+   "typed": "Milk\neggs\nbread.",
+   "route": "standard"
+  },
+  "default:new-line-noun-counted-mass": {
+   "typed": "We hired two new line staff.",
+   "route": "review"
+  },
+  "default:new-line-noun-counted-digit-mass": {
+   "typed": "We hired 12 new line staff.",
+   "route": "review"
+  },
+  "default:new-line-noun-counted-compound": {
+   "typed": "We posted two new line cook positions.",
+   "route": "review"
+  },
+  "default:new-line-noun-counted-dozen": {
+   "typed": "We hired a dozen new line cooks.",
+   "route": "standard"
+  },
+  "default:new-line-after-number-unpaused": {
+   "typed": "Step 1 new line step 2 new line step 3.",
+   "route": "review"
+  },
+  "default:new-line-command-after-number-paused": {
+   "typed": "Step 1\nstep 2\nstep 3.",
+   "route": "review"
+  },
+  "default:list-counted": {
+   "typed": "Here are two things:\n- Buy milk.\n- Call mom.",
+   "route": "review"
+  },
+  "default:new-line-noun-cooks": {
+   "typed": "The new line cooks start Monday.",
+   "route": "standard"
+  },
+  "default:tone-command-formal": {
+   "typed": "The meeting moved to Friday.",
+   "route": "standard"
+  },
+  "default:tone-command-casual": {
+   "typed": "See you at noon",
+   "route": "standard"
+  },
+  "default:tone-casual-app": {
+   "typed": "Sounds good, see you there",
+   "route": "standard"
+  },
+  "default:tone-word-formal": {
+   "typed": "Formal dinner is at eight.",
+   "route": "review"
+  },
+  "default:tone-word-casual": {
+   "typed": "Casual Friday starts next week.",
+   "route": "review"
+  },
+  "default:tone-word-code": {
+   "typed": "Code review is at noon.",
+   "route": "standard"
+  },
+  "default:tone-word-verbatim": {
+   "typed": "Verbatim quotes need a source.",
+   "route": "standard"
+  },
+  "default:tone-word-technical": {
+   "typed": "Technical debt is piling up.",
+   "route": "standard"
+  },
+  "default:tone-word-colon": {
+   "typed": "Code: 4471 opens the side gate.",
+   "route": "review"
+  },
+  "default:tone-word-comma": {
+   "typed": "Formal, but friendly, works best.",
+   "route": "standard"
+  },
+  "default:tone-word-neutral": {
+   "typed": "Neutral colors work best here.",
+   "route": "standard"
+  },
+  "default:repeat-digits-pin": {
+   "typed": "My PIN is 4 4 4 4.",
+   "route": "review"
+  },
+  "default:repeat-digits-zip": {
+   "typed": "The zip code is 1 0 0 0 1.",
+   "route": "review"
+  },
+  "default:repeat-number-words": {
+   "typed": "Dial five five five, one two three four.",
+   "route": "review"
+  },
+  "default:repeat-letters": {
+   "typed": "Type w w w dot example dot com.",
+   "route": "standard"
+  },
+  "default:repeat-twice": {
+   "typed": "No, no, that's not it.",
+   "route": "standard"
+  },
+  "default:repeat-three-times": {
+   "typed": "That was very, very, very good.",
+   "route": "standard"
+  },
+  "default:repeat-three-times-no": {
+   "typed": "No, no, no, that's wrong.",
+   "route": "standard"
+  },
+  "default:repeat-three-times-unpunctuated": {
+   "typed": "That was very, very, very good.",
+   "route": "standard"
+  },
+  "default:repeat-three-times-bare": {
+   "typed": "It was a really really really long day.",
+   "route": "standard"
+  },
+  "default:repeat-four-times": {
+   "typed": "No no no no, don't send that.",
+   "route": "standard"
+  },
+  "default:emoji-before-caret": {
+   "typed": "Nice work 🎉 Ship it on Friday.",
+   "route": "standard"
+  },
+  "default:emoji-skin-tone-before-caret": {
+   "typed": "Thanks 👍🏽 See you tomorrow.",
+   "route": "standard"
+  },
+  "default:emoji-flag-sentence": {
+   "typed": "Trip booked 🇯🇵. Next is the hotel.",
+   "route": "standard"
+  },
+  "default:emoji-after-casual-text": {
+   "typed": "Sure 🙂 Next week works, actually.",
+   "route": "standard"
+  },
+  "default:join-after-sentence": {
+   "typed": "Hello. How are you?",
+   "route": "standard"
+  },
+  "default:filler-um-opening": {
+   "typed": "I think the plan works.",
+   "route": "standard"
+  },
+  "default:filler-alone": {
+   "typed": "Draft: ",
+   "route": "standard"
+  },
+  "default:filler-pair-alone": {
+   "typed": "Draft: ",
+   "route": "standard"
+  },
+  "default:filler-before-word": {
+   "typed": "Okay.",
+   "route": "standard"
+  },
+  "default:filler-capital-um": {
+   "typed": "The UM campus is closed today.",
+   "route": "review"
+  },
+  "default:filler-inside-uh-oh": {
+   "typed": "Uh-oh, the build broke.",
+   "route": "standard"
+  },
+  "default:filler-inside-mm-hmm": {
+   "typed": "Mm-hmm, sure.",
+   "route": "standard"
+  },
+  "replay:actually-adverb-finish": {
+   "typed": "I didn't actually finish the report.",
+   "route": "standard"
+  },
+  "replay:actually-adverb-price": {
+   "typed": "The price is actually $40.",
+   "route": "review"
+  },
+  "replay:actually-adverb-question": {
+   "typed": "Did you actually see it?",
+   "route": "standard"
+  },
+  "replay:actually-adverb-opening": {
+   "typed": "Actually, I think we should wait.",
+   "route": "standard"
+  },
+  "replay:actually-adverb-late": {
+   "typed": "I was actually five minutes late.",
+   "route": "review"
+  },
+  "replay:actually-adverb-possessive": {
+   "typed": "That is actually Tuesday's meeting.",
+   "route": "standard"
+  },
+  "replay:actually-correction-day": {
+   "typed": "Let's meet Tuesday, actually Wednesday.",
+   "route": "standard"
+  },
+  "replay:actually-correction-day-noon": {
+   "typed": "Let's meet Tuesday, actually Wednesday at noon.",
+   "route": "standard"
+  },
+  "replay:actually-correction-month": {
+   "typed": "The meeting is in March, actually April.",
+   "route": "standard"
+  },
+  "replay:actually-correction-copies": {
+   "typed": "Send five copies, actually six copies.",
+   "route": "review"
+  },
+  "replay:actually-correction-date": {
+   "typed": "Move the meeting from March 3, actually March 4th.",
+   "route": "review"
+  },
+  "replay:actually-correction-hour": {
+   "typed": "It starts at 3, actually 4.",
+   "route": "review"
+  },
+  "replay:actually-contrast-negated": {
+   "typed": "It's not five, actually six.",
+   "route": "review"
+  },
+  "replay:actually-contrast-not-day": {
+   "typed": "Not Tuesday, actually Wednesday.",
+   "route": "review"
+  },
+  "replay:actually-contrast-out-of": {
+   "typed": "Out of ten, actually four past.",
+   "route": "review"
+  },
+  "replay:actually-contrast-thought": {
+   "typed": "I thought it was Tuesday, actually Wednesday.",
+   "route": "standard"
+  },
+  "replay:actually-contrast-expected": {
+   "typed": "We expected 20, actually 12 showed up.",
+   "route": "review"
+  },
+  "replay:snippet-name-email": {
+   "typed": "Send me your email.",
+   "route": "review"
+  },
+  "replay:snippet-name-address": {
+   "typed": "What's your address?",
+   "route": "standard"
+  },
+  "replay:snippet-name-signature": {
+   "typed": "I need your signature on this.",
+   "route": "standard"
+  },
+  "replay:sign-off-thank-you": {
+   "typed": "Thank you.",
+   "route": "standard"
+  },
+  "replay:sign-off-bye": {
+   "typed": "Bye.",
+   "route": "standard"
+  },
+  "replay:sign-off-thanks-for-watching": {
+   "typed": "Thanks for watching.",
+   "route": "standard"
+  },
+  "replay:sign-off-after-words": {
+   "typed": "Sounds good, thank you.",
+   "route": "standard"
+  },
+  "replay:new-line-command-paused": {
+   "typed": "First item\nsecond item.",
+   "route": "review"
+  },
+  "replay:new-paragraph-command-paused": {
+   "typed": "Dear team\n\nthe launch is on Friday.",
+   "route": "standard"
+  },
+  "replay:scratch-that-command-sentence": {
+   "typed": "Send it Wednesday.",
+   "route": "review"
+  },
+  "replay:scratch-that-command-inline": {
+   "typed": "Send it on Wednesday.",
+   "route": "review"
+  },
+  "replay:new-line-noun-of": {
+   "typed": "We need a new line of products.",
+   "route": "standard"
+  },
+  "replay:new-line-noun-counted": {
+   "typed": "We hired two new line cooks.",
+   "route": "review"
+  },
+  "replay:scratch-that-verb-itch": {
+   "typed": "I had to scratch that itch.",
+   "route": "standard"
+  },
+  "replay:scratch-that-verb-wall": {
+   "typed": "The kids scratch that wall every day.",
+   "route": "standard"
+  },
+  "replay:numbers-money": {
+   "typed": "The total is $1,250.50.",
+   "route": "review"
+  },
+  "replay:numbers-time-date": {
+   "typed": "It starts at 3:30 p.m. on November 14.",
+   "route": "review"
+  },
+  "replay:numbers-pin": {
+   "typed": "My pin is 4444.",
+   "route": "review"
+  },
+  "replay:numbers-phone": {
+   "typed": "Call me at 555-0100.",
+   "route": "review"
+  },
+  "replay:numbers-version-year": {
+   "typed": "Version 2.0 ships in 2027.",
+   "route": "review"
+  },
+  "replay:actually-contrast-range": {
+   "typed": "From 9 to 5, actually 6.",
+   "route": "review"
+  },
+  "replay:tone-word-formal": {
+   "typed": "Formal dinners are boring.",
+   "route": "standard"
+  },
+  "replay:tone-word-casual": {
+   "typed": "Casual Friday is tomorrow.",
+   "route": "review"
+  },
+  "replay:tone-word-friendly": {
+   "typed": "Friendly reminder that rent is due.",
+   "route": "standard"
+  },
+  "replay:repeat-three-times": {
+   "typed": "That was very, very, very good.",
+   "route": "standard"
+  },
+  "replay:repeat-three-times-no": {
+   "typed": "No, no, that's wrong.",
+   "route": "standard"
+  },
+  "replay:filler-um-opening": {
+   "typed": "I think we should go.",
+   "route": "standard"
+  },
+  "replay:filler-uh-oh": {
+   "typed": "Uh oh, the build broke.",
+   "route": "standard"
+  },
+  "replay:filler-hmm": {
+   "typed": "Hum, let me think.",
+   "route": "standard"
+  },
+  "replay:filler-like-you-know": {
+   "typed": "So, like, we could ship it.",
+   "route": "standard"
+  },
+  "replay:list-counted": {
+   "typed": "Three things:\n- Eggs.\n- Milk.\n- Bread.",
+   "route": "review"
+  },
+  "replay:names-siobhan-kubernetes": {
+   "typed": "Ask Siobhan to review the Kubernetes rollout.",
+   "route": "review"
+  },
+  "replay:names-priya": {
+   "typed": "Pink Priya about the Q3 forecast.",
+   "route": "review"
+  },
+  "replay:quote-reported": {
+   "typed": "He said, let's go, and we left.",
+   "route": "standard"
+  },
+  "replay:question-plain": {
+   "typed": "Can you send me the numbers by Friday?",
+   "route": "review"
+  },
+  "replay:new-line-command-unpaused": {
+   "typed": "First item\nsecond item.",
+   "route": "review"
+  },
+  "replay:new-paragraph-command-unpaused": {
+   "typed": "Dear team\n\nthe launch is on Friday.",
+   "route": "standard"
+  },
+  "replay:scratch-that-command-unpaused": {
+   "typed": "Send it Wednesday.",
+   "route": "review"
+  },
+  "replay:new-line-command-unpaused-list": {
+   "typed": "Milk\neggs\nbread.",
+   "route": "standard"
+  },
+  "replay:new-paragraph-command-unpaused-sentence": {
+   "typed": "Thanks for the update\n\nI will review it tonight.",
+   "route": "standard"
+  },
+  "replay:actually-correction-unpaused-day": {
+   "typed": "Let's meet Tuesday actually Wednesday.",
+   "route": "standard"
+  },
+  "replay:actually-correction-unpaused-copies": {
+   "typed": "Send five actually six copies.",
+   "route": "review"
+  },
+  "replay:actually-correction-unpaused-month": {
+   "typed": "The meeting is in March, actually, April.",
+   "route": "standard"
+  },
+  "replay:actually-correction-unpaused-called": {
+   "typed": "It was Tuesday actually Wednesday when he called.",
+   "route": "standard"
+  },
+  "replay:actually-correction-unpaused-reasons": {
+   "typed": "There were five actually six reasons.",
+   "route": "review"
+  },
+  "replay:new-paragraph-noun-start": {
+   "typed": "Start a new paragraph about pricing in the dock.",
+   "route": "standard"
+  },
+  "replay:new-line-noun-manager": {
+   "typed": "The new line manager starts Monday.",
+   "route": "standard"
+  },
+  "replay:new-line-noun-item": {
+   "typed": "Add a new line item to the invoice.",
+   "route": "standard"
+  },
+  "replay:scratch-that-verb-table": {
+   "typed": "Don't scratch that table.",
+   "route": "standard"
+  },
+  "replay:insert-verb": {
+   "typed": "She told me to insert my card and wait.",
+   "route": "standard"
+  },
+  "replay:actually-contrast-she-said": {
+   "typed": "She said five, actually six.",
+   "route": "review"
+  },
+  "replay:actually-contrast-invoice": {
+   "typed": "The invoice says 400, actually 450.",
+   "route": "review"
+  },
+  "replay:actually-contrast-guessed": {
+   "typed": "I guessed March, actually April.",
+   "route": "standard"
+  },
+  "replay:actually-contrast-assumed": {
+   "typed": "Everyone assumed Monday, actually Tuesday.",
+   "route": "standard"
+  },
+  "replay:tone-command-formal": {
+   "typed": "Please confirm the delivery date.",
+   "route": "standard"
+  },
+  "replay:sign-off-okay-bye": {
+   "typed": "Okay, bye.",
+   "route": "standard"
+  },
+  "replay:sign-off-you": {
+   "typed": "You.",
+   "route": "standard"
+  },
+  "replay:repeat-twice": {
+   "typed": "It was a long, long time ago.",
+   "route": "standard"
+  },
+  "replay:repeat-three-times-bare": {
+   "typed": "Really really good work.",
+   "route": "standard"
+  }
+ }
+}

@@ -419,7 +419,9 @@ are never Supporter-only features.
 A default Mac install downloads only the models dictation needs: Parakeet
 Unified (~565 MB, primary English recognition) and Whisper Tiny (~75 MB, the
 agreement check and the recognizer for other languages). It also builds a
-pinned FluidAudio helper and the launcher app with your Swift toolchain. On a
+pinned FluidAudio helper, Whisper Face's own speech runtime for the same model
+(`native/ParrotSpeechRuntime`, no package dependencies) and the launcher app
+with your Swift toolchain. On a
 fresh Mac the Command Line Tools and Homebrew come first, so expect to
 download a few gigabytes in all and allow 15–45 minutes; no install time has
 been measured. Two models are optional quality upgrades and are skipped
@@ -493,7 +495,15 @@ The launcher detects the OS. A Windows Git Bash or WSL invocation of
    `--with-all-models`), Qwen3.5-4B and both Whisper models on Windows. Each
    model is probed first, so a rerun reports what is already cached instead of
    announcing a download it will skip. On Mac it also builds and preloads the
-   native Parakeet Unified helper.
+   native Parakeet Unified helper and Whisper Face's own speech runtime. The
+   helper is required and stays the default. The runtime is optional while
+   it is off: if it does not build or load, setup says so in one line,
+   removes the partial binary and carries on. The **New speech runtime**
+   switch (Advanced → Models; `"new_speech_runtime": true` in
+   `preferences.json`) asks the runtime first from the next dictation, with
+   the helper as its fallback; `PARROT_ASR_RUNTIME` in the service's
+   environment, when set, wins over the switch
+   (`native/ParrotASRHelper/PROTOCOL.md`, "Which program answers").
 4. Creates private configuration files without overwriting existing ones.
 5. Installs and validates the dictation login service (`launchd` on Mac, Task
    Scheduler on Windows) and, when the cleanup model is installed, the tuned
@@ -577,8 +587,10 @@ After granting permissions, verify the complete installation at any time:
 Install.cmd --verify               # Windows, from a Command Prompt
 ```
 
-This checks the dependency lock, platform login service, the Parakeet model
-and helper (Mac), the Qwen model when it is installed, and the process health
+This checks the dependency lock, platform login service, the Parakeet model,
+helper (Mac), the speech runtime when it is installed (Mac; it says whether it
+is, and fails only for one that is present and broken), the Qwen model when it
+is installed, and the process health
 endpoint without changing the installation. A failed check names its own
 reason. The Mac check does not inspect the Whisper caches. When the cleanup
 model is installed, it also freshly reconstructs the expected Ollama service
@@ -675,7 +687,9 @@ until you add `--yes`:
 - **The software** goes without ceremony: both login services, the Ollama and
   dictation LaunchAgents (or the Windows scheduled task, under its current and
   legacy names), `~/Applications/Whisper Face.app`, the Application Support
-  receipts, the built native helper, and the Swift build scratch.
+  receipts, the built native helper and speech runtime, their Swift build
+  scratch, and the copy of the model Core ML compiles for the speech runtime
+  in `~/Library/Caches`.
 - **The models** are a separate choice because they are large (650 MB to 5 GB)
   and can be downloaded again: the Parakeet Unified Core ML model, the two
   pinned Whisper snapshots in the Hugging Face cache, and `qwen3.5:4b`, which

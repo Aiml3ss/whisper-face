@@ -235,6 +235,10 @@ class RecognitionWord:
     end: float = 0.0
     confidence: float = 0.5
     timing: str = "native"
+    # HELPER_WORD_SOURCE for words the Parakeet helper reported; empty for
+    # every other engine. Lets the runtime keep helper words out of the
+    # compiler until their use is switched on.
+    source: str = ""
 
 
 @dataclass
@@ -247,6 +251,163 @@ class Recognition:
     words: tuple[RecognitionWord, ...] = ()
     audio_duration: float = 0.0
     native_processing_s: float | None = None
+    # The Parakeet helper's mean token probability. Uncalibrated: recorded
+    # for calibration, never used as the route confidence.
+    acoustic_confidence: float | None = None
+    # One of WORD_EVIDENCE_STATUSES: what became of the helper's words.
+    word_evidence_status: str = "absent"
+
+
+# --- word evidence from the Parakeet helper (protocol 2) ---------------------
+
+HELPER_WORD_SOURCE = "parakeet-helper"
+# About ten minutes at 400 words a minute, as the helper's own cap.
+HELPER_MAX_WORDS = 4_096
+HELPER_MAX_WORD_CHARS = 64
+# A word may end this far past the clip: the helper rounds times to 1 ms.
+HELPER_END_TOLERANCE_S = 0.002
+# What became of the helper's words for one decode, worst first: the
+# helper's words were malformed; they did not match the text; the helper
+# speaks protocol 1; they were used; no helper words were expected or sent.
+WORD_EVIDENCE_STATUSES = (
+    "rejected", "misaligned", "v1-helper", "native", "absent")
+
+
+@dataclass(frozen=True)
+class HelperWord:
+    """One word as the helper reported it, after validation."""
+    text: str
+    start: float
+    end: float
+    confidence: float
+    mark_confidence: float | None = None
+
+
+class ParakeetResult(tuple):
+    """``(text, processing_s)`` from the helper, plus its word evidence.
+
+    A tuple of exactly those two values, so every caller and test that
+    unpacks or compares the protocol 1 pair keeps working; the evidence
+    rides along as attributes.
+    """
+
+    def __new__(cls, text: str, processing_s: float, *,
+                words: tuple[HelperWord, ...] | None = None,
+                avg_confidence: float | None = None,
+                word_evidence_status: str = "v1-helper"):
+        result = super().__new__(cls, (text, processing_s))
+        result.words = words
+        result.avg_confidence = avg_confidence
+        result.word_evidence_status = word_evidence_status
+        return result
+
+    @property
+    def text(self) -> str:
+        return self[0]
+
+    @property
+    def processing_s(self) -> float:
+        return self[1]
+
+
+def _helper_number(value) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        # JSON reads a long integer literal as an int; float() of one past
+        # about 1e308 raises instead of returning infinity.
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _helper_probability(value) -> float | None:
+    number = _helper_number(value)
+    return number if number is not None and 0.0 <= number <= 1.0 else None
+
+
+def parse_helper_words(raw, duration) -> tuple[HelperWord, ...] | None:
+    """Validate the helper's ``words`` list; ``None`` means no evidence.
+
+    The helper is a separate process and its output is untrusted input. Any
+    malformed entry, time out of order or past the clip, out-of-range
+    confidence, or absurd count or size discards the whole list: partial
+    word evidence is worse than none.
+    """
+    clip = _helper_number(duration)
+    if clip is None or clip <= 0.0:
+        return None
+    if not isinstance(raw, list) or not 0 < len(raw) <= HELPER_MAX_WORDS:
+        return None
+    words: list[HelperWord] = []
+    previous_start = 0.0
+    for entry in raw:
+        if not isinstance(entry, dict):
+            return None
+        text = entry.get("word")
+        if not isinstance(text, str):
+            return None
+        text = text.strip()
+        if not text or len(text) > HELPER_MAX_WORD_CHARS:
+            return None
+        start = _helper_number(entry.get("start"))
+        end = _helper_number(entry.get("end"))
+        if (start is None or end is None or start < previous_start
+                or not 0.0 <= start <= end <= clip + HELPER_END_TOLERANCE_S):
+            return None
+        confidence = _helper_probability(entry.get("confidence"))
+        if confidence is None:
+            return None
+        mark = None
+        if "mark_confidence" in entry:
+            mark = _helper_probability(entry.get("mark_confidence"))
+            if mark is None:
+                return None
+        words.append(HelperWord(text, start, end, confidence, mark))
+        previous_start = start
+    return tuple(words)
+
+
+def helper_protocol(status) -> int:
+    """The protocol a helper's ready line declares; 1 unless it is exactly 2.
+
+    A protocol 1 helper sends no ``protocol`` key. Anything that is not the
+    integer 2 with the ``words`` capability is treated as protocol 1.
+    """
+    if not isinstance(status, dict):
+        return 1
+    value = status.get("protocol")
+    capabilities = status.get("capabilities")
+    if (type(value) is int and value == 2 and isinstance(capabilities, list)
+            and "words" in capabilities):
+        return 2
+    return 1
+
+
+def parakeet_result(text: str, processing_s: float, response, *,
+                    protocol: int, duration) -> ParakeetResult:
+    """Read one helper response's evidence for the protocol it speaks."""
+    if protocol < 2 or not isinstance(response, dict):
+        return ParakeetResult(text, processing_s)
+    average = _helper_probability(response.get("avg_confidence"))
+    if "words" not in response:
+        return ParakeetResult(
+            text, processing_s, avg_confidence=average,
+            word_evidence_status="absent")
+    words = parse_helper_words(response.get("words"), duration)
+    return ParakeetResult(
+        text, processing_s, words=words, avg_confidence=average,
+        word_evidence_status="rejected" if words is None else "native")
+
+
+def combine_word_evidence_status(statuses: Iterable[str]) -> str:
+    """One dictation's status from its parts': the worst one present."""
+    present = set(statuses)
+    for status in WORD_EVIDENCE_STATUSES:
+        if status in present:
+            return status
+    return "absent"
 
 
 def _interesting_token(token: str) -> bool:

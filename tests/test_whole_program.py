@@ -24,6 +24,8 @@ import traceback
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 import fake_platform
 from fake_platform import Key, TextField
 
@@ -31,6 +33,8 @@ from fake_platform import Key, TextField
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "benchmarks" / "default_path_sentences.json"
 MAC = None
+SHIPPED_SWITCHES: dict = {}
+SHIPPED_RUNTIME: dict = {}
 
 sys.path.append(str(ROOT / "benchmarks"))
 import recognizer_replay  # noqa: E402
@@ -42,6 +46,14 @@ def setUpModule():
         raise unittest.SkipTest(
             "the harness boots the macOS runtime path of dictate.py")
     MAC = fake_platform.boot_fresh_install()
+    # What the module ships with, read before any test changes it.
+    SHIPPED_SWITCHES.update(
+        prosody=MAC.dictate.PROSODY_FORMATTING,
+        routing=MAC.dictate.PARAKEET_WORD_CONFIDENCE_ROUTING,
+        protocol=MAC.dictate.PARAKEET_PROTOCOL)
+    SHIPPED_RUNTIME.update(
+        runtime=MAC.dictate.PARAKEET_RUNTIME,
+        asked_first=MAC.dictate.PARAKEET.preferred)
 
 
 def tearDownModule():
@@ -179,7 +191,15 @@ class BootTests(unittest.TestCase):
         self.assertEqual(mac.desktop.network, [])
         helper = [argv for argv in mac.desktop.helper_spawns]
         self.assertEqual(len(helper), 1)
-        self.assertEqual(helper[0][1:], ["--server"])
+        # The FluidAudio helper: Whisper Face's own runtime is installed
+        # beside it but, with its switch off as shipped, never started.
+        self.assertEqual(Path(helper[0][0]).name, fake_platform.HELPER_NAME)
+        self.assertTrue(mac.dictate.PARAKEET_RUNTIME_HELPER.is_file())
+        # Protocol 2 is asked for, and the models folder Python verified is
+        # named; a protocol 1 helper reads only "--server".
+        self.assertEqual(helper[0][1:], [
+            "--server", "--protocol", "2",
+            "--models", str(mac.dictate.PARAKEET_MODEL_DIR)])
         # Every other process the runtime asks for, by program. A new entry
         # here is a new thing the app runs on the user's Mac.
         allowed = {"afplay", "/bin/launchctl", "/bin/ps"}
@@ -937,6 +957,414 @@ for _case in recognizer_replay.load_cases():
         setattr(RecognizerReplayTests,
                 "test_known_failure_" + _case["id"].replace("-", "_"),
                 _known_replay_failure_test(_case))
+
+
+BASELINE = ROOT / "benchmarks" / "replay_text_and_route_baseline.json"
+
+
+class HelperWordEvidenceTests(unittest.TestCase):
+    """The helper's word evidence changes nothing a user sees while it is off.
+
+    The client asks every helper for protocol 2. A protocol 1 helper ignores
+    the request; a protocol 2 helper adds each word's time and confidence,
+    which the runtime parses, reshapes and records. Until one of the two
+    switches is turned on, typed text and the consequence route must be what
+    origin/main produced: benchmarks/replay_text_and_route_baseline.json.
+    """
+
+    def tearDown(self):
+        mac = MAC
+        mac.desktop.helper_protocol = 2
+        mac.desktop.helper_words_override = None
+        mac.dictate.PROSODY_FORMATTING = False
+        mac.dictate.PARAKEET_WORD_CONFIDENCE_ROUTING = False
+        mac.dictate.PARAKEET._close()
+
+    @staticmethod
+    def use_helper(mac, protocol: int) -> None:
+        mac.desktop.helper_protocol = protocol
+        # The next decode starts a new helper, which speaks this protocol.
+        mac.dictate.PARAKEET._close()
+
+    @staticmethod
+    def dictate_case(mac, key: str, case: dict) -> dict:
+        if key.startswith("default:"):
+            field = TextField(case.get("field", ""),
+                              bundle=case.get("app", "com.apple.TextEdit"))
+            typed = mac.dictate_sentence(case["spoken"], field=field).text
+        else:
+            typed = recognizer_replay.type_transcript(mac, case)
+        metrics = transcript_records()[-1]["metrics"]
+        return {
+            "typed": typed,
+            "route": mac.dictate.PIPELINE_STATE["last_consequence_route"],
+            "status": metrics["word_evidence_status"],
+            "words": metrics["word_evidence"],
+        }
+
+    def test_the_word_evidence_switches_ship_off(self):
+        # Read at boot: by now earlier tests' tearDown has reset the module.
+        booted()
+        self.assertEqual(
+            SHIPPED_SWITCHES,
+            {"prosody": False, "routing": False, "protocol": 2})
+
+    def test_every_replayed_sentence_types_and_routes_as_origin_main(self):
+        mac = booted()
+        baseline = json.loads(BASELINE.read_text(encoding="utf-8"))["cases"]
+        cases = [("default:" + case["id"], case) for case in load_corpus()]
+        cases += [("replay:" + case["id"], case)
+                  for case in recognizer_replay.load_cases()]
+        recorded = [key for key, _case in cases if key in baseline]
+        # A corpus case without a recorded baseline is still compared
+        # between the two helpers below, but cannot show it is unchanged.
+        self.assertGreaterEqual(len(recorded), 197)
+        results = {}
+        for protocol in (1, 2):
+            self.use_helper(mac, protocol)
+            for key, case in cases:
+                results[protocol, key] = self.dictate_case(mac, key, case)
+        for key, _case in cases:
+            v1, v2 = results[1, key], results[2, key]
+            with self.subTest(case=key):
+                self.assertEqual((v2["typed"], v2["route"]),
+                                 (v1["typed"], v1["route"]))
+                if key in baseline:
+                    self.assertEqual(
+                        (v1["typed"], v1["route"]),
+                        (baseline[key]["typed"], baseline[key]["route"]))
+                # The words did arrive: an identity that held only because
+                # every word was thrown away would prove nothing.
+                self.assertEqual((v1["status"], v1["words"]),
+                                 ("v1-helper", 0))
+                self.assertEqual(v2["status"], "native")
+                self.assertGreater(v2["words"], 0)
+        spawned = mac.desktop.helper_spawns[-1][1:]
+        self.assertEqual(spawned[:3], ["--server", "--protocol", "2"])
+
+    def test_malformed_words_are_dropped_and_the_text_is_kept(self):
+        mac = booted()
+        spoken = "Send the invoice to Dana by Friday."
+        # Whisper mishears, so a helper that failed and fell back to Whisper
+        # would change the typed text, not only the recorded status.
+        misheard = "Send the invoice to Donna by Friday."
+        expected = mac.dictate_sentence(
+            spoken, whisper=misheard, field=TextField()).text
+        self.assertIn("Dana", expected)
+        for name, words in (
+                ("not a list", {"word": "Send"}),
+                ("time out of order", [
+                    {"word": "Send", "start": 0.5, "end": 0.6,
+                     "confidence": 0.9},
+                    {"word": "the", "start": 0.1, "end": 0.2,
+                     "confidence": 0.9}]),
+                ("past the end", [{"word": "Send", "start": 0.1,
+                                   "end": 900.0, "confidence": 0.9}]),
+                ("confidence above one", [{"word": "Send", "start": 0.1,
+                                           "end": 0.2, "confidence": 7}]),
+                # Crosses the pipe as 401 digits; float() of it raises.
+                ("integer too large", [{"word": "Send", "start": 10 ** 400,
+                                        "end": 0.2, "confidence": 0.9}]),
+                ("negative integer too large", [
+                    {"word": "Send", "start": 0.1, "end": 0.2,
+                     "confidence": -(10 ** 400)}]),
+                ("absurd count", [{"word": "a", "start": 0.0, "end": 0.0,
+                                   "confidence": 0.5}] * 5000),
+                ("words for other text", [{"word": "Hello", "start": 0.1,
+                                           "end": 0.2, "confidence": 0.9}]),
+        ):
+            with self.subTest(case=name):
+                mac.desktop.helper_words_override = words
+                typed = mac.dictate_sentence(
+                    spoken, whisper=misheard, field=TextField()).text
+                metrics = transcript_records()[-1]["metrics"]
+                self.assertEqual(typed, expected)
+                self.assertEqual(metrics["word_evidence"], 0)
+                self.assertEqual(
+                    metrics["word_evidence_status"],
+                    "misaligned" if name == "words for other text"
+                    else "rejected")
+
+    def test_words_of_a_collapsed_decode_loop_are_dropped(self):
+        # Collapsing the loop rewrites the text the words were timed for.
+        mac = booted()
+        field = mac.dictate_sentence(
+            "Restart " + "Unraid " * 40 + "tonight.", field=TextField())
+        self.assertEqual(field.text, "Restart Unraid Unraid tonight.")
+        metrics = transcript_records()[-1]["metrics"]
+        self.assertEqual(
+            (metrics["word_evidence"], metrics["word_evidence_status"]),
+            (0, "misaligned"))
+
+    def test_a_real_pause_reaches_the_text_only_through_its_switch(self):
+        mac = booted()
+        rate = fake_platform.SAMPLE_RATE
+        # Two stretches of speech with 0.7 s of silence between them: long
+        # enough for a comma, short of a paragraph.
+        audio = np.concatenate([
+            fake_platform.speech_audio(1.0, 0.7, seed=3),
+            fake_platform.speech_audio(1.2, 0.3, seed=5)])
+        spoken = "I called the office and nobody answered."
+        timed = [("I", 0.05, 0.25), ("called", 0.3, 0.55), ("the", 0.6, 0.7),
+                 ("office", 0.72, 0.95), ("and", 1.75, 1.9),
+                 ("nobody", 1.95, 2.3), ("answered.", 2.35, 2.8)]
+        self.assertLess(timed[-1][2], len(audio) / rate)
+        mac.desktop.helper_words_override = [
+            {"word": word, "start": start, "end": end, "confidence": 0.95}
+            for word, start, end in timed]
+        compiled = []
+        compile_voice = mac.dictate.VOICE_COMPILER.compile
+
+        def spy(voice):
+            compiled.append(voice)
+            return compile_voice(voice)
+
+        mac.dictate.VOICE_COMPILER.compile = spy
+        self.addCleanup(setattr, mac.dictate.VOICE_COMPILER, "compile",
+                        compile_voice)
+        expected = {
+            # Off, as shipped: the words are recorded and never compiled.
+            (False, False): (spoken, False),
+            # Routing alone: the words place spans but add no punctuation.
+            (False, True): (spoken, True),
+            # Prosody: the pause between "office" and "and" is a comma.
+            (True, False): (
+                "I called the office, and nobody answered.", True),
+        }
+        for (prosody, routing), (text, compiled_words) in expected.items():
+            with self.subTest(prosody=prosody, routing=routing):
+                mac.dictate.PROSODY_FORMATTING = prosody
+                mac.dictate.PARAKEET_WORD_CONFIDENCE_ROUTING = routing
+                compiled.clear()
+                typed = mac.dictate_sentence(
+                    spoken, field=TextField(), audio=audio).text
+                metrics = transcript_records()[-1]["metrics"]
+                self.assertEqual(typed, text)
+                self.assertEqual(metrics["word_evidence_status"], "native")
+                self.assertTrue(compiled)
+                for voice in compiled:
+                    # The fake audio really has the pause; only the switch
+                    # decides whether the helper's words can act on it.
+                    self.assertTrue(any(
+                        event.kind == "pause" and event.duration >= 0.45
+                        for event in voice.prosody))
+                    native = [word for word in voice.hypotheses[0].words
+                              if word.timing == "native"]
+                    self.assertEqual(bool(native), compiled_words)
+                    self.assertEqual(voice.pause_punctuation,
+                                     prosody or not compiled_words)
+
+    def test_switched_on_word_confidence_decides_the_review(self):
+        mac = booted()
+        spoken = "Send the invoice to Dana by Friday."
+        mac.dictate_sentence(spoken, field=TextField())
+        self.assertEqual(
+            mac.dictate.PIPELINE_STATE["last_consequence_route"], "review")
+        mac.dictate.PARAKEET_WORD_CONFIDENCE_ROUTING = True
+        mac.desktop.word_confidence = 0.97
+        try:
+            mac.dictate_sentence(spoken, field=TextField())
+            self.assertEqual(
+                mac.dictate.PIPELINE_STATE["last_consequence_route"],
+                "protected")
+            mac.desktop.word_confidence = 0.4
+            mac.dictate_sentence(spoken, field=TextField())
+            self.assertEqual(
+                mac.dictate.PIPELINE_STATE["last_consequence_route"],
+                "review")
+        finally:
+            mac.desktop.word_confidence = 0.95
+
+
+class SpeechRuntimeTests(unittest.TestCase):
+    """Whisper Face's own runtime, behind PARROT_ASR_RUNTIME.
+
+    Selected, the runtime is the first program asked (PARAKEET.preferred),
+    with the FluidAudio helper behind it and Whisper behind that. The fake
+    runtime hears exactly what the fake helper hears, so with the switch on
+    every replayed sentence must type and route as origin/main did, and a
+    runtime that is missing, does not start or fails a request must leave
+    the typed text as the helper alone would have typed it.
+    """
+
+    SPOKEN = "Send the invoice to Dana by Friday."
+    # Whisper mishears, so a fall all the way to Whisper changes the text.
+    MISHEARD = "Send the invoice to Donna by Friday."
+
+    def setUp(self):
+        self.mac = booted()
+
+    def tearDown(self):
+        dictate = self.mac.dictate
+        dictate.PARAKEET_RUNTIME = "fluidaudio"
+        dictate.PARAKEET.preferred = None
+        for client in (dictate.OWN_PARAKEET, dictate.PARAKEET):
+            client._close()
+            client.failed_starts = 0
+            client.next_start = 0.0
+        dictate.OWN_PARAKEET.missing_reported = False
+        self.mac.desktop.runtime_failure = None
+        dictate.PARAKEET_RUNTIME_HELPER.write_bytes(b"")
+        dictate.PARAKEET_RUNTIME_HELPER.chmod(0o755)
+
+    def switch_on(self):
+        # What PARROT_ASR_RUNTIME=own sets up at import; tests/test_dictate.py
+        # (SpeechRuntimeSwitchTests) holds the import-time expressions.
+        dictate = self.mac.dictate
+        dictate.PARAKEET_RUNTIME = "own"
+        dictate.PARAKEET.preferred = dictate.OWN_PARAKEET
+        dictate.PARAKEET._close()
+
+    def programs_spawned_since(self, count: int) -> list[str]:
+        return [Path(argv[0]).name
+                for argv in self.mac.desktop.helper_spawns[count:]]
+
+    def dictate(self) -> str:
+        return self.mac.dictate_sentence(
+            self.SPOKEN, whisper=self.MISHEARD, field=TextField()).text
+
+    def test_the_runtime_switch_ships_off(self):
+        self.assertEqual(SHIPPED_RUNTIME,
+                         {"runtime": "fluidaudio", "asked_first": None})
+
+    def test_switched_off_the_runtime_is_never_started(self):
+        desktop = self.mac.desktop
+        spawns, asked = len(desktop.helper_spawns), len(desktop.runtime_requests)
+        self.mac.dictate.PARAKEET._close()
+        for _ in range(3):
+            self.assertEqual(self.dictate(), self.SPOKEN)
+        self.assertEqual(len(desktop.runtime_requests), asked)
+        self.assertIn(fake_platform.HELPER_NAME,
+                      self.programs_spawned_since(spawns))
+        self.assertNotIn(fake_platform.RUNTIME_NAME,
+                         self.programs_spawned_since(spawns))
+
+    def test_every_replayed_sentence_types_and_routes_as_origin_main(self):
+        mac = self.mac
+        desktop = mac.desktop
+        self.switch_on()
+        baseline = json.loads(BASELINE.read_text(encoding="utf-8"))["cases"]
+        cases = [("default:" + case["id"], case) for case in load_corpus()]
+        cases += [("replay:" + case["id"], case)
+                  for case in recognizer_replay.load_cases()]
+        self.assertGreaterEqual(
+            len([key for key, _case in cases if key in baseline]), 197)
+        helper_asked = len(desktop.parakeet_requests)
+        runtime_asked = len(desktop.runtime_requests)
+        for key, case in cases:
+            result = HelperWordEvidenceTests.dictate_case(mac, key, case)
+            with self.subTest(case=key):
+                if key in baseline:
+                    self.assertEqual(
+                        (result["typed"], result["route"]),
+                        (baseline[key]["typed"], baseline[key]["route"]))
+                # The runtime answered, in protocol 2.
+                self.assertEqual(result["status"], "native")
+        self.assertGreaterEqual(
+            len(desktop.runtime_requests) - runtime_asked, len(cases))
+        # The FluidAudio helper was never needed.
+        self.assertEqual(len(desktop.parakeet_requests), helper_asked)
+
+    def test_the_window_switch_takes_effect_on_the_next_dictation(self):
+        # The window's own "New speech runtime" action: the very next
+        # dictation asks the runtime, with no restart, the choice reaches
+        # preferences.json, and the status the window reads says which
+        # program answered.
+        dictate = self.mac.dictate
+        desktop = self.mac.desktop
+        actions = dictate.STATUS["bar"].gui.view_model.actions
+        status_of = actions.status_snapshot
+        self.addCleanup(dictate.PREFERENCES.__setitem__,
+                        "new_speech_runtime", False)
+        self.assertIs(dictate.PARAKEET_RUNTIME_PINNED, False)
+        self.assertIs(status_of()["new_speech_runtime"], False)
+        runtime_asked = len(desktop.runtime_requests)
+        self.assertIs(actions.set_new_speech_runtime(True), True)
+        self.assertIs(json.loads(dictate.PREFERENCES_FILE.read_text(
+            encoding="utf-8"))["new_speech_runtime"], True)
+        self.assertEqual(self.dictate(), self.SPOKEN)
+        self.assertEqual(len(desktop.runtime_requests), runtime_asked + 1)
+        status = status_of()
+        self.assertEqual(
+            (status["new_speech_runtime"], status["new_speech_runtime_last"]),
+            (True, "new"))
+        self.assertIs(actions.set_new_speech_runtime(False), False)
+        helper_asked = len(desktop.parakeet_requests)
+        self.assertEqual(self.dictate(), self.SPOKEN)
+        self.assertEqual(len(desktop.runtime_requests), runtime_asked + 1)
+        self.assertGreater(len(desktop.parakeet_requests), helper_asked)
+        status = status_of()
+        self.assertEqual(
+            (status["new_speech_runtime"], status["new_speech_runtime_last"]),
+            (False, "previous"))
+
+    def test_a_missing_runtime_leaves_the_helper_to_answer(self):
+        desktop = self.mac.desktop
+        self.switch_on()
+        self.mac.dictate.PARAKEET_RUNTIME_HELPER.unlink()
+        spawns, helper_asked = (len(desktop.helper_spawns),
+                                len(desktop.parakeet_requests))
+        for _ in range(2):
+            self.assertEqual(self.dictate(), self.SPOKEN)
+        self.assertEqual(self.programs_spawned_since(spawns),
+                         [fake_platform.HELPER_NAME])
+        self.assertGreater(len(desktop.parakeet_requests), helper_asked)
+        self.assertEqual(self.mac.log.getvalue().count(
+            "! Speech runtime is not installed; using the FluidAudio helper"),
+            1)
+
+    def test_a_runtime_that_does_not_start_leaves_the_helper_to_answer(self):
+        desktop = self.mac.desktop
+        self.switch_on()
+        desktop.runtime_failure = "start"
+        spawns, helper_asked = (len(desktop.helper_spawns),
+                                len(desktop.parakeet_requests))
+        for _ in range(2):
+            self.assertEqual(self.dictate(), self.SPOKEN)
+        # Started once, then benched: the second dictation did not wait for
+        # it again.
+        self.assertEqual(self.programs_spawned_since(spawns),
+                         [fake_platform.RUNTIME_NAME, fake_platform.HELPER_NAME])
+        self.assertGreater(len(desktop.parakeet_requests), helper_asked)
+        self.assertIn("! Speech runtime did not start (not ready); using the "
+                      "FluidAudio helper", self.mac.log.getvalue())
+
+    def test_a_runtime_that_fails_mid_use_hands_its_request_to_the_helper(self):
+        desktop = self.mac.desktop
+        self.switch_on()
+        # Healthy first, so the failure comes from a runtime that was in use.
+        self.assertEqual(self.dictate(), self.SPOKEN)
+        process = self.mac.dictate.OWN_PARAKEET.process
+        self.assertIsNotNone(process)
+        desktop.runtime_failure = "request"
+        runtime_asked = len(desktop.runtime_requests)
+        helper_asked = len(desktop.parakeet_requests)
+        self.assertEqual(self.dictate(), self.SPOKEN)
+        # The request the runtime failed went to the helper, same audio.
+        failed = desktop.runtime_requests[runtime_asked:]
+        answered = desktop.parakeet_requests[helper_asked:]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(answered[:1], failed)
+        # The failing process was closed, not left running.
+        self.assertIsNone(self.mac.dictate.OWN_PARAKEET.process)
+        self.assertIsNotNone(process.poll())
+        self.assertIn("! Speech runtime failed; using the FluidAudio helper, "
+                      "next attempt in 30s", self.mac.log.getvalue())
+        # Benched: the next dictation goes straight to the helper.
+        self.assertEqual(self.dictate(), self.SPOKEN)
+        self.assertEqual(len(desktop.runtime_requests), runtime_asked + 1)
+
+    def test_when_both_fail_whisper_types_as_it_always_has(self):
+        desktop = self.mac.desktop
+        self.switch_on()
+        desktop.runtime_failure = "request"
+        desktop.helper_failure = "request"
+        try:
+            self.assertEqual(self.dictate(), self.MISHEARD)
+        finally:
+            desktop.helper_failure = None
+        self.assertIn("! Parakeet helper failed; using Whisper Turbo",
+                      self.mac.log.getvalue())
 
 
 if __name__ == "__main__":

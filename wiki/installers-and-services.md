@@ -28,7 +28,9 @@ reruns are idempotent.
 - **Mac flow**: private 0600 logs provisioned before services can
   create them; Homebrew + uv/ffmpeg/ollama; model inventory probed so
   announcements reflect actual work; Parakeet Core ML preload +
-  Swift helper build + verify; Ollama LaunchAgent with a warm fast path
+  Swift helper build + verify, then the same for Whisper Face's own speech
+  runtime (no package dependencies; [[asr-cascade]]); Ollama LaunchAgent
+  with a warm fast path
   (byte-identical plist + digest receipt + launchd-PID-equals-listener
   identity skips reload); locked env from `dictate.py.lock`; templates
   copied only when absent; the dictation LaunchAgent; the launcher app;
@@ -49,7 +51,7 @@ reruns are idempotent.
   service and writes exactly one byte to a PID+revision-bound 0600
   socket to show the GUI.
 - **Verify modes** are read-only and never repair: tools, helper,
-  plists, logs, launcher binding, locks, model pins, agents, health —
+  speech runtime when installed (optional while off by default; one that is present must answer protocol 2), plists, logs, launcher binding, locks, model pins, agents, health —
   plus a bounded native GUI smoke test on Mac. The documented platform
   asymmetry: Mac proves launchd-PID-to-listener identity; Windows
   cannot (Ollama is independently managed).

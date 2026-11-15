@@ -4,7 +4,7 @@
 # ///
 """Adversarial tests for consequence routing and selective re-listening."""
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 import sys
 import unittest
@@ -576,6 +576,52 @@ class ReceiptExecutionTests(unittest.TestCase):
         self.assertEqual(receipt.relisten_confirmed, 0)
         self.assertEqual(
             dict(receipt.relisten_skipped)["verifier-not-independent"], 1)
+
+class UncalibratedWordConfidenceTests(unittest.TestCase):
+    """Parakeet word confidence nobody has calibrated places a span in time
+    but never clears its review flag."""
+
+    def receipt(self, voice):
+        return consequence_receipt(voice, audio_duration=8.0, verifier=None)
+
+    def test_untrusted_confident_words_keep_the_review(self):
+        trusted = timed_voice("Send to Alice Smith", confidence=0.97)
+        untrusted = replace(trusted, trust_word_confidence=False)
+        self.assertTrue(trusted.trust_word_confidence)
+        plan = build_consequence_plan(untrusted, audio_duration=8.0)
+        names = [risk for risk in plan.risks if risk.category == "name"]
+        self.assertEqual(len(names), 1)
+        self.assertEqual(names[0].uncertainty,
+                         ("word-confidence-uncalibrated",))
+        # Timings are still used: the span is selected for a re-listen
+        # instead of being skipped as untimed.
+        self.assertIsNotNone(names[0].audio_start)
+        self.assertNotIn("timing-unavailable",
+                         dict(plan.relisten_skipped))
+        self.assertEqual(self.receipt(untrusted).route, "review")
+        self.assertEqual(self.receipt(trusted).route, "protected")
+
+    def test_trusted_low_confidence_words_still_ask_for_review(self):
+        voice = timed_voice("Send to Alice Smith", confidence=0.97)
+        low = replace(voice, hypotheses=(replace(
+            voice.hypotheses[0], words=tuple(
+                replace(word, confidence=0.4)
+                for word in voice.hypotheses[0].words)),))
+        self.assertEqual(self.receipt(low).route, "review")
+
+    def test_without_words_the_switch_changes_nothing(self):
+        bare = VoiceIR((RecognitionHypothesis(
+            "Send to Alice Smith", 0.97, "parakeet-unified"),))
+        plans = [build_consequence_plan(
+            replace(bare, trust_word_confidence=trust), audio_duration=8.0)
+            for trust in (True, False)]
+        self.assertEqual(plans[0], plans[1])
+        self.assertEqual(
+            {risk.uncertainty for risk in plans[0].risks},
+            {("word-evidence-unavailable",)})
+        self.assertEqual(dict(plans[0].relisten_skipped),
+                         {"timing-unavailable": len(plans[0].risks)})
+
 
 if __name__ == "__main__":
     unittest.main()

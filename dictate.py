@@ -359,6 +359,7 @@ from whisper_face_render import (  # noqa: E402
 )
 from parrot_core import (  # noqa: E402
     CleanupEdit,
+    HELPER_WORD_SOURCE,
     Recognition,
     RecognitionWord,
     EDIT_COMMAND_UNDO,
@@ -374,10 +375,13 @@ from parrot_core import (  # noqa: E402
     compile_cleanup,
     compile_code_dictation,
     NUMBER_WORDS,
+    combine_word_evidence_status,
     confidence_from_segments,
     correction_similarity,
+    helper_protocol,
     hypothesis_agreement,
     parakeet_confidence_from_agreement,
+    parakeet_result,
     should_escalate_uncertain,
     infer_revised_insertion,
     mode_from_modifiers,
@@ -401,6 +405,7 @@ from voice_compiler import (  # noqa: E402
     build_consequence_plan,
     context_firewall_receipt,
     execute_consequence_plan,
+    project_word_evidence,
 )
 from insertion_integrity import (  # noqa: E402
     DestinationObservation,
@@ -843,6 +848,22 @@ PARAKEET_HELPER = HERE / ".models" / "bin" / "parrot-asr-helper"
 PARAKEET_ENABLED = (
     IS_MACOS and os.environ.get("PARROT_ASR_BACKEND", "parakeet") != "whisper"
 )
+# Which program runs the Parakeet model. "fluidaudio", the default, is the
+# helper built on the FluidAudio package (native/ParrotASRHelper). "own" is
+# Whisper Face's own runtime (native/ParrotSpeechRuntime), which needs no
+# third-party package: setup.sh builds and verifies both, and with "own"
+# selected anything the runtime cannot answer (not built, does not start,
+# fails a request) goes to the FluidAudio helper, and from there to Whisper
+# as before. The "New speech runtime" switch (the new_speech_runtime
+# preference) selects it; PARROT_ASR_RUNTIME, when it is set to anything,
+# wins over the preference: "own" selects the runtime, any other value the
+# FluidAudio helper.
+PARAKEET_RUNTIME = (
+    "own" if os.environ.get("PARROT_ASR_RUNTIME", "").strip().lower() == "own"
+    else "fluidaudio")
+PARAKEET_RUNTIME_PINNED = bool(
+    os.environ.get("PARROT_ASR_RUNTIME", "").strip())
+PARAKEET_RUNTIME_HELPER = HERE / ".models" / "bin" / "parrot-speech-runtime"
 DICTIONARY_FILE = HERE / "dictionary.txt"
 TRANSCRIPTS_FILE = HERE / "transcripts.jsonl"   # local-only usage log
 LEARNED_FILE = HERE / "learned.json"            # mined term counts
@@ -876,7 +897,23 @@ PARAKEET_ROUTE_CONFIDENCE = 0.84
 PARAKEET_STARTUP_TIMEOUT = 10.0
 PARAKEET_MIN_REQUEST_TIMEOUT = 3.0
 PARAKEET_MAX_REQUEST_TIMEOUT = 10.0
-PARAKEET_MAX_RESPONSE_BYTES = 64 * 1024
+# The helper protocol this client asks for. A protocol 1 helper ignores the
+# request and answers as it always has; a protocol 2 helper adds each word's
+# time and confidence (native/ParrotASRHelper/PROTOCOL.md).
+PARAKEET_PROTOCOL = 2
+# A ten-minute dictation's words are about 300 KiB of JSON; the text alone
+# never came near the old 64 KiB.
+PARAKEET_MAX_RESPONSE_BYTES = 1024 * 1024
+# What the helper's words may do, both off until the owner's own recordings
+# show Parakeet's word confidence means something (the C1 criterion). Off,
+# the words are parsed, reshaped and recorded, and never reach the compiler:
+# pasted text, the consequence route and the review cue are what a protocol
+# 1 helper gives. PROSODY_FORMATTING lets pauses between the helper's timed
+# words add commas and paragraphs. PARAKEET_WORD_CONFIDENCE_ROUTING lets a
+# word's confidence clear a name or number's review flag; with only
+# PROSODY_FORMATTING on, the words place spans but every span stays flagged.
+PROSODY_FORMATTING = False
+PARAKEET_WORD_CONFIDENCE_ROUTING = False
 VOICE_OUTBOX_MAX_ITEMS = 20
 LLM_CLEANUP_TIMEOUT = (1, 4) # localhost connect + inter-chunk stall deadline.
                              # Capture must fall back faithfully instead of
@@ -1436,6 +1473,7 @@ PIPELINE_STATE = {
     "last_context_firewall_quarantined": 0,
     "last_context_firewall_reasons": {},
     "last_asr_engine": "",
+    "last_speech_program": "",
     "last_release_s": None,
     "last_word_count": None,
     "last_insertion_state": "legacy",
@@ -1554,6 +1592,7 @@ PREFERENCES = {
     "recent_dictations": False,
     "self_correction": False,
     "remove_repeats": True,
+    "new_speech_runtime": False,
     "language": LANGUAGE_DEFAULT,
 }
 ACOUSTIC_TIME_MACHINE = AcousticTimeMachine()
@@ -2014,6 +2053,11 @@ def load_preferences():
     # that off. A file written before the key existed keeps the default.
     PREFERENCES["remove_repeats"] = bool(
         loaded.get("remove_repeats") is not False)
+    # Whisper Face's own speech runtime is asked first only for a user who
+    # turned it on. Any other value, and a file written before the key
+    # existed, leaves the FluidAudio helper alone in charge.
+    PREFERENCES["new_speech_runtime"] = bool(
+        loaded.get("new_speech_runtime") is True)
     # Cross-platform: both mlx-whisper and faster-whisper take the same bare
     # ISO 639-1 code, so one preference drives Mac and Windows alike.
     PREFERENCES["language"] = normalize_language(loaded.get("language"))
@@ -2094,6 +2138,7 @@ def save_preferences():
         "recent_dictations": bool(PREFERENCES["recent_dictations"]),
         "self_correction": bool(PREFERENCES["self_correction"]),
         "remove_repeats": bool(PREFERENCES["remove_repeats"]),
+        "new_speech_runtime": bool(PREFERENCES["new_speech_runtime"]),
         "language": normalize_language(PREFERENCES["language"]),
     }
     atomic_write_text(
@@ -2222,6 +2267,62 @@ def set_remove_repeats(enabled: bool) -> bool:
     PREFERENCES["remove_repeats"] = bool(enabled)
     save_preferences()
     return PREFERENCES["remove_repeats"]
+
+
+def speech_runtime_selected() -> bool:
+    """Whether Whisper Face's own runtime is asked first.
+
+    PARROT_ASR_RUNTIME, when it is set, wins; otherwise the preference
+    decides, and it is off unless the preferences file says true.
+    """
+    if PARAKEET_RUNTIME_PINNED:
+        return PARAKEET_RUNTIME == "own"
+    return PREFERENCES["new_speech_runtime"] is True
+
+
+def apply_speech_runtime() -> None:
+    """Ask the selected program first from the next dictation on.
+
+    Only the client's ``preferred`` changes; a request already running
+    keeps the program it started with. Switched off, the runtime is closed
+    off the calling thread, under its lock, so its memory is given back
+    without making the window wait for a decode in progress.
+    """
+    selected = speech_runtime_selected()
+    PARAKEET.preferred = OWN_PARAKEET if selected else None
+    if selected or OWN_PARAKEET.process is None:
+        return
+
+    def close_runtime():
+        with OWN_PARAKEET.lock:
+            if PARAKEET.preferred is None:
+                OWN_PARAKEET._close()
+
+    threading.Thread(target=close_runtime, name="speech-runtime-close",
+                     daemon=True).start()
+
+
+def set_new_speech_runtime(enabled: bool) -> bool:
+    """Persist the off-by-default "New speech runtime" switch.
+
+    Takes effect on the next dictation. With PARROT_ASR_RUNTIME set the
+    environment decides, so the stored choice is left as it was and the
+    answer is the program actually asked first.
+    """
+    if not PARAKEET_RUNTIME_PINNED:
+        PREFERENCES["new_speech_runtime"] = bool(enabled)
+        save_preferences()
+        apply_speech_runtime()
+    return speech_runtime_selected()
+
+
+def speech_program_that_answered() -> str:
+    """"new" or "previous" for the program whose text the client returned
+    last, or "" when neither answered."""
+    answered = getattr(PARAKEET, "last_answered", None)
+    if answered is None:
+        return ""
+    return "new" if answered is OWN_PARAKEET else "previous"
 
 
 def set_voice_object_commands_enabled(enabled: bool) -> None:
@@ -6248,9 +6349,11 @@ def runtime_status_snapshot() -> dict:
         input_monitoring = accessibility = "Unknown"
     helper_ready = PARAKEET_ENABLED and PARAKEET_HELPER.is_file()
     try:
-        helper_running = bool(
-            helper_ready and PARAKEET.process is not None
-            and PARAKEET.process.poll() is None)
+        # The FluidAudio helper, or the runtime asked before it when one is.
+        helper_running = bool(helper_ready and any(
+            client is not None and client.process is not None
+            and client.process.poll() is None
+            for client in (PARAKEET, getattr(PARAKEET, "preferred", None))))
     except Exception:
         helper_running = False
     engine = str(PIPELINE_STATE["last_asr_engine"] or (
@@ -6297,6 +6400,8 @@ def runtime_status_snapshot() -> dict:
         "undo_hotkey_label": hotkey_label_for(UNDO_HOTKEY_NAME),
         "sounds": normalize_sound_theme(PREFERENCES["sounds"]),
         "recent_dictations": bool(PREFERENCES["recent_dictations"]),
+        "new_speech_runtime": speech_runtime_selected(),
+        "new_speech_runtime_last": PIPELINE_STATE["last_speech_program"],
         "language": current_language(),
         "undo_available": undoable_insertion_status()["available"],
         "flight_recorder": flight_active,
@@ -8156,12 +8261,13 @@ def bounded_helper_exchange(
 
 
 class ParakeetClient:
-    """Persistent, RAM-only bridge to the native FluidAudio helper.
+    """Persistent, RAM-only bridge to a native Parakeet helper.
 
     Requests are serialized because the app's ASR executor is deliberately
     single-threaded. Audio is framed Float32 over stdin; it is never written to
     disk. Any helper failure closes the process and returns ``None`` so the
-    existing Whisper Turbo path remains the faithful fallback.
+    next program in line (the FluidAudio helper after Whisper Face's own
+    runtime, Whisper Turbo after that helper) remains the faithful fallback.
     """
 
     # A start that fails can hold a decode for the whole start-up timeout, so
@@ -8171,18 +8277,47 @@ class ParakeetClient:
     START_RETRY_MAX_SECONDS = 300.0
 
     def __init__(self, helper=PARAKEET_HELPER, process_factory=None,
-                 exchange=None, clock=None):
+                 exchange=None, clock=None, models=PARAKEET_MODEL_DIR, *,
+                 name="Parakeet helper", fallback="Whisper",
+                 request_fallback="Whisper Turbo", ready_note="",
+                 missing_note="", retry_after_failure=False, preferred=None):
         self.helper = Path(helper)
+        # The pinned snapshot Python downloaded and verified. Named
+        # explicitly so a helper that honours --models loads exactly that
+        # folder and never looks for, or fetches, one of its own.
+        self.models = Path(models)
         self.process_factory = process_factory or subprocess.Popen
         self.exchange = exchange or bounded_helper_exchange
         self.clock = clock or time.monotonic
         self.process = None
+        self.protocol = 1
         self.lock = threading.Lock()
         self.failed_starts = 0
         self.next_start = 0.0
+        # How the log names this program and what takes over when it fails.
+        self.name = name
+        self.fallback = fallback
+        self.request_fallback = request_fallback
+        self.ready_note = ready_note
+        # Said once when the program is not installed; empty says nothing.
+        self.missing_note = missing_note
+        self.missing_reported = False
+        # A program on trial is benched after a failed request, as after a
+        # failed start, instead of being restarted inside the next
+        # dictation.
+        self.retry_after_failure = retry_after_failure
+        # Another client asked first for every request. Whatever it does not
+        # answer (it is not built, does not start, or fails the request)
+        # this client decodes from the same audio. None, the default, makes
+        # transcribe() exactly what it was before there was a second runtime.
+        self.preferred = preferred
+        # The client whose text the last transcribe() returned: this one,
+        # the one asked first, or None when neither answered.
+        self.last_answered = None
 
     def _close(self):
         process, self.process = self.process, None
+        self.protocol = 1
         if process is None:
             return
         for stream in (process.stdin, process.stdout):
@@ -8206,33 +8341,52 @@ class ParakeetClient:
             except Exception:
                 pass
 
-    def _start_failed(self, reason: str):
-        self._close()
+    def _bench(self) -> float:
+        """Hold off the next start; the wait doubles with each failure."""
         self.failed_starts += 1
         wait = min(self.START_RETRY_MAX_SECONDS,
                    self.START_RETRY_SECONDS * 2 ** (self.failed_starts - 1))
         self.next_start = self.clock() + wait
+        return wait
+
+    def _start_failed(self, reason: str):
+        self._close()
+        wait = self._bench()
         # The reason is a fixed word or an exception class, never its
         # message: an OSError message carries the helper's path.
-        print(f"! Parakeet helper did not start ({reason}); using Whisper, "
-              f"next attempt in {wait:.0f}s")
+        print(f"! {self.name} did not start ({reason}); using "
+              f"{self.fallback}, next attempt in {wait:.0f}s")
         return None
 
     def _start(self):
         if self.process is not None and self.process.poll() is None:
             return self.process
         self._close()
-        if not PARAKEET_ENABLED or not self.helper.is_file():
+        if not PARAKEET_ENABLED:
+            return None
+        if not self.helper.is_file():
+            if self.missing_note and not self.missing_reported:
+                self.missing_reported = True
+                print(self.missing_note)
             return None
         if self.clock() < self.next_start:
             return None
+        # FluidAudio reads FLUID_* tuning variables from the environment; a
+        # stray one must not retune the recognizer.
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith("FLUID_")}
         try:
+            # A protocol 1 helper reads only its first argument, so the
+            # extra ones cost an old helper nothing.
             process = self.process_factory(
-                [str(self.helper), "--server"],
+                [str(self.helper), "--server",
+                 "--protocol", str(PARAKEET_PROTOCOL),
+                 "--models", str(self.models)],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=None,
                 bufsize=0,
+                env=environment,
             )
         except Exception as error:
             return self._start_failed(type(error).__name__)
@@ -8244,13 +8398,36 @@ class ParakeetClient:
             return self._start_failed(type(error).__name__)
         if not status.get("ready"):
             return self._start_failed("not ready")
-        self.failed_starts = 0
+        self.protocol = helper_protocol(status)
+        if not self.retry_after_failure:
+            self.failed_starts = 0
         mark_model_warm_path_observed(PARAKEET_PROFILE.provider_id)
         print(f"[asr] Parakeet Unified ready in "
-              f"{float(status.get('load_s', 0.0)):.2f}s")
+              f"{float(status.get('load_s', 0.0)):.2f}s{self.ready_note}")
         return process
 
-    def transcribe(self, audio: np.ndarray) -> tuple[str, float] | None:
+    def transcribe(self, audio: np.ndarray):
+        """``(text, processing_s)`` as a ParakeetResult, or None.
+
+        The result also carries the helper's validated words and mean token
+        confidence when the helper speaks protocol 2; malformed words are
+        dropped there and never cost the transcript.
+        """
+        preferred = self.preferred
+        self.last_answered = None
+        if preferred is not None:
+            result = preferred.transcribe(audio)
+            if result is not None:
+                self.last_answered = preferred
+                # Answered again after a fallback: this program is not
+                # needed until the next failure, so it gives back its
+                # memory rather than staying loaded beside the other.
+                if self.process is not None:
+                    with self.lock:
+                        self._close()
+                    print(f"[asr] {self.name} closed; {preferred.name} "
+                          f"answers again")
+                return result
         payload = np.ascontiguousarray(audio, dtype="<f4")
         with self.lock:
             process = self._start()
@@ -8265,15 +8442,45 @@ class ParakeetClient:
                     timeout=timeout)
                 if not response.get("ok"):
                     raise RuntimeError(str(response.get("error", "ASR error")))
-                return (str(response.get("text", "")).strip(),
-                        float(response.get("processing_s", 0.0)))
+                result = parakeet_result(
+                    str(response.get("text", "")).strip(),
+                    float(response.get("processing_s", 0.0)),
+                    response, protocol=self.protocol, duration=duration)
+                # A program on trial earns its way off the bench by
+                # answering, not by starting: one that starts and then fails
+                # every request waits longer each time, as one that never
+                # starts does.
+                self.failed_starts = 0
+                self.last_answered = self
+                return result
             except Exception as error:
-                print(f"! Parakeet helper failed; using Whisper Turbo: {error}")
                 self._close()
+                if self.retry_after_failure:
+                    wait = self._bench()
+                    print(f"! {self.name} failed; using "
+                          f"{self.request_fallback}, next attempt in "
+                          f"{wait:.0f}s: {error}")
+                else:
+                    print(f"! {self.name} failed; using "
+                          f"{self.request_fallback}: {error}")
                 return None
 
 
-PARAKEET = ParakeetClient()
+# Whisper Face's own runtime (native/ParrotSpeechRuntime). It is asked first
+# only when PARAKEET_RUNTIME selects it; whatever it cannot answer goes to the
+# FluidAudio helper below, which falls back to Whisper as it always has.
+OWN_PARAKEET = ParakeetClient(
+    helper=PARAKEET_RUNTIME_HELPER,
+    name="Speech runtime",
+    fallback="the FluidAudio helper",
+    request_fallback="the FluidAudio helper",
+    ready_note=" (Whisper Face's own runtime)",
+    missing_note=("! Speech runtime is not installed; using the FluidAudio "
+                  "helper (./setup.sh builds it)"),
+    retry_after_failure=True,
+)
+PARAKEET = ParakeetClient(
+    preferred=OWN_PARAKEET if PARAKEET_RUNTIME == "own" else None)
 
 
 # ------------------------- pipeline -------------------------
@@ -8491,6 +8698,17 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
     if parakeet is None or not parakeet[0]:
         return None
     text = parakeet[0]
+    # A protocol 1 helper (or a bare (text, seconds) pair) has no words.
+    # Words that cannot be projected onto the text are dropped for this
+    # decode and reported as misaligned; the text is never touched.
+    status = getattr(parakeet, "word_evidence_status", "v1-helper")
+    helper_words = getattr(parakeet, "words", None)
+    words = ()
+    if status == "native" and helper_words:
+        words = project_word_evidence(text, helper_words, duration) or ()
+        status = "native" if words else "misaligned"
+    elif status == "native":
+        status = "absent"
     agreement = None
     confidence = PARAKEET_ROUTE_CONFIDENCE
     alternative = None
@@ -8504,8 +8722,11 @@ def _parakeet_crosschecked(audio: np.ndarray, prompt: str | None, *,
         confidence=confidence,
         engine="parakeet-unified",
         alternative=alternative,
+        words=words,
         audio_duration=duration,
         native_processing_s=_clean_native_processing_s(parakeet[1]),
+        acoustic_confidence=getattr(parakeet, "avg_confidence", None),
+        word_evidence_status=status,
     )
     # Escalation needs a third engine. asr_decode_target would quietly decode
     # with Tiny when Turbo is not installed, and Tiny is the engine that just
@@ -8743,10 +8964,20 @@ def compile_voice_evidence(recognition: Recognition,
                            finalized: bool = True,
                            context_pack: ContextPack | None = None):
     """Build VoiceIR and compile acoustic, contextual, and personal evidence."""
+    # The Parakeet helper's words reach the compiler only when one of their
+    # uses is switched on. With both off the compiler sees exactly what a
+    # protocol 1 helper gives it, so text and routing cannot change.
+    helper_words_used = PARAKEET_WORD_CONFIDENCE_ROUTING or PROSODY_FORMATTING
+    kept = tuple(
+        word for word in recognition.words
+        if helper_words_used
+        or getattr(word, "source", "") != HELPER_WORD_SOURCE)
+    helper_words_present = any(
+        getattr(word, "source", "") == HELPER_WORD_SOURCE for word in kept)
     words = tuple(WordEvidence(
         word.text, word.start, word.end, word.confidence,
         recognition.engine, word.timing,
-    ) for word in recognition.words)
+    ) for word in kept)
     hypotheses = [RecognitionHypothesis(
         recognition.text, recognition.confidence,
         recognition.engine or "primary", words)]
@@ -8790,6 +9021,9 @@ def compile_voice_evidence(recognition: Recognition,
         app_bundle=bundle,
         mode=mode,
         finalized=finalized,
+        trust_word_confidence=(
+            PARAKEET_WORD_CONFIDENCE_ROUTING or not helper_words_present),
+        pause_punctuation=PROSODY_FORMATTING or not helper_words_present,
     )
     return voice, VOICE_COMPILER.compile(voice)
 
@@ -12780,8 +13014,14 @@ def assemble_raw(chunk_futs: list, pre_future,
                     end + offset,
                     word.confidence,
                     word.timing if words_valid else "segment",
+                    getattr(word, "source", ""),
                 ))
                 word_has_bounds.append(has_bounds)
+            evidence_statuses.append(
+                getattr(result, "word_evidence_status", "absent"))
+            acoustic = getattr(result, "acoustic_confidence", None)
+            if acoustic is not None:
+                acoustic_confidences.append(acoustic)
             if result.engine:
                 engines.append(result.engine)
             verifications.append(result.verified)
@@ -12789,6 +13029,7 @@ def assemble_raw(chunk_futs: list, pre_future,
                 alternatives.append(result.alternative)
 
     parts, confidences, alternatives, engines, verifications = [], [], [], [], []
+    evidence_statuses, acoustic_confidences = [], []
     # Current rolling/speculative futures carry capture bounds, preserving
     # silence gaps in native timing. Bare futures remain supported for older
     # callers, but multi-part legacy timing fails closed to segment evidence.
@@ -12814,7 +13055,8 @@ def assemble_raw(chunk_futs: list, pre_future,
     if not timing_reliable:
         words = [
             word if has_bounds else RecognitionWord(
-                word.text, word.start, word.end, word.confidence, "segment")
+                word.text, word.start, word.end, word.confidence, "segment",
+                word.source)
             for word, has_bounds in zip(words, word_has_bounds)
         ]
     return Recognition(
@@ -12829,6 +13071,9 @@ def assemble_raw(chunk_futs: list, pre_future,
             sum(native_processing_times)
             if native_processing_times and native_processing_complete
             else None),
+        acoustic_confidence=(
+            min(acoustic_confidences) if acoustic_confidences else None),
+        word_evidence_status=combine_word_evidence_status(evidence_statuses),
     )
 
 
@@ -12948,6 +13193,8 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         if looped:
             # Collapsing a decode loop invalidates the original token indexes.
             recognition.words = ()
+            if recognition.word_evidence_status == "native":
+                recognition.word_evidence_status = "misaligned"
         if looks_like_prompt_echo(raw) and (
                 looped or raw.casefold().startswith(("glossary", "common terms"))):
             report_dictation_problem(
@@ -13458,6 +13705,11 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             if rec.capture_ready_at and rec.press_at else 0.0
         tail_wait = capture_done_at - released_at
         PIPELINE_STATE["last_asr_engine"] = recognition.engine or "unknown"
+        # Which program ran the Parakeet model for this dictation, when its
+        # text is the one kept; "" when another engine's text was.
+        PIPELINE_STATE["last_speech_program"] = (
+            speech_program_that_answered()
+            if recognition.engine == "parakeet-unified" else "")
         PIPELINE_STATE["last_release_s"] = release_total
         PIPELINE_STATE["last_word_count"] = len(text.split())
         # Publish the private detail as one atomic, in-memory latest-result
@@ -13547,6 +13799,10 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "asr_verified": recognition.verified,
             "alternatives": len(PIPELINE_STATE["last_alternatives"]),
             "word_evidence": len(recognition.words),
+            "word_evidence_status": recognition.word_evidence_status,
+            "acoustic_confidence": (
+                round(recognition.acoustic_confidence, 4)
+                if recognition.acoustic_confidence is not None else None),
             "prosody_events": len(voice_ir.prosody),
             "compiler_decisions": len(compiler_result.decisions),
             "protected_anchors": len(compiler_result.anchors),
@@ -14308,6 +14564,7 @@ def main():
         print(line)
     load_app_tones()
     load_preferences()
+    apply_speech_runtime()
     load_delayed_cleanup_activation()
     refresh_acoustic_calibration()
     refresh_selective_relisten_verifier()
@@ -14350,6 +14607,7 @@ def main():
             set_recent_dictations=set_recent_dictations_enabled,
             set_self_correction=set_self_correction,
             set_remove_repeats=set_remove_repeats,
+            set_new_speech_runtime=set_new_speech_runtime,
             recent_dictations=recent_dictation_metadata,
             reveal_recent_dictation=reveal_recent_dictation,
             insert_recent_dictation=insert_recent_dictation,

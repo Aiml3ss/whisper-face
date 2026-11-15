@@ -1,11 +1,22 @@
 # Parrot ASR helper protocol
 
-Wire contract between `dictate.py` (`ParakeetClient`, around line 6291) and the
-native FluidAudio helper in `Sources/parrot-asr-helper/main.swift`. The helper
-is a long-lived child process; audio crosses one pipe in RAM and never touches
-disk. This document defines the framed request, the response schema the helper
-emits today (v1), and the richer schema it will emit after a FluidAudio
-upgrade (v2), so the Python side can implement tolerant parsing ahead of time.
+Wire contract between `dictate.py` (`ParakeetClient`) and the two native
+programs that run the Parakeet Unified model:
+
+- the FluidAudio helper, `Sources/parrot-asr-helper/main.swift` here, built
+  on the FluidAudio 0.15.5 package. It speaks protocol 1 and is the default;
+- Whisper Face's own runtime, `native/ParrotSpeechRuntime`, which loads the
+  same model files with no package dependencies. It speaks protocols 1 and
+  2 and is used when `PARROT_ASR_RUNTIME=own` ("Which program answers",
+  below).
+
+Each is a long-lived child process; audio crosses one pipe in RAM and never
+touches disk.
+
+Two protocols are defined. Protocol 1 is what the FluidAudio helper speaks.
+Protocol 2 adds each word's time and confidence. The client asks every
+program for protocol 2 and reads, reshapes and records the words of one
+that answers it.
 
 ## Process modes
 
@@ -15,6 +26,32 @@ upgrade (v2), so the Python side can implement tolerant parsing ahead of time.
 | `parrot-asr-helper --preload` / `--verify` | Load models, print one status line, exit 0. |
 | anything else | Usage line on stderr, exit 2. |
 
+`parrot-speech-runtime` takes the same modes. It refuses an unknown mode
+before it loads anything, and before its status or ready line it decodes one
+second of silence, so a model file that loads but cannot run fails at start
+and never mid-dictation.
+
+Arguments after the mode:
+
+- `--protocol N` asks for protocol N. A program answers with the highest
+  protocol it speaks that is not above N, and with protocol 1 when the
+  argument is missing or unreadable. The FluidAudio helper reads only its
+  first argument, so it ignores this and every other extra argument.
+- `--models DIR` names the folder of the pinned Parakeet Unified snapshot
+  that Python downloaded and verified (`PARAKEET_MODEL_DIR`). The runtime
+  loads from exactly that folder and never downloads; the FluidAudio helper
+  ignores it and uses FluidAudio's default folder, which is the same
+  folder.
+
+`dictate.py` launches either program as `<program> --server --protocol 2
+--models <dir>`, with every `FLUID_*` variable removed from its environment
+(FluidAudio reads tuning overrides from them). `setup.sh` runs the
+FluidAudio helper with `--preload` and `--verify`, and the runtime with
+`--preload` and `--verify`, each followed by `--protocol 2 --models <dir>`.
+The runtime is optional while it is off by default: a runtime that does not
+build or preload is removed and the install goes on. `--verify` passes when
+it is absent and fails when one is present and does not answer protocol 2.
+
 Ready line (server mode), one JSON object terminated by `\n`:
 
 ```json
@@ -23,7 +60,8 @@ Ready line (server mode), one JSON object terminated by `\n`:
 
 Preload/verify line: same fields with `"ok": true` instead of `"ready"`. All
 helper output lines are single-line JSON objects with sorted keys. Model load
-logs from FluidAudio go to stderr, never stdout.
+logs from FluidAudio go to stderr, never stdout; the runtime writes nothing
+to stderr except its usage line.
 
 ## Request framing (stdin)
 
@@ -48,11 +86,16 @@ treats every non-`ok` response as fatal, closes the pipes, and kills the
 process, so desync cannot persist across requests. Keep that contract: after
 any error response, respawn rather than reuse.
 
-A payload truncated by EOF ends the helper process (it throws
-`truncatedAudio`). Clean EOF at a frame boundary exits the serve loop
-normally.
+Input that ends inside a request ends the process. Measured on 2026-11-15:
+the FluidAudio helper decodes whatever part of a cut-off payload arrived,
+answers, and exits 0 at the next read; a cut-off header, or a count of 2^63
+or more, crashes it. The runtime answers nothing for a cut-off header or
+payload and exits 1, and answers `invalid sample count` for any count out of
+range. Clean EOF at a frame boundary exits the serve loop normally. The
+client never sends any of these: it writes whole requests, and closes the
+process after any failure.
 
-## Response schema v1 (what the shipped helper emits)
+## Protocol 1 responses (what the FluidAudio helper emits)
 
 Success:
 
@@ -68,264 +111,197 @@ Failure:
 
 `processing_s` is wall time for the transcription call only (model load time
 is reported separately in the ready line). `text` may be empty for silence.
-Measured against the current build: a one-sentence response line is about 112
-bytes.
+A one-sentence response line is about 100 bytes.
 
-## Response schema v2 (planned; additive, optional fields)
+## Protocol 2
 
-v2 keeps every v1 field unchanged and adds two optional fields on success:
+### Ready and status lines
+
+Protocol 2 adds three keys to the ready line and to the `--preload` /
+`--verify` line:
 
 ```json
-{
-  "ok": true,
-  "text": "Hello world, this is a dictation test.",
-  "processing_s": 0.152,
-  "avg_confidence": 0.967,
-  "words": [
-    {"word": "Hello", "start": 0.88, "end": 0.96, "confidence": 0.998},
-    {"word": "world,", "start": 1.04, "end": 1.52, "confidence": 0.85}
-  ]
-}
+{"capabilities":["words"],"engine":"parrot-speech-runtime-1","load_s":0.14,"model":"parakeet-unified","protocol":2,"ready":true}
 ```
 
-Field semantics:
+Python treats a helper as protocol 2 only when `protocol` is the integer 2
+and `capabilities` is a list containing `"words"`; anything else is
+protocol 1 (`parrot_core.helper_protocol`). `engine` names the program and
+its version; Python records nothing from it.
 
-- `words[].word` — word text with punctuation attached, grouped from
-  SentencePiece tokens on their word-boundary markers. Joining `words[].word`
-  with single spaces reproduces `text` for typical output, but `text` remains
-  the authoritative transcript; do not reconstruct it from `words`.
-- `words[].start` / `words[].end` — seconds from the start of the submitted
-  clip, rounded to 3 decimals. Resolution is one encoder frame (80 ms:
-  `frameSamples 1280 / sampleRate 16000`). These are RNNT emission times, not
-  forced alignment: the decoder emits a token once it has heard enough
-  context, so a start can sit slightly after the word's true onset, and a gap
-  between one word's end and the next word's start is a real pause. The last
-  word's end is clamped to the clip duration upstream.
-- `words[].confidence` — minimum of the word's token softmax probabilities,
-  0..1, rounded to 3 decimals. Uncalibrated model confidence, chosen minimum
-  rather than mean so one weak sub-word token marks the whole word.
-- `avg_confidence` — mean softmax probability over all emitted tokens, 0..1,
-  rounded to 3 decimals. Uncalibrated; matches how FluidAudio's own TDT path
-  computes `ASRResult.confidence`.
+A model folder that is missing or damaged makes the runtime print
+`{"error":"model load failed","ok":false}` and exit 1, in every mode and
+whatever protocol was asked for. It does not download and does not delete
+anything.
 
-Compatibility rules:
+### Success response
 
-- Absent `words`/`avg_confidence` means v1 behavior. The helper omits both
-  when the transcription produced no tokens.
-- Consumers must ignore unknown fields, and must not fail when only some v2
-  fields are present.
-- Response stays a single JSON line. Measured size with real output: about 81
-  bytes per word entry, 1016 bytes for an 11-word sentence. A ten-minute
-  maximum-length dictation (~1,500 words at a fast pace) is roughly 125 KiB,
-  which exceeds the current Python-side cap `PARAKEET_MAX_RESPONSE_BYTES =
-  64 * 1024` (dictate.py:620). Raising that cap (1 MiB is comfortable) must
-  land in the same change that adopts v2; until then the cap is safe because
-  the shipped helper only emits v1-size lines.
+Keys sorted, one line:
 
-## Python-side parsing guidance
-
-Target dataclasses are in `parrot_core.py:124-142`:
-
-```python
-@dataclass
-class RecognitionWord:
-    text: str
-    start: float = 0.0
-    end: float = 0.0
-    confidence: float = 0.5
-    timing: str = "native"
-
-@dataclass
-class Recognition:
-    text: str
-    confidence: float = 1.0
-    alternative: str | None = None
-    verified: bool = False
-    engine: str = ""
-    words: tuple[RecognitionWord, ...] = ()
-    audio_duration: float = 0.0
-    native_processing_s: float | None = None
+```json
+{"avg_confidence":0.913,"ok":true,"processing_s":0.057,"text":"Send $42 to Priya.",
+ "words":[{"confidence":0.96,"end":0.96,"start":0.88,"word":"Send"},
+          {"confidence":0.99,"end":1.28,"mark_confidence":0.999,"start":1.04,"word":"$42"},
+          {"confidence":0.646,"end":2,"start":1.92,"word":"to"},
+          {"confidence":0.649,"end":2.32,"mark_confidence":0.586,"start":2.08,"word":"Priya."}]}
 ```
 
-Mapping for `ParakeetClient` / `_parakeet_crosschecked`:
+- `text` is authoritative and is the same text protocol 1 returns for the
+  same audio: both come from one decode, and the words are built from the
+  token stream that text was decoded from. Do not rebuild it from `words`.
+- `words[].word`: SentencePiece tokens grouped on their word-boundary
+  markers, punctuation attached.
+- `words[].start` / `end`: seconds from the start of the clip, three
+  decimals. These are RNNT emission times at the encoder's 80 ms frame
+  resolution, not forced alignment: a start can sit after the word's true
+  onset, and a gap between one word's end and the next one's start is a
+  real pause. Several tokens emitted on one frame get the same start and no
+  length. The last end is clamped to the clip.
+- `words[].confidence`: the lowest softmax probability among the word's
+  tokens that contain a letter or a digit (all its tokens when none do).
+  Sentence punctuation is often decoded less surely than the word before
+  it, and must not mark a clearly heard word as doubtful.
+- `words[].mark_confidence`: the lowest probability among the word's
+  punctuation-only tokens, present only when it has some.
+- `avg_confidence`: mean probability over all emitted tokens.
+- All confidences are uncalibrated model probabilities, three decimals.
+- `words` and `avg_confidence` are absent when no token was emitted, and
+  `words` is absent above 4,096 words (`WordEvidence.maximumWords` in the
+  runtime; the client rejects more than 4,096 entries).
+- A line is about 70 bytes per word; a ten-minute dictation stays well under
+  the 1 MiB the client accepts (`PARAKEET_MAX_RESPONSE_BYTES`).
 
-- `text` ← `response["text"]`, stripped (unchanged from today).
-- `native_processing_s` ← `response["processing_s"]` (unchanged).
-- `words` ← for each entry, `RecognitionWord(text=w["word"].strip(),
-  start=float(w["start"]), end=float(w["end"]),
-  confidence=min(1.0, max(0.0, float(w["confidence"]))), timing="native")`.
-  Skip entries whose word text strips to empty. If any entry is malformed
-  (missing key, non-numeric value), drop the whole `words` list and fall back
-  to v1 behavior — partial word evidence is worse than none. The downstream
-  harvest already validates native timings (monotonic, non-overlapping,
-  inside the span; dictate.py around 9646-9677) and demotes bad ones to
-  `timing="segment"`, mirroring how Whisper segment interpolation is labeled
-  in `recognition_words_from_segments` (parrot_core.py:631).
-- `Recognition.confidence` — policy decision for the dictate.py owner, not
-  this document. Today the Parakeet route derives confidence from
-  cross-engine agreement with a Whisper Tiny decode precisely because the
-  helper exposed none (`_parakeet_crosschecked`, dictate.py:6540).
-  `avg_confidence` is a direct but uncalibrated signal (mean softmax; RNNT
-  softmax probabilities skew high). Reasonable first use: keep the
-  agreement-based route confidence and use `avg_confidence` / per-word
-  confidence as additional evidence (for example, gating context repair on
-  low-confidence words) rather than replacing the agreement signal outright.
-- `ParakeetClient.transcribe` currently returns `(text, processing_s)`.
-  Adopting v2 means widening that return (or returning the parsed dict) plus
-  raising `PARAKEET_MAX_RESPONSE_BYTES`; both belong to the dictate.py owner.
+Error responses are as in protocol 1. The runtime launched without
+`--protocol 2` answers exactly as protocol 1 does: the same ready line, and
+responses with exactly the keys `ok`, `processing_s` and `text`.
 
-## Why the shipped helper still emits v1
+### Compatibility
 
-The helper pins FluidAudio `exact: "0.15.5"` and uses `UnifiedAsrManager`
-(Parakeet Unified 0.6B, offline 15 s full-attention encoder). In 0.15.5 that
-engine's entire batch API is:
+| Program \ client | Old client (`--server`) | Current client (`--server --protocol 2 --models DIR`) |
+| --- | --- | --- |
+| FluidAudio helper (protocol 1) | Protocol 1. | The helper reads only its mode and answers protocol 1; the client sees no `protocol` key and records `v1-helper`. |
+| The runtime (protocol 2) | Protocol 1, with exactly the protocol 1 keys. | Protocol 2. |
 
-```swift
-public func transcribe(_ samples: [Float]) async throws -> String
-public func transcribe(_ buffer: AVAudioPCMBuffer) async throws -> String
+`tests/test_dictate.py` (`HelperProtocolCompatibilityTests`) pins all four
+cells with the fake helper of `tests/fake_platform.py` behind real pipes,
+and checks that the FluidAudio helper's source reads only its first
+argument; `SpeechRuntimeSourceTests` holds the runtime's side of the
+contract in its Swift sources. On a Mac with the model,
+`scripts/speech_runtime_parity.py` checks the real programs
+(`native/ParrotSpeechRuntime/README.md` records what it printed).
+
+## The Python side (shipped)
+
+- `ParakeetClient.transcribe` returns a `parrot_core.ParakeetResult`: the
+  protocol 1 pair `(text, processing_s)`, which every caller unpacks as
+  before, carrying the validated words, `avg_confidence` and a status.
+- `parrot_core.parse_helper_words` treats the words as untrusted input.
+  Anything wrong anywhere (not a list, more than 4,096 entries, a word that
+  is not text or is longer than 64 characters, a time that is missing, not
+  finite, negative, out of order, ends before it starts or past the clip by
+  more than 2 ms, a confidence outside 0..1) discards every word: partial
+  evidence is worse than none. The text is never affected.
+- `voice_compiler.project_word_evidence` turns the helper's words into the
+  compiler's lexical tokens: ends clamped to the clip, a same-frame run
+  sharing its span by character count, each word split into its lexical
+  tokens ("world," is "world"; "$1,250.50" is "1" and "250.50"). The pieces
+  must be strictly ordered, at least 1 ms long, and spell exactly the
+  text's lexical tokens; otherwise the decode keeps no words. Times stay
+  labelled `native`.
+- Each dictation records `word_evidence` (a count) and
+  `word_evidence_status` in its transcript metrics: `native`, `v1-helper`,
+  `rejected` (malformed words), `misaligned` (words that do not spell the
+  text), or `absent` (no words expected or sent). Several decodes in one
+  dictation report the worst. `acoustic_confidence` records the lowest
+  `avg_confidence`; it is never the route confidence.
+- Two switches in `dictate.py` decide what the words may do, both `False`:
+  `PROSODY_FORMATTING` (pauses between the helper's timed words may add
+  commas and paragraphs) and `PARAKEET_WORD_CONFIDENCE_ROUTING` (a word's
+  confidence may clear a name's or a number's review flag). With both off,
+  helper words never reach the compiler, so typed text, the consequence
+  route and the review cue are exactly what a protocol 1 helper gives
+  (`tests/test_whole_program.py`, against
+  `benchmarks/replay_text_and_route_baseline.json`). With only
+  `PROSODY_FORMATTING` on, the words place spans in time but every span
+  stays flagged `word-confidence-uncalibrated`. Turn routing on only once
+  recordings of the owner's own voice show the confidence predicts errors.
+
+### Which program answers
+
+The **New speech runtime** switch in the window (Advanced → Models), saved
+as `new_speech_runtime` in `preferences.json`, chooses. It is off unless the
+file says `true`, and a change applies from the next dictation with no
+restart (`apply_speech_runtime` in `dictate.py` sets which client is asked
+first; switched off, the runtime is closed). `PARROT_ASR_RUNTIME` in the
+service's environment, when it is set to anything, wins over the switch:
+`own` (case and surrounding space ignored) selects the runtime, any other
+value the helper, and the switch then shows what runs and changes nothing.
+Off is the default, `fluidaudio`: the FluidAudio helper alone, exactly as
+before the runtime existed, and the runtime is never started. The switch's
+caption says which program answered the last dictation once one has.
+
+With the runtime selected, `PARAKEET` (the FluidAudio helper's client) asks
+`OWN_PARAKEET` (the runtime's) first for every request:
+
+- not built: the helper answers, and the log says so once;
+- does not start (no ready line within `PARAKEET_STARTUP_TIMEOUT`, or the
+  `model load failed` line): the helper answers, and the runtime is not
+  started again for 30 s, doubling with each failure in a row, up to 5
+  minutes;
+- fails a request (an error line, a timeout, a malformed or oversized
+  response): it is closed, the helper decodes the same audio for the same
+  dictation, and the runtime is benched the same way. Starting again does
+  not clear the count, only an answer does, so a runtime that starts and
+  then fails every request waits 30 s, 60 s, 120 s and so on, up to 5
+  minutes, as one that never starts does;
+- answers with empty text: that is the answer. Both programs run the same
+  model and give the same text, so the helper is not asked to decode the
+  same audio again;
+- answers again after a fallback: the helper is closed, so the two are not
+  both held in memory until the app restarts; the next fallback starts it
+  again;
+- the helper's own failures fall to Whisper, as they always have.
+
+The Parakeet route itself still requires the FluidAudio helper to be
+installed (`setup.sh` requires it; the runtime is optional), so the runtime is only ever asked
+where its fallback exists. To try it on an installed Mac, turn on New speech
+runtime under Advanced, or from a shell:
+
+```sh
+launchctl setenv PARROT_ASR_RUNTIME own
+launchctl kickstart -k "gui/$(id -u)/com.berg.dictate"
 ```
 
-Text only. Internally each window decodes to tokens carrying a frame
-timestamp and a confidence (`UnifiedRnntDecoder` emissions), but
-`transcribe` discards them at `tokenizer.decode`, and the types needed to
-rebuild the pipeline (`ChunkProcessor`, `UnifiedRnntDecoder`) are internal
-to the module. Verified against the pinned source, tag v0.15.5, revision
-`19600a485baa4998812e4654b70d2bab8f2c9949`.
+and `launchctl unsetenv PARROT_ASR_RUNTIME` with the same kickstart to go
+back. `dictate.log` names the program that started ("Parakeet Unified ready
+in 0.14s (Whisper Face's own runtime)") and every fallback.
 
-Richer results do exist elsewhere in 0.15.5, but only on other engines:
+## Why protocol 2 comes from Whisper Face's own runtime
 
-- `AsrManager` (TDT sliding-window family) returns full `ASRResult` — text,
-  mean-softmax confidence, `tokenTimings: [TokenTiming]?` — but runs the
-  `parakeet-tdt-0.6b-v2/v3-coreml` models, a different download and a
-  different accuracy profile from the unified offline encoder we ship.
-- `StreamingUnifiedAsrManager` exposes `consumeTokenTimings()` /
-  `consumeWordTimings()` with per-token confidence, but uses the chunked
-  streaming encoder export, which FluidAudio's own comments measure at worse
-  WER than the offline encoder (2.15% vs 1.82% LibriSpeech test-clean).
+The FluidAudio helper pins `exact: "0.15.5"`, whose `UnifiedAsrManager` has
+only `transcribe(_:) -> String`. Later FluidAudio releases report token
+timings, but cannot be built without fetching a prebuilt third-party binary:
+measured with Swift 6.4.2 on 2026-11-15, with every SwiftPM command run with
+outbound connections blocked, `.package(..., exact: "0.18.3", traits: [])`
+keeps TTS (and its GPL-derived LuxTTS G2P data), the diarizers and NeMo text
+normalisation out of the compiled helper, but `swift package resolve` and
+`swift build` still try to download `NemoTextProcessing.xcframework.zip`,
+which FluidAudio's own manifest declares, and fail when they cannot. On a
+toolchain older than 6.2 all three would be linked. Neither meets the
+project's licence and supply-chain rule, so the FluidAudio helper stays on
+0.15.5.
 
-Switching engine to gain evidence would change recognition behavior and
-model downloads; that is a product decision, not a protocol extension, so v1
-stands until the dependency moves.
-
-No FluidAudio engine offers n-best hypotheses in 0.15.5; all transcription
-decoding is greedy (the only beam search is the internal CTC keyword spotter
-used for vocabulary boosting).
-
-## The upgrade that enables v2 (verified)
-
-Upstream `FluidInference/FluidAudio` main gained exactly the missing API in
-PR #814, merged 2026-07-22, commit
-`f8529217d468a643c0b77bcf7e382569675b9559` ("Expose token timings from the
-Unified offline batch path"):
-
-```swift
-public struct TranscriptionWithTimings: Sendable {   // nested in UnifiedAsrManager
-    public let text: String
-    public let tokenTimings: [TokenTiming]
-}
-public func transcribeWithTimings(_ samples: [Float]) async throws -> TranscriptionWithTimings
-```
-
-`TokenTiming` (unchanged since 0.15.5): `token: String`, `tokenId: Int`,
-`startTime: TimeInterval`, `endTime: TimeInterval`, `confidence: Float`.
-`transcribe` and `transcribeWithTimings` share one decode path upstream, so
-the text cannot drift between them. As of 2026-07-27 no tagged release
-contains it; v0.15.5 is the newest tag.
-
-Verified on this machine (Apple toolchain, swift build, debug):
-
-- The unchanged helper builds against the 0.15.5 pin: `Build complete!`.
-- A scratch copy of this package pinned to revision `f8529217…` with the v2
-  changes below builds clean and, run against the locally cached model
-  bundle, transcribes a synthesized test sentence identically to the v1
-  build while adding correct `words` and `avg_confidence` (the sample
-  response above is its real output).
-
-Costs, measured, of moving the pin to that revision:
-
-- 28 commits of churn past v0.15.5, mostly TTS/diarization/download. The
-  ASR-side changes (seam-gap repair #761, final-window end-alignment #800)
-  rework `ChunkProcessor`, which the unified batch path uses only when
-  merging overlapping windows — audio over 15 s. Utterances up to 15 s
-  decode in a single window and are unaffected; long-dictation merges should
-  be re-validated after the upgrade.
-- Dependency resolution now downloads a binary artifact,
-  `NemoTextProcessing.xcframework` (~47 MB) from
-  `FluidInference/text-processing-rs` v0.3.0, pulled in by FluidAudio's TTS
-  text-normalization work. It links statically: the helper binary grows from
-  12 MB to 23 MB (debug) with no new dylibs, so the signed-single-binary
-  story is unchanged, but the build acquires a second-repo binary supply
-  chain.
-- `Package.swift`: one line, `exact: "0.15.5"` →
-  `revision: "f8529217d468a643c0b77bcf7e382569675b9559"` (or the next tagged
-  release once one exists — preferred; see
-  `docs/agents/fluidaudio-upstream-ask.md`).
-
-The verified v2 change to `main.swift`, in full (everything else in the file
-stays as it is):
-
-```swift
-// In serve(_:), replacing the transcribe call and success emit:
-let result = try await manager.transcribeWithTimings(samples)
-var response: [String: Any] = [
-    "ok": true,
-    "text": result.text,
-    "processing_s": seconds(started.duration(to: .now)),
-]
-let tokens = result.tokenTimings.filter {
-    !$0.token.isEmpty && $0.token != "<blank>" && $0.token != "<pad>"
-}
-if !tokens.isEmpty {
-    response["words"] = wordEvidence(tokens)
-    response["avg_confidence"] = rounded(
-        tokens.reduce(0.0) { $0 + Double($1.confidence) }
-            / Double(tokens.count))
-}
-emit(response)
-
-// New helpers:
-
-/// Group SentencePiece tokens into words on their leading-space boundaries
-/// (the same rule as FluidAudio's `buildWordTimings`, which drops per-token
-/// confidence). A word's confidence is the minimum of its tokens' softmax
-/// probabilities: uncalibrated, but conservative for downstream gating.
-private static func wordEvidence(_ tokens: [TokenTiming]) -> [[String: Any]] {
-    var words: [[String: Any]] = []
-    var text = ""
-    var start = 0.0
-    var end = 0.0
-    var confidence = 1.0
-    func flush() {
-        let trimmed = text.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return }
-        words.append([
-            "word": trimmed,
-            "start": rounded(start),
-            "end": rounded(end),
-            "confidence": rounded(confidence),
-        ])
-    }
-    for token in tokens {
-        if token.token.hasPrefix(" ") || text.isEmpty {
-            flush()
-            text = ""
-            confidence = 1.0
-            start = token.startTime
-        }
-        text += token.token
-        confidence = min(confidence, Double(token.confidence))
-        end = token.endTime
-    }
-    flush()
-    return words
-}
-
-/// Three decimals: 1 ms timing resolution (the model's is 80 ms) and a
-/// bounded response line for the Python side's size cap.
-private static func rounded(_ value: Double) -> Double {
-    (value * 1000).rounded() / 1000
-}
-```
+Protocol 2 is spoken instead by `native/ParrotSpeechRuntime`, Whisper
+Face's own program for the same model files. It has no package
+dependencies, so building it fetches nothing; it loads the Core ML files
+from the folder it is given and does the rest with Foundation, Core ML and
+Accelerate: log-mel features, the encoder over 15 s windows, the greedy
+transducer decode loop, tokens to text, the merge of overlapping windows,
+and the word timings and confidences above. The parts that reproduce
+FluidAudio 0.15.5's behaviour are ported from its Apache-2.0 source and say
+so; `native/ParrotSpeechRuntime/README.md` lists them, records the parity
+measurements against the FluidAudio helper and the proof that the runtime
+cannot reach the network, and says how to rebuild both.
 
 ## Appendix: FluidAudio 0.15.5 streaming and end-of-utterance APIs
 
