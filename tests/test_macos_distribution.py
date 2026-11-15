@@ -502,6 +502,10 @@ class MacDistributionContractTests(unittest.TestCase):
         for expected in (
             "git -C \"$REPO_DIR\" archive \"$FULL_REVISION\"",
             "fetch -q --depth 1",
+            # Loose objects keep the digest of .git stable across builds.
+            "-c fetch.unpackLimit=2147483647",
+            "-c maintenance.auto=false",
+            "holds objects that are not loose",
             "config core.logAllRefUpdates false",
             "packaged checkout lost its immutable source revision",
             "https://github.com/Aiml3ss/whisper-face.git",

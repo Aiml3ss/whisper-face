@@ -162,7 +162,7 @@ jobs:
           uv run tests/test_support_bundle.py
           uv run tests/test_whisper_face_characters.py
           uv run tests/test_whisper_face_gui.py
-          python3 -c 'import subprocess, sys; subprocess.run(sys.argv[1:], check=True, timeout=30)' \
+          python3 -c 'import subprocess, sys; subprocess.run(sys.argv[1:], check=True, timeout=120)' \
             uv run --locked --script dictate.py --native-gui-smoke-test
           uv run tests/test_network_egress.py
           uv run tests/test_supply_chain_integrity.py

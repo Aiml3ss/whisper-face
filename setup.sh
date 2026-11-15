@@ -843,8 +843,13 @@ verify_install() {
     "$uv_bin" sync --locked --script "$DIR/dictate.py" --check >/dev/null \
         || fail "the locked Python environment is incomplete; rerun ./setup.sh"
     if [ "$MODE" = "full" ]; then
-        run_with_timeout 30 "$uv_bin" run --locked \
-            --script "$DIR/dictate.py" --native-gui-smoke-test >/dev/null \
+        # --construction-only: build and draw the window, the overlay and
+        # the menu-bar face once. The full walk of the look is the release
+        # gate's and has no place in an install: it takes several times
+        # longer and measures nothing that differs from one Mac to the next.
+        run_with_timeout 60 "$uv_bin" run --locked \
+            --script "$DIR/dictate.py" --native-gui-smoke-test \
+            --construction-only >/dev/null \
             || fail "native AppKit construction smoke test failed or timed out"
     fi
     "$uv_bin" run --locked --script "$DIR/dictate.py" \

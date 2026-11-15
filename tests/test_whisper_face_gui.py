@@ -6,9 +6,11 @@
 """Headless tests for the Whisper Face native-window state seam."""
 
 import json
+import math
 import sys
 import ast
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,14 +28,24 @@ from whisper_face_gui import (
     RISKY_ACTION_CLASSES,
     SECTIONS,
     SETTINGS_PANES,
+    SIDEBAR_ROWS,
+    SIDEBAR_STATES,
     STRING_CATALOGS,
     SUPPORTED_LOCALES,
     WhisperFaceViewModel,
+    select_sidebar_row,
+    sidebar_row_destination,
+    sidebar_row_index,
+    sidebar_state,
     correction_review_text,
     create_gui,
     localized_string,
     native_appkit_smoke_contract,
     onboarding_presentation,
+    home_bubble_actions,
+    home_review_due,
+    home_review_in_row,
+    setup_rows,
     normalize_email_compose_receipt,
     normalize_voice_draft_clear_receipt,
     normalize_voice_draft_copy_receipt,
@@ -1002,7 +1014,8 @@ class SnapshotTests(unittest.TestCase):
             step for step in state.onboarding_steps
             if step.key == "first_dictation")
         self.assertIn("Voice Outbox", first_dictation.detail)
-        self.assertIn("Copy & Dismiss", first_dictation.detail)
+        # The button's name, held on one line by no-break spaces.
+        self.assertIn("Copy\u00a0&\u00a0Dismiss", first_dictation.detail)
 
     def test_status_presentation_covers_capture_processing_recovery_and_degraded(self):
         common = {
@@ -3184,6 +3197,3412 @@ class ControlSettingsViewModelTests(unittest.TestCase):
             self):
         model = self.model(reveal_recent_dictation=lambda _entry: None)
         self.assertEqual(model.reveal_recent_dictation("a"), "")
+
+
+GUI_SOURCE = (ROOT / "whisper_face_gui.py").read_text(encoding="utf-8")
+GUI_TREE = ast.parse(GUI_SOURCE)
+
+
+def _gui_class(name):
+    for node in ast.walk(GUI_TREE):
+        if isinstance(node, ast.ClassDef) and node.name == name:
+            return node
+    raise AssertionError(f"whisper_face_gui.py no longer defines {name}")
+
+
+def _gui_function(name, inside=None):
+    for node in ast.walk(inside or GUI_TREE):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"whisper_face_gui.py no longer defines {name}")
+
+
+def _method_names(node):
+    return {item.name for item in node.body
+            if isinstance(item, ast.FunctionDef)}
+
+
+def _called_names(node):
+    """Bare names and ``self.`` methods a piece of code calls, in order."""
+    calls = []
+    for item in ast.walk(node):
+        if not isinstance(item, ast.Call):
+            continue
+        target = item.func
+        if isinstance(target, ast.Name):
+            calls.append((item.lineno, item.col_offset, target.id))
+        elif (isinstance(target, ast.Attribute)
+              and isinstance(target.value, ast.Name)
+              and target.value.id == "self"):
+            calls.append((item.lineno, item.col_offset, target.attr))
+    return [name for _line, _column, name in sorted(calls)]
+
+
+def _gui_constants(*names):
+    """Evaluate simple module-level constants that sit behind the AppKit
+    guard, so the layout contract is checked where AppKit is absent."""
+    values = {}
+    for node in ast.walk(GUI_TREE):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if isinstance(target, ast.Name) and target.id in names:
+            values[target.id] = eval(  # noqa: S307 - our own constants
+                compile(ast.Expression(node.value), "<gui>", "eval"),
+                {}, dict(values))
+    missing = set(names) - set(values)
+    if missing:
+        raise AssertionError(f"missing layout constants: {sorted(missing)}")
+    return values
+
+
+class BrandGeometryTests(unittest.TestCase):
+    """The pure geometry every brand component draws from."""
+
+    def setUp(self):
+        import whisper_face_theme as theme
+        self.theme = theme
+
+    def test_hard_shadow_keeps_body_and_shadow_inside_the_footprint(self):
+        theme = self.theme
+        for name, shape in theme.BRAND_SHAPES.items():
+            with self.subTest(shape=name):
+                width, height = theme.hard_shadow_footprint(120.0, 40.0, shape)
+                self.assertEqual(
+                    (width, height),
+                    (120.0 + shape.shadow_right, 40.0 + shape.shadow_down))
+                body, shadow = theme.hard_shadow_frames(width, height, shape)
+                self.assertEqual(body, (0.0, 0.0, 120.0, 40.0))
+                self.assertEqual(
+                    shadow,
+                    (shape.shadow_right, shape.shadow_down, 120.0, 40.0))
+                for x, y, w, h in (body, shadow):
+                    self.assertGreaterEqual(x, 0.0)
+                    self.assertGreaterEqual(y, 0.0)
+                    self.assertLessEqual(x + w, width)
+                    self.assertLessEqual(y + h, height)
+
+    def test_pressing_moves_the_body_onto_its_shadow_and_leaves_a_sliver(
+            self):
+        theme = self.theme
+        for name in ("chunky_button", "chunky_button_small", "face_chip"):
+            shape = theme.BRAND_SHAPES[name]
+            width, height = theme.hard_shadow_footprint(90.0, 36.0, shape)
+            rest, shadow = theme.hard_shadow_frames(width, height, shape)
+            pressed, pressed_shadow = theme.hard_shadow_frames(
+                width, height, shape, pressed=True)
+            with self.subTest(shape=name):
+                self.assertEqual(shadow, pressed_shadow)
+                self.assertEqual(rest[2:], pressed[2:])
+                self.assertEqual(
+                    (pressed[0], pressed[1]),
+                    (shape.shadow_right - 1.0, shape.shadow_down - 1.0))
+                # Still inside the footprint: pressing never draws outside.
+                self.assertLessEqual(pressed[0] + pressed[2], width)
+                self.assertLessEqual(pressed[1] + pressed[3], height)
+        # An object without a shadow has nowhere to travel.
+        group = theme.BRAND_SHAPES["group"]
+        self.assertEqual(
+            theme.hard_shadow_frames(50.0, 20.0, group, pressed=True)[0],
+            (0.0, 0.0, 50.0, 20.0))
+
+    def test_a_tilted_tile_fits_the_upright_box_it_is_given(self):
+        theme = self.theme
+        for tilt in theme.STICKER_TILTS:
+            with self.subTest(tilt=tilt):
+                width, height = theme.tilted_inner_size(200.0, 76.0, tilt)
+                self.assertLess(width, 200.0)
+                self.assertLess(height, 76.0)
+                outer = theme.tilted_footprint(width, height, tilt)
+                self.assertAlmostEqual(outer[0], 200.0, places=6)
+                self.assertAlmostEqual(outer[1], 76.0, places=6)
+        self.assertEqual(theme.tilted_inner_size(200.0, 76.0, 0.0),
+                         (200.0, 76.0))
+        # A box too flat to hold the turned tile yields nothing, not a
+        # negative size.
+        self.assertEqual(theme.tilted_inner_size(200.0, 1.0, 20.0)[1], 0.0)
+
+    def test_stage_puts_the_face_left_and_the_content_beside_it(self):
+        theme = self.theme
+        shape = theme.BRAND_SHAPES["stage"]
+        # The widest and the narrowest the page column can be.
+        for column in (720.0, 632.0):
+            with self.subTest(column=column):
+                height = theme.STAGE_HEIGHT + shape.shadow_down
+                face, content = theme.stage_layout(column, height)
+                body_width = column - shape.shadow_right
+                self.assertEqual(face[2:], (200.0, 200.0))
+                self.assertEqual(face[0], theme.STAGE_PADDING_LEFT)
+                # Centred on the body, not on the footprint.
+                self.assertAlmostEqual(
+                    face[1] + face[3] / 2.0, theme.STAGE_HEIGHT / 2.0)
+                self.assertEqual(
+                    content[0], face[0] + face[2] + theme.STAGE_GAP)
+                self.assertAlmostEqual(
+                    content[0] + content[2],
+                    body_width - theme.STAGE_PADDING_RIGHT)
+                self.assertGreaterEqual(
+                    content[2], theme.STAGE_CONTENT_MIN_WIDTH)
+                self.assertGreaterEqual(content[1], theme.STAGE_PADDING_Y)
+                self.assertLessEqual(
+                    content[1] + content[3],
+                    theme.STAGE_HEIGHT - theme.STAGE_PADDING_Y)
+
+    def test_a_cramped_stage_shrinks_the_face_but_never_loses_it(self):
+        theme = self.theme
+        face, content = theme.stage_layout(330.0, 252.0)
+        self.assertLess(face[2], 200.0)
+        self.assertGreaterEqual(face[2], theme.STAGE_FACE_MIN_SIZE)
+        self.assertGreaterEqual(content[2], theme.STAGE_CONTENT_MIN_WIDTH)
+        face, content = theme.stage_layout(150.0, 252.0)
+        self.assertEqual(face[2], theme.STAGE_FACE_MIN_SIZE)
+        self.assertGreaterEqual(content[2], 0.0)
+        # A face smaller than the floor is honoured as asked.
+        self.assertEqual(
+            theme.stage_layout(150.0, 252.0, face_size=44.0)[0][2], 44.0)
+
+
+class NewLookFoundationContractTests(unittest.TestCase):
+    """What the next lanes rely on, checked without AppKit."""
+
+    COMPONENTS = {
+        # Controls: drawn, pressable, focusable.
+        "ChunkyButton": {
+            "configure", "drawRect_", "intrinsicContentSize", "is_pressed",
+            "drawFocusRingMask", "focusRingMaskBounds",
+            "viewDidChangeEffectiveAppearance"},
+        "FaceChipButton": {
+            "configure", "set_selected", "drawRect_", "is_pressed",
+            "drawFocusRingMask", "focusRingMaskBounds",
+            "viewDidChangeEffectiveAppearance"},
+        # Not controls: drawn and described, never focused.
+        "KeyCapView": {
+            "set_key", "drawRect_", "intrinsicContentSize",
+            "viewDidChangeEffectiveAppearance"},
+        "StickerTileView": {
+            "configure", "drawRect_", "intrinsicContentSize",
+            "viewDidChangeEffectiveAppearance"},
+        "StagePanelView": {
+            "set_face", "set_face_view", "set_content_view", "arrange",
+            "drawRect_", "viewDidChangeEffectiveAppearance"},
+    }
+    ROLES = {
+        "ChunkyButton": None,  # NSButton's own button role
+        "FaceChipButton": "NSAccessibilityRadioButtonRole",
+        "KeyCapView": "NSAccessibilityStaticTextRole",
+        "StickerTileView": "NSAccessibilityStaticTextRole",
+        "StagePanelView": "NSAccessibilityGroupRole",
+    }
+
+    def test_every_brand_component_is_defined_with_its_states(self):
+        shared = _gui_class("BrandButton")
+        for name, methods in self.COMPONENTS.items():
+            with self.subTest(component=name):
+                node = _gui_class(name)
+                defined = _method_names(node)
+                if [base.id for base in node.bases] == ["BrandButton"]:
+                    defined |= _method_names(shared)
+                self.assertFalse(
+                    methods - defined,
+                    f"{name} lost {sorted(methods - defined)}")
+                self.assertTrue(ast.get_docstring(node))
+        for name in ("ChunkyButton", "FaceChipButton"):
+            self.assertEqual(
+                [base.id for base in _gui_class(name).bases],
+                ["BrandButton"])
+        # Both ride the shared press spring, so Reduce Motion gates them
+        # exactly like every other jelly control.
+        self.assertEqual(
+            [base.id for base in shared.bases], ["JellyButton"])
+        # VoiceOver reads a button's cell, so what is set on the button
+        # must reach the cell.
+        self.assertLessEqual(
+            {"setAccessibilityLabel_", "setAccessibilityHelp_",
+             "setAccessibilityRole_", "setAccessibilityValue_"},
+            _method_names(shared))
+
+    def test_every_brand_component_draws_through_the_one_shadow_helper(self):
+        for name in (*self.COMPONENTS, "SpeechBubbleView"):
+            with self.subTest(component=name):
+                draw = _gui_function("drawRect_", _gui_class(name))
+                called = _called_names(draw)
+                if name == "KeyCapView":
+                    # A cap is drawn by the one function the cap inside a
+                    # line of copy is drawn by too.
+                    self.assertIn("draw_key_cap", called)
+                    called = _called_names(_gui_function("draw_key_cap"))
+                self.assertIn("draw_hard_shadow_shape", called)
+        helper = _gui_function("draw_hard_shadow_shape")
+        self.assertIn("hard_shadow_frames", _called_names(helper))
+        # The stage hands its circles to the helper and never strokes an
+        # outline of its own: one object, one outline.
+        stage = ast.unparse(
+            _gui_function("drawRect_", _gui_class("StagePanelView")))
+        self.assertIn("overlay=circles", stage)
+        self.assertNotIn("stroke", stage)
+
+    def test_every_brand_component_has_a_voiceover_role_and_label(self):
+        for name, role in self.ROLES.items():
+            with self.subTest(component=name):
+                text = ast.unparse(_gui_class(name))
+                if role is not None:
+                    self.assertIn(f"setAccessibilityRole_({role})", text)
+                self.assertTrue(
+                    "_accessible(" in text
+                    or "setAccessibilityLabel_(" in text
+                    or name == "StagePanelView",
+                    f"{name} sets no VoiceOver label")
+        # The chip says whether it is the chosen one.
+        self.assertIn(
+            "setAccessibilityValue_",
+            ast.unparse(_gui_function("set_selected",
+                                      _gui_class("FaceChipButton"))))
+
+    def test_brand_components_carry_no_colour_of_their_own(self):
+        start = GUI_SOURCE.index("# Brand components of the new look.")
+        end = GUI_SOURCE.index("class WhisperFaceWindowController(NSObject)")
+        block = GUI_SOURCE[start:end]
+        import re
+        self.assertEqual(re.findall(r"#[0-9A-Fa-f]{6}\b", block), [])
+        # Tokens are sRGB; the calibrated helper would lighten them.
+        self.assertNotIn("_theme_color(", block)
+        self.assertNotIn("colorWithCalibrated", block)
+
+    def test_layout_contract_adds_up_at_the_window_minimum(self):
+        values = _gui_constants(
+            "SIDEBAR_WIDTH", "CONTENT_WIDTH", "WINDOW_MIN_SIZE",
+            "TITLE_STRIP_HEIGHT", "CONTENT_INSET", "PAGE_COLUMN_MAX_WIDTH",
+            "PAGE_COLUMN_MIN_WIDTH", "ROW_MIN_HEIGHT",
+            "ROW_CAPTION_MIN_HEIGHT", "ROW_INSET", "SIDEBAR_ROW_HEIGHT",
+            "SIDEBAR_FACE_SIZE", "GROUP_HEADER_GAP", "GROUP_GAP")
+        # Sidebar, two insets and the narrowest column fill the minimum
+        # window exactly, so no page is ever asked to be narrower.
+        self.assertEqual(
+            values["SIDEBAR_WIDTH"] + 2 * values["CONTENT_INSET"]
+            + values["PAGE_COLUMN_MIN_WIDTH"],
+            values["WINDOW_MIN_SIZE"][0])
+        self.assertEqual(values["SIDEBAR_WIDTH"], 200.0)
+        self.assertEqual(
+            values["PAGE_COLUMN_MAX_WIDTH"], values["CONTENT_WIDTH"])
+        self.assertLess(
+            values["PAGE_COLUMN_MIN_WIDTH"], values["PAGE_COLUMN_MAX_WIDTH"])
+        self.assertEqual(values["ROW_MIN_HEIGHT"], 44.0)
+        self.assertEqual(values["ROW_CAPTION_MIN_HEIGHT"], 50.0)
+        self.assertEqual(values["SIDEBAR_ROW_HEIGHT"], 32.0)
+        self.assertEqual(values["SIDEBAR_FACE_SIZE"], 44.0)
+        self.assertEqual(values["TITLE_STRIP_HEIGHT"], 52.0)
+
+    def test_string_catalog_keeps_each_lanes_strings_under_its_marker(self):
+        markers = (
+            "# --- new look: shell",
+            "# --- new look: pages",
+            "# --- new look: home and setup",
+        )
+        lines = GUI_SOURCE.splitlines()
+        positions = []
+        for marker in markers:
+            found = [index for index, line in enumerate(lines)
+                     if line.strip() == marker]
+            self.assertEqual(len(found), 1, marker)
+            self.assertEqual(lines[found[0] + 1], "", marker)
+            positions.append(found[0])
+        self.assertEqual(positions, sorted(positions))
+        # They close the ``en`` catalog: nothing but markers, blank lines
+        # and whatever later lanes add sits between the first marker and
+        # the end of the dictionary.
+        closing = next(
+            index for index in range(positions[0], len(lines))
+            if lines[index] == "}")
+        self.assertEqual(lines[closing + 1],
+                         "SUPPORTED_LOCALES = tuple(STRING_CATALOGS)")
+        self.assertEqual(SUPPORTED_LOCALES, ("en",))
+        # Every lane has filled its place: each marker is followed by that
+        # lane's own strings.
+        self.assertTrue(any(
+            line.strip().startswith('"shell.')
+            for line in lines[positions[0]:positions[1]]))
+        self.assertTrue(any(
+            line.strip().startswith('"pages.')
+            for line in lines[positions[1]:positions[2]]))
+        self.assertTrue(any(
+            line.strip().startswith(('"home.', '"onboarding.'))
+            for line in lines[positions[2]:closing]))
+
+    RENDER_ORDER = [
+        "_render_shell", "_render_home", "_render_onboarding",
+        "_render_settings_shell", "_render_settings_personalize",
+        "_render_settings_controls", "_render_settings_privacy",
+        "_render_advanced", "_render_notices", "_render_finish",
+    ]
+
+    def test_render_calls_one_method_per_surface_in_a_fixed_order(self):
+        controller = _gui_class("WhisperFaceWindowController")
+        render = _gui_function("render", controller)
+        self.assertEqual(
+            [name for name in _called_names(render)
+             if name.startswith("_render")], self.RENDER_ORDER)
+        self.assertLess(
+            render.end_lineno - render.lineno, 30,
+            "render() is growing back into one method for every surface")
+        for name in self.RENDER_ORDER:
+            _gui_function(name, controller)
+        # The finish depends on what every surface enabled and hid.
+        finish = _called_names(_gui_function("_render_finish", controller))
+        self.assertEqual(
+            [name for name in finish if name.startswith("_")],
+            ["_sync_face_clock", "_configure_key_view_loop"])
+
+    def test_each_settings_pane_has_its_own_builder(self):
+        controller = _gui_class("WhisperFaceWindowController")
+        build = _gui_function("_build_settings", controller)
+        self.assertEqual(
+            [name for name in _called_names(build)
+             if name.startswith("_build_settings_")],
+            ["_build_settings_personalize", "_build_settings_controls",
+             "_build_settings_privacy"])
+        self.assertEqual(SETTINGS_PANES, ("Personalize", "Controls",
+                                          "Privacy"))
+
+
+class SettingsPagesContractTests(unittest.TestCase):
+    """The four settings pages, checked without AppKit."""
+
+    PAGE_BUILDERS = (
+        "_build_settings_personalize", "_build_settings_controls",
+        "_build_settings_privacy", "_build_advanced")
+
+    def test_each_page_is_a_grouped_scrolling_page_without_a_title(self):
+        controller = _gui_class("WhisperFaceWindowController")
+        for name in self.PAGE_BUILDERS + ("_build_settings",):
+            with self.subTest(builder=name):
+                called = _called_names(_gui_function(name, controller))
+                if name != "_build_settings":
+                    self.assertIn("_grouped_page", called)
+                    self.assertIn("_section_header", called)
+                    self.assertIn("_settings_group", called)
+                    # Groups are drawn by the group view, never an NSBox
+                    # card with its ambient shadow.
+                    self.assertNotIn("_card", called)
+                    self.assertNotIn("_pill", called)
+
+    def test_what_the_new_look_replaced_is_gone(self):
+        # The title strip names the page, so no page has a header of its
+        # own; buttons are the system's, so nothing repaints them; groups
+        # draw themselves, so nothing themes a card or a separator.
+        names = {node.id for node in ast.walk(GUI_TREE)
+                 if isinstance(node, ast.Name)} | {
+            node.attr for node in ast.walk(GUI_TREE)
+            if isinstance(node, ast.Attribute)} | {
+            node.name for node in ast.walk(GUI_TREE)
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef))} | {
+            alias.asname or alias.name for node in ast.walk(GUI_TREE)
+            if isinstance(node, ast.ImportFrom) for alias in node.names}
+        for gone in ("_page_header", "_stack", "_restyle_secondary_buttons",
+                     "_SECONDARY_BUTTONS", "_card", "_hairline", "_pill",
+                     "_fit_pill", "_set_pill_tone", "_amber_text_color",
+                     "_mirror_accessibility_to_cell", "_appkit_name",
+                     "NSSegmentStyleRounded", "NSBox", "SURFACE_SPECS",
+                     "CARD_RADIUS"):
+            with self.subTest(name=gone):
+                self.assertNotIn(gone, names)
+        # Every name the module imports from a framework or the theme is
+        # one it uses.
+        imported = [
+            (alias.asname or alias.name, node.lineno)
+            for node in ast.walk(GUI_TREE)
+            if isinstance(node, ast.ImportFrom)
+            and node.module in ("AppKit", "Foundation", "Quartz",
+                                "whisper_face_theme")
+            for alias in node.names]
+        used = {node.id for node in ast.walk(GUI_TREE)
+                if isinstance(node, ast.Name)
+                and isinstance(node.ctx, ast.Load)}
+        self.assertEqual(
+            [name for name, _line in imported if name not in used], [])
+        # No catalog string is left behind by a page that no longer
+        # shows it.
+        for key in ("settings.title", "settings.subtitle",
+                    "models.relisten.status.ready",
+                    "settings.personalize.keywords.detail",
+                    "settings.accessibility.edit.help"):
+            self.assertNotIn(key, STRING_CATALOGS["en"])
+
+    def test_a_render_that_changes_nothing_does_no_work(self):
+        # A page is laid out only when what a layout is worked out from
+        # (its width, which views show, what they say) has changed.
+        page = _gui_class("GroupedPageView")
+        arrange = ast.unparse(_gui_function("arrange", page))
+        self.assertIn(
+            "if not force and self.layout_inputs() == self.arranged_for:",
+            arrange)
+        self.assertIn("self.arranged_for = self.layout_inputs()", arrange)
+        inputs = ast.unparse(_gui_function("layout_inputs", page))
+        for read in ("self.content_width()", "view.stringValue()",
+                     "view.title()", "view.key", "view.isHidden()"):
+            self.assertIn(read, inputs)
+        # A group is marked for drawing only when its size or its
+        # separators changed: the one call is inside that test.
+        group = _gui_function("arrange", _gui_class("GroupBoxView"))
+        marks = [
+            node for node in ast.walk(group)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "attr", "") == "setNeedsDisplay_"]
+        guarded = [
+            node for branch in ast.walk(group)
+            if isinstance(branch, ast.If)
+            and "self.drawn_shape" in ast.unparse(branch.test)
+            for node in ast.walk(branch)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "attr", "") == "setNeedsDisplay_"]
+        self.assertEqual(len(marks), 1)
+        self.assertEqual(marks, guarded)
+        self.assertIn(
+            "shape = (float(width), top, tuple(separators))",
+            ast.unparse(group))
+        # The 2-second timer renders only when the state, the appearance
+        # or Increase Contrast changed what a render would write.
+        controller = _gui_class("WhisperFaceWindowController")
+        tick = ast.unparse(_gui_function("refreshTimer_", controller))
+        self.assertIn(
+            "    if self._what_a_render_reads() != self._rendered_from:\n"
+            "        self.render()", tick)
+        reads = ast.unparse(
+            _gui_function("_what_a_render_reads", controller))
+        for read in ("self.view_model.state", "_uses_dark_appearance",
+                     "_increase_contrast()"):
+            self.assertIn(read, reads)
+        render = ast.unparse(_gui_function("render", controller))
+        self.assertIn(
+            "self._rendered_from = self._what_a_render_reads()", render)
+        # Every other render (an action, a window being shown) still
+        # renders: only the timer asks first.
+        callers = [
+            node.name for node in ast.walk(controller)
+            if isinstance(node, ast.FunctionDef)
+            and "_what_a_render_reads" in _called_names(node)]
+        self.assertEqual(sorted(callers), ["refreshTimer_", "render"])
+
+    def test_buttons_are_system_push_buttons_read_through_their_cells(self):
+        button = _gui_function("_button")
+        text = ast.unparse(button)
+        self.assertIn("PushButton.alloc()", text)
+        self.assertIn("setBezelStyle_(NSBezelStyleRounded)", text)
+        # The system draws the bezel: no layer paint, no fixed corners.
+        for banned in ("setCornerRadius_", "setBordered_(False)", "layer()"):
+            self.assertNotIn(banned, text)
+        forwarded = _method_names(_gui_class("PushButton"))
+        self.assertLessEqual(
+            {"setAccessibilityLabel_", "setAccessibilityHelp_",
+             "setAccessibilityValue_"}, forwarded)
+
+    def test_the_face_picker_is_a_grid_of_face_chips(self):
+        picker = _gui_class("ArtFacePicker")
+        populate = ast.unparse(_gui_function("populate", picker))
+        self.assertIn("FaceChipButton.alloc()", populate)
+        self.assertLessEqual(
+            {"setSelectedSegment_", "selectedSegment", "chipPicked_",
+             "height_for_width", "arrange"}, _method_names(picker))
+        self.assertIn(
+            "chip.set_selected(",
+            ast.unparse(_gui_function("_paint_selection", picker)))
+
+    ROW_BUTTON_LABELS = {
+        "pages.personalize.tones.action": "Edit app tones",
+        "pages.personalize.snippets.action": "Edit snippets",
+        "pages.personalize.vocabulary.action": "Edit vocabulary",
+        "pages.personalize.corrections.action": "Review learned corrections",
+        "pages.personalize.keywords.action":
+            "Inspect pronunciation keywords",
+        "pages.controls.hotkey.action": "Change capture key",
+        "pages.controls.undo.action": "Change undo key",
+        "pages.controls.modes.action": "View voice modes",
+        "pages.controls.sound.action": "Preview feedback sounds",
+        "pages.privacy.recent.action": "Browse recent dictations",
+        "pages.privacy.voice_objects.action": "Inspect Voice Inbox",
+        "pages.support.licenses.action": "Open license notices",
+        "pages.support.source.action": "Open the exact source",
+        "home.replay.clear.action": "Clear retained spans",
+    }
+
+    def test_voiceover_copy_reaches_the_cell_a_control_is_read_through(self):
+        from whisper_face_gui import voiceover_elements
+
+        class Element:
+            label = help = value = None
+
+            def setAccessibilityLabel_(self, value):
+                self.label = value
+
+            def setAccessibilityHelp_(self, value):
+                self.help = value
+
+            def setAccessibilityValue_(self, value):
+                self.value = value
+
+        class Field(Element):
+            """A control drawn by a cell: VoiceOver reads the cell."""
+
+            def __init__(self):
+                self.its_cell = Element()
+
+            def cell(self):
+                return self.its_cell
+
+            def setStringValue_(self, value):
+                self.visual = value
+
+        class Switch(Element):
+            """A control with no cell is its own element."""
+
+            def cell(self):
+                return None
+
+        field = Field()
+        self.assertEqual(voiceover_elements(field), (field, field.cell()))
+        self.assertEqual(voiceover_elements(Element())[1:], ())
+        switch = Switch()
+        self.assertEqual(voiceover_elements(switch), (switch,))
+
+        gui_module._accessible(field, "Whisper Tiny status", "How it stands")
+        sync_accessibility(field, "Ready")
+        for element in (field, field.cell()):
+            self.assertEqual(
+                (element.label, element.help, element.value),
+                ("Whisper Tiny status", "How it stands", "Ready"))
+        # No help given: none set, and the label still lands on both.
+        other = Field()
+        gui_module._accessible(other, "Model name")
+        self.assertEqual(
+            (other.cell().label, other.cell().help), ("Model name", None))
+        sync_accessibility(field, "Checking", label="Parakeet status")
+        set_accessible_text(other, "Parakeet", label="Model name")
+        self.assertEqual(
+            (field.cell().label, field.cell().value),
+            ("Parakeet status", "Checking"))
+        self.assertEqual(
+            (other.visual, other.cell().label, other.cell().value),
+            ("Parakeet", "Model name", "Parakeet"))
+        # It is done once, in the helpers: nothing mirrors page by page.
+        names = {node.name for node in ast.walk(GUI_TREE)
+                 if isinstance(node, ast.FunctionDef)}
+        self.assertNotIn("_mirror_accessibility_to_cell", names)
+        for helper in ("_accessible", "sync_accessibility"):
+            self.assertIn(
+                "voiceover_elements", _called_names(_gui_function(helper)))
+        self.assertIn("sync_accessibility", _called_names(
+            _gui_function("set_accessible_text")))
+
+    def test_a_text_is_labelled_only_by_what_it_does_not_say(self):
+        # A label that only repeated the text would be spoken as well as
+        # the text, now that labels reach the cell.
+        label = ast.unparse(_gui_function("_label"))
+        self.assertNotIn("accessibility_label or text", label)
+        self.assertIn(
+            "_accessible(label, accessibility_label) "
+            "if accessibility_label else label", label)
+
+    def test_a_row_button_says_what_it_does_to_what(self):
+        catalog = STRING_CATALOGS["en"]
+        contract = native_appkit_smoke_contract().accessibility_catalog_keys
+        controller = ast.unparse(_gui_class("WhisperFaceWindowController"))
+        for key, words in self.ROW_BUTTON_LABELS.items():
+            with self.subTest(key=key):
+                self.assertEqual(catalog[key], words)
+                self.assertIn(key, contract)
+                self.assertGreaterEqual(len(words.split()), 2)
+                if key.startswith("pages.personalize."):
+                    # Built in a loop over the rows.
+                    self.assertIn(
+                        "label=self._l(f'pages.personalize.{key}.action')",
+                        controller)
+                else:
+                    self.assertIn(f"'{key}'", controller)
+        self.assertEqual(
+            len(set(self.ROW_BUTTON_LABELS.values())),
+            len(self.ROW_BUTTON_LABELS))
+        # The visible titles are unchanged, three of them still Edit.
+        self.assertEqual(
+            [catalog[key] for key in (
+                "settings.action.edit", "settings.action.review",
+                "settings.action.inspect", "settings.action.view",
+                "settings.controls.action.change",
+                "settings.controls.action.preview",
+                "settings.privacy.recent.browse", "results.audio.clear")],
+            ["Edit", "Review", "Inspect", "View", "Change…", "Preview",
+             "Browse…", "Clear"])
+        # A button reads its label, or its title when it has none, and a
+        # symbol beside the title never names it.
+        button = ast.unparse(_gui_function("_button"))
+        self.assertIn("_accessible(button, label or title, help_text)",
+                      button)
+        self.assertIn("image.setAccessibilityDescription_('')", button)
+        # A state's symbol is silent on the view and on its cell.
+        self.assertIn("_silence_image(self.icon)", ast.unparse(
+            _gui_function("initWithFrame_", _gui_class("StatusLabelView"))))
+        silence = ast.unparse(_gui_function("_silence_image"))
+        self.assertIn("view.cell()", silence)
+
+    def test_the_face_grid_fills_its_group_eight_to_a_row(self):
+        from whisper_face_gui import (
+            FACE_CHIP_GAP, FACE_CHIP_MAX, FACE_CHIP_MIN, FACE_GRID_COLUMNS,
+            face_grid)
+        self.assertEqual(
+            (FACE_GRID_COLUMNS, FACE_CHIP_GAP, FACE_CHIP_MAX), (8, 10.0, 78.0))
+        values = _gui_constants(
+            "CONTENT_WIDTH", "PAGE_COLUMN_MIN_WIDTH",
+            "PAGE_COLUMN_MAX_WIDTH", "ROW_INSET")
+        # The room the chips' bodies get: the group, less its two insets.
+        for column in (values["PAGE_COLUMN_MIN_WIDTH"],
+                       values["PAGE_COLUMN_MAX_WIDTH"]):
+            width = column - 2 * values["ROW_INSET"]
+            with self.subTest(column=column):
+                columns, chip, margin, rows = face_grid(width, len(FACES))
+                self.assertEqual((columns, rows), (8, 2))
+                # As large as the width allows with the spec's gap, in
+                # whole points; what is left over is under a point a chip
+                # and is split evenly either side.
+                self.assertEqual(chip, math.floor(
+                    (width - 7 * FACE_CHIP_GAP) / 8))
+                self.assertEqual(chip, int(chip))
+                left_over = width - (8 * chip + 7 * FACE_CHIP_GAP)
+                self.assertTrue(0.0 <= left_over < 8.0)
+                self.assertEqual(margin, math.floor(left_over / 2.0))
+                self.assertLessEqual(margin, 3.5)
+        self.assertEqual(face_grid(720.0 - 28.0, 16)[1], 77.0)
+        self.assertEqual(face_grid(632.0 - 28.0, 16)[1], 66.0)
+        # Never larger than the cap; then the grid is centred.
+        columns, chip, margin, rows = face_grid(1000.0, 16)
+        self.assertEqual((columns, chip, rows), (8, FACE_CHIP_MAX, 2))
+        self.assertEqual(margin, (1000.0 - (8 * 78.0 + 70.0)) / 2.0)
+        # Too narrow for eight chips of the smallest size: fewer to a row,
+        # not smaller chips.
+        columns, chip, _margin, rows = face_grid(300.0, 16)
+        self.assertLess(columns, 8)
+        self.assertGreaterEqual(chip, FACE_CHIP_MIN)
+        self.assertEqual(rows, -(-16 // columns))
+        self.assertEqual(face_grid(500.0, 3)[0], 3)
+        # The picker asks this function, and the line naming the chosen
+        # face rides the section header's line, outside the group.
+        picker = _gui_class("ArtFacePicker")
+        self.assertIn("face_grid", _called_names(
+            _gui_function("grid", picker)))
+        build = ast.unparse(_gui_function(
+            "_build_settings_personalize",
+            _gui_class("WhisperFaceWindowController")))
+        self.assertIn("hint = self._header_note()", build)
+        self.assertIn("trailing=hint", build)
+        self.assertNotIn("face_row.addSubview_(hint)", build)
+
+    def test_sentences_that_wrap_do_not_end_on_one_word(self):
+        # Each of these wrapped with its last word alone on a line, or with
+        # a button's name split across two, at a width the window takes.
+        catalog = STRING_CATALOGS["en"]
+        # Every sentence the bubble speaks, on Home and in setup, and the
+        # captions and notes that were seen to wrap badly.
+        spoken = [
+            key for key in catalog
+            if (key.startswith("overview.status.") and ".detail" in key)
+            or (key.startswith("onboarding.") and key.endswith(".detail")
+                and key.count(".") == 2)]
+        self.assertGreaterEqual(len(spoken), 12)
+        for key in (
+                *spoken,
+                "settings.controls.self_correction.off",
+                "settings.controls.self_correction.on",
+                "pages.models.advisory",
+                "pages.models.advisory.evidence",
+                "pages.models.advisory.unavailable"):
+            with self.subTest(key=key):
+                last = catalog[key].rsplit(" ", 1)[-1]
+                self.assertGreaterEqual(
+                    len(last.split("\u00a0")), 2,
+                    "the last two words stay on one line")
+        name = catalog["overview.action.copy_outbox"]
+        self.assertEqual(name, "Copy & Dismiss")
+        held = name.replace(" ", "\u00a0")
+        for key, text in catalog.items():
+            if key != "overview.action.copy_outbox":
+                with self.subTest(key=key):
+                    self.assertNotIn(
+                        name, text,
+                        "a button's name inside a sentence stays on one line")
+        for key in ("overview.status.recovery.detail.one",
+                    "overview.status.recovery.detail.many",
+                    "onboarding.first_dictation.detail"):
+            self.assertIn(held, catalog[key])
+
+    def test_the_model_checks_note_says_what_it_found(self):
+        import re
+        from whisper_face_gui import (
+            INTERNAL_STATUS_WORDS, internal_words_in, model_checks_note)
+        # The last words are held together by no-break spaces, so the
+        # note never ends with one word alone on a line.
+        information_only = (
+            "for information only; they never change "
+            "which\u00a0model\u00a0runs.")
+        # The runtime's own sentence carries counts; the page keeps them.
+        evidence = localized_string(
+            "models.wallet.evidence", resolved=3, warm=2)
+        self.assertEqual(
+            model_checks_note(evidence),
+            "Model files found on this Mac: 3 of 4 · warmed up: 2 of 4. "
+            "These checks are " + information_only)
+        for resolved in range(5):
+            for warm in range(5):
+                with self.subTest(resolved=resolved, warm=warm):
+                    note = model_checks_note(localized_string(
+                        "models.wallet.evidence", resolved=resolved,
+                        warm=warm))
+                    self.assertIn(
+                        f"found on this Mac: {resolved} of 4 · "
+                        f"warmed up: {warm} of 4.", note)
+        # No receipt, or one that failed validation.
+        unavailable = (
+            "Model file checks are not available on this Mac yet. They are "
+            + information_only)
+        self.assertEqual(
+            model_checks_note(localized_string("models.wallet.unavailable")),
+            unavailable)
+        self.assertEqual(
+            model_checks_note(
+                gui_module.GUIState().model_wallet_advisory), unavailable)
+        self.assertEqual(
+            model_checks_note(normalize_snapshot(
+                {"model_wallet_shadow": {"mode": "anything"}}
+            ).model_wallet_advisory), unavailable)
+        # Anything else claims nothing.
+        informational = "Model checks are " + information_only
+        for other in (localized_string("models.wallet.informational"),
+                      "", "Exact files resolved 9/4"):
+            self.assertEqual(model_checks_note(other), informational)
+        # Whatever it says, it says in plain words.
+        for note in (model_checks_note(evidence), unavailable, informational):
+            with self.subTest(note=note):
+                self.assertTrue(note.endswith(information_only))
+                self.assertFalse(internal_words_in(note))
+                self.assertIsNone(re.search(
+                    r"shadow|advisory|wallet|attested|\bpin", note,
+                    re.IGNORECASE))
+        self.assertIn("wallet", INTERNAL_STATUS_WORDS)
+        # The runtime's value and its wording are untouched, and the page
+        # goes through this function.
+        self.assertIn("Exact files resolved 3/4", evidence)
+        controller = _gui_class("WhisperFaceWindowController")
+        self.assertIn("model_checks_note", _called_names(
+            _gui_function("_render_advanced", controller)))
+        self.assertNotIn(
+            "models.accessibility.wallet", ast.unparse(controller))
+        self.assertIn(
+            "pages.models.advisory.label",
+            native_appkit_smoke_contract().accessibility_catalog_keys)
+
+    def test_model_states_are_shown_in_words_with_a_tone(self):
+        from whisper_face_gui import ModelStatus, model_status_display
+        models = normalize_snapshot({"models": [
+            READY_MODEL, PREPARING_MODEL,
+            {**READY_MODEL, "install_state": "not_installed",
+             "required": False, "warm": False},
+            {**READY_MODEL, "install_state": "failed", "warm": False},
+        ]}).models
+        self.assertEqual(
+            [model_status_display(model) for model in models],
+            [("Ready", "good"), ("Checking", "neutral"),
+             ("Optional", "neutral"), ("Needs repair", "warn")])
+        # A row the runtime did not classify keeps none of its words.
+        for word, expected in (("RESOLVED", ("Installed", "good")),
+                               ("UNAVAILABLE", ("Not available", "warn")),
+                               ("shadow-only", ("Unknown", "neutral"))):
+            with self.subTest(word=word):
+                model = ModelStatus("Whisper Tiny", role="Preview",
+                                    status=word, detail="Exact pinned")
+                self.assertEqual(model_status_display(model), expected)
+                self.assertEqual(
+                    gui_module.model_detail_display(model), "Preview")
+
+    def test_no_state_phrase_uses_an_internal_word(self):
+        from whisper_face_gui import (
+            INTERNAL_STATUS_TOKENS, INTERNAL_STATUS_WORDS, internal_words_in,
+            relisten_status_display, system_status_tone,
+            voice_inbox_status_display)
+        phrases = [
+            relisten_status_display(status) for status in (
+                "off", "ready", "warming", "enabled-not-ready",
+                "evidence-required", "receipt-invalid", "anything")]
+        phrases += [voice_inbox_status_display(status, count)
+                    for status in ("Off", "Ready", "Unavailable", "odd")
+                    for count in (0, 1, 3)]
+        phrases += [value for key, value in STRING_CATALOGS["en"].items()
+                    if key.startswith("pages.")]
+        for phrase in phrases:
+            with self.subTest(phrase=phrase):
+                self.assertFalse(internal_words_in(phrase))
+        # The receipt's status token counts as the runtime writes it; the
+        # microphone's own plain word for the same thing does not, and a
+        # Mac with no microphone shows it.
+        self.assertEqual(INTERNAL_STATUS_TOKENS, ("UNAVAILABLE",))
+        self.assertLessEqual(
+            set(INTERNAL_STATUS_TOKENS), set(INTERNAL_STATUS_WORDS))
+        self.assertEqual(internal_words_in("Unavailable"), [])
+        self.assertEqual(internal_words_in("UNAVAILABLE"), ["UNAVAILABLE"])
+        self.assertEqual(
+            internal_words_in("Exact pinned files resolved"),
+            ["RESOLVED", "pinned"])
+        self.assertEqual(
+            internal_words_in("Runtime readiness not attested"), ["attested"])
+        self.assertEqual(internal_words_in("Ready"), [])
+        # The reasons it cannot turn on all read the same way.
+        self.assertEqual(relisten_status_display("evidence-required"),
+                         relisten_status_display("receipt-invalid"))
+        self.assertIn("1 draft waiting",
+                      voice_inbox_status_display("Ready", 1))
+        self.assertEqual(
+            [system_status_tone(word) for word in (
+                "Running", "Granted", "Unavailable", "Needs attention",
+                "Starting")],
+            ["good", "good", "warn", "warn", "neutral"])
+
+
+class ShellNavigationTests(unittest.TestCase):
+    """The sidebar as a projection of the view model, checked headlessly."""
+
+    def test_five_rows_in_sidebar_order(self):
+        self.assertEqual(
+            [(row.key, row.section, row.pane) for row in SIDEBAR_ROWS],
+            [("home", "Home", None),
+             ("personalize", "Settings", "Personalize"),
+             ("controls", "Settings", "Controls"),
+             ("privacy", "Settings", "Privacy"),
+             ("advanced", "Advanced", None)])
+        for row in SIDEBAR_ROWS:
+            with self.subTest(row=row.key):
+                self.assertIn(row.section, SECTIONS)
+                self.assertTrue(row.pane is None or row.pane in SETTINGS_PANES)
+                self.assertIn(row.label_key, STRING_CATALOGS["en"])
+                self.assertTrue(row.symbol)
+        # One row per settings pane, and one for each section without panes.
+        self.assertEqual(
+            [row.pane for row in SIDEBAR_ROWS if row.section == "Settings"],
+            list(SETTINGS_PANES))
+        self.assertEqual(
+            len({row.symbol for row in SIDEBAR_ROWS}), len(SIDEBAR_ROWS))
+
+    def test_row_to_destination_and_back(self):
+        for index, row in enumerate(SIDEBAR_ROWS):
+            with self.subTest(row=row.key):
+                section, pane = sidebar_row_destination(index)
+                self.assertEqual((section, pane), (row.section, row.pane))
+                self.assertEqual(
+                    sidebar_row_index(section, pane or SETTINGS_PANES[0]),
+                    index)
+
+    def test_every_state_the_view_model_can_hold_has_exactly_one_row(self):
+        seen = set()
+        for section in SECTIONS:
+            for pane in SETTINGS_PANES:
+                with self.subTest(section=section, pane=pane):
+                    index = sidebar_row_index(section, pane)
+                    self.assertEqual(
+                        sidebar_row_destination(index),
+                        (section, pane if section == "Settings" else None))
+                    seen.add(index)
+        self.assertEqual(seen, set(range(len(SIDEBAR_ROWS))))
+
+    def test_the_remembered_pane_does_not_move_the_selection_elsewhere(self):
+        # The view model keeps the last settings pane while Home or
+        # Advanced is showing.
+        for pane in SETTINGS_PANES:
+            self.assertEqual(sidebar_row_index("Home", pane), 0)
+            self.assertEqual(sidebar_row_index("Advanced", pane), 4)
+
+    def test_unknown_rows_and_destinations_are_errors(self):
+        for index in (-1, len(SIDEBAR_ROWS), 99):
+            with self.assertRaises(ValueError):
+                sidebar_row_destination(index)
+        with self.assertRaises(ValueError):
+            sidebar_row_index("Nowhere", "Personalize")
+        with self.assertRaises(ValueError):
+            sidebar_row_index("Settings", "Nowhere")
+
+    def model(self, reads, *, fail=False):
+        def settings_snapshot():
+            reads.append(True)
+            if fail:
+                raise OSError("disk says no")
+            return {}
+
+        return WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {},
+            settings_snapshot=settings_snapshot))
+
+    def test_selecting_a_row_goes_through_the_view_model(self):
+        reads = []
+        model = self.model(reads)
+        for index, row in enumerate(SIDEBAR_ROWS):
+            with self.subTest(row=row.key):
+                state = select_sidebar_row(model, index)
+                self.assertIs(state, model.state)
+                self.assertEqual(state.section, row.section)
+                if row.pane is not None:
+                    self.assertEqual(state.settings_pane, row.pane)
+                self.assertEqual(
+                    sidebar_row_index(state.section, state.settings_pane),
+                    index)
+        # Walking back up shows the same pages.
+        for index in reversed(range(len(SIDEBAR_ROWS))):
+            select_sidebar_row(model, index)
+            self.assertEqual(
+                sidebar_row_index(
+                    model.state.section, model.state.settings_pane), index)
+
+    def test_settings_are_read_on_arrival_not_between_panes(self):
+        reads = []
+        model = self.model(reads)
+        select_sidebar_row(model, 1)       # Home -> Personalize: arrival
+        self.assertEqual(len(reads), 1)
+        select_sidebar_row(model, 2)       # Personalize -> Controls
+        select_sidebar_row(model, 3)       # Controls -> Privacy
+        self.assertEqual(len(reads), 1)
+        select_sidebar_row(model, 3)       # the showing row again: refresh
+        self.assertEqual(len(reads), 2)
+        select_sidebar_row(model, 4)       # Advanced reads nothing
+        select_sidebar_row(model, 0)
+        self.assertEqual(len(reads), 2)
+        select_sidebar_row(model, 2)       # arrival again, straight to a pane
+        self.assertEqual(len(reads), 3)
+        self.assertEqual(model.state.settings_pane, "Controls")
+
+    def test_selecting_a_row_clears_the_last_notice(self):
+        model = self.model([])
+        for index in range(len(SIDEBAR_ROWS)):
+            with self.subTest(row=SIDEBAR_ROWS[index].key):
+                model.state = replace(
+                    model.state, notice="stale", notice_level="success")
+                select_sidebar_row(model, index)
+                self.assertEqual(model.state.notice, "")
+                self.assertEqual(model.state.notice_level, "info")
+
+    def test_a_failed_settings_read_stays_on_screen_in_the_chosen_pane(self):
+        model = self.model([], fail=True)
+        select_sidebar_row(model, 2)
+        self.assertEqual(model.state.section, "Settings")
+        self.assertEqual(model.state.settings_pane, "Controls")
+        self.assertEqual(model.state.notice_level, "error")
+        self.assertIn("disk says no", model.state.notice)
+
+    def test_every_runtime_phase_has_a_one_or_two_word_state(self):
+        phases = {
+            "ready", "recording", "processing", "recovery", "degraded",
+            "paused", "starting"}
+        self.assertEqual(set(SIDEBAR_STATES), phases)
+        for phase in phases:
+            with self.subTest(phase=phase):
+                key, tone = sidebar_state(phase, setting_up=False)
+                self.assertLessEqual(
+                    len(localized_string(key).split()), 2)
+                self.assertIn(tone, ("good", "attention", "quiet"))
+                # First-run setup outranks whatever the service reports.
+                self.assertEqual(
+                    sidebar_state(phase, setting_up=True),
+                    ("shell.state.setup", "quiet"))
+        self.assertEqual(localized_string("shell.state.ready"), "Ready")
+        self.assertEqual(localized_string("shell.state.paused"), "Paused")
+        self.assertEqual(localized_string("shell.state.setup"), "Setting up")
+        self.assertEqual(sidebar_state("ready", setting_up=False)[1], "good")
+        self.assertEqual(
+            sidebar_state("degraded", setting_up=False)[1], "attention")
+        # A phase the window has never heard of is not reported as ready.
+        self.assertEqual(
+            sidebar_state("mystery", setting_up=False),
+            SIDEBAR_STATES["starting"])
+        # Model snapshots really produce these phases.
+        self.assertIn(normalize_snapshot({}).status_phase, phases)
+
+    def test_page_shortcuts_are_in_the_smoke_contract(self):
+        equivalents = native_appkit_smoke_contract().key_equivalents
+        for index, row in enumerate(SIDEBAR_ROWS):
+            self.assertIn(f"command-{index + 1}:{row.key}", equivalents)
+        self.assertIn("command-d:advanced", equivalents)
+
+    def test_shell_accessibility_labels_are_in_the_smoke_contract(self):
+        keys = native_appkit_smoke_contract().accessibility_catalog_keys
+        self.assertIn("shell.sidebar.accessibility.label", keys)
+        self.assertIn("shell.state.accessibility.label", keys)
+        # The pane switch is gone, and so is the label only it carried.
+        self.assertNotIn("settings.accessibility.category.label", keys)
+
+    def test_shell_structure_is_the_systems(self):
+        controller = _gui_class("WhisperFaceWindowController")
+        build = ast.unparse(_gui_function("_build_window", controller))
+        # A split view controller with a sidebar item, in a full-size
+        # content view: the material, divider and full-height layout are
+        # the system's. No toolbar, no hand-made effect view.
+        self.assertIn("NSSplitViewItem.sidebarWithViewController_(", build)
+        self.assertIn("setContentViewController_(", build)
+        self.assertIn("NSWindowStyleMaskFullSizeContentView", build)
+        self.assertIn("setTitlebarAppearsTransparent_(True)", build)
+        self.assertIn("setTitleVisibility_(NSWindowTitleHidden)", build)
+        # Read from the code the shell is built by, not from the module's
+        # text, so a comment or another surface elsewhere cannot trip it.
+        shell = build + ast.unparse(
+            _gui_function("_build_sidebar", controller))
+        for hand_made in ("NSVisualEffectView", "NSToolbar"):
+            self.assertNotIn(hand_made, shell)
+        self.assertEqual(
+            [base.id for base in _gui_class(
+                "ShellSplitViewController").bases],
+            ["NSSplitViewController"])
+        # The old in-window header and pane switch are gone for good: no
+        # attribute, function or dynamic key still goes by their names.
+        names = set()
+        for node in ast.walk(GUI_TREE):
+            if isinstance(node, ast.Attribute):
+                names.add(node.attr)
+            elif isinstance(node, ast.FunctionDef):
+                names.add(node.name)
+            elif isinstance(node, ast.keyword) and node.arg:
+                names.add(node.arg)
+            elif isinstance(node, ast.Constant) and isinstance(
+                    node.value, str):
+                names.add(node.value)
+        for gone in ("topbar", "settings_pane_control",
+                     "settingsPaneChanged_", "settingsPaneChanged:",
+                     "sectionChanged_", "sectionChanged:"):
+            self.assertNotIn(gone, names)
+
+    def test_shell_names_are_imported_inside_the_appkit_guard(self):
+        # One missing AppKit name outside the guard would stop the module
+        # importing at all, instead of leaving the window unavailable.
+        guard = next(
+            node for node in GUI_TREE.body
+            if isinstance(node, ast.Try) and any(
+                isinstance(item, ast.Assign)
+                and getattr(item.targets[0], "id", "") == "APPKIT_AVAILABLE"
+                for item in node.body))
+        guarded = {
+            alias.name
+            for item in guard.body if isinstance(item, ast.ImportFrom)
+            for alias in item.names}
+        self.assertLessEqual(
+            {"NSSplitViewController", "NSSplitViewItem", "NSStackView",
+             "NSViewController", "NSWindowStyleMaskFullSizeContentView",
+             "NSWindowTitleHidden", "NSAccessibilityListRole"}, guarded)
+        # Newer than macOS 14, so looked up rather than imported.
+        self.assertNotIn("NSAccessibilityHeadingRole", guarded)
+        # So are the names the brand components, Home and setup draw with.
+        self.assertLessEqual(
+            {"NSAccessibilityGroupRole", "NSAccessibilityImageRole",
+             "NSAffineTransform", "NSGraphicsContext", "NSTextAttachment",
+             "NSMutableAttributedString", "NSTextAlignmentRight",
+             "NSTextAlignmentCenter", "CGContextBeginTransparencyLayer"},
+            guarded)
+        # Nothing from a system framework is imported anywhere else at
+        # import time: outside the guard, only the project's own modules.
+        guarded_lines = {item.lineno for item in guard.body}
+        frameworks = {"AppKit", "Foundation", "Quartz", "objc", "CoreText"}
+
+        def top_level_imports(body):
+            for node in body:
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    yield node
+                elif isinstance(node, (ast.If, ast.Try)):
+                    yield from top_level_imports(node.body)
+                    yield from top_level_imports(node.orelse)
+
+        for node in top_level_imports(GUI_TREE.body):
+            module = (node.module if isinstance(node, ast.ImportFrom)
+                      else node.names[0].name)
+            if module.split(".")[0] in frameworks:
+                self.assertIn(
+                    node.lineno, guarded_lines,
+                    f"line {node.lineno} imports {module} outside the guard")
+        # No name is fetched from AppKit by string where it is used.
+        self.assertNotIn("_appkit_name", {
+            node.name for node in ast.walk(GUI_TREE)
+            if isinstance(node, ast.FunctionDef)})
+        self.assertNotIn("_appkit_name(", GUI_SOURCE)
+
+    def test_one_missing_appkit_name_leaves_the_module_importable(self):
+        # Import the module in a fresh interpreter against stand-in
+        # frameworks. With every name there, the import goes all the way
+        # through, so a name that is missing is the only thing in the
+        # way: the window is then unavailable, and the module, with the
+        # view model in it, still loads.
+        import subprocess
+        import textwrap
+        script = textwrap.dedent("""
+            import sys, types
+
+            class Anything:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                def __call__(self, *args, **kwargs):
+                    return Anything()
+
+                def __getattr__(self, name):
+                    if name.startswith("__"):
+                        raise AttributeError(name)
+                    return Anything()
+
+                def __mro_entries__(self, bases):
+                    return (object,)
+
+                def __or__(self, other):
+                    return self
+
+                __ror__ = __and__ = __rand__ = __or__
+
+                def __int__(self):
+                    return 0
+
+                def __float__(self):
+                    return 0.0
+
+                def __index__(self):
+                    return 0
+
+            class Framework(types.ModuleType):
+                missing = ()
+
+                def __getattr__(self, name):
+                    if name.startswith("__") or name in self.missing:
+                        raise AttributeError(name)
+                    return Anything()
+
+            for module in ("objc", "AppKit", "Foundation", "Quartz"):
+                sys.modules[module] = Framework(module)
+            if sys.argv[3]:
+                sys.modules[sys.argv[2]].missing = (sys.argv[3],)
+            sys.path.insert(0, sys.argv[1])
+            import whisper_face_gui
+            print("available" if whisper_face_gui.APPKIT_AVAILABLE
+                  else "unavailable")
+            whisper_face_gui.WhisperFaceViewModel(
+                whisper_face_gui.GUIActions())
+        """)
+        for module, name, expected in (
+                ("AppKit", "", "available"),
+                # Only the brand components draw with these.
+                ("AppKit", "NSAccessibilityRadioButtonRole", "unavailable"),
+                ("AppKit", "NSFontFeatureSettingsAttribute", "unavailable"),
+                ("AppKit", "NSMutableParagraphStyle", "unavailable"),
+                ("AppKit", "NSViewNoIntrinsicMetric", "unavailable"),
+                ("Quartz", "CGContextSetAlpha", "unavailable"),
+                # Home and setup used to fetch these by name at use.
+                ("AppKit", "NSTextAttachment", "unavailable"),
+                ("Foundation", "NSMutableAttributedString", "unavailable"),
+                # The window's own, as before.
+                ("AppKit", "NSSplitViewController", "unavailable"),
+                ("AppKit", "NSWindow", "unavailable")):
+            with self.subTest(missing=f"{module}.{name}"):
+                result = subprocess.run(
+                    [sys.executable, "-c", script, str(ROOT), module, name],
+                    capture_output=True, text=True, timeout=60)
+                self.assertEqual(
+                    result.returncode, 0,
+                    f"import failed without {name}:\n{result.stderr[-600:]}")
+                self.assertEqual(result.stdout.strip(), expected)
+
+    def test_sidebar_row_has_every_state_a_custom_control_needs(self):
+        row = _gui_class("SidebarRowButton")
+        self.assertEqual([base.id for base in row.bases], ["BrandButton"])
+        self.assertTrue(ast.get_docstring(row))
+        self.assertLessEqual(
+            {"configure", "set_selected", "drawRect_", "keyDown_",
+             "mouseDown_", "hitTest_", "canBecomeKeyView",
+             "takes_tab_stop", "drawFocusRingMask",
+             "focusRingMaskBounds", "viewDidChangeEffectiveAppearance"},
+            _method_names(row))
+        text = ast.unparse(row)
+        # One Tab stop for the whole sidebar: only the selected row, and
+        # only where the system lets a button take one. The rule is its
+        # own method so it can be checked where that setting is off.
+        self.assertIn(
+            "takes_tab_stop",
+            _called_names(_gui_function("canBecomeKeyView", row)))
+        self.assertEqual(
+            ast.unparse(_gui_function("takes_tab_stop", row).body[-1]),
+            "return bool(self.selected) and bool(buttons_take_tab)")
+        # Selected, for VoiceOver as well as for the eye.
+        self.assertIn("setAccessibilitySelected_", text)
+        self.assertIn("'sidebar_selection'", text)
+        # No press spring on navigation: the click skips JellyButton.
+        self.assertIn(
+            "objc.super(JellyButton, self).mouseDown_(event)", text)
+        self.assertNotIn("add_jelly_motion", text)
+
+    def test_shell_render_and_actions_are_wired(self):
+        controller = _gui_class("WhisperFaceWindowController")
+        shell = _called_names(_gui_function("_render_shell", controller))
+        for name in ("_apply_window_theme", "sidebar_row_index",
+                     "_sync_sidebar", "_sync_title_strip",
+                     "_animate_section_change"):
+            self.assertIn(name, shell)
+        self.assertLess(
+            shell.index("_apply_window_theme"), shell.index("_sync_sidebar"),
+            "the sidebar reads the appearance the theme resolves")
+        for name in ("set_setup_mode", "add_title_item", "selectSidebarRow_",
+                     "move_sidebar_focus", "windowDidBecomeKey_",
+                     "windowDidResignKey_", "_build_sidebar"):
+            _gui_function(name, controller)
+        self.assertIn(
+            "select_sidebar_row",
+            _called_names(_gui_function("_select_sidebar_row", controller)))
+        menu = ast.unparse(_gui_function("_install_main_menu", controller))
+        self.assertIn("'menu.view'", menu)
+        self.assertIn("'selectSidebarRow:'", menu)
+        self.assertIn("enumerate(SIDEBAR_ROWS)", menu)
+        self.assertEqual(localized_string("menu.view"), "View")
+
+    def test_shell_geometry_adds_up(self):
+        values = _gui_constants(
+            "SIDEBAR_WIDTH", "CONTENT_WIDTH", "CONTENT_MIN_WIDTH",
+            "CONTENT_EDGE_MIN", "CONTENT_INSET", "WINDOW_MIN_SIZE",
+            "WINDOW_DEFAULT_SIZE", "TITLE_STRIP_HEIGHT", "TITLE_BAR_HEIGHT",
+            "SIDEBAR_BRAND_TOP", "SIDEBAR_FACE_SIZE", "SIDEBAR_BRAND_GAP",
+            "SIDEBAR_ROW_HEIGHT", "SIDEBAR_ROW_GAP",
+            "SIDEBAR_GROUP_LABEL_HEIGHT", "SIDEBAR_FOOT_INSET",
+            "SIDEBAR_PADDING", "SIDEBAR_ROW_RADIUS", "PAGE_COLUMN_MIN_WIDTH")
+        # At the window minimum the column is at its narrowest, and the
+        # margin beside it is never less than CONTENT_EDGE_MIN. Today the
+        # pages need CONTENT_MIN_WIDTH, which leaves exactly that margin;
+        # with PAGE_COLUMN_MIN_WIDTH it would be the full CONTENT_INSET.
+        margin = (values["WINDOW_MIN_SIZE"][0] - values["SIDEBAR_WIDTH"]
+                  - values["CONTENT_MIN_WIDTH"]) / 2.0
+        self.assertGreaterEqual(margin, values["CONTENT_EDGE_MIN"])
+        self.assertLessEqual(margin, values["CONTENT_INSET"])
+        self.assertLessEqual(
+            values["PAGE_COLUMN_MIN_WIDTH"], values["CONTENT_MIN_WIDTH"])
+        self.assertLess(values["CONTENT_MIN_WIDTH"], values["CONTENT_WIDTH"])
+        self.assertLess(values["CONTENT_EDGE_MIN"], values["CONTENT_INSET"])
+        # The default window has room for the full column and full insets.
+        self.assertGreaterEqual(
+            values["WINDOW_DEFAULT_SIZE"][0],
+            values["SIDEBAR_WIDTH"] + 2 * values["CONTENT_INSET"]
+            + values["CONTENT_WIDTH"])
+        # The brand block starts below the title bar, and the title bar
+        # fits inside the strip that replaces it on the content side.
+        self.assertGreater(
+            values["SIDEBAR_BRAND_TOP"], values["TITLE_BAR_HEIGHT"])
+        self.assertGreater(
+            values["TITLE_STRIP_HEIGHT"], values["TITLE_BAR_HEIGHT"])
+        # Everything in the sidebar fits the minimum height with the build
+        # label clear of the last row.
+        rows = len(SIDEBAR_ROWS)
+        rows_bottom = (
+            values["SIDEBAR_BRAND_TOP"] + values["SIDEBAR_FACE_SIZE"]
+            + values["SIDEBAR_BRAND_GAP"]
+            + rows * values["SIDEBAR_ROW_HEIGHT"]
+            + (rows - 1) * values["SIDEBAR_ROW_GAP"]
+            + values["SIDEBAR_GROUP_LABEL_HEIGHT"])
+        self.assertLess(
+            rows_bottom + 24.0,
+            values["WINDOW_MIN_SIZE"][1] - values["SIDEBAR_FOOT_INSET"] - 14.0)
+        self.assertLess(
+            values["SIDEBAR_ROW_RADIUS"], values["SIDEBAR_ROW_HEIGHT"] / 2.0)
+
+    def test_sidebar_text_keeps_aa_on_the_selection_and_the_material(self):
+        import whisper_face_theme as theme
+
+        # The opaque colours the sidebar material falls back to, measured
+        # in the probe: what an inactive window and a headless render show.
+        materials = {False: (0.941, 0.941, 0.941), True: (0.157, 0.157, 0.157)}
+        for dark, material in materials.items():
+            palette = theme.palette_for_appearance(dark)
+            with self.subTest(dark=dark):
+                for contrast in (False, True):
+                    selection = theme.color_token(
+                        "sidebar_selection", dark, contrast).over(material)
+                    self.assertGreaterEqual(
+                        theme.contrast_ratio(palette.ink, selection), 4.5)
+                dimmed = theme.Shade(palette.ink, 0.10).over(material)
+                self.assertGreaterEqual(
+                    theme.contrast_ratio(palette.ink, dimmed), 4.5)
+                for ink in (palette.ink, palette.ink_soft):
+                    self.assertGreaterEqual(
+                        theme.contrast_ratio(ink, material), 4.5)
+                attention = (
+                    palette.error if dark else gui_module.ERROR_TEXT_ON_LIGHT)
+                self.assertGreaterEqual(
+                    theme.contrast_ratio(attention, material), 3.0)
+
+
+
+class HomeAndSetupTests(unittest.TestCase):
+    """Home and first-run setup, as far as they can be checked without
+    AppKit: the rules that decide what shows, and the edge the dark
+    appearance gives a control."""
+
+    ISSUE = gui_module.DegradedIssue(
+        "microphone", "Microphone permission is needed", "Enable it")
+
+    def test_a_dark_filled_control_gets_the_lowest_edge_that_measures_3(
+            self):
+        import whisper_face_theme as theme
+
+        dark = theme.DARK_PALETTE
+        edge = theme.color_token("control_edge", True)
+        # The light ink, at the lowest opacity (in hundredths) that is 3:1
+        # against the surface a plain button or a key cap is filled with
+        # and usually sits on.
+        self.assertEqual(edge.color, dark.ink)
+        self.assertEqual(edge.alpha, theme.CONTROL_EDGE_DARK_ALPHA)
+        self.assertEqual(edge.alpha, 0.39)
+        measured = theme.contrast_ratio(
+            edge.over(dark.surface), dark.surface)
+        self.assertGreaterEqual(measured, 3.0)
+        self.assertLess(measured, 3.1)
+        self.assertLess(
+            theme.contrast_ratio(
+                theme.Shade(dark.ink, edge.alpha - 0.01).over(dark.surface),
+                dark.surface), 3.0)
+        # On the darker window field the same edge is stronger.
+        self.assertGreater(
+            theme.contrast_ratio(edge.over(dark.surface), dark.bg), measured)
+        # Increase Contrast keeps the whole light ink; the light
+        # appearance keeps the ordinary outline in both.
+        self.assertEqual(
+            theme.color_token("control_edge", True, True),
+            theme.Shade(dark.ink))
+        for contrast in (False, True):
+            self.assertEqual(
+                theme.color_token("control_edge", False, contrast),
+                theme.color_token("ink_outline", False, contrast))
+        # The ink of bright fills and of things that are not controls is
+        # the dark ink, as before: the stage, amber, the bubble, stickers.
+        self.assertEqual(
+            theme.color_token("ink_outline", True).color, dark.line)
+
+    def test_the_edge_rule_is_applied_where_the_components_draw(self):
+        ink = ast.unparse(_gui_function("_outline_ink"))
+        self.assertIn("color_token('control_edge', dark", ink)
+        chunky = ast.unparse(
+            _gui_function("drawRect_", _gui_class("ChunkyButton")))
+        # Plain is the dark-filled control; amber keeps the dark ink.
+        self.assertIn(
+            "ink=_outline_ink(dark, on_bright=amber, control=not amber)",
+            chunky)
+        cap = ast.unparse(_gui_function("draw_key_cap"))
+        self.assertIn("ink=_outline_ink(dark, control=True)", cap)
+        # Not controls: the bubble and the stickers keep the ordinary ink.
+        for name in ("SpeechBubbleView", "StickerTileView"):
+            draw = ast.unparse(_gui_function("drawRect_", _gui_class(name)))
+            self.assertIn("_outline_ink(dark)", draw)
+            self.assertNotIn("control=True", draw)
+
+    def test_a_hard_shadow_is_dark_whatever_its_outline_is(self):
+        # Increase Contrast turns the bubble's and the stickers' outline
+        # light in the dark appearance. Their shadow used to follow it
+        # and read as a glow. Every shadow is drawn in one place, in the
+        # ink a bright fill keeps: dark in both appearances.
+        helper = _gui_function("draw_hard_shadow_shape")
+        text = ast.unparse(helper)
+        self.assertIn("_outline_ink(dark, on_bright=True).setFill()", text)
+        self.assertNotIn("shadow_ink", GUI_SOURCE)
+        arguments = [argument.arg for argument in helper.args.kwonlyargs]
+        self.assertIn("dark", arguments)
+        # No default: a caller cannot forget which appearance it draws in.
+        position = arguments.index("dark")
+        self.assertIsNone(helper.args.kw_defaults[position])
+        # The ink it uses never takes the light Increase Contrast value
+        # in the dark appearance, and is the palette's dark line there.
+        theme = gui_module.__dict__.get("color_token") or __import__(
+            "whisper_face_theme").color_token
+        from whisper_face_theme import DARK_PALETTE, LIGHT_PALETTE
+        ink = ast.unparse(_gui_function("_outline_ink"))
+        self.assertIn(
+            "_increase_contrast() and (not (dark and on_bright))", ink)
+        self.assertEqual(
+            theme("ink_outline", True, False).color, DARK_PALETTE.line)
+        self.assertEqual(
+            theme("ink_outline", True, True).color, DARK_PALETTE.ink)
+        for increase in (False, True):
+            self.assertLess(
+                sum(theme("ink_outline", False, increase).color),
+                sum(LIGHT_PALETTE.surface) / 2.0)
+        # Every component hands the helper its appearance.
+        for name in (*NewLookFoundationContractTests.COMPONENTS,
+                     "SpeechBubbleView"):
+            draw = _gui_function("drawRect_", _gui_class(name))
+            if name == "KeyCapView":
+                draw = _gui_function("draw_key_cap")
+            with self.subTest(component=name):
+                self.assertIn("dark=dark", ast.unparse(draw))
+
+    def test_key_cap_is_read_once_in_the_readers_language(self):
+        cap = ast.unparse(_gui_class("KeyCapView"))
+        self.assertIn(
+            "localized_string('key_cap.accessibility.role'", cap)
+        self.assertNotIn("setAccessibilityRoleDescription_('key')", cap)
+        self.assertNotIn("setAccessibilityValue_", cap)
+        self.assertEqual(
+            localized_string("key_cap.accessibility.role"), "key")
+
+    def state(self, **changes):
+        return replace(normalize_snapshot({}), **{
+            "onboarding_acknowledged": True, **changes})
+
+    def test_the_bubble_carries_the_primary_action_and_at_most_one_more(
+            self):
+        cases = (
+            ({}, ("pause",), False),
+            ({"paused": True}, ("pause",), False),
+            ({"outbox_count": 2}, ("pause", "copy_outbox"), False),
+            ({"degraded_issues": (self.ISSUE,)}, ("pause", "review"), False),
+            ({"outbox_count": 1, "degraded_issues": (self.ISSUE,)},
+             ("pause", "copy_outbox"), True),
+            # Setup that was never finished or acknowledged asks for a
+            # review exactly as a degraded item does.
+            ({"onboarding_acknowledged": False, "onboarding_complete": False},
+             ("pause", "review"), False),
+        )
+        for changes, actions, in_row in cases:
+            with self.subTest(changes=changes):
+                state = self.state(**changes)
+                self.assertEqual(home_bubble_actions(state), actions)
+                self.assertEqual(home_review_in_row(state), in_row)
+                self.assertLessEqual(len(home_bubble_actions(state)), 2)
+                self.assertEqual(home_bubble_actions(state)[0], "pause")
+                # Whatever is due is always offered somewhere.
+                self.assertEqual(
+                    home_review_due(state),
+                    "review" in actions or in_row)
+                self.assertEqual(
+                    bool(state.outbox_count), "copy_outbox" in actions)
+
+    RUNTIME = {
+        "service_status": "Running", "microphone_status": "Starting",
+        "accessibility_status": "Needs attention",
+        "input_monitoring_status": "Granted", "capture_state": "Ready",
+        "hotkey_label": "F13",
+        "models": [{**PREPARING_MODEL}],
+    }
+
+    def test_setup_shows_one_row_for_each_permission_with_its_state(self):
+        rows = setup_rows(normalize_snapshot(self.RUNTIME))
+        self.assertEqual(
+            [row.key for row in rows],
+            ["microphone", "accessibility", "input_monitoring"])
+        self.assertEqual(
+            [row.title for row in rows],
+            ["Microphone", "Accessibility", "Input Monitoring"])
+        self.assertTrue(all(row.caption and row.symbol for row in rows))
+        checking, missing, granted = rows
+        # Still being checked: nothing to grant yet, so no button.
+        self.assertEqual(
+            (checking.status, checking.tone, checking.permission),
+            ("Checking", "quiet", ""))
+        # One state, one phrase: a model being checked says it the same way.
+        self.assertEqual(
+            checking.status, STRING_CATALOGS["en"]["models.state.checking"])
+        # Missing: the row's own button to that pane, and no status words.
+        self.assertEqual(
+            (missing.status, missing.tone, missing.permission),
+            ("", "attention", "accessibility"))
+        # Granted: the check mark and the word.
+        self.assertEqual(
+            (granted.status, granted.tone, granted.permission),
+            ("Allowed", "good", ""))
+        self.assertNotIn(
+            "allow ", " ".join(
+                localized_string(key).casefold() for key in (
+                    "onboarding.action.open_system_settings",
+                    "onboarding.action.continue")))
+
+    def test_the_first_missing_permission_carries_the_steps_primary_action(
+            self):
+        def primaries(**statuses):
+            rows = setup_rows(normalize_snapshot(
+                {**self.RUNTIME, **statuses}))
+            return rows, [row.key for row in rows if row.primary]
+
+        # One missing: its row is the primary, and Continue waits.
+        rows, primary = primaries()
+        self.assertEqual(primary, ["accessibility"])
+        self.assertTrue(gui_module.setup_waits_on_a_row(rows))
+        # Several missing: only the first, the pane the step's single
+        # button has always opened.
+        rows, primary = primaries(
+            microphone_status="Unavailable",
+            input_monitoring_status="Needs attention")
+        self.assertEqual(primary, ["microphone"])
+        self.assertEqual(
+            primary[0], normalize_snapshot({
+                **self.RUNTIME, "microphone_status": "Unavailable",
+                "input_monitoring_status": "Needs attention",
+            }).missing_permissions[0])
+        self.assertEqual(
+            [row.permission for row in rows],
+            ["microphone", "accessibility", "input_monitoring"])
+        # Nothing missing, only still being checked: no row carries it,
+        # and the foot's Continue is the way forward.
+        rows, primary = primaries(accessibility_status="Unknown")
+        self.assertEqual(primary, [])
+        self.assertFalse(gui_module.setup_waits_on_a_row(rows))
+        # No other step ever puts its primary action in a row.
+        granted = {**self.RUNTIME, "microphone_status": "Ready",
+                   "accessibility_status": "Granted"}
+        for runtime in (
+                granted, {**granted, "hotkey_practiced": True},
+                {**granted, "hotkey_practiced": True,
+                 "models": [READY_MODEL]},
+                {**granted, "hotkey_practiced": True,
+                 "models": [READY_MODEL], "last_word_count": 3}):
+            self.assertFalse(gui_module.setup_waits_on_a_row(
+                setup_rows(normalize_snapshot(runtime))))
+
+    def test_the_window_gives_the_primary_row_the_amber_button_and_return(
+            self):
+        controller = _gui_class("WhisperFaceWindowController")
+        rows = ast.unparse(_gui_function("_render_setup_rows", controller))
+        self.assertIn("'amber' if spec.primary else 'plain'", rows)
+        self.assertIn(
+            "button.setKeyEquivalent_('\\r' if spec.primary else '')", rows)
+        onboarding = ast.unparse(
+            _gui_function("_render_onboarding", controller))
+        self.assertIn("waiting = setup_waits_on_a_row(rows)", onboarding)
+        self.assertIn("action.setEnabled_(not waiting)", onboarding)
+        self.assertIn(
+            "action.setKeyEquivalent_('' if waiting else '\\r')", onboarding)
+        # The action itself is unchanged: sent while a permission is
+        # missing, it still opens the first missing permission's pane.
+        proceed = ast.unparse(_gui_function("continueSetup_", controller))
+        self.assertIn(
+            "    elif self.view_model.permission_recovery_needed():\n"
+            "        self.view_model.open_system_settings()\n", proceed)
+
+    def test_only_what_just_turned_good_pops(self):
+        turned = gui_module.setup_rows_turned_good
+        none = frozenset()
+        # The first render pops nothing.
+        self.assertEqual(
+            turned(None, "permissions", frozenset({"microphone"}), none),
+            none)
+        # A permission granted while its step is showing.
+        self.assertEqual(
+            turned(("permissions", frozenset({"microphone"})), "permissions",
+                   frozenset({"microphone", "accessibility"}), none),
+            frozenset({"accessibility"}))
+        # A new step: every row is new, nothing pops.
+        self.assertEqual(
+            turned(("hotkey", none), "models",
+                   frozenset({"model:Parakeet"}), frozenset({"hotkey"})),
+            none)
+        # Completion: only the step that was just confirmed.
+        steps = frozenset(native_appkit_smoke_contract().onboarding_steps)
+        self.assertEqual(
+            turned(("first_dictation", none), "complete", steps,
+                   frozenset({"first_dictation"})),
+            frozenset({"first_dictation"}))
+        # A refresh that changed nothing.
+        self.assertEqual(
+            turned(("complete", steps), "complete", steps, none), none)
+
+    def test_model_rows_are_keyed_by_the_model_not_its_place(self):
+        granted = {
+            **self.RUNTIME, "microphone_status": "Ready",
+            "accessibility_status": "Granted", "hotkey_practiced": True}
+        models = [PREPARING_MODEL, {
+            "name": "Optional", "install_state": "installed"}]
+        first = setup_rows(normalize_snapshot({**granted, "models": models}))
+        second = setup_rows(normalize_snapshot(
+            {**granted, "models": models[::-1]}))
+        self.assertEqual(
+            {row.key: row.tone for row in first},
+            {row.key: row.tone for row in second})
+        self.assertEqual(
+            {row.key for row in first},
+            {f"model:{model['name']}" for model in models})
+
+    def test_the_face_pops_only_when_a_dictation_lands(self):
+        landed = gui_module.home_dictation_landed
+        before, after = (930.0, 9, 714, "9 words"), (810.0, 4, 718, "4 words")
+        self.assertTrue(
+            landed(before, after, available=True, section="Home"))
+        # Not on the first render, and not on a refresh that changed
+        # nothing (the window renders every two seconds).
+        self.assertFalse(landed(None, after, available=True, section="Home"))
+        self.assertFalse(
+            landed(after, after, available=True, section="Home"))
+        # Not without a result to show, and not behind another page.
+        self.assertFalse(
+            landed(before, after, available=False, section="Home"))
+        self.assertFalse(
+            landed(before, after, available=True, section="Advanced"))
+        # Every spring Home and setup add is gated by Reduce Motion.
+        controller = _gui_class("WhisperFaceWindowController")
+        for name in ("_animate_home_landing", "_animate_onboarding_face",
+                     "_animate_onboarding_steps", "_entrance_stagger"):
+            function = _gui_function(name, controller)
+            calls = [
+                node for node in ast.walk(function)
+                if isinstance(node, ast.Call)
+                and getattr(node.func, "id", "") == "add_jelly_motion"]
+            self.assertTrue(calls, name)
+            for call in calls:
+                gates = [ast.unparse(keyword.value)
+                         for keyword in call.keywords
+                         if keyword.arg == "reduced_motion"]
+                self.assertEqual(len(gates), 1, name)
+                self.assertIn("reduced", gates[0], name)
+                self.assertNotIn(gates[0], ("False", "True"), name)
+        self.assertIn(
+            "home_dictation_landed",
+            _called_names(_gui_function("_animate_home_landing", controller)))
+
+    def test_setup_rows_follow_the_step_and_the_key_that_is_bound(self):
+        granted = {
+            **self.RUNTIME, "microphone_status": "Ready",
+            "accessibility_status": "Granted"}
+        hotkey = setup_rows(normalize_snapshot(granted))
+        self.assertEqual(
+            [(row.key, row.key_cap, row.status) for row in hotkey],
+            [("hotkey", "F13", "")])
+        models = setup_rows(normalize_snapshot(
+            {**granted, "hotkey_practiced": True}))
+        self.assertEqual(
+            [(row.title, row.status) for row in models],
+            [(PREPARING_MODEL["name"], normalize_snapshot(
+                granted).models[0].status)])
+        # No model listed yet: the step itself, waiting.
+        waiting = setup_rows(normalize_snapshot(
+            {**granted, "hotkey_practiced": True, "models": []}))
+        self.assertEqual([row.key for row in waiting], ["models"])
+        first = setup_rows(normalize_snapshot(
+            {**granted, "hotkey_practiced": True, "models": [READY_MODEL]}))
+        self.assertEqual(
+            [(row.key, row.key_cap) for row in first],
+            [("first_dictation", "F13")])
+        done = setup_rows(normalize_snapshot(
+            {**granted, "hotkey_practiced": True, "models": [READY_MODEL],
+             "last_word_count": 3}))
+        self.assertEqual(
+            [(row.key, row.tone, row.status) for row in done],
+            [(key, "good", "Done") for key in native_appkit_smoke_contract()
+             .onboarding_steps])
+        self.assertEqual(done[1].key_cap, "F13")
+        # Never more rows than the window builds, required models first.
+        many = setup_rows(normalize_snapshot({
+            **granted, "hotkey_practiced": True, "models": [
+                {"name": f"Optional {index}", "install_state": "checking"}
+                for index in range(5)] + [PREPARING_MODEL]}))
+        self.assertEqual(len(many), gui_module.SETUP_ROW_LIMIT)
+        self.assertEqual(many[0].title, PREPARING_MODEL["name"])
+
+    def test_a_row_opens_its_own_permissions_pane_and_only_a_missing_one(
+            self):
+        opened = []
+        model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {
+                **self.RUNTIME, "microphone_status": "Unavailable"},
+            open_system_settings=opened.append))
+        self.assertEqual(
+            model.state.missing_permissions, ("microphone", "accessibility"))
+        model.open_system_settings("accessibility")
+        model.open_system_settings("input_monitoring")   # granted: ignored
+        model.open_system_settings("nonsense")
+        model.open_system_settings()                     # the first missing
+        self.assertEqual(opened, ["accessibility", "microphone"])
+
+    def test_home_and_setup_are_built_from_the_brand_components(self):
+        controller = _gui_class("WhisperFaceWindowController")
+        home = ast.unparse(_gui_function("_build_home", controller))
+        setup = ast.unparse(_gui_function("_build_setup", controller))
+        for text in (home, setup):
+            self.assertIn("StagePanelView.alloc()", text)
+            self.assertIn("LiveFaceView.alloc()", text)
+            self.assertIn("SpeechBubbleView.alloc()", text)
+            # On a stage the face has its hard shadow and no speech puffs.
+            self.assertIn("setShadow_(True)", text)
+            self.assertIn("setWhispers_(False)", text)
+            # One look for a group of rows: the header, the rows and the
+            # group that holds them are the settings pages' own, and
+            # nothing is a boxed card with separator views of its own.
+            for helper in ("self._section_header(", "self._settings_row(",
+                           "self._settings_group("):
+                self.assertIn(helper, text)
+            for old in ("_card(", "_hairline(", "NSBox"):
+                self.assertNotIn(old, text)
+            self.assertNotIn("_face_image(", text)
+        self.assertIn("StickerTileView.alloc()", home)
+        # Both place that header and group through the one section
+        # layout every settings page uses.
+        page = _called_names(
+            _gui_function("arrange", _gui_class("GroupedPageView")))
+        self.assertIn("arrange_section", page)
+        for name in ("_layout_home", "_layout_onboarding"):
+            self.assertIn("arrange_section", _called_names(
+                _gui_function(name, controller)))
+        # A setup row's state is the status view every page uses.
+        self.assertIn("self._status_label()", setup)
+        self.assertIn("_show_status", _called_names(
+            _gui_function("_render_setup_rows", controller)))
+        # The old blob backdrop and the layer-styled amber button are gone.
+        names = {node.attr for node in ast.walk(GUI_TREE)
+                 if isinstance(node, ast.Attribute)} | {
+            node.name for node in ast.walk(GUI_TREE)
+            if isinstance(node, ast.FunctionDef)} | {
+            node.value for node in ast.walk(GUI_TREE)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+        for gone in ("home_blobs", "home_stat_badges", "_primary_button",
+                     "_set_cta_title", "onboarding_face_chip",
+                     # ... and so are the card, its separator views and
+                     # the row layouts Home and setup used to keep.
+                     "_home_row", "_group_row", "_rows_host",
+                     "_layout_home_rows", "_layout_setup_row",
+                     "home_row_lines", "onboarding_row_lines"):
+            self.assertNotIn(gone, names)
+        # One Continue button; per-permission buttons are plain.
+        self.assertEqual(setup.count("'continueSetup:'"), 1)
+        self.assertIn("'openPermissionSettings:', variant='plain'", setup)
+
+    def test_the_render_probe_can_write_every_home_state_and_setup_variant(
+            self):
+        # ``--states`` renders the complete look from the repository: the
+        # states and variants below, by these names, in both appearances.
+        source = (ROOT / "scripts" / "window_render_probe.py").read_text(
+            encoding="utf-8")
+        tree = ast.parse(source)
+        functions = {node.name: node for node in tree.body
+                     if isinstance(node, ast.FunctionDef)}
+        self.assertIn('STATES = "--states" in ARGS', source)
+        self.assertIn("``--states``", ast.get_docstring(tree))
+        returned = next(
+            node.value for node in ast.walk(functions["home_states"])
+            if isinstance(node, ast.Return))
+        self.assertEqual(
+            [key.value for key in returned.keys],
+            ["ready", "ready-empty", "ready-long-key", "ready-fox",
+             "ready-replay", "ready-replay-held", "paused", "listening",
+             "working", "starting", "outbox", "needs-attention-permission",
+             "needs-attention-model", "outbox-and-attention",
+             "paused-outbox-attention"])
+        variants = next(
+            node.value for node in tree.body
+            if isinstance(node, ast.Assign)
+            and getattr(node.targets[0], "id", "") == "SETUP_VARIANTS")
+        self.assertEqual(
+            [key.value for key in variants.keys],
+            ["permissions", "permissions-all-missing", "permissions-mixed",
+             "hotkey", "hotkey-long", "models", "models-many",
+             "first-dictation", "complete"])
+        render = ast.unparse(functions["render_states"])
+        for name in ("f'home-{name}-{suffix}'", "f'setup-{name}-{suffix}'",
+                     "'home-outbox-contrast'", "'setup-permissions-contrast'",
+                     "f'setup-left-for-advanced-{suffix}'"):
+            self.assertIn(name, render)
+        # Increase Contrast is put back however the render ends.
+        self.assertIn("finally:\n        gui._increase_contrast = ", render)
+        # Without the option the probe writes what it always wrote.
+        calls = [node for node in ast.walk(tree)
+                 if isinstance(node, ast.If)
+                 and ast.unparse(node.test) == "STATES"]
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(
+            ast.unparse(calls[1].body[0]), "render_states(suffix)")
+        # Every phase it renders has status copy in the catalog.
+        phases = {
+            node.args[0].value for node in ast.walk(functions["home_states"])
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", "") == "home_phase"}
+        self.assertEqual(phases, {
+            "ready", "paused", "recording", "processing", "starting",
+            "recovery", "degraded"})
+        for phase in phases:
+            self.assertIn(
+                f"overview.status.{phase}.title", STRING_CATALOGS["en"])
+
+    def test_the_render_drives_setup_mode(self):
+        controller = _gui_class("WhisperFaceWindowController")
+        onboarding = _gui_function("_render_onboarding", controller)
+        self.assertIn("set_setup_mode", _called_names(onboarding))
+        self.assertIn(
+            "self.set_setup_mode(presentation.visible and "
+            "state.section == 'Home')", ast.unparse(onboarding))
+        # Nothing else in the window turns it on or off.
+        callers = [
+            node.name for node in controller.body
+            if isinstance(node, ast.FunctionDef)
+            and "set_setup_mode" in _called_names(node)]
+        self.assertEqual(callers, ["_render_onboarding"])
+
+    def test_the_live_face_can_be_asked_for_a_shadow_a_lean_and_no_puffs(
+            self):
+        source = (ROOT / "whisper_face_render.py").read_text(encoding="utf-8")
+        view = next(
+            node for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.ClassDef) and node.name == "LiveFaceView")
+        self.assertLessEqual(
+            {"setTilt_", "setBleed_", "setShadow_", "setWhispers_",
+             "setPose_", "art_side"}, _method_names(view))
+        draw = ast.unparse(next(
+            node for node in view.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "drawRect_"))
+        self.assertIn("shadow=self.shadow, whispers=self.whispers", draw)
+        self.assertIn("rotateByDegrees_(self.tilt)", draw)
+        self.assertIn("self.art_side()", draw)
+
+    def test_home_and_setup_voiceover_copy_is_in_the_smoke_contract(self):
+        keys = native_appkit_smoke_contract().accessibility_catalog_keys
+        for key in ("key_cap.accessibility.role",
+                    "home.stage.accessibility.label",
+                    "home.attention.accessibility.label",
+                    "onboarding.stage.accessibility.label",
+                    "onboarding.rows.accessibility.label",
+                    "onboarding.permission.open.label",
+                    "onboarding.row.accessibility.status",
+                    "onboarding.action.waiting.help"):
+            self.assertIn(key, keys)
+            self.assertIn(key, STRING_CATALOGS["en"])
+        # What the phase label carried still has its VoiceOver label.
+        self.assertIn("overview.accessibility.phase", keys)
+
+
+
+@unittest.skipUnless(
+    APPKIT_AVAILABLE,
+    "needs AppKit: run with "
+    "uv run --with pyobjc-framework-Cocoa --with pyobjc-framework-Quartz "
+    "tests/test_whisper_face_gui.py BrandComponentAppKitTests")
+class BrandComponentAppKitTests(unittest.TestCase):
+    """The components themselves, drawn off screen. Never shows a window."""
+
+    @classmethod
+    def setUpClass(cls):
+        import AppKit
+        cls.AppKit = AppKit
+        cls.app = AppKit.NSApplication.sharedApplication()
+        cls.window = AppKit.NSWindow.alloc() \
+            .initWithContentRect_styleMask_backing_defer_(
+                AppKit.NSMakeRect(0, 0, 400, 300), 0,
+                AppKit.NSBackingStoreBuffered, False)
+
+    def setUp(self):
+        self.set_appearance(dark=False)
+        contrast = patch.object(
+            gui_module, "_increase_contrast", lambda: False)
+        contrast.start()
+        self.addCleanup(contrast.stop)
+
+    def set_appearance(self, *, dark):
+        AppKit = self.AppKit
+        appearance = AppKit.NSAppearance.appearanceNamed_(
+            AppKit.NSAppearanceNameDarkAqua if dark
+            else AppKit.NSAppearanceNameAqua)
+        self.app.setAppearance_(appearance)
+        self.window.setAppearance_(appearance)
+
+    def show(self, view):
+        """Put a view in the off-screen window and return its bitmap."""
+        AppKit = self.AppKit
+        root = AppKit.NSView.alloc().initWithFrame_(
+            AppKit.NSMakeRect(0, 0, 400, 300))
+        self.window.setContentView_(root)
+        root.addSubview_(view)
+        view.setNeedsDisplay_(True)
+        bounds = view.bounds()
+        rep = view.bitmapImageRepForCachingDisplayInRect_(bounds)
+        view.cacheDisplayInRect_toBitmapImageRep_(bounds, rep)
+        srgb = rep.bitmapImageRepByConvertingToColorSpace_renderingIntent_(
+            AppKit.NSColorSpace.sRGBColorSpace(), 0)
+        # Converting drops the point size; ``pixel`` needs it back.
+        srgb.setSize_(bounds.size)
+        return srgb
+
+    def pixel(self, rep, x, y):
+        """sRGB colour at a point, measured in points from the top left."""
+        scale = rep.pixelsWide() / rep.size().width
+        color = rep.colorAtX_y_(int(x * scale), int(y * scale))
+        return (color.redComponent(), color.greenComponent(),
+                color.blueComponent())
+
+    def assertColor(self, actual, expected, message=""):
+        for got, want in zip(actual, expected):
+            self.assertAlmostEqual(got, want, delta=0.02, msg=message)
+
+    def frame(self, width=10, height=10):
+        return self.AppKit.NSMakeRect(0, 0, width, height)
+
+    def chunky(self, title, **kwargs):
+        button = gui_module.ChunkyButton.alloc().initWithFrame_(
+            self.frame()).configure(title, **kwargs)
+        size = button.intrinsicContentSize()
+        button.setFrame_(self.frame(size.width, size.height))
+        return button
+
+    def test_chunky_button_sizes_itself_around_its_title_and_shadow(self):
+        from whisper_face_theme import BRAND_SHAPES
+
+        regular = self.chunky("Pause")
+        small = self.chunky("Pause", small=True)
+        self.assertEqual(
+            regular.frame().size.height,
+            BRAND_SHAPES["chunky_button"].height
+            + BRAND_SHAPES["chunky_button"].shadow_down)
+        self.assertEqual(
+            small.frame().size.height,
+            BRAND_SHAPES["chunky_button_small"].height
+            + BRAND_SHAPES["chunky_button_small"].shadow_down)
+        self.assertLess(small.frame().size.width,
+                        regular.frame().size.width)
+        self.assertGreater(
+            self.chunky("Copy & Dismiss").frame().size.width,
+            regular.frame().size.width)
+        # The hit target clears the 28pt a Mac control should offer.
+        self.assertGreaterEqual(small.body_rect().size.height, 28.0)
+        with self.assertRaises(ValueError):
+            self.chunky("Pause", variant="rainbow")
+
+    def test_chunky_button_is_a_labelled_button_with_a_focus_ring(self):
+        button = self.chunky("Pause")
+        self.assertEqual(str(button.accessibilityLabel()), "Pause")
+        # VoiceOver reads the cell: it is the element, it is a button, and
+        # it carries whatever label and help the button was given.
+        element = self.AppKit.NSAccessibilityUnignoredDescendant(button)
+        self.assertIs(element, button.cell())
+        self.assertTrue(element.isAccessibilityElement())
+        self.assertEqual(
+            str(element.accessibilityRole()),
+            str(self.AppKit.NSAccessibilityButtonRole))
+        self.assertEqual(str(element.accessibilityLabel()), "Pause")
+        gui_module._accessible(button, "Pause dictation", "Stops listening")
+        self.assertEqual(
+            str(element.accessibilityLabel()), "Pause dictation")
+        self.assertEqual(str(element.accessibilityHelp()), "Stops listening")
+        body = button.body_rect()
+        ring = button.focusRingMaskBounds()
+        self.assertEqual(
+            (ring.origin.x, ring.origin.y, ring.size.width,
+             ring.size.height),
+            (body.origin.x, body.origin.y, body.size.width,
+             body.size.height))
+        # The ring hugs the body, not the shadow under it.
+        self.assertLess(ring.size.height, button.bounds().size.height)
+        self.assertNotEqual(
+            int(button.focusRingType()),
+            int(self.AppKit.NSFocusRingTypeNone))
+        fired = []
+        target = _ClickTarget.alloc().init()
+        target.fired = fired
+        button.setTarget_(target)
+        button.setAction_("clicked:")
+        button.performClick_(None)
+        self.assertEqual(fired, ["clicked"])
+
+    def test_chunky_button_draws_amber_and_plain_in_both_appearances(self):
+        from whisper_face_theme import (
+            DARK_PALETTE, LIGHT_PALETTE, STICKER_INK)
+
+        from whisper_face_theme import color_token, contrast_ratio
+
+        for dark, palette in ((False, LIGHT_PALETTE), (True, DARK_PALETTE)):
+            self.set_appearance(dark=dark)
+            for variant, fill in (("amber", palette.accent),
+                                  ("plain", palette.surface)):
+                with self.subTest(dark=dark, variant=variant):
+                    button = self.chunky("M", variant=variant)
+                    rep = self.show(button)
+                    body = button.body_rect()
+                    # Just inside the outline, clear of the title.
+                    self.assertColor(
+                        self.pixel(rep, body.origin.x + 6.0,
+                                   body.size.height / 2.0),
+                        fill, "fill")
+                    # The outline, on the body's left edge. A fill that is
+                    # dark in the dark appearance gets the light control
+                    # edge, laid over that fill; everything else the ink.
+                    outline = palette.line
+                    if dark and variant == "plain":
+                        outline = color_token("control_edge", True).over(
+                            palette.surface)
+                        self.assertGreaterEqual(
+                            contrast_ratio(
+                                self.pixel(rep, 1.0, body.size.height / 2.0),
+                                palette.surface), 3.0)
+                    self.assertColor(
+                        self.pixel(rep, 1.0, body.size.height / 2.0),
+                        outline, "outline")
+                    # The hard shadow, under the body's bottom edge.
+                    self.assertColor(
+                        self.pixel(rep, body.size.width / 2.0,
+                                   button.bounds().size.height - 1.0),
+                        palette.line, "shadow")
+        self.assertEqual(STICKER_INK, (42 / 255, 33 / 255, 28 / 255))
+
+    def test_chunky_button_pressed_and_disabled_states_are_visible(self):
+        from whisper_face_theme import BRAND_SHAPES, LIGHT_PALETTE
+
+        shape = BRAND_SHAPES["chunky_button"]
+        button = self.chunky("Pause")
+        rest = button.body_rect()
+        self.assertEqual((rest.origin.x, rest.origin.y), (0.0, 0.0))
+        self.assertFalse(button.is_pressed())
+        button.highlight_(True)
+        self.assertTrue(button.is_pressed())
+        pressed = button.body_rect()
+        self.assertEqual(
+            (pressed.origin.x, pressed.origin.y),
+            (shape.shadow_right - 1.0, shape.shadow_down - 1.0))
+        rep = self.show(button)
+        # Where the body's top-left corner used to be is now the window.
+        self.assertEqual(rep.colorAtX_y_(0, 0).alphaComponent(), 0.0)
+        button.highlight_(False)
+
+        button.setEnabled_(False)
+        self.assertFalse(button.is_pressed())
+        rep = self.show(button)
+        # No shadow under a disabled button, and a faded body.
+        height = button.bounds().size.height
+        scale = rep.pixelsWide() / rep.size().width
+        shadow = rep.colorAtX_y_(
+            int(rest.size.width / 2.0 * scale), int((height - 1.0) * scale))
+        self.assertEqual(shadow.alphaComponent(), 0.0)
+        fill = rep.colorAtX_y_(
+            int(6.0 * scale), int(rest.size.height / 2.0 * scale))
+        self.assertLess(fill.alphaComponent(), 0.6)
+        self.assertGreater(fill.alphaComponent(), 0.3)
+        self.assertIsNotNone(LIGHT_PALETTE)
+
+    def test_increase_contrast_gives_dark_fills_a_light_edge(self):
+        from whisper_face_theme import DARK_PALETTE
+
+        self.set_appearance(dark=True)
+        with patch.object(gui_module, "_increase_contrast", lambda: True):
+            plain = self.chunky("M", variant="plain")
+            rep = self.show(plain)
+            self.assertColor(
+                self.pixel(rep, 1.0, plain.body_rect().size.height / 2.0),
+                DARK_PALETTE.ink, "dark fill gets the light outline")
+            amber = self.chunky("M")
+            rep = self.show(amber)
+            self.assertColor(
+                self.pixel(rep, 1.0, amber.body_rect().size.height / 2.0),
+                DARK_PALETTE.line, "bright fill keeps the dark outline")
+
+    def test_key_cap_reads_as_a_named_key_and_fits_its_legend(self):
+        from whisper_face_theme import BRAND_SHAPES, LIGHT_PALETTE
+
+        cap = gui_module.KeyCapView.alloc().initWithFrame_(
+            self.frame()).set_key("Right Option")
+        self.assertEqual(str(cap.accessibilityLabel()), "Right Option")
+        self.assertEqual(
+            str(cap.accessibilityRole()),
+            str(self.AppKit.NSAccessibilityStaticTextRole))
+        # Read once: the name is the label, there is no value to repeat
+        # it, and the role's words come from the string catalog.
+        self.assertIsNone(cap.accessibilityValue())
+        self.assertEqual(
+            str(cap.accessibilityRoleDescription()),
+            localized_string("key_cap.accessibility.role"))
+        self.assertTrue(cap.isAccessibilityElement())
+        self.assertFalse(cap.acceptsFirstResponder())
+        shape = BRAND_SHAPES["key_cap"]
+        size = cap.intrinsicContentSize()
+        self.assertEqual(size.height, shape.height + shape.shadow_down)
+        short = gui_module.KeyCapView.alloc().initWithFrame_(
+            self.frame()).set_key("⌘")
+        # A one-glyph key is at least as wide as it is tall.
+        self.assertGreaterEqual(
+            short.intrinsicContentSize().width, shape.height)
+        self.assertLess(short.intrinsicContentSize().width, size.width)
+        cap.setFrame_(self.frame(size.width, size.height))
+        rep = self.show(cap)
+        self.assertColor(
+            self.pixel(rep, 3.0, shape.height / 2.0),
+            LIGHT_PALETTE.surface, "cap fill")
+        self.assertColor(
+            self.pixel(rep, size.width / 2.0, size.height - 0.5),
+            LIGHT_PALETTE.line, "cap shadow")
+
+    def test_key_cap_has_a_light_edge_and_a_dark_shadow_in_the_dark(self):
+        from whisper_face_theme import (
+            BRAND_SHAPES, DARK_PALETTE, color_token, contrast_ratio)
+
+        self.set_appearance(dark=True)
+        cap = gui_module.KeyCapView.alloc().initWithFrame_(
+            self.frame()).set_key("F13")
+        size = cap.intrinsicContentSize()
+        cap.setFrame_(self.frame(size.width, size.height))
+        rep = self.show(cap)
+        edge = self.pixel(rep, 0.5, BRAND_SHAPES["key_cap"].height / 2.0)
+        self.assertColor(
+            edge, color_token("control_edge", True).over(
+                DARK_PALETTE.surface), "cap edge")
+        self.assertGreaterEqual(
+            contrast_ratio(edge, DARK_PALETTE.surface), 3.0)
+        self.assertColor(
+            self.pixel(rep, size.width / 2.0, size.height - 0.5),
+            DARK_PALETTE.line, "cap shadow stays dark")
+        with patch.object(gui_module, "_increase_contrast", lambda: True):
+            rep = self.show(cap)
+            self.assertColor(
+                self.pixel(rep, 0.5, BRAND_SHAPES["key_cap"].height / 2.0),
+                DARK_PALETTE.ink, "Increase Contrast keeps the whole ink")
+
+    def test_sticker_tile_takes_its_tint_and_tilt_from_its_place(self):
+        from whisper_face_theme import (
+            STICKER_TILTS, STICKER_TINTS, color_token)
+
+        for dark in (False, True):
+            self.set_appearance(dark=dark)
+            for index in range(4):
+                with self.subTest(dark=dark, index=index):
+                    tile = gui_module.StickerTileView.alloc() \
+                        .initWithFrame_(self.frame(200, 10)).configure(
+                            "714", "Words today", index)
+                    place = index % 3
+                    self.assertEqual(tile.tilt(), STICKER_TILTS[place])
+                    height = tile.intrinsicContentSize().height
+                    self.assertGreater(height, 60.0)
+                    self.assertLess(height, 90.0)
+                    tile.setFrame_(self.frame(200, height))
+                    width, tall = tile.tile_size()
+                    self.assertLess(width, 200.0)
+                    self.assertLess(tall, height)
+                    rep = self.show(tile)
+                    # Right of the text, in the middle of the tile.
+                    self.assertColor(
+                        self.pixel(rep, 150.0, height / 2.0),
+                        color_token(STICKER_TINTS[place], dark).color)
+                    # Drawn tilted, not only sized for it: on a row level
+                    # with the middle of the tile's top edge, the end the
+                    # tilt lifts is inside the tile and the other is not.
+                    lean = math.radians(tile.tilt())
+                    reach = width / 2.0 - 20.0
+                    row = height / 2.0 - tall / 2.0 * math.cos(lean)
+                    scale = rep.pixelsWide() / rep.size().width
+                    left, right = (
+                        rep.colorAtX_y_(
+                            int((100.0 + side * reach) * scale),
+                            int(row * scale)).alphaComponent()
+                        for side in (-1.0, 1.0))
+                    lifted, dropped = (
+                        (left, right) if tile.tilt() > 0.0
+                        else (right, left))
+                    self.assertGreater(lifted, 0.6)
+                    self.assertLess(dropped, 0.4)
+        self.assertEqual(str(tile.accessibilityLabel()), "Words today")
+        self.assertEqual(str(tile.accessibilityValue()), "714")
+        self.assertEqual(
+            str(tile.accessibilityRole()),
+            str(self.AppKit.NSAccessibilityStaticTextRole))
+
+    def test_sticker_number_gets_smaller_before_it_gets_cut(self):
+        from whisper_face_theme import TYPE_SPECS
+
+        tile = gui_module.StickerTileView.alloc().initWithFrame_(
+            self.frame(200, 76)).configure("714", "Words today", 1)
+        full = TYPE_SPECS["stat_number"].size
+        self.assertEqual(tile.number_font(160.0).pointSize(), full)
+        tile.configure("0.93s · 9 words", "Last dictation", 0)
+        fitted = tile.number_font(160.0)
+        self.assertLess(fitted.pointSize(), full)
+        self.assertGreaterEqual(
+            fitted.pointSize(), tile.NUMBER_MIN_SIZE)
+        self.assertLessEqual(
+            gui_module._text_size(tile.number, fitted)[0], 160.0)
+        tile.configure("an impossibly long value that cannot fit", "x", 0)
+        self.assertEqual(
+            tile.number_font(160.0).pointSize(), tile.NUMBER_MIN_SIZE)
+
+    def test_stage_lays_out_a_leaning_face_and_its_content(self):
+        from whisper_face_theme import (
+            STAGE_FACE_TILT, STAGE_FOR_FACE, color_token, stage_layout)
+
+        AppKit = self.AppKit
+        stage = gui_module.StagePanelView.alloc().initWithFrame_(
+            self.frame(380, 252))
+        face = AppKit.NSView.alloc().initWithFrame_(self.frame())
+        content = AppKit.NSView.alloc().initWithFrame_(self.frame())
+        stage.set_face_view(face).set_content_view(content)
+        expected_face, expected_content = stage_layout(380.0, 252.0)
+        self.assertEqual(face.superview(), stage)
+        self.assertEqual(
+            (face.frame().size.width, face.frame().size.height),
+            expected_face[2:])
+        self.assertEqual(face.frameCenterRotation(), STAGE_FACE_TILT)
+        got = content.frame()
+        self.assertEqual(
+            (got.origin.x, got.origin.y, got.size.width, got.size.height),
+            expected_content)
+        # Resizing the stage re-lays both.
+        stage.setFrameSize_((330.0, 252.0))
+        self.assertEqual(
+            content.frame().size.width, stage_layout(330.0, 252.0)[1][2])
+        # Replacing the face removes the old one.
+        other = AppKit.NSView.alloc().initWithFrame_(self.frame())
+        stage.set_face_view(other, 120.0)
+        self.assertIsNone(face.superview())
+        self.assertLessEqual(other.frame().size.width, 120.0)
+
+        self.assertEqual(
+            str(stage.accessibilityRole()),
+            str(AppKit.NSAccessibilityGroupRole))
+        gui_module._accessible(stage, "Fox, ready")
+        self.assertEqual(str(stage.accessibilityLabel()), "Fox, ready")
+
+        for dark in (False, True):
+            self.set_appearance(dark=dark)
+            for name in ("fox", "parrot"):
+                with self.subTest(dark=dark, face=name):
+                    plain = gui_module.StagePanelView.alloc() \
+                        .initWithFrame_(self.frame(380, 252)).set_face(name)
+                    rep = self.show(plain)
+                    # Clear of all three circles and of the outline.
+                    self.assertColor(
+                        self.pixel(rep, 230.0, 60.0),
+                        color_token(STAGE_FOR_FACE[name], dark).color)
+
+    def test_stage_leaves_a_face_that_leans_itself_unrotated(self):
+        from whisper_face_render import LiveFaceView
+        from whisper_face_theme import (
+            STAGE_FACE_BLEED, STAGE_FACE_SIZE, STAGE_FACE_TILT, stage_layout)
+
+        stage = gui_module.StagePanelView.alloc().initWithFrame_(
+            self.frame(500, 252))
+        face = LiveFaceView.alloc().initWithFrame_(self.frame())
+        stage.set_face_view(face)
+        box = stage_layout(500.0, 252.0)[0]
+        frame = face.frame()
+        # The view is the face's box and clear room round it; the lean is
+        # drawn inside, so the frame itself is never turned.
+        self.assertEqual(face.frameCenterRotation(), 0.0)
+        self.assertEqual(face.tilt, STAGE_FACE_TILT)
+        self.assertEqual(face.bleed, STAGE_FACE_BLEED)
+        self.assertEqual(face.art_side(), STAGE_FACE_SIZE)
+        self.assertEqual(
+            (frame.origin.x, frame.origin.y, frame.size.width),
+            (box[0] - STAGE_FACE_BLEED, box[1] - STAGE_FACE_BLEED,
+             STAGE_FACE_SIZE + 2.0 * STAGE_FACE_BLEED))
+        # A spring re-anchors the layer at its middle. Laying the stage
+        # out again, as every layout pass does, must leave it there: a
+        # frame rotation put the anchor back in the corner mid-spring.
+        self.show(stage)
+        self.assertTrue(gui_module.add_jelly_motion(face, "wobble"))
+        anchor = face.layer().anchorPoint()
+        position = face.layer().position()
+        self.assertEqual((anchor.x, anchor.y), (0.5, 0.5))
+        stage.arrange()
+        stage.layout()
+        self.assertEqual(
+            (face.layer().anchorPoint().x, face.layer().anchorPoint().y),
+            (0.5, 0.5))
+        self.assertEqual(
+            (face.layer().position().x, face.layer().position().y),
+            (position.x, position.y))
+        self.assertIsNotNone(
+            face.layer().animationForKey_("whisper-face-wobble-x"))
+        # The lean and the hard shadow are in the drawing.
+        face.layer().removeAllAnimations()
+        leaning = self.show(face)
+        face.setTilt_(0.0)
+        upright = self.show(face)
+        face.setTilt_(STAGE_FACE_TILT)
+        face.setShadow_(True)
+        shadowed = self.show(face)
+        points = [(x, y) for x in range(12, 220, 16)
+                  for y in range(12, 220, 16)]
+
+        def rgba(rep, x, y):
+            scale = rep.pixelsWide() / rep.size().width
+            color = rep.colorAtX_y_(int(x * scale), int(y * scale))
+            return (color.redComponent(), color.greenComponent(),
+                    color.blueComponent(), color.alphaComponent())
+
+        def differ(first, second):
+            return sum(
+                any(abs(a - b) > 0.05 for a, b in zip(
+                    rgba(first, x, y), rgba(second, x, y)))
+                for x, y in points)
+
+        self.assertGreaterEqual(differ(leaning, upright), 6)
+        self.assertGreaterEqual(differ(leaning, shadowed), 4)
+        # Nothing reaches the edge of the view, shadow included.
+        scale = shadowed.pixelsWide() / shadowed.size().width
+        last = shadowed.pixelsWide() - 1
+        for along in range(0, shadowed.pixelsWide(), 5):
+            for across in (0, last):
+                self.assertEqual(
+                    shadowed.colorAtX_y_(along, across).alphaComponent(),
+                    0.0)
+                self.assertEqual(
+                    shadowed.colorAtX_y_(across, along).alphaComponent(),
+                    0.0)
+        self.assertGreater(scale, 0.0)
+
+    def test_face_chip_is_a_radio_button_that_shows_its_selection(self):
+        from whisper_face_theme import LIGHT_PALETTE
+
+        AppKit = self.AppKit
+        chip = gui_module.FaceChipButton.alloc().initWithFrame_(
+            self.frame(74, 75)).configure(None, "Fox")
+        self.assertEqual(str(chip.accessibilityLabel()), "Fox")
+        self.assertEqual(str(chip.toolTip()), "Fox")
+        self.assertEqual(
+            str(chip.accessibilityRole()),
+            str(AppKit.NSAccessibilityRadioButtonRole))
+        self.assertEqual(int(chip.accessibilityValue()), 0)
+        # The cell is what VoiceOver reads, so it says the same.
+        element = AppKit.NSAccessibilityUnignoredDescendant(chip)
+        self.assertIs(element, chip.cell())
+        self.assertEqual(
+            str(element.accessibilityRole()),
+            str(AppKit.NSAccessibilityRadioButtonRole))
+        self.assertEqual(str(element.accessibilityLabel()), "Fox")
+        self.assertEqual(int(element.accessibilityValue()), 0)
+        rest = chip.body_rect()
+        rep = self.show(chip)
+        # Unselected: no outline, no shadow, a faint tile.
+        self.assertEqual(
+            rep.colorAtX_y_(
+                rep.pixelsWide() - 1, rep.pixelsHigh() - 1).alphaComponent(),
+            0.0)
+        self.assertLess(
+            rep.colorAtX_y_(rep.pixelsWide() // 2,
+                            rep.pixelsHigh() // 2).alphaComponent(), 0.2)
+
+        chip.set_selected(True)
+        self.assertEqual(int(chip.accessibilityValue()), 1)
+        self.assertEqual(int(element.accessibilityValue()), 1)
+        selected = chip.body_rect()
+        # Choosing a face never nudges the art.
+        self.assertEqual(
+            (rest.origin.x, rest.origin.y, rest.size.width,
+             rest.size.height),
+            (selected.origin.x, selected.origin.y, selected.size.width,
+             selected.size.height))
+        rep = self.show(chip)
+        self.assertColor(
+            self.pixel(rep, 36.0, 36.0), LIGHT_PALETTE.accent, "amber")
+        self.assertColor(
+            self.pixel(rep, 1.0, 36.0), LIGHT_PALETTE.line, "outline")
+        self.assertColor(
+            self.pixel(rep, 36.0, 74.0), LIGHT_PALETTE.line, "shadow")
+        ring = chip.focusRingMaskBounds()
+        self.assertEqual(
+            (ring.size.width, ring.size.height),
+            (selected.size.width, selected.size.height))
+        # A small chip keeps a tile's corners instead of becoming a circle.
+        small = gui_module.FaceChipButton.alloc().initWithFrame_(
+            self.frame(46, 47))
+        self.assertLess(small.corner_radius(), 44.0 / 2.0)
+        self.assertLess(small.corner_radius(), chip.corner_radius())
+
+    def test_role_fonts_follow_the_type_tokens(self):
+        from whisper_face_theme import TYPE_SPECS
+
+        for role, spec in TYPE_SPECS.items():
+            with self.subTest(role=role):
+                font = gui_module._role_font(role)
+                self.assertEqual(font.pointSize(), spec.size)
+        rounded = gui_module._role_font("page_title")
+        plain = gui_module._role_font("row_title")
+        self.assertNotEqual(
+            str(rounded.fontDescriptor().postscriptName()),
+            str(plain.fontDescriptor().postscriptName()))
+        # Tabular figures: every digit takes the same room.
+        stat = gui_module._role_font("stat_number")
+        widths = {gui_module._text_size(digit * 4, stat)[0]
+                  for digit in "0123456789"}
+        self.assertEqual(len(widths), 1)
+
+
+@unittest.skipUnless(
+    APPKIT_AVAILABLE,
+    "needs AppKit: run with "
+    "uv run --with pyobjc-framework-Cocoa --with pyobjc-framework-Quartz "
+    "tests/test_whisper_face_gui.py ShellAppKitTests")
+class ShellAppKitTests(unittest.TestCase):
+    """The shell in a real window that is never shown.
+
+    The native smoke test asserts the structure in the release gate; these
+    look closer at what it leaves out: pixels, key events and resizing.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import AppKit
+        cls.AppKit = AppKit
+        cls.app = AppKit.NSApplication.sharedApplication()
+
+    def setUp(self):
+        contrast = patch.object(
+            gui_module, "_increase_contrast", lambda: False)
+        contrast.start()
+        self.addCleanup(contrast.stop)
+        self.model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {}, settings_snapshot=lambda: {}))
+        self.model.state = replace(
+            self.model.state, onboarding_acknowledged=True)
+        self.controller = gui_module.WhisperFaceWindowController.alloc() \
+            .initForSmokeWithViewModel_(self.model)
+        self.window = self.controller.window
+        self.addCleanup(self.close)
+        self.set_appearance(dark=False)
+
+    def close(self):
+        self.window.setDelegate_(None)
+        self.window.close()
+        self.controller.pages.clear()
+        self.controller.dynamic.clear()
+
+    def set_appearance(self, *, dark):
+        AppKit = self.AppKit
+        appearance = AppKit.NSAppearance.appearanceNamed_(
+            AppKit.NSAppearanceNameDarkAqua if dark
+            else AppKit.NSAppearanceNameAqua)
+        self.app.setAppearance_(appearance)
+        self.window.setAppearance_(appearance)
+        self.controller.render()
+
+    def layout(self, width=None, height=None):
+        if width is not None:
+            self.window.setContentSize_((width, height))
+        self.window.contentView().layoutSubtreeIfNeeded()
+
+    def in_window(self, view):
+        return view.convertRect_toView_(view.bounds(), None)
+
+    def row_pixel(self, row, x, y):
+        """Unpremultiplied RGBA at a point in the row, from its top left."""
+        bounds = row.bounds()
+        rep = row.bitmapImageRepForCachingDisplayInRect_(bounds)
+        row.cacheDisplayInRect_toBitmapImageRep_(bounds, rep)
+        srgb = rep.bitmapImageRepByConvertingToColorSpace_renderingIntent_(
+            self.AppKit.NSColorSpace.sRGBColorSpace(), 0)
+        scale = rep.pixelsWide() / bounds.size.width
+        color = srgb.colorAtX_y_(int(x * scale), int(y * scale))
+        return (color.redComponent(), color.greenComponent(),
+                color.blueComponent(), color.alphaComponent())
+
+    def key_event(self, key_code):
+        AppKit = self.AppKit
+        return AppKit.NSEvent \
+            .keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(
+                AppKit.NSEventTypeKeyDown, (0.0, 0.0), 0, 0.0,
+                self.window.windowNumber(), None, "", "", False, key_code)
+
+    def test_selected_row_is_drawn_in_the_selection_colour(self):
+        from whisper_face_theme import LIGHT_PALETTE, color_token
+
+        rows = self.controller.sidebar_rows
+        for dark in (False, True):
+            self.set_appearance(dark=dark)
+            shade = color_token("sidebar_selection", dark)
+            red, green, blue, alpha = self.row_pixel(rows[0], 4, 16)
+            with self.subTest(dark=dark):
+                self.assertAlmostEqual(alpha, shade.alpha, delta=0.03)
+                for got, want in zip((red, green, blue), shade.color):
+                    self.assertAlmostEqual(got, want, delta=0.04)
+                self.assertLess(self.row_pixel(rows[1], 4, 16)[3], 0.02)
+                # The corner is rounded away.
+                self.assertLess(self.row_pixel(rows[0], 0.5, 0.5)[3], 0.1)
+        self.set_appearance(dark=False)
+        self.controller.windowDidResignKey_(None)
+        red, green, blue, alpha = self.row_pixel(rows[0], 4, 16)
+        self.assertAlmostEqual(alpha, 0.10, delta=0.03)
+        for got, want in zip((red, green, blue), LIGHT_PALETTE.ink):
+            self.assertAlmostEqual(got, want, delta=0.12)
+        self.controller.windowDidBecomeKey_(None)
+        self.assertAlmostEqual(
+            self.row_pixel(rows[0], 4, 16)[3], 0.38, delta=0.03)
+
+    def test_increase_contrast_outlines_the_selected_row(self):
+        from whisper_face_theme import LIGHT_PALETTE
+
+        row = self.controller.sidebar_rows[0]
+        self.assertLess(self.row_pixel(row, 60, 0.5)[3], 0.6)
+        with patch.object(gui_module, "_increase_contrast", lambda: True):
+            self.controller.render()
+            red, green, blue, alpha = self.row_pixel(row, 60, 0.5)
+        self.assertGreater(alpha, 0.9)
+        for got, want in zip((red, green, blue), LIGHT_PALETTE.ink):
+            self.assertAlmostEqual(got, want, delta=0.06)
+
+    def test_arrow_keys_move_through_the_rows_and_stop_at_the_ends(self):
+        rows = self.controller.sidebar_rows
+        down, up = self.key_event(125), self.key_event(126)
+        rows[0].keyDown_(up)
+        self.assertEqual(self.model.state.section, "Home")
+        expected = [("Settings", "Personalize"), ("Settings", "Controls"),
+                    ("Settings", "Privacy"), ("Advanced", "Privacy")]
+        for index, (section, pane) in enumerate(expected):
+            rows[index].keyDown_(down)
+            self.assertEqual(
+                (self.model.state.section, self.model.state.settings_pane),
+                (section, pane))
+            self.assertTrue(rows[index + 1].selected)
+            self.assertEqual(self.window.firstResponder(), rows[index + 1])
+            # At most one Tab stop: the row the arrows landed on, when the
+            # system lets buttons take Tab stops at all.
+            buttons_take_tab = bool(self.controller.dynamic[
+                "window_face_button"].canBecomeKeyView())
+            self.assertEqual(
+                [bool(row.canBecomeKeyView()) for row in rows],
+                [buttons_take_tab and position == index + 1
+                 for position in range(len(rows))])
+            # The same rule with the system setting taken out of it.
+            self.assertEqual(
+                [row.takes_tab_stop(True) for row in rows],
+                [position == index + 1 for position in range(len(rows))])
+            self.assertFalse(any(row.takes_tab_stop(False) for row in rows))
+            # Keyboard entry starts on that row too.
+            self.assertEqual(
+                self.window.initialFirstResponder(), rows[index + 1])
+        rows[4].keyDown_(down)
+        self.assertEqual(self.model.state.section, "Advanced")
+        rows[4].keyDown_(up)
+        self.assertEqual(
+            (self.model.state.section, self.model.state.settings_pane),
+            ("Settings", "Privacy"))
+
+    def test_a_click_anywhere_in_a_row_reaches_the_row(self):
+        row = self.controller.sidebar_rows[2]
+        frame = row.frame()
+        for offset in (4.0, 17.0, 60.0, frame.size.width - 4.0):
+            hit = row.hitTest_(
+                (frame.origin.x + offset, frame.origin.y + 16.0))
+            self.assertEqual(hit, row)
+        self.assertIsNone(row.hitTest_(
+            (frame.origin.x + 20.0, frame.origin.y - 1.0)))
+        row.performClick_(None)
+        self.assertEqual(self.model.state.settings_pane, "Controls")
+        self.assertEqual(self.model.state.section, "Settings")
+
+    def test_focus_ring_is_the_rows_own_shape(self):
+        row = self.controller.sidebar_rows[1]
+        ring, bounds = row.focusRingMaskBounds(), row.bounds()
+        self.assertEqual(
+            (ring.origin.x, ring.origin.y, ring.size.width, ring.size.height),
+            (bounds.origin.x, bounds.origin.y, bounds.size.width,
+             bounds.size.height))
+        self.assertTrue(row.acceptsFirstResponder())
+        self.assertTrue(row.isFlipped())
+
+    def test_the_divider_is_a_line_not_a_handle(self):
+        split = self.controller.split_controller
+        view = split.splitView()
+        rect = self.AppKit.NSMakeRect(199, 0, 1, 680)
+        grab = split.splitView_effectiveRect_forDrawnRect_ofDividerAtIndex_(
+            view, rect, rect, 0)
+        self.assertEqual((grab.size.width, grab.size.height), (0.0, 0.0))
+        self.assertTrue(view.isVertical())
+        for width in (880.0, 1000.0, 1400.0):
+            self.layout(width, 700.0)
+            sidebar = self.in_window(self.controller.sidebar)
+            self.assertAlmostEqual(
+                sidebar.size.width + view.dividerThickness(),
+                gui_module.SIDEBAR_WIDTH, delta=0.5)
+            self.assertAlmostEqual(sidebar.size.height, 700.0, delta=0.5)
+
+    def test_the_column_keeps_its_range_and_its_insets_at_every_width(self):
+        narrowest = gui_module.CONTENT_MIN_WIDTH
+        widest = gui_module.CONTENT_WIDTH
+        for window_width in (880.0, 904.0, 940.0, 968.0, 1000.0, 1400.0):
+            # The column takes what the comfortable inset leaves, within
+            # its range, and sits in the middle of the content side.
+            side = window_width - gui_module.SIDEBAR_WIDTH
+            column_width = min(widest, max(
+                narrowest, side - 2.0 * gui_module.CONTENT_INSET))
+            inset = (side - column_width) / 2.0
+            with self.subTest(window=window_width):
+                self.assertGreaterEqual(inset, gui_module.CONTENT_EDGE_MIN)
+                self.layout(window_width, 680.0)
+                column = self.in_window(self.controller.dynamic["page_column"])
+                self.assertAlmostEqual(
+                    column.size.width, column_width, delta=0.5)
+                self.assertAlmostEqual(
+                    column.origin.x - gui_module.SIDEBAR_WIDTH, inset,
+                    delta=0.5)
+                title = self.controller.dynamic["page_title"]
+                self.assertAlmostEqual(
+                    self.in_window(title).origin.x
+                    + title.alignmentRectInsets().left,
+                    column.origin.x, delta=0.5)
+
+    def test_homes_actions_keep_their_places_at_every_width(self):
+        # With the Voice Outbox holding text and a setup item needing
+        # attention, Home shows every action it has: Pause and Copy &
+        # Dismiss in the bubble, a button apart, and Review Setup in its
+        # own row. All of it stays inside the column down to the minimum.
+        self.model.state = replace(
+            self.model.state, section="Home", outbox_count=1,
+            outbox_summary="Paste may have landed",
+            degraded_issues=(gui_module.DegradedIssue(
+                "microphone", "Microphone unavailable",
+                "Check the microphone"),))
+        self.controller.render()
+        dynamic = self.controller.dynamic
+        bubble = dynamic["home_bubble"]
+        for window_width in (880.0, 900.0, 920.0, 944.0, 1000.0, 1400.0):
+            with self.subTest(window=window_width):
+                self.layout(window_width, 648.0)
+                column = self.in_window(dynamic["page_column"])
+                self.assertFalse(dynamic["pause_button"].isHidden())
+                self.assertFalse(dynamic["copy_outbox_button"].isHidden())
+                self.assertTrue(dynamic["review_issue_button"].isHidden())
+                self.assertFalse(dynamic["home_attention_row"].isHidden())
+                pause = self.in_window(dynamic["pause_button"])
+                copy = self.in_window(dynamic["copy_outbox_button"])
+                review_button = dynamic["review_issue_row_button"]
+                review = review_button.superview().convertRect_toView_(
+                    review_button.alignmentRectForFrame_(
+                        review_button.frame()), None)
+                room = bubble.convertRect_toView_(bubble.content_rect(), None)
+                self.assertAlmostEqual(
+                    pause.origin.x, room.origin.x, delta=0.5)
+                self.assertAlmostEqual(
+                    copy.origin.x - pause.origin.x - pause.size.width,
+                    gui_module.BUBBLE_BUTTON_GAP, delta=0.5)
+                self.assertLessEqual(
+                    copy.origin.x + copy.size.width,
+                    room.origin.x + room.size.width + 0.5)
+                self.assertAlmostEqual(
+                    review.origin.x + review.size.width,
+                    column.origin.x + column.size.width
+                    - gui_module.ROW_INSET, delta=0.5)
+                self.assertGreaterEqual(review.origin.x, column.origin.x)
+
+    def test_the_sidebar_keeps_its_foot_and_its_top_as_the_window_grows(self):
+        for height in (648.0, 680.0, 1000.0):
+            with self.subTest(height=height):
+                self.layout(1000.0, height)
+                header = self.in_window(
+                    self.controller.dynamic["window_header"])
+                version = self.in_window(
+                    self.controller.dynamic["window_version"])
+                self.assertAlmostEqual(
+                    height - header.origin.y - header.size.height,
+                    gui_module.SIDEBAR_BRAND_TOP, delta=0.5)
+                self.assertAlmostEqual(
+                    version.origin.y, gui_module.SIDEBAR_FOOT_INSET,
+                    delta=0.5)
+                last_row = self.in_window(self.controller.sidebar_rows[-1])
+                self.assertGreater(
+                    last_row.origin.y,
+                    version.origin.y + version.size.height + 24.0)
+
+    def test_the_state_line_follows_the_runtime_and_setup(self):
+        label = self.controller.dynamic["window_state"]
+        for phase, (key, _tone) in SIDEBAR_STATES.items():
+            with self.subTest(phase=phase):
+                self.model.state = replace(
+                    self.model.state, status_phase=phase)
+                self.controller.render()
+                self.assertEqual(
+                    str(label.stringValue()), localized_string(key))
+                self.assertEqual(
+                    str(label.accessibilityLabel()),
+                    localized_string("shell.state.accessibility.label"))
+        self.model.state = replace(
+            self.model.state, onboarding_acknowledged=False,
+            onboarding_complete=False)
+        self.controller.render()
+        self.assertEqual(str(label.stringValue()), "Setting up")
+
+    def test_setup_mode_round_trip_changes_nothing_else(self):
+        self.layout(1000.0, 680.0)
+        self.controller.sidebar_rows[3].performClick_(None)
+        self.layout()
+        tracked = ("page_column", "title_strip", "page_title", "notice",
+                   "content_side")
+
+        def frames():
+            return {
+                key: tuple(round(value, 1) for value in (
+                    rect.origin.x, rect.origin.y,
+                    rect.size.width, rect.size.height))
+                for key in tracked
+                for rect in [self.in_window(self.controller.dynamic[key])]}
+
+        before = frames()
+        self.controller.set_setup_mode(True)
+        self.controller.set_setup_mode(True)       # idempotent
+        self.layout()
+        during = frames()
+        self.assertEqual(during["content_side"], (0.0, 0.0, 1000.0, 680.0))
+        self.assertEqual(during["page_column"][2], before["page_column"][2])
+        self.assertEqual(
+            during["page_column"][1] + during["page_column"][3], 680.0 - 28.0)
+        self.assertTrue(self.controller.title_strip.isHidden())
+        # The page shortcuts still work, and still move the selection.
+        self.controller.sidebar_rows[4].performClick_(None)
+        self.assertEqual(self.model.state.section, "Advanced")
+        self.controller.sidebar_rows[3].performClick_(None)
+        self.controller.set_setup_mode(False)
+        self.layout()
+        self.assertEqual(frames(), before)
+        self.assertTrue(self.controller.sidebar_rows[3].selected)
+        self.assertEqual(
+            str(self.controller.dynamic["page_title"].stringValue()),
+            "Privacy")
+
+    def test_title_items_keep_their_order_and_follow_their_page(self):
+        AppKit = self.AppKit
+
+        def button(title):
+            control = AppKit.NSButton.alloc().initWithFrame_(
+                AppKit.NSMakeRect(0, 0, 10, 10))
+            control.setTitle_(title)
+            control.setBezelStyle_(AppKit.NSBezelStyleRounded)
+            return control
+
+        first, second, elsewhere = (
+            button("First"), button("Second"), button("Elsewhere"))
+        self.controller.add_title_item("home", first)
+        self.controller.add_title_item(
+            "home", second, visible=lambda state: state.outbox_count > 0)
+        self.controller.add_title_item("advanced", elsewhere)
+        self.controller.render()
+        self.layout()
+        self.assertFalse(first.isHidden())
+        self.assertTrue(second.isHidden())
+        self.assertTrue(elsewhere.isHidden())
+        self.model.state = replace(self.model.state, outbox_count=2)
+        self.controller.render()
+        self.layout()
+        self.assertFalse(second.isHidden())
+        self.assertLess(
+            self.in_window(first).origin.x, self.in_window(second).origin.x)
+        column = self.in_window(self.controller.dynamic["page_column"])
+        stack = self.in_window(self.controller.dynamic["title_strip_items"])
+        self.assertAlmostEqual(
+            stack.origin.x + stack.size.width,
+            column.origin.x + column.size.width, delta=0.5)
+        rows = self.controller.sidebar_rows
+        self.assertEqual(rows[-1].nextKeyView(), first)
+        self.assertEqual(first.nextKeyView(), second)
+        rows[4].performClick_(None)
+        self.assertTrue(first.isHidden())
+        self.assertFalse(elsewhere.isHidden())
+        self.assertEqual(rows[-1].nextKeyView(), elsewhere)
+
+
+@unittest.skipUnless(
+    APPKIT_AVAILABLE,
+    "needs AppKit: run with "
+    "uv run --with pyobjc-framework-Cocoa --with pyobjc-framework-Quartz "
+    "tests/test_whisper_face_gui.py SettingsPagesAppKitTests")
+class SettingsPagesAppKitTests(unittest.TestCase):
+    """The pages' pieces in an off-screen window that is never shown."""
+
+    @classmethod
+    def setUpClass(cls):
+        import AppKit
+        cls.AppKit = AppKit
+        cls.app = AppKit.NSApplication.sharedApplication()
+        cls.window = AppKit.NSWindow.alloc() \
+            .initWithContentRect_styleMask_backing_defer_(
+                AppKit.NSMakeRect(0, 0, 800, 400), 0,
+                AppKit.NSBackingStoreBuffered, False)
+
+    def test_a_button_label_reaches_the_element_voiceover_reads(self):
+        AppKit = self.AppKit
+        button = gui_module._button(
+            "Edit", AppKit.NSMakeRect(0, 0, 40, 28), None, "edit:",
+            help_text="Edit the list")
+        gui_module._accessible(button, "Edit vocabulary", "Opens it")
+        self.window.contentView().addSubview_(button)
+        element = AppKit.NSAccessibilityUnignoredDescendant(button)
+        self.assertIs(element, button.cell())
+        self.assertEqual(str(element.accessibilityLabel()), "Edit vocabulary")
+        self.assertEqual(str(element.accessibilityHelp()), "Opens it")
+        # The system's bezel and size: never narrower than its title.
+        self.assertEqual(int(button.bezelStyle()),
+                         int(AppKit.NSBezelStyleRounded))
+        self.assertGreaterEqual(
+            button.frame().size.width, button.fittingSize().width)
+
+    def test_the_face_grid_fills_its_width_in_rows_of_eight(self):
+        AppKit = self.AppKit
+        picker = gui_module.ArtFacePicker.alloc().initWithFrame_(
+            AppKit.NSMakeRect(0, 0, 604, 140))
+        picker.populate(FACES, [None] * len(FACES),
+                        [face.title() for face in FACES], None, None)
+        shape = gui_module.BRAND_SHAPES["face_chip"]
+        # The grid's width is the group between its insets plus the room
+        # the last chip's hard shadow takes.
+        for width, side in ((604.0 + shape.shadow_right, 66.0),
+                            (692.0 + shape.shadow_right, 77.0)):
+            with self.subTest(width=width):
+                columns, chip, margin, rows = picker.grid(width)
+                self.assertEqual((columns, rows, chip), (8, 2, side))
+                picker.setFrameSize_((width, picker.height_for_width(width)))
+                picker.arrange()
+                frames = [view.frame() for view in picker.chips]
+                first, second, last = frames[0], frames[1], frames[-1]
+                self.assertEqual(
+                    (first.size.width, first.size.height),
+                    (side + shape.shadow_right, side + shape.shadow_down))
+                # Bodies are exactly the spec's gap apart, across and down.
+                self.assertEqual(
+                    second.origin.x - first.origin.x - side,
+                    gui_module.FACE_CHIP_GAP)
+                self.assertEqual(
+                    frames[8].origin.y - first.origin.y - side,
+                    gui_module.FACE_CHIP_GAP)
+                # The bodies fill the width, the same margin either side,
+                # and the last chip's shadow stays inside the grid.
+                self.assertEqual(first.origin.x, margin)
+                self.assertLessEqual(margin, 3.5)
+                self.assertAlmostEqual(
+                    width - shape.shadow_right
+                    - (last.origin.x + side), margin, delta=1.0)
+                self.assertLessEqual(
+                    last.origin.x + last.size.width, width + 0.01)
+                self.assertAlmostEqual(
+                    last.origin.y + last.size.height,
+                    picker.height_for_width(width), delta=0.5)
+        picker.setSelectedSegment_(3)
+        self.assertEqual(
+            [chip.selected for chip in picker.chips].index(True), 3)
+        self.assertEqual(picker.selectedSegment(), 3)
+
+    def test_a_row_wraps_its_caption_beside_its_controls(self):
+        AppKit = self.AppKit
+        title = gui_module._label("Capture key", AppKit.NSMakeRect(
+            0, 0, 100, 16), wrap=True)
+        caption = gui_module._label(
+            "Hold Right Control to dictate · Reply, Command, Code need "
+            "the other Control key, which is a long line on purpose",
+            AppKit.NSMakeRect(0, 0, 100, 15), size=12, wrap=True)
+        button = gui_module._button(
+            "Change…", AppKit.NSMakeRect(0, 0, 40, 28), None, "change:")
+        row = gui_module.SettingsRowView.alloc().initWithFrame_(
+            AppKit.NSMakeRect(0, 0, 632, 50)).configure(
+                title, caption, [button])
+        narrow = row.arrange(420.0)
+        wide = row.arrange(720.0)
+        self.assertGreaterEqual(wide, gui_module.ROW_CAPTION_MIN_HEIGHT)
+        self.assertGreater(narrow, wide)
+        row.arrange(632.0)
+        text_right = caption.frame().origin.x + caption.frame().size.width
+        self.assertLessEqual(
+            text_right + gui_module.ROW_CONTROL_GAP,
+            button.alignmentRectForFrame_(button.frame()).origin.x + 0.5)
+        needed = caption.cell().cellSizeForBounds_(AppKit.NSMakeRect(
+            0, 0, caption.frame().size.width, 10_000.0))
+        self.assertLessEqual(needed.height, caption.frame().size.height)
+        # A hidden control gives its room back to the text.
+        button.setHidden_(True)
+        self.assertGreater(row.text_width(632.0), text_right)
+
+    def test_a_status_shows_its_whole_phrase_and_tone(self):
+        AppKit = self.AppKit
+        view = gui_module.StatusLabelView.alloc().initWithFrame_(
+            AppKit.NSMakeRect(0, 0, 10, 10))
+        ink = gui_module._srgb_color((0.2, 0.2, 0.2))
+        view.set_status("Needs repair", "warn", symbol_color=ink,
+                        text_color=ink)
+        size = view.intrinsicContentSize()
+        view.setFrame_(AppKit.NSMakeRect(0, 0, size.width, size.height))
+        text = view.text
+        needed = text.cell().cellSizeForBounds_(
+            AppKit.NSMakeRect(0, 0, 10_000.0, 10_000.0))
+        self.assertGreaterEqual(text.frame().size.width, needed.width)
+        self.assertIsNotNone(view.icon.image())
+        self.assertEqual(view.tone, "warn")
+        view.set_status("Ready", "nonsense", symbol_color=ink,
+                        text_color=ink)
+        self.assertEqual(view.tone, "neutral")
+
+
+@unittest.skipUnless(
+    APPKIT_AVAILABLE,
+    "needs AppKit: run with "
+    "uv run --with pyobjc-framework-Cocoa --with pyobjc-framework-Quartz "
+    "tests/test_whisper_face_gui.py HomeAppKitTests")
+class HomeAppKitTests(unittest.TestCase):
+    """Home and first-run setup in a real window that is never shown.
+
+    The native smoke test asserts them in the release gate; these go
+    through more states, more widths and both appearances.
+    """
+
+    ISSUE = gui_module.DegradedIssue(
+        "microphone", localized_string("issue.microphone.title"),
+        localized_string("issue.microphone.detail"))
+    SETUP = {
+        "service_status": "Running", "microphone_status": "Starting",
+        "accessibility_status": "Needs attention",
+        "input_monitoring_status": "Granted", "capture_state": "Ready",
+        "hotkey_label": "Right Command",
+        "models": [{**PREPARING_MODEL}],
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        import AppKit
+        cls.AppKit = AppKit
+        cls.app = AppKit.NSApplication.sharedApplication()
+
+    def setUp(self):
+        contrast = patch.object(
+            gui_module, "_increase_contrast", lambda: False)
+        contrast.start()
+        self.addCleanup(contrast.stop)
+        self.opened = []
+        self.runtime = {
+            "service_status": "Running", "microphone_status": "Ready",
+            "accessibility_status": "Granted",
+            "input_monitoring_status": "Granted", "capture_state": "Ready",
+            "hotkey_label": "Right Option", "models": [READY_MODEL],
+            "hotkey_practiced": True, "last_word_count": 9,
+            "last_latency_ms": 930.0,
+        }
+        self.model = WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: dict(self.runtime),
+            settings_snapshot=lambda: {},
+            open_system_settings=self.opened.append))
+        self.model.acknowledge_onboarding()
+        self.controller = gui_module.WhisperFaceWindowController.alloc() \
+            .initForSmokeWithViewModel_(self.model)
+        self.window = self.controller.window
+        self.addCleanup(self.close)
+        self.set_appearance(dark=False)
+
+    def close(self):
+        self.window.setDelegate_(None)
+        self.window.close()
+        self.controller.pages.clear()
+        self.controller.dynamic.clear()
+
+    def set_appearance(self, *, dark):
+        AppKit = self.AppKit
+        appearance = AppKit.NSAppearance.appearanceNamed_(
+            AppKit.NSAppearanceNameDarkAqua if dark
+            else AppKit.NSAppearanceNameAqua)
+        self.app.setAppearance_(appearance)
+        self.window.setAppearance_(appearance)
+        self.controller.render()
+
+    def show(self, **changes):
+        self.model.state = replace(self.model.state, **changes)
+        self.controller.render()
+        self.window.contentView().layoutSubtreeIfNeeded()
+
+    def resize(self, width, height=648.0):
+        self.window.setContentSize_((width, height))
+        self.window.contentView().layoutSubtreeIfNeeded()
+
+    def in_window(self, view):
+        return view.convertRect_toView_(view.bounds(), None)
+
+    def leaves(self, view):
+        AppKit = self.AppKit
+        inside = view
+        if (view.isKindOfClass_(AppKit.NSButton)
+                or view.isKindOfClass_(AppKit.NSTextField)):
+            inside = None
+        children = [] if inside is None else [
+            child for child in inside.subviews() if not child.isHidden()]
+        if not children:
+            return [view]
+        return [leaf for child in children for leaf in self.leaves(child)]
+
+    def assert_laid_out(self, container, over=()):
+        """Nothing cut short, outside its page, or on top of another."""
+        AppKit = self.AppKit
+        self.window.contentView().layoutSubtreeIfNeeded()
+        bounds = self.in_window(container)
+        placed = []
+        for leaf in self.leaves(container):
+            # Where a control is, is its alignment rectangle: a system
+            # button's frame is wider than the bezel it draws.
+            rect = leaf.superview().convertRect_toView_(
+                leaf.alignmentRectForFrame_(leaf.frame()), None)
+            if leaf.isKindOfClass_(AppKit.NSTextField):
+                size = leaf.frame().size
+                if leaf.cell().wraps():
+                    needed = leaf.cell().cellSizeForBounds_(
+                        AppKit.NSMakeRect(0, 0, size.width, 10_000.0)).height
+                    self.assertLessEqual(
+                        needed, size.height + 1.0, str(leaf.stringValue()))
+                else:
+                    self.assertLessEqual(
+                        leaf.cell().cellSize().width, size.width + 1.0,
+                        str(leaf.stringValue()))
+            self.assertGreaterEqual(rect.origin.x, bounds.origin.x - 0.5)
+            self.assertGreaterEqual(rect.origin.y, bounds.origin.y - 0.5)
+            self.assertLessEqual(
+                rect.origin.x + rect.size.width,
+                bounds.origin.x + bounds.size.width + 0.5)
+            self.assertLessEqual(
+                rect.origin.y + rect.size.height,
+                bounds.origin.y + bounds.size.height + 0.5)
+            if rect.size.width and rect.size.height and leaf not in over:
+                placed.append((leaf, rect))
+        for index, (first_view, first) in enumerate(placed):
+            for second_view, second in placed[index + 1:]:
+                self.assertFalse(
+                    first.origin.x + 0.5 < second.origin.x + second.size.width
+                    and second.origin.x + 0.5
+                    < first.origin.x + first.size.width
+                    and first.origin.y + 0.5
+                    < second.origin.y + second.size.height
+                    and second.origin.y + 0.5
+                    < first.origin.y + first.size.height,
+                    f"{first_view} overlaps {second_view}")
+
+    def phase(self, name, **changes):
+        detail = changes.pop("status_detail", None)
+        if detail is None:
+            detail = localized_string(
+                f"overview.status.{name}.detail",
+                hotkey=changes.get("hotkey_label", "Right Option"))
+        return {"section": "Home", "status_phase": name,
+                "status_title": localized_string(
+                    f"overview.status.{name}.title"),
+                "status_detail": detail, **changes}
+
+    def home_states(self):
+        outbox = {"outbox_count": 3, "outbox_summary": localized_string(
+            "overview.outbox.summary.paste_attempted")}
+        recovery = localized_string(
+            "overview.status.recovery.detail.many", count=3)
+        return {
+            "ready": self.phase("ready"),
+            "ready, longest key": self.phase(
+                "ready", hotkey_label="Right Command"),
+            "paused": self.phase("paused", paused=True),
+            "listening": self.phase("recording"),
+            "listening, longest key": self.phase(
+                "recording", hotkey_label="Right Command"),
+            "working": self.phase("processing"),
+            "starting": self.phase("starting"),
+            "outbox": self.phase(
+                "recovery", status_detail=recovery, **outbox),
+            "needs attention": self.phase(
+                "degraded", status_detail=self.ISSUE.detail,
+                degraded_issues=(self.ISSUE,)),
+            "outbox and attention": self.phase(
+                "recovery", status_detail=recovery,
+                degraded_issues=(self.ISSUE,), **outbox),
+            "replay on, nothing held": {**self.phase("ready"), "last_result":
+                replace(self.model.state.last_result,
+                        acoustic_replay_enabled=True)},
+            "no dictation yet": {
+                **self.phase("ready"), "last_latency_ms": None,
+                "last_word_count": None, "words_today": 0,
+                "last_result": gui_module.ResultInspection()},
+            "large numbers": {
+                **self.phase("ready"), "words_today": 1234567,
+                "minutes_saved": 98765.0, "last_latency_ms": 12345.0,
+                "last_word_count": 1234},
+        }
+
+    def test_every_home_state_fits_the_columns_narrowest_and_widest(self):
+        dynamic = self.controller.dynamic
+        base = self.model.state
+        for window_width in (880.0, 1000.0):
+            self.resize(window_width)
+            column = self.in_window(dynamic["page_column"]).size.width
+            self.assertEqual(
+                column, 632.0 if window_width == 880.0 else 720.0)
+            for name, changes in self.home_states().items():
+                with self.subTest(column=column, state=name):
+                    self.model.state = base
+                    self.show(**changes)
+                    self.assert_laid_out(dynamic["home_cluster"])
+                    # The whole instruction is showing, not a cut of it.
+                    self.assertEqual(
+                        dynamic["overview_detail"].maximumNumberOfLines(), 0)
+                    self.assertIsNone(dynamic["overview_detail"].toolTip())
+                    # The bubble stays on the stage, clear of its edge.
+                    stage = self.in_window(dynamic["home_stage"])
+                    bubble = self.in_window(dynamic["home_bubble"])
+                    self.assertGreaterEqual(
+                        bubble.origin.y, stage.origin.y + 6.0 + 16.0)
+                    self.assertLessEqual(
+                        bubble.origin.y + bubble.size.height,
+                        stage.origin.y + stage.size.height - 16.0)
+                    # At most the primary action and one secondary.
+                    shown = [key for key in (
+                        "pause_button", "review_issue_button",
+                        "copy_outbox_button")
+                        if not dynamic[key].isHidden()]
+                    self.assertLessEqual(len(shown), 2)
+                    self.assertEqual(shown[0], "pause_button")
+
+    def test_the_headline_steps_down_before_it_wraps(self):
+        from whisper_face_theme import TYPE_SPECS
+
+        status = self.controller.dynamic["overview_status"]
+        full = TYPE_SPECS["bubble_headline"].size
+        self.resize(1000.0)
+        self.show(**self.phase("ready"))
+        self.assertEqual(status.font().pointSize(), full)
+        self.resize(880.0)
+        self.show(**self.phase("processing"))
+        self.assertEqual(
+            status.font().pointSize(), gui_module.BUBBLE_HEADLINE_SMALL)
+        self.show(**self.phase("ready"))
+        self.assertEqual(status.font().pointSize(), full)
+
+    def test_the_instruction_shows_whichever_key_is_bound(self):
+        detail = self.controller.dynamic["overview_detail"]
+        for key in ("Right Option", "Right Command", "F13", "Fn"):
+            for name in ("ready", "recording"):
+                with self.subTest(key=key, phase=name):
+                    self.show(**self.phase(name, hotkey_label=key))
+                    plain = str(detail.attributedStringValue().string())
+                    self.assertEqual(plain.count("\ufffc"), 1)
+                    self.assertNotIn(key, plain)
+                    self.assertEqual(
+                        plain.replace("\ufffc", key),
+                        self.model.state.status_detail)
+                    attachment, _range = detail.attributedStringValue() \
+                        .attribute_atIndex_effectiveRange_(
+                            "NSAttachment", plain.index("\ufffc"), None)
+                    self.assertEqual(
+                        (attachment.bounds().size.width,
+                         attachment.bounds().size.height),
+                        gui_module.key_cap_size(key))
+                    # VoiceOver reads the cell, and hears the key's name.
+                    self.assertEqual(
+                        str(detail.cell().accessibilityValue()),
+                        self.model.state.status_detail)
+        # Copy that names no key has no cap.
+        self.show(**self.phase("paused", paused=True))
+        self.assertNotIn(
+            "\ufffc", str(detail.attributedStringValue().string()))
+
+    def test_setup_rows_show_each_permissions_state_and_open_its_pane(self):
+        self.runtime.clear()
+        self.runtime.update(self.SETUP)
+        self.model.acknowledge_onboarding(False)
+        self.model.refresh()
+        self.show(section="Home")
+        dynamic = self.controller.dynamic
+        self.assertTrue(self.controller.setup_mode)
+        checking, missing, granted, unused = dynamic["onboarding_rows"]
+        self.assertTrue(unused["view"].isHidden())
+        # Still being checked: its state in words, in the neutral tone.
+        self.assertTrue(checking["button"].isHidden())
+        self.assertFalse(checking["state"].isHidden())
+        self.assertEqual(checking["state"].tone, "neutral")
+        self.assertEqual(str(checking["status"].stringValue()), "Checking")
+        # Missing: its own button, and it opens that pane. It is the
+        # first missing permission, so it is the step's primary action:
+        # the one amber button, and the one that answers Return.
+        self.assertFalse(missing["button"].isHidden())
+        self.assertTrue(missing["state"].isHidden())
+        self.assertEqual(missing["button"].variant, "amber")
+        self.assertEqual(str(missing["button"].keyEquivalent()), "\r")
+        self.assertEqual(
+            str(missing["button"].title()), "Open System Settings")
+        self.assertEqual(
+            self.window.initialFirstResponder(), missing["button"])
+        missing["button"].performClick_(None)
+        self.assertEqual(self.opened, ["accessibility"])
+        # The foot's Continue waits: plain, disabled, not on Return.
+        action = dynamic["onboarding_action"]
+        self.assertEqual(str(action.title()), "Keep Going")
+        self.assertEqual(action.variant, "plain")
+        self.assertFalse(action.isEnabled())
+        self.assertEqual(str(action.keyEquivalent()), "")
+        self.assertEqual(
+            str(action.cell().accessibilityHelp()),
+            localized_string("onboarding.action.waiting.help"))
+        # Granted: the check mark and the word.
+        self.assertTrue(granted["button"].isHidden())
+        self.assertFalse(granted["state"].isHidden())
+        self.assertEqual(granted["state"].tone, "good")
+        self.assertEqual(str(granted["status"].stringValue()), "Allowed")
+        self.assertIsNotNone(granted["check"].image())
+        for width in (880.0, 1000.0):
+            self.resize(width)
+            self.assert_laid_out(
+                dynamic["onboarding_card"],
+                over=(dynamic["onboarding_progress_fill"],))
+        # The check mark appears on the next refresh after the grant.
+        self.runtime["accessibility_status"] = "Granted"
+        self.model.refresh()
+        self.show()
+        self.assertFalse(missing["state"].isHidden())
+        self.assertEqual(missing["state"].tone, "good")
+        self.assertTrue(missing["button"].isHidden())
+        self.assertEqual(str(missing["button"].keyEquivalent()), "")
+        # Nothing is missing any more, so the step has moved on and the
+        # foot's button is the way forward again.
+        self.assertTrue(action.isEnabled())
+        self.assertEqual(action.variant, "amber")
+        self.assertEqual(str(action.keyEquivalent()), "\r")
+
+    def test_several_missing_permissions_share_one_primary_action(self):
+        self.runtime.clear()
+        self.runtime.update({
+            **self.SETUP, "microphone_status": "Unavailable",
+            "input_monitoring_status": "Needs attention"})
+        self.model.acknowledge_onboarding(False)
+        self.model.refresh()
+        self.show(section="Home")
+        rows = self.controller.dynamic["onboarding_rows"][:3]
+        self.assertEqual(
+            [row["button"].variant for row in rows],
+            ["amber", "plain", "plain"])
+        self.assertEqual(
+            [str(row["button"].keyEquivalent()) for row in rows],
+            ["\r", "", ""])
+        for row, permission in zip(rows, gui_module.PERMISSIONS):
+            row["button"].performClick_(None)
+            self.assertEqual(self.opened[-1], permission)
+        # Granting the first hands the primary action to the next.
+        self.runtime["microphone_status"] = "Ready"
+        self.model.refresh()
+        self.show()
+        self.assertEqual(
+            [row["button"].variant for row in rows[1:]], ["amber", "plain"])
+        self.assertTrue(rows[0]["button"].isHidden())
+        self.assertFalse(rows[0]["check"].isHidden())
+        self.assertEqual(
+            self.window.initialFirstResponder(), rows[1]["button"])
+
+    def test_the_setup_bubble_shows_the_bound_key_as_a_key_cap(self):
+        granted = {
+            **self.SETUP, "microphone_status": "Ready",
+            "accessibility_status": "Granted", "hotkey_label": "F13"}
+        self.runtime.clear()
+        self.runtime.update(granted)
+        self.model.acknowledge_onboarding(False)
+        self.model._hotkey_practiced = False
+        self.model.refresh()
+        self.show(section="Home")
+        detail = self.controller.dynamic["onboarding_detail"]
+        plain = str(detail.attributedStringValue().string())
+        self.assertEqual(plain.count("\ufffc"), 1)
+        self.assertNotIn("F13", plain)
+        whole = localized_string("onboarding.hotkey.detail", hotkey="F13")
+        self.assertEqual(plain.replace("\ufffc", "F13"), whole)
+        # VoiceOver reads the cell, and hears the key's name.
+        self.assertEqual(str(detail.cell().accessibilityValue()), whole)
+
+    def test_every_setup_step_fits_and_shows_the_key_that_is_bound(self):
+        dynamic = self.controller.dynamic
+        granted = {
+            **self.SETUP, "microphone_status": "Ready",
+            "accessibility_status": "Granted"}
+        steps = (
+            ("hotkey", granted, 1),
+            ("models", {**granted, "hotkey_practiced": True}, 1),
+            ("first_dictation", {
+                **granted, "hotkey_practiced": True,
+                "models": [READY_MODEL]}, 1),
+            (None, {**granted, "hotkey_practiced": True,
+                    "models": [READY_MODEL], "last_word_count": 3}, 4),
+        )
+        self.model.acknowledge_onboarding(False)
+        # The model remembers a key it has seen held; this walk starts
+        # from a Mac where it has not been yet.
+        self.model._hotkey_practiced = False
+        for current, runtime, rows in steps:
+            self.runtime.clear()
+            self.runtime.update(runtime)
+            self.model.refresh()
+            for width in (880.0, 1000.0):
+                with self.subTest(step=current, window=width):
+                    self.resize(width)
+                    self.show(section="Home")
+                    self.assertTrue(self.controller.setup_mode)
+                    shown = [row for row in dynamic["onboarding_rows"]
+                             if not row["view"].isHidden()]
+                    self.assertEqual(len(shown), rows)
+                    self.assert_laid_out(
+                        dynamic["onboarding_card"],
+                        over=(dynamic["onboarding_progress_fill"],))
+                    caps = [row["cap"].key for row in shown
+                            if not row["cap"].isHidden()]
+                    if current in ("hotkey", "first_dictation", None):
+                        self.assertEqual(caps, ["Right Command"])
+                    # The face opens its mouth where the copy asks the
+                    # person to speak, and for the celebration.
+                    self.assertEqual(
+                        dynamic["onboarding_face"].pose,
+                        "talk" if current in ("first_dictation", None)
+                        else "idle")
+                    # The route is there until the rows say it all.
+                    self.assertEqual(
+                        [marker.isHidden() for marker in
+                         dynamic["onboarding_step_cards"]],
+                        [current is None] * 4)
+        # Finishing leaves setup mode and shows Home.
+        self.controller.continueSetup_(None)
+        self.assertFalse(self.controller.setup_mode)
+        self.assertTrue(dynamic["onboarding_card"].isHidden())
+        self.assertFalse(dynamic["home_cluster"].isHidden())
+
+    def test_setup_mode_follows_what_home_is_showing(self):
+        self.runtime.clear()
+        self.runtime.update(self.SETUP)
+        self.model.acknowledge_onboarding(False)
+        self.model.refresh()
+        self.show(section="Home")
+        self.assertTrue(self.controller.setup_mode)
+        self.assertTrue(self.controller.sidebar_item.isCollapsed())
+        # A page shortcut shows that page with the shell back around it.
+        self.controller._select_sidebar_row(2)
+        self.assertFalse(self.controller.setup_mode)
+        self.assertFalse(self.controller.sidebar_item.isCollapsed())
+        self.assertFalse(self.controller.title_strip.isHidden())
+        # Coming Home returns to setup.
+        self.controller._select_sidebar_row(0)
+        self.assertTrue(self.controller.setup_mode)
+
+    def test_the_bubble_and_the_stage_follow_the_appearance(self):
+        from whisper_face_theme import (
+            DARK_PALETTE, LIGHT_PALETTE, color_token, stage_token_for_face)
+
+        dynamic = self.controller.dynamic
+        self.resize(1000.0, 680.0)
+        for face in ("parrot", "fox"):
+            for dark, palette in (
+                    (False, LIGHT_PALETTE), (True, DARK_PALETTE)):
+                with self.subTest(face=face, dark=dark):
+                    self.show(face=face, **self.phase("ready"))
+                    self.set_appearance(dark=dark)
+                    self.window.contentView().layoutSubtreeIfNeeded()
+                    bubble = dynamic["home_bubble"]
+                    bounds = bubble.bounds()
+                    rep = bubble.bitmapImageRepForCachingDisplayInRect_(
+                        bounds)
+                    bubble.cacheDisplayInRect_toBitmapImageRep_(bounds, rep)
+                    rep = rep \
+                        .bitmapImageRepByConvertingToColorSpace_renderingIntent_(
+                            self.AppKit.NSColorSpace.sRGBColorSpace(), 0)
+                    scale = rep.pixelsWide() / bounds.size.width
+                    body = bubble.body_rect()
+
+                    def at(x, y):
+                        color = rep.colorAtX_y_(
+                            int(x * scale), int(y * scale))
+                        return (color.redComponent(), color.greenComponent(),
+                                color.blueComponent())
+
+                    low = body.origin.y + body.size.height
+                    for got, want in zip(
+                            at(body.origin.x + 8.0, low - 34.0),
+                            palette.surface):
+                        self.assertAlmostEqual(got, want, delta=0.03)
+                    # Not a control: the bubble keeps the dark ink.
+                    for got, want in zip(
+                            at(body.origin.x + 0.75, low - 34.0),
+                            palette.line):
+                        self.assertAlmostEqual(got, want, delta=0.03)
+                    self.assertEqual(
+                        dynamic["home_stage"].stage_token,
+                        stage_token_for_face(face))
+                    self.assertIsNotNone(color_token(
+                        dynamic["home_stage"].stage_token, dark))
+        self.set_appearance(dark=False)
+
+
+if APPKIT_AVAILABLE:
+    from Foundation import NSObject as _NSObject
+
+    class _ClickTarget(_NSObject):
+        def clicked_(self, _sender):
+            self.fired.append("clicked")
 
 
 if __name__ == "__main__":

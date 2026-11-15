@@ -58,16 +58,18 @@ are never Supporter-only features.
 ## Features
 
 - **A real native Mac app window** — choose **Open Whisper Face…** from the
-  menu-bar face for focused Home, Settings, and Advanced sections. It exposes
+  menu-bar face for a Home page and, in its sidebar, the Personalize,
+  Controls, Privacy, and Advanced pages. It exposes
   live latency and usage—including
   Parakeet's own processing time when available—inspectable decision evidence,
   unified personalization/privacy controls, local model health, and one-click
   installer verification without adding a browser runtime. Advanced can
   also save a private `0600`, transcript-free support bundle to a destination
   you choose; it is never uploaded and contains only allowlisted health,
-  permission, model, and aggregate result metadata. First run shows
-  Permissions, Hotkey, Models, and Dictate together with live evidence-backed
-  status; hotkey practice completes only after capture is actually observed.
+  permission, model, and aggregate result metadata. First run walks through
+  four steps (Permissions, Your key, Models, First words), one at a time,
+  with every step's live, evidence-backed status along the foot; hotkey
+  practice completes only after capture is actually observed.
 - **Transactional insertion + Voice Outbox (Mac)** — readable text fields are
   leased at key-down and revalidated before the single paste attempt. If focus,
   selection, or nearby text changed while recognition ran, Whisper Face does
@@ -92,13 +94,14 @@ are never Supporter-only features.
   open whether or not you hold the key.
 - **Acoustic Time Machine (experimental, Mac)** — opt in under Privacy to keep
   only the latest result's short, consequence-selected audio spans in RAM after
-  insertion. Home's Last dictation card can play those spans directly from
+  insertion. Home's Dictation rows can play those spans directly from
   memory or clear them
   immediately; they self-delete after one minute, a new usable result replaces
   them, disabling wipes them, and no replay file is written.
 - **Hold-to-talk anywhere** — hold Right Option (Right Alt on Windows), speak,
-  release; text pastes into whatever app has focus, with a frosted HUD
-  waveform while you talk. On Mac the capture key, an optional undo key, the
+  release; text pastes into whatever app has focus. On Mac a recording pill
+  shows the face you picked and a row of level bars while you talk, and
+  the capture key, an optional undo key, the
   feedback sounds, and the “Actually” corrections switch are under
   Settings → Controls. The microphone is
   pre-warmed at login and the start cue sounds only once capture is ready. A
@@ -360,9 +363,9 @@ are never Supporter-only features.
 - **Whispering works** — quiet speech is gain-normalized before recognition.
 - **Choose your Whisper Face** — sixteen characters (Parrot, Fox, Owl, Cat,
   Bear, Dog, Wolf, Pig, Panda, Tiger, Frog, Rabbit, Hedgehog, Penguin, and
-  the two English cream goldens, Pickles and Olive) share one pastel
-  chibi-clay style. Pick one from the menu bar and it
-  persists locally. On Mac, both the floating
+  the two English cream goldens, Pickles and Olive) share one sticker
+  style: flat bright colour inside a thick ink outline. Pick one from the
+  menu bar or under Personalize and it persists locally. On Mac, both the floating
   character and tiny menu-bar face open and close their mouths with your live
   speech; Windows mirrors the selected face and recording state in its tray
   icon.
@@ -529,10 +532,11 @@ Settings → Privacy & Security and turn on **Whisper Face** under **Input
 Monitoring** (so it notices you holding the key), **Accessibility** (so it can
 paste), and **Microphone** (macOS asks the first time you dictate). The app
 starts listening by itself once the first two are on. While a permission is
-reported missing, Home and Advanced show an accessible **Open System
-Settings** action that opens that permission's own Privacy & Security pane;
-it never changes a permission, and it does not appear while permissions are
-still being checked.
+reported missing, first-run setup gives it its own accessible **Open System
+Settings** button, and afterwards Home's **Review Setup** leads to Advanced,
+which shows the same action. It opens that permission's own Privacy &
+Security pane; it never changes a permission, and it does not appear while
+permissions are still being checked.
 Only an explicit headless `--server-only` install needs trusted-LAN/firewall
 access for the experimental compatibility endpoint.
 
@@ -575,10 +579,18 @@ currently provide the same task-to-listener identity binding.
 Click the selected animal in the menu bar and choose **Open Whisper Face…**.
 The menu bar remains the fastest everyday control, while the window provides a
 clear home for setup health, privacy controls, model status, character choice,
-and Voice Outbox recovery. Home leads with your character, drawn live: it
-breathes and blinks while idle and mouths along with the mic while you
-dictate (System Settings Reduce Motion keeps it still). Closing the window
-does not stop dictation.
+and Voice Outbox recovery. A sidebar lists the pages: **Home**, then under
+Settings **Personalize**, **Controls**, **Privacy**, and **Advanced**
+(Command-1 to Command-5). Home puts your character on a coloured stage, drawn
+live: it breathes and blinks while idle and mouths along with the mic while
+you dictate (System Settings Reduce Motion keeps it still). Beside it a
+speech bubble says what is happening, shows your capture key, and carries
+Pause and, when there is one, the next thing to do; under it are today's
+numbers and your last dictation. The other pages are lists of rows with
+standard Mac controls, the way System Settings lays them out. Until first
+run is finished, the window is a focused setup flow instead: one step at a
+time, with an **Open System Settings** button for each missing permission.
+Closing the window does not stop dictation.
 A single **Last Recognition…** menu row appears once there is a result to look
 at, and is a direct route to the transcript-free evidence inspector.
 Advanced can copy a fixed support snapshot containing only categorized

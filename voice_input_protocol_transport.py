@@ -189,8 +189,12 @@ class UnixProtocolServer:
             listener.bind(os.fspath(self.path))
             bound = self.path.stat()
             self._owned_path_identity = (bound.st_dev, bound.st_ino)
-            os.chmod(self.path, 0o600)
+            # Listen first: a caller takes the private mode as the sign
+            # that the server is ready, so a socket must not turn private
+            # before it can be connected to. Every peer's uid is still
+            # verified when it is accepted.
             listener.listen(1)
+            os.chmod(self.path, 0o600)
         except Exception:
             listener.close()
             self._unlink_owned_path()

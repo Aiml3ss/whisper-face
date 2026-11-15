@@ -182,6 +182,7 @@ except Exception:  # pragma: no cover
 
 if RENDER_APPKIT_AVAILABLE:
     from whisper_face_characters import (
+        FRAMES,
         Arc,
         Curve,
         Ellipse,
@@ -193,7 +194,10 @@ if RENDER_APPKIT_AVAILABLE:
     from whisper_face_theme import jelly_face_scale
 
     def _render_rgb(r, g, b, a=1.0):
-        NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, a).set()
+        # sRGB, like the exported SVGs and the site: the calibrated space
+        # draws the same numbers visibly paler, and the two renderers would
+        # disagree about every color in the spec.
+        NSColor.colorWithSRGBRed_green_blue_alpha_(r, g, b, a).set()
 
     def _render_poly(points):
         path = NSBezierPath.bezierPath()
@@ -203,21 +207,29 @@ if RENDER_APPKIT_AVAILABLE:
         path.closePath()
         return path
 
+    def _render_fill(path, op) -> None:
+        """Fill ``path``; a ``grow`` op is also stroked out to its border."""
+        _render_rgb(*op.color, op.alpha)
+        path.fill()
+        if op.grow > 0.0:
+            path.setLineWidth_(2.0 * op.grow)
+            path.setLineJoinStyle_(1)
+            path.stroke()
+
     def replay_ops(ops) -> None:
         """Draw a shared character op list through Core Graphics.
 
         The single Core Graphics twin of ``whisper_face_characters._svg_op``;
         the HUD and the window both call this so the two renderers cannot
-        drift apart.
+        drift apart.  The sticker outline and hard shadow arrive as ordinary
+        filled ops carrying ``grow``.
         """
         for op in ops:
             if isinstance(op, Ellipse):
-                _render_rgb(*op.color, op.alpha)
-                NSBezierPath.bezierPathWithOvalInRect_(
-                    NSMakeRect(op.x, op.y, op.w, op.h)).fill()
+                _render_fill(NSBezierPath.bezierPathWithOvalInRect_(
+                    NSMakeRect(op.x, op.y, op.w, op.h)), op)
             elif isinstance(op, Polygon):
-                _render_rgb(*op.color, op.alpha)
-                _render_poly(op.points).fill()
+                _render_fill(_render_poly(op.points), op)
             elif isinstance(op, Stroke):
                 _render_rgb(*op.color, op.alpha)
                 path = NSBezierPath.bezierPath()
@@ -229,10 +241,10 @@ if RENDER_APPKIT_AVAILABLE:
                     path.lineToPoint_(point)
                 path.stroke()
             elif isinstance(op, RoundedRect):
-                _render_rgb(*op.color, op.alpha)
-                NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                    NSMakeRect(op.x, op.y, op.w, op.h),
-                    op.radius, min(op.radius, op.h / 2.0)).fill()
+                _render_fill(
+                    NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                        NSMakeRect(op.x, op.y, op.w, op.h),
+                        op.radius, min(op.radius, op.h / 2.0)), op)
             elif isinstance(op, Arc):
                 _render_rgb(*op.color, op.alpha)
                 path = NSBezierPath.bezierPath()
@@ -243,14 +255,16 @@ if RENDER_APPKIT_AVAILABLE:
                 path.setLineCapStyle_(1)
                 path.stroke()
             elif isinstance(op, Curve):
-                _render_rgb(*op.color, op.alpha)
                 path = NSBezierPath.bezierPath()
                 path.moveToPoint_(op.start)
                 for control_one, control_two, end in op.segments:
                     path.curveToPoint_controlPoint1_controlPoint2_(
                         end, control_one, control_two)
                 path.closePath()
-                path.fill()
+                _render_fill(path, op)
+            else:
+                raise TypeError(
+                    f"unsupported draw op: {type(op).__name__}")
 
     class LiveFaceView(NSView):
         """The window's living character: breath, blinks, glances, speech.
@@ -260,6 +274,15 @@ if RENDER_APPKIT_AVAILABLE:
         draws a correct static frame whenever the timer is off.  Visibility
         callers use ``startLiving``/``stopLiving``; feeding a level via
         ``setLevel_mode_`` is how recording reaches the mouth.
+
+        A surface says how the face stands on it.  ``setShadow_`` asks for
+        the sticker's hard shadow and ``setWhispers_(False)`` leaves the
+        speech puffs out, for a stage that shows the level some other way.
+        ``setTilt_`` leans the drawing inside the view, so the view itself is
+        never rotated and a spring on its layer has nothing to fight, and
+        ``setBleed_`` keeps that many points on every side clear of the art
+        so the lean, the squash and the shadow are never clipped.
+        ``setPose_`` names the exported frame a face without a clock holds.
         """
 
         def initWithFrame_(self, frame):
@@ -274,6 +297,11 @@ if RENDER_APPKIT_AVAILABLE:
             self.life = IdleLifeDriver()
             self._timer = None
             self._wobble_hook = None
+            self.tilt = 0.0
+            self.bleed = 0.0
+            self.shadow = False
+            self.whispers = True
+            self.pose = "idle"
             return self
 
         def isFlipped(self):
@@ -308,6 +336,47 @@ if RENDER_APPKIT_AVAILABLE:
         def setWobbleHook_(self, hook):
             """Install the controller's spring callback for rare shrugs."""
             self._wobble_hook = hook
+
+        # -- placement on a surface -------------------------------------
+
+        def setTilt_(self, degrees):
+            """Lean the drawing; positive is clockwise on screen."""
+            degrees = float(degrees)
+            if degrees != self.tilt:
+                self.tilt = degrees
+                self.setNeedsDisplay_(True)
+
+        def setBleed_(self, points):
+            """Keep this much of every edge clear of the art."""
+            points = max(0.0, float(points))
+            if points != self.bleed:
+                self.bleed = points
+                self.setNeedsDisplay_(True)
+
+        def setShadow_(self, flag):
+            flag = bool(flag)
+            if flag != self.shadow:
+                self.shadow = flag
+                self.setNeedsDisplay_(True)
+
+        def setWhispers_(self, flag):
+            flag = bool(flag)
+            if flag != self.whispers:
+                self.whispers = flag
+                self.setNeedsDisplay_(True)
+
+        def setPose_(self, pose):
+            """The frame a face without a clock holds: ``idle`` or ``talk``."""
+            pose = pose if pose in FRAMES else "idle"
+            if pose != self.pose:
+                self.pose = pose
+                self.setNeedsDisplay_(True)
+
+        def art_side(self):
+            """Side of the square the character is drawn in, in points."""
+            bounds = self.bounds().size
+            return max(
+                0.0, min(bounds.width, bounds.height) - 2.0 * self.bleed)
 
         # -- clock ------------------------------------------------------
 
@@ -344,7 +413,7 @@ if RENDER_APPKIT_AVAILABLE:
 
         def drawRect_(self, _rect):
             bounds = self.bounds().size
-            side = min(bounds.width, bounds.height)
+            side = self.art_side()
             if side <= 0:
                 return
             animate = not self.reduce_motion and self._timer is not None
@@ -352,6 +421,9 @@ if RENDER_APPKIT_AVAILABLE:
 
             mouth = self.life.mouth(
                 lv, animate and self.mode == "recording")
+            if not animate and self.pose != "idle":
+                # A still face holds the exported frame it was asked for.
+                mouth, lv = FRAMES[self.pose]
             blink = self.life.blink(animate)
             gaze = self.life.gaze(animate and self.mode == "idle")
             mood = mood_overrides(self.mode)
@@ -373,12 +445,14 @@ if RENDER_APPKIT_AVAILABLE:
             ctx.saveGraphicsState()
             transform = NSAffineTransform.transform()
             transform.translateXBy_yBy_(
-                (bounds.width - side) / 2.0, (bounds.height - side) / 2.0)
+                bounds.width / 2.0, bounds.height / 2.0)
+            # Flipped view: a positive angle turns clockwise on screen.
+            transform.rotateByDegrees_(self.tilt)
             transform.scaleBy_(side / 256.0)
-            transform.translateXBy_yBy_(128.0, 128.0)
             transform.scaleXBy_yBy_(scale_x, scale_y)
             transform.translateXBy_yBy_(-128.0, -128.0)
             transform.concat()
             replay_ops(character_ops(
-                self.face, mouth, lv, blink, gaze=gaze))
+                self.face, mouth, lv, blink, gaze=gaze,
+                shadow=self.shadow, whispers=self.whispers))
             ctx.restoreGraphicsState()

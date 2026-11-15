@@ -3,7 +3,7 @@ title: "Insertion Transaction"
 type: concept
 language: en
 created: 2026-07-26
-modified: 2026-07-27
+modified: 2026-11-15
 tags: [insertion, safety, outbox, core, macos]
 aliases: [insertion-lease, voice-outbox, exactly-once-insertion]
 summary: "Final insertion is an exactly-once local transaction: lease the target at key-down, revalidate before one paste attempt, and route anything unproven to a recoverable RAM-only outbox."
@@ -64,8 +64,9 @@ Outbox instead of the wrong field.
   distinguishes never-pasted from possibly-landed text; only the
   explicit Copy & Dismiss control recovers content. Since 2026-07-26 the
   count-only [[menu-bar]] row appears solely while the queue holds
-  something, and it routes to Home, where the hero card carries the
-  warning line and the Copy & Dismiss control ([[app-window]]). Only
+  something, and it routes to Home, where the Dictation rows carry the
+  warning line and the speech bubble carries the Copy & Dismiss control
+  ([[app-window]]). Only
   *verified* receipts may train [[personalization]].
 - Receipt states: verified, unverifiable, conflict, unresolved — with
   fixed reasons; the same vocabulary is reused by the in-process
