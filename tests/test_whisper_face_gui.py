@@ -3549,8 +3549,7 @@ class NewLookFoundationContractTests(unittest.TestCase):
         finish = _called_names(_gui_function("_render_finish", controller))
         self.assertEqual(
             [name for name in finish if name.startswith("_")],
-            ["_restyle_secondary_buttons", "_sync_face_clock",
-             "_configure_key_view_loop"])
+            ["_sync_face_clock", "_configure_key_view_loop"])
 
     def test_each_settings_pane_has_its_own_builder(self):
         controller = _gui_class("WhisperFaceWindowController")
@@ -3576,8 +3575,6 @@ class SettingsPagesContractTests(unittest.TestCase):
         for name in self.PAGE_BUILDERS + ("_build_settings",):
             with self.subTest(builder=name):
                 called = _called_names(_gui_function(name, controller))
-                # The title strip names the page; nothing repeats it.
-                self.assertNotIn("_page_header", called)
                 if name != "_build_settings":
                     self.assertIn("_grouped_page", called)
                     self.assertIn("_section_header", called)
@@ -3587,14 +3584,55 @@ class SettingsPagesContractTests(unittest.TestCase):
                     self.assertNotIn("_card", called)
                     self.assertNotIn("_pill", called)
 
+    def test_what_the_new_look_replaced_is_gone(self):
+        # The title strip names the page, so no page has a header of its
+        # own; buttons are the system's, so nothing repaints them; groups
+        # draw themselves, so nothing themes a card or a separator.
+        names = {node.id for node in ast.walk(GUI_TREE)
+                 if isinstance(node, ast.Name)} | {
+            node.attr for node in ast.walk(GUI_TREE)
+            if isinstance(node, ast.Attribute)} | {
+            node.name for node in ast.walk(GUI_TREE)
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef))} | {
+            alias.asname or alias.name for node in ast.walk(GUI_TREE)
+            if isinstance(node, ast.ImportFrom) for alias in node.names}
+        for gone in ("_page_header", "_stack", "_restyle_secondary_buttons",
+                     "_SECONDARY_BUTTONS", "_card", "_hairline", "_pill",
+                     "_fit_pill", "_set_pill_tone", "_amber_text_color",
+                     "_mirror_accessibility_to_cell", "_appkit_name",
+                     "NSSegmentStyleRounded", "NSBox", "SURFACE_SPECS",
+                     "CARD_RADIUS"):
+            with self.subTest(name=gone):
+                self.assertNotIn(gone, names)
+        # Every name the module imports from a framework or the theme is
+        # one it uses.
+        imported = [
+            (alias.asname or alias.name, node.lineno)
+            for node in ast.walk(GUI_TREE)
+            if isinstance(node, ast.ImportFrom)
+            and node.module in ("AppKit", "Foundation", "Quartz",
+                                "whisper_face_theme")
+            for alias in node.names]
+        used = {node.id for node in ast.walk(GUI_TREE)
+                if isinstance(node, ast.Name)
+                and isinstance(node.ctx, ast.Load)}
+        self.assertEqual(
+            [name for name, _line in imported if name not in used], [])
+        # No catalog string is left behind by a page that no longer
+        # shows it.
+        for key in ("settings.title", "settings.subtitle",
+                    "models.relisten.status.ready",
+                    "settings.personalize.keywords.detail",
+                    "settings.accessibility.edit.help"):
+            self.assertNotIn(key, STRING_CATALOGS["en"])
+
     def test_buttons_are_system_push_buttons_read_through_their_cells(self):
         button = _gui_function("_button")
         text = ast.unparse(button)
         self.assertIn("PushButton.alloc()", text)
         self.assertIn("setBezelStyle_(NSBezelStyleRounded)", text)
         # The system draws the bezel: no layer paint, no fixed corners.
-        for banned in ("setCornerRadius_", "setBordered_(False)",
-                       "_SECONDARY_BUTTONS.append"):
+        for banned in ("setCornerRadius_", "setBordered_(False)", "layer()"):
             self.assertNotIn(banned, text)
         forwarded = _method_names(_gui_class("PushButton"))
         self.assertLessEqual(

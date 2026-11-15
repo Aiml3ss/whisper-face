@@ -21,7 +21,6 @@ from typing import Any, Callable, Mapping, Sequence
 from support_bundle import SupportBundleError, write_support_bundle
 from whisper_face_theme import (
     FACE_CHIP_COLORS,
-    LIGHT_PALETTE,
     MOTION_SPECS,
     contrast_ratio,
     palette_for_appearance,
@@ -321,7 +320,6 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "advanced.accessibility.shortcut": "Advanced section shortcut",
         "advanced.accessibility.shortcut.help": "Show the Advanced section (Command-D).",
         "app.subtitle": "Private, fast voice input on your Mac",
-        "app.local_badge": "LOCAL FIRST",
         "app.version": "BUILD {version}",
         "overview.phase.ready": "READY",
         "overview.phase.recording": "RECORDING",
@@ -541,11 +539,6 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "models.detail.mismatch": "A different version is installed · run the installer again to repair",
         "models.detail.checking": "Checking the files on this Mac",
         "models.relisten.label": "Selective Re-listen",
-        "models.relisten.status.off": "Off",
-        "models.relisten.status.ready": "On · verifier ready",
-        "models.relisten.status.warming": "On · warming locally",
-        "models.relisten.status.enabled-not-ready": "On · starting locally",
-        "models.relisten.status.evidence-required": "Evidence required",
         "models.relisten.help": "Recheck only uncertain names and numbers with the local Whisper Tiny verifier. Activation requires approved evidence from this Mac.",
         "models.wallet.unavailable": "Model wallet shadow advisory only · No model execution or routing · Exact pin evidence unavailable · Runtime readiness and capability evidence remain separate.",
         "models.wallet.evidence": "Model wallet shadow advisory only · No model execution or routing · Exact files resolved {resolved}/4 · Warm path observed {warm}/4 · Runtime readiness attested 0/4 · Capability bounds available 0/4.",
@@ -559,7 +552,6 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "diagnostics.service": "Service",
         "diagnostics.microphone": "Microphone",
         "diagnostics.accessibility": "Accessibility",
-        "diagnostics.regression": "Personal Regression Lab",
         "diagnostics.motion": "Motion",
         "diagnostics.build": "Build",
         "diagnostics.unknown": "Unknown",
@@ -584,7 +576,6 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "diagnostics.license": "AGPL-3.0-only · no warranty · corresponding source available",
         "diagnostics.regression.cases.one": "1 case",
         "diagnostics.regression.cases.many": "{count} cases",
-        "diagnostics.regression.quarantined": " · {count} quarantined",
         "diagnostics.motion.reduced": "Reduced motion",
         "diagnostics.motion.standard": "Standard motion",
         "diagnostics.issue": "{title}: {detail}",
@@ -614,8 +605,6 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "issue.models.detail": "Run Install.command again to restore {models}. Your settings stay.",
         "issue.fallback.title": "An optional model needs repair",
         "issue.fallback.detail": "Dictation still works. Run the installer again to repair {models}.",
-        "settings.title": "Settings",
-        "settings.subtitle": "Personal language, appearance, keys, sound, and privacy in one place.",
         "settings.pane.personalize": "Personalize",
         "settings.pane.controls": "Controls",
         "settings.pane.privacy": "Privacy",
@@ -747,11 +736,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.personalize.vocabulary.exclusions.many": "{count} exclusions",
         "settings.personalize.vocabulary.empty": "Teach me the names I keep getting wrong",
         "settings.personalize.corrections": "Learned corrections",
-        "settings.personalize.corrections.detail.one": "1 inspectable mapping",
-        "settings.personalize.corrections.detail.many": "{count} inspectable mappings",
         "settings.personalize.corrections.empty": "Fix the same word a few times and I’ll remember it",
         "settings.personalize.keywords": "Pronunciation keywords",
-        "settings.personalize.keywords.detail": "Open to inspect correction-backed evidence",
         "settings.personalize.modes": "Voice modes",
         "settings.personalize.modes.detail": "Six {hotkey} shortcuts choose capture behavior",
         "settings.dialog.modes.title": "Voice modes",
@@ -845,11 +831,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.privacy.flight": "Flight Recorder",
         "settings.privacy.flight.detail": "Keeps a rolling 20-second audio buffer in RAM only.",
         "settings.privacy.acoustic": "Acoustic Time Machine",
-        "settings.privacy.acoustic.detail": "Opt in to keep selected latest-result spans in RAM for at most one minute.",
         "settings.privacy.voice_objects": "Voice Object Commands",
         "settings.privacy.voice_objects.detail": "Exact task, email, and calendar commands queue inert local drafts instead of pasting.",
-        "settings.privacy.voice_objects.status.one": "{status} · 1 local draft queued",
-        "settings.privacy.voice_objects.status.many": "{status} · {count} local drafts queued",
         "settings.privacy.voice_objects.inspect": "Inspect",
         "settings.privacy.voice_objects.inspect.help": "Open the local Voice Inbox. Draft content stays hidden until you explicitly reveal a selected draft.",
         "settings.privacy.face": "Companion",
@@ -874,8 +857,6 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.state.local_processing": "Local processing",
         "settings.accessibility.sections.label": "Settings sections",
         "settings.accessibility.sections.help": "Use arrow keys to move between Whisper Face settings sections.",
-        "settings.accessibility.category.label": "Settings category",
-        "settings.accessibility.category.help": "Choose personalization, control, or privacy settings.",
         "settings.accessibility.forget.help": "Inspect or forget {setting}.",
         "settings.accessibility.language.label": "Dictation language",
         "settings.accessibility.language.help": "Choose the language you dictate in. English uses the fast on-device recognizer; every other language is recognized by Whisper, which is accurate but slower.",
@@ -5691,13 +5672,10 @@ try:  # The view-model above remains usable in headless test environments.
         NSSavePanel,
         NSScrollView,
         NSSegmentedControl,
-        NSSegmentStyleRounded,
         NSSwitch,
         NSTextField,
         NSTextView,
         NSView,
-        NSViewMaxXMargin,
-        NSViewMinXMargin,
         NSViewMinYMargin,
         NSViewWidthSizable,
         NSWindow,
@@ -6478,12 +6456,6 @@ if APPKIT_AVAILABLE:
         # be spoken as well as the text.
         return (_accessible(label, accessibility_label)
                 if accessibility_label else label)
-
-    # Secondary buttons used to be layer-painted clay capsules repainted
-    # through this registry on every render. They are system push buttons
-    # now and draw themselves in both appearances, so nothing joins it; it
-    # stays for ``_restyle_secondary_buttons``, which still walks it.
-    _SECONDARY_BUTTONS: list[Any] = []
 
     class PushButton(JellyButton):
         """A system push button whose VoiceOver copy reaches VoiceOver.
@@ -8045,7 +8017,7 @@ if APPKIT_AVAILABLE:
             self.pages: dict[str, Any] = {}
             self.dynamic: dict[str, Any] = {}
             # Views that must re-read the palette when the appearance flips.
-            # Roles: ink, ink_soft, brand.
+            # Roles: ink, ink_soft.
             self.themed: dict[str, list[Any]] = {}
             self.timer = None
             self.defaults = None
@@ -8580,8 +8552,6 @@ if APPKIT_AVAILABLE:
                 label.setTextColor_(_theme_color(palette.ink))
             for label in self.themed.get("ink_soft", ()):
                 label.setTextColor_(_theme_color(palette.ink_soft))
-            for label in self.themed.get("brand", ()):
-                label.setTextColor_(_brand_text_color(dark))
             # Home's stage, bubble, buttons and stickers draw themselves
             # from the tokens and follow the appearance on their own.
 
@@ -8795,45 +8765,6 @@ if APPKIT_AVAILABLE:
             if self is None:
                 return None
             return self._initialize(view_model, read_system_state=False)
-
-        @objc.python_method
-        def _stack(self, page: Any, view: Any, *, below: Any = None,
-                   gap: float = 0.0, height: float | None = None) -> Any:
-            """Pin a full-width block into a page's vertical rhythm."""
-            view.setTranslatesAutoresizingMaskIntoConstraints_(False)
-            page.addSubview_(view)
-            top = (page.topAnchor() if below is None
-                   else below.bottomAnchor())
-            constraints = [
-                view.topAnchor().constraintEqualToAnchor_constant_(top, gap),
-                view.leadingAnchor().constraintEqualToAnchor_(
-                    page.leadingAnchor()),
-                view.trailingAnchor().constraintEqualToAnchor_(
-                    page.trailingAnchor()),
-            ]
-            if height is not None:
-                constraints.append(
-                    view.heightAnchor().constraintEqualToConstant_(height))
-            NSLayoutConstraint.activateConstraints_(constraints)
-            return view
-
-        @objc.python_method
-        def _page_header(self, page: Any, title: str,
-                         *, subtitle: str = "") -> Any:
-            """Content header: 22pt rounded title, optional 13pt subtitle."""
-            height = 56.0 if subtitle else 32.0
-            header = NSView.alloc().initWithFrame_(
-                NSMakeRect(0, 0, CONTENT_WIDTH, height))
-            title_label = self._ink(
-                title, NSMakeRect(0, height - 28, 520, 28),
-                size=22, weight="semibold", rounded=True)
-            header.addSubview_(title_label)
-            if subtitle:
-                header.addSubview_(self._soft(
-                    subtitle, NSMakeRect(1, height - 50, 620, 18),
-                    size=13, truncate=True))
-            self._stack(page, header, height=height)
-            return header
 
         def _build_window(self) -> None:
             # A standard titled window whose content view runs under the
@@ -9382,7 +9313,6 @@ if APPKIT_AVAILABLE:
             self.dynamic.update(
                 home_cluster=home,
                 home_stage=stage,
-                home_header=stage,
                 overview_hero=stage,
                 home_face_view=face_view,
                 home_bubble_host=host,
@@ -9406,9 +9336,6 @@ if APPKIT_AVAILABLE:
                 home_attention_icon=attention_icon,
                 home_attention_title=attention_title,
                 review_issue_row_button=review_row,
-                home_result_row=result_row,
-                home_replay_row=replay_row,
-                home_outbox_row=outbox_row,
                 result_summary=result_summary,
                 result_engine=result_engine,
                 result_mode=result_mode,
@@ -10030,7 +9957,6 @@ if APPKIT_AVAILABLE:
                 sound_theme_detail=sound_detail,
                 self_correction_toggle=correction_switch,
                 self_correction_detail=correction_detail,
-                self_correction_cost=correction_cost,
             )
             return tuple(control_key_views)
 
@@ -11175,38 +11101,8 @@ if APPKIT_AVAILABLE:
         @objc.python_method
         def _render_finish(self, state: GUIState) -> None:
             """What depends on every surface having rendered."""
-            dark = getattr(self, "_dark", False)
-            self._restyle_secondary_buttons(dark)
             self._sync_face_clock()
             self._configure_key_view_loop(state)
-
-        @objc.python_method
-        def _restyle_secondary_buttons(self, dark: bool) -> None:
-            """Clay treatment for every non-CTA button, last so any title
-            written earlier in this render keeps its ink."""
-            palette = palette_for_appearance(dark)
-            fill = (0.259, 0.318, 0.286) if dark else (1.0, 1.0, 1.0)
-            for button in _SECONDARY_BUTTONS:
-                layer = button.layer()
-                if layer is None:
-                    continue
-                layer.setBackgroundColor_(_theme_color(fill).CGColor())
-                layer.setBorderColor_(_theme_color(
-                    palette.line, 0.26 if dark else 0.16).CGColor())
-                try:
-                    tint = _theme_color(
-                        palette.ink if bool(button.isEnabled())
-                        else palette.ink_soft)
-                    button.setContentTintColor_(tint)
-                    button.setAttributedTitle_(
-                        NSAttributedString.alloc()
-                        .initWithString_attributes_(str(button.title()), {
-                            NSFontAttributeName: _font(
-                                12.5, "medium", rounded=True),
-                            NSForegroundColorAttributeName: tint,
-                        }))
-                except Exception:
-                    pass
 
         @objc.python_method
         def _text_editor(self, frame: Any, value: str, *,
