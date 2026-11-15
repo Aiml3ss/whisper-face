@@ -35,6 +35,7 @@ import contextlib
 import http.client
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -996,6 +997,127 @@ class EgressTripwireTests(unittest.TestCase):
             with EgressTripwire():
                 socket.create_connection(("exfil.example.com", 443))
         self.assertIs(socket.socket, original)
+
+
+class SpeechRuntimeReachTests(unittest.TestCase):
+    """Whisper Face's own speech runtime cannot reach the network.
+
+    native/ParrotSpeechRuntime is Swift, so the tripwire above cannot see it.
+    Its sources are read instead: they import only Foundation, Core ML and
+    Accelerate, name no networking, process or file-changing API, and build
+    every URL from a file path. What the built binary links on a Mac is
+    recorded in native/ParrotSpeechRuntime/README.md.
+    """
+
+    SOURCES = ROOT / "native" / "ParrotSpeechRuntime" / "Sources"
+    # Networking in any form, starting another program, and changing a file
+    # (the runtime never downloads, deletes, moves or writes one).
+    FORBIDDEN = (
+        "URLSession", "URLRequest", "URLConnection", "NSURLConnection",
+        "NSURLSession", "CFNetwork", "CFSocket", "CFStream", "CFHost",
+        "NWConnection", "NWListener", "NWPathMonitor", "nw_", "socket(",
+        "connect(", "getaddrinfo", "gethostbyname", "SCNetwork", "Bonjour",
+        "NetService", "WebSocket", "http", "Process(", "NSTask",
+        "posix_spawn", "system(", "popen", "dlopen", "removeItem",
+        "unlink", "rmdir", "trashItem", "moveItem", "copyItem",
+        "replaceItem", "createFile", "createDirectory", "write(to",
+        "write(toFile", "contentsOf: URL(string", "URL(string",
+        "Data(contentsOf", "String(contentsOf", "fopen", "open(",
+        "setAttributes", "ModelHub", "download",
+        # Writing through a handle it opened, or changing a path with the C
+        # library Foundation re-exports. Standard output and standard error
+        # are reached as FileHandle.standardOutput and .standardError, never
+        # through a constructor.
+        "FileHandle(", "NSFileHandle", "fwrite", "freopen", "creat(",
+        "rename(", "renameat", "truncate", "mkdir", "symlink", "chmod",
+        "chown", "utimes", "copyfile", "clonefile",
+        # Reaching a class, selector or symbol by a name built at run time,
+        # which would get past every word above.
+        "NSClassFromString", "NSSelectorFromString", "objc_getClass",
+        "objc_lookUpClass", "objc_msgSend", "dlsym", "_silgen_name",
+        "_cdecl", "performSelector", "perform(", "#selector(", "Selector(",
+        "Bundle(", "value(forKey",
+    )
+    # Names that are also the start of harmless longer ones (removeLast,
+    # unlinked): matched as whole words only.
+    FORBIDDEN_WORDS = ("remove", "link", "exec", "fork", "kill")
+
+    @classmethod
+    def violations(cls, code: str) -> list[str]:
+        found = [word for word in cls.FORBIDDEN if word in code]
+        found += [word for word in cls.FORBIDDEN_WORDS
+                  if re.search(rf"\b{word}\s*\(", code)]
+        return found
+
+    @classmethod
+    def setUpClass(cls):
+        cls.files = {
+            path.relative_to(cls.SOURCES).as_posix():
+                path.read_text(encoding="utf-8")
+            for path in sorted(cls.SOURCES.rglob("*.swift"))}
+
+    @staticmethod
+    def code(text: str) -> str:
+        text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        return "\n".join(line.split("//", 1)[0] for line in text.splitlines())
+
+    def test_the_sources_are_read(self):
+        self.assertGreaterEqual(len(self.files), 8)
+
+    def test_only_apple_compute_frameworks_are_imported(self):
+        for name, text in self.files.items():
+            imports = set(re.findall(r"^\s*(?:@\w+\s+)?import\s+(\w+)",
+                                     self.code(text), re.MULTILINE))
+            with self.subTest(file=name):
+                self.assertTrue(imports)
+                self.assertLessEqual(
+                    imports, {"Foundation", "CoreML", "Accelerate"})
+
+    def test_no_networking_process_or_file_changing_api_is_named(self):
+        for name, text in self.files.items():
+            with self.subTest(file=name):
+                self.assertEqual(self.violations(self.code(text)), [])
+
+    def test_every_url_is_a_file_path(self):
+        seen = 0
+        for name, text in self.files.items():
+            code = self.code(text)
+            for match in re.finditer(r"\bURL\(", code):
+                seen += 1
+                with self.subTest(file=name, at=match.start()):
+                    self.assertTrue(code.startswith(
+                        "URL(fileURLWithPath:", match.start()))
+        # The model files are opened by URL, so there is at least one.
+        self.assertGreater(seen, 0)
+
+    def test_the_tripwire_words_are_caught(self):
+        # The scan above would pass on code it could not read; prove it bites.
+        sample = 'let s = URLSession.shared // fine\n/* also fine */'
+        self.assertIn("URLSession", self.code(sample))
+        self.assertNotIn("fine", self.code(sample))
+        # Each of these got past an earlier version of the list.
+        for line in (
+                'FileHandle(forWritingAtPath: path)?.write(data)',
+                'FileHandle(forUpdatingAtPath: path)',
+                '_ = remove(path)',
+                '_ = Darwin.remove (path)',
+                'rename(from, to)',
+                'let cls = NSClassFromString("NSURL" + "Session")',
+                '@_silgen_name("connect") func c(_: Int32) -> Int32',
+                'let f = dlsym(nil, "socket")',
+                'objc_getClass("NSURLSession")',
+                'truncate(path, 0)',
+                'mkdir(path, 0o700)'):
+            with self.subTest(line=line):
+                self.assertNotEqual(self.violations(self.code(line)), [])
+        # and what the runtime does need stays allowed.
+        for line in (
+                'FileHandle.standardOutput.write(data)',
+                'FileHandle.standardError.write(Data(usage.utf8))',
+                'result.removeLast(result.count - cursor)',
+                'FileManager.default.contents(atPath: path)'):
+            with self.subTest(allowed=line):
+                self.assertEqual(self.violations(self.code(line)), [])
 
 
 if __name__ == "__main__":

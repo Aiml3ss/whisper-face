@@ -3,6 +3,7 @@
 # dependencies = []
 # ///
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -11,8 +12,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from parrot_core import (  # noqa: E402
+    HELPER_MAX_WORDS,
+    HelperWord,
+    ParakeetResult,
     Recognition,
     RecognitionWord,
+    WORD_EVIDENCE_STATUSES,
+    combine_word_evidence_status,
+    helper_protocol,
+    parakeet_result,
+    parse_helper_words,
     EDIT_COMMAND_UNDO,
     EDIT_COMMAND_DELETE_WORD,
     EDIT_COMMAND_DELETE_SENTENCE,
@@ -1313,6 +1322,206 @@ class NonEnglishCleanupTests(unittest.TestCase):
         # own spacing around it.
         self.assertEqual(
             normalize_spacing("a  b", spaced=False), "a b")
+
+
+def helper_word(word="Hello", start=0.1, end=0.3, confidence=0.9, **extra):
+    return {"word": word, "start": start, "end": end,
+            "confidence": confidence, **extra}
+
+
+class HelperWordParsingTests(unittest.TestCase):
+    """Protocol 2 words are untrusted input: anything wrong is no evidence."""
+
+    def test_well_formed_words_are_kept_in_order(self):
+        words = parse_helper_words([
+            helper_word("Hello", 0.88, 0.96, 0.998),
+            helper_word(" world, ", 1.04, 1.52, 0.991, mark_confidence=0.61),
+        ], 2.0)
+        self.assertEqual(words, (
+            HelperWord("Hello", 0.88, 0.96, 0.998),
+            HelperWord("world,", 1.04, 1.52, 0.991, 0.61)))
+
+    def test_same_frame_words_and_rounding_past_the_end_are_allowed(self):
+        words = parse_helper_words([
+            helper_word("a", 0.4, 0.4), helper_word("b", 0.4, 0.4),
+            helper_word("c", 0.4, 1.0015)], 1.0)
+        self.assertEqual(len(words), 3)
+
+    def test_anything_malformed_discards_every_word(self):
+        good = helper_word()
+        cases = {
+            "not a list": {"word": "Hello"},
+            "a string": "Hello world",
+            "empty": [],
+            "too many": [helper_word("a", 0.0, 0.0)] * (HELPER_MAX_WORDS + 1),
+            "not an object": [good, ["Hello", 0.1, 0.3, 0.9]],
+            "no word": [{"start": 0.1, "end": 0.3, "confidence": 0.9}],
+            "word not text": [helper_word(7)],
+            "blank word": [helper_word("   ")],
+            "word too long": [helper_word("x" * 65)],
+            "no start": [{"word": "a", "end": 0.3, "confidence": 0.9}],
+            "text start": [helper_word(start="0.1")],
+            "boolean end": [helper_word(end=True)],
+            "not a number": [helper_word(start=float("nan"))],
+            "infinite": [helper_word(end=float("inf"))],
+            "negative start": [helper_word(start=-0.1)],
+            "ends before it starts": [helper_word(start=0.5, end=0.4)],
+            "past the clip": [helper_word(end=2.01)],
+            "starts out of order": [helper_word("a", 0.5, 0.6),
+                                    helper_word("b", 0.4, 0.6)],
+            "no confidence": [{"word": "a", "start": 0.1, "end": 0.3}],
+            "confidence above one": [helper_word(confidence=1.5)],
+            "confidence below zero": [helper_word(confidence=-0.1)],
+            "boolean confidence": [helper_word(confidence=True)],
+            "bad mark confidence": [helper_word(mark_confidence=2)],
+            "null mark confidence": [helper_word(mark_confidence=None)],
+        }
+        for name, raw in cases.items():
+            with self.subTest(case=name):
+                self.assertIsNone(parse_helper_words(raw, 2.0))
+        # One bad word anywhere drops the good ones too.
+        self.assertIsNone(parse_helper_words(
+            [good, helper_word("b", 0.4, 0.5, confidence="high")], 2.0))
+
+    def test_the_word_cap_is_the_helpers_own_4096(self):
+        # The runtime leaves `words` out above 4,096 (PROTOCOL.md); a larger
+        # list can only come from a broken or hostile helper.
+        self.assertEqual(HELPER_MAX_WORDS, 4_096)
+        protocol = (ROOT / "native" / "ParrotASRHelper"
+                    / "PROTOCOL.md").read_text(encoding="utf-8")
+        self.assertIn("more than 4,096 entries", protocol)
+        runtime = (ROOT / "native" / "ParrotSpeechRuntime" / "Sources"
+                   / "parrot-speech-runtime"
+                   / "WordEvidence.swift").read_text(encoding="utf-8")
+        self.assertIn("static let maximumWords = 4_096", runtime)
+        self.assertIn("words.count <= maximumWords", runtime)
+        at_cap = [helper_word("a", 0.0, 0.0)] * 4_096
+        self.assertEqual(len(parse_helper_words(at_cap, 2.0)), 4_096)
+        self.assertIsNone(parse_helper_words(at_cap + at_cap[:1], 2.0))
+
+    def test_an_integer_too_large_for_a_float_is_no_evidence(self):
+        # JSON reads 1 followed by 400 zeros as an int, and float() of it
+        # raises OverflowError rather than returning infinity.
+        huge = 10 ** 400
+        for field in ("start", "end", "confidence", "mark_confidence"):
+            for value in (huge, -huge):
+                with self.subTest(field=field, value=value > 0):
+                    self.assertIsNone(parse_helper_words(
+                        [helper_word(**{field: value})], 2.0))
+        parsed = json.loads(
+            '[{"word": "Hello", "start": 1' + "0" * 400
+            + ', "end": 0.3, "confidence": 0.9}]')
+        self.assertIsInstance(parsed[0]["start"], int)
+        self.assertIsNone(parse_helper_words(parsed, 2.0))
+        self.assertIsNone(parse_helper_words([helper_word()], huge))
+
+    def test_an_unusable_clip_length_discards_every_word(self):
+        for duration in (0, -1.0, float("nan"), None, True, "2.0"):
+            with self.subTest(duration=duration):
+                self.assertIsNone(parse_helper_words([helper_word()], duration))
+
+    def test_unknown_word_fields_are_ignored(self):
+        self.assertEqual(
+            parse_helper_words([helper_word(speaker=2)], 1.0),
+            (HelperWord("Hello", 0.1, 0.3, 0.9),))
+
+
+class HelperProtocolTests(unittest.TestCase):
+    def test_only_an_exact_protocol_2_with_words_is_protocol_2(self):
+        self.assertEqual(helper_protocol(
+            {"ready": True, "protocol": 2, "capabilities": ["words"]}), 2)
+        for status in (
+                {"ready": True},                              # protocol 1
+                {"ready": True, "protocol": 1},
+                {"ready": True, "protocol": 3, "capabilities": ["words"]},
+                {"ready": True, "protocol": "2", "capabilities": ["words"]},
+                {"ready": True, "protocol": 2.0, "capabilities": ["words"]},
+                {"ready": True, "protocol": True, "capabilities": ["words"]},
+                {"ready": True, "protocol": 2},
+                {"ready": True, "protocol": 2, "capabilities": "words"},
+                {"ready": True, "protocol": 2, "capabilities": ["vocabulary"]},
+                None, "ready", []):
+            with self.subTest(status=status):
+                self.assertEqual(helper_protocol(status), 1)
+
+    def test_a_result_is_the_protocol_1_pair_with_evidence_attached(self):
+        result = parakeet_result(
+            "Hello world.", 0.15,
+            {"ok": True, "text": "Hello world.", "processing_s": 0.15,
+             "avg_confidence": 0.97,
+             "words": [helper_word("Hello", 0.1, 0.4),
+                       helper_word("world.", 0.5, 0.9)]},
+            protocol=2, duration=1.0)
+        self.assertIsInstance(result, ParakeetResult)
+        self.assertEqual(result, ("Hello world.", 0.15))
+        text, seconds = result
+        self.assertEqual((text, seconds), (result.text, result.processing_s))
+        self.assertEqual(result.word_evidence_status, "native")
+        self.assertEqual(result.avg_confidence, 0.97)
+        self.assertEqual([word.text for word in result.words],
+                         ["Hello", "world."])
+
+    def test_a_protocol_1_helper_has_no_evidence_whatever_it_sends(self):
+        result = parakeet_result(
+            "Hello.", 0.1, {"ok": True, "text": "Hello.",
+                            "words": [helper_word("Hello.")],
+                            "avg_confidence": 0.9},
+            protocol=1, duration=1.0)
+        self.assertEqual(
+            (result.words, result.avg_confidence, result.word_evidence_status),
+            (None, None, "v1-helper"))
+
+    def test_missing_words_are_absent_and_malformed_words_are_rejected(self):
+        absent = parakeet_result("", 0.1, {"ok": True, "text": ""},
+                                 protocol=2, duration=1.0)
+        self.assertEqual(absent.word_evidence_status, "absent")
+        rejected = parakeet_result(
+            "Hello.", 0.1,
+            {"ok": True, "text": "Hello.", "avg_confidence": "high",
+             "words": [helper_word("Hello.", 0.5, 0.1)]},
+            protocol=2, duration=1.0)
+        self.assertEqual(rejected, ("Hello.", 0.1))
+        self.assertEqual(
+            (rejected.words, rejected.avg_confidence,
+             rejected.word_evidence_status), (None, None, "rejected"))
+
+    def test_a_huge_integer_anywhere_in_a_response_costs_no_text(self):
+        huge = 10 ** 400
+        words = [helper_word("Hello.", 0.1, 0.4)]
+        average = parakeet_result(
+            "Hello.", 0.1, {"ok": True, "text": "Hello.",
+                            "avg_confidence": huge, "words": words},
+            protocol=2, duration=1.0)
+        self.assertEqual(average, ("Hello.", 0.1))
+        self.assertEqual(
+            (average.avg_confidence, average.word_evidence_status),
+            (None, "native"))
+        response = json.loads(
+            '{"ok": true, "text": "Hello.", "processing_s": 0.1, '
+            '"avg_confidence": -1' + "0" * 400 + ', "words": [{"word": '
+            '"Hello.", "start": 0.1, "end": 1' + "0" * 400
+            + ', "confidence": 0.9}]}')
+        result = parakeet_result("Hello.", 0.1, response,
+                                 protocol=2, duration=1.0)
+        self.assertEqual(result, ("Hello.", 0.1))
+        self.assertEqual(
+            (result.words, result.avg_confidence,
+             result.word_evidence_status), (None, None, "rejected"))
+
+    def test_a_dictation_reports_the_worst_status_of_its_parts(self):
+        self.assertEqual(WORD_EVIDENCE_STATUSES, (
+            "rejected", "misaligned", "v1-helper", "native", "absent"))
+        self.assertEqual(combine_word_evidence_status([]), "absent")
+        self.assertEqual(
+            combine_word_evidence_status(["native", "absent"]), "native")
+        self.assertEqual(combine_word_evidence_status(
+            ["native", "misaligned", "native"]), "misaligned")
+        self.assertEqual(combine_word_evidence_status(
+            ["misaligned", "rejected"]), "rejected")
+        self.assertEqual(
+            combine_word_evidence_status(["unknown"]), "absent")
+        self.assertEqual(Recognition("x").word_evidence_status, "absent")
+        self.assertEqual(RecognitionWord("x").source, "")
 
 
 if __name__ == "__main__":

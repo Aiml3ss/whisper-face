@@ -16,7 +16,11 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable, Protocol, Sequence
 
-from parrot_core import find_self_correction
+from parrot_core import (
+    HELPER_WORD_SOURCE,
+    RecognitionWord,
+    find_self_correction,
+)
 from personal_regression import is_common_word
 from phonetic_keys import double_metaphone
 from process_verifier import RefusalReason, VerificationReceipt
@@ -336,6 +340,13 @@ class VoiceIR:
     app_bundle: str = ""
     mode: str = "capture"
     finalized: bool = True
+    # Whether a word's own confidence may clear a consequential span's
+    # uncertainty. False for recognizer confidence nobody has calibrated:
+    # its timings still place the span, and the span stays uncertain.
+    trust_word_confidence: bool = True
+    # Whether pauses between timed words may add commas and paragraphs. A
+    # rising question contour is unaffected.
+    pause_punctuation: bool = True
 
     def __post_init__(self):
         if not self.hypotheses:
@@ -847,6 +858,97 @@ def _aligned_words(primary: RecognitionHypothesis,
     return words
 
 
+# Shortest span a projected piece may have; the harvest and the consequence
+# plan both refuse an empty interval.
+_PROJECTED_MINIMUM_SECONDS = 0.001
+
+
+def _divide_interval(start: float, end: float,
+                     weights: Sequence[int]) -> list[tuple[float, float]]:
+    """Split ``[start, end]`` in proportion to ``weights``; exact ends."""
+    total = sum(weights)
+    bounds = [start]
+    covered = 0
+    for weight in weights[:-1]:
+        covered += weight
+        bounds.append(start + (end - start) * covered / total)
+    bounds.append(end)
+    return list(zip(bounds[:-1], bounds[1:]))
+
+
+def project_word_evidence(
+        text: str, helper_words: Sequence, duration: float) \
+        -> tuple[RecognitionWord, ...] | None:
+    """Turn the helper's words into this compiler's lexical tokens.
+
+    The helper groups SentencePiece tokens into words with punctuation
+    attached ("world,", "$1,250.50"), and gives every token emitted on one
+    80 ms encoder frame the same start, so several words can share a start
+    and have no length. The compiler aligns evidence to its own lexical
+    tokens and the harvest refuses empty or overlapping spans, so used as
+    they come the words would be thrown away without a trace. Here:
+
+    - each end is clamped to the clip;
+    - a run of words sharing one start shares out the run's span by
+      character count;
+    - each word is split into its lexical tokens ("world," gives "world";
+      "$1,250.50" gives "1" and "250.50"), sharing out the word's span by
+      character count, each keeping the word's confidence;
+    - the pieces must be strictly ordered, at least 1 ms long, and spell
+      exactly the text's own lexical tokens.
+
+    Times stay labelled "native": decoder emission times at 80 ms
+    resolution, interpolated within a frame. Any failure returns ``None``
+    and the decode keeps no word evidence.
+    """
+    if (isinstance(duration, bool) or not isinstance(duration, (int, float))
+            or not math.isfinite(float(duration)) or float(duration) <= 0.0
+            or not helper_words):
+        return None
+    clip = float(duration)
+    spans: list[tuple[float, float]] = []
+    for word in helper_words:
+        end = min(float(word.end), clip)
+        start = min(float(word.start), end)
+        spans.append((start, end))
+    # Same-frame runs: one start shared by consecutive words.
+    index = 0
+    while index < len(spans):
+        last = index
+        while last + 1 < len(spans) and spans[last + 1][0] == spans[index][0]:
+            last += 1
+        if last > index:
+            run_end = max(end for _start, end in spans[index:last + 1])
+            weights = [max(1, len(helper_words[position].text))
+                       for position in range(index, last + 1)]
+            spans[index:last + 1] = _divide_interval(
+                spans[index][0], run_end, weights)
+        index = last + 1
+    pieces: list[RecognitionWord] = []
+    for word, (start, end) in zip(helper_words, spans):
+        tokens = _lexical_tokens(word.text)
+        if not tokens:
+            continue
+        for token, (piece_start, piece_end) in zip(tokens, _divide_interval(
+                start, end, [len(token.text) for token in tokens])):
+            pieces.append(RecognitionWord(
+                token.text, piece_start, piece_end, float(word.confidence),
+                "native", HELPER_WORD_SOURCE))
+    cursor = 0.0
+    for piece in pieces:
+        if (piece.start < cursor
+                or piece.end - piece.start < _PROJECTED_MINIMUM_SECONDS
+                or piece.end > clip):
+            return None
+        cursor = piece.end
+    expected = [_evidence_token_key(token.text)
+                for token in _lexical_tokens(text)]
+    if not expected or [
+            _evidence_token_key(piece.text) for piece in pieces] != expected:
+        return None
+    return tuple(pieces)
+
+
 def _alternative_disagreements(
         voice: VoiceIR) -> tuple[tuple[int, int], ...]:
     """Return changed primary character ranges using punctuation-safe tokens."""
@@ -1019,6 +1121,8 @@ def build_consequence_plan(
             uncertainty.append("hypothesis-confidence")
         if not evidence:
             uncertainty.append("word-evidence-unavailable")
+        elif not voice.trust_word_confidence:
+            uncertainty.append("word-confidence-uncalibrated")
         elif min(word.confidence for word in evidence) < 0.78:
             uncertainty.append("word-confidence")
         if any(_change_affects_span(
@@ -1324,7 +1428,8 @@ class VoiceCompiler:
         primary = voice.hypotheses[0]
         fused, decisions = self._fuse(primary, voice)
         formatted, prosody_decisions = self._format_prosody(
-            fused, primary.words, voice.prosody)
+            fused, primary.words, voice.prosody,
+            pauses=voice.pause_punctuation)
         decisions.extend(prosody_decisions)
         stable = formatted if voice.finalized else self._stable_prefix(voice)
         # Keep acoustic confidence calibrated and separate from formatting or
@@ -1668,13 +1773,15 @@ class VoiceCompiler:
 
     def _format_prosody(
             self, text: str, words: Sequence[WordEvidence],
-            events: Sequence[ProsodyEvent]) -> tuple[str, list[Decision]]:
+            events: Sequence[ProsodyEvent], *,
+            pauses: bool = True) -> tuple[str, list[Decision]]:
         if not text or not events:
             return text, []
         decisions: list[Decision] = []
         output = text
         timed_words = [word for word in words
-                       if word.end > word.start and word.timing == "native"]
+                       if word.end > word.start and word.timing == "native"
+                       ] if pauses else []
         text_tokens = [token for token in _tokens(output) if _norm(token.text)]
         insertions: list[tuple[int, int, str, str]] = []
         # One-to-one alignment is required. Segment interpolation and partial

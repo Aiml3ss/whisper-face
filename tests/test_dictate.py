@@ -17,6 +17,7 @@ import ctypes
 import enum
 import functools
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -45,9 +46,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from parrot_core import (  # noqa: E402
+    HELPER_WORD_SOURCE,
     NUMBER_WORDS,
+    ParakeetResult,
     Recognition,
     RecognitionWord,
+    combine_word_evidence_status,
+    helper_protocol,
+    parakeet_result,
     can_reuse_speculation,
     compile_cleanup,
     infer_revised_insertion,
@@ -150,6 +156,11 @@ BASELINE_ASSIGNMENTS = (
     "SPACELESS_GLOSSARY_CHAR_DIVISOR",
     "GLOSSARY_MAX_CHARS",
     "GLOSSARY_MAX_TERMS",
+    # The helper word-evidence switches: the compiler and the assembly read
+    # them on every dictation.
+    "PROSODY_FORMATTING",
+    "PARAKEET_WORD_CONFIDENCE_ROUTING",
+    "PARAKEET_PROTOCOL",
 )
 
 try:  # pragma: no cover - depends on the runner
@@ -213,6 +224,9 @@ def load_definitions(*names, assignments=(), extra=None):
         "functools": functools,
         "objc": _objc,
         "sys": sys,
+        # Pure helpers the assembly and the compiler call on every decode.
+        "HELPER_WORD_SOURCE": HELPER_WORD_SOURCE,
+        "combine_word_evidence_status": combine_word_evidence_status,
     }
     # Shared constants come first so an explicit `extra` still overrides them
     # (tests pin IS_MACOS both ways), and a per-call copy keeps one test's
@@ -2390,6 +2404,17 @@ class FakePortAudio:
         self.reinitializations += 1
 
 
+# What ParakeetClient needs beyond the timeouts each test sets: the models
+# folder it names to the helper, the environment it filters, and the protocol
+# 2 readers.
+PARAKEET_CLIENT_NAMES = {
+    "PARAKEET_MODEL_DIR": Path("/models/parakeet-unified-en-0.6b"),
+    "os": os,
+    "helper_protocol": helper_protocol,
+    "parakeet_result": parakeet_result,
+}
+
+
 class ParakeetClientTests(unittest.TestCase):
     def test_native_helper_protocol_keeps_audio_in_memory(self):
         class FakeProcess:
@@ -2436,6 +2461,7 @@ class ParakeetClientTests(unittest.TestCase):
                     "PARAKEET_MIN_REQUEST_TIMEOUT": 3.0,
                     "PARAKEET_MAX_REQUEST_TIMEOUT": 10.0,
                     "PARAKEET_PROFILE": PARAKEET_PROFILE,
+                    **PARAKEET_CLIENT_NAMES,
                     "mark_model_warm_path_observed": lambda _provider: True,
                 },
             )
@@ -2602,6 +2628,7 @@ class ParakeetClientTests(unittest.TestCase):
                     "PARAKEET_MIN_REQUEST_TIMEOUT": 3.0,
                     "PARAKEET_MAX_REQUEST_TIMEOUT": 10.0,
                     "PARAKEET_PROFILE": PARAKEET_PROFILE,
+                    **PARAKEET_CLIENT_NAMES,
                     "mark_model_warm_path_observed": lambda _provider: True,
                 },
             )
@@ -2638,6 +2665,7 @@ class ParakeetClientTests(unittest.TestCase):
                 "PARAKEET_MIN_REQUEST_TIMEOUT": 3.0,
                 "PARAKEET_MAX_REQUEST_TIMEOUT": 10.0,
                 "PARAKEET_PROFILE": PARAKEET_PROFILE,
+                **PARAKEET_CLIENT_NAMES,
                 "mark_model_warm_path_observed": lambda _provider: True,
                 "print": lambda *args, **_kwargs: (
                     printed.append(" ".join(str(arg) for arg in args))
@@ -2850,6 +2878,7 @@ class FacePreferenceTests(unittest.TestCase):
                 "recent_dictations": False,
                 "self_correction": False,
                 "remove_repeats": True,
+                "new_speech_runtime": False,
                 "language": "en",
             })
 
@@ -14892,6 +14921,1046 @@ class AutoreleasePoolTests(unittest.TestCase):
             "with cocoa_pool():\n        try:\n"
             "            finish_and_process", source)
         self.assertIn("with cocoa_pool():\n                try:", source)
+
+
+class HelperProtocolCompatibilityTests(unittest.TestCase):
+    """Every mix of helper and client fails safe (T3, PROTOCOL.md).
+
+    The fake helper from tests/fake_platform.py runs as a thread behind real
+    pipes, and the shipping client speaks to it through the shipping bounded
+    exchange: one helper that speaks protocol 1 whatever it is asked, one
+    that speaks protocol 2 when asked. "Old client" is what origin/main
+    spawns, ``[helper, "--server"]``.
+    """
+
+    OLD_CLIENT_ARGUMENTS = ["--server"]
+
+    def setUp(self):
+        sys.path.insert(0, str(ROOT / "tests"))
+        self.addCleanup(sys.path.remove, str(ROOT / "tests"))
+        import fake_platform
+        self.fake = fake_platform
+
+    def desktop(self, protocol, words_override=None):
+        heard = "Pay Dana $1,250.50 by Friday, okay?"
+        return SimpleNamespace(
+            helper_protocol=protocol, word_confidence=0.9,
+            helper_words_override=words_override, parakeet_requests=[],
+            recognize=lambda audio, _engine: heard)
+
+    def client(self, desktop, *, arguments=None):
+        if os.name == "nt":
+            self.skipTest("select() cannot wait on Windows pipes")
+        spawned = []
+
+        def factory(argv, **kwargs):
+            spawned.append((list(argv), kwargs))
+            if arguments is not None:
+                argv = [argv[0], *arguments]
+            process = self.fake.HelperProcess(desktop, argv)
+            self.addCleanup(process.terminate)
+            return process
+
+        exchange = load_definitions(
+            "bounded_helper_exchange",
+            extra={"PARAKEET_MAX_RESPONSE_BYTES": 1024 * 1024,
+                   "PARAKEET_MAX_REQUEST_TIMEOUT": 10.0, "os": os,
+                   "select": select, "time": time},
+        )["bounded_helper_exchange"]
+        with tempfile.TemporaryDirectory() as directory:
+            client = ParakeetClientTests.client(
+                directory, process_factory=factory, exchange=exchange)
+        client.helper = Path(__file__)       # any existing file will do
+        return client, spawned
+
+    def raw_exchange(self, desktop, argv):
+        """One request to the fake helper; the ready and response lines."""
+        process = self.fake.HelperProcess(desktop, ["helper", *argv])
+        self.addCleanup(process.terminate)
+        ready = json.loads(process.stdout.readline())
+        audio = np.full(16_000, 0.1, dtype="<f4")
+        process.stdin.write(struct.pack("<Q", len(audio)) + audio.tobytes())
+        line = process.stdout.readline()
+        return ready, json.loads(line), len(line)
+
+    def test_old_helper_with_old_client_is_protocol_1(self):
+        ready, response, _size = self.raw_exchange(
+            self.desktop(1), self.OLD_CLIENT_ARGUMENTS)
+        self.assertEqual(set(ready), {"ready", "load_s", "model"})
+        self.assertEqual(set(response), {"ok", "text", "processing_s"})
+
+    def test_new_helper_with_old_client_answers_exactly_protocol_1(self):
+        ready, response, size = self.raw_exchange(
+            self.desktop(2), self.OLD_CLIENT_ARGUMENTS)
+        self.assertEqual(set(ready), {"ready", "load_s", "model"})
+        self.assertEqual(set(response), {"ok", "text", "processing_s"})
+        # The old client's cap.
+        self.assertLess(size, 64 * 1024)
+
+    def test_old_helper_with_new_client_stays_protocol_1(self):
+        client, spawned = self.client(self.desktop(1))
+        result = client.transcribe(np.full(16_000, 0.1, dtype=np.float32))
+        self.assertEqual(spawned[0][0][1:4], ["--server", "--protocol", "2"])
+        self.assertEqual(client.protocol, 1)
+        self.assertEqual(result, ("Pay Dana $1,250.50 by Friday, okay?", 0.01))
+        self.assertEqual(
+            (result.words, result.avg_confidence, result.word_evidence_status),
+            (None, None, "v1-helper"))
+
+    def test_new_helper_with_new_client_reports_words(self):
+        client, _spawned = self.client(self.desktop(2))
+        result = client.transcribe(np.full(16_000, 0.1, dtype=np.float32))
+        self.assertEqual(client.protocol, 2)
+        self.assertEqual(result, ("Pay Dana $1,250.50 by Friday, okay?", 0.01))
+        self.assertEqual(result.word_evidence_status, "native")
+        self.assertEqual([word.text for word in result.words],
+                         ["Pay", "Dana", "$1,250.50", "by", "Friday,", "okay?"])
+        self.assertEqual(result.avg_confidence, 0.9)
+
+    def test_new_client_launching_a_helper_the_old_way_is_protocol_1(self):
+        # A wrapper or an older launcher that drops the extra arguments.
+        client, _spawned = self.client(
+            self.desktop(2), arguments=self.OLD_CLIENT_ARGUMENTS)
+        result = client.transcribe(np.full(16_000, 0.1, dtype=np.float32))
+        self.assertEqual(client.protocol, 1)
+        self.assertEqual(result.word_evidence_status, "v1-helper")
+
+    def test_malformed_words_never_cost_the_text(self):
+        for words in ("Pay Dana", [{"word": "Pay"}], [None], 7,
+                      [{"word": "Pay", "start": 9.0, "end": 1.0,
+                        "confidence": 0.9}]):
+            with self.subTest(words=words):
+                client, _spawned = self.client(self.desktop(2, words))
+                result = client.transcribe(
+                    np.full(16_000, 0.1, dtype=np.float32))
+                self.assertEqual(
+                    result, ("Pay Dana $1,250.50 by Friday, okay?", 0.01))
+                self.assertEqual(result.word_evidence_status, "rejected")
+                self.assertIsNone(result.words)
+
+    def test_the_shipped_helper_reads_only_its_first_argument(self):
+        # What lets a new client ask an old helper for protocol 2: the
+        # helper built from native/ParrotASRHelper never looks past its mode.
+        source = (ROOT / "native" / "ParrotASRHelper" / "Sources"
+                  / "parrot-asr-helper" / "main.swift").read_text()
+        self.assertEqual(source.count("CommandLine.arguments"), 1)
+        self.assertIn("CommandLine.arguments.dropFirst().first", source)
+
+
+class SpeechRuntimeSwitchTests(unittest.TestCase):
+    """PARROT_ASR_RUNTIME=own asks Whisper Face's own runtime first.
+
+    Whatever the runtime does not answer (it is not built, it does not
+    start, it fails the request) the FluidAudio helper decodes from the same
+    audio, and whatever that helper does not answer goes to Whisper, as it
+    always has. Without the switch nothing about the client changes.
+    """
+
+    OWN = "parrot-speech-runtime"
+    FLUID = "parrot-asr-helper"
+
+    @staticmethod
+    def selected(value):
+        environ = {} if value is None else {"PARROT_ASR_RUNTIME": value}
+        return load_definitions(
+            assignments=("PARAKEET_RUNTIME",),
+            extra={"os": SimpleNamespace(environ=environ)},
+        )["PARAKEET_RUNTIME"]
+
+    def test_only_own_selects_the_runtime(self):
+        for value, expected in (
+                (None, "fluidaudio"), ("", "fluidaudio"),
+                ("fluidaudio", "fluidaudio"), ("own", "own"),
+                (" Own\n", "own"), ("OWN", "own"), ("1", "fluidaudio"),
+                ("true", "fluidaudio"), ("owner", "fluidaudio")):
+            with self.subTest(value=value):
+                self.assertEqual(self.selected(value), expected)
+
+    @staticmethod
+    def namespace(runtime, directory, printed=None):
+        return load_definitions(
+            "ParakeetClient",
+            assignments=("OWN_PARAKEET", "PARAKEET"),
+            extra={
+                "PARAKEET_HELPER": Path(directory) / "parrot-asr-helper",
+                "PARAKEET_RUNTIME_HELPER":
+                    Path(directory) / "parrot-speech-runtime",
+                "PARAKEET_RUNTIME": runtime,
+                "PARAKEET_ENABLED": True,
+                "PARAKEET_PROTOCOL": 2,
+                # Replaced on each client before it is used.
+                "bounded_helper_exchange": None,
+                "Path": Path,
+                "subprocess": subprocess,
+                "threading": threading,
+                "struct": struct,
+                "time": time,
+                "np": np,
+                "PARAKEET_STARTUP_TIMEOUT": 10.0,
+                "PARAKEET_MIN_REQUEST_TIMEOUT": 3.0,
+                "PARAKEET_MAX_REQUEST_TIMEOUT": 10.0,
+                "PARAKEET_PROFILE": PARAKEET_PROFILE,
+                **PARAKEET_CLIENT_NAMES,
+                "mark_model_warm_path_observed": lambda _provider: True,
+                "print": lambda *args, **_kwargs: (
+                    printed.append(" ".join(str(arg) for arg in args))
+                    if printed is not None else None),
+            },
+        )
+
+    def test_the_switch_puts_the_runtime_in_front_of_the_helper(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for runtime in ("fluidaudio", "own"):
+                with self.subTest(runtime=runtime):
+                    ns = self.namespace(runtime, directory)
+                    own, fluid = ns["OWN_PARAKEET"], ns["PARAKEET"]
+                    self.assertEqual(
+                        own.helper, Path(directory) / "parrot-speech-runtime")
+                    self.assertEqual(
+                        fluid.helper, Path(directory) / "parrot-asr-helper")
+                    self.assertIs(fluid.preferred,
+                                  own if runtime == "own" else None)
+                    self.assertIsNone(own.preferred)
+                    # The FluidAudio helper keeps its old names and its
+                    # restart-at-once behaviour; only the trial is benched.
+                    self.assertEqual(
+                        (fluid.name, fluid.fallback, fluid.request_fallback,
+                         fluid.retry_after_failure),
+                        ("Parakeet helper", "Whisper", "Whisper Turbo",
+                         False))
+                    self.assertTrue(own.retry_after_failure)
+
+    class Program:
+        """A helper process of either kind, scripted by the test."""
+
+        def __init__(self, name):
+            self.name = name
+            self.stdin = io.BytesIO()
+            self.stdout = io.BytesIO()
+            self.alive = True
+
+        def poll(self):
+            return None if self.alive else 1
+
+        def terminate(self):
+            self.alive = False
+
+        def wait(self, timeout=None):
+            return 0
+
+    def chain(self, directory, *, runtime="own", own_installed=True,
+              own_start="ok", own_request="ok", fluid_request="ok",
+              printed=None):
+        """(fluid client with the runtime in front, spawns, requests, now)."""
+        directory = Path(directory)
+        (directory / self.FLUID).write_bytes(b"helper")
+        if own_installed:
+            (directory / self.OWN).write_bytes(b"runtime")
+        script = {"own_start": own_start, "own_request": own_request,
+                  "fluid_request": fluid_request}
+        spawned = []
+        requests = []
+        now = [1_000.0]
+
+        def factory(argv, **_kwargs):
+            spawned.append(Path(argv[0]).name)
+            return self.Program(Path(argv[0]).name)
+
+        def exchange(process, chunks, *, timeout):
+            kind = "own" if process.name == self.OWN else "fluid"
+            if not chunks:
+                if kind == "own" and script["own_start"] != "ok":
+                    return {"ok": False, "error": "model load failed"}
+                return {"ready": True, "load_s": 0.1}
+            requests.append((process.name, b"".join(
+                bytes(chunk) for chunk in chunks)))
+            if script[f"{kind}_request"] == "empty":
+                return {"ok": True, "text": "", "processing_s": 0.02}
+            if script[f"{kind}_request"] != "ok":
+                return {"ok": False, "error": "transcription failed"}
+            return {"ok": True, "text": f"heard by {kind}",
+                    "processing_s": 0.02}
+
+        ns = self.namespace(runtime, directory, printed)
+        clients = (ns["OWN_PARAKEET"], ns["PARAKEET"])
+        for client in clients:
+            client.process_factory = factory
+            client.exchange = exchange
+            client.clock = lambda: now[0]
+        return ns["PARAKEET"], spawned, requests, now, script
+
+    def test_a_healthy_runtime_answers_and_the_helper_never_starts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client, spawned, requests, _now, _script = self.chain(directory)
+            for _ in range(3):
+                self.assertEqual(
+                    client.transcribe(np.ones(160, dtype=np.float32)),
+                    ("heard by own", 0.02))
+        self.assertEqual(spawned, [self.OWN])
+        self.assertEqual({name for name, _payload in requests}, {self.OWN})
+
+    def test_without_the_switch_the_runtime_is_never_started(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client, spawned, requests, _now, _script = self.chain(
+                directory, runtime="fluidaudio")
+            self.assertEqual(client.transcribe(np.ones(160, np.float32)),
+                             ("heard by fluid", 0.02))
+        self.assertEqual(spawned, [self.FLUID])
+        self.assertEqual([name for name, _payload in requests], [self.FLUID])
+
+    def test_a_missing_runtime_hands_every_request_to_the_helper(self):
+        printed = []
+        with tempfile.TemporaryDirectory() as directory:
+            client, spawned, _requests, _now, _script = self.chain(
+                directory, own_installed=False, printed=printed)
+            for _ in range(2):
+                self.assertEqual(client.transcribe(np.ones(160, np.float32)),
+                                 ("heard by fluid", 0.02))
+        self.assertEqual(spawned, [self.FLUID])
+        self.assertEqual(printed.count(
+            "! Speech runtime is not installed; using the FluidAudio helper "
+            "(./setup.sh builds it)"), 1)
+
+    def test_a_runtime_that_does_not_start_is_benched_behind_the_helper(self):
+        printed = []
+        audio = np.linspace(-0.5, 0.5, 320, dtype=np.float32)
+        with tempfile.TemporaryDirectory() as directory:
+            client, spawned, requests, now, script = self.chain(
+                directory, own_start="fail", printed=printed)
+            self.assertEqual(client.transcribe(audio), ("heard by fluid", 0.02))
+            # Benched: the next decodes go straight to the helper.
+            now[0] += 29.0
+            self.assertEqual(client.transcribe(audio), ("heard by fluid", 0.02))
+            self.assertEqual(spawned, [self.OWN, self.FLUID])
+            # After the wait it is tried again, and answers once it can.
+            now[0] += 2.0
+            script["own_start"] = "ok"
+            self.assertEqual(client.transcribe(audio), ("heard by own", 0.02))
+            self.assertEqual(spawned, [self.OWN, self.FLUID, self.OWN])
+        self.assertIn(
+            "! Speech runtime did not start (not ready); using the FluidAudio "
+            "helper, next attempt in 30s", printed)
+        self.assertEqual({payload for _name, payload in requests},
+                         {struct.pack("<Q", 320) + audio.astype("<f4").tobytes()})
+
+    def test_a_runtime_that_fails_a_request_hands_that_audio_to_the_helper(self):
+        printed = []
+        audio = np.linspace(-0.25, 0.25, 480, dtype=np.float32)
+        with tempfile.TemporaryDirectory() as directory:
+            client, spawned, requests, now, script = self.chain(
+                directory, own_request="fail", printed=printed)
+            self.assertEqual(client.transcribe(audio), ("heard by fluid", 0.02))
+            # The same request, byte for byte, went to the helper.
+            self.assertEqual([name for name, _payload in requests],
+                             [self.OWN, self.FLUID])
+            self.assertEqual(requests[0][1], requests[1][1])
+            # Benched for 30 s: the runtime is not restarted in the next
+            # dictation, which the helper answers at once.
+            now[0] += 10.0
+            self.assertEqual(client.transcribe(audio), ("heard by fluid", 0.02))
+            self.assertEqual([name for name, _payload in requests],
+                             [self.OWN, self.FLUID, self.FLUID])
+            now[0] += 21.0
+            script["own_request"] = "ok"
+            self.assertEqual(client.transcribe(audio), ("heard by own", 0.02))
+            self.assertEqual(spawned, [self.OWN, self.FLUID, self.OWN])
+        self.assertIn(
+            "! Speech runtime failed; using the FluidAudio helper, next "
+            "attempt in 30s: transcription failed", printed)
+
+    def test_a_runtime_that_keeps_failing_requests_waits_longer_each_time(self):
+        # PROTOCOL.md: a failed request benches the runtime as a failed
+        # start does, 30 s doubling to 5 minutes. Restarting it must not
+        # reset the count; only an answer does.
+        for failing in ("own_request", "own_start"):
+            printed = []
+
+            def benched():
+                return [line for line in printed
+                        if line.startswith("! Speech runtime")]
+
+            with self.subTest(failing=failing), \
+                    tempfile.TemporaryDirectory() as directory:
+                client, _spawned, _requests, now, script = self.chain(
+                    directory, printed=printed, **{failing: "fail"})
+                waits = []
+                for _ in range(6):
+                    self.assertEqual(client.transcribe(np.ones(160, np.float32)),
+                                     ("heard by fluid", 0.02))
+                    waits.append(int(re.search(
+                        r"next attempt in (\d+)s", benched()[-1]).group(1)))
+                    # Not asked again until the wait is over.
+                    seen = len(benched())
+                    now[0] += waits[-1] - 1.0
+                    self.assertEqual(client.transcribe(np.ones(160, np.float32)),
+                                     ("heard by fluid", 0.02))
+                    self.assertEqual(len(benched()), seen)
+                    now[0] += 1.0
+                self.assertEqual(waits, [30, 60, 120, 240, 300, 300])
+                # One answer clears the count: the next failure waits 30 s.
+                script[failing] = "ok"
+                self.assertEqual(client.transcribe(np.ones(160, np.float32)),
+                                 ("heard by own", 0.02))
+                script[failing] = "fail"
+                client.preferred._close()
+                client.transcribe(np.ones(160, np.float32))
+                self.assertIn("next attempt in 30s", benched()[-1])
+
+    def test_an_empty_answer_from_the_runtime_is_the_answer(self):
+        # Both programs run the same model, and parity says they give the
+        # same text, so an empty transcript from a runtime that answered is
+        # what the helper would say too: it is not decoded twice. (A
+        # vocabulary of the wrong size, which would make every answer empty,
+        # fails the runtime's start instead.)
+        with tempfile.TemporaryDirectory() as directory:
+            client, spawned, requests, _now, _script = self.chain(
+                directory, own_request="empty")
+            for _ in range(2):
+                self.assertEqual(client.transcribe(np.ones(160, np.float32)),
+                                 ("", 0.02))
+        self.assertEqual(spawned, [self.OWN])
+        self.assertEqual({name for name, _payload in requests}, {self.OWN})
+
+    def test_the_helper_lets_go_once_the_runtime_answers_again(self):
+        # After a fallback the FluidAudio helper is loaded beside the
+        # runtime. Once the runtime answers again the helper is closed, so
+        # the two are not both held in memory until the app restarts.
+        printed = []
+        with tempfile.TemporaryDirectory() as directory:
+            client, spawned, _requests, now, script = self.chain(
+                directory, own_request="fail", printed=printed)
+            self.assertEqual(client.transcribe(np.ones(160, np.float32)),
+                             ("heard by fluid", 0.02))
+            helper = client.process
+            self.assertIsNotNone(helper)
+            self.assertIsNone(helper.poll())
+            now[0] += 31.0
+            script["own_request"] = "ok"
+            self.assertEqual(client.transcribe(np.ones(160, np.float32)),
+                             ("heard by own", 0.02))
+            self.assertIsNone(client.process)
+            self.assertIsNotNone(helper.poll())
+            self.assertIsNotNone(client.preferred.process)
+            self.assertIn("[asr] Parakeet helper closed; Speech runtime "
+                          "answers again", printed)
+            # The next failure starts the helper again.
+            script["own_request"] = "fail"
+            self.assertEqual(client.transcribe(np.ones(160, np.float32)),
+                             ("heard by fluid", 0.02))
+            self.assertEqual(spawned, [self.OWN, self.FLUID, self.OWN,
+                                       self.FLUID])
+
+    def test_when_both_fail_whisper_decodes_as_it_always_has(self):
+        printed = []
+        with tempfile.TemporaryDirectory() as directory:
+            client, _spawned, requests, _now, _script = self.chain(
+                directory, own_request="fail", fluid_request="fail",
+                printed=printed)
+            self.assertIsNone(client.transcribe(np.ones(160, np.float32)))
+            recognition, _decodes = ParakeetCrosscheckTests.cascade(
+                parakeet=client,
+                scripted={"tiny-repo": ("Ship the installer today.", 0.9)},
+                cached={"tiny-repo"})
+        self.assertEqual(recognition.text, "Ship the installer today.")
+        self.assertEqual(recognition.engine, "tiny")
+        self.assertIn("! Parakeet helper failed; using Whisper Turbo: "
+                      "transcription failed", printed)
+        self.assertIn(self.FLUID, {name for name, _payload in requests})
+
+
+    def test_the_last_answer_names_the_program_that_gave_it(self):
+        # The window says which program ran the model for the last
+        # dictation, so the client remembers whose text it returned.
+        cases = (
+            ({}, "own"),
+            ({"own_request": "fail"}, "fluid"),
+            ({"own_request": "fail", "fluid_request": "fail"}, None),
+            ({"runtime": "fluidaudio"}, "fluid"),
+            ({"runtime": "fluidaudio", "fluid_request": "fail"}, None),
+        )
+        for script, expected in cases:
+            with self.subTest(**script), \
+                    tempfile.TemporaryDirectory() as directory:
+                client, _spawned, _requests, _now, _script = self.chain(
+                    directory, **script)
+                own = client.preferred
+                client.last_answered = "stale"
+                client.transcribe(np.ones(160, np.float32))
+                answered = {None: None, "fluid": client}.get(expected, own)
+                self.assertIs(client.last_answered, answered)
+
+    class Runtime:
+        """The runtime's client, as far as the switch can see it."""
+
+        def __init__(self):
+            self.process = None
+            self.lock = threading.Lock()
+            self.closed = 0
+
+        def _close(self):
+            self.closed += 1
+            self.process = None
+
+    class Thread:
+        """Runs the close at once, so the test needs no waiting."""
+
+        def __init__(self, *, target, name, daemon):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    def switch_namespace(self, directory, *, environment=None, stored=None):
+        preferences = Path(directory) / "preferences.json"
+        if stored is not None:
+            preferences.write_text(json.dumps(stored), encoding="utf-8")
+        environ = ({} if environment is None
+                   else {"PARROT_ASR_RUNTIME": environment})
+        own = self.Runtime()
+        ns = load_definitions(
+            "normalize_face", "current_face", "load_preferences",
+            "save_preferences", "normalize_hotkey", "normalize_sound_theme",
+            "speech_runtime_selected", "apply_speech_runtime",
+            "set_new_speech_runtime", "speech_program_that_answered",
+            assignments={
+                "FACE_CHOICES", "DEFAULT_FACE", "PREFERENCES",
+                "HOTKEY_CHOICES", "HOTKEY_DEFAULT",
+                "SOUND_THEMES", "SOUND_THEME_DEFAULT",
+                "PARAKEET_RUNTIME", "PARAKEET_RUNTIME_PINNED",
+            },
+            extra={
+                "os": SimpleNamespace(environ=environ),
+                "PREFERENCES_FILE": preferences,
+                "IS_MACOS": True,
+                "ACOUSTIC_TIME_MACHINE": AcousticTimeMachine(),
+                "json": json,
+                "apply_hotkey_bindings": lambda: None,
+                "atomic_write_text": lambda path, value:
+                    path.write_text(value, encoding="utf-8"),
+                "threading": SimpleNamespace(Thread=self.Thread),
+                "OWN_PARAKEET": own,
+                "PARAKEET": SimpleNamespace(
+                    preferred=None, last_answered=None),
+            },
+        )
+        ns["load_preferences"]()
+        ns["apply_speech_runtime"]()
+        return ns, own, preferences
+
+    def test_the_window_switch_is_off_unless_the_file_says_true(self):
+        for stored, expected in (
+                (None, False), ({}, False), ({"remove_repeats": True}, False),
+                ({"new_speech_runtime": "true"}, False),
+                ({"new_speech_runtime": 1}, False),
+                ({"new_speech_runtime": False}, False),
+                ({"new_speech_runtime": True}, True)):
+            with self.subTest(stored=stored), \
+                    tempfile.TemporaryDirectory() as directory:
+                ns, own, _file = self.switch_namespace(
+                    directory, stored=stored)
+                self.assertIs(ns["PREFERENCES"]["new_speech_runtime"],
+                              expected)
+                self.assertIs(ns["speech_runtime_selected"](), expected)
+                self.assertIs(ns["PARAKEET"].preferred,
+                              own if expected else None)
+
+    def test_the_window_switch_applies_at_once_and_is_saved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ns, own, preferences = self.switch_namespace(directory)
+
+            def saved():
+                return json.loads(preferences.read_text(
+                    encoding="utf-8"))["new_speech_runtime"]
+
+            self.assertIs(ns["set_new_speech_runtime"](True), True)
+            self.assertIs(saved(), True)
+            # The next transcribe asks the runtime first; nothing restarts.
+            self.assertIs(ns["PARAKEET"].preferred, own)
+            self.assertEqual(own.closed, 0)
+            own.process = object()  # it answered a dictation
+            self.assertIs(ns["set_new_speech_runtime"](False), False)
+            self.assertIs(saved(), False)
+            self.assertIsNone(ns["PARAKEET"].preferred)
+            # Switched off, the runtime gives its memory back.
+            self.assertEqual(own.closed, 1)
+            self.assertIsNone(own.process)
+            # A reinstall keeps the file, and the choice with it.
+            ns["set_new_speech_runtime"](True)
+            ns["PREFERENCES"]["new_speech_runtime"] = False
+            ns["load_preferences"]()
+            self.assertIs(ns["PREFERENCES"]["new_speech_runtime"], True)
+
+    def test_the_environment_wins_over_the_window_switch_when_set(self):
+        for environment, stored, expected in (
+                ("own", False, True), (" OWN ", False, True),
+                ("fluidaudio", True, False), ("anything", True, False),
+                ("", True, True), ("  ", False, False)):
+            with self.subTest(environment=environment, stored=stored), \
+                    tempfile.TemporaryDirectory() as directory:
+                ns, own, preferences = self.switch_namespace(
+                    directory, environment=environment,
+                    stored={"new_speech_runtime": stored})
+                self.assertIs(ns["speech_runtime_selected"](), expected)
+                self.assertIs(ns["PARAKEET"].preferred,
+                              own if expected else None)
+                before = preferences.read_text(encoding="utf-8")
+                answer = ns["set_new_speech_runtime"](not expected)
+                if environment.strip():
+                    # Pinned: the switch reports what runs and writes
+                    # nothing, so it does not change behind the person.
+                    self.assertIs(answer, expected)
+                    self.assertEqual(
+                        preferences.read_text(encoding="utf-8"), before)
+                    self.assertIs(ns["PARAKEET"].preferred,
+                                  own if expected else None)
+                else:
+                    self.assertIs(answer, not expected)
+
+    def test_the_last_program_is_said_in_two_words_or_none(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ns, own, _file = self.switch_namespace(directory)
+            parakeet = ns["PARAKEET"]
+            for answered, expected in ((own, "new"), (parakeet, "previous"),
+                                       (None, "")):
+                with self.subTest(expected=expected):
+                    parakeet.last_answered = answered
+                    self.assertEqual(
+                        ns["speech_program_that_answered"](), expected)
+        # A dictation whose kept text came from another engine says nothing.
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        self.assertIn(
+            'PIPELINE_STATE["last_speech_program"] = (\n'
+            '            speech_program_that_answered()\n'
+            '            if recognition.engine == "parakeet-unified" else "")',
+            source)
+
+
+class SpeechRuntimeSourceTests(unittest.TestCase):
+    """The runtime's Swift sources hold the contract without being built.
+
+    Hosted checks cannot run the model, so what parity, the wire protocol
+    and the fallbacks rely on is read from the sources here. The parity
+    itself is measured by scripts/speech_runtime_parity.py on a Mac that has
+    the model (native/ParrotSpeechRuntime/README.md records the result).
+    """
+
+    PACKAGE = ROOT / "native" / "ParrotSpeechRuntime"
+    SOURCES = PACKAGE / "Sources" / "parrot-speech-runtime"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.files = {path.name: path.read_text(encoding="utf-8")
+                     for path in sorted(cls.SOURCES.glob("*.swift"))}
+
+    def source(self, name):
+        return self.files[name]
+
+    @staticmethod
+    def code(text):
+        """Swift source without its comments."""
+        text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        return "\n".join(line.split("//", 1)[0] for line in text.splitlines())
+
+    def test_every_source_file_is_read(self):
+        self.assertEqual(set(self.files), {
+            "main.swift", "Wire.swift", "Recognizer.swift",
+            "MelFeatures.swift", "TransducerDecoder.swift",
+            "Vocabulary.swift", "WindowMerge.swift", "WordEvidence.swift"})
+
+    def test_launched_the_old_way_it_answers_protocol_1(self):
+        wire = self.code(self.source("Wire.swift"))
+        main = self.code(self.source("main.swift"))
+        self.assertIn("static let supportedProtocol = 2", wire)
+        # No --protocol, or an unreadable one, is protocol 1.
+        self.assertIn('arguments.firstIndex(of: "--protocol")', wire)
+        self.assertIn("let requested = Int(arguments[flag + 1]) else { return 1 }",
+                      wire)
+        # A success carries exactly the protocol 1 keys; anything more is
+        # added only behind the negotiated protocol.
+        literal = re.search(
+            r"var response: \[String: Any\] = \[\n(.*?)\n\s*\]\n", main,
+            re.S)
+        self.assertIsNotNone(literal)
+        self.assertEqual(re.findall(r'^\s*"(\w+)":', literal.group(1),
+                                    re.MULTILINE),
+                         ["ok", "text", "processing_s"])
+        between = main[literal.end():main.index("Wire.emit(response)")]
+        self.assertEqual(between.count('response["'), 0)
+        self.assertIn("if wire >= 2 {\n            WordEvidence.add(", main)
+        words = self.code(self.source("WordEvidence.swift"))
+        add = words[words.index("static func add("):
+                    words.index("static func group(")]
+        self.assertEqual(sorted(set(re.findall(r'response\["(\w+)"\]', add))),
+                         ["avg_confidence", "words"])
+        self.assertIn('if wire >= 2 {\n    status["protocol"] = wire\n'
+                      '    status["capabilities"] = ["words"]\n'
+                      '    status["engine"] = Wire.engine', main)
+        # Ready and status lines carry the keys the FluidAudio helper's do.
+        self.assertIn('"model": Wire.model', main)
+        self.assertIn('"load_s": Wire.seconds(', main)
+        self.assertIn('status["ready"] = true', main)
+        self.assertIn('status["ok"] = true', main)
+        self.assertIn('static let model = "parakeet-unified"', wire)
+        self.assertIn("options: [.sortedKeys]", wire)
+        # The bounds and the bad-count answer are the helper's own.
+        helper = (ROOT / "native" / "ParrotASRHelper" / "Sources"
+                  / "parrot-asr-helper" / "main.swift").read_text()
+        self.assertIn('"error": "invalid sample count"', helper)
+        self.assertIn('"error": "invalid sample count"', main)
+        self.assertIn("sampleRate * 10 * 60", helper)
+        self.assertIn("static let maximumSamples = sampleRate * 10 * 60", wire)
+
+    def test_protocol_2_is_what_the_python_half_reads(self):
+        wire = self.code(self.source("Wire.swift"))
+        words = self.code(self.source("WordEvidence.swift"))
+        self.assertIn('static let engine = "parrot-speech-runtime-1"', wire)
+        for key in ('"avg_confidence"', '"words"', '"word"', '"start"',
+                    '"end"', '"confidence"', '"mark_confidence"'):
+            with self.subTest(key=key):
+                self.assertIn(key, words)
+        # The same cap the client enforces (parrot_core.HELPER_MAX_WORDS).
+        self.assertIn("static let maximumWords = 4_096", words)
+        from parrot_core import HELPER_MAX_WORDS
+        self.assertEqual(HELPER_MAX_WORDS, 4_096)
+        protocol = (ROOT / "native" / "ParrotASRHelper"
+                    / "PROTOCOL.md").read_text(encoding="utf-8")
+        self.assertIn("parrot-speech-runtime-1", protocol)
+
+    def test_a_model_that_will_not_load_fails_closed_in_every_mode(self):
+        main = self.code(self.source("main.swift"))
+        recognizer = self.code(self.source("Recognizer.swift"))
+        # Load, then one decode of silence, before any status line: a model
+        # that loads but cannot run fails here, not mid-dictation.
+        load = main.index("recognizer = try Recognizer(")
+        warm = main.index("try recognizer.transcribe([Float](repeating: 0")
+        failed = main.index('Wire.emit(["ok": false, "error": "model load failed"])')
+        status = main.index('var status: [String: Any]')
+        self.assertLess(load, warm)
+        self.assertLess(warm, failed)
+        self.assertLess(failed, status)
+        self.assertIn('"model load failed"])\n    exit(1)', main)
+        # Every model file is checked by path before anything loads; the
+        # models come from the folder given and nowhere else.
+        self.assertIn("fileManager.fileExists(atPath: path)", recognizer)
+        for name in ("parakeet_unified_encoder_int8.mlmodelc",
+                     "parakeet_unified_decoder.mlmodelc",
+                     "parakeet_unified_joint_decision_single_step.mlmodelc",
+                     "vocab.json"):
+            with self.subTest(file=name):
+                self.assertIn(f'"{name}"', recognizer)
+
+    def test_a_vocabulary_that_does_not_fit_the_model_fails_the_start(self):
+        # One of the wrong size loaded, answered protocol 2, and then decoded
+        # every request to empty text, sending every dictation to Whisper.
+        recognizer = self.code(self.source("Recognizer.swift"))
+        vocabulary = self.code(self.source("Vocabulary.swift"))
+        self.assertIn("size: decoder.blankId)", recognizer)
+        self.assertIn("init(path: String, size: Int) throws", vocabulary)
+        self.assertIn("guard let id = Int(key), id >= 0, id < size else {",
+                      vocabulary)
+        self.assertIn("guard pieces.count == size else {", vocabulary)
+        self.assertEqual(vocabulary.count(
+            'throw RuntimeError.modelFiles("vocabulary does not match the '
+            'model")'), 2)
+
+    def test_the_sources_are_the_ones_parity_measured(self):
+        # Hosted checks cannot run the model, so nothing in the gate can see
+        # an edit change a transcript. The runtime's README records the
+        # digest of the sources its parity run built; any edit to what is
+        # compiled must be run through scripts/speech_runtime_parity.py on a
+        # Mac with the model, and the result and the digest it prints
+        # recorded there again.
+        spec = importlib.util.spec_from_file_location(
+            "speech_runtime_parity",
+            ROOT / "scripts" / "speech_runtime_parity.py")
+        parity = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(parity)
+        readme = (self.PACKAGE / "README.md").read_text(encoding="utf-8")
+        recorded = re.findall(r"^sources: sha256:([0-9a-f]{64})$", readme,
+                              re.MULTILINE)
+        self.assertTrue(recorded)
+        self.assertEqual(
+            set(recorded), {parity.source_digest(self.PACKAGE)},
+            "native/ParrotSpeechRuntime changed since its parity run: rerun "
+            "scripts/speech_runtime_parity.py and record what it prints in "
+            "native/ParrotSpeechRuntime/README.md")
+
+    def test_unknown_modes_are_refused_before_any_model_loads(self):
+        main = self.code(self.source("main.swift"))
+        self.assertIn('var knownModes = ["--server", "--preload", "--verify"]',
+                      main)
+        self.assertLess(main.index("guard knownModes.contains(mode) else"),
+                        main.index("Recognizer("))
+        self.assertIn("exit(2)", main)
+
+    def test_parity_critical_numbers_match_the_library_it_replaces(self):
+        # The FluidAudio 0.15.5 values; a change here changes transcripts,
+        # which only scripts/speech_runtime_parity.py on a Mac can see.
+        mel = self.code(self.source("MelFeatures.swift"))
+        recognizer = self.code(self.source("Recognizer.swift"))
+        decoder = self.code(self.source("TransducerDecoder.swift"))
+        merge = self.code(self.source("WindowMerge.swift"))
+        for expected in ("private let nFFT = 512", "private let hopLength = 160",
+                         "private let winLength = 400",
+                         "private let preemph: Float = 0.97",
+                         "private let logFloor: Float = powf(2, -24)",
+                         "createHannWindow(length: 400, periodic: false)",
+                         "let std = (varSum / denom).squareRoot() + 1e-5",
+                         "let validFrames = min(validCount / hopLength, totalFrames)"):
+            with self.subTest(mel=expected):
+                self.assertIn(expected, mel)
+        for expected in ("var windowSamples: Int { 15 * sampleRate }",
+                         "let frameSamples = 1280",
+                         "let requested = 2 * sampleRate",
+                         "MelFeatures(windowSamples: layout.windowSamples, nMels: 128)",
+                         "encoderConfig.computeUnits = .cpuAndNeuralEngine",
+                         "cpuConfig.computeUnits = .cpuOnly",
+                         "merged.sort { $0.timestamp < $1.timestamp }",
+                         "merger.collapseSeamWordDuplicates(merged"):
+            with self.subTest(recognizer=expected):
+                self.assertIn(expected, recognizer)
+        for expected in ("blankId: Int = 1024", "maxSymbolsPerFrame: Int = 10",
+                         "decoderLayers: Int = 2", "decoderHidden: Int = 640"):
+            with self.subTest(decoder=expected):
+                self.assertIn(expected, decoder)
+        self.assertIn("let overlapSeconds: Double = 2.0", merge)
+        self.assertIn("let secondsPerEncoderFrame: Double = 1280.0 / 16_000.0",
+                      merge)
+
+    def test_the_decoder_takes_the_models_own_choice(self):
+        # The joint network's top candidates are kept reachable for later
+        # work; nothing in this slice may let them change a transcript.
+        decoder = self.code(self.source("TransducerDecoder.swift"))
+        loop = decoder[decoder.index("func decode("):
+                       decoder.index("private struct DecoderStep")]
+        self.assertIn('featureValue(for: "token_id")', loop)
+        self.assertIn("let tokenId = Self.firstInt32(tokenArray)", loop)
+        self.assertIn("if tokenId == Int32(blankId) {\n                    break",
+                      loop)
+        self.assertIn("token: Int(tokenId), frame: globalFrameOffset + t", loop)
+        self.assertIn("decoderStep = try runDecoder(token: tokenId,", loop)
+        # The observer sees a copy and returns nothing.
+        self.assertIn("var stepObserver: ((DecodeStep) -> Void)?", decoder)
+        self.assertNotIn("var candidates", decoder)
+        for name, text in self.files.items():
+            code = self.code(text)
+            if name in ("TransducerDecoder.swift", "main.swift"):
+                continue
+            with self.subTest(file=name):
+                self.assertNotIn("candidates", code)
+                self.assertNotIn("stepObserver", code)
+
+    def test_the_candidate_dump_exists_only_in_debug_builds(self):
+        main = self.source("main.swift")
+        outside = re.sub(r"#if DEBUG\n.*?#endif\n", "", main, flags=re.S)
+        self.assertGreaterEqual(main.count("#if DEBUG"), 3)
+        self.assertIn("--dump-candidates", main)
+        self.assertNotIn("--dump-candidates", outside)
+        self.assertNotIn("dumpCandidates", outside)
+        self.assertNotIn("stepObserver", outside)
+        for name, text in self.files.items():
+            if name == "main.swift":
+                continue
+            with self.subTest(file=name):
+                self.assertNotIn("stepObserver =", self.code(text))
+
+    def test_every_port_names_its_source_and_licence(self):
+        licence = (self.PACKAGE / "LICENSE-Apache-2.0.txt").read_text(
+            encoding="utf-8")
+        self.assertIn("Apache License\n                           Version 2.0",
+                      licence)
+        self.assertEqual(
+            hashlib.sha256(licence.encode("utf-8")).hexdigest(),
+            "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4")
+        ported = ("MelFeatures.swift", "WindowMerge.swift", "Vocabulary.swift",
+                  "TransducerDecoder.swift", "Recognizer.swift",
+                  "WordEvidence.swift")
+        for name in ported:
+            header = " ".join(
+                line.lstrip("/").strip() for line in
+                self.source(name).split("\nimport ", 1)[0].splitlines())
+            with self.subTest(file=name):
+                self.assertIn("FluidAudio (https://github.com/FluidInference/"
+                              "FluidAudio)", header)
+                self.assertRegex(header, r"tag v0\.1[58]\.[35], commit "
+                                         r"[0-9a-f]{40}")
+                self.assertIn("Licensed under the Apache License,", header)
+                self.assertIn("LICENSE-Apache-2.0.txt", header)
+                self.assertIn("Changed for Whisper Face", header)
+        notices = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+        self.assertIn("native/ParrotSpeechRuntime", notices)
+        for name in ported:
+            with self.subTest(notice=name):
+                self.assertIn(name, notices)
+
+
+class ParakeetWordEvidenceRuntimeTests(unittest.TestCase):
+    """The client spawn, the projection in the cross-check, and the gate in
+    front of the compiler."""
+
+    def test_the_client_names_protocol_models_and_drops_fluid_variables(self):
+        spawned = []
+
+        class Process:
+            stdin = stdout = None
+
+            def poll(self):
+                return None
+
+        def factory(argv, **kwargs):
+            spawned.append((argv, kwargs))
+            return Process()
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                os.environ, {"FLUID_SPOTTER_RESCUE": "1", "KEEP_ME": "1"}):
+            client = ParakeetClientTests.client(
+                directory, process_factory=factory,
+                exchange=lambda _process, chunks, *, timeout: (
+                    {"ready": True, "protocol": 2, "capabilities": ["words"]}
+                    if not chunks else {"ok": True, "text": "hi",
+                                        "processing_s": 0.1}))
+            self.assertEqual(client.transcribe(np.ones(160, np.float32)),
+                             ("hi", 0.1))
+        argv, kwargs = spawned[0]
+        self.assertEqual(argv[1:], [
+            "--server", "--protocol", "2",
+            "--models", str(PARAKEET_CLIENT_NAMES["PARAKEET_MODEL_DIR"])])
+        self.assertIn("KEEP_ME", kwargs["env"])
+        self.assertFalse(any(key.startswith("FLUID_")
+                             for key in kwargs["env"]))
+        self.assertEqual(client.protocol, 2)
+        client._close()
+        self.assertEqual(client.protocol, 1)
+
+    def test_production_switches_and_cap(self):
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        for line in ("PROSODY_FORMATTING = False",
+                     "PARAKEET_WORD_CONFIDENCE_ROUTING = False",
+                     "PARAKEET_PROTOCOL = 2",
+                     "PARAKEET_MAX_RESPONSE_BYTES = 1024 * 1024"):
+            with self.subTest(line=line):
+                self.assertIn("\n" + line + "\n", source)
+
+    @staticmethod
+    def crosschecked(parakeet):
+        from voice_compiler import project_word_evidence
+        ns = load_definitions(
+            "_parakeet_crosschecked", "_clean_native_processing_s",
+            extra={
+                "PARAKEET_IO_POOL": SimpleNamespace(
+                    submit=lambda fn, *args: SimpleNamespace(
+                        result=lambda: fn(*args))),
+                "PARAKEET": SimpleNamespace(transcribe=lambda _a: parakeet),
+                "PARAKEET_CROSSCHECK": False,
+                "PARAKEET_CROSSCHECK_MAX_SECONDS": 90.0,
+                "PARAKEET_ROUTE_CONFIDENCE": 0.84,
+                "SAMPLE_RATE": 16_000,
+                "FAST_WHISPER_REPO": "tiny",
+                "Recognition": Recognition,
+                "project_word_evidence": project_word_evidence,
+            })
+        return ns["_parakeet_crosschecked"](
+            np.zeros(16_000, dtype=np.float32), None, verify=True)
+
+    def test_the_crosscheck_attaches_projected_words(self):
+        from parrot_core import HelperWord
+        words = (HelperWord("Hello", 0.1, 0.3, 0.98),
+                 HelperWord("world.", 0.4, 0.7, 0.61))
+        recognition = self.crosschecked(ParakeetResult(
+            "Hello world.", 0.05, words=words, avg_confidence=0.9,
+            word_evidence_status="native"))
+        self.assertEqual(recognition.text, "Hello world.")
+        self.assertEqual(recognition.word_evidence_status, "native")
+        self.assertEqual(recognition.acoustic_confidence, 0.9)
+        self.assertEqual(
+            [(word.text, word.confidence, word.source)
+             for word in recognition.words],
+            [("Hello", 0.98, HELPER_WORD_SOURCE),
+             ("world", 0.61, HELPER_WORD_SOURCE)])
+        # Route confidence stays agreement-derived (here the fixed prior).
+        self.assertEqual(recognition.confidence, 0.84)
+
+        misaligned = self.crosschecked(ParakeetResult(
+            "Hello there.", 0.05, words=words, avg_confidence=0.9,
+            word_evidence_status="native"))
+        self.assertEqual(misaligned.text, "Hello there.")
+        self.assertEqual(
+            (misaligned.words, misaligned.word_evidence_status),
+            ((), "misaligned"))
+        for result, status in ((("Hello.", 0.05), "v1-helper"),
+                               (ParakeetResult(
+                                   "Hello.", 0.05,
+                                   word_evidence_status="rejected"),
+                                "rejected")):
+            with self.subTest(status=status):
+                recognition = self.crosschecked(result)
+                self.assertEqual(
+                    (recognition.words, recognition.word_evidence_status),
+                    ((), status))
+
+    @staticmethod
+    def compile(recognition, **switches):
+        ns = load_definitions(
+            "compile_voice_evidence",
+            extra={
+                "Recognition": Recognition,
+                "WordEvidence": WordEvidence,
+                "RecognitionHypothesis": RecognitionHypothesis,
+                "ContextCandidate": ContextCandidate,
+                "ContextPack": ContextPack,
+                "VoiceIR": VoiceIR,
+                "VOICE_COMPILER": VoiceCompiler(),
+                "learned_alternatives": lambda *_args: [],
+                "compiler_personal_priors": lambda _bundle: (),
+                "np": np,
+                "analyze_prosody": lambda *_args: (),
+                "SAMPLE_RATE": 16_000,
+                "GLOSS": {"lock": threading.Lock(),
+                          "anchor_pack": ContextPack()},
+                **switches,
+            },
+        )
+        voice, _result = ns["compile_voice_evidence"](
+            recognition, (), "", audio=np.zeros(1_600, dtype=np.float32))
+        return voice
+
+    def test_helper_words_reach_the_compiler_only_when_switched_on(self):
+        helper_words = (
+            RecognitionWord("Pay", 0.1, 0.3, 0.9, "native",
+                            HELPER_WORD_SOURCE),
+            RecognitionWord("Dana", 0.4, 0.6, 0.9, "native",
+                            HELPER_WORD_SOURCE))
+        recognition = Recognition("Pay Dana", 0.93,
+                                  engine="parakeet-unified",
+                                  words=helper_words)
+        off = self.compile(recognition)
+        self.assertEqual(off.hypotheses[0].words, ())
+        self.assertEqual(off, self.compile(Recognition(
+            "Pay Dana", 0.93, engine="parakeet-unified")))
+        self.assertTrue(off.trust_word_confidence)
+        self.assertTrue(off.pause_punctuation)
+        for switches, trust, pauses in (
+                ({"PARAKEET_WORD_CONFIDENCE_ROUTING": True}, True, False),
+                ({"PROSODY_FORMATTING": True}, False, True),
+                ({"PARAKEET_WORD_CONFIDENCE_ROUTING": True,
+                  "PROSODY_FORMATTING": True}, True, True)):
+            with self.subTest(switches=switches):
+                voice = self.compile(recognition, **switches)
+                self.assertEqual(
+                    [word.text for word in voice.hypotheses[0].words],
+                    ["Pay", "Dana"])
+                self.assertEqual(
+                    (voice.trust_word_confidence, voice.pause_punctuation),
+                    (trust, pauses))
+
+    def test_other_engines_words_are_untouched_by_the_switches(self):
+        whisper_words = (RecognitionWord("Pay", 0.0, 0.5, 0.7, "segment"),
+                         RecognitionWord("Dana", 0.5, 1.0, 0.7, "segment"))
+        voice = self.compile(Recognition("Pay Dana", 0.7, engine="tiny",
+                                         words=whisper_words))
+        self.assertEqual(len(voice.hypotheses[0].words), 2)
+        self.assertTrue(voice.trust_word_confidence)
+        self.assertTrue(voice.pause_punctuation)
 
 
 class UncheckedPasteDeliveryTests(unittest.TestCase):

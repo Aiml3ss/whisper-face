@@ -549,6 +549,12 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "models.detail.checking": "Checking the files on this Mac",
         "models.relisten.label": "Selective Re-listen",
         "models.relisten.help": "Recheck only uncertain names and numbers with the local Whisper Tiny verifier. Activation requires approved evidence from this Mac.",
+        "models.speech_runtime.label": "New speech runtime",
+        "models.speech_runtime.on": "On. Whisper Face runs the speech model with its own code, and goes back to the previous one by itself if anything\u00a0fails.",
+        "models.speech_runtime.off": "Off. When on, Whisper Face runs the speech model with its own code, and goes back to the previous one by itself if anything\u00a0fails.",
+        "models.speech_runtime.last.new": "{caption} The last dictation used the new\u00a0one.",
+        "models.speech_runtime.last.previous": "{caption} The last dictation used the previous\u00a0one.",
+        "models.speech_runtime.help": "Off by default. When on, Whisper Face runs the speech model with its own code from the next dictation, and goes back to the previous one by itself if anything fails.",
         "models.wallet.unavailable": "Model wallet shadow advisory only · No model execution or routing · Exact pin evidence unavailable · Runtime readiness and capability evidence remain separate.",
         "models.wallet.evidence": "Model wallet shadow advisory only · No model execution or routing · Exact files resolved {resolved}/4 · Warm path observed {warm}/4 · Runtime readiness attested 0/4 · Capability bounds available 0/4.",
         "models.wallet.informational": "Model wallet shadow advisory only · No model execution or routing · Eligible ordering is informational.",
@@ -558,6 +564,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "models.accessibility.guidance": "Model guidance",
         "models.accessibility.wallet": "Model wallet shadow advisory; no execution or routing",
         "models.accessibility.relisten": "Selective Re-listen activation",
+        "models.accessibility.speech_runtime": "New speech runtime",
         "diagnostics.service": "Service",
         "diagnostics.microphone": "Microphone",
         "diagnostics.accessibility": "Accessibility",
@@ -929,6 +936,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "operation.keyword.forget_failed": "Could not forget that pronunciation keyword: {error}. Its evidence is unchanged — try Forget again.",
         "operation.face.change_failed": "Could not change your companion: {error}. The current face stays — pick it again.",
         "operation.remove_repeats.update_failed": "Could not change Repeated words: {error}. It stayed exactly as it was — try the switch again.",
+        "operation.speech_runtime.update_failed": "Could not change New speech runtime: {error}. It stayed exactly as it was — try the switch again.",
         "operation.self_correction.update_failed": "Could not change “Actually” corrections: {error}. It stayed exactly as it was — try the switch again.",
         "operation.flight.update_failed": "Could not update Flight Recorder: {error}. It stayed exactly as it was — try the switch again.",
         "operation.acoustic.update_failed": "Could not update Acoustic Time Machine: {error}. It stayed exactly as it was — try the switch again.",
@@ -1338,6 +1346,7 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "models.accessibility.guidance",
             "pages.models.advisory.label",
             "models.accessibility.relisten",
+            "models.accessibility.speech_runtime",
             "diagnostics.accessibility.verification",
             "diagnostics.accessibility.open_system_settings",
         ),
@@ -1386,6 +1395,7 @@ class GUIActions:
     set_recent_dictations: Callable[[bool], bool] = lambda _enabled: False
     set_self_correction: Callable[[bool], bool] = lambda _enabled: False
     set_remove_repeats: Callable[[bool], bool] = lambda _enabled: True
+    set_new_speech_runtime: Callable[[bool], bool] = lambda _enabled: False
     recent_dictations: Callable[[], Sequence[Mapping[str, Any]]] = lambda: ()
     reveal_recent_dictation: Callable[[str], str | None] = (
         lambda _entry_id: None)
@@ -1932,6 +1942,11 @@ class GUIState:
     sound_theme: str = "system"
     language: str = LANGUAGE_DEFAULT
     recent_dictations: bool = False
+    # Whisper Face's own speech runtime: whether it is asked first, and which
+    # program ran the model for the last dictation ("new", "previous", or ""
+    # when that is not known).
+    new_speech_runtime: bool = False
+    new_speech_runtime_last: str = ""
     prefers_reduced_motion: bool = False
     onboarding_steps: tuple[OnboardingStep, ...] = field(default_factory=tuple)
     onboarding_complete: bool = False
@@ -3024,6 +3039,22 @@ def model_checks_note(advisory: str, *, locale: str = "en") -> str:
     return localized_string("pages.models.advisory", locale=locale)
 
 
+def speech_runtime_caption(enabled: bool, last: str, *,
+                           locale: str = "en") -> str:
+    """The New speech runtime row's caption, in catalog words only.
+
+    What the switch does, then which program answered the last dictation
+    when that is known. Nothing the runtime reports is shown as text.
+    """
+    caption = localized_string(
+        "models.speech_runtime.on" if enabled
+        else "models.speech_runtime.off", locale=locale)
+    if last not in {"new", "previous"}:
+        return caption
+    return localized_string(
+        f"models.speech_runtime.last.{last}", locale=locale, caption=caption)
+
+
 def relisten_status_display(status: str, *, locale: str = "en") -> str:
     """Selective Re-listen's state as a plain phrase.
 
@@ -4108,6 +4139,11 @@ def normalize_snapshot(
                   if _clean_text(source.get("language"), LANGUAGE_DEFAULT)
                   in LANGUAGES else LANGUAGE_DEFAULT),
         recent_dictations=source.get("recent_dictations") is True,
+        new_speech_runtime=source.get("new_speech_runtime") is True,
+        new_speech_runtime_last=(
+            source.get("new_speech_runtime_last")
+            if source.get("new_speech_runtime_last") in {"new", "previous"}
+            else ""),
         prefers_reduced_motion=(
             source.get("prefers_reduced_motion") is True),
         onboarding_steps=onboarding_steps,
@@ -4702,6 +4738,20 @@ class WhisperFaceViewModel:
             self.state = replace(
                 self.state, notice=self.localized(
                     "operation.self_correction.update_failed", error=error),
+                notice_level="error")
+        return self.state
+
+    def set_new_speech_runtime(self, enabled: bool) -> GUIState:
+        try:
+            stored = self.actions.set_new_speech_runtime(bool(enabled)) is True
+            self.state = replace(
+                self.state, new_speech_runtime=stored,
+                notice="", notice_level="info")
+            return self.refresh()
+        except Exception as error:
+            self.state = replace(
+                self.state, notice=self.localized(
+                    "operation.speech_runtime.update_failed", error=error),
                 notice_level="error")
         return self.state
 
@@ -9685,6 +9735,7 @@ if APPKIT_AVAILABLE:
                 "Settings": (),
                 "Advanced": (
                     self.dynamic["selective_relisten_toggle"],
+                    self.dynamic["new_speech_runtime_toggle"],
                     self.dynamic["verify_button"],
                     self.dynamic["open_log_button"],
                     self.dynamic["copy_support_snapshot_button"],
@@ -10767,9 +10818,19 @@ if APPKIT_AVAILABLE:
                 accessories=(relisten,))
             _accessible(relisten_status, self._l(
                 "models.accessibility.relisten"))
+            # Which program runs the speech model: a switch whose caption
+            # says what it does and, once known, which one answered last.
+            speech_runtime = self._switch(
+                NSMakeRect(0, 0, 40, 22), "newSpeechRuntimeChanged:",
+                label=self._l("models.accessibility.speech_runtime"),
+                help_text=self._l("models.speech_runtime.help"))
+            speech_runtime_row, _title, speech_runtime_detail = (
+                self._settings_row(
+                    self._l("models.speech_runtime.label"), caption="",
+                    accessories=(speech_runtime,)))
             model_rows = []
             model_status_views = []
-            group_rows = [relisten_row]
+            group_rows = [relisten_row, speech_runtime_row]
             for _index in range(4):
                 status = self._status_label()
                 row, name, detail = self._settings_row(
@@ -10889,6 +10950,8 @@ if APPKIT_AVAILABLE:
                 model_guidance=model_guidance,
                 selective_relisten_toggle=relisten,
                 selective_relisten_status=relisten_status,
+                new_speech_runtime_toggle=speech_runtime,
+                new_speech_runtime_detail=speech_runtime_detail,
                 open_system_settings_button=open_system_settings,
                 open_system_settings_row=permissions_row,
                 open_log_button=open_log,
@@ -11776,6 +11839,21 @@ if APPKIT_AVAILABLE:
                 relisten_toggle, relisten_status,
                 label=self._l("models.accessibility.relisten"),
             )
+            speech_runtime = state.new_speech_runtime
+            self.dynamic["new_speech_runtime_toggle"].setState_(
+                NSControlStateValueOn if speech_runtime
+                else NSControlStateValueOff)
+            set_accessible_text(
+                self.dynamic["new_speech_runtime_detail"],
+                speech_runtime_caption(
+                    speech_runtime, state.new_speech_runtime_last,
+                    locale=locale),
+                label=self._l("models.accessibility.speech_runtime"))
+            sync_accessibility(
+                self.dynamic["new_speech_runtime_toggle"],
+                self._l("settings.state.enabled") if speech_runtime
+                else self._l("settings.state.disabled"),
+                label=self._l("models.accessibility.speech_runtime"))
             model_issue = next(
                 (issue for issue in state.degraded_issues
                  if issue.key in {"models", "fallback"}), None)
@@ -13339,6 +13417,11 @@ if APPKIT_AVAILABLE:
             self.view_model.set_self_correction(enabled)
             self.render()
 
+        def newSpeechRuntimeChanged_(self, sender: Any) -> None:
+            enabled = sender.state() == NSControlStateValueOn
+            self.view_model.set_new_speech_runtime(enabled)
+            self.render()
+
         def removeRepeatsChanged_(self, sender: Any) -> None:
             enabled = sender.state() == NSControlStateValueOn
             self.view_model.set_remove_repeats(enabled)
@@ -13769,6 +13852,7 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         "sounds": "system",
         "language": LANGUAGE_DEFAULT,
         "recent_dictations": False,
+        "new_speech_runtime": False,
         # Shaped like runtime_status_snapshot before the first readiness
         # receipt: nothing inspected yet.
         "models": [{
@@ -13954,6 +14038,11 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         private_settings["remove_repeats"] = bool(enabled)
         return bool(enabled)
 
+    def set_new_speech_runtime(enabled: bool) -> bool:
+        calls.append(("new_speech_runtime", enabled))
+        runtime["new_speech_runtime"] = bool(enabled)
+        return bool(enabled)
+
     actions = GUIActions(
         status_snapshot=lambda: dict(runtime),
         settings_snapshot=lambda: dict(private_settings),
@@ -13967,6 +14056,7 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         set_recent_dictations=set_recent_dictations,
         set_self_correction=set_self_correction,
         set_remove_repeats=set_remove_repeats,
+        set_new_speech_runtime=set_new_speech_runtime,
         # Two entries share one metadata row, as two short dictations into
         # the same app within a minute do.
         recent_dictations=lambda: (
@@ -16067,6 +16157,51 @@ def run_native_appkit_smoke(*, construction_only: bool = False
         require(model.state.settings.remove_repeats
                 and private_settings["remove_repeats"] is True,
                 "the repeated words switch turns the repair back on")
+        # New speech runtime: off for a new install, labelled, reachable by
+        # keyboard on Advanced, and its caption names which program answered
+        # the last dictation once the runtime says so.
+        speech_toggle = controller.dynamic["new_speech_runtime_toggle"]
+        speech_detail = controller.dynamic["new_speech_runtime_detail"]
+        require(
+            accessible_value(speech_toggle, "accessibilityLabel")
+            == localized_string("models.accessibility.speech_runtime")
+            and speech_toggle in controller.key_views_by_section["Advanced"],
+            "the new speech runtime switch is labelled and reachable by "
+            "keyboard")
+        require(
+            int(speech_toggle.state()) == int(NSControlStateValueOff)
+            and str(speech_detail.stringValue()) == localized_string(
+                "models.speech_runtime.off"),
+            "the new speech runtime starts off and says so")
+        speech_toggle.setState_(NSControlStateValueOn)
+        controller.newSpeechRuntimeChanged_(speech_toggle)
+        require(
+            ("new_speech_runtime", True) in calls
+            and model.state.new_speech_runtime
+            and int(speech_toggle.state()) == int(NSControlStateValueOn)
+            and str(speech_detail.stringValue()) == localized_string(
+                "models.speech_runtime.on")
+            and accessible_value(speech_toggle, "accessibilityValue")
+            == localized_string("settings.state.enabled"),
+            "the new speech runtime switch turns it on")
+        for last in ("new", "previous"):
+            runtime["new_speech_runtime_last"] = last
+            model.refresh()
+            controller.render()
+            require(
+                str(speech_detail.stringValue()) == localized_string(
+                    f"models.speech_runtime.last.{last}",
+                    caption=localized_string("models.speech_runtime.on")),
+                f"the new speech runtime caption names the {last} program")
+        runtime.pop("new_speech_runtime_last")
+        speech_toggle.setState_(NSControlStateValueOff)
+        controller.newSpeechRuntimeChanged_(speech_toggle)
+        require(
+            not model.state.new_speech_runtime
+            and not runtime["new_speech_runtime"]
+            and str(speech_detail.stringValue()) == localized_string(
+                "models.speech_runtime.off"),
+            "the new speech runtime switch turns it back off")
         require(
             hotkey_name_for_keycode(61) == "alt_r"
             and hotkey_name_for_keycode(0) == ""
@@ -16169,11 +16304,13 @@ def run_native_appkit_smoke(*, construction_only: bool = False
             "selectiveRelistenChanged:",
             "selective re-listen surface")
         # The Selective Re-listen switch stays disabled without evidence, so
-        # the loop hands Tab to the first enabled Advanced control, which
-        # is the first button on the page, Run Verification.
+        # the loop hands Tab to the first enabled Advanced control, the New
+        # speech runtime switch, and from there to Run Verification.
         require(
             controller.sidebar_rows[-1].nextKeyView() ==
-            controller.dynamic["verify_button"]
+            controller.dynamic["new_speech_runtime_toggle"]
+            and controller.dynamic["new_speech_runtime_toggle"]
+            .nextKeyView() == controller.dynamic["verify_button"]
             and controller.dynamic["verify_button"].nextKeyView() ==
             controller.dynamic["open_log_button"],
             "advanced Tab order")

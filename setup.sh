@@ -334,6 +334,13 @@ launcher_receipt="$HOME/Library/Application Support/Whisper Face/launcher-instal
 service_receipt_dir="$HOME/Library/Application Support/Whisper Face"
 ollama_service_receipt="$service_receipt_dir/ollama-service.sha256"
 parakeet_helper="$DIR/.models/bin/parrot-asr-helper"
+# Whisper Face's own runtime for the same model (native/ParrotSpeechRuntime).
+# It is built and verified beside the FluidAudio helper; dictate.py asks it
+# first only when PARROT_ASR_RUNTIME=own.
+speech_runtime="$DIR/.models/bin/parrot-speech-runtime"
+# Core ML keeps its compiled copy of the model (about 17 MB) under the
+# program's name; the runtime itself writes no file.
+speech_runtime_cache="$HOME/Library/Caches/parrot-speech-runtime"
 dictate_log="$DIR/dictate.log"
 ollama_log="$DIR/ollama.log"
 install_log="$DIR/install.log"
@@ -591,10 +598,15 @@ uninstall_whisper_face() {
 
     step "build products and runtime state inside the checkout"
     remove_installed_path 1 "$parakeet_helper" "native Parakeet ASR helper"
+    remove_installed_path 1 "$speech_runtime" "Whisper Face speech runtime"
     remove_installed_path 1 "$DIR/.models/bin" "helper install directory"
     remove_installed_path 1 "$DIR/.models/swift-build" "Swift build scratch"
+    remove_installed_path 1 "$DIR/.models/swift-build-runtime" \
+        "speech runtime build scratch"
     prune_empty_directory "$DIR/.models"
     remove_installed_path 1 "$DIR/.dictate.lock" "single-instance lock"
+    remove_installed_path 1 "$speech_runtime_cache" \
+        "speech runtime's Core ML compiled model cache, ~17 MB"
 
     step "personal files (removed only with --remove-personal-data)"
     echo "   These are your words and your corrections. No download restores"
@@ -695,6 +707,16 @@ required=(
     native/ParrotASRHelper/Package.swift
     native/ParrotASRHelper/Package.resolved
     native/ParrotASRHelper/Sources/parrot-asr-helper/main.swift
+    native/ParrotSpeechRuntime/Package.swift
+    native/ParrotSpeechRuntime/LICENSE-Apache-2.0.txt
+    native/ParrotSpeechRuntime/Sources/parrot-speech-runtime/main.swift
+    native/ParrotSpeechRuntime/Sources/parrot-speech-runtime/Wire.swift
+    native/ParrotSpeechRuntime/Sources/parrot-speech-runtime/Recognizer.swift
+    native/ParrotSpeechRuntime/Sources/parrot-speech-runtime/MelFeatures.swift
+    native/ParrotSpeechRuntime/Sources/parrot-speech-runtime/TransducerDecoder.swift
+    native/ParrotSpeechRuntime/Sources/parrot-speech-runtime/Vocabulary.swift
+    native/ParrotSpeechRuntime/Sources/parrot-speech-runtime/WindowMerge.swift
+    native/ParrotSpeechRuntime/Sources/parrot-speech-runtime/WordEvidence.swift
     setup.ps1 Install.command Install.cmd
     com.berg.dictate.plist.template com.berg.ollama.plist.template
     snippets.template.json tones.template.json preferences.template.json
@@ -813,7 +835,7 @@ verify_cleanup_service() {
 
 verify_install() {
     step "verifying installation"
-    local uv_bin
+    local uv_bin runtime_status
     uv_bin="$(command -v uv 2>/dev/null || true)"
     [ -n "$uv_bin" ] || fail "uv is not installed"
     command -v ffmpeg >/dev/null 2>&1 || fail "ffmpeg is not installed"
@@ -823,6 +845,25 @@ verify_install() {
     [ -x "$parakeet_helper" ] || fail "Parakeet ASR helper is missing"
     "$parakeet_helper" --verify >/dev/null \
         || fail "Parakeet Unified model/helper verification failed"
+    # The runtime is optional while it is off by default: an install whose
+    # runtime did not build has none, and the app uses the helper. One that
+    # is present must load the model from the folder named, decode a second
+    # of silence, and answer protocol 2; a binary built before protocol 2, or
+    # one that cannot run the model, fails here.
+    if [ -e "$speech_runtime" ]; then
+        [ -x "$speech_runtime" ] \
+            || fail "speech runtime is present but cannot run; rerun ./setup.sh"
+        runtime_status="$("$speech_runtime" --verify --protocol 2 \
+            --models "$parakeet_model_dir")" \
+            || fail "speech runtime verification failed"
+        case "$runtime_status" in
+            *'"protocol":2'*) ;;
+            *) fail "speech runtime is out of date; rerun ./setup.sh" ;;
+        esac
+        echo "== speech runtime: installed and working"
+    else
+        echo "== speech runtime: not installed (optional; dictation uses the Parakeet helper)"
+    fi
     [ -f "$dictate_plist" ] || fail "dictation LaunchAgent is missing"
     for private_log in "$dictate_log" "$ollama_log"; do
         private_log_is_valid "$private_log" \
@@ -1237,6 +1278,30 @@ install -m 755 \
     "$parakeet_helper"
 step "verifying the pinned Parakeet Unified model and helper"
 "$parakeet_helper" --preload
+
+# Whisper Face's own runtime for the same model files. It has no package
+# dependencies, so this build fetches nothing. --preload loads the model
+# once, so the first dictation that asks for the runtime finds it warm.
+# It is off by default and the app falls back to the helper above when it is
+# missing, so a runtime that will not build, install or load does not stop
+# the install: the binary is removed, one line says so, and setup goes on.
+install_speech_runtime() {
+    step "building Whisper Face's own speech runtime"
+    if swift build -c release \
+            --package-path "$DIR/native/ParrotSpeechRuntime" \
+            --scratch-path "$DIR/.models/swift-build-runtime" \
+        && install -m 755 \
+            "$DIR/.models/swift-build-runtime/release/parrot-speech-runtime" \
+            "$speech_runtime" \
+        && step "verifying the speech runtime against the pinned model" \
+        && "$speech_runtime" --preload --protocol 2 --models "$parakeet_model_dir"; then
+        return 0
+    fi
+    rm -f "$speech_runtime"
+    echo "!! Whisper Face's own speech runtime could not be built or checked, so it was not installed; dictation uses the Parakeet helper as before" >&2
+    return 0
+}
+install_speech_runtime
 
 # --- Ollama service and cleanup model --------------------------------------
 # The cleanup model only rewrites text the deterministic compiler refuses to

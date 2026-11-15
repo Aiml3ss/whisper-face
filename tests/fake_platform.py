@@ -12,8 +12,9 @@ Fakes sit only at the edge of the process:
                whose Cmd+V pastes the pasteboard into the focused field
   field        an Accessibility element with a value and a selection that,
                like macOS, reports its range in UTF-16 code units
-  recognizers  the Parakeet helper as a child process speaking the framed
-               protocol over real pipes, and mlx_whisper for Whisper Tiny
+  recognizers  the Parakeet helper (and Whisper Face's own speech runtime,
+               which speaks the same protocol) as a child process speaking the
+               framed protocol over real pipes, and mlx_whisper for Whisper Tiny
   models       the default Mac set: Parakeet and Whisper Tiny, no
                large-v3-turbo, no cleanup model
   processes    every other spawn is refused and recorded
@@ -53,6 +54,9 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_RATE = 16_000
+# The two programs setup.sh installs that can run the Parakeet model.
+HELPER_NAME = "parrot-asr-helper"
+RUNTIME_NAME = "parrot-speech-runtime"
 # Kept before any FakeMac refuses spawning, for a test that needs a child.
 REAL_POPEN = subprocess.Popen
 
@@ -529,6 +533,18 @@ class InputStream:
         self.closed = True
 
 
+def helper_words(text: str, seconds: float, confidence: float) -> list[dict]:
+    """Protocol 2 words for a transcript: whitespace-split, evenly spaced,
+    times rounded to 1 ms as the real helper rounds them."""
+    words = text.split()
+    slot = seconds / max(1, len(words))
+    return [{"word": word,
+             "start": round(index * slot, 3),
+             "end": round((index + 0.9) * slot, 3),
+             "confidence": confidence}
+            for index, word in enumerate(words)]
+
+
 class HelperProcess:
     """The Parakeet helper: a child process speaking the framed protocol.
 
@@ -536,11 +552,32 @@ class HelperProcess:
     its bounded, non-blocking exchange are what is being exercised. The
     "process" is a thread that reads a little-endian u64 sample count and that
     many float32 samples, and answers with one JSON line.
+
+    It speaks protocol 2 (word times and confidence) when its arguments ask
+    for it, as the protocol 2 helper does, and protocol 1 otherwise. With
+    ``Desktop.helper_protocol`` set to 1 it is a protocol 1 helper, which
+    reads only its first argument and ignores the request.
+
+    Started as ``parrot-speech-runtime`` it is Whisper Face's own runtime,
+    which always speaks protocol 2 when asked, and fails the way
+    ``Desktop.runtime_failure`` says: "start" (a model that will not load:
+    an error line, then it exits) or "request" (every request answered with
+    an error). ``Desktop.helper_failure`` does the same to the FluidAudio
+    helper.
     """
 
     def __init__(self, desktop, argv):
         self.desktop = desktop
         self.argv = list(argv)
+        self.runtime = Path(self.argv[0]).name == RUNTIME_NAME
+        self.protocol = 1
+        speaks = 2 if self.runtime else desktop.helper_protocol
+        if speaks >= 2 and "--protocol" in self.argv:
+            flag = self.argv.index("--protocol")
+            try:
+                self.protocol = max(1, min(int(self.argv[flag + 1]), speaks))
+            except (IndexError, ValueError):
+                self.protocol = 1
         request_read, request_write = os.pipe()
         response_read, response_write = os.pipe()
         self.stdin = os.fdopen(request_write, "wb", buffering=0)
@@ -564,19 +601,46 @@ class HelperProcess:
     def _reply(self, value: dict):
         self._output.write(json.dumps(value).encode("utf-8") + b"\n")
 
+    def _failure(self):
+        """How this program fails right now, read at each step, so a
+        running program can start failing mid-use."""
+        return getattr(self.desktop, "runtime_failure" if self.runtime
+                       else "helper_failure", None)
+
     def _serve(self):
         try:
-            self._reply({"ready": True, "load_s": 0.01,
-                         "model": "parakeet-unified"})
+            if self._failure() == "start":
+                self._reply({"ok": False, "error": "model load failed"})
+                return
+            ready = {"ready": True, "load_s": 0.01,
+                     "model": "parakeet-unified"}
+            if self.protocol >= 2:
+                ready.update(protocol=2, capabilities=["words"],
+                             engine=("parrot-speech-runtime-1" if self.runtime
+                                     else "fluidaudio-fake"))
+            self._reply(ready)
             while True:
                 header = self._read_exactly(8)
                 (count,) = struct.unpack("<Q", header)
                 payload = self._read_exactly(4 * count)
                 audio = np.frombuffer(payload, dtype="<f4")
-                self.desktop.parakeet_requests.append(len(audio))
-                self._reply({"ok": True,
-                             "text": self.desktop.recognize(audio, "parakeet"),
-                             "processing_s": 0.01})
+                (self.desktop.runtime_requests if self.runtime
+                 else self.desktop.parakeet_requests).append(len(audio))
+                if self._failure() == "request":
+                    self._reply({"ok": False,
+                                 "error": "transcription failed"})
+                    continue
+                text = self.desktop.recognize(audio, "parakeet")
+                response = {"ok": True, "text": text, "processing_s": 0.01}
+                if self.protocol >= 2 and text:
+                    confidence = self.desktop.word_confidence
+                    response["avg_confidence"] = confidence
+                    response["words"] = (
+                        self.desktop.helper_words_override
+                        if self.desktop.helper_words_override is not None
+                        else helper_words(
+                            text, len(audio) / SAMPLE_RATE, confidence))
+                self._reply(response)
         except (EOFError, OSError, ValueError):
             pass
         finally:
@@ -667,6 +731,18 @@ class Desktop:
         self.helper_spawns = []
         self.network = []
         self.parakeet_requests = []
+        # The newest protocol the helper speaks (2 by default; 1 is a helper
+        # built before word evidence), the word confidence it reports, and a
+        # raw "words" value to send instead of well-formed words.
+        self.helper_protocol = 2
+        self.word_confidence = 0.95
+        self.helper_words_override = None
+        # Requests Whisper Face's own runtime received (parakeet_requests
+        # holds the FluidAudio helper's), and how each fails: None, "start"
+        # or "request".
+        self.runtime_requests = []
+        self.runtime_failure = None
+        self.helper_failure = None
         self.whisper_requests = []
         self.main_thread_calls = []
         self.installed_models = set()
@@ -991,10 +1067,12 @@ class FakeMac:
             if not destination.exists():
                 shutil.copyfile(ROOT / template, destination)
             destination.chmod(0o600)
-        helper = self.state / ".models" / "bin" / "parrot-asr-helper"
-        helper.parent.mkdir(parents=True)
-        helper.write_bytes(b"")
-        helper.chmod(0o755)
+        # setup.sh builds and installs both programs that can run Parakeet.
+        for name in (HELPER_NAME, RUNTIME_NAME):
+            helper = self.state / ".models" / "bin" / name
+            helper.parent.mkdir(parents=True, exist_ok=True)
+            helper.write_bytes(b"")
+            helper.chmod(0o755)
         (self.directory / "ollama-models").mkdir()
 
     # -- install and import --------------------------------------------------
@@ -1046,10 +1124,14 @@ class FakeMac:
                 function.__defaults__ = tuple(
                     moved.get(item, item) if isinstance(item, Path) else item
                     for item in defaults)
-        helper = self.state / ".models" / "bin" / "parrot-asr-helper"
+        helper = self.state / ".models" / "bin" / HELPER_NAME
         dictate.PARAKEET_HELPER = helper
         dictate.PARAKEET.helper = helper
         dictate.PARAKEET.process_factory = self.desktop.spawn_helper
+        runtime = self.state / ".models" / "bin" / RUNTIME_NAME
+        dictate.PARAKEET_RUNTIME_HELPER = runtime
+        dictate.OWN_PARAKEET.helper = runtime
+        dictate.OWN_PARAKEET.process_factory = self.desktop.spawn_helper
         dictate.AUDIO_RECOVERY.core_audio = self.desktop.core_audio
         dictate.ThreadingHTTPServer = (
             lambda address, handler: PhoneServer(
@@ -1090,6 +1172,7 @@ class FakeMac:
             OLLAMA_MODELS=str(self.directory / "ollama-models"),
             PARROT_ASR_BACKEND=None,
             PARROT_ASR_CROSSCHECK=None,
+            PARROT_ASR_RUNTIME=None,
             WHISPER_FACE_SOURCE_REVISION="0" * 40,
             WHISPER_FACE_PERMISSION_ATTEMPT=None,
         )
@@ -1180,6 +1263,8 @@ class FakeMac:
         if self.dictate is not None:
             with contextlib.suppress(Exception):
                 self.dictate.PARAKEET._close()
+            with contextlib.suppress(Exception):
+                self.dictate.OWN_PARAKEET._close()
         if self._lock is not None:
             self._lock.close()
         for name, module in self._saved_modules.items():

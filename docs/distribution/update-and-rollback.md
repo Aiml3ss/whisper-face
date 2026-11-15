@@ -227,7 +227,7 @@ What each tier covers:
 
 | Tier | macOS | Windows |
 |---|---|---|
-| Software (with `--yes`) | `launchctl bootout` of `com.berg.dictate` and `com.berg.ollama`, both LaunchAgent plists, `~/Applications/Whisper Face.app`, the `Application Support/Whisper Face` receipts, `.models/bin`, `.models/swift-build`, `.dictate.lock` | the `Whisper Face` scheduled task and its legacy `Whispering Parrot` name, `.windows/launch.ps1`, `.windows/launch.sha256`, the `.windows` directory, `.dictate.lock` |
+| Software (with `--yes`) | `launchctl bootout` of `com.berg.dictate` and `com.berg.ollama`, both LaunchAgent plists, `~/Applications/Whisper Face.app`, the `Application Support/Whisper Face` receipts, `.models/bin`, `.models/swift-build`, `.models/swift-build-runtime`, `~/Library/Caches/parrot-speech-runtime`, `.dictate.lock` | the `Whisper Face` scheduled task and its legacy `Whispering Parrot` name, `.windows/launch.ps1`, `.windows/launch.sha256`, the `.windows` directory, `.dictate.lock` |
 | Models (`--remove-models`) | the Parakeet Unified Core ML model, both pinned `mlx-community/whisper-*` snapshots in the Hugging Face cache, and `ollama rm qwen3.5:4b` | the `.models` faster-Whisper cache and `ollama rm qwen3.5:4b` |
 | Personal (`--remove-personal-data`) | `snippets.json`, `tones.json`, `preferences.json`, `acoustic_keyword_memory.json`, `acoustic_keyword_activation.json`, `acoustic_calibration_activation.json`, `relisten_activation.json`, `delayed_cleanup_activation.json`, `dictionary.txt`, `transcripts.jsonl`, `learned.json`, `voice_inbox.json`, `demonstrations.json`, `phone_token.txt`, `dictate.log`, `ollama.log`, `install.log` | the same, plus `ollama-error.log` |
 

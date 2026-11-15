@@ -3,7 +3,7 @@ title: "ASR Cascade"
 type: concept
 language: en
 created: 2026-07-26
-modified: 2026-07-27
+modified: 2026-11-15
 tags: [asr, recognition, parakeet, whisper, performance]
 aliases: [confidence-cascade, rolling-recognition, speculation]
 summary: "The three-engine recognition strategy: Whisper Tiny speculates, native Parakeet verifies, Whisper large-v3-turbo is the independent fallback — with rolling chunk decoding during the hold."
@@ -73,6 +73,26 @@ speech is recognized *while you talk* through rolling chunk cuts, so a
   measured baseline that justifies the cascade: Parakeet 1.240% WER at
   113× realtime vs Turbo 1.717% at 4.4× vs Tiny 7.010% at 120×
   ([[benchmarks]]).
+- **Word evidence (protocol 2)**: the client asks the helper for each
+  word's time and confidence (`--protocol 2`) and names the verified model
+  folder (`--models`). The FluidAudio helper speaks protocol 1 and ignores
+  both, so by default Parakeet decodes carry no words. When a protocol 2
+  program answers, its words are validated, reshaped into the compiler's
+  tokens and recorded (`word_evidence_status`), but two switches, both off,
+  keep them out of formatting and routing.
+- **Whisper Face's own speech runtime**: `native/ParrotSpeechRuntime`
+  runs the same Parakeet model files with no package dependencies (Core ML
+  and Accelerate only, nothing fetched to build it, no networking API) and
+  speaks protocols 1 and 2. Its transcripts match the FluidAudio helper's
+  on every measured clip. `setup.sh` requires the helper and builds the runtime if it can (a runtime
+  that does not build or load is skipped with one line, not an install failure);
+  the New speech runtime switch (Advanced → Models, preference
+  `new_speech_runtime`, applied from the next dictation) or
+  `PARROT_ASR_RUNTIME=own`, which wins when set, asks the runtime first, and anything it cannot
+  answer goes to the FluidAudio helper, then Whisper. Off by default until
+  the owner has used it. Details, parity and attribution:
+  `native/ParrotSpeechRuntime/README.md`; wire contract and switch:
+  `native/ParrotASRHelper/PROTOCOL.md`.
 
 ## Examples
 

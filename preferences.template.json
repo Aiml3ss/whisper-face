@@ -10,5 +10,6 @@
   "recent_dictations": false,
   "self_correction": false,
   "remove_repeats": true,
+  "new_speech_runtime": false,
   "language": "en"
 }

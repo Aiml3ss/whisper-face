@@ -43,8 +43,38 @@ transcription; it is also a transitive dependency of both Whisper backends.
 | FluidAudio | 0.15.5 / `19600a485baa4998812e4654b70d2bab8f2c9949` | Apache-2.0 | Swift package compiled locally into the Mac helper. [Source and license](https://github.com/FluidInference/FluidAudio) |
 | Parakeet Unified 0.6B Core ML | `4252711f6f060f9a2f91e5f081a806d7f45eebd8` | **Review required: conflicting upstream metadata** | Model downloaded at install time from [`FluidInference/parakeet-unified-en-0.6b-coreml`](https://huggingface.co/FluidInference/parakeet-unified-en-0.6b-coreml). At this exact revision, the repository card/API declares CC-BY-4.0 and names `nvidia/parakeet-tdt-0.6b-v2` as its base; the shipped `metadata.json` and `config.json` instead identify `nvidia/parakeet-unified-en-0.6b`, whose upstream repository declares the NVIDIA Open Model License. Do not treat the conversion as unambiguously CC-BY-4.0 or redistribute it in a binary/commercial package until FluidInference or NVIDIA reconciles the artifact provenance and governing terms. |
 
-The helper receives audio through a RAM-only local pipe. Neither model weights
-nor FluidAudio source are committed to this repository.
+The helper receives audio through a RAM-only local pipe. Model weights are not
+committed to this repository, and neither is FluidAudio's source as a whole;
+the portions ported into Whisper Face's own speech runtime are listed in the
+next section.
+
+## Ported source in the speech runtime
+
+`native/ParrotSpeechRuntime` is Whisper Face's own program for the Parakeet
+Unified model above. `setup.sh` builds it beside the FluidAudio helper, and
+`dictate.py` asks it first only when `PARROT_ASR_RUNTIME=own`. It has no
+package dependencies: its build fetches nothing and it links only Apple's
+Foundation, Core ML and Accelerate. To give the same transcripts as the
+FluidAudio helper it ports the parts of FluidAudio's Apache-2.0 source listed
+here. As that licence asks, its text is kept beside them
+(`native/ParrotSpeechRuntime/LICENSE-Apache-2.0.txt`, identical to the
+`LICENSE` FluidAudio ships), and every ported file names the FluidAudio
+files, tag and commit it came from and says what was changed. FluidAudio
+ships no `NOTICE` file. `main.swift` and `Wire.swift` are first-party, after
+the FluidAudio helper's own `main.swift`.
+
+| Runtime file | Ported from (FluidAudio `Sources/FluidAudio/`) | Release / commit | License |
+|---|---|---|---|
+| `MelFeatures.swift` | `Shared/AudioMelSpectrogram.swift`, `ASR/Parakeet/Unified/UnifiedMelExtractor.swift` | 0.15.5 / `19600a485baa4998812e4654b70d2bab8f2c9949` | Apache-2.0 |
+| `TransducerDecoder.swift` | `ASR/Parakeet/Unified/UnifiedRnntDecoder.swift`, `ASR/Parakeet/Unified/UnifiedFeatureProviders.swift` | 0.15.5 / `19600a485baa4998812e4654b70d2bab8f2c9949` | Apache-2.0 |
+| `Recognizer.swift` | `ASR/Parakeet/Unified/UnifiedAsrManager.swift`, `ASR/Parakeet/Unified/UnifiedConfig.swift`, `Shared/MLModelConfigurationUtils.swift`, `ModelNames.swift` | 0.15.5 / `19600a485baa4998812e4654b70d2bab8f2c9949` | Apache-2.0 |
+| `WindowMerge.swift` | `ASR/Parakeet/SlidingWindow/TDT/ChunkProcessor.swift`, `ASR/Parakeet/TokenDeduplication/SequenceMatcher.swift`, `ASR/Parakeet/SlidingWindow/CustomVocabulary/Rescorer/VocabularyRescorer+Utilities.swift` | 0.15.5 / `19600a485baa4998812e4654b70d2bab8f2c9949` | Apache-2.0 |
+| `Vocabulary.swift` | `ASR/Parakeet/Streaming/Tokenizer.swift` | 0.15.5 / `19600a485baa4998812e4654b70d2bab8f2c9949` | Apache-2.0 |
+| `WordEvidence.swift` (`tokenTimings` only) | `ASR/Parakeet/Unified/UnifiedAsrManager.swift` | 0.18.3 / `c8b41f98eae668794dd0083bbe028fe7e6585051` | Apache-2.0 |
+
+Apache-2.0 permits use in both the `AGPL-3.0-only` edition and a commercial
+licence; a binary distribution of the runtime must carry the licence text and
+these attributions.
 
 ## Speech and cleanup models
 
@@ -68,7 +98,7 @@ hash the local manifest and reject any unreviewed change.
 | Ollama | Homebrew or `Ollama.Ollama` via winget | MIT; installed separately, not linked into Whisper Face. |
 | FFmpeg | Homebrew or `Gyan.FFmpeg` via winget | The current Homebrew formula is `GPL-3.0-or-later`; Gyan's full Windows builds are GPLv3 distributions. Installed and invoked as a separate executable for compatibility-endpoint audio decoding. |
 | uv | Official installer or `astral-sh.uv` via winget | Apache-2.0 OR MIT; used to create the locked environment. |
-| Swift toolchain | Apple Command Line Tools | Apple toolchain terms; used locally to compile the helper. |
+| Swift toolchain | Apple Command Line Tools | Apple toolchain terms; used locally to compile the helper and the speech runtime. |
 
 ## Release automation actions
 

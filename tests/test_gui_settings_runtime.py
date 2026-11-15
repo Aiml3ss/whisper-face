@@ -665,7 +665,9 @@ class RuntimeStatusWindowContractTests(unittest.TestCase):
 
     def snapshot(self, *, installed=None, warm=None, receipt=True,
                  input_monitoring=True, post_events=True,
-                 microphone="Ready", outbox=None):
+                 microphone="Ready", outbox=None, parakeet=None,
+                 last_engine="parakeet-unified", speech_runtime=False,
+                 speech_program=""):
         from model_wallet import (
             CURRENT_PROVIDER_PROFILES, Capability, MAX_LATENCY_BOUND_MS,
             ModelRequest, PARAKEET_PROFILE, QWEN_CLEANUP_PROFILE,
@@ -705,9 +707,11 @@ class RuntimeStatusWindowContractTests(unittest.TestCase):
                 "personal_regression_lab": lambda _learned: lab,
                 "PARAKEET_ENABLED": True,
                 "PARAKEET_HELPER": Path(__file__),
-                "PARAKEET": SimpleNamespace(process=None),
+                "PARAKEET": parakeet or SimpleNamespace(process=None),
+                "speech_runtime_selected": lambda: speech_runtime,
                 "PIPELINE_STATE": {
-                    "last_asr_engine": "parakeet-unified",
+                    "last_asr_engine": last_engine,
+                    "last_speech_program": speech_program,
                     "last_release_s": 0.4,
                     "last_word_count": None,
                     "last_confidence": 0.93,
@@ -788,6 +792,53 @@ class RuntimeStatusWindowContractTests(unittest.TestCase):
     def window(self, snapshot):
         from whisper_face_gui import normalize_snapshot
         return normalize_snapshot(snapshot)
+
+    def test_a_running_speech_runtime_counts_as_parakeet_running(self):
+        # With PARROT_ASR_RUNTIME=own the runtime may be the only program
+        # loaded (the FluidAudio helper is closed while it answers). Before
+        # the first dictation names an engine, either one running is
+        # Parakeet, not "Warming up".
+        from types import SimpleNamespace
+        live = SimpleNamespace(poll=lambda: None)
+        ended = SimpleNamespace(poll=lambda: 1)
+        cases = (
+            (SimpleNamespace(process=None), "Warming up"),
+            (SimpleNamespace(process=live), "Parakeet Unified"),
+            (SimpleNamespace(process=None, preferred=SimpleNamespace(
+                process=live)), "Parakeet Unified"),
+            (SimpleNamespace(process=None, preferred=SimpleNamespace(
+                process=ended)), "Warming up"),
+            (SimpleNamespace(process=None, preferred=None), "Warming up"),
+        )
+        for parakeet, expected in cases:
+            with self.subTest(parakeet=parakeet):
+                self.assertEqual(self.snapshot(
+                    parakeet=parakeet, last_engine=None)["active_engine"],
+                    expected)
+
+    def test_the_window_shows_the_speech_runtime_switch_and_last_program(
+            self):
+        # The status snapshot carries the switch as the runtime resolved it
+        # (environment over preference) and which program ran the model for
+        # the last dictation; the window keeps only the two words it shows.
+        cases = (
+            ((False, ""), (False, "")),
+            ((True, ""), (True, "")),
+            ((True, "new"), (True, "new")),
+            ((False, "previous"), (False, "previous")),
+            ((True, "fluidaudio"), (True, "")),
+        )
+        for (selected, program), expected in cases:
+            with self.subTest(selected=selected, program=program):
+                snapshot = self.snapshot(
+                    speech_runtime=selected, speech_program=program)
+                self.assertIs(snapshot["new_speech_runtime"], selected)
+                self.assertEqual(
+                    snapshot["new_speech_runtime_last"], program)
+                state = self.window(snapshot)
+                self.assertEqual(
+                    (state.new_speech_runtime,
+                     state.new_speech_runtime_last), expected)
 
     def test_default_install_shows_no_warning_for_optional_models(self):
         state = self.window(self.snapshot())

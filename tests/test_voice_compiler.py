@@ -26,9 +26,12 @@ from voice_compiler import (
     VoiceIR,
     WordEvidence,
     analyze_prosody,
+    build_consequence_plan,
     context_firewall_receipt,
+    project_word_evidence,
     protected_anchors,
 )
+from parrot_core import HELPER_WORD_SOURCE, HelperWord  # noqa: E402
 
 
 class VoiceCompilerTests(unittest.TestCase):
@@ -1022,6 +1025,158 @@ class ScoreScaleTests(unittest.TestCase):
         self.assertLess(
             phonetic_similarity("Said", "Zed"),
             phonetic_similarity("Zed", "Zed"))
+
+
+def helper(text, start, end, confidence=0.9):
+    return HelperWord(text, start, end, confidence)
+
+
+class HelperWordProjectionTests(unittest.TestCase):
+    """The helper's words reshaped into the compiler's lexical tokens."""
+
+    def assert_usable(self, text, pieces, duration):
+        """What the harvest and the consequence plan both require."""
+        self.assertIsNotNone(pieces)
+        cursor = 0.0
+        for piece in pieces:
+            self.assertGreaterEqual(piece.start, cursor)
+            self.assertGreaterEqual(piece.end - piece.start, 0.001)
+            self.assertLessEqual(piece.end, duration)
+            self.assertEqual(
+                (piece.timing, piece.source), ("native", HELPER_WORD_SOURCE))
+            cursor = piece.end
+        words = tuple(WordEvidence(piece.text, piece.start, piece.end,
+                                   piece.confidence, "parakeet-unified",
+                                   piece.timing) for piece in pieces)
+        voice = VoiceIR((RecognitionHypothesis(
+            text, 0.9, "parakeet-unified", words),))
+        plan = build_consequence_plan(voice, audio_duration=duration)
+        for risk in plan.risks:
+            self.assertNotIn("word-evidence-unavailable", risk.uncertainty)
+            self.assertIsNotNone(risk.audio_start)
+
+    def test_attached_punctuation_is_left_out_of_the_word(self):
+        text = "Hello world, this is a test."
+        pieces = project_word_evidence(text, (
+            helper("Hello", 0.88, 0.96), helper("world,", 1.04, 1.52, 0.8),
+            helper("this", 1.6, 1.7), helper("is", 1.76, 1.84),
+            helper("a", 1.84, 1.92), helper("test.", 1.92, 2.4)), 2.5)
+        self.assert_usable(text, pieces, 2.5)
+        self.assertEqual([piece.text for piece in pieces],
+                         ["Hello", "world", "this", "is", "a", "test"])
+        self.assertEqual((pieces[1].start, pieces[1].end, pieces[1].confidence),
+                         (1.04, 1.52, 0.8))
+
+    def test_money_splits_into_its_lexical_tokens(self):
+        text = "Pay $1,250.50 to Dana Lee on 3:15 p.m. Friday."
+        pieces = project_word_evidence(text, (
+            helper("Pay", 0.1, 0.3), helper("$1,250.50", 0.4, 1.3, 0.7),
+            helper("to", 1.3, 1.4), helper("Dana", 1.5, 1.8),
+            helper("Lee", 1.8, 2.0), helper("on", 2.0, 2.1),
+            helper("3:15", 2.2, 2.6), helper("p.m.", 2.6, 2.9),
+            helper("Friday.", 3.0, 3.4)), 3.5)
+        self.assert_usable(text, pieces, 3.5)
+        self.assertEqual(
+            [piece.text for piece in pieces],
+            ["Pay", "1", "250.50", "to", "Dana", "Lee", "on", "3", "15",
+             "p.m", "Friday"])
+        one, amount = pieces[1], pieces[2]
+        self.assertEqual((one.start, amount.end), (0.4, 1.3))
+        self.assertEqual(one.end, amount.start)
+        self.assertEqual({one.confidence, amount.confidence}, {0.7})
+
+    def test_words_emitted_on_one_frame_share_out_its_span(self):
+        # Every token after the first on one 80 ms frame has no length.
+        text = "OK, so I go."
+        pieces = project_word_evidence(text, (
+            helper("OK,", 0.32, 0.32), helper("so", 0.32, 0.32),
+            helper("I", 0.32, 0.4), helper("go.", 0.48, 0.56)), 1.0)
+        self.assert_usable(text, pieces, 1.0)
+        self.assertEqual(pieces[0].start, 0.32)
+        self.assertEqual(pieces[2].end, 0.4)
+        # Shared by character count: "OK," 3, "so" 2, "I" 1.
+        self.assertAlmostEqual(pieces[0].end - pieces[0].start, 0.04)
+        self.assertAlmostEqual(pieces[1].end - pieces[1].start, 0.08 * 2 / 6)
+
+    def test_an_end_rounded_past_the_clip_is_clamped(self):
+        text = "Done."
+        pieces = project_word_evidence(text, (helper("Done.", 0.5, 1.0015),),
+                                       1.0)
+        self.assert_usable(text, pieces, 1.0)
+        self.assertEqual(pieces[-1].end, 1.0)
+
+    def test_a_lone_mark_is_carried_by_no_token(self):
+        text = "Wait - what?"
+        pieces = project_word_evidence(text, (
+            helper("Wait", 0.1, 0.3), helper("-", 0.3, 0.4),
+            helper("what?", 0.4, 0.7)), 1.0)
+        self.assert_usable(text, pieces, 1.0)
+        self.assertEqual([piece.text for piece in pieces], ["Wait", "what"])
+
+    def test_words_that_do_not_spell_the_text_are_no_evidence(self):
+        words = (helper("Hello", 0.1, 0.3), helper("world.", 0.4, 0.8))
+        for text in ("Hello there.", "Hello world again.", "Hello.", "",
+                     "Hello, world."[:5]):
+            with self.subTest(text=text):
+                self.assertIsNone(project_word_evidence(text, words, 1.0))
+        self.assertIsNotNone(
+            project_word_evidence("HELLO World!", words, 1.0))
+
+    def test_an_empty_or_overlapping_span_is_no_evidence(self):
+        text = "one two"
+        for words in (
+                (helper("one", 0.1, 0.1), helper("two", 0.3, 0.5)),
+                (helper("one", 0.1, 0.6), helper("two", 0.3, 0.5)),
+                (helper("one", 0.1, 0.10005), helper("two", 0.2, 0.5)),
+                (helper("one", 0.1, 0.3), helper("two", 1.0, 1.2))):
+            with self.subTest(words=words):
+                self.assertIsNone(project_word_evidence(text, words, 1.0))
+
+    def test_no_words_or_no_clip_is_no_evidence(self):
+        for words, duration in (((), 1.0),
+                                ((helper("one", 0.1, 0.2),), 0.0),
+                                ((helper("one", 0.1, 0.2),), float("nan")),
+                                ((helper("one", 0.1, 0.2),), True)):
+            with self.subTest(duration=duration):
+                self.assertIsNone(
+                    project_word_evidence("one", words, duration))
+
+
+class PausePunctuationSwitchTests(unittest.TestCase):
+    """Uncalibrated timed words never place commas or paragraphs."""
+
+    def voice(self, **switches):
+        words = (
+            WordEvidence("First", 0.0, 0.3), WordEvidence("point", 0.35, 0.8),
+            WordEvidence("Second", 1.9, 2.2), WordEvidence("point", 2.25, 2.7))
+        return VoiceIR(
+            hypotheses=(RecognitionHypothesis(
+                "First point. Second point.", 0.8, "parakeet-unified",
+                words),),
+            prosody=(ProsodyEvent("pause", 0.9, 1.0),),
+            **switches)
+
+    def test_pauses_place_punctuation_only_when_allowed(self):
+        compiler = VoiceCompiler()
+        self.assertEqual(compiler.compile(self.voice()).text,
+                         "First point.\n\nSecond point.")
+        self.assertEqual(
+            compiler.compile(self.voice(pause_punctuation=False)).text,
+            "First point. Second point.")
+
+    def test_a_rising_question_is_not_a_pause(self):
+        voice = VoiceIR(
+            hypotheses=(RecognitionHypothesis(
+                "Can we ship this.", 0.64, "parakeet-unified", (
+                    WordEvidence("Can", 0.0, 0.2),
+                    WordEvidence("we", 0.25, 0.4),
+                    WordEvidence("ship", 1.6, 1.8),
+                    WordEvidence("this", 1.85, 2.0))),),
+            prosody=(ProsodyEvent("pause", 0.5, 1.0),
+                     ProsodyEvent("rising_end", 2.0, strength=0.8)),
+            pause_punctuation=False)
+        self.assertEqual(VoiceCompiler().compile(voice).text,
+                         "Can we ship this?")
 
 
 if __name__ == "__main__":
