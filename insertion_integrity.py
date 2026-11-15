@@ -176,6 +176,19 @@ class InsertionReceipt:
     # later can never pick up another utterance's. Empty when none ran.
     readback_shape: str = ""
 
+    @property
+    def pasted_unchecked(self) -> bool:
+        """The one paste was sent and nothing could be read back.
+
+        Not proof of delivery, and not a failure either: the destination
+        hides its text, so there was nothing to compare. It is never true
+        of a readback that read different text (a conflict), of a paste
+        whose own outcome is unknown, or of a paste that was never
+        attempted; those stay problems.
+        """
+        return (self.paste_attempted
+                and self.state == ReceiptState.UNVERIFIABLE)
+
 
 @dataclass(frozen=True)
 class OutboxItem:
@@ -308,6 +321,22 @@ class InsertionCoordinator:
                 1 for entry in self._entries.values()
                 if (entry.terminal and not entry.in_flight
                     and entry.receipt.state != ReceiptState.VERIFIED)
+            )
+
+    def needs_home_count(self) -> int:
+        """Count the recoverable entries that are still looking for a home.
+
+        Everything recoverable except a paste that was sent and could not
+        be read back: text that was never pasted, a paste whose outcome is
+        unknown, and a readback that read something else. Like
+        ``recoverable_count`` it builds no payload-bearing item.
+        """
+        with self._lock:
+            return sum(
+                1 for entry in self._entries.values()
+                if (entry.terminal and not entry.in_flight
+                    and entry.receipt.state != ReceiptState.VERIFIED
+                    and not entry.receipt.pasted_unchecked)
             )
 
     def acknowledge(self, utterance_id: str) -> bool:

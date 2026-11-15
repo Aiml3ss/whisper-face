@@ -415,6 +415,134 @@ class EdgeWhitespaceVerificationTests(unittest.TestCase):
                          ReadbackResult.verified().state)
 
 
+class UncheckedPasteTests(unittest.TestCase):
+    """A paste that was sent and could not be read back is its own outcome.
+
+    It is shown calmly and counted apart from text that still needs a home,
+    so exactly which receipts qualify is the whole of the trust decision.
+    """
+
+    READABLE = ("pid:42/field:7", (12, 0), "before|after")
+
+    def outcome(self, name, utterance="utterance-1"):
+        """One committed utterance with a named outcome, on a fresh or
+        shared coordinator: ``(receipt, pasted)``."""
+        coordinator = getattr(self, "coordinator", None) \
+            or InsertionCoordinator()
+        lease = InsertionLease.capture(utterance, *self.READABLE)
+        current = DestinationObservation.capture(*self.READABLE)
+        readback = ReadbackResult.verified
+        pasted = []
+        paste = pasted.append
+        if name == "unchecked":
+            readback = ReadbackResult.unverifiable
+        elif name == "opaque":
+            lease = InsertionLease.capture_opaque(
+                utterance, "pid:42/window:3", "window-context")
+            current = DestinationObservation.capture(
+                "pid:42/window:3", (0, 0), "window-context")
+            readback = ReadbackResult.unverifiable
+        elif name == "conflict":
+            readback = lambda: ReadbackResult.conflict("divergent")
+        elif name == "paste-raised":
+            def paste(_text):
+                raise RuntimeError("synthetic paste failure")
+        elif name == "readback-raised":
+            def readback():
+                raise RuntimeError("synthetic readback failure")
+        elif name == "focus-drift":
+            current = DestinationObservation.capture(
+                "pid:99/field:1", (12, 0), "before|after")
+        elif name == "selection-drift":
+            current = DestinationObservation.capture(
+                "pid:42/field:7", (3, 0), "before|after")
+        elif name == "target-unreadable":
+            current = DestinationObservation.capture(None, None, None)
+        elif name != "verified":
+            raise AssertionError(name)
+        coordinator.stage(lease, "Ship it")
+        receipt = coordinator.commit(utterance, current, paste, readback)
+        return receipt, pasted
+
+    def test_only_a_sent_paste_with_no_readback_is_unchecked(self):
+        for name in ("unchecked", "opaque"):
+            with self.subTest(outcome=name):
+                receipt, pasted = self.outcome(name)
+                self.assertEqual(pasted, ["Ship it"])
+                self.assertEqual(receipt.state, ReceiptState.UNVERIFIABLE)
+                self.assertEqual(
+                    receipt.reason, ReceiptReason.READBACK_UNAVAILABLE)
+                self.assertTrue(receipt.pasted_unchecked)
+
+    def test_every_real_failure_and_every_proof_is_something_else(self):
+        expected = {
+            # outcome: (state, paste attempted)
+            "verified": (ReceiptState.VERIFIED, True),
+            "conflict": (ReceiptState.CONFLICT, True),
+            "paste-raised": (ReceiptState.UNRESOLVED, True),
+            "readback-raised": (ReceiptState.UNRESOLVED, True),
+            "focus-drift": (ReceiptState.CONFLICT, False),
+            "selection-drift": (ReceiptState.CONFLICT, False),
+            "target-unreadable": (ReceiptState.UNVERIFIABLE, False),
+        }
+        for name, (state, attempted) in expected.items():
+            with self.subTest(outcome=name):
+                receipt, _pasted = self.outcome(name)
+                self.assertEqual(receipt.state, state)
+                self.assertEqual(receipt.paste_attempted, attempted)
+                self.assertFalse(receipt.pasted_unchecked)
+
+    def test_unchecked_is_never_verified(self):
+        receipt, _pasted = self.outcome("opaque")
+        self.assertNotEqual(receipt.state, ReceiptState.VERIFIED)
+        self.assertNotIn(receipt.reason, (
+            ReceiptReason.COMMIT_VERIFIED,
+            ReceiptReason.COMMIT_VERIFIED_EDGE_WHITESPACE))
+
+    def test_unchecked_copies_are_kept_and_counted_apart(self):
+        self.coordinator = InsertionCoordinator()
+        for index in range(5):
+            self.outcome("opaque", f"calm-{index}")
+        # Kept exactly like any other entry that was not proven delivered.
+        self.assertEqual(self.coordinator.recoverable_count(), 5)
+        self.assertEqual(
+            [item.text for item in self.coordinator.recoverable()],
+            ["Ship it"] * 5)
+        self.assertEqual(self.coordinator.needs_home_count(), 0)
+
+        problems = ("conflict", "paste-raised", "readback-raised",
+                    "focus-drift", "selection-drift", "target-unreadable")
+        for index, name in enumerate(problems, start=1):
+            self.outcome(name, f"problem-{name}")
+            self.assertEqual(self.coordinator.needs_home_count(), index)
+        self.assertEqual(
+            self.coordinator.recoverable_count(), 5 + len(problems))
+        # A verified paste is in neither count.
+        self.outcome("verified", "verified-1")
+        self.assertEqual(
+            self.coordinator.recoverable_count(), 5 + len(problems))
+        self.assertEqual(
+            self.coordinator.needs_home_count(), len(problems))
+
+    def test_the_count_ignores_in_flight_and_dismissed_entries(self):
+        self.coordinator = InsertionCoordinator()
+        seen = []
+        lease = InsertionLease.capture("in-flight", *self.READABLE)
+        self.coordinator.stage(lease, "Ship it")
+
+        def readback():
+            # The entry is terminal and still in flight here.
+            seen.append(self.coordinator.needs_home_count())
+            return ReadbackResult.conflict("divergent")
+
+        self.coordinator.commit(
+            "in-flight", DestinationObservation.capture(*self.READABLE),
+            lambda _text: None, readback)
+        self.assertEqual(seen, [0])
+        self.assertEqual(self.coordinator.needs_home_count(), 1)
+        self.assertTrue(self.coordinator.acknowledge("in-flight"))
+        self.assertEqual(self.coordinator.needs_home_count(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
