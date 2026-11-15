@@ -24,6 +24,12 @@ first-run stage, into ``.probe-renders/`` by default.
 Pass ``--size WIDTHxHEIGHT`` to review a different window size; the window's
 minimum size is where truncation shows up first.
 
+Pass ``--states`` to render the complete look: every state Home can be in
+and every variant of the first-run steps, on top of the pages above, as
+home-{state}-{light,dark}.png and setup-{variant}-{light,dark}.png. That
+includes Home and the permissions step under Increase Contrast, and a
+settings page reached while setup is unfinished.
+
 Pass ``--overlay`` to review the recording overlay instead of the window:
 
     uv run scripts/window_render_probe.py --overlay [output-dir]
@@ -56,6 +62,9 @@ if "--size" in ARGS:
 OVERLAY = "--overlay" in ARGS
 if OVERLAY:
     ARGS.remove("--overlay")
+STATES = "--states" in ARGS
+if STATES:
+    ARGS.remove("--states")
 OUT = Path(ARGS[0]) if ARGS else REPO / ".probe-renders"
 sys.path.insert(0, str(REPO))
 
@@ -367,6 +376,133 @@ def snapshot(name: str) -> None:
     print(f"wrote {path} ({data.length()} bytes)")
 
 
+def home_phase(name: str, **changes) -> GUIState:
+    """Home in one phase, with the status copy the runtime gives it."""
+    detail = changes.pop("detail", None)
+    if detail is None:
+        try:
+            detail = gui.localized_string(
+                f"overview.status.{name}.detail",
+                hotkey=changes.get("hotkey_label", STATE.hotkey_label))
+        except (KeyError, ValueError):
+            detail = ""
+    return replace(STATE, **{
+        "section": "Home", "outbox_count": 0, "outbox_summary": "",
+        "status_phase": name, "status_detail": detail,
+        "status_title": gui.localized_string(
+            f"overview.status.{name}.title"),
+        **changes})
+
+
+def home_states() -> dict[str, GUIState]:
+    """Every state Home can be in, by the name its picture gets."""
+    copy = gui.localized_string
+    microphone = gui.DegradedIssue(
+        "microphone", copy("issue.microphone.title"),
+        copy("issue.microphone.detail"))
+    models = gui.DegradedIssue(
+        "models", copy("issue.models.title"),
+        copy("issue.models.detail", models="Parakeet Unified 0.6B"))
+    ready = home_phase("ready")
+    held = replace(STATE.last_result, acoustic_replay_enabled=True)
+    return {
+        "ready": ready,
+        "ready-empty": replace(
+            ready, last_latency_ms=None, last_word_count=None,
+            words_today=0, minutes_saved=0.0,
+            last_result=ResultInspection()),
+        "ready-long-key": home_phase("ready", hotkey_label="Right Command"),
+        "ready-fox": replace(ready, face="fox"),
+        "ready-replay": replace(
+            ready, last_result=replace(held, retained_span_count=0)),
+        "ready-replay-held": replace(
+            ready, last_result=replace(held, retained_span_count=2)),
+        "paused": home_phase("paused", paused=True),
+        "listening": home_phase("recording"),
+        "working": home_phase("processing"),
+        "starting": home_phase("starting"),
+        "outbox": home_phase(
+            "recovery", outbox_count=1,
+            outbox_summary=copy("overview.outbox.summary.paste_attempted"),
+            detail=copy("overview.status.recovery.detail.one")),
+        "needs-attention-permission": home_phase(
+            "degraded", degraded_issues=(microphone,),
+            detail=microphone.detail, microphone_status="Unavailable",
+            missing_permissions=("microphone",)),
+        "needs-attention-model": home_phase(
+            "degraded", degraded_issues=(models,), detail=models.detail),
+        "outbox-and-attention": home_phase(
+            "recovery", outbox_count=3,
+            outbox_summary=copy("overview.outbox.summary.not_pasted"),
+            detail=copy("overview.status.recovery.detail.many", count=3),
+            degraded_issues=(microphone,)),
+        "paused-outbox-attention": home_phase(
+            "paused", paused=True, outbox_count=1,
+            outbox_summary=copy("overview.outbox.summary.paste_attempted"),
+            degraded_issues=(models,)),
+    }
+
+
+# First-run variants the five stages above do not reach, as changes to the
+# runtime the first of them starts from.
+SETUP_VARIANTS = {
+    "permissions": {},
+    "permissions-all-missing": {"microphone_status": "Unavailable"},
+    "permissions-mixed": {
+        "microphone_status": "Ready", "accessibility_status": "Granted"},
+    "hotkey": ONBOARDING_STAGES[1][1],
+    "hotkey-long": {
+        **ONBOARDING_STAGES[1][1], "hotkey_label": "Right Command"},
+    "models": ONBOARDING_STAGES[2][1],
+    "models-many": {**ONBOARDING_STAGES[2][1], "models": [
+        {"name": "Parakeet Unified 0.6B", "role": "Primary recognition",
+         "install_state": "installed", "required": True, "warm": True},
+        {"name": "Whisper Tiny", "role": "Fast recognition preview",
+         "install_state": "checking", "required": True},
+        {"name": "Whisper large-v3-turbo", "role": "Recognition fallback",
+         "install_state": "not_installed", "required": False},
+        {"name": "qwen3.5:4b", "role": "Selective cleanup",
+         "install_state": "failed", "required": False}]},
+    "first-dictation": ONBOARDING_STAGES[3][1],
+    "complete": ONBOARDING_STAGES[4][1],
+}
+
+
+def setup_state(changes: dict, section: str = "Home") -> GUIState:
+    return replace(
+        gui.normalize_snapshot({**ONBOARDING_RUNTIME, **changes}),
+        section=section)
+
+
+def render_states(suffix: str) -> None:
+    """Every Home state and first-run variant, in this appearance."""
+    states = home_states()
+    for name, state in states.items():
+        model.state = state
+        controller.render()
+        snapshot(f"home-{name}-{suffix}")
+    for name, changes in SETUP_VARIANTS.items():
+        model.state = setup_state(changes)
+        controller.render()
+        snapshot(f"setup-{name}-{suffix}")
+    # Increase Contrast, as the window reads it while it draws.
+    increase_contrast = gui._increase_contrast
+    gui._increase_contrast = lambda: True
+    try:
+        for name, state in (
+                ("home-outbox-contrast", states["outbox"]),
+                ("setup-permissions-contrast", setup_state({}))):
+            model.state = state
+            controller.render()
+            snapshot(f"{name}-{suffix}")
+    finally:
+        gui._increase_contrast = increase_contrast
+    # A page shortcut pressed during setup brings the sidebar back.
+    model.state = setup_state({}, section="Advanced")
+    controller.render()
+    snapshot(f"setup-left-for-advanced-{suffix}")
+
+
 for appearance_name, suffix in (
         (NSAppearanceNameAqua, "light"),
         (NSAppearanceNameDarkAqua, "dark")):
@@ -414,5 +550,8 @@ for appearance_name, suffix in (
             section="Home")
         controller.render()
         snapshot(f"window-onboarding-{stage}-{suffix}")
+
+    if STATES:
+        render_states(suffix)
 
 print(f"done → {OUT}")

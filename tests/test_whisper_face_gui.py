@@ -4899,6 +4899,62 @@ class HomeAndSetupTests(unittest.TestCase):
         self.assertEqual(setup.count("'continueSetup:'"), 1)
         self.assertIn("'openPermissionSettings:', variant='plain'", setup)
 
+    def test_the_render_probe_can_write_every_home_state_and_setup_variant(
+            self):
+        # ``--states`` renders the complete look from the repository: the
+        # states and variants below, by these names, in both appearances.
+        source = (ROOT / "scripts" / "window_render_probe.py").read_text(
+            encoding="utf-8")
+        tree = ast.parse(source)
+        functions = {node.name: node for node in tree.body
+                     if isinstance(node, ast.FunctionDef)}
+        self.assertIn('STATES = "--states" in ARGS', source)
+        self.assertIn("``--states``", ast.get_docstring(tree))
+        returned = next(
+            node.value for node in ast.walk(functions["home_states"])
+            if isinstance(node, ast.Return))
+        self.assertEqual(
+            [key.value for key in returned.keys],
+            ["ready", "ready-empty", "ready-long-key", "ready-fox",
+             "ready-replay", "ready-replay-held", "paused", "listening",
+             "working", "starting", "outbox", "needs-attention-permission",
+             "needs-attention-model", "outbox-and-attention",
+             "paused-outbox-attention"])
+        variants = next(
+            node.value for node in tree.body
+            if isinstance(node, ast.Assign)
+            and getattr(node.targets[0], "id", "") == "SETUP_VARIANTS")
+        self.assertEqual(
+            [key.value for key in variants.keys],
+            ["permissions", "permissions-all-missing", "permissions-mixed",
+             "hotkey", "hotkey-long", "models", "models-many",
+             "first-dictation", "complete"])
+        render = ast.unparse(functions["render_states"])
+        for name in ("f'home-{name}-{suffix}'", "f'setup-{name}-{suffix}'",
+                     "'home-outbox-contrast'", "'setup-permissions-contrast'",
+                     "f'setup-left-for-advanced-{suffix}'"):
+            self.assertIn(name, render)
+        # Increase Contrast is put back however the render ends.
+        self.assertIn("finally:\n        gui._increase_contrast = ", render)
+        # Without the option the probe writes what it always wrote.
+        calls = [node for node in ast.walk(tree)
+                 if isinstance(node, ast.If)
+                 and ast.unparse(node.test) == "STATES"]
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(
+            ast.unparse(calls[1].body[0]), "render_states(suffix)")
+        # Every phase it renders has status copy in the catalog.
+        phases = {
+            node.args[0].value for node in ast.walk(functions["home_states"])
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", "") == "home_phase"}
+        self.assertEqual(phases, {
+            "ready", "paused", "recording", "processing", "starting",
+            "recovery", "degraded"})
+        for phase in phases:
+            self.assertIn(
+                f"overview.status.{phase}.title", STRING_CATALOGS["en"])
+
     def test_the_render_drives_setup_mode(self):
         controller = _gui_class("WhisperFaceWindowController")
         onboarding = _gui_function("_render_onboarding", controller)
