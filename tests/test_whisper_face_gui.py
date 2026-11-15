@@ -3612,6 +3612,142 @@ class SettingsPagesContractTests(unittest.TestCase):
             "chip.set_selected(",
             ast.unparse(_gui_function("_paint_selection", picker)))
 
+    ROW_BUTTON_LABELS = {
+        "pages.personalize.tones.action": "Edit app tones",
+        "pages.personalize.snippets.action": "Edit snippets",
+        "pages.personalize.vocabulary.action": "Edit vocabulary",
+        "pages.personalize.corrections.action": "Review learned corrections",
+        "pages.personalize.keywords.action":
+            "Inspect pronunciation keywords",
+        "pages.controls.hotkey.action": "Change capture key",
+        "pages.controls.undo.action": "Change undo key",
+        "pages.controls.modes.action": "View voice modes",
+        "pages.controls.sound.action": "Preview feedback sounds",
+        "pages.privacy.recent.action": "Browse recent dictations",
+        "pages.privacy.voice_objects.action": "Inspect Voice Inbox",
+        "pages.support.licenses.action": "Open license notices",
+        "pages.support.source.action": "Open the exact source",
+        "home.replay.clear.action": "Clear retained spans",
+    }
+
+    def test_voiceover_copy_reaches_the_cell_a_control_is_read_through(self):
+        from whisper_face_gui import voiceover_elements
+
+        class Element:
+            label = help = value = None
+
+            def setAccessibilityLabel_(self, value):
+                self.label = value
+
+            def setAccessibilityHelp_(self, value):
+                self.help = value
+
+            def setAccessibilityValue_(self, value):
+                self.value = value
+
+        class Field(Element):
+            """A control drawn by a cell: VoiceOver reads the cell."""
+
+            def __init__(self):
+                self.its_cell = Element()
+
+            def cell(self):
+                return self.its_cell
+
+            def setStringValue_(self, value):
+                self.visual = value
+
+        class Switch(Element):
+            """A control with no cell is its own element."""
+
+            def cell(self):
+                return None
+
+        field = Field()
+        self.assertEqual(voiceover_elements(field), (field, field.cell()))
+        self.assertEqual(voiceover_elements(Element())[1:], ())
+        switch = Switch()
+        self.assertEqual(voiceover_elements(switch), (switch,))
+
+        gui_module._accessible(field, "Whisper Tiny status", "How it stands")
+        sync_accessibility(field, "Ready")
+        for element in (field, field.cell()):
+            self.assertEqual(
+                (element.label, element.help, element.value),
+                ("Whisper Tiny status", "How it stands", "Ready"))
+        # No help given: none set, and the label still lands on both.
+        other = Field()
+        gui_module._accessible(other, "Model name")
+        self.assertEqual(
+            (other.cell().label, other.cell().help), ("Model name", None))
+        sync_accessibility(field, "Checking", label="Parakeet status")
+        set_accessible_text(other, "Parakeet", label="Model name")
+        self.assertEqual(
+            (field.cell().label, field.cell().value),
+            ("Parakeet status", "Checking"))
+        self.assertEqual(
+            (other.visual, other.cell().label, other.cell().value),
+            ("Parakeet", "Model name", "Parakeet"))
+        # It is done once, in the helpers: nothing mirrors page by page.
+        names = {node.name for node in ast.walk(GUI_TREE)
+                 if isinstance(node, ast.FunctionDef)}
+        self.assertNotIn("_mirror_accessibility_to_cell", names)
+        for helper in ("_accessible", "sync_accessibility"):
+            self.assertIn(
+                "voiceover_elements", _called_names(_gui_function(helper)))
+        self.assertIn("sync_accessibility", _called_names(
+            _gui_function("set_accessible_text")))
+
+    def test_a_text_is_labelled_only_by_what_it_does_not_say(self):
+        # A label that only repeated the text would be spoken as well as
+        # the text, now that labels reach the cell.
+        label = ast.unparse(_gui_function("_label"))
+        self.assertNotIn("accessibility_label or text", label)
+        self.assertIn(
+            "_accessible(label, accessibility_label) "
+            "if accessibility_label else label", label)
+
+    def test_a_row_button_says_what_it_does_to_what(self):
+        catalog = STRING_CATALOGS["en"]
+        contract = native_appkit_smoke_contract().accessibility_catalog_keys
+        controller = ast.unparse(_gui_class("WhisperFaceWindowController"))
+        for key, words in self.ROW_BUTTON_LABELS.items():
+            with self.subTest(key=key):
+                self.assertEqual(catalog[key], words)
+                self.assertIn(key, contract)
+                self.assertGreaterEqual(len(words.split()), 2)
+                if key.startswith("pages.personalize."):
+                    # Built in a loop over the rows.
+                    self.assertIn(
+                        "label=self._l(f'pages.personalize.{key}.action')",
+                        controller)
+                else:
+                    self.assertIn(f"'{key}'", controller)
+        self.assertEqual(
+            len(set(self.ROW_BUTTON_LABELS.values())),
+            len(self.ROW_BUTTON_LABELS))
+        # The visible titles are unchanged, three of them still Edit.
+        self.assertEqual(
+            [catalog[key] for key in (
+                "settings.action.edit", "settings.action.review",
+                "settings.action.inspect", "settings.action.view",
+                "settings.controls.action.change",
+                "settings.controls.action.preview",
+                "settings.privacy.recent.browse", "results.audio.clear")],
+            ["Edit", "Review", "Inspect", "View", "Change…", "Preview",
+             "Browse…", "Clear"])
+        # A button reads its label, or its title when it has none, and a
+        # symbol beside the title never names it.
+        button = ast.unparse(_gui_function("_button"))
+        self.assertIn("_accessible(button, label or title, help_text)",
+                      button)
+        self.assertIn("image.setAccessibilityDescription_('')", button)
+        # A state's symbol is silent on the view and on its cell.
+        self.assertIn("_silence_image(self.icon)", ast.unparse(
+            _gui_function("initWithFrame_", _gui_class("StatusLabelView"))))
+        silence = ast.unparse(_gui_function("_silence_image"))
+        self.assertIn("view.cell()", silence)
+
     def test_the_face_grid_fills_its_group_eight_to_a_row(self):
         from whisper_face_gui import (
             FACE_CHIP_GAP, FACE_CHIP_MAX, FACE_CHIP_MIN, FACE_GRID_COLUMNS,

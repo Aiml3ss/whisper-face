@@ -591,7 +591,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "diagnostics.accessibility.service": "Service status",
         "diagnostics.accessibility.microphone": "Microphone status",
         "diagnostics.accessibility.permission": "Accessibility permission status",
-        "diagnostics.accessibility.regression": "Personal Regression Lab status",
+        "diagnostics.accessibility.regression": "Correction tests status",
         "diagnostics.accessibility.motion": "Motion setting",
         "diagnostics.accessibility.build": "Build version",
         "diagnostics.accessibility.verification": "Verification result",
@@ -654,13 +654,10 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.modifier.shift": "Shift",
         "settings.modifier.command": "Command",
         "settings.modifier.control": "Control",
-        "settings.accessibility.hotkey.label": "Capture key",
         "settings.accessibility.hotkey.help": "Choose which key you hold to dictate.",
-        "settings.accessibility.undo_hotkey.label": "Undo key",
         "settings.accessibility.undo_hotkey.help": "Choose a key that undoes the last dictation.",
         "settings.accessibility.sound.label": "Feedback sounds",
         "settings.accessibility.sound.help": "Choose macOS sounds, the first-party set, or silence.",
-        "settings.accessibility.sound_preview.label": "Preview feedback sound",
         "settings.accessibility.sound_preview.help": "Play the finish cue for the selected sound setting.",
         "settings.accessibility.capture_field.label": "Key capture",
         "settings.accessibility.capture_field.help": "Press a modifier key or a function key to bind it.",
@@ -879,7 +876,6 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.accessibility.sections.help": "Use arrow keys to move between Whisper Face settings sections.",
         "settings.accessibility.category.label": "Settings category",
         "settings.accessibility.category.help": "Choose personalization, control, or privacy settings.",
-        "settings.accessibility.edit.help": "Edit {setting}.",
         "settings.accessibility.forget.help": "Inspect or forget {setting}.",
         "settings.accessibility.language.label": "Dictation language",
         "settings.accessibility.language.help": "Choose the language you dictate in. English uses the fast on-device recognizer; every other language is recognized by Whisper, which is accurate but slower.",
@@ -892,7 +888,6 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.accessibility.acoustic.help": "Opt in to selected consequential audio replay. Retained audio is wiped after one minute, and disabling clears it immediately.",
         "settings.accessibility.voice_objects.label": "Voice Object Commands",
         "settings.accessibility.voice_objects.help": "Opt in to exact spoken commands becoming inert local drafts. Nothing is sent or scheduled.",
-        "settings.accessibility.voice_objects.inspector": "Voice Inbox inspector",
         "settings.accessibility.voice_objects.chooser": "Queued draft metadata",
         "settings.accessibility.voice_objects.content": "Selected inert draft content",
         "settings.accessibility.voice_objects.copy": "Copy the revealed task or calendar draft after confirmation",
@@ -901,7 +896,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "settings.accessibility.snippets_summary.label": "Snippets summary",
         "settings.accessibility.vocabulary_summary.label": "Vocabulary summary",
         "settings.accessibility.corrections_summary.label": "Learned corrections summary",
-        "settings.accessibility.keywords_summary.label": "Pronunciation keyword evidence",
+        "settings.accessibility.keywords_summary.label": "Pronunciation keywords summary",
         "settings.accessibility.hotkey_summary.label": "Capture key summary",
         "settings.accessibility.undo_hotkey_summary.label": "Undo key summary",
         "settings.accessibility.undo_summary.label": "Undo availability",
@@ -1059,12 +1054,23 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "pages.personalize.corrections.detail.one": "1 word it now fixes your way",
         "pages.personalize.corrections.detail.many": "{count} words it now fixes your way",
         "pages.personalize.keywords.detail": "Names it learned to hear from your fixes",
+        "pages.personalize.tones.action": "Edit app tones",
+        "pages.personalize.snippets.action": "Edit snippets",
+        "pages.personalize.vocabulary.action": "Edit vocabulary",
+        "pages.personalize.corrections.action": "Review learned corrections",
+        "pages.personalize.keywords.action": "Inspect pronunciation keywords",
+        "pages.controls.hotkey.action": "Change capture key",
+        "pages.controls.undo.action": "Change undo key",
+        "pages.controls.modes.action": "View voice modes",
+        "pages.controls.sound.action": "Preview feedback sounds",
         "pages.controls.keys": "Keys",
         "pages.controls.sounds": "Sounds",
         "pages.controls.corrections": "Corrections",
         "pages.privacy.audio": "Audio kept in memory",
         "pages.privacy.dictations": "Dictations and drafts",
         "pages.privacy.acoustic.detail": "Keeps short pieces of your last dictation’s audio in memory, never on disk, for at most a minute.",
+        "pages.privacy.recent.action": "Browse recent dictations",
+        "pages.privacy.voice_objects.action": "Inspect Voice Inbox",
         "pages.privacy.voice_objects.off": "Off",
         "pages.privacy.voice_objects.ready": "On",
         "pages.privacy.voice_objects.unavailable": "Not available on this Mac",
@@ -1096,6 +1102,8 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "pages.support.permissions": "Permissions",
         "pages.support.permissions.detail": "A permission Whisper Face needs is missing",
         "pages.support.license": "License",
+        "pages.support.licenses.action": "Open license notices",
+        "pages.support.source.action": "Open the exact source",
 
         # --- new look: home and setup
 
@@ -1104,6 +1112,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "home.group.dictation": "Dictation",
         "home.attention.accessibility.label": "Setup needs a review",
         "home.attention.fallback": "Setup is not finished",
+        "home.replay.clear.action": "Clear retained spans",
         "onboarding.stage.accessibility.label": "Whisper Face, first-run guide",
         "onboarding.rows.accessibility.label": "What this step is waiting on",
         "onboarding.permission.microphone": "Microphone",
@@ -1265,6 +1274,20 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "onboarding.permission.open.label",
             "onboarding.row.accessibility.status",
             "onboarding.action.waiting.help",
+            "home.replay.clear.action",
+            "pages.personalize.tones.action",
+            "pages.personalize.snippets.action",
+            "pages.personalize.vocabulary.action",
+            "pages.personalize.corrections.action",
+            "pages.personalize.keywords.action",
+            "pages.controls.hotkey.action",
+            "pages.controls.undo.action",
+            "pages.controls.modes.action",
+            "pages.controls.sound.action",
+            "pages.privacy.recent.action",
+            "pages.privacy.voice_objects.action",
+            "pages.support.licenses.action",
+            "pages.support.source.action",
             "settings.accessibility.sections.label",
             "shell.sidebar.accessibility.label",
             "shell.state.accessibility.label",
@@ -1274,7 +1297,6 @@ def native_appkit_smoke_contract() -> NativeAppKitSmokeContract:
             "settings.accessibility.acoustic.label",
             "settings.accessibility.self_correction.label",
             "settings.accessibility.voice_objects.label",
-            "settings.accessibility.voice_objects.inspector",
             "settings.accessibility.voice_objects.chooser",
             "settings.accessibility.voice_objects.content",
             "settings.accessibility.voice_objects.copy",
@@ -5518,14 +5540,43 @@ def select_sidebar_row(model: WhisperFaceViewModel, index: int) -> GUIState:
     return model.state
 
 
+def voiceover_elements(view: Any) -> tuple[Any, ...]:
+    """A view, and with it the element VoiceOver reads it through.
+
+    A control that is drawn by a cell (a text field, a button, a pop-up,
+    a segmented control) is not itself the accessibility element: its
+    cell is. A label, help or value set on the view alone is never
+    spoken, so whatever the helpers below set, they set on both. A view
+    without a cell (a switch, a custom view) is its own element.
+    """
+    try:
+        cell = view.cell()
+    except Exception:
+        cell = None
+    return (view,) if cell is None else (view, cell)
+
+
+def _accessible(view: Any, label: str, help_text: str = "") -> Any:
+    """Apply explicit VoiceOver copy without depending on visual text."""
+    for element in voiceover_elements(view):
+        try:
+            element.setAccessibilityLabel_(label)
+            if help_text:
+                element.setAccessibilityHelp_(help_text)
+        except Exception:
+            pass
+    return view
+
+
 def sync_accessibility(view: Any, value: str, *, label: str = "") -> None:
     """Keep VoiceOver state synchronized with a dynamic visual control."""
-    try:
-        if label:
-            view.setAccessibilityLabel_(label)
-        view.setAccessibilityValue_(value)
-    except Exception:
-        pass
+    for element in voiceover_elements(view):
+        try:
+            if label:
+                element.setAccessibilityLabel_(label)
+            element.setAccessibilityValue_(value)
+        except Exception:
+            pass
 
 
 def set_accessible_text(view: Any, value: str, *, label: str) -> None:
@@ -6375,16 +6426,6 @@ if APPKIT_AVAILABLE:
         palette = palette_for_appearance(dark)
         return _theme_color(palette.error if dark else ERROR_TEXT_ON_LIGHT)
 
-    def _accessible(view: Any, label: str, help_text: str = "") -> Any:
-        """Apply explicit VoiceOver copy without depending on visual text."""
-        try:
-            view.setAccessibilityLabel_(label)
-            if help_text:
-                view.setAccessibilityHelp_(help_text)
-        except Exception:
-            pass
-        return view
-
     def _label(text: str, frame: Any, *, size: float = 13,
                weight: str = "regular", color: Any = None,
                accessibility_label: str = "", rounded: bool = False,
@@ -6425,7 +6466,11 @@ if APPKIT_AVAILABLE:
                     label.setLineBreakMode_(0)
         if alignment is not None:
             label.setAlignment_(alignment)
-        return _accessible(label, accessibility_label or text)
+        # A text is read as what it says. A label is for what it does not
+        # say (whose state it is); one that only repeated the text would
+        # be spoken as well as the text.
+        return (_accessible(label, accessibility_label)
+                if accessibility_label else label)
 
     # Secondary buttons used to be layer-painted clay capsules repainted
     # through this registry on every render. They are system push buttons
@@ -6457,31 +6502,20 @@ if APPKIT_AVAILABLE:
             if self.cell() is not None:
                 self.cell().setAccessibilityValue_(value)
 
-    def _mirror_accessibility_to_cell(control: Any) -> Any:
-        """Copy a control's VoiceOver label, help and value onto its cell.
-
-        Pop-up buttons and segmented controls are read through their cells,
-        like buttons; call this after their copy changes.
-        """
-        try:
-            cell = control.cell()
-            if cell is not None:
-                cell.setAccessibilityLabel_(control.accessibilityLabel())
-                cell.setAccessibilityHelp_(control.accessibilityHelp())
-                value = control.accessibilityValue()
-                if value is not None:
-                    cell.setAccessibilityValue_(value)
-        except Exception:
-            pass
-        return control
-
     def _button(title: str, frame: Any, target: Any, action: str,
-                *, help_text: str = "", symbol: str = "") -> Any:
+                *, help_text: str = "", symbol: str = "",
+                label: str = "") -> Any:
         """A standard bordered push button at the system's regular size.
 
         The bezel's height and corners are the system's: the frame's height
         only says where the button is centred, and its width is a minimum,
         grown to fit the title.
+
+        VoiceOver reads ``label``, or the title when none is given. A
+        button in a row is given one that says what it does to what
+        ("Change capture key" for Change…), because the row's title is
+        not part of the button. A symbol is decoration: it never names
+        the button.
         """
         button = PushButton.alloc().initWithFrame_(frame)
         button.setBezelStyle_(NSBezelStyleRounded)
@@ -6491,6 +6525,12 @@ if APPKIT_AVAILABLE:
         if symbol:
             image = _symbol_image(symbol, size=12.0)
             if image is not None:
+                try:
+                    # An SF Symbol describes itself ("Search Document");
+                    # the button's own words are what is read.
+                    image.setAccessibilityDescription_("")
+                except Exception:
+                    pass
                 button.setImage_(image)
                 button.setImagePosition_(NSImageLeading)
         fitted = button.fittingSize()
@@ -6500,7 +6540,7 @@ if APPKIT_AVAILABLE:
             max(frame.size.width, fitted.width), fitted.height))
         button.setTarget_(target)
         button.setAction_(action)
-        return _accessible(button, title, help_text)
+        return _accessible(button, label or title, help_text)
 
     def _silence_image(view: Any) -> Any:
         """Keep a decorative image view out of the VoiceOver tree.
@@ -8557,8 +8597,8 @@ if APPKIT_AVAILABLE:
             self.dynamic["window_face"].setImage_(self._face_image(
                 state.face, talk=state.status_phase == "recording"))
             sync_accessibility(
-                self.dynamic["window_face"], state.status_title,
-                label=face_name)
+                self.dynamic["window_face_button"], face_name,
+                label=self._l("app.face_chip.label"))
             self.dynamic["window_title"].setTextColor_(
                 _srgb_color(palette.ink))
 
@@ -9047,6 +9087,8 @@ if APPKIT_AVAILABLE:
             face_image.setImageScaling_(
                 NSImageScaleProportionallyUpOrDown)
             face_image.setEditable_(False)
+            # The button over it names it, and says which face it is.
+            _silence_image(face_image)
             face_button = JellyButton.alloc().initWithFrame_(chip_frame)
             face_button.setTitle_("")
             face_button.setBordered_(False)
@@ -9268,10 +9310,8 @@ if APPKIT_AVAILABLE:
                 "exclamationmark.triangle.fill", size=14.0, weight="semibold")
             if image is not None:
                 attention_icon.setImage_(image)
-            try:
-                attention_icon.setAccessibilityElement_(False)
-            except Exception:
-                pass
+            # The row's own words say what needs a review.
+            _silence_image(attention_icon)
             review_row = _button(
                 self._l("overview.action.review"), NSMakeRect(0, 0, 60, 28),
                 self, "reviewIssue:",
@@ -9302,6 +9342,7 @@ if APPKIT_AVAILABLE:
             clear_audio = _button(
                 self._l("results.audio.clear"), NSMakeRect(0, 0, 60, 28),
                 self, "clearRetainedSpans:", symbol="xmark.bin",
+                label=self._l("home.replay.clear.action"),
                 help_text=self._l("results.audio.clear.help"))
             replay_row, _title, result_audio = self._settings_row(
                 None, caption=self._l("results.audio.off"),
@@ -9847,7 +9888,6 @@ if APPKIT_AVAILABLE:
                         popup,
                         self._l("settings.accessibility.language.label"),
                         self._l("settings.accessibility.language.help"))
-                    _mirror_accessibility_to_cell(popup)
                     row, _title, detail = self._settings_row(
                         self._l(title_key), caption="", accessories=(popup,))
                     row_views.append(row)
@@ -9859,16 +9899,17 @@ if APPKIT_AVAILABLE:
                     "settings.action.review" if key == "corrections" else
                     "settings.action.inspect" if key == "keywords" else
                     "settings.action.edit")
-                help_key = (
-                    "settings.accessibility.forget.help"
-                    if key in {"corrections", "keywords"}
-                    else "settings.accessibility.edit.help")
+                # Three of these are titled Edit: the label says what each
+                # one edits. Review and Inspect also forget, which their
+                # help adds; an Edit button's label already says it all.
                 button = _button(
                     self._l(action_key), NSMakeRect(0, 0, 60, 28),
                     self, selector,
+                    label=self._l(f"pages.personalize.{key}.action"),
                     help_text=self._l(
-                        help_key,
-                        setting=self._l(title_key).casefold()))
+                        "settings.accessibility.forget.help",
+                        setting=self._l(title_key).casefold())
+                    if key in {"corrections", "keywords"} else "")
                 row, _title, detail = self._settings_row(
                     self._l(title_key), caption="", accessories=(button,))
                 row_views.append(row)
@@ -9889,17 +9930,17 @@ if APPKIT_AVAILABLE:
             control_rows = (
                 ("hotkey", "settings.controls.hotkey", "changeHotkey:",
                  "settings.controls.action.change",
-                 "settings.accessibility.hotkey.label",
+                 "pages.controls.hotkey.action",
                  "settings.accessibility.hotkey.help"),
                 ("undo_hotkey", "settings.controls.undo",
                  "changeUndoHotkey:", "settings.controls.action.change",
-                 "settings.accessibility.undo_hotkey.label",
+                 "pages.controls.undo.action",
                  "settings.accessibility.undo_hotkey.help"),
                 # Voice modes are six modifier combinations of the capture
                 # key, so they sit beside the key.
                 ("modes", "settings.personalize.modes", "viewModes:",
                  "settings.action.view",
-                 "settings.accessibility.modes.label",
+                 "pages.controls.modes.action",
                  "settings.accessibility.modes.help"),
             )
             control_key_views: list[Any] = []
@@ -9908,8 +9949,8 @@ if APPKIT_AVAILABLE:
                  help_key) in control_rows:
                 button = _button(
                     self._l(action_key), NSMakeRect(0, 0, 60, 28),
-                    self, selector, help_text=self._l(help_key))
-                _accessible(button, self._l(label_key), self._l(help_key))
+                    self, selector, label=self._l(label_key),
+                    help_text=self._l(help_key))
                 accessories: list[Any] = [button]
                 if key in {"hotkey", "undo_hotkey"}:
                     # The bound key, drawn as a key cap where the row names
@@ -9943,15 +9984,11 @@ if APPKIT_AVAILABLE:
                 sound_control,
                 self._l("settings.accessibility.sound.label"),
                 self._l("settings.accessibility.sound.help"))
-            _mirror_accessibility_to_cell(sound_control)
             sound_preview = _button(
                 self._l("settings.controls.action.preview"),
                 NSMakeRect(0, 0, 60, 28), self, "previewSound:",
+                label=self._l("pages.controls.sound.action"),
                 help_text=self._l("settings.accessibility.sound_preview.help"))
-            _accessible(
-                sound_preview,
-                self._l("settings.accessibility.sound_preview.label"),
-                self._l("settings.accessibility.sound_preview.help"))
             sound_row, _sound_title, sound_detail = self._settings_row(
                 self._l("settings.controls.sound"), caption="",
                 accessories=(sound_control, sound_preview))
@@ -10014,20 +10051,14 @@ if APPKIT_AVAILABLE:
             browse_recent = _button(
                 self._l("settings.privacy.recent.browse"),
                 NSMakeRect(0, 0, 60, 28), self, "browseRecentDictations:",
+                label=self._l("pages.privacy.recent.action"),
                 help_text=self._l("settings.privacy.recent.browse.help"))
-            _accessible(
-                browse_recent,
-                self._l("settings.accessibility.recent_list.label"),
-                self._l("settings.privacy.recent.browse.help"))
             inspect_voice_objects = _button(
                 self._l("settings.privacy.voice_objects.inspect"),
                 NSMakeRect(0, 0, 60, 28), self, "inspectVoiceObjects:",
+                label=self._l("pages.privacy.voice_objects.action"),
                 help_text=self._l(
                     "settings.privacy.voice_objects.inspect.help"))
-            _accessible(
-                inspect_voice_objects,
-                self._l("settings.accessibility.voice_objects.inspector"),
-                self._l("settings.privacy.voice_objects.inspect.help"))
             buttons = {"recent": browse_recent,
                        "voice_objects": inspect_voice_objects}
             controls: dict[str, tuple[Any, Any, Any]] = {}
@@ -10176,23 +10207,26 @@ if APPKIT_AVAILABLE:
                 self._l("pages.support.bundle"),
                 caption=self._l("pages.support.bundle.detail"),
                 accessories=(export_support_bundle,))
-            open_system_settings = _accessible(_button(
+            open_system_settings = _button(
                 self._l("diagnostics.action.open_system_settings"),
                 NSMakeRect(0, 0, 60, 28),
                 self, "openSystemSettings:",
+                label=self._l(
+                    "diagnostics.accessibility.open_system_settings"),
                 help_text=self._l(
-                    "diagnostics.action.open_system_settings.help")),
-                self._l("diagnostics.accessibility.open_system_settings"),
-                self._l("diagnostics.action.open_system_settings.help"))
+                    "diagnostics.action.open_system_settings.help"))
             permissions_row, _title, _caption = self._settings_row(
                 self._l("pages.support.permissions"),
                 caption=self._l("pages.support.permissions.detail"),
                 accessories=(open_system_settings,))
             license_notices = _button(
                 self._l("diagnostics.action.licenses"),
-                NSMakeRect(0, 0, 60, 28), self, "openLicense:")
-            source = _button(self._l("diagnostics.action.source"),
-                             NSMakeRect(0, 0, 60, 28), self, "openSource:")
+                NSMakeRect(0, 0, 60, 28), self, "openLicense:",
+                label=self._l("pages.support.licenses.action"))
+            source = _button(
+                self._l("diagnostics.action.source"),
+                NSMakeRect(0, 0, 60, 28), self, "openSource:",
+                label=self._l("pages.support.source.action"))
             license_row, _title, _caption = self._settings_row(
                 self._l("pages.support.license"),
                 caption=self._l("diagnostics.license"),
@@ -10485,12 +10519,6 @@ if APPKIT_AVAILABLE:
             ):
                 sync_accessibility(
                     self.dynamic[key], value, label=self._l(label_key))
-            # The key cap stands in for the key's name in the drawn line.
-            # VoiceOver reads a label through its cell, which would say
-            # the line without it, so the cell is given the whole sentence.
-            sync_accessibility(
-                detail.cell(), state.status_detail,
-                label=self._l("overview.accessibility.detail"))
 
             # The bubble holds the primary action and at most one more.
             shown = home_bubble_actions(state)
@@ -10705,28 +10733,24 @@ if APPKIT_AVAILABLE:
                     "overview.accessibility.onboarding.face",
                     face=face_name),
             )
-            for key, label_key in (
+            # The key cap stands in for the key's name in the drawn line,
+            # so VoiceOver is given the whole sentence, key included.
+            for key, label_key, spoken in (
                 ("onboarding_progress",
-                 "overview.accessibility.onboarding.progress"),
+                 "overview.accessibility.onboarding.progress",
+                 presentation.progress),
                 ("onboarding_title",
-                 "overview.accessibility.onboarding.title"),
+                 "overview.accessibility.onboarding.title",
+                 presentation.title),
                 ("onboarding_detail",
-                 "overview.accessibility.onboarding.detail"),
+                 "overview.accessibility.onboarding.detail",
+                 presentation.detail),
             ):
                 sync_accessibility(
-                    self.dynamic[key],
-                    str(self.dynamic[key].stringValue()),
-                    label=self._l(label_key),
-                )
+                    self.dynamic[key], spoken, label=self._l(label_key))
+            # The header over the rows is read as what it says.
             sync_accessibility(
-                self.dynamic["onboarding_status"], presentation.status,
-                label=presentation.status,
-            )
-            # The key cap stands in for the key's name in the drawn line;
-            # VoiceOver reads the cell, which is given the whole sentence.
-            sync_accessibility(
-                detail.cell(), presentation.detail,
-                label=self._l("overview.accessibility.onboarding.detail"))
+                self.dynamic["onboarding_status"], presentation.status)
             sync_accessibility(
                 action, presentation.status, label=action_title)
             self._render_setup_rows(rows)
@@ -10878,8 +10902,6 @@ if APPKIT_AVAILABLE:
             self.dynamic["face_hint"].setStringValue_(self._l(
                 "pages.personalize.face.hint",
                 face=self._l(f"settings.face.{state.face}")))
-            _mirror_accessibility_to_cell(
-                self.dynamic["settings_language_popup"])
             self._arrange_page("Personalize")
 
         @objc.python_method
@@ -10928,7 +10950,6 @@ if APPKIT_AVAILABLE:
                 self._l("settings.state.enabled") if self_correction
                 else self._l("settings.state.disabled"),
                 label=self._l("settings.accessibility.self_correction.label"))
-            _mirror_accessibility_to_cell(self.dynamic["sound_theme_control"])
             # The bound keys, as key caps. No undo key bound: no cap, and
             # the caption says so.
             self.dynamic["hotkey_keycap"].set_key(state.hotkey_label)
@@ -12640,6 +12661,114 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                              < first.origin.y + first.size.height),
                         f"{label}: nothing overlaps")
 
+        # ---- What VoiceOver hears, read through the accessibility API.
+        # AppKit says which element it reads for a view (a control's
+        # cell, or the view itself); the label must be on that one.
+        import AppKit as _appkit_module
+        unignored_descendant = getattr(
+            _appkit_module, "NSAccessibilityUnignoredDescendant", None)
+        require(
+            unignored_descendant is not None,
+            "AppKit says which element VoiceOver reads for a view")
+
+        def voiceover_stops(root: Any) -> list[Any]:
+            """Every shown control, text and image under ``root``, and
+            every other view that is an accessibility element itself."""
+            found: list[Any] = []
+
+            def walk(view: Any) -> None:
+                if bool(view.isHidden()):
+                    return
+                if bool(view.isKindOfClass_(NSScrollView)):
+                    # The scrollers are the system's; the page is ours.
+                    walk(view.documentView())
+                    return
+                if bool(view.respondsToSelector_("cell")):
+                    found.append(view)
+                    return
+                if bool(view.isAccessibilityElement()):
+                    found.append(view)
+                for child in view.subviews():
+                    walk(child)
+
+            walk(root)
+            return found
+
+        def check_voiceover(page_name: str, root: Any,
+                            *, plain_words: bool = False) -> list[Any]:
+            """On one page: each control and each labelled text has its
+            label on the element VoiceOver reads; no text's label only
+            repeats it; no image is a VoiceOver stop; no two buttons say
+            the same thing, and a button in a row says what it does to
+            what. ``plain_words`` also holds every label to the words
+            the settings pages may show. Returns what it checked."""
+            hidden = []
+            holder = root
+            while holder is not None:
+                if bool(holder.isHidden()):
+                    hidden.append(holder)
+                holder = holder.superview()
+            for holder in hidden:
+                holder.setHidden_(False)
+            try:
+                stops = voiceover_stops(root)
+                said: dict[str, Any] = {}
+                for view in stops:
+                    element = unignored_descendant(view)
+                    label = accessible_value(view, "accessibilityLabel")
+                    text = (str(view.stringValue())
+                            if bool(view.isKindOfClass_(NSTextField))
+                            else str(view.title())
+                            if bool(view.isKindOfClass_(NSButton)) else "")
+                    what = (f"{page_name}: {type(view).__name__} "
+                            f"{text or label!r}")
+                    if bool(view.isKindOfClass_(NSImageView)):
+                        require(
+                            element is None
+                            and not bool(view.isAccessibilityElement())
+                            and not bool(
+                                view.cell().isAccessibilityElement()),
+                            f"{what}: an image is not a VoiceOver stop")
+                        continue
+                    if element is None:
+                        continue
+                    spoken = accessible_value(element, "accessibilityLabel")
+                    require(
+                        spoken == label,
+                        f"{what}: VoiceOver reads {spoken!r} where the "
+                        f"label is {label!r}")
+                    require(
+                        not plain_words or not any(
+                            word.casefold() in label.casefold()
+                            for word in INTERNAL_STATUS_WORDS),
+                        f"{what}: the label uses an internal word")
+                    if bool(view.isKindOfClass_(NSTextField)):
+                        require(
+                            not label or label != text,
+                            f"{what}: the label only repeats the text")
+                        continue
+                    require(bool(label), f"{what}: no VoiceOver label")
+                    require(
+                        accessible_value(element, "accessibilityHelp")
+                        == accessible_value(view, "accessibilityHelp"),
+                        f"{what}: VoiceOver reads the help on its element")
+                    if not bool(view.isKindOfClass_(NSButton)):
+                        continue
+                    require(
+                        label not in said,
+                        f"{page_name}: two buttons both say {label!r}")
+                    said[label] = view
+                    in_row = bool(view.superview().isKindOfClass_(
+                        SettingsRowView))
+                    require(
+                        not in_row or len(label.split()) >= 2,
+                        f"{what}: a row's button says what it does to "
+                        f"what, not only {label!r}")
+                return stops
+            finally:
+                for holder in hidden:
+                    holder.setHidden_(True)
+
         # ---- First run: the render itself puts the window in setup mode,
         # because setup is what Home is showing.
         setup = controller.dynamic["onboarding_card"]
@@ -12858,6 +12987,21 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
             "the primary action moves to the next missing permission")
         laid_out(setup, "setup, one permission granted", over=(
             controller.dynamic["onboarding_progress_fill"],))
+        require(
+            len(check_voiceover("setup", setup)) >= 20
+            and accessible_value(
+                granted_row["status"].cell(), "accessibilityLabel")
+            == localized_string(
+                "onboarding.row.accessibility.status",
+                row=localized_string("onboarding.permission.microphone"))
+            and accessible_value(
+                next_row["button"].cell(), "accessibilityLabel")
+            == localized_string(
+                "onboarding.permission.open.label",
+                permission=localized_string(
+                    "onboarding.permission.accessibility")),
+            "VoiceOver hears whose state a setup row's words are, and "
+            "which pane its button opens")
         runtime["microphone_status"] = "Unavailable"
         model.refresh()
         controller.render()
@@ -13702,6 +13846,25 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                     "review_issue_button" in shown or review_in_row),
                 f"Home, {name}: every action it offers is in the Tab loop")
             laid_out(home, f"Home, {name}")
+            require(
+                len(check_voiceover(f"Home, {name}", home)) >= 15,
+                f"Home, {name}: VoiceOver")
+        require(
+            [accessible_value(controller.dynamic[key].cell(),
+                              "accessibilityLabel")
+             for key in ("review_issue_row_button", "result_inspect_button",
+                         "result_play_audio_button",
+                         "result_clear_audio_button")]
+            == [localized_string("overview.action.review"),
+                localized_string("results.inspect.action"),
+                localized_string("results.audio.play"),
+                localized_string("home.replay.clear.action")]
+            and all(controller.dynamic[key].image() is not None
+                    for key in ("result_inspect_button",
+                                "result_play_audio_button",
+                                "result_clear_audio_button")),
+            "Home's row buttons are named by their words, never by the "
+            "symbol beside them")
         model.state = replace(home_state, **phase("paused", paused=True))
         controller.render()
         require(
@@ -15321,19 +15484,58 @@ def run_native_appkit_smoke() -> Mapping[str, int]:
                     not any(word.casefold() in text.casefold()
                             for word in INTERNAL_STATUS_WORDS),
                     f"{name} shows an internal word: {text!r}")
-        for control in page_controls:
-            cell = control.cell() if control.respondsToSelector_(
-                "cell") else None
-            if cell is None or bool(control.isAccessibilityElement()):
-                continue
+        # The same goes for everything else VoiceOver stops on, on each
+        # of the four pages and in the sidebar beside them.
+        checked = [
+            view for name, document in
+            controller.dynamic["page_documents"].items()
+            for view in check_voiceover(name, document, plain_words=True)]
+        checked += check_voiceover("the sidebar", controller.sidebar)
+        require(
+            len(checked) >= 120
+            and all(control in checked or bool(control.isHidden())
+                    or bool(control.superview().isHidden())
+                    for control in page_controls),
+            f"every control on the four pages was read ({len(checked)})")
+        # What each row's button says: what it does, to what.
+        row_button_labels = {
+            "settings_tones_button": "pages.personalize.tones.action",
+            "settings_snippets_button": "pages.personalize.snippets.action",
+            "settings_vocabulary_button":
+                "pages.personalize.vocabulary.action",
+            "settings_corrections_button":
+                "pages.personalize.corrections.action",
+            "settings_keywords_button": "pages.personalize.keywords.action",
+            "settings_hotkey_button": "pages.controls.hotkey.action",
+            "settings_undo_hotkey_button": "pages.controls.undo.action",
+            "settings_modes_button": "pages.controls.modes.action",
+            "sound_preview_button": "pages.controls.sound.action",
+            "recent_dictations_browse": "pages.privacy.recent.action",
+            "voice_object_inspect_button":
+                "pages.privacy.voice_objects.action",
+            "open_system_settings_button":
+                "diagnostics.accessibility.open_system_settings",
+            "license_button": "pages.support.licenses.action",
+            "source_button": "pages.support.source.action",
+        }
+        for key, label_key in row_button_labels.items():
             require(
-                accessible_value(control, "accessibilityLabel")
-                and accessible_value(cell, "accessibilityLabel")
-                == accessible_value(control, "accessibilityLabel")
-                and accessible_value(cell, "accessibilityHelp")
-                == accessible_value(control, "accessibilityHelp"),
-                f"VoiceOver reads {control.title() if control.respondsToSelector_('title') else control}'s "
-                "label and help on its cell")
+                accessible_value(
+                    controller.dynamic[key].cell(), "accessibilityLabel")
+                == localized_string(label_key)
+                and label_key in native_appkit_smoke_contract()
+                .accessibility_catalog_keys,
+                f"{key} says {localized_string(label_key)!r}")
+        # A state's words say whose state they are, on the element read.
+        first_model = controller.dynamic["model_rows"][0]
+        require(
+            accessible_value(first_model[3].cell(), "accessibilityLabel")
+            == localized_string(
+                "models.accessibility.status",
+                name=str(first_model[1].stringValue()))
+            and accessible_value(first_model[1].cell(), "accessibilityLabel")
+            == localized_string("models.accessibility.name"),
+            "VoiceOver hears whose status a model's status is")
         require(model.state.notice_level == "error", "light error notice")
         require(model.state.status_phase == "degraded", "light degraded phase")
         for key in ("notice",):
