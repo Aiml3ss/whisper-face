@@ -68,6 +68,11 @@ def slow_factory():
     return FakeProvider()
 
 
+# How long the retention probe watches an idle child for the previous
+# request to be let go.
+RETENTION_WATCH_SECONDS = 1.0
+
+
 class RetentionProbeProvider:
     def __init__(self):
         self.collected = False
@@ -77,8 +82,15 @@ class RetentionProbeProvider:
             request_ref = weakref.ref(request)
 
             def probe():
-                time.sleep(0.05)
-                self.collected = request_ref() is None
+                # The request is dropped once this call has been answered,
+                # which on a busy machine can be well after it began: watch
+                # for a while instead of looking once.
+                deadline = time.monotonic() + RETENTION_WATCH_SECONDS
+                while time.monotonic() < deadline:
+                    if request_ref() is None:
+                        self.collected = True
+                        return
+                    time.sleep(0.01)
 
             Thread(target=probe, daemon=True).start()
         return {
@@ -106,6 +118,14 @@ class OversizedAudio:
 
 
 class PrewarmedVerifierTests(unittest.TestCase):
+    def supervisor(self, *args, **kwargs):
+        """A supervisor that is closed however its test ends. A failed
+        assertion ahead of a test's own ``close`` used to leave the child
+        alive, and the test process then never exited."""
+        verifier = PrewarmedVerifierSupervisor(*args, **kwargs)
+        self.addCleanup(verifier.close)
+        return verifier
+
     def verify(self, verifier, expected="ok", deadline=2.0):
         return verifier.verify(
             [0.0, 0.25, -0.25],
@@ -115,7 +135,7 @@ class PrewarmedVerifierTests(unittest.TestCase):
         )
 
     def test_one_lazy_child_initializes_once_and_serves_multiple_requests(self):
-        verifier = PrewarmedVerifierSupervisor(fake_provider_factory)
+        verifier = self.supervisor(fake_provider_factory)
         self.assertIsNone(verifier._process)
 
         first = self.verify(verifier)
@@ -133,7 +153,7 @@ class PrewarmedVerifierTests(unittest.TestCase):
         verifier.close()
 
     def test_explicit_prewarm_starts_child_without_request_payload(self):
-        verifier = PrewarmedVerifierSupervisor(fake_provider_factory)
+        verifier = self.supervisor(fake_provider_factory)
 
         self.assertFalse(verifier.ready)
         self.assertTrue(verifier.prewarm(
@@ -146,12 +166,18 @@ class PrewarmedVerifierTests(unittest.TestCase):
         self.assertFalse(verifier.ready)
 
     def test_idle_child_does_not_retain_the_previous_request(self):
-        verifier = PrewarmedVerifierSupervisor(retention_probe_factory)
+        verifier = self.supervisor(retention_probe_factory)
 
         verifier.verify(
             [0.25], 16_000, "arm",
             deadline_at=time.monotonic() + 2.0)
-        time.sleep(0.1)
+        # The child has to let go of the request while it is idle, before
+        # the next one arrives. The probe watches for that for a second
+        # (one look after a twentieth of a second failed on a loaded hosted
+        # runner), and the next request waits until the watch is over: one
+        # that arrived sooner could free the first request itself and hide
+        # a child that had kept it.
+        time.sleep(RETENTION_WATCH_SECONDS + 0.25)
         receipt = verifier.verify(
             [0.5], 16_000, "check",
             deadline_at=time.monotonic() + 2.0)
@@ -160,7 +186,7 @@ class PrewarmedVerifierTests(unittest.TestCase):
         verifier.close()
 
     def test_absolute_timeout_discards_child_and_next_call_restarts_lazily(self):
-        verifier = PrewarmedVerifierSupervisor(fake_provider_factory)
+        verifier = self.supervisor(fake_provider_factory)
         self.verify(verifier)
         original = verifier._process
         started = time.monotonic()
@@ -177,7 +203,7 @@ class PrewarmedVerifierTests(unittest.TestCase):
         verifier.close()
 
     def test_crash_discards_child_and_returns_only_closed_refusal(self):
-        verifier = PrewarmedVerifierSupervisor(fake_provider_factory)
+        verifier = self.supervisor(fake_provider_factory)
 
         receipt = self.verify(verifier, "crash")
 
@@ -187,7 +213,7 @@ class PrewarmedVerifierTests(unittest.TestCase):
         verifier.close()
 
     def test_malformed_response_discards_child_before_lazy_restart(self):
-        verifier = PrewarmedVerifierSupervisor(fake_provider_factory)
+        verifier = self.supervisor(fake_provider_factory)
 
         receipt = self.verify(verifier, "malformed")
 
@@ -199,7 +225,7 @@ class PrewarmedVerifierTests(unittest.TestCase):
         verifier.close()
 
     def test_provider_initialization_failure_is_closed_and_restartable(self):
-        verifier = PrewarmedVerifierSupervisor(crashing_factory)
+        verifier = self.supervisor(crashing_factory)
 
         receipt = self.verify(verifier)
 
@@ -209,7 +235,7 @@ class PrewarmedVerifierTests(unittest.TestCase):
         verifier.close()
 
     def test_provider_initialization_is_inside_the_request_deadline(self):
-        verifier = PrewarmedVerifierSupervisor(slow_factory)
+        verifier = self.supervisor(slow_factory)
         started = time.monotonic()
 
         receipt = self.verify(verifier, deadline=0.12)
@@ -220,7 +246,7 @@ class PrewarmedVerifierTests(unittest.TestCase):
         verifier.close()
 
     def test_expired_and_oversized_requests_never_spawn_or_read_audio(self):
-        verifier = PrewarmedVerifierSupervisor(fake_provider_factory)
+        verifier = self.supervisor(fake_provider_factory)
 
         expired = verifier.verify(
             UnreadableAudio(), 16_000, "private",
@@ -247,7 +273,7 @@ class PrewarmedVerifierTests(unittest.TestCase):
         )
         for samples, rate, expected, deadline in cases:
             with self.subTest(rate=rate, expected=expected):
-                verifier = PrewarmedVerifierSupervisor(fake_provider_factory)
+                verifier = self.supervisor(fake_provider_factory)
                 with self.assertRaises((TypeError, ValueError)):
                     verifier.verify(
                         samples, rate, expected, deadline_at=deadline)
@@ -255,7 +281,7 @@ class PrewarmedVerifierTests(unittest.TestCase):
                 verifier.close()
 
     def test_sequential_calls_reuse_state_and_child_output_is_suppressed(self):
-        verifier = PrewarmedVerifierSupervisor(fake_provider_factory)
+        verifier = self.supervisor(fake_provider_factory)
 
         noisy = self.verify(verifier, "noisy")
         next_receipt = self.verify(verifier, "slow")
@@ -267,7 +293,7 @@ class PrewarmedVerifierTests(unittest.TestCase):
         verifier.close()
 
     def test_close_and_context_manager_destroy_child_and_are_idempotent(self):
-        verifier = PrewarmedVerifierSupervisor(fake_provider_factory)
+        verifier = self.supervisor(fake_provider_factory)
         with verifier as active:
             self.assertTrue(self.verify(active).accepted)
             self.assertIsNotNone(active._process)
@@ -306,7 +332,7 @@ class PrewarmedVerifierTests(unittest.TestCase):
             def close(self):
                 events.append(("process-close", None))
 
-        verifier = PrewarmedVerifierSupervisor(fake_provider_factory)
+        verifier = self.supervisor(fake_provider_factory)
         verifier._connection = FakeConnection()
         verifier._process = FakeProcess()
 

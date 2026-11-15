@@ -12453,7 +12453,10 @@ class OllamaChatTransportTests(unittest.TestCase):
     """Structured-output schema and streamed generation deadlines."""
 
     @staticmethod
-    def namespace(post, installed=True):
+    def namespace(post, installed=True, clock=time):
+        # ``clock`` stands in for the ``time`` module from the moment the
+        # definitions are compiled: the stream reader takes its clock as a
+        # default argument, so one swapped in afterwards never reaches it.
         return load_definitions(
             "ollama_chat", "_ollama_stream_reply",
             extra={
@@ -12461,7 +12464,7 @@ class OllamaChatTransportTests(unittest.TestCase):
                 "OLLAMA_URL": "http://127.0.0.1:11434/api/chat",
                 "LOCAL_MODEL_SESSION": SimpleNamespace(post=post),
                 "cleanup_model_installed": lambda: installed,
-                "time": time,
+                "time": clock,
             },
         )
 
@@ -12576,10 +12579,24 @@ class OllamaChatTransportTests(unittest.TestCase):
             clock["t"] += 10.0     # the request itself burns the whole budget
             return self.response(lines=lines)
 
-        ns = self.namespace(slow_post)
-        ns["time"] = SimpleNamespace(monotonic=lambda: clock["t"])
+        # The fake clock is in place before the definitions are compiled.
+        # Set afterwards, it reached ``ollama_chat`` but not the stream
+        # reader, which kept the machine's real uptime: the deadline of 105
+        # was then long past on any computer that had been up for two
+        # minutes, and the test failed on a hosted runner that had not.
+        ns = self.namespace(
+            slow_post, clock=SimpleNamespace(monotonic=lambda: clock["t"]))
         with self.assertRaises(TimeoutError):
             ns["ollama_chat"]("system", "user", total_deadline=5.0)
+        # And the budget is what expired it: a post that costs nothing
+        # leaves the same reply inside the same deadline.
+        clock["t"] = 100.0
+        quick = self.namespace(
+            lambda *args, **kwargs: self.response(lines=lines),
+            clock=SimpleNamespace(monotonic=lambda: clock["t"]))
+        self.assertEqual(
+            quick["ollama_chat"]("system", "user", total_deadline=5.0),
+            ("xxx", "stop"))
 
     def test_streaming_total_deadline_fails_rather_than_hanging(self):
         def endless():
