@@ -70,9 +70,11 @@ IRIS_GOLD = BEAK_UP                      # owl iris, same gold as the beaks
 OUTLINE = 6.5
 SHADOW_OFFSET: Point = (7.0, 9.0)
 EYE_SCALE = 1.14                         # eyes, about their old centers
-HEAVY = 1.35                             # whiskers, brows, stripes, chevrons
-SMILE_WIDTH = 5.6                        # closed smile
-LID_WIDTH = 6.0                          # the happy lid of a blink
+HEAVY = 1.35                             # every thin stroke, so it holds
+#                                          up next to the outline
+SMILE_WIDTH = 5.0 * HEAVY                # closed smile
+LID_WIDTH = 5.5 * HEAVY                  # the happy lid of a blink
+QUILL_GROW = 1.5                         # see ``_quill_ops``
 
 
 @dataclass(frozen=True)
@@ -154,8 +156,9 @@ class CharacterStyle:
 
     ``ears`` picks the silhouette: ``pointed`` for the feline and vulpine
     faces, ``round`` for the bear family, ``floppy`` for the dog, whose flat
-    silhouette has always had hanging ears, ``long`` for the rabbit, and
-    ``none`` for the two faces whose crown carries something else entirely.
+    silhouette has always had hanging ears, ``retriever`` for the goldens'
+    broader ones, ``long`` for the rabbit, and ``none`` for the faces whose
+    crown carries something else entirely.
     ``snout`` gives the pig the feature that separates it from a pink bear.
     The remaining flags are the species accents that keep a dozen similar
     toys from reading as one animal in a dozen colorways.
@@ -172,8 +175,9 @@ class CharacterStyle:
     the real dog does.  Accessories, not palette, tell the pair apart.
 
     ``fit`` shrinks the three faces whose ears or quills reach the edge of
-    the design box, so their outline and hard shadow still land inside it.
-    See ``_fitted``.
+    the design box, by just enough that their outline and hard shadow still
+    land inside it without the face leaving the center line.  See
+    ``_fitted``.
     """
     head: Color
     deep: Color
@@ -288,7 +292,7 @@ COMPANIONS: Mapping[str, CharacterStyle] = {
         quills=True,
         snout_point=True,
         blush_alpha=0.42,
-        fit=0.945,
+        fit=0.92,
     ),
     "penguin": CharacterStyle(
         head=(0.236, 0.696, 0.922),         # #3cb1eb
@@ -307,7 +311,7 @@ COMPANIONS: Mapping[str, CharacterStyle] = {
         big_tongue=True,
         blep=True,
         blush_alpha=0.45,
-        fit=0.962,
+        fit=0.935,
     ),
     "olive": CharacterStyle(
         head=(0.930, 0.844, 0.696),         # #edd7b1
@@ -316,7 +320,7 @@ COMPANIONS: Mapping[str, CharacterStyle] = {
         ears="retriever",
         bow=True,
         blush_alpha=0.45,
-        fit=0.962,
+        fit=0.935,
     ),
 }
 
@@ -455,7 +459,7 @@ def _wide_grin(cx: float, top: float, mouth: float) -> list[Op]:
         fade = 1.0 - mouth / 0.18
         ops.append(Stroke(((cx - 56, top - 8), (cx - 30, top + 8),
                            (cx, top + 12), (cx + 30, top + 8),
-                           (cx + 56, top - 8)), MOUTH, 6.5, fade))
+                           (cx + 56, top - 8)), MOUTH, 6.5 * HEAVY, fade))
     if mouth <= 0.04:
         return ops
 
@@ -498,14 +502,22 @@ def _beak_ops(top: float, mouth: float) -> list[Op]:
     ]
 
 
-def _quill_ops(color: Color) -> list[Op]:
+def _quill_ops(color: Color, *, ink: bool = False) -> list[Op]:
     """The hedgehog's spines, fanned around the crown behind the head.
 
     Each spine roots just inside the head ellipse and points straight out of
     it, so the head swallows the bases and only the tips break the outline.
+
+    ``ink=True`` returns the spines' share of the sticker outline instead.
+    A needle grown by the full ``OUTLINE`` with round joins ends in a blunt
+    knob, so each spine brings its own ink: a wider, longer triangle with
+    only ``QUILL_GROW`` of rounding.  The line it leaves starts at the full
+    outline weight where the spine meets the head and comes to a point past
+    the tip, which is what keeps the fan spiky.
     """
     ops: list[Op] = []
     count = 9
+    half, reach = (23.0, 39.0) if ink else (16.0, 28.5)
     for index in range(count):
         angle = math.radians(200.0 + index * (140.0 / (count - 1)))
         edge_x = 128.0 + 98.0 * math.cos(angle)
@@ -515,10 +527,10 @@ def _quill_ops(color: Color) -> list[Op]:
         out_x, out_y = out_x / span, out_y / span
         root_x, root_y = edge_x - out_x * 14.0, edge_y - out_y * 14.0
         ops.append(Polygon((
-            (root_x - out_y * 16.0, root_y + out_x * 16.0),
-            (edge_x + out_x * 34.0, edge_y + out_y * 34.0),
-            (root_x + out_y * 16.0, root_y - out_x * 16.0),
-        ), color))
+            (root_x - out_y * half, root_y + out_x * half),
+            (edge_x + out_x * reach, edge_y + out_y * reach),
+            (root_x + out_y * half, root_y - out_x * half),
+        ), color, grow=QUILL_GROW if ink else 0.0))
     return ops
 
 
@@ -641,22 +653,24 @@ def _companion_ops(face: str, mouth: float, blink: float,
                 style.muzzle, 0.30,
             ))
     elif style.ears == "floppy":
-        # Teardrop ears that hug the head instead of hanging past the jaw;
-        # closed curves so they still droop rather than stand up stiff.
-        ops.append(Curve(
-            (74, 62),
-            (((38, 74), (28, 132), (48, 158)),
-             ((62, 174), (78, 156), (78, 132)),
-             ((90, 102), (88, 72), (74, 62))),
-            style.deep,
-        ))
-        ops.append(Curve(
-            (182, 62),
-            (((218, 74), (228, 132), (208, 158)),
-             ((194, 174), (178, 156), (178, 132)),
-             ((166, 102), (168, 72), (182, 62))),
-            style.deep,
-        ))
+        # Long ovals hanging down each side of the head, from above the
+        # eyes to the cheek, the way the dog's menu-bar silhouette has
+        # always worn them.  The head covers the inner half; the outer half
+        # hangs clear of it, which is what makes this a dog and not a bear
+        # with its ears off.  Slimmer and shorter than the goldens' ears,
+        # and a little fuller at the bottom so they droop.
+        for flip in (False, True):
+            def x(value: float) -> float:
+                return 256.0 - value if flip else value
+
+            ops.append(Curve(
+                (x(56), 78),
+                (((x(30), 78), (x(14), 104), (x(14), 138)),
+                 ((x(14), 172), (x(26), 194), (x(44), 194)),
+                 ((x(64), 194), (x(76), 170), (x(76), 138)),
+                 ((x(76), 104), (x(72), 78), (x(56), 78))),
+                style.deep,
+            ))
         body += ops
     else:
         # Short, wide triangles: pointed species keep their ears, chibi
@@ -688,7 +702,7 @@ def _companion_ops(face: str, mouth: float, blink: float,
         body += ops[-2:]
     if style.quills:
         ops += _quill_ops(style.deep)
-        body += _quill_ops(style.deep)
+        body += _quill_ops(style.deep, ink=True)
 
     ops.append(Ellipse(30, 52, 196, 184, style.head))
     body.append(ops[-1])
@@ -1045,26 +1059,28 @@ def _moved(op: Op, scale: float, dx: float, dy: float) -> Op:
 def _fitted(ops: Sequence[Op], fit: float) -> list[Op]:
     """Keep a wide character, its outline, and its shadow inside the box.
 
-    Thirteen faces already leave room and pass through untouched.  The
-    hedgehog and the two goldens reach the box edge, so they shrink by
-    ``fit`` toward the chin and slide left by half the shadow's reach, which
-    centers sticker-plus-shadow as a pair.  The placement is the same
-    whether or not the shadow is drawn: asking for it never moves the face.
+    Most faces already leave room and pass through untouched.  The hedgehog
+    and the two goldens reach the box edge, so they shrink by ``fit`` toward
+    the chin.  Nothing shifts sideways: every face stays centered on the
+    same vertical line, and the placement is the same whether or not the
+    shadow is drawn, so asking for it never moves the face.
     """
     if fit >= 1.0:
         return list(ops)
-    return [_moved(op, fit, -SHADOW_OFFSET[0] / 2.0, 0.0) for op in ops]
+    return [_moved(op, fit, 0.0, 0.0) for op in ops]
 
 
 def _inked(op: Op) -> Op:
     """``op`` as a piece of the ink silhouette, ``OUTLINE`` larger all round.
 
-    Body shapes are filled ops today; a stroked one would simply widen.
+    Body shapes are filled ops today; a stroked one would simply widen.  A
+    shape that arrives with its own ``grow`` keeps it: that is a body part
+    that drew its outline by hand, like the hedgehog's spines.
     """
     if isinstance(op, (Stroke, Arc)):
         return replace(op, color=INK, alpha=1.0,
                        width=op.width + 2.0 * OUTLINE)
-    return replace(op, color=INK, alpha=1.0, grow=OUTLINE)
+    return replace(op, color=INK, alpha=1.0, grow=op.grow or OUTLINE)
 
 
 def character_ops(face: str, mouth: float, level: float,
@@ -1081,8 +1097,9 @@ def character_ops(face: str, mouth: float, level: float,
     the exported frames keep both at rest.
 
     The list opens with the sticker outline: the character's body shapes in
-    ink, each grown by ``OUTLINE``, so their union reads as one line around
-    the whole character.  ``shadow=True`` puts a second copy of that
+    ink, grown by ``OUTLINE`` (the hedgehog's spines bring a sharper one of
+    their own), so their union reads as one line around the whole
+    character.  ``shadow=True`` puts a second copy of that
     silhouette under it, offset by ``SHADOW_OFFSET``.  The shadow belongs to
     the surface rather than the art: ask for it where the face is large and
     stands on its own, leave it off where the face is small or already sits

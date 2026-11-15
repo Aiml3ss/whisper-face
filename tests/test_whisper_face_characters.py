@@ -36,6 +36,7 @@ from whisper_face_characters import (
     FRAMES,
     INK,
     OUTLINE,
+    QUILL_GROW,
     SHADOW_OFFSET,
     Arc,
     Curve,
@@ -112,6 +113,25 @@ def union_bounds(ops):
 def outline_of(ops):
     """The grown ink ops, which are the sticker outline (and its shadow)."""
     return [op for op in ops if getattr(op, "grow", 0.0) > 0.0]
+
+
+def head_of(ops):
+    """The head: the largest oval in the outline."""
+    return max((op for op in outline_of(ops) if isinstance(op, Ellipse)),
+               key=lambda op: op.w * op.h)
+
+
+def inside_triangle(point, triangle, slack=0.0):
+    """Whether ``point`` lies in ``triangle``, within ``slack`` units."""
+    (ax, ay), (bx, by), (cx, cy) = triangle
+    turn = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+    for (x0, y0), (x1, y1) in (((ax, ay), (bx, by)), ((bx, by), (cx, cy)),
+                               ((cx, cy), (ax, ay))):
+        side = (x1 - x0) * (point[1] - y0) - (y1 - y0) * (point[0] - x0)
+        length = math.hypot(x1 - x0, y1 - y0)
+        if side * (1 if turn > 0 else -1) < -slack * length:
+            return False
+    return True
 
 
 class CharacterSpecTests(unittest.TestCase):
@@ -217,6 +237,74 @@ class CharacterSpecTests(unittest.TestCase):
         self.assertEqual(COMPANIONS["dog"].ears, "floppy")
         self.assertFalse(COMPANIONS["bear"].snout)
 
+    def test_the_dogs_ears_hang_clear_of_its_head(self):
+        # Ears tucked behind the head showed only as two bumps in the
+        # outline, and the dog read as a plain tan ball. Like the ovals on
+        # its menu-bar silhouette, they must hang visibly outside the head
+        # on both sides, from above the eyes down to the cheek.
+        ops = character_ops("dog", 0.0, 0.0)
+        head = head_of(ops)
+        ears = [op for op in outline_of(ops) if isinstance(op, Curve)]
+        self.assertEqual(len(ears), 2)
+        left, right = sorted(ears, key=lambda op: op_bounds(op)[0])
+        clear = 12.0
+        self.assertLessEqual(op_bounds(left)[0] + clear, op_bounds(head)[0])
+        self.assertGreaterEqual(op_bounds(right)[2] - clear,
+                                op_bounds(head)[2])
+        eyes = [op for op in ops if isinstance(op, Ellipse)
+                and op.color == INK and op.grow == 0.0]
+        for ear in ears:
+            _, top, _, bottom = op_bounds(ear)
+            self.assertLess(top, min(eye.y for eye in eyes))
+            self.assertGreater(bottom, max(eye.y + eye.h for eye in eyes)
+                               + 40.0)
+
+    def test_every_face_sits_on_the_same_center_line(self):
+        # A face that had to shrink to fit shrinks toward its chin and
+        # nowhere else. One shifted sideways sits off-center in every chip
+        # and row that shows it without the shadow.
+        for face in FACE_ORDER:
+            for shadow in (False, True):
+                ops = character_ops(face, 0.0, 0.0, shadow=shadow)
+                head = head_of(ops[len(ops) - len(
+                    character_ops(face, 0.0, 0.0)):])
+                with self.subTest(face=face, shadow=shadow):
+                    self.assertAlmostEqual(
+                        head.x + head.w / 2.0, DESIGN_SIZE / 2.0)
+        chins = {face: head_of(character_ops(face, 0.0, 0.0))
+                 for face in COMPANIONS}
+        for face, head in chins.items():
+            with self.subTest(face=face):
+                self.assertAlmostEqual(head.y + head.h, 236.0)
+
+    def test_the_hedgehogs_quills_stay_spiky(self):
+        # The full outline with round joins ends every spine in a blunt
+        # knob. Each spine carries its own ink instead: a sharper triangle
+        # that wraps the brown one and runs on past its tip to a point.
+        ops = character_ops("hedgehog", 0.0, 0.0)
+        ink = [op for op in outline_of(ops) if isinstance(op, Polygon)]
+        quills = [op for op in ops if isinstance(op, Polygon)
+                  and op.color == COMPANIONS["hedgehog"].deep]
+        self.assertEqual(len(ink), 9)
+        self.assertEqual(len(quills), 9)
+        self.assertLess(QUILL_GROW, OUTLINE / 3.0)
+        for sharp, quill in zip(ink, quills):
+            self.assertEqual(sharp.grow, QUILL_GROW)
+            for point in quill.points:
+                self.assertTrue(
+                    inside_triangle(point, sharp.points, slack=0.01))
+            # The ink point runs well past the brown tip...
+            beyond = math.dist(sharp.points[1], quill.points[1])
+            self.assertGreater(beyond, OUTLINE)
+            # ...while the line it leaves beside the tip is thinner than
+            # the outline, which is what keeps the point a point.
+            tip_x, tip_y = quill.points[1]
+            (ax, ay), (bx, by) = sharp.points[0], sharp.points[1]
+            beside = abs((bx - ax) * (tip_y - ay) - (by - ay) * (tip_x - ax)
+                         ) / math.hypot(bx - ax, by - ay) + sharp.grow
+            self.assertLess(beside, OUTLINE)
+            self.assertGreater(beside, OUTLINE / 2.0)
+
     def test_each_companion_is_visually_distinct(self):
         # Same silhouette plus same accents means two faces a user cannot tell
         # apart in the picker.
@@ -257,10 +345,14 @@ class StickerOutlineTests(unittest.TestCase):
                     self.assertEqual(list(ops[:len(outline)]), outline)
                     for op in outline:
                         self.assertEqual(op.color, INK)
-                        self.assertEqual(op.grow, OUTLINE)
+                        # The full weight, except a piece that shaped its
+                        # own outline (the hedgehog's spines).
+                        self.assertIn(op.grow, (OUTLINE, QUILL_GROW))
                         # Fill and border overlap, which only an opaque
                         # op can do without a visible seam.
                         self.assertEqual(op.alpha, 1.0)
+                    # The head always carries the full outline.
+                    self.assertEqual(head_of(ops).grow, OUTLINE)
 
     def test_the_outline_does_not_move_with_the_animation(self):
         # It is grown from the body, and no animation input reshapes the
@@ -307,7 +399,7 @@ class StickerOutlineTests(unittest.TestCase):
                     for cast, source in zip(shadowed[:extra], outline):
                         self.assertEqual(type(cast), type(source))
                         self.assertEqual(cast.color, INK)
-                        self.assertEqual(cast.grow, OUTLINE)
+                        self.assertEqual(cast.grow, source.grow)
                         ahead = op_bounds(source)
                         behind = op_bounds(cast)
                         for index, offset in enumerate(SHADOW_OFFSET * 2):
@@ -395,32 +487,108 @@ class RendererCoverageTests(unittest.TestCase):
         self.assertEqual(len(fills), 4)      # Ellipse, Polygon, rect, Curve
         self.assertIn("op.grow", ast.unparse(functions["_render_fill"]))
 
-    @unittest.skipUnless(whisper_face_render.RENDER_APPKIT_AVAILABLE,
-                         "needs AppKit")
-    def test_core_graphics_replay_draws_every_op(self):
+    @staticmethod
+    def _replayed(ops):
+        """``ops`` drawn offscreen by the real replay; returns a pixel reader.
+
+        The bitmap is tagged sRGB and flipped, so the reader takes design
+        coordinates and returns the stored (r, g, b, a).
+        """
         from AppKit import (
+            NSAffineTransform,
             NSBitmapImageRep,
+            NSColorSpace,
             NSDeviceRGBColorSpace,
             NSGraphicsContext,
         )
 
         size = int(DESIGN_SIZE)
+        rep = NSBitmapImageRep.alloc().initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(  # noqa: E501
+            None, size, size, 8, 4, True, False, NSDeviceRGBColorSpace, 0, 0)
+        rep = rep.bitmapImageRepByRetaggingWithColorSpace_(
+            NSColorSpace.sRGBColorSpace())
+        NSGraphicsContext.setCurrentContext_(
+            NSGraphicsContext.graphicsContextWithBitmapImageRep_(rep))
+        flip = NSAffineTransform.transform()
+        flip.translateXBy_yBy_(0, size)
+        flip.scaleXBy_yBy_(1, -1)
+        flip.concat()
+        whisper_face_render.replay_ops(ops)
+
+        def pixel(x, y):
+            color = rep.colorAtX_y_(int(x), int(y))
+            return (color.redComponent(), color.greenComponent(),
+                    color.blueComponent(), color.alphaComponent())
+        return pixel
+
+    def assertInk(self, pixel):
+        self.assertEqual(pixel[3], 1.0)
+        for got, want in zip(pixel, INK):
+            self.assertAlmostEqual(got, want, delta=0.02)
+
+    @unittest.skipUnless(whisper_face_render.RENDER_APPKIT_AVAILABLE,
+                         "needs AppKit")
+    def test_core_graphics_replay_draws_every_op(self):
         for face in FACE_ORDER:
-            rep = NSBitmapImageRep.alloc().initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(  # noqa: E501
-                None, size, size, 8, 4, True, False, NSDeviceRGBColorSpace,
-                0, 0)
-            NSGraphicsContext.setCurrentContext_(
-                NSGraphicsContext.graphicsContextWithBitmapImageRep_(rep))
             for mouth, level, blink, gaze in POSES:
-                whisper_face_render.replay_ops(character_ops(
+                pixel = self._replayed(character_ops(
                     face, mouth, level, blink, gaze, shadow=True))
-            with self.subTest(face=face):
-                # The head covers the middle of the box on every face.
-                self.assertEqual(
-                    rep.colorAtX_y_(size // 2, size // 2).alphaComponent(),
-                    1.0)
+                with self.subTest(face=face, mouth=mouth, blink=blink):
+                    # The head covers the middle of the box on every face.
+                    self.assertEqual(pixel(128, 128)[3], 1.0)
         with self.assertRaises(TypeError):
             whisper_face_render.replay_ops([object()])
+
+    @unittest.skipUnless(whisper_face_render.RENDER_APPKIT_AVAILABLE,
+                         "needs AppKit")
+    def test_core_graphics_replay_draws_the_outline_and_the_shadow(self):
+        # The outline exists only as the border ``grow`` adds to the ink
+        # shapes. A replay that filled them and never stroked them would
+        # hide the whole ink layer behind the character and still paint a
+        # plausible face, so the ink is looked for where nothing else is:
+        # in the band just outside the head, and under the chin where only
+        # the shadow reaches.
+        for face in ("parrot", "fox", "bear", "panda", "frog", "penguin"):
+            head = head_of(character_ops(face, 0.0, 0.0))
+            left, middle = head.x, head.y + head.h / 2.0
+            center, chin = head.x + head.w / 2.0, head.y + head.h
+            plain = self._replayed(character_ops(face, 0.0, 0.0))
+            cast = self._replayed(character_ops(face, 0.0, 0.0, shadow=True))
+            with self.subTest(face=face):
+                # Inside the head it is the head, not ink.
+                inside = plain(left + 5.0, middle)
+                self.assertEqual(inside[3], 1.0)
+                self.assertGreater(
+                    max(abs(got - want) for got, want in zip(inside, INK)),
+                    0.2)
+                # The band the outline adds, on both sides and below.
+                self.assertInk(plain(left - OUTLINE / 2.0, middle))
+                self.assertInk(plain(head.x + head.w + OUTLINE / 2.0,
+                                     middle))
+                self.assertInk(plain(center, chin + OUTLINE / 2.0))
+                # It is a band, not a flood.
+                self.assertEqual(plain(left - OUTLINE - 4.0, middle)[3], 0.0)
+                # Past the outline's lower edge there is nothing, until a
+                # surface asks for the shadow.
+                under = chin + OUTLINE + SHADOW_OFFSET[1] / 2.0
+                self.assertEqual(plain(center, under)[3], 0.0)
+                self.assertInk(cast(center, under))
+                self.assertInk(cast(left - OUTLINE / 2.0, middle))
+
+    @unittest.skipUnless(whisper_face_render.RENDER_APPKIT_AVAILABLE,
+                         "needs AppKit")
+    def test_core_graphics_replay_draws_the_hedgehogs_sharp_quill_ink(self):
+        # The quill ink is a polygon with a small ``grow``; just past a
+        # brown tip there must be ink, and it must come from that polygon.
+        ops = character_ops("hedgehog", 0.0, 0.0)
+        pixel = self._replayed(ops)
+        ink = [op for op in outline_of(ops) if isinstance(op, Polygon)]
+        quills = [op for op in ops if isinstance(op, Polygon)
+                  and op.color == COMPANIONS["hedgehog"].deep]
+        (tip_x, tip_y), (ink_x, ink_y) = quills[4].points[1], ink[4].points[1]
+        self.assertInk(pixel((tip_x + ink_x) / 2.0, (tip_y + ink_y) / 2.0))
+        # Beyond the ink point, nothing.
+        self.assertEqual(pixel(ink_x, ink_y - QUILL_GROW - 4.0)[3], 0.0)
 
 
 class CharacterSVGTests(unittest.TestCase):
@@ -464,18 +632,26 @@ class CharacterSVGTests(unittest.TestCase):
                     self.assertNotIn(
                         shadowed, character_svg(face, frame=frame))
 
-    def test_exported_art_wears_the_shadow_and_site_art_does_not(self):
-        # The exported SVGs are large standalone art; the site sets each
-        # face inside a chip of its own, which is a container already.
-        exported = (ROOT / "icons" / "faces" / "color" / "fox-idle.svg"
-                    ).read_text(encoding="utf-8")
+    def test_generated_art_is_the_plain_sticker_without_the_shadow(self):
+        # The window loads the exported SVGs for small contained uses (a
+        # chip, the picker) and the site sets each face inside a chip of
+        # its own, so neither carries the hard shadow. A large surface asks
+        # character_ops for it.
         site = (ROOT / "site" / "src" / "data" / "face-art.ts"
                 ).read_text(encoding="utf-8")
-        self.assertIn(
-            character_body("fox", whispers=False, shadow=True), exported)
-        self.assertIn(character_body("fox", whispers=False), site)
-        self.assertNotIn(
-            character_body("fox", whispers=False, shadow=True), site)
+        for face in FACE_ORDER:
+            for frame in FRAMES:
+                exported = (ROOT / "icons" / "faces" / "color"
+                            / f"{face}-{frame}.svg").read_text(
+                                encoding="utf-8")
+                plain = character_body(face, frame=frame, whispers=False)
+                shadowed = character_body(
+                    face, frame=frame, whispers=False, shadow=True)
+                with self.subTest(face=face, frame=frame):
+                    self.assertIn(plain, exported)
+                    self.assertNotIn(shadowed, exported)
+                    self.assertIn(plain, site)
+                    self.assertNotIn(shadowed, site)
 
     def test_committed_art_matches_the_spec(self):
         result = subprocess.run(
