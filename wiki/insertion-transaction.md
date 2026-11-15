@@ -68,6 +68,35 @@ Outbox instead of the wrong field.
   warning line and the speech bubble carries the Copy & Dismiss control
   ([[app-window]]). Only
   *verified* receipts may train [[personalization]].
+- **Unchecked paste** (November 2026): a paste that was sent into a
+  destination that hides its text, so that there was never anything to
+  read back (an opaque lease whose receipt is `unverifiable` with a
+  paste attempted: `InsertionReceipt.pasted_unchecked`, which reads the
+  receipt's `destination_opaque`), is no longer reported as an error.
+  The overlay shows its porcelain "Pasted" pill with the ordinary cue,
+  the menu-bar face stays as it is, and the copy is kept in the outbox,
+  where it is counted ("pasted, not double-checked") but does not put
+  the window into its recovery phase. If the next dictation is already
+  being recorded, the overlay is left to it and only the cue plays.
+  Nothing else changed: the receipt's state and reason, the `outbox/`
+  transcript path, `insertion_verified: false`, no correction learning
+  and no undo. A readback conflict, an unknown paste outcome and a
+  paste that was never attempted still get the coral error. So does a
+  field that was read when the dictation began and answers nothing once
+  the paste is sent: its receipt has the same state and reason, but the
+  destination is one the runtime reads, so "not checked here" would be
+  untrue and something there has changed. Copy & Dismiss takes all of
+  those entries before any unchecked copy, and Home's row and the menu
+  count the two kinds apart ("1 recoverable, 5 pasted").
+- **Why a destination was opaque**: for an opaque lease the transcript
+  metrics also carry `insertion_opaque_reason` (`no-focused-element`,
+  `value-unreadable` or `selection-outside-text`),
+  `insertion_focus_kind`, `insertion_focus_role`,
+  `insertion_focus_subrole`, `insertion_value_kind` and
+  `insertion_selection_kind`: closed categories and Accessibility role
+  names recorded at key-down, never a title, a value or a label, so
+  that one dictation into an app says what the app exposes. What the
+  focus snapshot already read is not read a second time.
 - Receipt states: verified, unverifiable, conflict, unresolved — with
   fixed reasons; the same vocabulary is reused by the in-process
   protocol ([[inert-foundations]]) and the compatibility fingerprint.

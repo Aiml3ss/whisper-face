@@ -175,6 +175,26 @@ class InsertionReceipt:
     # The readback's shape for this utterance alone, so a record written
     # later can never pick up another utterance's. Empty when none ran.
     readback_shape: str = ""
+    # The lease this receipt settles was opaque: the destination hid its
+    # text when the dictation began, so no readback was ever possible.
+    # False unless the coordinator says so, which is the careful reading.
+    destination_opaque: bool = False
+
+    @property
+    def pasted_unchecked(self) -> bool:
+        """The one paste was sent into a destination that hides its text.
+
+        Not proof of delivery, and not a failure either: there was never
+        anything to compare. It is never true of a destination that could
+        be read when the dictation began and answered nothing after the
+        paste (something changed there, and the person should look), of a
+        readback that read different text (a conflict), of a paste whose
+        own outcome is unknown, or of a paste that was never attempted;
+        those stay problems.
+        """
+        return (self.paste_attempted
+                and self.destination_opaque
+                and self.state == ReceiptState.UNVERIFIABLE)
 
 
 @dataclass(frozen=True)
@@ -216,6 +236,7 @@ class InsertionCoordinator:
                 ReceiptState.UNRESOLVED,
                 ReceiptReason.PENDING,
                 False,
+                destination_opaque=lease.opaque,
             )
             self._entries[lease.utterance_id] = _OutboxEntry(
                 lease, text, receipt)
@@ -239,18 +260,21 @@ class InsertionCoordinator:
                          if reason == ReceiptReason.TARGET_UNREADABLE
                          else ReceiptState.CONFLICT)
                 entry.receipt = InsertionReceipt(
-                    utterance_id, state, reason, False)
+                    utterance_id, state, reason, False,
+                    destination_opaque=entry.lease.opaque)
                 entry.terminal = True
                 self._settle_locked(utterance_id, entry)
                 return entry.receipt
 
             # Mark terminal before invoking platform code. A reentrant or
             # concurrent callback can therefore never create another attempt.
+            opaque = entry.lease.opaque
             entry.receipt = InsertionReceipt(
                 utterance_id,
                 ReceiptState.UNRESOLVED,
                 ReceiptReason.PASTE_OUTCOME_UNKNOWN,
                 True,
+                destination_opaque=opaque,
             )
             entry.terminal = True
             entry.in_flight = True
@@ -264,6 +288,7 @@ class InsertionCoordinator:
             ReceiptState.UNRESOLVED,
             ReceiptReason.PASTE_OUTCOME_UNKNOWN,
             True,
+            destination_opaque=opaque,
         )
         try:
             paste(text)
@@ -271,7 +296,8 @@ class InsertionCoordinator:
             if not isinstance(proof, ReadbackResult):
                 raise TypeError("readback must return ReadbackResult")
             receipt = InsertionReceipt(
-                utterance_id, proof.state, proof.reason, True, proof.detail)
+                utterance_id, proof.state, proof.reason, True, proof.detail,
+                opaque)
         except Exception:
             # Delivery may precede failure. Retrying risks duplication, so
             # the unresolved entry remains recoverable.
@@ -308,6 +334,33 @@ class InsertionCoordinator:
                 1 for entry in self._entries.values()
                 if (entry.terminal and not entry.in_flight
                     and entry.receipt.state != ReceiptState.VERIFIED)
+            )
+
+    def recoverable_counts(self) -> tuple[int, int]:
+        """``(recoverable, needs a home)`` from one look at the queue.
+
+        For a caller that words one line from both: read apart, an entry
+        that settles between the two reads is counted as the wrong kind.
+        """
+        with self._lock:
+            return self.recoverable_count(), self.needs_home_count()
+
+    def needs_home_count(self) -> int:
+        """Count the recoverable entries that are still looking for a home.
+
+        Everything recoverable except a paste that was sent into a
+        destination that hides its text: text that was never pasted, a
+        paste whose outcome is unknown, a readback that read something
+        else, and a readable destination that answered nothing after the
+        paste. Like ``recoverable_count`` it builds no payload-bearing
+        item.
+        """
+        with self._lock:
+            return sum(
+                1 for entry in self._entries.values()
+                if (entry.terminal and not entry.in_flight
+                    and entry.receipt.state != ReceiptState.VERIFIED
+                    and not entry.receipt.pasted_unchecked)
             )
 
     def acknowledge(self, utterance_id: str) -> bool:

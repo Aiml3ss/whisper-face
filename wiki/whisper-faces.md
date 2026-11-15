@@ -81,8 +81,10 @@ the HUD and the window's `LiveFaceView` so the two cannot drift apart.
   error), with the face
   leaning out of its left end. It also draws a short row of level bars,
   the [[stable-prefix]] caption, and honest status copy as one headline
-  (Listening… / Heard you / Tidying up… / Uh-oh), with accessibility
-  values kept in sync.
+  (Listening… / Heard you / Tidying up… / Pasted / Uh-oh), with
+  accessibility values kept in sync. "Pasted" is the porcelain pill with
+  a calm face: the paste was sent into an app that hides its text and
+  could not be read back ([[insertion-transaction]]).
 
 > 📝 **New look (November 2026)**: the faces became stickers. In
 > [[app-window]] the chosen face sits on a chip at the top of the

@@ -337,6 +337,7 @@ else:
 
 from whisper_face_theme import (  # noqa: E402
     FACE_CHIP_COLORS,
+    HUD_PASTED_CAPTION,
     LIGHT_PALETTE,
     MOTION_SPECS,
     TYPE_SPECS,
@@ -1036,7 +1037,10 @@ HUD_TEXT_MAX = 250.0
 HUD_PADDING_RIGHT = 24.0
 HUD_DOT_SIZE = 7.0           # the three dots that mean "working"
 HUD_DOT_GAP = 6.0
-HUD_MARK_SIZE = 28.0         # the check and the exclamation mark's disc
+HUD_MARK_SIZE = 28.0         # the disc behind a result's mark
+# The overlay's modes that end a dictation with a mark in the level slot:
+# verified, pasted without a readback, and failed.
+HUD_RESULT_MODES = ("done", "pasted", "error")
 HUD_CAPTION_LIMIT = 72       # characters of caption kept, newest last
 # Mouth, blink, breath, and gaze schedules live in whisper_face_render's
 # IdleLifeDriver so the HUD and the window face cannot drift apart.
@@ -1044,6 +1048,10 @@ LEVEL_SMOOTH = 0.35
 NUM_BARS = 16                # LEVELS history buffer length (not the display)
 FPS = 30.0
 DICTATION_ERROR_SECONDS = 2.5
+# A paste that was sent and could not be read back is not an error and does
+# not hold the screen like one: long enough to read two short lines, and
+# clearly shorter than the time a real problem gets.
+DICTATION_UNCHECKED_SECONDS = 1.6
 
 SIMPLE_FILLER_RE = re.compile(
     r"(?:,\s*)?\b(?:um+|uh+|erm|hmm)\b(?:\s*,)?", re.I)
@@ -2294,13 +2302,27 @@ def voice_inbox_menu_title(status) -> str:
     return "Voice Inbox" if count == 0 else f"Voice Inbox — {count} queued"
 
 
-def voice_outbox_menu_title(count) -> str:
-    """Render only the bounded recoverable count for the outbox shortcut."""
+def voice_outbox_menu_title(count, needs_home=None) -> str:
+    """Render only the bounded recoverable count for the outbox shortcut.
+
+    ``needs_home`` is how many of them are more than a paste sent into an
+    app that hides its text. When none is, the row says what the copies are
+    instead of calling them recoverable; when some are, each kind is
+    counted as what it is. Left out, every entry counts as needing a home,
+    which is the careful reading.
+    """
     if not isinstance(count, int) or isinstance(count, bool):
         count = 0
     count = min(max(count, 0), VOICE_OUTBOX_MAX_ITEMS)
-    return ("Voice Outbox" if count == 0 else
-            f"Voice Outbox — {count} recoverable")
+    if count == 0:
+        return "Voice Outbox"
+    if isinstance(needs_home, int) and not isinstance(needs_home, bool):
+        if needs_home <= 0:
+            return f"Voice Outbox — {count} pasted, not double-checked"
+        if needs_home < count:
+            return (f"Voice Outbox — {needs_home} recoverable, "
+                    f"{count - needs_home} pasted")
+    return f"Voice Outbox — {count} recoverable"
 
 
 def undo_menu_title(status, hotkey_label: str = "") -> str:
@@ -2912,12 +2934,13 @@ def hud_slot_width(mode: str) -> float:
     """Width of the slot between the face and the text, for one state.
 
     It holds the state's own mark: the level bars while listening, three
-    dots while working, a disc with a check or an exclamation mark at the
-    end. The text starts a fixed gap after whichever it is.
+    dots while working, and at the end a disc with a check, three lines
+    of text, or an exclamation mark. The text starts a fixed gap after
+    whichever it is.
     """
     if mode == "processing":
         return 3.0 * HUD_DOT_SIZE + 2.0 * HUD_DOT_GAP
-    if mode in ("done", "error"):
+    if mode in HUD_RESULT_MODES:
         return HUD_MARK_SIZE
     return HUD_SLOT_WIDTH
 
@@ -3006,9 +3029,12 @@ def hud_pill_shades(mode: str, dark: bool,
 
     The pill is a sticker, and a sticker is bright in both appearances:
     porcelain while listening and working, the stage emerald when done, the
-    theme's coral for an error. It does not go dark with the Mac, because
-    the face leans over it and the face's ink outline is all but invisible
-    on the dark surface colour (about 1.2:1). So the text, the outline and
+    theme's coral for an error. A paste that was sent and could not be read
+    back stays porcelain: it is neither of those, and must not borrow the
+    colour of a verified result or of a failure. The pill does not go dark
+    with the Mac, because the face leans over it and the face's ink outline
+    is all but invisible on the dark surface colour (about 1.2:1). So the
+    text, the outline and
     the hard shadow are dark inks everywhere, and the appearance only picks
     the theme's own shade of the emerald and of the outline ink. Increase
     Contrast swaps in a token's stronger value where that value is darker.
@@ -3163,8 +3189,13 @@ def _hud_draw_working_dots(center_x, center_y, shade, t, reduce_motion):
             center_y - size / 2.0 - 3.0 * hop, size, size)).fill()
 
 
-def _hud_draw_mark(center_x, center_y, shades, check):
-    """A porcelain disc carrying a check mark or an exclamation mark."""
+def _hud_draw_mark(center_x, center_y, shades, check, pasted=False):
+    """A porcelain disc carrying a check mark or an exclamation mark.
+
+    ``pasted`` draws neither: three lines of text, for words that were
+    sent and not read back. It claims no check and raises no alarm, and
+    it is not an arrow, which reads as a download.
+    """
     radius = HUD_MARK_SIZE / 2.0
     disc = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(
         center_x - radius + 1.0, center_y - radius + 1.0,
@@ -3177,6 +3208,14 @@ def _hud_draw_mark(center_x, center_y, shades, check):
     stroke = NSBezierPath.bezierPath()
     stroke.setLineCapStyle_(1)
     stroke.setLineJoinStyle_(1)
+    if pasted:
+        # Three lines of text, the last one short: the words, set down.
+        stroke.setLineWidth_(2.4)
+        for offset, reach in ((-4.4, 5.2), (0.0, 5.2), (4.4, 0.6)):
+            stroke.moveToPoint_((center_x - 5.2, center_y + offset))
+            stroke.lineToPoint_((center_x + reach, center_y + offset))
+        stroke.stroke()
+        return
     if check:
         stroke.setLineWidth_(2.6)
         stroke.moveToPoint_((center_x - 5.4, center_y + 0.4))
@@ -3324,6 +3363,9 @@ class WaveView(NSView):
                 self.reduce_motion)
         elif self.mode == "done":
             _hud_draw_mark(slot_middle, middle, shades, check=True)
+        elif self.mode == "pasted":
+            _hud_draw_mark(
+                slot_middle, middle, shades, check=False, pasted=True)
         elif self.mode == "error":
             _hud_draw_mark(slot_middle, middle, shades, check=False)
 
@@ -3891,9 +3933,12 @@ class StatusBar(NSObject):
         self.voice_inbox_item.setEnabled_(self.gui is not None)
         outbox_count = 0
         try:
-            outbox_count = INSERTION_COORDINATOR.recoverable_count()
-            self.voice_outbox_item.setTitle_(
-                voice_outbox_menu_title(outbox_count))
+            # Both counts in one read, so the row cannot count an entry
+            # that arrived between two of them as the wrong kind.
+            outbox_count, outbox_needs_home = (
+                INSERTION_COORDINATOR.recoverable_counts())
+            self.voice_outbox_item.setTitle_(voice_outbox_menu_title(
+                outbox_count, outbox_needs_home))
         except Exception:
             self.voice_outbox_item.setTitle_("Voice Outbox")
         self.voice_outbox_item.setHidden_(outbox_count <= 0)
@@ -5423,6 +5468,7 @@ class Recorder:
         self.utterance_id = ""
         self.insertion_lease = None
         self.insertion_receipt = None
+        self.insertion_opaque_evidence = None
         self.process_ticket = None
         self.input_signature_at_press = None
         self.context_terms = []
@@ -5467,6 +5513,7 @@ class Recorder:
         self.utterance_id = f"{time.time_ns():x}-{id(self):x}"
         self.insertion_lease = None
         self.insertion_receipt = None
+        self.insertion_opaque_evidence = None
         self.process_ticket = None
         self.input_signature_at_press = None
         self.recording = True
@@ -6211,13 +6258,20 @@ def runtime_status_snapshot() -> dict:
     voice_object_inbox = voice_object_inbox_status()
     risky_confirmation = risky_action_confirmation_status_snapshot()
     model_wallet_shadow = model_wallet_shadow_status_snapshot()
+    # A paste that was sent and could not be read back is kept like any
+    # other entry and is not a problem to raise. Only what still needs a
+    # home drives the window's phase, and the summary describes the newest
+    # of those; an outbox holding nothing else says what its copies are.
+    outbox_needs_home = [
+        item.receipt for item in outbox if not item.receipt.pasted_unchecked]
     outbox_summary = ""
-    if outbox:
-        latest = outbox[-1].receipt
+    if outbox_needs_home:
         outbox_summary = (
             "Paste may have landed — verify before reusing"
-            if latest.paste_attempted
+            if outbox_needs_home[-1].paste_attempted
             else "Not pasted — destination changed")
+    elif outbox:
+        outbox_summary = "Pasted, not double-checked"
     return {
         "capture_state": capture,
         "paused": PAUSED["on"],
@@ -6281,6 +6335,7 @@ def runtime_status_snapshot() -> dict:
         "words_today": words,
         "minutes_saved": saved,
         "outbox_count": len(outbox),
+        "outbox_needs_home": len(outbox_needs_home),
         "outbox_summary": outbox_summary,
         "regression_cases": len(lab.cases),
         "regression_quarantined": len(lab.quarantined),
@@ -6852,14 +6907,19 @@ def copy_latest_outbox():
     recoverable = INSERTION_COORDINATOR.recoverable()
     if not recoverable:
         raise RuntimeError("Voice Outbox is empty")
+    # Text that still needs a home comes first. Copies of pastes that were
+    # sent and could not be read back pile up behind it and do not ask for
+    # anything, so the newest of them must not stand between the person
+    # and the one dictation the window says needs a review.
+    needs_home = [
+        item for item in recoverable if not item.receipt.pasted_unchecked]
+    item = (needs_home or recoverable)[-1]
     pb = NSPasteboard.generalPasteboard()
     pb.clearContents()
-    copied = pb.setString_forType_(
-        recoverable[-1].text, NSPasteboardTypeString)
+    copied = pb.setString_forType_(item.text, NSPasteboardTypeString)
     if not copied:
         raise RuntimeError("macOS clipboard rejected the recovery text")
-    INSERTION_COORDINATOR.acknowledge(
-        recoverable[-1].receipt.utterance_id)
+    INSERTION_COORDINATOR.acknowledge(item.receipt.utterance_id)
 
 
 def copy_support_snapshot(payload: str) -> None:
@@ -9833,6 +9893,161 @@ def capture_insertion_lease(snapshot: FocusSnapshot | None, bundle: str,
         return None
 
 
+# Why a destination could not be read, for the private per-dictation record.
+# Everything here is a category from a closed set or an Accessibility role
+# name: never a title, a value, a label or any other text from the app. The
+# point is that one dictation into an app that hides its text says what the
+# app does expose, so that reading it properly can be designed from evidence.
+AX_ERROR_KINDS = {
+    -25200: "failure",            # kAXErrorFailure
+    -25202: "invalid-element",    # kAXErrorInvalidUIElement
+    -25204: "cannot-complete",    # kAXErrorCannotComplete
+    -25205: "unsupported",        # kAXErrorAttributeUnsupported
+    -25208: "not-implemented",    # kAXErrorNotImplemented
+    -25211: "api-disabled",       # kAXErrorAPIDisabled
+    -25212: "no-value",           # kAXErrorNoValue
+}
+# Bridged Accessibility values by what their type is called, most specific
+# first. The name itself is never recorded, only the category it maps to.
+AX_VALUE_TYPE_KINDS = (
+    ("AttributedString", "attributed-string"),
+    ("AXTextMarkerRange", "text-marker-range"),
+    ("AXTextMarker", "text-marker"),
+    ("AXValue", "ax-value"),
+    ("AXUIElement", "element"),
+    ("Array", "array"),
+    ("Dictionary", "dictionary"),
+    ("Number", "number"),
+    ("String", "string"),
+    ("URL", "url"),
+    ("Data", "data"),
+)
+AX_VALUE_KINDS = frozenset(
+    {"none", "error", "string", "boolean", "number", "array", "dictionary",
+     "range", "other"}
+    | set(AX_ERROR_KINDS.values())
+    | {kind for _marker, kind in AX_VALUE_TYPE_KINDS})
+OPAQUE_DESTINATION_REASONS = frozenset({
+    "no-focused-element",       # Accessibility named no focused element
+    "value-unreadable",         # its value is missing or is not plain text
+    "selection-outside-text",   # text, and a range that does not fit it
+})
+AX_ROLE_NAME_RE = re.compile(r"AX[A-Za-z]{1,40}\Z")
+
+
+def ax_value_kind(error, value) -> str:
+    """Name what one Accessibility read returned, never what it held."""
+    if error:
+        try:
+            return AX_ERROR_KINDS.get(int(error), "error")
+        except (TypeError, ValueError):
+            return "error"
+    if value is None:
+        return "none"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, (list, tuple)):
+        return "array"
+    if isinstance(value, dict):
+        return "dictionary"
+    name = type(value).__name__
+    for marker, kind in AX_VALUE_TYPE_KINDS:
+        if marker in name:
+            return kind
+    return "other"
+
+
+def ax_role_name(value) -> str:
+    """An Accessibility role or subrole as a name, or why it is not one.
+
+    Role names are API constants such as ``AXTextArea``. Anything that is
+    not shaped like one is replaced by a category, so a role an app made up
+    out of its own text can never reach the record.
+    """
+    if value is None:
+        return "none"
+    if not isinstance(value, str):
+        return "not-a-name"
+    return value if AX_ROLE_NAME_RE.match(value) else "nonstandard"
+
+
+def _ax_attribute_read(element, attribute):
+    """One Accessibility read as ``(error, value)``, keeping the error."""
+    try:
+        from ApplicationServices import AXUIElementCopyAttributeValue
+        error, value = AXUIElementCopyAttributeValue(element, attribute, None)
+        return int(error or 0), (None if error else value)
+    except Exception:
+        return -1, None
+
+
+def _ax_focused_element_read():
+    """The system-wide focused element read as ``(error, value)``."""
+    try:
+        from ApplicationServices import (
+            AXUIElementCreateSystemWide,
+            kAXFocusedUIElementAttribute,
+        )
+        return _ax_attribute_read(
+            AXUIElementCreateSystemWide(), kAXFocusedUIElementAttribute)
+    except Exception:
+        return -1, None
+
+
+def opaque_destination_evidence(snapshot: FocusSnapshot | None,
+                                lease: InsertionLease | None, *,
+                                read=None, focused=None) -> dict | None:
+    """Why this destination got an opaque lease, in categories only.
+
+    None for a readable destination, which needs no explanation. The reason
+    comes from the same snapshot the lease was decided on; the kinds name
+    what the focused element, its value and its selection range each
+    answered, and the role and subrole say what kind of element it is.
+
+    What the snapshot already settled is not read again, because this runs
+    on the hotkey worker as a dictation begins: a value the snapshot read
+    as text is a string, and a selection it kept, or dropped from a field
+    whose text it did read, was a range. (With text in hand the snapshot
+    drops a selection only when the reported range does not fit that
+    text; with none reported it places the cursor at the end.) Only an
+    answer the snapshot could not use is asked for once more, and only
+    its category is kept. Nothing here changes what counts as readable.
+    """
+    if lease is None or not lease.opaque:
+        return None
+    read = read or _ax_attribute_read
+    focused = focused or _ax_focused_element_read
+    evidence = {
+        "reason": "no-focused-element", "focus": "none", "role": None,
+        "subrole": None, "value": None, "selection": None}
+    try:
+        if snapshot is None:
+            evidence["focus"] = ax_value_kind(*focused())
+            return evidence
+        evidence["focus"] = "element"
+        has_text = snapshot.text is not None
+        has_range = has_text or snapshot.selection is not None
+        evidence["reason"] = (
+            "selection-outside-text" if has_text else "value-unreadable")
+        element = snapshot.element
+        evidence["role"] = ax_role_name(read(element, "AXRole")[1])
+        evidence["subrole"] = ax_role_name(read(element, "AXSubrole")[1])
+        evidence["value"] = (
+            "string" if has_text
+            else ax_value_kind(*read(element, "AXValue")))
+        evidence["selection"] = (
+            "range" if has_range
+            else ax_value_kind(*read(element, "AXSelectedTextRange")))
+    except Exception:
+        # A diagnostic may never cost a dictation; what it has is kept.
+        pass
+    return evidence
+
+
 def seal_opaque_window_lease(rec) -> None:
     """Seal only when the press-time input counters remain unchanged."""
     lease = getattr(rec, "insertion_lease", None)
@@ -12361,6 +12576,43 @@ def report_dictation_problem(
     play("Funk")
 
 
+def report_unchecked_paste(
+        rec: Recorder, hud: HUD, log_message: str, *, sound: str = "Pop",
+        seconds: float = DICTATION_UNCHECKED_SECONDS,
+        active: dict | None = None):
+    """Say the paste was sent and that this app could not be read back.
+
+    Not a problem report: the pill stays porcelain, the menu-bar face goes
+    back to its ordinary state, and the cue is the one a dictation that
+    landed plays. It claims nothing about delivery either. The copy stays
+    in the Voice Outbox and every record of the dictation stays unverified;
+    this only decides how the outcome is shown.
+
+    ``active`` is the hotkey worker's record of the take being recorded.
+    When the next dictation has already begun, the overlay, its caption
+    and the menu-bar face belong to that one: a calm notice does not take
+    them from someone who is speaking, so only the cue is played.
+    """
+    print(log_message)
+    if active is not None and active.get("rec") is not None:
+        play(sound)
+        return
+    CAPTION["text"] = HUD_PASTED_CAPTION
+    CAPTION["confidence"] = None
+    CAPTION["stable_prefix"] = False
+    # An uncertain take is held longer so that its alternative can be read.
+    # This pill shows the fixed line instead, so that hold has nothing left
+    # to show and the pill keeps its own short one.
+    rec.uncertain = False
+    rec.feedback_seconds = max(
+        float(getattr(rec, "feedback_seconds", 0.0) or 0.0),
+        max(0.0, float(seconds)),
+    )
+    set_status("off" if PAUSED["on"] else "idle")
+    AppHelper.callAfter(hud.showMode_, "pasted")
+    play(sound)
+
+
 def dictation_feedback_delay(rec: Recorder) -> float:
     """How long terminal feedback should remain visible."""
     try:
@@ -12805,7 +13057,19 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             integrity_receipt = rec.insertion_receipt
             if (integrity_receipt is not None
                     and integrity_receipt.state != ReceiptState.VERIFIED):
-                if integrity_receipt.paste_attempted:
+                if integrity_receipt.pasted_unchecked:
+                    # Sent into an app that hides its text, so there was
+                    # never anything to read back. A field that could be
+                    # read and went quiet after the paste is not this.
+                    report_unchecked_paste(
+                        rec,
+                        hud,
+                        "[insertion] snippet pasted, not double-checked "
+                        f"({integrity_receipt.reason.value}); copy kept in "
+                        "Voice Outbox",
+                        active=active,
+                    )
+                elif integrity_receipt.paste_attempted:
                     report_dictation_problem(
                         rec,
                         hud,
@@ -13076,6 +13340,24 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             # there is no prior state to restore.
             record_undoable_insertion(build_undoable_insertion(
                 rec, insertion_target, bundle, event_id))
+        elif integrity_receipt.pasted_unchecked:
+            # Sent into an app that hides its text, so there was never
+            # anything to read back. A field that could be read and went
+            # quiet after the paste is not this, and keeps the error below.
+            # Everything after this still treats the dictation as
+            # unverified; only the way the outcome is shown is calm.
+            report_unchecked_paste(
+                rec,
+                hud,
+                "[insertion] pasted, not double-checked "
+                f"({integrity_receipt.reason.value}); copy kept in Voice "
+                "Outbox",
+                sound=dictation_success_sound(
+                    PIPELINE_STATE["last_consequence_route"],
+                    is_macos=IS_MACOS,
+                ),
+                active=active,
+            )
         elif attempted:
             report_dictation_problem(
                 rec,
@@ -13128,6 +13410,10 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         # dictations can never publish each other's destination capabilities.
         insertion_capabilities = getattr(
             rec, "insertion_capabilities", None) or {}
+        # Why the destination was opaque, when it was: categories and role
+        # names recorded at key-down, never anything the app displayed.
+        opaque_evidence = getattr(
+            rec, "insertion_opaque_evidence", None) or {}
         now = time.perf_counter()
         release_total = now - released_at
         press_total = now - rec.press_at if rec.press_at else release_total
@@ -13288,6 +13574,15 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "insertion_target": insertion_capabilities.get("target"),
             "insertion_paste": insertion_capabilities.get("paste"),
             "insertion_readback": insertion_capabilities.get("readback"),
+            # Absent (None) for a readable destination. Otherwise which of
+            # the focused element, its value and its selection could not
+            # be used, what each answered, and the element's role.
+            "insertion_opaque_reason": opaque_evidence.get("reason"),
+            "insertion_focus_kind": opaque_evidence.get("focus"),
+            "insertion_focus_role": opaque_evidence.get("role"),
+            "insertion_focus_subrole": opaque_evidence.get("subrole"),
+            "insertion_value_kind": opaque_evidence.get("value"),
+            "insertion_selection_kind": opaque_evidence.get("selection"),
             "delayed_cleanup_scheduled": delayed_cleanup_scheduled,
         }, event_id=event_id, language=rec.language)
     except Exception as error:
@@ -13526,6 +13821,12 @@ HUD_SMOKE_STATES = (
     ("error", "error", "I couldn't understand that — try again",
      None, False, 0.0),
 )
+# States only the release gate's whole walk draws. An install's construction
+# check draws the list above and nothing more, and the gate counts its
+# frames, so a state added here costs an install nothing.
+HUD_SMOKE_WALK_STATES = (
+    ("pasted", "pasted", HUD_PASTED_CAPTION, None, False, 0.0),
+)
 # Set to a directory, the smoke test also writes every frame it checks there
 # as a transparent PNG. ``scripts/window_render_probe.py --overlay`` uses it
 # to put the overlay in front of a person; nothing else reads it.
@@ -13663,6 +13964,9 @@ def _hud_smoke_check_frame(name, wave, bitmap, shades):
         "recording": shades["level"],
         "processing": shades["ink"],
         "done": shades["mark"],
+        # The disc is porcelain on a porcelain pill, so its ring is what
+        # there is to find.
+        "pasted": shades["mark_ink"],
         "error": shades["mark"],
     }[wave.mode]
     if wave.mode == "processing" and not wave.reduce_motion:
@@ -13684,11 +13988,21 @@ def _hud_smoke_check_frame(name, wave, bitmap, shades):
             middle - HUD_BAR_MIN / 2.0 - 2.0)
         if risen != (wave.raw > 0.3 and not wave.reduce_motion):
             fail("the level bars do not follow the level")
-    if wave.mode in ("done", "error") and not _hud_smoke_find(
+    if wave.mode in HUD_RESULT_MODES and not _hud_smoke_find(
             bitmap, shades["mark_ink"],
             slot_x + slot_width / 2.0 - 7.0, middle - 8.0,
             slot_x + slot_width / 2.0 + 7.0, middle + 8.0):
         fail(f"the {wave.mode} mark has no glyph")
+    if wave.mode == "pasted":
+        # Sent and not read back is neither a verified result nor a
+        # failure, and must not be drawn as one: porcelain, never the
+        # emerald of "done" or the coral of an error, in any appearance.
+        ground = _hud_smoke_pixel(bitmap, x + width - 12.0, middle)
+        for other in ("done", "error"):
+            if _hud_smoke_matches(ground, hud_pill_shades(
+                    other, bool(wave.dark),
+                    bool(wave.increase_contrast))["fill"]):
+                fail(f"the pasted pill is drawn in the {other} colour")
 
     # The headline, in the text column.
     text_x = slot_x + slot_width + HUD_SLOT_GAP
@@ -13728,6 +14042,15 @@ def _hud_smoke_check_frame(name, wave, bitmap, shades):
                     bitmap, shades["fill"],
                     (left, top + line + 2.0, wide, line - 4.0)):
                 fail("the caption's second line is missing")
+    if wave.mode == "pasted" and (
+            shown != HUD_PASTED_CAPTION
+            or _hud_line(shown, "hud_caption", shades["ink"]).size().width
+            > HUD_TEXT_MAX
+            or boxes["caption"][3] > 1.5 * _hud_line(
+                shown, "hud_caption", shades["ink"]).size().height):
+        # It is shown after every dictation into an app that hides its
+        # text, so it is read at a glance: whole, and on one line.
+        fail("the pasted caption is not whole on one line")
 
     # The face, whichever it is. Walking in from the panel's left edge along
     # the row through the face's middle, the first solid pixel is the outer
@@ -13797,10 +14120,10 @@ def run_native_hud_smoke_test(*, construction_only: bool = False
     """Exercise Phase 1 AppKit surfaces without showing UI or reading state.
 
     ``construction_only`` is what an install runs: build the overlay and
-    the menu-bar face and draw every state, one of them in the dark
-    appearance too. The
-    walk without it is the release gate's, and adds Increase Contrast,
-    Reduce Motion and every face at its loudest.
+    the menu-bar face and draw every state in ``HUD_SMOKE_STATES``, one of
+    them in the dark appearance too. The walk without it is the release
+    gate's, and adds the states in ``HUD_SMOKE_WALK_STATES``, Increase
+    Contrast, Reduce Motion and every face at its loudest.
     """
     if not IS_MACOS:
         raise RuntimeError("native HUD smoke requires macOS")
@@ -13883,6 +14206,10 @@ def run_native_hud_smoke_test(*, construction_only: bool = False
                          dark=dark, contrast=contrast)
                     if construction_only and dark:
                         break
+                if not construction_only:
+                    for state in HUD_SMOKE_WALK_STATES:
+                        draw(f"state-{state[0]}-{suffix}", *state[1:],
+                             dark=dark, contrast=contrast)
             if construction_only:
                 continue
             # Reduce Motion: no level, no squash, still every part drawn.
@@ -13901,8 +14228,11 @@ def run_native_hud_smoke_test(*, construction_only: bool = False
         status_bar.setMouthLevel_(0.5)
         status_bar.setMouthLevel_(0.0)
         status_bar.setState_("proc")
-        return {"states": len(HUD_SMOKE_STATES), "frames": drawn,
-                "motions": len(MOTION_SPECS)}
+        # ``states`` is what an install's check is counted against; the
+        # whole walk also draws the states it alone covers.
+        return {"states": len(HUD_SMOKE_STATES) + (
+                    0 if construction_only else len(HUD_SMOKE_WALK_STATES)),
+                "frames": drawn, "motions": len(MOTION_SPECS)}
     except Exception as error:
         # The caller reports only that the smoke test failed. Say which
         # frame and which check, so the gate's log is enough to act on.
@@ -14188,6 +14518,13 @@ def main():
                                 rec.bundle_at_press,
                                 rec.utterance_id,
                             ) if IS_MACOS else None
+                        )
+                        # Content-free, and only for a destination that
+                        # could not be read: what it did expose.
+                        rec.insertion_opaque_evidence = (
+                            opaque_destination_evidence(
+                                rec.focus_at_press, rec.insertion_lease)
+                            if IS_MACOS else None
                         )
                         with GLOSS["lock"]:
                             stable_terms = [
