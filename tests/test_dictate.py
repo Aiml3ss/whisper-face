@@ -3085,6 +3085,28 @@ class RecordingOverlayTests(unittest.TestCase):
             (pill.outline, pill.shadow_right, pill.shadow_down),
             (bubble.outline, bubble.shadow_right, bubble.shadow_down))
 
+    def test_the_springs_never_push_the_pill_past_the_panel(self):
+        ns = self._overlay()
+        pill = ns["HUD_PILL"]
+        # The pop and the wobble scale the whole view about its middle, and
+        # the panel clips what leaves it. The widest pill, with the face
+        # hanging off one end and the shadow off the other, must still be
+        # inside at the widest either spring starts from.
+        widest = (ns["HUD_FACE_OVERHANG"] + ns["hud_pill_width"](5000.0)
+                  + pill.shadow_right)
+        tallest = 2.0 * max(
+            ns["HUD_H"] / 2.0 - 4.0,
+            ns["HUD_PILL_TOP"] + pill.height + pill.shadow_down
+            - ns["HUD_H"] / 2.0)
+        for name in ("pop", "wobble"):
+            spec = MOTION_SPECS[name]
+            with self.subTest(motion=name):
+                self.assertLess(
+                    widest * max(1.0, spec.squash_x), ns["HUD_W"] - 2.0)
+                self.assertLessEqual(
+                    tallest * max(1.0, spec.squash_y), ns["HUD_H"])
+        self.assertGreater(MOTION_SPECS["wobble"].squash_x, 1.0)
+
     def test_the_face_leans_out_of_the_pill_and_is_never_clipped(self):
         ns = self._overlay()
         matrix, point = ns["hud_face_matrix"], ns["hud_face_point"]

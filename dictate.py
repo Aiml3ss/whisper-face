@@ -1008,10 +1008,11 @@ LOCK_FILE = HERE / ".dictate.lock"
 # HUD: the recording pill. An ink-outlined capsule with a hard shadow, the
 # selected face leaning out of its left end, then the level, the state and
 # one or two lines of caption. The panel is a fixed, transparent box big
-# enough for the widest pill, its shadow and a face at its loudest squash;
+# enough for the widest pill, its shadow and a face at its loudest squash,
+# all stretched as far as the pop and the wobble stretch the whole view;
 # the pill itself is drawn only as wide as what it says, centred in it.
 # Everything here is in points, y down, from the panel's top-left corner.
-HUD_W = 456.0
+HUD_W = 472.0
 HUD_H = 106.0
 HUD_BOTTOM_MARGIN = 80.0
 HUD_PILL = BrandShape(
