@@ -890,6 +890,17 @@ class RuntimeStatusWindowContractTests(unittest.TestCase):
         coordinator = InsertionCoordinator()
         for index, outcome in enumerate(outcomes):
             utterance = f"take-{index}"
+            if outcome == "went-quiet":
+                # A field the runtime read, which answered nothing once
+                # the paste was sent: not an app that hides its text.
+                coordinator.stage(InsertionLease.capture(
+                    utterance, "com.apple.Notes:4", (3, 0), "Hi."), "Ship it")
+                coordinator.commit(
+                    utterance,
+                    DestinationObservation.capture(
+                        "com.apple.Notes:4", (3, 0), "Hi."),
+                    lambda _text: None, ReadbackResult.unverifiable)
+                continue
             coordinator.stage(InsertionLease.capture_opaque(
                 utterance, "com.apple.MobileSMS:7", "Chat"), "Ship it")
             coordinator.commit(
@@ -963,11 +974,17 @@ class RuntimeStatusWindowContractTests(unittest.TestCase):
             self.assertNotIn(nag, title.casefold())
 
     def test_one_entry_that_needs_a_home_keeps_todays_treatment(self):
-        from whisper_face_gui import localized_string, sidebar_state
+        from whisper_face_gui import (
+            home_outbox_line, localized_string, sidebar_state)
+
+        menu = load_definitions(
+            "voice_outbox_menu_title",
+            extra={"VOICE_OUTBOX_MAX_ITEMS": 20})["voice_outbox_menu_title"]
 
         for outcome, summary in (
             ("not-pasted", "Not pasted — destination changed"),
             ("conflict", "Paste may have landed — verify before reusing"),
+            ("went-quiet", "Paste may have landed — verify before reusing"),
         ):
             with self.subTest(outcome=outcome):
                 # Its place in the queue does not matter: buried under

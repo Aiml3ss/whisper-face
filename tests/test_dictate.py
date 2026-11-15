@@ -14772,6 +14772,10 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
             seen.pasted.append(text)
             if outcome == "conflict":
                 field["value"] = "something else entirely"
+            elif outcome == "readback-empty":
+                # A field that was read at key-down and at release answers
+                # nothing at all once the paste is sent.
+                field["value"] = None
             else:
                 field["value"] = self.BEFORE + text
 
@@ -15059,6 +15063,13 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
             ("conflict", unverified, ReceiptState.CONFLICT, True, 1),
             # A paste whose own outcome is unknown.
             ("paste-raised", unverified, ReceiptState.UNRESOLVED, True, 0),
+            # A field that was read at key-down and at release and answers
+            # nothing once the paste is sent. Its receipt is the calm one's
+            # twin (unverifiable, readback unavailable, paste attempted);
+            # only the destination differs, and this one does not hide its
+            # text, so "not checked here" would be a false thing to say.
+            ("readback-empty", unverified, ReceiptState.UNVERIFIABLE,
+             True, 1),
             # Focus moved before the paste: never attempted.
             ("destination-changed", changed, ReceiptState.CONFLICT, False, 0),
             # The destination could not be read at release: never attempted.
@@ -15080,10 +15091,34 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
                 self.assertEqual(seen.delays, [error])
                 self.assertNotIn("pasted", seen.modes)
                 self.assert_unverified_everywhere(seen)
+                # It is counted as still needing a home, so the window
+                # and the menu keep their recovery treatment for it.
+                self.assertEqual(seen.coordinator.needs_home_count(), 1)
                 record = seen.records[0]
                 self.assertTrue(record.path.startswith("outbox/"))
                 self.assertIs(record.metrics["insertion_verified"], False)
                 self.assertIs(record.metrics["paste_attempted"], attempted)
+                # Every one of these was a destination the runtime reads.
+                self.assertEqual(
+                    record.metrics["insertion_target"], "readable")
+                for key in self.OPAQUE_METRICS:
+                    self.assertIsNone(record.metrics[key])
+
+    def test_a_readable_field_gone_quiet_is_told_apart_by_its_record(self):
+        seen = self.deliver("readback-empty")
+
+        # The private record is enough to find it later: a destination the
+        # runtime could read, a readback that was run, and nothing read.
+        metrics = seen.records[0].metrics
+        self.assertEqual(metrics["insertion_state"], "unverifiable")
+        self.assertEqual(metrics["insertion_reason"], "readback_unavailable")
+        self.assertEqual(metrics["insertion_target"], "readable")
+        self.assertEqual(metrics["insertion_readback"], "available")
+        self.assertIs(metrics["paste_attempted"], True)
+        self.assertEqual(
+            [log for log in seen.logs if log.startswith("[insertion]")],
+            ["[insertion] paste attempted but unverified "
+             "(readback_unavailable); saved in Voice Outbox"])
 
     def test_a_failed_recognition_keeps_the_error(self):
         seen = self.deliver("unchecked", spoken="")
@@ -15161,6 +15196,8 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
             ("conflict", "Paste unverified — check target; saved in Outbox"),
             ("paste-raised",
              "Paste unverified — check target; saved in Outbox"),
+            ("readback-empty",
+             "Paste unverified — check target; saved in Outbox"),
             ("destination-changed",
              "Destination changed — saved in Voice Outbox"),
         ):
@@ -15171,6 +15208,7 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
                 self.assertEqual(seen.statuses, ["err"])
                 self.assertEqual(seen.caption["text"], caption)
                 self.assertEqual(seen.threads, [])
+                self.assertEqual(seen.coordinator.needs_home_count(), 1)
 
         verified = self.deliver("verified", snippet=snippet)
         self.assertEqual(verified.modes, [])
