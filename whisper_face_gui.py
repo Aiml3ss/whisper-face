@@ -41,6 +41,92 @@ SECTIONS = ("Home", "Settings", "Advanced")
 # would cost more than the extra segment does. A seventh row overflows into
 # the notice band, so anything new here has to displace something.
 SETTINGS_PANES = ("Personalize", "Controls", "Privacy")
+
+
+@dataclass(frozen=True)
+class SidebarRow:
+    """One page in the window's sidebar.
+
+    The sidebar is a projection, not a second source of truth: the view
+    model keeps its sections and settings panes, and each row names the
+    (section, pane) it shows. ``pane`` is None for a section that has no
+    panes. ``key`` is the row's stable name for code (title-strip items,
+    tests); ``label_key`` is its catalog string; ``symbol`` its SF Symbol.
+    """
+
+    key: str
+    section: str
+    pane: str | None
+    label_key: str
+    symbol: str
+
+
+# In sidebar order, which is also the order of the Command-1 to Command-5
+# shortcuts. The rows after Home sit under a small "Settings" group label,
+# and Advanced closes that group.
+SIDEBAR_ROWS: tuple[SidebarRow, ...] = (
+    SidebarRow("home", "Home", None, "nav.home", "house"),
+    SidebarRow("personalize", "Settings", "Personalize",
+               "settings.pane.personalize", "face.smiling"),
+    SidebarRow("controls", "Settings", "Controls",
+               "settings.pane.controls", "keyboard"),
+    SidebarRow("privacy", "Settings", "Privacy",
+               "settings.pane.privacy", "hand.raised"),
+    SidebarRow("advanced", "Advanced", None, "nav.advanced",
+               "wrench.and.screwdriver"),
+)
+
+
+def sidebar_row_index(section: str, settings_pane: str) -> int:
+    """The sidebar row that shows this section and settings pane.
+
+    The settings pane only matters inside Settings: the view model keeps the
+    last pane while another section is showing, and that must not move the
+    selection.
+    """
+
+    for index, row in enumerate(SIDEBAR_ROWS):
+        if row.section == section and row.pane in (None, settings_pane):
+            return index
+    raise ValueError(f"no sidebar row shows {section!r} / {settings_pane!r}")
+
+
+def sidebar_row_destination(index: int) -> tuple[str, str | None]:
+    """The (section, settings pane) a sidebar row opens."""
+
+    if not 0 <= index < len(SIDEBAR_ROWS):
+        raise ValueError(f"no sidebar row {index!r}")
+    row = SIDEBAR_ROWS[index]
+    return row.section, row.pane
+
+
+# The one-word state beside the face in the sidebar, and the tone of its
+# dot. Amber is left out on purpose: an amber dot reads as the system's
+# microphone indicator.
+SIDEBAR_STATES: Mapping[str, tuple[str, str]] = {
+    "ready": ("shell.state.ready", "good"),
+    "recording": ("shell.state.recording", "good"),
+    "processing": ("shell.state.processing", "good"),
+    "recovery": ("shell.state.recovery", "attention"),
+    "degraded": ("shell.state.degraded", "attention"),
+    "paused": ("shell.state.paused", "quiet"),
+    "starting": ("shell.state.starting", "quiet"),
+}
+SIDEBAR_STATE_SETUP = ("shell.state.setup", "quiet")
+
+
+def sidebar_state(status_phase: str, *, setting_up: bool) -> tuple[str, str]:
+    """Catalog key and dot tone for the sidebar's state line.
+
+    First-run setup outranks the runtime phase: until it is finished the
+    honest one-word answer is "Setting up", whatever the service reports.
+    """
+
+    if setting_up:
+        return SIDEBAR_STATE_SETUP
+    return SIDEBAR_STATES.get(status_phase, SIDEBAR_STATES["starting"])
+
+
 MODE_GUIDE = ("capture", "compose", "edit", "reply", "command", "code")
 TONE_CHOICES = ("auto", "casual", "formal", "code", "verbatim", "default")
 SOUND_THEMES = ("system", "whisper", "silent")
@@ -952,6 +1038,19 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "diagnostics.notice.support_snapshot.copied": "Transcript-free support snapshot copied",
 
         # --- new look: shell
+
+        "shell.sidebar.accessibility.label": "Whisper Face pages",
+        "shell.sidebar.group.settings": "Settings",
+        "shell.state.accessibility.label": "Whisper Face status",
+        "shell.state.ready": "Ready",
+        "shell.state.recording": "Listening",
+        "shell.state.processing": "Working",
+        "shell.state.recovery": "Recoverable",
+        "shell.state.degraded": "Needs attention",
+        "shell.state.paused": "Paused",
+        "shell.state.starting": "Starting",
+        "shell.state.setup": "Setting up",
+        "menu.view": "View",
 
         # --- new look: pages
 
@@ -4968,6 +5067,30 @@ class WhisperFaceViewModel:
     def set_verification(self, status: str) -> GUIState:
         self._carry(replace(self.state, verification=status))
         return self.state
+
+
+def select_sidebar_row(model: WhisperFaceViewModel, index: int) -> GUIState:
+    """Show the page behind one sidebar row, through the view model.
+
+    Uses only ``select_settings_pane`` and ``select_section``, and keeps what
+    each did when the window had separate section and pane controls:
+
+    - Moving between two settings panes only selects the pane. Settings are
+      not read again, exactly as with the old pane switch.
+    - Arriving in a section, or choosing the row that is already showing,
+      selects the section, which for Settings reads the private settings.
+      The pane is chosen first so that a failure to read them is the notice
+      left on screen, not cleared by the pane selection after it.
+    """
+
+    section, pane = sidebar_row_destination(index)
+    state = model.state
+    reselected = sidebar_row_index(state.section, state.settings_pane) == index
+    if pane is not None:
+        model.select_settings_pane(pane)
+    if state.section != section or reselected:
+        model.select_section(section)
+    return model.state
 
 
 def sync_accessibility(view: Any, value: str, *, label: str = "") -> None:
@@ -11647,8 +11770,11 @@ __all__ = [
     "RevealedVoiceDraft",
     "SECTIONS",
     "SETTINGS_PANES",
+    "SIDEBAR_ROWS",
+    "SIDEBAR_STATES",
     "STRING_CATALOGS",
     "SUPPORTED_LOCALES",
+    "SidebarRow",
     "SnippetSetting",
     "StageTiming",
     "UnifiedSettings",
@@ -11673,6 +11799,10 @@ __all__ = [
     "normalize_settings",
     "run_native_appkit_smoke",
     "resolve_locale",
+    "select_sidebar_row",
+    "sidebar_row_destination",
+    "sidebar_row_index",
+    "sidebar_state",
     "result_evidence_text",
     "support_snapshot_text",
     "tone_for_app_index",

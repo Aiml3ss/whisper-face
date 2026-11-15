@@ -9,6 +9,7 @@ import json
 import sys
 import ast
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,9 +27,15 @@ from whisper_face_gui import (
     RISKY_ACTION_CLASSES,
     SECTIONS,
     SETTINGS_PANES,
+    SIDEBAR_ROWS,
+    SIDEBAR_STATES,
     STRING_CATALOGS,
     SUPPORTED_LOCALES,
     WhisperFaceViewModel,
+    select_sidebar_row,
+    sidebar_row_destination,
+    sidebar_row_index,
+    sidebar_state,
     correction_review_text,
     create_gui,
     localized_string,
@@ -3491,8 +3498,12 @@ class NewLookFoundationContractTests(unittest.TestCase):
         self.assertEqual(lines[closing + 1],
                          "SUPPORTED_LOCALES = tuple(STRING_CATALOGS)")
         self.assertEqual(SUPPORTED_LOCALES, ("en",))
-        # Reserving the places added no string.
-        for line in lines[positions[0]:closing]:
+        # The shell lane has filled its place; the two after it are still
+        # only reserved, so nothing follows their markers yet.
+        self.assertTrue(any(
+            line.strip().startswith('"shell.')
+            for line in lines[positions[0]:positions[1]]))
+        for line in lines[positions[1]:closing]:
             self.assertFalse(line.strip().startswith('"'), line)
 
     RENDER_ORDER = [
@@ -3530,6 +3541,162 @@ class NewLookFoundationContractTests(unittest.TestCase):
              "_build_settings_privacy"])
         self.assertEqual(SETTINGS_PANES, ("Personalize", "Controls",
                                           "Privacy"))
+
+
+class ShellNavigationTests(unittest.TestCase):
+    """The sidebar as a projection of the view model, checked headlessly."""
+
+    def test_five_rows_in_sidebar_order(self):
+        self.assertEqual(
+            [(row.key, row.section, row.pane) for row in SIDEBAR_ROWS],
+            [("home", "Home", None),
+             ("personalize", "Settings", "Personalize"),
+             ("controls", "Settings", "Controls"),
+             ("privacy", "Settings", "Privacy"),
+             ("advanced", "Advanced", None)])
+        for row in SIDEBAR_ROWS:
+            with self.subTest(row=row.key):
+                self.assertIn(row.section, SECTIONS)
+                self.assertTrue(row.pane is None or row.pane in SETTINGS_PANES)
+                self.assertIn(row.label_key, STRING_CATALOGS["en"])
+                self.assertTrue(row.symbol)
+        # One row per settings pane, and one for each section without panes.
+        self.assertEqual(
+            [row.pane for row in SIDEBAR_ROWS if row.section == "Settings"],
+            list(SETTINGS_PANES))
+        self.assertEqual(
+            len({row.symbol for row in SIDEBAR_ROWS}), len(SIDEBAR_ROWS))
+
+    def test_row_to_destination_and_back(self):
+        for index, row in enumerate(SIDEBAR_ROWS):
+            with self.subTest(row=row.key):
+                section, pane = sidebar_row_destination(index)
+                self.assertEqual((section, pane), (row.section, row.pane))
+                self.assertEqual(
+                    sidebar_row_index(section, pane or SETTINGS_PANES[0]),
+                    index)
+
+    def test_every_state_the_view_model_can_hold_has_exactly_one_row(self):
+        seen = set()
+        for section in SECTIONS:
+            for pane in SETTINGS_PANES:
+                with self.subTest(section=section, pane=pane):
+                    index = sidebar_row_index(section, pane)
+                    self.assertEqual(
+                        sidebar_row_destination(index),
+                        (section, pane if section == "Settings" else None))
+                    seen.add(index)
+        self.assertEqual(seen, set(range(len(SIDEBAR_ROWS))))
+
+    def test_the_remembered_pane_does_not_move_the_selection_elsewhere(self):
+        # The view model keeps the last settings pane while Home or
+        # Advanced is showing.
+        for pane in SETTINGS_PANES:
+            self.assertEqual(sidebar_row_index("Home", pane), 0)
+            self.assertEqual(sidebar_row_index("Advanced", pane), 4)
+
+    def test_unknown_rows_and_destinations_are_errors(self):
+        for index in (-1, len(SIDEBAR_ROWS), 99):
+            with self.assertRaises(ValueError):
+                sidebar_row_destination(index)
+        with self.assertRaises(ValueError):
+            sidebar_row_index("Nowhere", "Personalize")
+        with self.assertRaises(ValueError):
+            sidebar_row_index("Settings", "Nowhere")
+
+    def model(self, reads, *, fail=False):
+        def settings_snapshot():
+            reads.append(True)
+            if fail:
+                raise OSError("disk says no")
+            return {}
+
+        return WhisperFaceViewModel(GUIActions(
+            status_snapshot=lambda: {},
+            settings_snapshot=settings_snapshot))
+
+    def test_selecting_a_row_goes_through_the_view_model(self):
+        reads = []
+        model = self.model(reads)
+        for index, row in enumerate(SIDEBAR_ROWS):
+            with self.subTest(row=row.key):
+                state = select_sidebar_row(model, index)
+                self.assertIs(state, model.state)
+                self.assertEqual(state.section, row.section)
+                if row.pane is not None:
+                    self.assertEqual(state.settings_pane, row.pane)
+                self.assertEqual(
+                    sidebar_row_index(state.section, state.settings_pane),
+                    index)
+        # Walking back up shows the same pages.
+        for index in reversed(range(len(SIDEBAR_ROWS))):
+            select_sidebar_row(model, index)
+            self.assertEqual(
+                sidebar_row_index(
+                    model.state.section, model.state.settings_pane), index)
+
+    def test_settings_are_read_on_arrival_not_between_panes(self):
+        reads = []
+        model = self.model(reads)
+        select_sidebar_row(model, 1)       # Home -> Personalize: arrival
+        self.assertEqual(len(reads), 1)
+        select_sidebar_row(model, 2)       # Personalize -> Controls
+        select_sidebar_row(model, 3)       # Controls -> Privacy
+        self.assertEqual(len(reads), 1)
+        select_sidebar_row(model, 3)       # the showing row again: refresh
+        self.assertEqual(len(reads), 2)
+        select_sidebar_row(model, 4)       # Advanced reads nothing
+        select_sidebar_row(model, 0)
+        self.assertEqual(len(reads), 2)
+        select_sidebar_row(model, 2)       # arrival again, straight to a pane
+        self.assertEqual(len(reads), 3)
+        self.assertEqual(model.state.settings_pane, "Controls")
+
+    def test_selecting_a_row_clears_the_last_notice(self):
+        model = self.model([])
+        for index in range(len(SIDEBAR_ROWS)):
+            with self.subTest(row=SIDEBAR_ROWS[index].key):
+                model.state = replace(
+                    model.state, notice="stale", notice_level="success")
+                select_sidebar_row(model, index)
+                self.assertEqual(model.state.notice, "")
+                self.assertEqual(model.state.notice_level, "info")
+
+    def test_a_failed_settings_read_stays_on_screen_in_the_chosen_pane(self):
+        model = self.model([], fail=True)
+        select_sidebar_row(model, 2)
+        self.assertEqual(model.state.section, "Settings")
+        self.assertEqual(model.state.settings_pane, "Controls")
+        self.assertEqual(model.state.notice_level, "error")
+        self.assertIn("disk says no", model.state.notice)
+
+    def test_every_runtime_phase_has_a_one_or_two_word_state(self):
+        phases = {
+            "ready", "recording", "processing", "recovery", "degraded",
+            "paused", "starting"}
+        self.assertEqual(set(SIDEBAR_STATES), phases)
+        for phase in phases:
+            with self.subTest(phase=phase):
+                key, tone = sidebar_state(phase, setting_up=False)
+                self.assertLessEqual(
+                    len(localized_string(key).split()), 2)
+                self.assertIn(tone, ("good", "attention", "quiet"))
+                # First-run setup outranks whatever the service reports.
+                self.assertEqual(
+                    sidebar_state(phase, setting_up=True),
+                    ("shell.state.setup", "quiet"))
+        self.assertEqual(localized_string("shell.state.ready"), "Ready")
+        self.assertEqual(localized_string("shell.state.paused"), "Paused")
+        self.assertEqual(localized_string("shell.state.setup"), "Setting up")
+        self.assertEqual(sidebar_state("ready", setting_up=False)[1], "good")
+        self.assertEqual(
+            sidebar_state("degraded", setting_up=False)[1], "attention")
+        # A phase the window has never heard of is not reported as ready.
+        self.assertEqual(
+            sidebar_state("mystery", setting_up=False),
+            SIDEBAR_STATES["starting"])
+        # Model snapshots really produce these phases.
+        self.assertIn(normalize_snapshot({}).status_phase, phases)
 
 
 @unittest.skipUnless(
