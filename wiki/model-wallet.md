@@ -3,7 +3,7 @@ title: "Model Wallet"
 type: concept
 language: en
 created: 2026-07-26
-modified: 2026-07-26
+modified: 2026-11-15
 tags: [models, routing, evidence, foundation]
 aliases: [model-readiness-evidence, model-wallet-shadow]
 summary: "A provider-neutral routing policy over the four pinned models — deliberately not wired to live routing, with filesystem evidence capped below readiness and a fail-closed shadow advisory."
@@ -43,9 +43,11 @@ deliberately withheld.
   readiness/capability/routing authority stay false. Bounded traversal,
   symlink containment, no paths in receipts.
 - The window labels all of this as a shadow advisory with no execution or
-  routing. Since 2026-07-26 that label sits on **Advanced**, above the
-  four model rows and their readiness pills — the Models and Diagnostics
-  panes merged into one section ([[app-window]]).
+  routing. Since 2026-07-26 that label sits on **Advanced**, with the
+  four model rows and their readiness states — the Models and Diagnostics
+  panes merged into one section ([[app-window]]). Since November 2026 it
+  is a note under the Models group, and each row states its readiness as
+  a word with a symbol.
 
 ## Related Concepts
 

@@ -310,20 +310,22 @@ actually saw for anything that is not `observed-as-described`.
    completes without a single undocumented step.
 2. On first launch, record whether the app asks for **microphone** access, and
    whether the panel shows the Whisper Face icon and name.
-3. Record whether it asks for **Accessibility** access, and whether the
-   Overview's status changes on its own after you grant it, without a restart.
-4. From Overview, use the one accessible action that opens System Settings.
-   Record whether it opens the generic pane without changing a grant, and
-   whether the visible status refreshes when you come back.
+3. Record whether it asks for **Accessibility** access, and whether
+   first-run setup's Accessibility row turns to a check mark on its own after
+   you grant it, without a restart.
+4. In first-run setup, use a missing permission's **Open System Settings**
+   button. Record whether it opens that permission's own Privacy & Security
+   pane without changing a grant, and whether the row refreshes when you come
+   back.
 5. Record the **model** step: which model is downloaded, how long it takes, and
    whether the status is accurate while it downloads.
 6. Complete the **hotkey practice** step. Record whether it completes only
    after a capture is actually observed, not merely after a keypress.
 7. Perform your **first dictation** into TextEdit. Record whether the intended
    text appears, and how long from first launch to that moment.
-8. Run the whole thing again with VoiceOver on. Record whether every Overview
-   control has a label that says what it does, and whether Tab order reaches
-   all of them.
+8. Run the whole thing again with VoiceOver on. Record whether every control
+   in first-run setup and on Home has a label that says what it does, and
+   whether Tab order reaches all of them.
 9. Restart the Mac. Record whether dictation works after login without any
    manual step.
 10. Record the completion acknowledgement: does the app tell you onboarding is
