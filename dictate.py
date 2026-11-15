@@ -9926,8 +9926,7 @@ AX_VALUE_KINDS = frozenset(
 OPAQUE_DESTINATION_REASONS = frozenset({
     "no-focused-element",       # Accessibility named no focused element
     "value-unreadable",         # its value is missing or is not plain text
-    "selection-unreadable",     # text, but no usable selection range
-    "selection-outside-text",   # a range that does not fit the text
+    "selection-outside-text",   # text, and a range that does not fit it
 })
 AX_ROLE_NAME_RE = re.compile(r"AX[A-Za-z]{1,40}\Z")
 
@@ -9997,22 +9996,27 @@ def _ax_focused_element_read():
 
 def opaque_destination_evidence(snapshot: FocusSnapshot | None,
                                 lease: InsertionLease | None, *,
-                                read=None, focused=None,
-                                reported_range=None) -> dict | None:
+                                read=None, focused=None) -> dict | None:
     """Why this destination got an opaque lease, in categories only.
 
     None for a readable destination, which needs no explanation. The reason
     comes from the same snapshot the lease was decided on; the kinds name
     what the focused element, its value and its selection range each
-    answered, and the role and subrole say what kind of element it is. The
-    reads repeat ones the snapshot already made and keep only a category,
-    and they change nothing about what counts as readable.
+    answered, and the role and subrole say what kind of element it is.
+
+    What the snapshot already settled is not read again, because this runs
+    on the hotkey worker as a dictation begins: a value the snapshot read
+    as text is a string, and a selection it kept, or dropped from a field
+    whose text it did read, was a range. (With text in hand the snapshot
+    drops a selection only when the reported range does not fit that
+    text; with none reported it places the cursor at the end.) Only an
+    answer the snapshot could not use is asked for once more, and only
+    its category is kept. Nothing here changes what counts as readable.
     """
     if lease is None or not lease.opaque:
         return None
     read = read or _ax_attribute_read
     focused = focused or _ax_focused_element_read
-    reported_range = reported_range or _ax_reported_range
     evidence = {
         "reason": "no-focused-element", "focus": "none", "role": None,
         "subrole": None, "value": None, "selection": None}
@@ -10021,18 +10025,18 @@ def opaque_destination_evidence(snapshot: FocusSnapshot | None,
             evidence["focus"] = ax_value_kind(*focused())
             return evidence
         evidence["focus"] = "element"
-        if snapshot.text is None:
-            evidence["reason"] = "value-unreadable"
-        elif snapshot.selection is None:
-            evidence["reason"] = "selection-unreadable"
-        else:
-            evidence["reason"] = "selection-outside-text"
+        has_text = snapshot.text is not None
+        has_range = has_text or snapshot.selection is not None
+        evidence["reason"] = (
+            "selection-outside-text" if has_text else "value-unreadable")
         element = snapshot.element
         evidence["role"] = ax_role_name(read(element, "AXRole")[1])
         evidence["subrole"] = ax_role_name(read(element, "AXSubrole")[1])
-        evidence["value"] = ax_value_kind(*read(element, "AXValue"))
+        evidence["value"] = (
+            "string" if has_text
+            else ax_value_kind(*read(element, "AXValue")))
         evidence["selection"] = (
-            "range" if reported_range(element) is not None
+            "range" if has_range
             else ax_value_kind(*read(element, "AXSelectedTextRange")))
     except Exception:
         # A diagnostic may never cost a dictation; what it has is kept.

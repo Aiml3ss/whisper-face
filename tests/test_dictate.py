@@ -14968,8 +14968,7 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
                         "AXValue": (-25212, None),
                         "AXSelectedTextRange": (-25205, None),
                     }[attribute],
-                    focused=lambda: (0, element),
-                    reported_range=lambda _element: None)
+                    focused=lambda: (0, element))
                 if is_macos else None),
             focus_at_press=at_press if is_macos else None,
             input_signature_at_press=None,
@@ -15279,17 +15278,19 @@ class OpaqueDestinationEvidenceTests(unittest.TestCase):
             extra={"dataclass": dataclass})
 
     def evidence(self, ns, snapshot, *, answers=None, focused=(0, object()),
-                 reported=None, opaque=True):
+                 opaque=True, calls=None):
         lease = (InsertionLease.capture_opaque("u1", "bundle:1", "context")
                  if opaque else InsertionLease.capture(
                      "u1", "bundle:1", (0, 0), "context"))
         answers = answers or {}
+
+        def read(_element, attribute):
+            if calls is not None:
+                calls.append(attribute)
+            return answers.get(attribute, (-25205, None))
+
         return ns["opaque_destination_evidence"](
-            snapshot, lease,
-            read=lambda _element, attribute: answers.get(
-                attribute, (-25205, None)),
-            focused=lambda: focused,
-            reported_range=lambda _element: reported)
+            snapshot, lease, read=read, focused=lambda: focused)
 
     def test_a_readable_destination_has_nothing_to_explain(self):
         ns = self._ns()
@@ -15305,53 +15306,104 @@ class OpaqueDestinationEvidenceTests(unittest.TestCase):
         element = object()
         cases = (
             # No focused element at all, and what the system said instead.
-            (None, {}, (-25204, None), None, {
+            (None, {}, (-25204, None), {
                 "reason": "no-focused-element", "focus": "cannot-complete",
                 "role": None, "subrole": None, "value": None,
-                "selection": None}),
-            (None, {}, (-25211, None), None, {
+                "selection": None}, []),
+            (None, {}, (-25211, None), {
                 "reason": "no-focused-element", "focus": "api-disabled",
                 "role": None, "subrole": None, "value": None,
-                "selection": None}),
+                "selection": None}, []),
             # An element whose value is absent: empty, or not offered.
             (snapshot(element=element, text=None, selection=None),
              {"AXRole": (0, "AXTextArea"), "AXValue": (-25212, None)},
-             (0, element), None, {
+             (0, element), {
                 "reason": "value-unreadable", "focus": "element",
                 "role": "AXTextArea", "subrole": "none",
-                "value": "no-value", "selection": "unsupported"}),
+                "value": "no-value", "selection": "unsupported"},
+             ["AXRole", "AXSubrole", "AXValue", "AXSelectedTextRange"]),
             # A value of a type the runtime does not read as text, and a
-            # selection it does report.
+            # selection range it did report: the range is not asked for
+            # again.
             (snapshot(element=element, text=None, selection=(3, 0)),
              {"AXRole": (0, "AXGroup"), "AXSubrole": (0, "AXContentList"),
               "AXValue": (0, 7)},
-             (0, element), (3, 0), {
+             (0, element), {
                 "reason": "value-unreadable", "focus": "element",
                 "role": "AXGroup", "subrole": "AXContentList",
-                "value": "number", "selection": "range"}),
-            # Text, and a range that does not fit it.
+                "value": "number", "selection": "range"},
+             ["AXRole", "AXSubrole", "AXValue"]),
+            # A selection that is there and is not a usable range.
+            (snapshot(element=element, text=None, selection=None),
+             {"AXRole": (0, "AXWebArea"), "AXValue": (0, None),
+              "AXSelectedTextRange": (0, {"start": 1})},
+             (0, element), {
+                "reason": "value-unreadable", "focus": "element",
+                "role": "AXWebArea", "subrole": "none",
+                "value": "none", "selection": "dictionary"},
+             ["AXRole", "AXSubrole", "AXValue", "AXSelectedTextRange"]),
+            # Text, and a reported range that does not fit it. That is the
+            # only way the snapshot keeps text and drops the selection, so
+            # neither is read a second time.
             (snapshot(element=element, text="Hi", selection=None),
-             {"AXRole": (0, "AXTextField"), "AXValue": (0, "Hi")},
-             (0, element), (40, 2), {
-                "reason": "selection-unreadable", "focus": "element",
-                "role": "AXTextField", "subrole": "none",
-                "value": "string", "selection": "range"}),
-            (snapshot(element=element, text="Hi", selection=(9, 0)),
-             {"AXRole": (0, "AXTextField"), "AXValue": (0, "Hi")},
-             (0, element), (9, 0), {
+             {"AXRole": (0, "AXTextField"),
+              "AXValue": (0, "never asked for"),
+              "AXSelectedTextRange": (0, "never asked for")},
+             (0, element), {
                 "reason": "selection-outside-text", "focus": "element",
                 "role": "AXTextField", "subrole": "none",
-                "value": "string", "selection": "range"}),
+                "value": "string", "selection": "range"},
+             ["AXRole", "AXSubrole"]),
+            (snapshot(element=element, text="Hi", selection=(9, 0)),
+             {"AXRole": (0, "AXTextField")},
+             (0, element), {
+                "reason": "selection-outside-text", "focus": "element",
+                "role": "AXTextField", "subrole": "none",
+                "value": "string", "selection": "range"},
+             ["AXRole", "AXSubrole"]),
         )
-        for at_press, answers, focused, reported, expected in cases:
+        for at_press, answers, focused, expected, asked in cases:
             with self.subTest(expected=expected["reason"],
-                              value=expected["value"]):
+                              value=expected["value"],
+                              selection=expected["selection"]):
+                calls = []
                 got = self.evidence(
                     ns, at_press, answers=answers, focused=focused,
-                    reported=reported)
+                    calls=calls)
                 self.assertEqual(got, expected)
                 self.assertIn(
                     got["reason"], ns["OPAQUE_DESTINATION_REASONS"])
+                # Nothing the snapshot already settled is read again as a
+                # dictation begins.
+                self.assertEqual(calls, asked)
+
+    def test_every_reason_it_can_give_is_one_it_does_give(self):
+        ns = self._ns()
+        # A label nothing can produce would send whoever reads the record
+        # looking for a case that does not exist.
+        self.assertEqual(ns["OPAQUE_DESTINATION_REASONS"], {
+            "no-focused-element", "value-unreadable",
+            "selection-outside-text"})
+        function = next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "opaque_destination_evidence")
+        given = {
+            node.value for node in ast.walk(function)
+            if isinstance(node, ast.Constant)
+            and node.value in ns["OPAQUE_DESTINATION_REASONS"]}
+        self.assertEqual(given, ns["OPAQUE_DESTINATION_REASONS"])
+        # The snapshot is what makes "text and no selection" mean a range
+        # that does not fit: with text and no range reported it places the
+        # cursor at the end instead.
+        selection = ast.unparse(next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_ax_selection"))
+        self.assertIn(
+            "return utf16_range_to_code_points(text, reported)", selection)
+        self.assertIn(
+            "return (len(text), 0) if text is not None else None", selection)
 
     def test_values_are_named_by_kind_from_a_closed_set(self):
         ns = self._ns()
@@ -15472,8 +15524,7 @@ class OpaqueDestinationEvidenceTests(unittest.TestCase):
             return 0, "AXTextArea"
 
         got = ns["opaque_destination_evidence"](
-            snapshot, lease, read=read, focused=lambda: (0, object()),
-            reported_range=lambda _element: None)
+            snapshot, lease, read=read, focused=lambda: (0, object()))
 
         self.assertEqual(got["reason"], "value-unreadable")
         self.assertEqual(got["role"], "AXTextArea")
