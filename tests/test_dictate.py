@@ -3357,7 +3357,7 @@ class RecordingOverlayTests(unittest.TestCase):
         self.assertNotIn("colorWithCalibratedRed", source)
         self.assertIn("colorWithSRGBRed_green_blue_alpha_", source)
 
-    def test_smoke_covers_every_state(self):
+    def test_smoke_covers_every_state_and_the_probe_can_ask_for_frames(self):
         ns = load_definitions(
             assignments={"HUD_SMOKE_STATES", "HUD_FRAMES_ENV"})
         states = ns["HUD_SMOKE_STATES"]
@@ -3373,6 +3373,10 @@ class RecordingOverlayTests(unittest.TestCase):
             "listening", "mode", "heard", "heard-long", "working",
             "uncertain", "done", "error"])
         self.assertTrue(any(len(state[2]) > 72 for state in states))
+        probe = (ROOT / "scripts" / "window_render_probe.py").read_text(
+            encoding="utf-8")
+        self.assertIn(f'HUD_FRAMES_ENV = "{ns["HUD_FRAMES_ENV"]}"', probe)
+        self.assertIn('"--native-gui-smoke-test"', probe)
 
 
 class SelectiveRelistenPreferenceTests(unittest.TestCase):
