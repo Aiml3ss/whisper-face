@@ -432,6 +432,41 @@ class FreshInstallDictationTests(unittest.TestCase):
         self.assertEqual(typed(spoken),
                          "Of course I can. I have nothing going on")
 
+    def test_the_repeat_repair_does_not_run_again_on_the_model_text(self):
+        # The optional cleanup model may change punctuation alone, and the
+        # voice compiler accepts that because the words stay the same. A
+        # full stop the speaker said between two copies, turned into a
+        # comma, must not let a copy be deleted after the model, where no
+        # record would show it.
+        mac = booted()
+        dictate = mac.dictate
+        spoken = "I want to. I want to ask you something, you know."
+        asked = []
+
+        def model(text, tone, mode="capture", context=None):
+            asked.append(text)
+            out = text.replace("to. I want", "to, I want")
+            edits = [dictate.CleanupEdit(
+                "punctuation", "to. I want", "to, I want")] \
+                if out != text else []
+            return out, edits
+
+        saved = (dictate.llm_clean_with_edits,
+                 dictate.delayed_cleanup_scheduling_enabled)
+        dictate.llm_clean_with_edits = model
+        dictate.delayed_cleanup_scheduling_enabled = lambda: False
+        try:
+            field = mac.dictate_sentence(
+                spoken, field=TextField(bundle="com.apple.TextEdit"))
+        finally:
+            (dictate.llm_clean_with_edits,
+             dictate.delayed_cleanup_scheduling_enabled) = saved
+        self.assertEqual(asked, [spoken])
+        self.assertEqual(
+            field.text, "I want to, I want to ask you something, you know.")
+        self.assertEqual(dictate.PIPELINE_STATE["last_cleanup_edits"],
+                         ["proof:punctuation"])
+
     def test_a_recognizer_stuck_on_one_word_is_cut_short(self):
         mac = booted()
         field = mac.dictate_sentence(

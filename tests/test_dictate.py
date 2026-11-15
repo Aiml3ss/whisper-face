@@ -12526,6 +12526,47 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
         namespace["PREFERENCES"]["self_correction"] = True
         self.assertEqual(propose(), "The invoice says 450.")
 
+    def test_delayed_proposal_does_not_repair_repeats_again(self):
+        # The model turns the full stop the speaker said into a comma; the
+        # words are unchanged, so the proof accepts it. The repeat repair
+        # ran before the model and must not run on its text: the typed text
+        # keeps both copies.
+        compiled = "I want to. I want to ask you something."
+        namespace = load_definitions(
+            "build_delayed_cleanup_proposal", "quick_clean",
+            extra={
+                "VOICE_COMPILER": VoiceCompiler(),
+                "EditProposal": EditProposal,
+                "llm_clean_with_edits": lambda *_args: (
+                    "I want to, I want to ask you something.",
+                    (SimpleNamespace(
+                        kind="punctuation",
+                        before="to. I want", after="to, I want"),),
+                ),
+                "compile_cleanup": compile_cleanup,
+                "LANGUAGE_DEFAULT": "en",
+                "strip_casual_period": lambda text: text,
+                "apply_vocabulary_casing": lambda text: text,
+                "_restore_snippet_sentinels": lambda text, _restore: text,
+            },
+        )
+        namespace["PREFERENCES"]["remove_repeats"] = True
+        voice_ir = SimpleNamespace(context=SimpleNamespace(candidates=()))
+        self.assertEqual(
+            namespace["build_delayed_cleanup_proposal"](
+                compiled, "tone", voice_ir, continuing=False,
+                context_tail="", context_text=None, tone_key="default",
+                snippet_restore={}),
+            "I want to, I want to ask you something.")
+        # quick_clean still follows the preference when not told otherwise.
+        self.assertEqual(
+            namespace["quick_clean"]("I want to, I want to ask you."),
+            "I want to ask you.")
+        self.assertEqual(
+            namespace["quick_clean"]("I want to, I want to ask you.",
+                                     remove_repeats=False),
+            "I want to, I want to ask you.")
+
     def test_delayed_proposal_keeps_a_word_that_starts_with_the_field(self):
         class Compiler:
             def verify_edits(self, original, proposals, candidates, *, mode,
@@ -12591,6 +12632,33 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
             "load_delayed_cleanup_activation()",
             ast.get_source_segment(source, main),
         )
+
+    def test_repeats_are_repaired_once_before_the_model_and_never_in_code(
+            self):
+        # The model's proof text, now and delayed, is finished without the
+        # repeat repair; code mode's alternatives never get it.
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        calls = {}
+        for name in ("finish_and_process", "build_delayed_cleanup_proposal"):
+            function = next(
+                node for node in TREE.body
+                if isinstance(node, ast.FunctionDef) and node.name == name)
+            for node in ast.walk(function):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == "quick_clean"):
+                    first = ast.get_source_segment(source, node.args[0])
+                    keywords = {
+                        keyword.arg: ast.get_source_segment(
+                            source, keyword.value)
+                        for keyword in node.keywords}
+                    calls.setdefault(first, []).append(keywords)
+        self.assertEqual(len(calls["proof.text"]), 2)
+        for keywords in calls["proof.text"]:
+            self.assertEqual(keywords.get("remove_repeats"), "False")
+        (alternative,) = calls["candidate"]
+        self.assertIn('rec.mode != "code"',
+                      alternative.get("remove_repeats", ""))
 
 
 class ReadbackEdgeWhitespaceTests(unittest.TestCase):

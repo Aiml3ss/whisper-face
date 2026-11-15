@@ -11414,13 +11414,25 @@ def strip_context_echo(text: str, context_tail: str) -> str:
 
 def quick_clean(text: str, verbatim: bool = False,
                 continuing: bool = False,
-                language: str = LANGUAGE_DEFAULT) -> str:
+                language: str = LANGUAGE_DEFAULT,
+                remove_repeats: bool | None = None) -> str:
+    """Deterministic finish: the cleanup compiler, then English casing.
+
+    ``remove_repeats`` follows the preference unless the caller says
+    otherwise. Text that comes back from the cleanup model passes False:
+    the repair already ran before the model saw the text, and run again on
+    the model's punctuation (a full stop turned into a comma) it would
+    delete a phrase the speaker ended a sentence after, with nothing in the
+    record to say so.
+    """
     t = text.strip()
     if verbatim or not t:
         return t
     language = str(language or "").strip().casefold() or LANGUAGE_DEFAULT
+    if remove_repeats is None:
+        remove_repeats = PREFERENCES["remove_repeats"]
     t = compile_cleanup(t, language, PREFERENCES["self_correction"],
-                        PREFERENCES["remove_repeats"]).text
+                        remove_repeats).text
     if not t:
         return ""
     if language != "en":
@@ -11613,8 +11625,9 @@ def build_delayed_cleanup_proposal(
     )
     if proof.text != candidate:
         return None
+    # The repair of a phrase said twice ran before the model saw the text.
     text = quick_clean(
-        proof.text, continuing=continuing)
+        proof.text, continuing=continuing, remove_repeats=False)
     if tone_key == "casual":
         text = strip_casual_period(text)
     text = apply_vocabulary_casing(text)
@@ -13214,9 +13227,11 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                     semantic_edits = [CleanupEdit(
                         f"proof:{edit.kind}", edit.before, edit.after)
                         for edit in proof_edits if edit.accepted]
+                    # The repeat repair ran on ``compiled``, before the
+                    # model; it does not run again on the model's text.
                     text = proof.text if rec.mode == "code" else quick_clean(
                         proof.text, verbatim=verbatim, continuing=continuing,
-                        language=rec.language)
+                        language=rec.language, remove_repeats=False)
                 else:
                     print("! LLM proof edits did not reconstruct its output; "
                           "pasting deterministic cleanup")
@@ -13282,8 +13297,11 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             cleaned_alternatives = []
             for alternative in PIPELINE_STATE["last_alternatives"]:
                 candidate = apply_learned_fixes(alternative, bundle)
+                # Code mode keeps a repeated token in its alternatives too.
                 candidate = quick_clean(
-                    candidate, verbatim=verbatim, language=rec.language)
+                    candidate, verbatim=verbatim, language=rec.language,
+                    remove_repeats=(PREFERENCES["remove_repeats"]
+                                    and rec.mode != "code"))
                 if tone_key == "casual" and not verbatim:
                     candidate = strip_casual_period(candidate, rec.language)
                 if candidate and candidate != text:
