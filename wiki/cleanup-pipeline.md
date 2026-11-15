@@ -60,6 +60,18 @@ through validated [[proof-edit]]s.
 - **A word said a few times is kept**: `collapse_repeats` cuts only a
   run of eight or more of one word (a decode loop), so "very, very, very
   good" is typed whole.
+- **A phrase said twice by accident is typed once** (November 2026): the
+  preference `remove_repeats` (default true; Settings → Controls →
+  Repeated words) passes into `compile_cleanup`, whose
+  `parrot_core.find_restart` removes the first copy of a restart ("I have
+  nothing I have nothing going on" → "I have nothing going on") and
+  records a `remove_repeat` edit. It runs once, before the model: the
+  model's proof text, now and delayed, is finished with
+  `quick_clean(..., remove_repeats=False)`, because a model that turns a
+  spoken full stop into a comma would otherwise let a copy be deleted with
+  no record. Code mode, verbatim apps and other languages are never
+  repaired; anything said three times is kept. The full rule and its lists
+  are in `docs/capabilities.md`.
 - **Snippet masking**: inline snippets fire only on the spoken cue
   "insert my <name>" (never on a bare snippet name, never when the cue is
   negated as in "do not insert my email", and never for a value still

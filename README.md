@@ -172,11 +172,12 @@ are never Supporter-only features.
   A phrase said twice by accident is typed once, **on by default**: "I have
   nothing I have nothing going on" becomes "I have nothing going on". Only a
   restart is repaired: three or more words said twice where the sentence goes
-  on, two words that open like a restart ("in the in the morning", "we can we
-  can do it"), or one of a few small words nobody doubles on purpose ("the
-  the", "I I"). Anything said three times, across a sentence end, in
-  quotation marks or made of numbers stays as spoken, and so do code mode and
-  verbatim apps. Turn it off under Settings → Controls → **Repeated words**
+  on, two words that open like a restart ("in the in the morning", "can you
+  can you hear me"), or one of a few small words nobody doubles on purpose
+  ("the the", "I I"). Anything said three times, across a sentence end, in
+  quotation marks, after "she sang" or "he said", or made of numbers, letters
+  or a list stays as spoken, and so does a phrase repeated after a comma
+  ("I'm sorry, I'm sorry"), as do code mode and verbatim apps. Turn it off under Settings → Controls → **Repeated words**
   (on Windows, set `"remove_repeats": false` in `preferences.json` and
   restart).
   Safe edits are compiled

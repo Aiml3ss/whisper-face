@@ -106,22 +106,35 @@ Qwen3.5-4B, and has no Parakeet.
 - **Restart repair (on by default).** A phrase said twice in a row by
   accident is typed once: "I have nothing I have nothing going on" becomes
   "I have nothing going on". The rule (`parrot_core.find_restart`) is
-  deterministic and English-only, and runs before the optional cleanup model
-  sees the text; each repair is recorded as a `remove_repeat` cleanup edit.
+  deterministic and English-only, and runs once, before the optional cleanup
+  model sees the text; it does not run again on the model's text. Each
+  repair is recorded as a `remove_repeat` cleanup edit.
   Three or more words said twice are repaired where the sentence goes on
-  after them; two words only when they open like a restart (a subject
-  pronoun or its contraction, an article or a preposition: "we can we can do
-  it", "in the in the morning") and the sentence goes straight on; one word
-  only from `i`, `the`, `a`, `an`, `to`, `of`, `and`, `we`, `my`. A comma,
-  dash or ellipsis at the restart point goes with the removed copy. Never
-  repaired: anything said three or more times ("no way no way no way", "on
-  and on and on"), anything across a sentence end or a line break, quoted
-  text, runs of numbers, snippet expansions, spoken commands, a capitalised
-  small word in mid-sentence ("Plan A a day"), "in in" ("log in in the
-  morning"), a pair said twice at the end of a sentence ("I love you, I love
-  you."), and "he said he said it"-style reports. Code mode and verbatim
-  apps are never repaired. The preference `remove_repeats` turns it off: the
-  Repeated words switch under Settings → Controls on Mac, or
+  after them and the run holds a word that opens a phrase (a pronoun, an
+  article, a preposition, an auxiliary, a conjunction). Two words only when
+  they open like a restart and the sentence goes straight on: a subject
+  pronoun or its contraction, an article, a preposition, a possessive, a
+  clause opener ("so I so I told him", "there's a there's a problem"), or a
+  question's verb and its subject ("can you can you hear me"). One word only
+  from `i`, `the`, `a`, `an`, `to`, `of`, `and`, `we`, `my`, `i'm`, `it's`,
+  `because`. A dash or an ellipsis at the restart point goes with the
+  removed copy. A comma alone there counts only after a word no phrase ends
+  on ("Go to the, to the store", "We can, we can do it"): "I'm sorry, I'm
+  sorry I didn't mean it" is written that way on purpose, and so, with the
+  same words, a restart such as "I have nothing, I have nothing going on" is
+  kept too. Never repaired: anything said three or more times ("no way no
+  way no way", "on and on and on we went"), anything across a sentence end
+  or a line break, quoted text, a quotation after a verb of saying or
+  singing ("the crowd chanted we will, we will rock you"), both copies set
+  off by commas, runs that are half numbers, only letters or no word that
+  opens a phrase ("X Y Z X Y Z", "red blue green red blue green"), a word
+  being named ("type and and or", "the letter a, a vowel"), "oh my my",
+  snippet expansions, spoken commands, a capitalised small word in
+  mid-sentence ("Plan A a day"), "in in" ("log in in the morning"), a pair
+  said twice at the end of a sentence ("I love you, I love you."), and "he
+  said he said it"-style reports. Code mode (its alternatives included) and
+  verbatim apps are never repaired. The preference `remove_repeats` turns it
+  off: the Repeated words switch under Settings → Controls on Mac, or
   `"remove_repeats": false` in `preferences.json` on Windows.
 - **Snippets.** Say "insert my email", alone or inside a sentence, and saved
   text arrives. A bare snippet name is never expanded, nor is a negated cue

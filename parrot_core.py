@@ -674,10 +674,14 @@ def _resolve_scratch_that(text: str) -> tuple[str, bool]:
 # what people say.
 RESTART_SINGLE_WORDS = frozenset({
     "i", "the", "a", "an", "to", "of", "and", "we", "my",
+    "i'm", "it's", "because",
 })
 # Two words said twice open the way a restart does: a subject pronoun or its
-# contraction first ("I have I have to go", "it's a it's a problem"), or an
-# article or preposition first ("in the in the morning").
+# contraction first ("I have I have to go", "it's a it's a problem"), an
+# article or preposition first ("in the in the morning"), a possessive
+# ("my mom my mom"), a word that opens a clause ("so I so I told him",
+# "there's a there's a problem"), or a question's verb and its subject
+# ("can you can you hear me").
 RESTART_PRONOUNS = frozenset({
     "i", "you", "he", "she", "it", "we", "they",
     "i'm", "i've", "i'll", "i'd",
@@ -688,6 +692,18 @@ RESTART_PRONOUNS = frozenset({
     "they're", "they've", "they'll", "they'd",
 })
 RESTART_ARTICLES = frozenset({"a", "an", "the"})
+RESTART_POSSESSIVES = frozenset({
+    "my", "your", "his", "her", "its", "our", "their"})
+RESTART_CLAUSE_OPENERS = frozenset({
+    "so", "and", "but", "if", "because", "when", "let", "let's",
+    "this", "that's", "there's", "here's", "what's", "where's", "who's",
+})
+RESTART_AUXILIARIES = frozenset({
+    "am", "is", "are", "was", "were", "have", "has", "had", "do", "does",
+    "did", "can", "could", "will", "would", "shall", "should", "may",
+    "might", "must",
+})
+RESTART_SUBJECTS = frozenset({"i", "you", "he", "she", "it", "we", "they"})
 RESTART_PREPOSITIONS = frozenset({
     "about", "above", "across", "after", "against", "along", "among",
     "around", "at", "before", "behind", "below", "beside", "between",
@@ -706,6 +722,53 @@ RESTART_REPORTING_VERBS = frozenset({
     "feel", "felt", "feels", "mean", "meant", "means", "guess", "guessed",
     "realized", "realised", "saw", "see", "sees", "wrote", "write",
     "writes", "asked", "ask", "asks",
+})
+# A comma alone at the restart point is also how a repeat on purpose is
+# written ("I'm sorry, I'm sorry", "I mean it, I mean it this time"). With
+# only a comma there, the first copy has to stop where no phrase can end:
+# on one of these words ("Go to the, to the store", "We can, we can do it").
+# "you", "it", "her" and the prepositions that also close a phrase ("come
+# in", "hold on") are not here.
+RESTART_CUT_WORDS = (
+    RESTART_ARTICLES | RESTART_AUXILIARIES
+    | frozenset({"i", "we", "he", "she", "they"})
+    | frozenset({"my", "your", "his", "its", "our", "their"})
+    | frozenset({"and", "but", "or", "so", "because", "if", "that", "when",
+                 "while", "than"})
+    | frozenset({"to", "of", "for", "from", "with", "at", "into", "onto",
+                 "toward", "towards", "between", "among", "during",
+                 "until"})
+    | frozenset(word for word in RESTART_PRONOUNS if "'" in word)
+    | frozenset({"that's", "there's", "here's", "what's", "where's",
+                 "who's", "let's"})
+)
+# A run of three or more words that holds none of these is a list, a code
+# or a pattern ("red blue green red blue green", "foo bar baz foo bar baz"),
+# not the start of a sentence said again.
+RESTART_FUNCTION_WORDS = (
+    RESTART_CUT_WORDS | RESTART_PRONOUNS | RESTART_PREPOSITIONS
+    | RESTART_POSSESSIVES | RESTART_CLAUSE_OPENERS
+    | frozenset({"me", "him", "her", "us", "them", "you", "it", "not",
+                 "no", "this", "these", "those", "what", "where", "who",
+                 "how", "why", "then", "there", "here", "just", "really"})
+)
+# A word that introduces what someone said, sang or chanted: what follows it
+# is a quotation, and a repeat in a quotation is the quotation's ("the crowd
+# chanted we will, we will rock you", "she whispered I love you, I love
+# you").
+RESTART_QUOTATIVES = frozenset({
+    "said", "says", "say", "sang", "sing", "sings", "sung", "singing",
+    "chanted", "chant", "chants", "chanting", "yelled", "yell", "yells",
+    "yelling", "shouted", "shout", "shouts", "shouting", "screamed",
+    "scream", "screams", "screaming", "whispered", "whisper", "whispers",
+    "cried", "goes", "repeated", "repeats", "muttered", "mumbled",
+})
+# A word that shows the next word is being named, not used ("type and and
+# or", "the letter a, a vowel", "write I I").
+RESTART_MENTION_CUES = frozenset({
+    "letter", "letters", "word", "words", "type", "types", "typed",
+    "write", "writes", "wrote", "written", "spell", "spells", "spelled",
+    "spelt", "press", "character", "symbol", "term", "terms",
 })
 # The longest restart looked for. A speaker restarts a clause, not a
 # paragraph; a longer run said twice is left as it was.
@@ -824,7 +887,26 @@ def _restart_at(words: list[_RestartWord], index: int, size: int) -> bool:
             return False
     if any(word.lead for word in span[1:]):
         return False
-    if all(_is_number(key) for key in keys):
+    # A comma alone at the restart point: the first copy must stop where no
+    # phrase can end. A dash or an ellipsis there is a break in the speech
+    # and is enough on its own.
+    point = first[-1].trail
+    if point == "," and keys[-1] not in RESTART_CUT_WORDS:
+        return False
+    # Both copies set off by commas is a repeat written on purpose
+    # ("happy birthday to you, happy birthday to you, and ...").
+    if point.startswith(",") and second[-1].trail.startswith(","):
+        return False
+    # Numbers, codes and patterns: half or more of the run is numbers
+    # ("knit one purl one"), or it is spelled letters ("X Y Z X Y Z").
+    if 2 * sum(_is_number(key) for key in keys) >= size:
+        return False
+    if size > 1 and all(len(key) == 1 for key in keys):
+        return False
+    if size > 2 and not any(key in RESTART_FUNCTION_WORDS for key in keys):
+        return False
+    # A quotation introduced by a verb of saying or singing keeps its words.
+    if index > 0 and words[index - 1].key in RESTART_QUOTATIVES:
         return False
     phrase = " " + " ".join(word.key for word in span) + " "
     if any(f" {command} " in phrase for command in RESTART_COMMAND_PHRASES):
@@ -861,8 +943,16 @@ def _restart_at(words: list[_RestartWord], index: int, size: int) -> bool:
     if size == 1:
         if keys[0] not in RESTART_SINGLE_WORDS:
             return False
-        # Spelled-out letters ("a a r o n") are not a restart.
-        for neighbour in (index - 1, last + 1):
+        # A word being named ("type and and or", "write I I"), and "oh my
+        # my", are said as they are.
+        if index > 0 and (words[index - 1].key in RESTART_MENTION_CUES
+                          or words[index - 1].key == "oh"):
+            return False
+        if words[last + 1].key in ("or", "nor", "versus", "vs"):
+            return False
+        # Spelled-out letters ("a a r o n", "the regex is a a star b") are
+        # not a restart.
+        for neighbour in (index - 2, index - 1, last + 1, last + 2):
             if 0 <= neighbour < len(words):
                 key = words[neighbour].key
                 if len(key) == 1 and key not in ("i", "a"):
@@ -871,7 +961,30 @@ def _restart_at(words: list[_RestartWord], index: int, size: int) -> bool:
     if keys[0] in RESTART_PRONOUNS:
         return not (keys[1] in RESTART_REPORTING_VERBS
                     and keys[0] not in ("i", "we"))
-    return keys[0] in RESTART_ARTICLES or keys[0] in RESTART_PREPOSITIONS
+    if keys[0] in RESTART_AUXILIARIES:
+        return keys[1] in RESTART_SUBJECTS
+    # "this is this is" is a restart; "this way this way" is a guide.
+    if keys[0] == "this":
+        return keys[1] in RESTART_AUXILIARIES
+    return (keys[0] in RESTART_ARTICLES or keys[0] in RESTART_PREPOSITIONS
+            or keys[0] in RESTART_POSSESSIVES
+            or keys[0] in RESTART_CLAUSE_OPENERS)
+
+
+def _third_copy_begins(keys: list[str], index: int, size: int) -> bool:
+    """Whether a third copy of keys[index:index+size] starts after two.
+
+    One matching word is enough, except for a run of two or more words that
+    opens with a subject pronoun: the pronoun coming back is how the
+    sentence goes on ("I think I think I should go"), so there the first
+    two words must match.
+    """
+    after = index + 2 * size
+    if after >= len(keys) or keys[after] != keys[index]:
+        return False
+    if size == 1 or keys[index] not in RESTART_SUBJECTS:
+        return True
+    return after + 1 >= len(keys) or keys[after + 1] == keys[index + 1]
 
 
 def find_restart(text: str, begin: int = 0) -> tuple[int, int, str] | None:
@@ -901,9 +1014,8 @@ def find_restart(text: str, begin: int = 0) -> tuple[int, int, str] | None:
             # The two copies must start alike, and a third copy after them,
             # whole or begun, is emphasis. Checked here, before anything
             # else, so a long dictation that repeats a pattern stays fast.
-            if keys[index] != keys[index + size] or (
-                    index + 2 * size < count
-                    and keys[index + 2 * size] == keys[index]):
+            if keys[index] != keys[index + size] or _third_copy_begins(
+                    keys, index, size):
                 continue
             if not _restart_at(words, index, size):
                 continue

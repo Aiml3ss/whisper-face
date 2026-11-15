@@ -844,7 +844,6 @@ MUST_REPAIR = (
     # Twenty more, the harder ones.
     ("In the in the morning we left.", "In the morning we left."),
     ("Go to the, to the store.", "Go to the store."),
-    ("I have nothing, I have nothing going on.", "I have nothing going on."),
     ("I have nothing... I have nothing going on.",
      "I have nothing going on."),
     ("I have nothing — I have nothing going on.", "I have nothing going on."),
@@ -875,6 +874,29 @@ MUST_REPAIR = (
     ("I, um, I think so.", "I think so."),
     # Two separate restarts in one dictation.
     ("I have I have to go to the to the store.", "I have to go to the store."),
+    # Plain restarts the first review found left as they were.
+    ("Can you can you hear me?", "Can you hear me?"),
+    ("Is it is it worth it?", "Is it worth it?"),
+    ("Did you did you get my message?", "Did you get my message?"),
+    ("Have you have you eaten yet?", "Have you eaten yet?"),
+    ("I think I think I should go.", "I think I should go."),
+    ("Can we can we talk later?", "Can we talk later?"),
+    ("My mom my mom is coming over.", "My mom is coming over."),
+    ("Let me let me check.", "Let me check."),
+    ("So I so I told him.", "So I told him."),
+    ("If you if you want, we can meet.", "If you want, we can meet."),
+    ("There's a there's a problem with the order.",
+     "There's a problem with the order."),
+    ("That's what that's what I said.", "That's what I said."),
+    ("It's it's fine.", "It's fine."),
+    ("I'm I'm on my way.", "I'm on my way."),
+    ("This is this is the best part.", "This is the best part."),
+    ("Where's the where's the remote?", "Where's the remote?"),
+    ("Because because it's late.", "Because it's late."),
+    # A comma at the restart point after a word no phrase ends on.
+    ("We can, we can do it on Friday.", "We can do it on Friday."),
+    ("I want to, I want to ask you something.",
+     "I want to ask you something."),
 )
 
 # Repeats a person meant, and anything the repair must not read.
@@ -929,6 +951,57 @@ MUST_KEEP = (
     "Plan A a day keeps things simple.",
     # Spelled-out letters.
     "spell it a a r o n",
+    # A comma alone at the restart point, after a copy that is a whole
+    # phrase, is how a repeat on purpose is written. The restart written the
+    # same way is kept too: the words cannot tell the two apart.
+    "I have nothing, I have nothing going on.",
+    "And I mean it, I mean it this time.",
+    "I'm serious, I'm serious about this.",
+    "We won, we won the whole thing!",
+    "It's mine, it's mine and you can't have it.",
+    "I'm sorry, I'm sorry I didn't mean it.",
+    "I did it for you, for you and nobody else.",
+    "Without you, without you I'm nothing.",
+    "In the end, in the end it doesn't even matter is the line.",
+    "You and me, you and me against the world.",
+    "The chorus goes one more time, one more time and then the drop.",
+    "He goes I know, I know and then leaves.",
+    "The kids yelled we want cake, we want cake all afternoon.",
+    "Hold on, hold on a second.",
+    # Both copies set off by commas.
+    "We sang happy birthday to you, happy birthday to you, and then cut "
+    "the cake.",
+    "Don't stop me now, don't stop me now, I'm having such a good time.",
+    "Come in, come in, sit down.",
+    # A quotation after a verb of saying, singing or chanting.
+    "The crowd chanted we will, we will rock you.",
+    "She whispered I love you, I love you over and over.",
+    "She sang let it go let it go all day.",
+    # A word being named, not used, and "oh my my".
+    "Oh my my what a mess.",
+    "Type and and or in the search box.",
+    "The words and and or are conjunctions.",
+    "The letter a, a vowel, comes first.",
+    "Write I I for the roman numeral two.",
+    "The regex is a a star b.",
+    # Patterns, codes and lists: no word that opens a phrase, half numbers,
+    # or only letters.
+    "The pattern is red blue green red blue green and so on.",
+    "Knit one purl one knit one purl one to the end of the row.",
+    "The code is X Y Z X Y Z then press enter.",
+    "The plate is K L M K L M and it is red.",
+    "Call foo bar baz foo bar baz in the loop.",
+    # Said over and over, with the sentence going on after.
+    "on and on and on we went",
+    "over and over and over again",
+    "you know you know you know what I mean",
+    "This way this way please.",
+    # A sentence end after the second copy, with more text after it.
+    "I love you I love you. See you soon.",
+    # A full stop inside each copy.
+    "No. I have no. I have nothing going on",
+    # An opening mark on a later word of the second copy.
+    "I have nothing (I have nothing going on",
 )
 
 
@@ -952,6 +1025,16 @@ class RestartRepairTests(unittest.TestCase):
         # The brief's own examples plus at least twenty more of each.
         self.assertGreaterEqual(len(MUST_REPAIR), 8 + 20)
         self.assertGreaterEqual(len(MUST_KEEP), 13 + 20)
+
+    def test_the_repair_runs_once_on_already_compiled_text(self):
+        # quick_clean compiles text the compiler has already compiled; that
+        # second pass must find nothing new, or a removal would go
+        # unrecorded.
+        for spoken in [spoken for spoken, _ in MUST_REPAIR] + list(MUST_KEEP):
+            with self.subTest(spoken=spoken):
+                once = compile_cleanup(spoken).text
+                self.assertNotIn("remove_repeat",
+                                 compile_cleanup(once).edit_kinds)
 
     def test_a_spoken_command_is_never_part_of_a_run(self):
         # The cleanup expands or resolves a command before the repair runs;
