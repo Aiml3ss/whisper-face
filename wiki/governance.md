@@ -44,7 +44,9 @@ parity is a hard gate.
   gate list.
 - **CI workflows**: two *required* status checks, both on
   GitHub-hosted runners — cla-check (`acceptance-recorded`, on
-  `pull_request_target` so the base branch's copy runs) and
+  `pull_request_target` so the base branch's copy runs; the old
+  `pull_request` trigger stays beside it for the one merge that
+  introduces it) and
   repository-governance (`repository-governance`, #143), which runs
   `tests/test_repository_governance.py` in about 0.1 s. Neither runs
   on the self-hosted bergserver runner any more: a persistent personal

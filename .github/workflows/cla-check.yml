@@ -9,6 +9,13 @@ name: Contributor license agreement
 on:
   pull_request_target:
     types: [opened, edited, synchronize, reopened]
+  # TRANSITIONAL: the next pull request removes this trigger. While main's
+  # copy of this file listens only to pull_request, the pull request that
+  # introduces pull_request_target would get no run from either copy, and the
+  # required check could never report. Keeping pull_request for that one
+  # merge lets its own copy report, exactly as main's copy does today.
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
 
 permissions:
   contents: read

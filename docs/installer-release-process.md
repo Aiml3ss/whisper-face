@@ -165,13 +165,20 @@ available to this repository: if they are not, neither check can start and no
 pull request can merge until they are.
 
 `cla-check.yml` runs on `pull_request_target`, so GitHub takes the workflow
-from `main`, not from the pull request. That has a one-time consequence. The
-pull request that introduces the trigger gets no `acceptance-recorded` run at
-all: its own copy no longer has a `pull_request` trigger, and `main`'s copy
-does not have `pull_request_target` yet. With the check required, that one
-pull request cannot merge on its own. The Project Owner checks the ledger by
-hand, lifts the `acceptance-recorded` requirement for that merge, and restores
-it straight afterwards. Every later pull request is checked by `main`'s copy.
+from `main`, not from the pull request. Introducing that takes two pull
+requests, because the first cannot be checked by a copy of the file that is
+not on `main` yet:
+
+1. The pull request that introduces `pull_request_target` keeps the old
+   `pull_request` trigger beside it. `main`'s copy still listens only to
+   `pull_request`, so GitHub runs the pull request's own copy and
+   `acceptance-recorded` reports as it always has.
+2. The next pull request removes `pull_request`. By then `main`'s copy
+   listens to `pull_request_target`, so that pull request and every later one
+   is checked by `main`'s copy.
+
+Until the second one merges, a pull request's own copy also runs, as it did
+before this change. Nobody has to lift the required check.
 
 Everything else is advisory. `windows-smoke.yml` carries most of the gate list,
 including the governance suite, but it is not a required check. That is
