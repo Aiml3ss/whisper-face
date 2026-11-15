@@ -423,6 +423,27 @@ class PhoneEndpointBindingTests(unittest.TestCase):
                     headers=("Authorization: Bearer ",)))[0], 401)
 
 
+def descriptors_open_on(path) -> list[int]:
+    """The descriptors this process still holds on ``path``.
+
+    Windows will not let a second process open a file that is still open
+    here, so there the read itself fails. POSIX allows it, so on POSIX the
+    descriptor table is the only witness.
+    """
+    if not os.path.isdir("/dev/fd"):
+        return []
+    target = os.stat(path)
+    held = []
+    for name in os.listdir("/dev/fd"):
+        try:
+            info = os.fstat(int(name))
+        except (OSError, ValueError):
+            continue
+        if (info.st_dev, info.st_ino) == (target.st_dev, target.st_ino):
+            held.append(int(name))
+    return held
+
+
 class PhoneEndpointRequestTests(unittest.TestCase):
     """What a caller that reaches port 8787 can and cannot do."""
 
@@ -430,12 +451,14 @@ class PhoneEndpointRequestTests(unittest.TestCase):
 
     def handler(self, server_only, transcribed="Insert my address."):
         calls = []
+        self.uploads = uploads = []
         recognition = transcribed if isinstance(transcribed, Recognition) \
             else Recognition(transcribed, confidence=0.93,
                              engine="parakeet-unified", audio_duration=1.0)
 
         def decode_audio(path):
             calls.append(("decode", Path(path).read_bytes()))
+            uploads.append((path, descriptors_open_on(path)))
             return np.zeros(16000, dtype=np.float32)
 
         ns = load_definitions(
@@ -447,6 +470,7 @@ class PhoneEndpointRequestTests(unittest.TestCase):
                     "http.server").server.BaseHTTPRequestHandler,
                 "email": __import__("email.policy"),
                 "hashlib": hashlib,
+                "os": os,
                 "tempfile": tempfile,
                 "time": time,
                 "SERVER_ONLY": server_only,
@@ -574,6 +598,38 @@ class PhoneEndpointRequestTests(unittest.TestCase):
 
         self.assertEqual(status, 500)
         self.assertNotIn(b"/Users", body)
+
+    def test_the_upload_is_closed_for_the_decoder_and_removed_after(self):
+        # ffmpeg is another process. Windows refuses to let it open a file
+        # this process still holds open, so there every upload failed.
+        handler, _ = self.handler(server_only=True)
+
+        status, _ = self.drive(handler, self.request(
+            "POST", "/v1/audio/transcriptions", body=b"RIFF-audio",
+            headers=(f"Authorization: Bearer {self.TOKEN}",)))
+
+        self.assertEqual(status, 200)
+        (path, still_open), = self.uploads
+        self.assertEqual(still_open, [])
+        self.assertFalse(Path(path).exists())
+
+    def test_the_upload_is_removed_when_decoding_fails(self):
+        handler, _ = self.handler(server_only=True)
+        seen = []
+
+        def failing_decode(path):
+            seen.append(path)
+            raise RuntimeError("ffmpeg failed")
+
+        handler.do_POST.__globals__["decode_audio"] = failing_decode
+
+        status, _ = self.drive(handler, self.request(
+            "POST", "/v1/audio/transcriptions", body=b"bad",
+            headers=(f"Authorization: Bearer {self.TOKEN}",)))
+
+        self.assertEqual(status, 500)
+        self.assertEqual(len(seen), 1)
+        self.assertFalse(Path(seen[0]).exists())
 
     def test_a_silent_upload_is_not_answered_with_whisper_filler(self):
         clean = load_definitions(

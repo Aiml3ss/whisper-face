@@ -11595,10 +11595,20 @@ class PhoneHandler(BaseHTTPRequestHandler):
                             "application/json")
                 return
 
-            with tempfile.NamedTemporaryFile(suffix=".audio") as tmp:
-                tmp.write(audio_bytes)
-                tmp.flush()
-                audio = decode_audio(tmp.name)
+            # ffmpeg is another process, and Windows will not let it open a
+            # file this process still holds open. So the upload is closed
+            # before it is decoded, and removed whatever happens next.
+            descriptor, upload = tempfile.mkstemp(suffix=".audio")
+            try:
+                with os.fdopen(descriptor, "wb") as tmp:
+                    tmp.write(audio_bytes)
+                audio = decode_audio(upload)
+            finally:
+                try:
+                    os.unlink(upload)
+                except OSError as e:
+                    print(f"! uploaded audio was not removed: {upload} "
+                          f"({type(e).__name__})")
             recognition = ASR_POOL.submit(
                 transcribe_detailed, audio).result()
             text = phone_clean(recognition.text, recognition)
