@@ -23,7 +23,14 @@ machine without maintaining a second copy of the application.
 the PEP 723 dependency block, and `dictate.py.lock` are the runtime source of
 truth. The Mac LaunchAgent and
 Windows scheduled task execute those files from the checkout. Installers may
-provision and verify the runtime, but must never embed a frozen copy of it.
+provision and verify the runtime. An app built for drag install carries the
+exact published source archive of its own release, verified against its
+checksum before use, and installs from it; installers still execute the
+checkout as the single source of truth and never embed runtime source.
+
+The drag-install app never runs anything from the archive itself. It unpacks
+the archive into `~/Library/Application Support/Whisper Face/checkout` and runs
+that checkout's own `setup.sh`, so the login service still executes a checkout.
 
 ## Change classification
 
