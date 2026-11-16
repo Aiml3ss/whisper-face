@@ -13008,6 +13008,10 @@ class PositionReadbackTests(unittest.TestCase):
             element=element, text=None, selection=None)))
         self.assertFalse(applies(pressed, opaque, snapshot(
             element=element, text="Hi", selection=None)))
+        # Text that can be read at release is never checked by position,
+        # even where the lease was opaque.
+        self.assertFalse(applies(pressed, opaque, snapshot(
+            element=element, text="Hi", selection=(2, 0))))
         self.assertFalse(applies(pressed, opaque, None))
         self.assertFalse(applies(pressed, None, hidden))
 
@@ -16907,8 +16911,14 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
 
     def deliver(self, outcome, *, snippet=None, is_macos=True,
                 paused=False, route="standard", spoken=None,
-                coordinator=None, utterance="take-1", recording=None):
-        """One dictation with a named delivery outcome; what it did."""
+                coordinator=None, utterance="take-1", recording=None,
+                spoken_edits=False, force_position=False):
+        """One dictation with a named delivery outcome; what it did.
+
+        ``force_position`` makes the commit report a check by position
+        whatever the field is, so that what a check by position may not
+        unlock is seen even where the text could have been read.
+        """
         spoken = self.SPOKEN if spoken is None else spoken
         seen = SimpleNamespace(
             pasted=[], modes=[], statuses=[], sounds=[], logs=[],
@@ -17108,6 +17118,12 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
             },
         )
         ns["_ax_character_count"] = lambda _element: field["count"]
+        ns["PREFERENCES"]["spoken_edit_commands"] = spoken_edits
+        ns["LAST_INSERTION"] = None
+        if force_position:
+            ns["position_check_applies"] = lambda *_args: True
+            ns["position_readback"] = lambda *_args: (
+                ReadbackResult.verified_by_position("not-offered"))
         snapshot = ns["FocusSnapshot"]
         readable = snapshot(
             element=element, text=self.BEFORE,
@@ -17176,6 +17192,7 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
         seen.text = getattr(recorder, "committed_text", None)
         seen.range_reads = field["range_reads"]
         seen.clock = clock[0]
+        seen.last_insertion = ns["LAST_INSERTION"]
         return seen
 
     # Outcomes in a field the runtime reads: what it holds once the paste
@@ -17554,6 +17571,29 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
                 self.assertEqual(
                     metrics["insertion_selection_kind"], "range")
 
+    def test_nothing_that_needs_the_text_acts_on_a_check_by_position(self):
+        # The field here is one the runtime reads, so every gate below is
+        # held by the receipt's reason and not only by a missing text.
+        read = self.deliver("verified", spoken_edits=True)
+        self.assertEqual(len(read.undoable), 1)
+        self.assertIsNotNone(read.undoable[0])
+        self.assertEqual([name for name, _args in read.threads],
+                         ["learn_from_corrections"])
+        self.assertEqual(read.last_insertion["text"], self.SPOKEN)
+
+        seen = self.deliver("verified", spoken_edits=True,
+                            force_position=True)
+        self.assertTrue(seen.receipt.checked_by_position)
+        self.assertEqual(seen.sounds, ["Pop"])
+        self.assertEqual(seen.undoable, [None])
+        self.assertEqual(seen.threads, [])
+        self.assertIsNone(seen.last_insertion)
+        snippet = self.deliver(
+            "verified", snippet=("signature", "Best,\nBerg"),
+            force_position=True)
+        self.assertTrue(snippet.receipt.checked_by_position)
+        self.assertEqual(snippet.threads, [])
+
     def test_it_does_not_wait_once_the_cursor_has_moved(self):
         seen = self.deliver("position-exact")
 
@@ -17725,7 +17765,7 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
 class RecentReinsertPositionTests(unittest.TestCase):
     """Re-inserting a recent dictation earns the same check by position."""
 
-    def reinsert(self, moved):
+    def reinsert(self, moved, force_position=False):
         seen = SimpleNamespace(sounds=[], logs=[], undoable=[])
         element = object()
         field = {"range": (4, 0)}
@@ -17776,8 +17816,14 @@ class RecentReinsertPositionTests(unittest.TestCase):
             })
         ns["_ax_character_count"] = lambda _element: None
         ns["focused_snapshot"] = lambda: ns["FocusSnapshot"](
-            element=element, text=None, selection=(4, 0),
-            window_title="Chat")
+            element=element, text="Hi. " if force_position else None,
+            selection=(4, 0), window_title="Chat")
+        if force_position:
+            # A readable field reported as checked by position: undo must
+            # still have nothing, because of the reason and not the text.
+            ns["position_check_applies"] = lambda *_args: True
+            ns["position_readback"] = lambda *_args: (
+                ReadbackResult.verified_by_position("not-offered"))
         ns["time"] = SimpleNamespace(
             time_ns=lambda: 1, monotonic=iter(
                 [0.0, 0.0] + [1.0] * 50).__next__,
@@ -17794,6 +17840,11 @@ class RecentReinsertPositionTests(unittest.TestCase):
         self.assertEqual(seen.logs, [
             "[recent] re-inserted (commit_verified_position; "
             "position moved-exactly; count not-offered)"])
+
+    def test_undo_is_held_back_by_the_reason_itself(self):
+        seen = self.reinsert(moved=True, force_position=True)
+        self.assertEqual(seen.result["reason"], "commit_verified_position")
+        self.assertEqual(seen.undoable, [None])
 
     def test_a_cursor_that_did_not_move_is_refused_as_before(self):
         seen = self.reinsert(moved=False)

@@ -169,13 +169,13 @@ POSITION_COUNTS = frozenset({
     "not-offered",       # the element offers no count
 })
 
-_LINE_BREAK_FORMS = re.compile("\r\n|[\r  \x85]")
+_LINE_BREAK_FORMS = re.compile("\r\n|[\r\u2028\u2029\x85]")
 _WHITESPACE_RUN = re.compile(r"\s+")
 _TYPOGRAPHIC_FORMS = str.maketrans({
-    "‘": "'", "’": "'", "‚": "'", "‛": "'",
-    "′": "'", "“": '"', "”": '"', "„": '"',
-    "‟": '"', "″": '"', "‒": "-", "–": "-",
-    "—": "-", "−": "-",
+    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",
+    "\u2032": "'", "\u201c": '"', "\u201d": '"', "\u201e": '"',
+    "\u201f": '"', "\u2033": '"', "\u2012": "-", "\u2013": "-",
+    "\u2014": "-", "\u2212": "-",
 })
 
 
@@ -187,7 +187,7 @@ def whitespace_form(text: str) -> str:
     U+2028 or U+2029, and still hold exactly what was pasted. Nothing else
     (a tab, a thin space, a dropped or doubled space) is folded here.
     """
-    return _LINE_BREAK_FORMS.sub("\n", text).replace(" ", " ")
+    return _LINE_BREAK_FORMS.sub("\n", text).replace("\u00a0", " ")
 
 
 def same_but_whitespace_form(observed: str | None, expected: str) -> bool:
