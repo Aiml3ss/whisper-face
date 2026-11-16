@@ -8,7 +8,9 @@ single paste attempt, and reports what its readback could prove.
 from __future__ import annotations
 
 import hashlib
+import re
 import threading
+import unicodedata
 from collections import OrderedDict
 from dataclasses import dataclass
 from enum import Enum
@@ -26,6 +28,8 @@ class ReceiptReason(str, Enum):
     PENDING = "pending"
     COMMIT_VERIFIED = "commit_verified"
     COMMIT_VERIFIED_EDGE_WHITESPACE = "commit_verified_edge_whitespace"
+    COMMIT_VERIFIED_WHITESPACE_FORM = "commit_verified_whitespace_form"
+    COMMIT_VERIFIED_POSITION = "commit_verified_position"
     FOCUS_DRIFT = "focus_drift"
     SELECTION_DRIFT = "selection_drift"
     SURROUNDING_TEXT_DRIFT = "surrounding_text_drift"
@@ -121,18 +125,204 @@ READBACK_CONFLICT_SHAPES = frozenset({
     "divergent",               # genuinely different content
 })
 
+# What the field read back as, measured against the paste itself rather than
+# the whole field: categories only, never text, a length or a position. The
+# first two are proofs (the readback verified); the rest are conflicts.
+READBACK_DIFFERENCES = frozenset({
+    "edge-whitespace",   # verified: equal once edge whitespace is ignored
+    "whitespace-form",   # verified: equal once no-break spaces and
+                         # line-break forms are written one way
+    "field-empty",       # the field read back as nothing, or only spaces
+    "unchanged",         # the field still held what it held before
+    "spacing",           # equal once runs of whitespace collapse
+    "typographic",       # equal once quotes, dashes, ellipses and Unicode
+                         # compatibility forms are folded
+    "leading-part",      # the text around the insertion point is intact and
+                         # only a leading part of the paste stands there
+    "extra-at-place",    # the paste stands at the insertion point with
+                         # something more beside it
+    "inserted-alone",    # the paste is all the field holds: what was there
+                         # before is gone
+    "elsewhere",         # the paste is in the field, not where expected
+    "absent",            # the paste is not in the field
+})
+# How the field behaved over the readback window that ended in a conflict.
+# A readback returns on its first match, so a conflict never follows one.
+READBACK_STAGES = frozenset({
+    "no-change-seen",    # every read was the text from before the paste
+    "still-changing",    # the last two reads differed when the window closed
+    "settled",           # it changed, and held something else
+})
+# What a check by position saw: where the cursor of a field that hides its
+# text went once the paste was sent. Never a length or an offset.
+POSITION_CHECKS = frozenset({
+    "moved-exactly",     # by the paste's length, the old selection replaced
+    "moved-other",       # somewhere else
+    "did-not-move",      # still where it was before the paste
+    "unreadable-after",  # the range could not be read after the paste
+})
+# Whether a character count the element offers agrees with the paste.
+POSITION_COUNTS = frozenset({
+    "agrees",            # it changed by exactly what the paste should add
+    "disagrees",         # it changed by something else, or stopped (or
+                         # started) being offered
+    "not-offered",       # the element offers no count
+})
+
+_LINE_BREAK_FORMS = re.compile("\r\n|[\r\u2028\u2029\x85]")
+_WHITESPACE_RUN = re.compile(r"\s+")
+_TYPOGRAPHIC_FORMS = str.maketrans({
+    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",
+    "\u2032": "'", "\u201c": '"', "\u201d": '"', "\u201e": '"',
+    "\u201f": '"', "\u2033": '"', "\u2012": "-", "\u2013": "-",
+    "\u2014": "-", "\u2212": "-",
+})
+
+
+def whitespace_form(text: str) -> str:
+    """Write every line break as ``\\n`` and every no-break space as a space.
+
+    These are the only substitutions that are the same text by construction:
+    an editor may store a typed space as U+00A0 or a line break as CR LF,
+    U+2028 or U+2029, and still hold exactly what was pasted. Nothing else
+    (a tab, a thin space, a dropped or doubled space) is folded here.
+    """
+    return _LINE_BREAK_FORMS.sub("\n", text).replace("\u00a0", " ")
+
+
+def same_but_whitespace_form(observed: str | None, expected: str) -> bool:
+    """True when ``observed`` is ``expected`` in another whitespace form.
+
+    Also true where the forms differ and, on top of that, only edge
+    whitespace does (one trailing line break, say), which the edge rule
+    proves on its own. Never true of an expectation that is all whitespace,
+    so a field that reads as blank cannot pass.
+    """
+    if observed is None or not expected.strip():
+        return False
+    left, right = whitespace_form(observed), whitespace_form(expected)
+    return left == right or left.strip() == right.strip()
+
+
+def _collapsed(text: str) -> str:
+    return _WHITESPACE_RUN.sub(" ", text).strip()
+
+
+def _typographic(text: str) -> str:
+    return _collapsed(
+        unicodedata.normalize("NFKC", text).translate(_TYPOGRAPHIC_FORMS))
+
+
+def readback_difference(before: str, selection: tuple[int, int],
+                        inserted: str, observed: str) -> str:
+    """Name how a conflicting readback differed from the paste, as a category.
+
+    ``before`` and ``selection`` are the field and its selection when the
+    paste was sent (code points), ``inserted`` what was pasted and
+    ``observed`` the last value read. The answer is drawn from
+    ``READBACK_DIFFERENCES`` and carries no text, length or position.
+    """
+    start, length = selection
+    # Compared in one whitespace form throughout, so a paste that is short
+    # or misplaced is named for that and not for its no-break spaces.
+    prefix = whitespace_form(before[:start])
+    suffix = whitespace_form(before[start + length:])
+    before, inserted = whitespace_form(before), whitespace_form(inserted)
+    observed = whitespace_form(observed)
+    expected = prefix + inserted + suffix
+    if not observed.strip():
+        return "field-empty"
+    if observed == before:
+        return "unchanged"
+    if _collapsed(observed) == _collapsed(expected):
+        return "spacing"
+    if _typographic(observed) == _typographic(expected):
+        return "typographic"
+    if (len(observed) >= len(prefix) + len(suffix)
+            and observed.startswith(prefix) and observed.endswith(suffix)):
+        middle = observed[len(prefix):len(observed) - len(suffix)]
+        if middle and inserted.startswith(middle):
+            return "leading-part"
+        if inserted in middle:
+            return "extra-at-place"
+    if before.strip() and observed.strip() == inserted.strip():
+        return "inserted-alone"
+    if inserted.strip() and inserted.strip() in observed:
+        return "elsewhere"
+    return "absent"
+
+
+def readback_stage(changed: bool, still_changing: bool) -> str:
+    """Name how the field behaved over a readback window that conflicted."""
+    if not changed:
+        return "no-change-seen"
+    return "still-changing" if still_changing else "settled"
+
+
+def utf16_units(text: str) -> int:
+    """Length as Accessibility counts it: UTF-16 code units, as NSString."""
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def position_check(before: tuple[int, int],
+                   after: tuple[int, int] | None,
+                   inserted_units: int) -> str:
+    """Where a paste of ``inserted_units`` took a selection, as a category.
+
+    Both ranges are ``(location, length)`` in UTF-16 units. A paste that
+    replaced the selection leaves a bare cursor at the selection's start
+    plus exactly what it inserted; nothing else is "moved-exactly".
+    """
+    if after is None:
+        return "unreadable-after"
+    start, _length = before
+    if inserted_units > 0 and tuple(after) == (start + inserted_units, 0):
+        return "moved-exactly"
+    if tuple(after) == tuple(before):
+        return "did-not-move"
+    return "moved-other"
+
+
+def position_count(before: int | None, after: int | None,
+                   selection_units: int, inserted_units: int) -> str:
+    """Whether a character count the element offers agrees with the paste."""
+    if before is None and after is None:
+        return "not-offered"
+    if before is None or after is None:
+        return "disagrees"
+    agrees = after - before == inserted_units - selection_units
+    return "agrees" if agrees else "disagrees"
+
 
 @dataclass(frozen=True)
 class ReadbackResult:
-    """A terminal readback outcome, plus a content-free shape for conflicts.
+    """A terminal readback outcome, plus content-free detail.
 
     ``detail`` names *how* the observed field differed, drawn from
     ``READBACK_CONFLICT_SHAPES``. It never carries destination text, so a
-    conflict can be diagnosed without a transcript. Empty for non-conflicts.
+    conflict can be diagnosed without a transcript. ``difference`` and
+    ``stage`` say the same against the paste itself and over time
+    (``READBACK_DIFFERENCES``, ``READBACK_STAGES``); ``position`` and
+    ``position_count`` say what a check by position saw
+    (``POSITION_CHECKS``, ``POSITION_COUNTS``). Each is empty when it does
+    not apply.
     """
     state: ReceiptState
     reason: ReceiptReason
     detail: str = ""
+    difference: str = ""
+    stage: str = ""
+    position: str = ""
+    position_count: str = ""
+
+    def __post_init__(self):
+        for value, allowed in (
+                (self.difference, READBACK_DIFFERENCES),
+                (self.stage, READBACK_STAGES),
+                (self.position, POSITION_CHECKS),
+                (self.position_count, POSITION_COUNTS)):
+            if value and value not in allowed:
+                raise ValueError(f"unknown readback category: {value}")
 
     @classmethod
     def verified(cls) -> "ReadbackResult":
@@ -151,19 +341,56 @@ class ReadbackResult:
         """
         return cls(ReceiptState.VERIFIED,
                    ReceiptReason.COMMIT_VERIFIED_EDGE_WHITESPACE,
-                   "trailing-whitespace")
+                   "trailing-whitespace", difference="edge-whitespace")
 
     @classmethod
-    def unverifiable(cls) -> "ReadbackResult":
+    def verified_whitespace_form(cls) -> "ReadbackResult":
+        """Delivery proven where only the form of whitespace differs.
+
+        A no-break space read back for a space, or a line break written as
+        CR LF, U+2028 or U+2029, is the same text by construction (see
+        ``whitespace_form``). Its own reason keeps it apart from a
+        byte-exact match. A missing, extra or reordered character survives
+        the folding and stays a conflict.
+        """
+        return cls(ReceiptState.VERIFIED,
+                   ReceiptReason.COMMIT_VERIFIED_WHITESPACE_FORM,
+                   difference="whitespace-form")
+
+    @classmethod
+    def verified_by_position(cls, count: str) -> "ReadbackResult":
+        """A field that hides its text moved its cursor by exactly the paste.
+
+        Proof that the right amount went in at the right place, not of which
+        characters: weaker than reading the text back, and its own reason
+        says so, so that nothing which needs the text (undo, a later rewrite
+        of the destination, learning from corrections) treats it as read.
+        """
+        if count not in ("agrees", "not-offered"):
+            raise ValueError("a disagreeing count is no proof")
+        return cls(ReceiptState.VERIFIED,
+                   ReceiptReason.COMMIT_VERIFIED_POSITION,
+                   position="moved-exactly", position_count=count)
+
+    @classmethod
+    def unverifiable(cls, position: str = "",
+                     position_count: str = "") -> "ReadbackResult":
+        """No readback proved anything; a position check may say why not."""
+        if position == "moved-exactly" and position_count != "disagrees":
+            raise ValueError("an exact move with no disagreement is proof")
         return cls(ReceiptState.UNVERIFIABLE,
-                   ReceiptReason.READBACK_UNAVAILABLE)
+                   ReceiptReason.READBACK_UNAVAILABLE,
+                   position=position, position_count=position_count)
 
     @classmethod
-    def conflict(cls, detail: str = "unclassified") -> "ReadbackResult":
+    def conflict(cls, detail: str = "unclassified", difference: str = "",
+                 stage: str = "") -> "ReadbackResult":
         if detail not in READBACK_CONFLICT_SHAPES:
             raise ValueError(f"unknown readback conflict shape: {detail}")
+        if difference in ("edge-whitespace", "whitespace-form"):
+            raise ValueError("that difference is a proof, not a conflict")
         return cls(ReceiptState.CONFLICT, ReceiptReason.READBACK_CONFLICT,
-                   detail)
+                   detail, difference=difference, stage=stage)
 
 
 @dataclass(frozen=True)
@@ -179,6 +406,38 @@ class InsertionReceipt:
     # text when the dictation began, so no readback was ever possible.
     # False unless the coordinator says so, which is the careful reading.
     destination_opaque: bool = False
+    # The readback's content-free detail for this utterance alone, as
+    # ``ReadbackResult`` carries it. Empty when it does not apply.
+    readback_difference: str = ""
+    readback_stage: str = ""
+    position_check: str = ""
+    position_count: str = ""
+
+    @property
+    def checked_by_position(self) -> bool:
+        """Verified by where the cursor went, not by reading the text.
+
+        Enough to say the paste landed whole and in place, so it is shown
+        and kept like any checked paste. Not enough for anything that needs
+        the text itself: undo, rewriting the destination later, or learning
+        from what the person changed there.
+        """
+        return (self.state == ReceiptState.VERIFIED
+                and self.reason == ReceiptReason.COMMIT_VERIFIED_POSITION)
+
+    @property
+    def log_reason(self) -> str:
+        """The reason, with its content-free detail, for a log line."""
+        parts = [self.reason.value]
+        if self.readback_difference:
+            parts.append(f"difference {self.readback_difference}")
+        if self.readback_stage:
+            parts.append(f"stage {self.readback_stage}")
+        if self.position_check:
+            parts.append(f"position {self.position_check}")
+        if self.position_count:
+            parts.append(f"count {self.position_count}")
+        return "; ".join(parts)
 
     @property
     def pasted_unchecked(self) -> bool:
@@ -297,7 +556,11 @@ class InsertionCoordinator:
                 raise TypeError("readback must return ReadbackResult")
             receipt = InsertionReceipt(
                 utterance_id, proof.state, proof.reason, True, proof.detail,
-                opaque)
+                opaque,
+                readback_difference=proof.difference,
+                readback_stage=proof.stage,
+                position_check=proof.position,
+                position_count=proof.position_count)
         except Exception:
             # Delivery may precede failure. Retrying risks duplication, so
             # the unresolved entry remains recoverable.
@@ -444,8 +707,19 @@ __all__ = [
     "InsertionLease",
     "InsertionReceipt",
     "OutboxItem",
+    "POSITION_CHECKS",
+    "POSITION_COUNTS",
+    "READBACK_DIFFERENCES",
+    "READBACK_STAGES",
     "ReadbackResult",
     "ReceiptReason",
     "ReceiptState",
     "fingerprint_surrounding",
+    "position_check",
+    "position_count",
+    "readback_difference",
+    "readback_stage",
+    "same_but_whitespace_form",
+    "utf16_units",
+    "whitespace_form",
 ]
