@@ -8199,6 +8199,91 @@ def _wait_for_permission_grant_and_reexec(
         return
 
 
+def missing_event_permissions(*, runner=None) -> tuple[str, ...]:
+    """Which of Accessibility and Input Monitoring a fresh process lacks.
+
+    Read from a short-lived process, as the re-check reads it, because a
+    running process keeps the verdict it started with. An answer that cannot
+    be read counts as both missing: the window then stays until the
+    re-check's own restart replaces it.
+    """
+    run = runner or subprocess.run
+    probe = (
+        "from Quartz import CGPreflightListenEventAccess,"
+        "CGPreflightPostEventAccess;"
+        "print(int(bool(CGPreflightPostEventAccess())),"
+        "int(bool(CGPreflightListenEventAccess())))"
+    )
+    both = ("accessibility", "input_monitoring")
+    try:
+        result = run([sys.executable, "-c", probe], stdin=subprocess.DEVNULL,
+                     capture_output=True, text=True, timeout=5, check=False)
+        post, listen = (int(value) for value in str(result.stdout).split())
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return both
+    if result.returncode != 0:
+        return both
+    return tuple(name for name, granted in zip(both, (post, listen))
+                 if not granted)
+
+
+def run_permission_reset_command(command, *, runner=None) -> int:
+    """Run one of the two resets the permission window may run, nothing else.
+
+    Only Whisper Face's own Accessibility and Input Monitoring entries, as
+    whisper_face_gui.permission_reset_commands names them; any other command
+    is refused without running.
+    """
+    from whisper_face_gui import permission_reset_commands
+    if list(command) not in permission_reset_commands():
+        return 1
+    run = runner or subprocess.run
+    try:
+        return run(list(command), stdin=subprocess.DEVNULL,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   timeout=10, check=False).returncode
+    except (OSError, subprocess.SubprocessError):
+        return 1
+
+
+def restart_for_fresh_permissions(*, execv=os.execv) -> None:
+    """Replace this process as the permission re-check does, with its
+    counter at zero so the new process asks macOS afresh."""
+    try:
+        os.environ[PERMISSION_ATTEMPT_ENV] = "0"
+    except (OSError, ValueError):
+        pass
+    execv(sys.executable, [sys.executable] + sys.argv)
+
+
+def show_permission_help(*, show=None):
+    """Show the permission window while macOS withholds a permission.
+
+    The re-check thread and its re-exec are unchanged; the window only adds
+    a way through that needs no Terminal. Never fatal.
+    """
+    if not IS_MACOS:
+        return None
+    try:
+        from whisper_face_gui import (
+            PermissionHelpFlow, show_permission_help_window)
+        flow = PermissionHelpFlow(
+            missing=missing_event_permissions(),
+            opener=lambda url: subprocess.run(
+                ["open", url], stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=5, check=False),
+            runner=run_permission_reset_command,
+            restart=restart_for_fresh_permissions,
+            record=lambda line: print(line, flush=True),
+            probe=missing_event_permissions,
+        )
+        return (show or show_permission_help_window)(flow)
+    except Exception as e:  # the window is help, never a reason to stop
+        print(f"! permission help unavailable: {type(e).__name__}")
+        return None
+
+
 def ensure_event_permissions() -> bool:
     """Under the signed launcher chain, TCC attributes these grants to the
     launcher app ("Whisper Face"), the responsible process this fork+exec child
@@ -15023,6 +15108,9 @@ def main():
         start_gui_activation_server(STATUS["bar"].gui)
 
     if not ensure_event_permissions():
+        # Name what is missing and open its settings page; held here so the
+        # window lives as long as this process waits.
+        STATUS["permission_help"] = show_permission_help()
         # Keep AppKit alive while TCC recovery waits. The signed launcher can
         # now request this existing GUI even when its menu-bar item is hidden by
         # a notch or a full menu bar. The background recheck replaces this

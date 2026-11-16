@@ -1223,6 +1223,24 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "installer.unset.title": "Whisper Face isn’t set up yet",
         "installer.unset.body": "Open Install.command in the Whisper Face folder to set it up.",
 
+        # --- mac download: permission help
+
+        # The small window the running app shows while macOS has not given
+        # it Accessibility or Input Monitoring (PermissionHelpWindowController).
+        "permission_help.window.title": "Whisper Face Permissions",
+        "permission_help.title": "Whisper Face needs your permission",
+        "permission_help.body": "macOS hasn’t switched these on for Whisper Face yet. Open each one and switch Whisper Face on.",
+        "permission_help.open": "Open Settings",
+        "permission_help.open.label": "Open {permission} settings",
+        "permission_help.toggle": "If Whisper Face is already listed and switched on, switch it off and on again.",
+        "permission_help.closes": "This window closes by itself once both are on.",
+        "permission_help.still": "Still Not Working…",
+        "permission_help.confirm.title": "Ask macOS again?",
+        "permission_help.confirm.body": "Whisper Face can clear its own Accessibility and Input Monitoring entries so macOS asks you afresh, then start again. Nothing else in System Settings changes.",
+        "permission_help.confirm.action": "Clear and Start Again",
+        "permission_help.confirm.cancel": "Cancel",
+        "permission_help.failed": "macOS didn’t let Whisper Face clear its entries. In each list, select Whisper Face, remove it with the minus button, then switch it on again when macOS asks.",
+
     },
 }
 SUPPORTED_LOCALES = tuple(STRING_CATALOGS)
@@ -19583,6 +19601,359 @@ def run_native_appkit_smoke(*, construction_only: bool = False
             controller.dynamic.clear()
 
 
+# --- Permission help -------------------------------------------------------
+# When macOS has not given the app Accessibility or Input Monitoring, the
+# runtime shows a small window that names what is missing and opens the exact
+# System Settings page for each. A launcher rebuilt with a new code identity
+# leaves its old entries listed and switched on but no longer applying, and
+# macOS then asks nothing; switching the entry off and on, or as a last
+# resort clearing this app's own two entries so macOS asks afresh, is the
+# way out. Nobody should need Terminal for it.
+
+LAUNCHER_BUNDLE_ID = "com.berg.whisper-face.launcher"
+# (permission key, System Settings anchor, tccutil service, catalog name key)
+PERMISSION_HELP_PANES: tuple[tuple[str, str, str, str], ...] = (
+    ("accessibility", "Privacy_Accessibility", "Accessibility",
+     "onboarding.permission.accessibility"),
+    ("input_monitoring", "Privacy_ListenEvent", "ListenEvent",
+     "onboarding.permission.input_monitoring"),
+)
+PERMISSION_HELP_KEYS = tuple(pane[0] for pane in PERMISSION_HELP_PANES)
+TCCUTIL = "/usr/bin/tccutil"
+# Every line the help writes to the runtime log is one of these events and
+# names at most the permission keys above: no path, no text, no identity.
+PERMISSION_HELP_EVENTS = frozenset({
+    "shown", "opened_settings", "still_not_working", "reset_cancelled",
+    "reset_confirmed", "reset_done", "reset_failed", "granted",
+})
+
+
+def permission_settings_url(permission: str) -> str:
+    """The System Settings page for one permission, exactly."""
+    for key, anchor, _service, _name in PERMISSION_HELP_PANES:
+        if key == permission:
+            return ("x-apple.systempreferences:"
+                    f"com.apple.preference.security?{anchor}")
+    raise ValueError(f"unknown permission: {permission!r}")
+
+
+def permission_reset_commands(
+        bundle_id: str = LAUNCHER_BUNDLE_ID) -> list[list[str]]:
+    """The only reset the help can run: this app's own two entries.
+
+    Never another app's, never a whole service (``tccutil reset
+    Accessibility`` with no bundle ID clears every app's grant), never
+    "All".
+    """
+    if bundle_id != LAUNCHER_BUNDLE_ID:
+        raise ValueError("permission reset is only for Whisper Face's own entries")
+    return [[TCCUTIL, "reset", service, bundle_id]
+            for _key, _anchor, service, _name in PERMISSION_HELP_PANES]
+
+
+def permission_help_record(event: str, permissions: Sequence[str] = ()) -> str:
+    """One content-free log line saying which path the help took."""
+    if event not in PERMISSION_HELP_EVENTS:
+        raise ValueError(f"unknown permission help event: {event!r}")
+    names = [name for name in permissions if name in PERMISSION_HELP_KEYS]
+    if len(names) != len(tuple(permissions)):
+        raise ValueError("permission help records name known permissions only")
+    suffix = f" permissions={','.join(names)}" if names else ""
+    return f"[permissions] help {event}{suffix}"
+
+
+@dataclass
+class PermissionHelpFlow:
+    """What the permission window shows and does, without AppKit.
+
+    ``opener`` opens a URL, ``runner`` runs one command and returns its exit
+    status, ``restart`` replaces the process the way the permission re-check
+    does, ``record`` writes one log line, ``probe`` reports what is still
+    missing from a fresh process. All are injected, so tests use fakes and
+    never open Settings or touch TCC.
+    """
+
+    missing: tuple[str, ...]
+    opener: Callable[[str], Any]
+    runner: Callable[[list[str]], int]
+    restart: Callable[[], Any]
+    record: Callable[[str], Any]
+    probe: Callable[[], Sequence[str]] = lambda: ()
+    stage: str = "missing"          # "missing" | "confirm" | "failed"
+
+    def __post_init__(self) -> None:
+        self.missing = tuple(key for key in PERMISSION_HELP_KEYS
+                             if key in tuple(self.missing))
+
+    def shown(self) -> None:
+        self.record(permission_help_record("shown", self.missing))
+
+    def open_settings(self, permission: str) -> None:
+        url = permission_settings_url(permission)
+        self.record(permission_help_record("opened_settings", (permission,)))
+        self.opener(url)
+
+    def still_not_working(self) -> None:
+        self.stage = "confirm"
+        self.record(permission_help_record("still_not_working", self.missing))
+
+    def cancel_reset(self) -> None:
+        self.stage = "missing"
+        self.record(permission_help_record("reset_cancelled"))
+
+    def reset(self, *, confirmed: bool) -> bool:
+        """Clear this app's own entries and start again; only on a click."""
+        if not confirmed or self.stage != "confirm":
+            return False
+        self.record(permission_help_record("reset_confirmed"))
+        for command in permission_reset_commands():
+            try:
+                status = int(self.runner(command))
+            except Exception:
+                status = 1
+            if status != 0:
+                self.stage = "failed"
+                self.record(permission_help_record("reset_failed"))
+                return False
+        self.record(permission_help_record("reset_done"))
+        self.restart()
+        return True
+
+    def update(self, missing: Sequence[str]) -> bool:
+        """Take a fresh reading; True once nothing is missing."""
+        self.missing = tuple(key for key in PERMISSION_HELP_KEYS
+                             if key in tuple(missing))
+        if self.missing:
+            return False
+        self.record(permission_help_record("granted"))
+        return True
+
+
+PERMISSION_HELP_WIDTH = 460.0
+PERMISSION_HELP_RECHECK_SECONDS = 3.0
+
+
+if APPKIT_AVAILABLE:
+    class _PermissionHelpBackground(NSView):
+        """The theme's window colour, drawn rather than layered so a cached
+        render shows exactly what the window does."""
+
+        def isFlipped(self):
+            return True
+
+        def drawRect_(self, rect):
+            palette = palette_for_appearance(_uses_dark_appearance(self))
+            _theme_color(palette.bg).setFill()
+            NSBezierPath.fillRect_(rect)
+
+    class PermissionHelpWindowController(NSObject):
+        """A small native window for the permissions macOS has not given."""
+
+        def initWithFlow_(self, flow):
+            self = objc.super(PermissionHelpWindowController, self).init()
+            if self is None:
+                return None
+            self.flow = flow
+            self.timer = None
+            self.closed = False
+            self.window = NSWindow.alloc() \
+                .initWithContentRect_styleMask_backing_defer_(
+                    NSMakeRect(0, 0, PERMISSION_HELP_WIDTH, 400),
+                    NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                    | NSWindowStyleMaskMiniaturizable,
+                    NSBackingStoreBuffered, True)
+            self.window.setReleasedWhenClosed_(False)
+            self.window.setTitle_(localized_string("permission_help.window.title"))
+            self.content = _PermissionHelpBackground.alloc().initWithFrame_(
+                NSMakeRect(0, 0, PERMISSION_HELP_WIDTH, 400))
+            self.window.setContentView_(self.content)
+            self.render()
+            return self
+
+        @objc.python_method
+        def _text(self, text, role, color, width):
+            label = NSTextField.wrappingLabelWithString_(text)
+            label.setFont_(_role_font(role))
+            label.setTextColor_(color)
+            label.setSelectable_(False)
+            label.setPreferredMaxLayoutWidth_(width)
+            size = label.cell().cellSizeForBounds_(
+                NSMakeRect(0, 0, width, 10_000.0))
+            return label, float(size.height)
+
+        @objc.python_method
+        def _button(self, title, action, tag=0):
+            button = NSButton.buttonWithTitle_target_action_(title, self, action)
+            button.setTag_(tag)
+            button.sizeToFit()
+            return button
+
+        @objc.python_method
+        def render(self):
+            """Lay the window out for the flow's current stage."""
+            for view in list(self.content.subviews()):
+                view.removeFromSuperview()
+            dark = _uses_dark_appearance(self.content)
+            palette = palette_for_appearance(dark)
+            ink, soft = _theme_color(palette.ink), _theme_color(palette.ink_soft)
+            pad, width = 28.0, PERMISSION_HELP_WIDTH - 56.0
+            y = 24.0
+            self.buttons = {}
+            face = NSImageView.alloc().initWithFrame_(NSMakeRect(pad, y, 56, 56))
+            image = NSImage.alloc().initWithContentsOfFile_(str(
+                Path(__file__).resolve().parent / "icons" / "faces" / "color"
+                / "parrot-idle.svg"))
+            if image is not None:
+                face.setImage_(image)
+            face.setImageScaling_(3)   # proportionally up or down
+            face.setAccessibilityElement_(False)
+            self.content.addSubview_(face)
+            y += 56 + 16
+            confirm = self.flow.stage == "confirm"
+            title_key = ("permission_help.confirm.title" if confirm
+                         else "permission_help.title")
+            body_key = {"confirm": "permission_help.confirm.body",
+                        "failed": "permission_help.failed"}.get(
+                            self.flow.stage, "permission_help.body")
+            for key, role, color, gap in (
+                    (title_key, "page_title", ink, 6.0),
+                    (body_key, "row_caption", soft, 16.0)):
+                label, height = self._text(
+                    localized_string(key), role, color, width)
+                label.setFrame_(NSMakeRect(pad, y, width, height))
+                self.content.addSubview_(label)
+                y += height + gap
+            if not confirm:
+                for index, key in enumerate(PERMISSION_HELP_KEYS):
+                    if key not in self.flow.missing:
+                        continue
+                    name_key = PERMISSION_HELP_PANES[index][3]
+                    name = localized_string(name_key)
+                    button = self._button(
+                        localized_string("permission_help.open"),
+                        "openSettings:", index)
+                    button.setAccessibilityLabel_(localized_string(
+                        "permission_help.open.label", permission=name))
+                    button_width = float(button.frame().size.width)
+                    text_width = width - button_width - 12
+                    title, title_height = self._text(
+                        name, "row_title", ink, text_width)
+                    why, why_height = self._text(
+                        localized_string(f"{name_key}.why"), "row_caption",
+                        soft, text_width)
+                    title.setFrame_(NSMakeRect(pad, y, text_width, title_height))
+                    why.setFrame_(NSMakeRect(
+                        pad, y + title_height + 2, text_width, why_height))
+                    row_height = max(title_height + 2 + why_height, 28.0)
+                    button.setFrameOrigin_((
+                        pad + width - button_width,
+                        y + (row_height - float(button.frame().size.height)) / 2))
+                    for view in (title, why, button):
+                        self.content.addSubview_(view)
+                    self.buttons[key] = button
+                    y += row_height + 14
+                for key in ("permission_help.toggle", "permission_help.closes"):
+                    label, height = self._text(
+                        localized_string(key), "row_caption",
+                        ink if key == "permission_help.toggle" else soft, width)
+                    label.setFrame_(NSMakeRect(pad, y, width, height))
+                    self.content.addSubview_(label)
+                    y += height + 8
+            y += 12
+            row = []
+            if confirm:
+                cancel = self._button(
+                    localized_string("permission_help.confirm.cancel"),
+                    "cancelReset:")
+                cancel.setKeyEquivalent_("\x1b")
+                clear = self._button(
+                    localized_string("permission_help.confirm.action"),
+                    "confirmReset:")
+                clear.setHasDestructiveAction_(True)
+                row = [cancel, clear]
+                self.buttons["cancel"], self.buttons["confirm"] = cancel, clear
+            elif self.flow.stage == "missing":
+                still = self._button(
+                    localized_string("permission_help.still"),
+                    "stillNotWorking:")
+                still.setFrameOrigin_((pad, y))
+                self.content.addSubview_(still)
+                self.buttons["still"] = still
+            x = pad + width
+            for button in reversed(row):
+                x -= float(button.frame().size.width)
+                button.setFrameOrigin_((x, y))
+                self.content.addSubview_(button)
+                x -= 12
+            y += 32 + 20
+            self.window.setContentSize_((PERMISSION_HELP_WIDTH, y))
+            self.content.setFrame_(NSMakeRect(0, 0, PERMISSION_HELP_WIDTH, y))
+            self.content.setNeedsDisplay_(True)
+
+        def openSettings_(self, sender):
+            index = int(sender.tag())
+            self.flow.open_settings(PERMISSION_HELP_KEYS[index])
+
+        def stillNotWorking_(self, sender):
+            self.flow.still_not_working()
+            self.render()
+
+        def cancelReset_(self, sender):
+            self.flow.cancel_reset()
+            self.render()
+
+        def confirmReset_(self, sender):
+            if not self.flow.reset(confirmed=True):
+                self.render()
+
+        @objc.python_method
+        def show(self):
+            self.flow.shown()
+            self.window.center()
+            self.window.makeKeyAndOrderFront_(None)
+            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            self.timer = NSTimer \
+                .scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                    PERMISSION_HELP_RECHECK_SECONDS, self, "recheck:", None, True)
+
+        def recheck_(self, timer):
+            def probe():
+                try:
+                    missing = tuple(self.flow.probe())
+                except Exception:
+                    return
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "applyReading:", list(missing), False)
+            threading.Thread(target=probe, daemon=True,
+                             name="whisper-face-permission-help").start()
+
+        def applyReading_(self, missing):
+            if self.closed:
+                return
+            if self.flow.update(tuple(missing or ())):
+                self.close()
+            elif self.flow.stage == "missing":
+                self.render()
+
+        @objc.python_method
+        def close(self):
+            self.closed = True
+            if self.timer is not None:
+                self.timer.invalidate()
+                self.timer = None
+            self.window.orderOut_(None)
+            self.window.close()
+
+
+def show_permission_help_window(flow: PermissionHelpFlow) -> Any:
+    """Show the permission window for ``flow``; returns its controller."""
+    if not APPKIT_AVAILABLE:
+        raise RuntimeError("The permission window requires macOS AppKit")
+    controller = PermissionHelpWindowController.alloc().initWithFlow_(flow)
+    controller.show()
+    return controller
+
+
 class WhisperFaceGUI:
     """Retained facade suitable for ownership by the existing status bar."""
 
@@ -19652,6 +20023,13 @@ def create_gui(actions: GUIActions, *, locale: str = "en") -> WhisperFaceGUI:
 
 __all__ = [
     "APPKIT_AVAILABLE",
+    "LAUNCHER_BUNDLE_ID",
+    "PERMISSION_HELP_KEYS",
+    "PermissionHelpFlow",
+    "permission_help_record",
+    "permission_reset_commands",
+    "permission_settings_url",
+    "show_permission_help_window",
     "AcousticKeywordCandidate",
     "AcousticKeywordInspection",
     "AppToneSetting",

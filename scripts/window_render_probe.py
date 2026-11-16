@@ -63,6 +63,15 @@ and writes every screen in both appearances as installer-{screen}-{light,
 dark}.png, at the window's own size. Nothing is installed, started or
 opened; the compiled launcher is thrown away afterwards.
 
+Pass ``--permissions`` to review the window the running app shows while
+macOS withholds Accessibility or Input Monitoring:
+
+    uv run scripts/window_render_probe.py --permissions [output-dir]
+
+It writes permissions-{both,accessibility,input-monitoring,confirm,failed}-
+{light,dark}.png. The window's seams are fakes here: nothing opens System
+Settings and nothing touches a privacy setting.
+
 Pass ``--overlay`` to review the recording overlay instead of the window:
 
     uv run scripts/window_render_probe.py --overlay [output-dir]
@@ -104,6 +113,9 @@ if SHEETS:
 INSTALLER = "--installer" in ARGS
 if INSTALLER:
     ARGS.remove("--installer")
+PERMISSIONS = "--permissions" in ARGS
+if PERMISSIONS:
+    ARGS.remove("--permissions")
 OUT = Path(ARGS[0]) if ARGS else REPO / ".probe-renders"
 sys.path.insert(0, str(REPO))
 
@@ -310,6 +322,52 @@ def render_installer(out: Path) -> int:
 if INSTALLER:
     OUT.mkdir(parents=True, exist_ok=True)
     raise SystemExit(render_installer(OUT))
+
+
+def render_permissions(out: Path) -> int:
+    """Draw the permission window's stages with fake seams; never shown."""
+    from AppKit import (NSApplication, NSAppearance, NSAppearanceNameAqua,
+                        NSAppearanceNameDarkAqua, NSBitmapImageFileTypePNG)
+    import whisper_face_gui as gui
+    NSApplication.sharedApplication()
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("the probe never acts")
+
+    samples = (
+        ("both", ("accessibility", "input_monitoring"), "missing"),
+        ("accessibility", ("accessibility",), "missing"),
+        ("input-monitoring", ("input_monitoring",), "missing"),
+        ("confirm", ("accessibility", "input_monitoring"), "confirm"),
+        ("failed", ("accessibility", "input_monitoring"), "failed"),
+    )
+    for name, missing, stage in samples:
+        for suffix, appearance in (("light", NSAppearanceNameAqua),
+                                   ("dark", NSAppearanceNameDarkAqua)):
+            flow = gui.PermissionHelpFlow(
+                missing=missing, opener=refuse, runner=refuse,
+                restart=refuse, record=lambda _line: None)
+            flow.stage = stage
+            controller = gui.PermissionHelpWindowController.alloc() \
+                .initWithFlow_(flow)
+            controller.window.setAppearance_(
+                NSAppearance.appearanceNamed_(appearance))
+            controller.render()
+            view = controller.window.contentView()
+            view.layoutSubtreeIfNeeded()
+            rep = view.bitmapImageRepForCachingDisplayInRect_(view.bounds())
+            view.cacheDisplayInRect_toBitmapImageRep_(view.bounds(), rep)
+            data = rep.representationUsingType_properties_(
+                NSBitmapImageFileTypePNG, {})
+            data.writeToFile_atomically_(
+                str(out / f"permissions-{name}-{suffix}.png"), True)
+    print(f"done → {out}")
+    return 0
+
+
+if PERMISSIONS:
+    OUT.mkdir(parents=True, exist_ok=True)
+    raise SystemExit(render_permissions(OUT))
 
 if OVERLAY:
     from AppKit import NSApplication as _Application
