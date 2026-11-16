@@ -14,6 +14,73 @@ never runs a benchmark, and never writes an activation receipt. It prints the
 exact command to run and stops. `--confirm-manual-review` stays yours to pass,
 after you have listened.
 
+## Accuracy: your voice, your names — about 15 minutes
+
+This one approves nothing. It records you saying your own names and
+vocabulary, once, so every later change to recognition can be measured
+against your voice instead of a guess.
+
+```sh
+uv run scripts/capture_voice_evidence.py accuracy
+```
+
+That is the whole command. The terms come from `~/whisper-face-evidence/terms.txt`
+if you wrote one, otherwise from the names you typed above the auto-learned
+marker in this checkout's `dictionary.txt`. A `terms.txt` is one entry per line:
+
+```text
+Priya | Maria
+Okafor
+jargon: kubectl
+```
+
+`Name | sound-alike` adds a near miss: a real word or name that sounds close
+but must not be written as the name. `jargon:` marks a technical term. Blank
+lines and `#` comments are ignored. The first 15 names and 5 jargon terms are
+used, in file order.
+
+**The essential set is 40 sentences and takes about 15 minutes**: 30
+sentences with your names in them (each name at least twice, in different
+sentences and positions, possessives included) and 10 sentences that use a
+near miss or no name at all. Each case is three presses of Return: record,
+stop, keep. `r` redoes, `p` plays it back, `e` changes the text to what you
+actually said (it starts from the prompt, so you only fix the difference),
+`s` skips, `q` quits. A silent, far too quiet, clipped or cut-short take is
+caught at once with one line and Return records it again. If the microphone
+sends nothing at all, the tool stops and says to allow your terminal app in
+System Settings > Privacy & Security > Microphone.
+
+When the essential set is done the tool says so, writes everything, prints
+the next commands and stops. **The extended part is optional**: 60 more cases,
+about 38 minutes — 10 more near-miss sentences, 20 numbers, dates, times,
+money, phone numbers, emails and links (all fictional), 10 technical
+sentences, 15 free dictations where you say something of your own and type
+what you said, and 5 long passages of 20 to 40 seconds. Press `x` when
+offered, or run the command with `--extended`. Skipping the free dictations
+(`F`) saves about 15 minutes and skipping the long takes (`L`) about 8; a
+break is suggested halfway through.
+
+Quit whenever you like. The plan is fixed when you start and saved with the
+recordings, so the next run picks up at the next unrecorded case, in either
+part. `--plan` lists every case without recording; nothing is written until
+you start.
+
+Everything goes into `~/whisper-face-evidence/accuracy/` (folder `0700`,
+files `0600`): `acc-NNN.wav` (16 kHz mono PCM16) with `acc-NNN.txt` beside it
+(what you said), `manifest.jsonl` for `benchmark_asr.py --dataset`,
+`cases.json` with the labels (which name, which near miss, which position),
+and `session.json`. The tool refuses any folder inside a Git checkout, even a
+gitignored one. **Nothing leaves this Mac**: there is no network code, and your
+terms and what you said are written nowhere else — not into a log, not into
+the repository, not into an error message.
+
+The commands it prints transcribe every take with both speech programs,
+`.models/bin/parrot-asr-helper` and the app's own
+`.models/bin/parrot-speech-runtime`, into private `--transcripts` files under
+`~/whisper-face-evidence` (the default transcripts file is committed, so never
+use it for these), and score them with `benchmark_asr.py`. They work on a
+finished essential set or on any partial corpus.
+
 ## Before you start
 
 ```sh
@@ -25,7 +92,7 @@ uv run scripts/capture_voice_evidence.py relisten --plan
 microphone. `--status` shows progress on an existing session. `--list-devices`
 prints what the machine can hear with.
 
-Everything lands in `.evidence/<corpus>/` — directories `0700`, files `0600`,
+For the three activation corpora, everything lands in `.evidence/<corpus>/` — directories `0700`, files `0600`,
 written atomically, and gitignored. The tool refuses to write anywhere inside
 the checkout that `.gitignore` does not already cover. To keep the corpus off
 the repository disk entirely, pass `--evidence-root ~/Private/whisper-evidence`.
