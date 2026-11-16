@@ -93,6 +93,7 @@ from compatibility_fingerprint import (  # noqa: E402
     TARGET_BUCKETS,
 )
 from measurement_mode import MeasurementMode  # noqa: E402
+import insertion_integrity  # noqa: E402
 from insertion_integrity import (  # noqa: E402
     DestinationObservation,
     InsertionCoordinator,
@@ -145,6 +146,11 @@ BASELINE_DEFINITIONS = (
     # What bounded_helper_exchange raises for a start still loading, and
     # what ParakeetClient catches.
     "HelperStillLoading",
+    # What commit_insertion asks of a field that hides its text and not its
+    # range, so every harness that commits gets the real rule.
+    "position_check_applies",
+    "position_readback",
+    "_ax_character_count",
 )
 BASELINE_ASSIGNMENTS = (
     "IS_MACOS",
@@ -168,6 +174,8 @@ BASELINE_ASSIGNMENTS = (
     "PARAKEET_PROTOCOL",
     # bounded_helper_exchange's bound for a start, and the runtime's client.
     "PARAKEET_RUNTIME_START_ALLOWANCE",
+    # The window a check by position waits for the cursor to move.
+    "POSITION_CHECK_TIMEOUT",
 )
 
 try:  # pragma: no cover - depends on the runner
@@ -234,6 +242,11 @@ def load_definitions(*names, assignments=(), extra=None):
         # Pure helpers the assembly and the compiler call on every decode.
         "HELPER_WORD_SOURCE": HELPER_WORD_SOURCE,
         "combine_word_evidence_status": combine_word_evidence_status,
+        # The pure readback comparisons dictate.py imports from
+        # insertion_integrity, so a selected readback runs the real ones.
+        **{name: getattr(insertion_integrity, name) for name in (
+            "position_check", "position_count", "readback_difference",
+            "readback_stage", "same_but_whitespace_form", "utf16_units")},
     }
     # Shared constants come first so an explicit `extra` still overrides them
     # (tests pin IS_MACOS both ways), and a per-call copy keeps one test's
@@ -12687,11 +12700,17 @@ class DelayedCleanupRuntimeTests(unittest.TestCase):
         segment = ast.get_source_segment(source, finish)
         self.assertIn(
             "if needs_llm and not delayed_cleanup_requested:", segment)
+        # Both need the text itself, so a paste checked only by where the
+        # cursor went never starts either.
         self.assertIn(
-            "if verified and delayed_cleanup_requested:", segment)
+            "text_verified = verified and not (\n"
+            "            integrity_receipt is not None\n"
+            "            and integrity_receipt.checked_by_position)", segment)
         self.assertIn(
-            "if learn_correction and verified and "
-            "not delayed_cleanup_scheduled:",
+            "if text_verified and delayed_cleanup_requested:", segment)
+        self.assertIn(
+            "if (learn_correction and text_verified\n"
+            "                and not delayed_cleanup_scheduled):",
             segment,
         )
         self.assertGreater(
@@ -12793,6 +12812,226 @@ class ReadbackEdgeWhitespaceTests(unittest.TestCase):
         self.assertEqual(classify("totally other", "abc"), "divergent")
         self.assertEqual(classify(None, "abc"), "observed-empty")
         self.assertEqual(classify("", "abc"), "observed-empty")
+
+
+class ReadbackDetailTests(unittest.TestCase):
+    """Whitespace forms verify; every other difference is named, not read."""
+
+    def _namespace(self):
+        import unicodedata
+        return load_definitions(
+            "insertion_readback", "classify_readback_conflict",
+            assignments={"READBACK_TIMEOUT"},
+            extra={"ReadbackResult": ReadbackResult,
+                   "unicodedata": unicodedata})
+
+    def _run(self, before, inserted, reads, selection=None):
+        ns = self._namespace()
+        clock = [0.0]
+        reads = list(reads)
+
+        def reader(_element):
+            return reads.pop(0) if len(reads) > 1 else reads[0]
+
+        snapshot = types.SimpleNamespace(
+            text=before, element=object(),
+            selection=(len(before), 0) if selection is None else selection)
+        return ns["insertion_readback"](
+            snapshot, inserted, timeout=0.1, reader=reader,
+            clock=lambda: clock[0],
+            sleeper=lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+
+    def test_the_same_text_in_another_whitespace_form_verifies(self):
+        for before, inserted, observed in (
+                ("Hi ", "see you soon", "Hi\u00a0see\u00a0you soon"),
+                ("", "one\ntwo", "one\r\ntwo"),
+                ("", "one\ntwo", "one\u2028two"),
+                ("", "one\ntwo", "one\u2029two\n"),
+                ("Hi ", "there", "Hi\u00a0there\n")):
+            with self.subTest(observed=observed):
+                result = self._run(before, inserted, [observed])
+                self.assertEqual(result.state, ReceiptState.VERIFIED)
+                self.assertEqual(
+                    result.reason, ReceiptReason.COMMIT_VERIFIED_WHITESPACE_FORM)
+                self.assertEqual(result.difference, "whitespace-form")
+                self.assertEqual(result.stage, "")
+
+    def test_the_rules_that_verified_before_still_do_as_they_did(self):
+        exact = self._run("Hi ", "there", ["Hi there"])
+        self.assertEqual(exact.reason, ReceiptReason.COMMIT_VERIFIED)
+        self.assertEqual(exact.difference, "")
+        edge = self._run("Hi ", "there", ["Hi there\n"])
+        self.assertEqual(
+            edge.reason, ReceiptReason.COMMIT_VERIFIED_EDGE_WHITESPACE)
+        self.assertEqual(edge.difference, "edge-whitespace")
+
+    def test_a_short_missing_or_misplaced_paste_stays_a_conflict(self):
+        for observed, difference in (
+                ("Hi\u00a0see\u00a0you", "leading-part"),
+                ("Hi ", "unchanged"),
+                ("see\u00a0you soonHi ", "elsewhere"),
+                ("Hi see  you soon", "spacing"),
+                ("Hi see\tyou soon", "spacing"),
+                ("Hi see you soon.", "extra-at-place"),
+                ("", "field-empty")):
+            with self.subTest(observed=observed):
+                result = self._run("Hi ", "see you soon", [observed])
+                self.assertEqual(result.state, ReceiptState.CONFLICT)
+                self.assertEqual(result.difference, difference)
+
+    def test_the_stage_says_how_the_field_behaved_over_the_window(self):
+        # A field still filling in when the window closes: a new value on
+        # every read, all of them short of the paste.
+        filling = ["Hi " + "see you soon"[:index] for index in range(1, 12)]
+        for reads, stage in (
+                (["Hi "], "no-change-seen"),
+                (filling, "still-changing"),
+                (["Hi ", "Hi s", "Hi se"], "settled"),
+                # It changed once, and went back.
+                (["Hi s", "Hi "], "settled")):
+            with self.subTest(reads=reads):
+                result = self._run("Hi ", "see you soon", reads)
+                self.assertEqual(result.state, ReceiptState.CONFLICT)
+                self.assertEqual(result.stage, stage)
+
+    def test_a_match_ends_the_readback_so_none_can_conflict_after_it(self):
+        # The readback returns on its first match; nothing reads the field
+        # again for this receipt, so "matched, then changed" cannot be a
+        # conflict here.
+        result = self._run("Hi ", "there", ["Hi ", "Hi there", "Hi"])
+        self.assertEqual(result.state, ReceiptState.VERIFIED)
+
+
+class PositionReadbackTests(unittest.TestCase):
+    """A field that hides its text and not its range, checked by its cursor."""
+
+    def _namespace(self):
+        return load_definitions(
+            "FocusSnapshot", "insertion_capability_buckets",
+            "unresolved_destination_id",
+            extra={"ReadbackResult": ReadbackResult,
+                   "dataclass": dataclass})
+
+    def _run(self, inserted, ranges, *, before=(4, 0), counts=(None, None),
+             timeout=None):
+        ns = self._namespace()
+        clock = [0.0]
+        ranges = list(ranges)
+        reads = []
+
+        def reader(_element):
+            reads.append(clock[0])
+            return ranges.pop(0) if len(ranges) > 1 else ranges[0]
+
+        snapshot = ns["FocusSnapshot"](
+            element=object(), text=None, selection=before)
+        kwargs = {} if timeout is None else {"timeout": timeout}
+        result = ns["position_readback"](
+            snapshot, inserted, counts[0], reader=reader,
+            counter=lambda _element: counts[1], clock=lambda: clock[0],
+            sleeper=lambda seconds: clock.__setitem__(
+                0, clock[0] + seconds), **kwargs)
+        return result, reads, clock[0]
+
+    def test_an_exact_move_is_proof_and_is_read_once(self):
+        result, reads, elapsed = self._run("hello", [(9, 0)])
+        self.assertEqual(result.state, ReceiptState.VERIFIED)
+        self.assertEqual(result.reason, ReceiptReason.COMMIT_VERIFIED_POSITION)
+        self.assertEqual(result.position_count, "not-offered")
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(elapsed, 0.0)
+
+    def test_a_late_move_is_still_proof_within_the_window(self):
+        result, reads, _elapsed = self._run(
+            "hello", [(4, 0), (4, 0), (9, 0)])
+        self.assertEqual(result.reason, ReceiptReason.COMMIT_VERIFIED_POSITION)
+        self.assertEqual(len(reads), 3)
+
+    def test_anything_else_is_the_unverifiable_result_it_always_was(self):
+        for ranges, before, counts, check, count in (
+                ([(4, 0)], (4, 0), (None, None), "did-not-move",
+                 "not-offered"),
+                ([(8, 0)], (4, 0), (None, None), "moved-other",
+                 "not-offered"),
+                ([(0, 0)], (4, 0), (None, None), "moved-other",
+                 "not-offered"),
+                ([(12, 0)], (4, 3), (None, None), "moved-other",
+                 "not-offered"),
+                ([None], (4, 0), (None, None), "unreadable-after",
+                 "not-offered"),
+                ([(9, 0)], (4, 0), (10, 16), "moved-exactly", "disagrees"),
+                ([(9, 0)], (4, 0), (10, None), "moved-exactly", "disagrees"),
+                ([(4, 0)], (4, 0), (10, 15), "did-not-move", "agrees")):
+            with self.subTest(ranges=ranges, before=before, counts=counts):
+                result, _reads, elapsed = self._run(
+                    "hello", ranges, before=before, counts=counts)
+                self.assertEqual(result.state, ReceiptState.UNVERIFIABLE)
+                self.assertEqual(
+                    result.reason, ReceiptReason.READBACK_UNAVAILABLE)
+                self.assertEqual(result.position, check)
+                self.assertEqual(result.position_count, count)
+                ns = self._namespace()
+                self.assertLessEqual(
+                    elapsed, ns["POSITION_CHECK_TIMEOUT"] + 0.02)
+
+    def test_a_replaced_selection_and_an_agreeing_count_are_proof(self):
+        result, _reads, _elapsed = self._run(
+            "hello", [(9, 0)], before=(4, 3), counts=(10, 12))
+        self.assertEqual(result.reason, ReceiptReason.COMMIT_VERIFIED_POSITION)
+        self.assertEqual(result.position_count, "agrees")
+
+    def test_it_counts_in_the_units_accessibility_uses(self):
+        thumbs = "ok \U0001f44d"
+        self.assertEqual(
+            self._run(thumbs, [(9, 0)])[0].reason,
+            ReceiptReason.COMMIT_VERIFIED_POSITION)
+        self.assertEqual(self._run(thumbs, [(8, 0)])[0].position,
+                         "moved-other")
+
+    def test_it_applies_to_an_element_that_hides_its_text_not_its_range(self):
+        ns = self._namespace()
+        snapshot = ns["FocusSnapshot"]
+        applies = ns["position_check_applies"]
+        element = object()
+        hidden = snapshot(element=element, text=None, selection=(4, 0))
+        opaque = InsertionLease.capture_opaque("u", "app:1", "Chat")
+        readable = InsertionLease.capture("u", "app:1", (4, 0), "Hi. ")
+        pressed = types.SimpleNamespace(focus_at_press=hidden)
+        windowed = types.SimpleNamespace(focus_at_press=None)
+        self.assertTrue(applies(pressed, opaque, hidden))
+        # Leased by window and input counters, never by the element.
+        self.assertFalse(applies(windowed, opaque, hidden))
+        # A field the runtime reads keeps its text readback.
+        self.assertFalse(applies(pressed, readable, hidden))
+        # No range, text that is there, or nothing at release.
+        self.assertFalse(applies(pressed, opaque, snapshot(
+            element=element, text=None, selection=None)))
+        self.assertFalse(applies(pressed, opaque, snapshot(
+            element=element, text="Hi", selection=None)))
+        self.assertFalse(applies(pressed, opaque, None))
+        self.assertFalse(applies(pressed, None, hidden))
+
+    def test_no_application_is_named_and_the_paste_is_not_held(self):
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        for name in ("position_check_applies", "position_readback",
+                     "_ax_character_count"):
+            function = ast.unparse(next(
+                node for node in TREE.body
+                if isinstance(node, ast.FunctionDef) and node.name == name))
+            self.assertNotIn("com.", function)
+            self.assertNotIn("bundle", function)
+            self.assertNotIn("MobileSMS", function)
+        commit = ast.unparse(next(
+            node for node in TREE.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "commit_insertion"))
+        # Before the paste: one count read and no wait; the polling runs in
+        # the readback, after it.
+        before_paste = commit[:commit.index("def readback")]
+        self.assertNotIn("sleep", before_paste)
+        self.assertNotIn("position_readback(", before_paste)
+        self.assertEqual(before_paste.count("_ax_character_count("), 1)
+        self.assertIn("POSITION_CHECK_TIMEOUT = 0.12\n", source)
 
 
 class InsertionJoinPrefixTests(unittest.TestCase):
@@ -16677,21 +16916,50 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
             caption={},
             coordinator=coordinator or InsertionCoordinator())
         element, elsewhere = object(), object()
-        field = {"value": self.BEFORE}
+        positioned = outcome.startswith("position-")
+        # A field that hides its text: no value, and a selection range in
+        # UTF-16 units, as Accessibility reports it.
+        start = len(self.BEFORE.encode("utf-16-le")) // 2
+        field = {"value": None if positioned else self.BEFORE,
+                 "range": (start, 0) if positioned else None,
+                 "count": start if outcome in self.COUNTED else None,
+                 "range_reads": 0}
         clock = [100.0]
 
         def paste(text):
             if outcome == "paste-raised":
                 raise RuntimeError("synthetic paste failure")
             seen.pasted.append(text)
+            units = len(text.encode("utf-16-le")) // 2
             if outcome == "conflict":
                 field["value"] = "something else entirely"
             elif outcome == "readback-empty":
                 # A field that was read at key-down and at release answers
                 # nothing at all once the paste is sent.
                 field["value"] = None
+            elif outcome in self.READABLE_RESULTS:
+                field["value"] = self.READABLE_RESULTS[outcome](
+                    self.BEFORE, text)
+            elif positioned:
+                field["range"] = {
+                    "position-exact": (start + units, 0),
+                    "position-counted": (start + units, 0),
+                    "position-count-off": (start + units, 0),
+                    "position-still": (start, 0),
+                    "position-short": (start + units - 1, 0),
+                    "position-elsewhere": (0, 0),
+                    "position-code-points": (start + len(text), 0),
+                    "position-unreadable": None,
+                }[outcome]
+                if field["count"] is not None:
+                    field["count"] += units + (
+                        1 if outcome == "position-count-off" else 0)
             else:
                 field["value"] = self.BEFORE + text
+
+        def reported_range(_element):
+            field["range_reads"] += 1
+            return field["range"]
 
         class Thread:
             def __init__(self, target=None, args=(), **_kwargs):
@@ -16823,6 +17091,7 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
                 "user_input_signature": lambda: None,
                 "_ax_elements_equal": lambda left, right: left is right,
                 "_ax_text": lambda _element: field["value"],
+                "_ax_reported_range": reported_range,
                 "paste": paste,
                 "play": seen.sounds.append,
                 "set_status": seen.statuses.append,
@@ -16838,13 +17107,18 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
                     callAfter=lambda function, *args: function(*args)),
             },
         )
+        ns["_ax_character_count"] = lambda _element: field["count"]
         snapshot = ns["FocusSnapshot"]
         readable = snapshot(
             element=element, text=self.BEFORE,
             selection=(len(self.BEFORE), 0), window_title="Chat")
         hidden = snapshot(
             element=element, text=None, selection=None, window_title="Chat")
-        at_press = hidden if outcome == "unchecked" else readable
+        hidden_with_range = snapshot(
+            element=element, text=None, selection=(start, 0),
+            window_title="Chat")
+        at_press = (hidden if outcome == "unchecked"
+                    else hidden_with_range if positioned else readable)
         at_release = {
             "destination-changed": snapshot(
                 element=elsewhere, text="", selection=(0, 0),
@@ -16900,7 +17174,38 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
         seen.recorder = recorder
         seen.receipt = recorder.insertion_receipt
         seen.text = getattr(recorder, "committed_text", None)
+        seen.range_reads = field["range_reads"]
+        seen.clock = clock[0]
         return seen
+
+    # Outcomes in a field the runtime reads: what it holds once the paste
+    # is sent, from what it held before and what was pasted.
+    READABLE_RESULTS = {
+        # The same text, its spaces stored as no-break spaces.
+        "no-break-spaces": lambda before, text: (
+            before + text).replace(" ", "\u00a0"),
+        # Cut short, missing, or put in front of what was there.
+        "truncated": lambda before, text: before + text[:-3],
+        "missing": lambda before, _text: before,
+        "misplaced": lambda before, text: text + before,
+        # The same three, in no-break spaces: the folding rescues none.
+        "truncated-no-break": lambda before, text: (
+            before + text[:-3]).replace(" ", "\u00a0"),
+        "misplaced-no-break": lambda before, text: (
+            text + before).replace(" ", "\u00a0"),
+    }
+    COUNTED = ("position-counted", "position-count-off")
+    POSITION_FAILURES = (
+        # (outcome, what the check saw, what the count said)
+        ("position-still", "did-not-move", "not-offered"),
+        ("position-short", "moved-other", "not-offered"),
+        ("position-elsewhere", "moved-other", "not-offered"),
+        ("position-unreadable", "unreadable-after", "not-offered"),
+        ("position-count-off", "moved-exactly", "disagrees"),
+    )
+    READBACK_METRICS = (
+        "insertion_readback_difference", "insertion_readback_stage",
+        "insertion_position_check", "insertion_position_count")
 
     def assert_unverified_everywhere(self, seen):
         """The trust path: nothing may record this dictation as proven."""
@@ -17109,7 +17414,8 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
         self.assertEqual(
             record.metrics["insertion_reason"], "unsupported_field")
         self.assertIs(record.metrics["insertion_verified"], True)
-        for key in ("insertion_target", *self.OPAQUE_METRICS):
+        for key in ("insertion_target", *self.OPAQUE_METRICS,
+                    *self.READBACK_METRICS):
             self.assertIsNone(record.metrics[key])
         self.assertEqual(seen.coordinator.recoverable(), ())
 
@@ -17196,6 +17502,308 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
         self.assertEqual(seen.modes, ["error"])
         self.assertEqual(coordinator.recoverable_count(), 6)
         self.assertEqual(coordinator.needs_home_count(), 1)
+
+
+    EMOJI = "Meet me at the station \U0001f44d"
+
+    def test_a_paste_checked_by_position_is_a_checked_paste(self):
+        for outcome, count in (("position-exact", "not-offered"),
+                               ("position-counted", "agrees")):
+            with self.subTest(outcome=outcome):
+                seen = self.deliver(outcome)
+
+                self.assertEqual(seen.pasted, [self.SPOKEN])
+                self.assertEqual(seen.receipt.state, ReceiptState.VERIFIED)
+                self.assertTrue(seen.receipt.checked_by_position)
+                self.assertFalse(seen.receipt.pasted_unchecked)
+                # It looks and sounds like any checked paste: the cue, no
+                # pill, no "Not checked here", and no copy kept.
+                self.assertEqual(seen.modes, [])
+                self.assertEqual(seen.statuses, [])
+                self.assertEqual(seen.sounds, ["Pop"])
+                self.assertEqual(seen.delays, [0.0])
+                self.assertNotEqual(
+                    seen.caption.get("text"), HUD_PASTED_CAPTION)
+                self.assertEqual(seen.coordinator.recoverable(), ())
+                self.assertEqual(seen.coordinator.needs_home_count(), 0)
+                # Nothing that needs the text acts on it: undo has nothing
+                # to put back (and an older insertion is no longer the
+                # last), and no correction learning starts.
+                self.assertEqual(seen.undoable, [None])
+                self.assertEqual(seen.threads, [])
+                self.assertEqual(seen.delayed, [])
+                # The record says it was checked, and how.
+                record = seen.records[0]
+                self.assertFalse(record.path.startswith("outbox/"))
+                metrics = record.metrics
+                self.assertIs(metrics["insertion_verified"], True)
+                self.assertEqual(metrics["insertion_state"], "verified")
+                self.assertEqual(
+                    metrics["insertion_reason"], "commit_verified_position")
+                self.assertEqual(
+                    metrics["insertion_position_check"], "moved-exactly")
+                self.assertEqual(metrics["insertion_position_count"], count)
+                self.assertIsNone(metrics["insertion_readback_difference"])
+                self.assertIsNone(metrics["insertion_readback_stage"])
+                # Still an opaque destination with no text readback, as
+                # the six metrics from before say.
+                self.assertEqual(metrics["insertion_target"], "opaque")
+                self.assertEqual(metrics["insertion_readback"], "unavailable")
+                self.assertEqual(
+                    metrics["insertion_opaque_reason"], "value-unreadable")
+                self.assertEqual(
+                    metrics["insertion_selection_kind"], "range")
+
+    def test_it_does_not_wait_once_the_cursor_has_moved(self):
+        seen = self.deliver("position-exact")
+
+        # One read of the range after the paste settled it.
+        self.assertEqual(seen.range_reads, 1)
+        # A cursor that never moves waits out a short window, and no more.
+        still = self.deliver("position-still")
+        timeout = load_definitions(
+            assignments={"POSITION_CHECK_TIMEOUT", "READBACK_TIMEOUT"})
+        self.assertGreater(still.range_reads, 1)
+        self.assertLessEqual(
+            still.clock - seen.clock, timeout["POSITION_CHECK_TIMEOUT"] + 0.02)
+        self.assertLess(timeout["POSITION_CHECK_TIMEOUT"],
+                        timeout["READBACK_TIMEOUT"])
+
+    def test_a_cut_short_missing_or_misplaced_paste_is_never_checked(self):
+        for outcome, check, count in self.POSITION_FAILURES:
+            with self.subTest(outcome=outcome):
+                seen = self.deliver(outcome)
+
+                # Exactly what an unchecked paste does today: the calm
+                # pill, its copy kept, and nothing recorded as proven.
+                self.assertTrue(seen.receipt.pasted_unchecked)
+                self.assertFalse(seen.receipt.checked_by_position)
+                self.assertEqual(seen.modes, ["pasted"])
+                self.assertEqual(seen.sounds, ["Pop"])
+                self.assertEqual(seen.statuses, ["idle"])
+                self.assertEqual(seen.caption["text"], HUD_PASTED_CAPTION)
+                self.assert_unverified_everywhere(seen)
+                self.assertEqual(seen.coordinator.needs_home_count(), 0)
+                record = seen.records[0]
+                self.assertTrue(record.path.startswith("outbox/"))
+                metrics = record.metrics
+                self.assertIs(metrics["insertion_verified"], False)
+                self.assertEqual(metrics["insertion_state"], "unverifiable")
+                self.assertEqual(
+                    metrics["insertion_reason"], "readback_unavailable")
+                self.assertEqual(metrics["insertion_position_check"], check)
+                self.assertEqual(metrics["insertion_position_count"], count)
+                self.assertEqual(
+                    [log for log in seen.logs
+                     if log.startswith("[insertion]")],
+                    ["[insertion] pasted, not double-checked "
+                     f"(readback_unavailable; position {check}; "
+                     f"count {count}); copy kept in Voice Outbox"])
+
+    def test_characters_outside_the_basic_plane_count_as_two(self):
+        verified = self.deliver("position-exact", spoken=self.EMOJI)
+        self.assertIn("\U0001f44d", verified.pasted[0])
+        self.assertTrue(verified.receipt.checked_by_position)
+        # Moving by code points is one unit short of the paste.
+        short = self.deliver("position-code-points", spoken=self.EMOJI)
+        self.assertIn("\U0001f44d", short.pasted[0])
+        self.assertTrue(short.receipt.pasted_unchecked)
+        self.assertEqual(
+            short.records[0].metrics["insertion_position_check"],
+            "moved-other")
+
+    def test_the_snippet_path_checks_by_position_too(self):
+        snippet = ("signature", "Best,\nBerg")
+        seen = self.deliver("position-exact", snippet=snippet)
+        self.assertEqual(seen.pasted, ["Best,\nBerg"])
+        self.assertTrue(seen.receipt.checked_by_position)
+        self.assertEqual(seen.modes, [])
+        self.assertEqual(seen.sounds, ["Pop"])
+        # Learning a snippet's edit needs its text: not started.
+        self.assertEqual(seen.threads, [])
+        self.assertEqual(seen.coordinator.recoverable(), ())
+        still = self.deliver("position-still", snippet=snippet)
+        self.assertEqual(still.modes, ["pasted"])
+        self.assertEqual(
+            [item.text for item in still.coordinator.recoverable()],
+            ["Best,\nBerg"])
+        self.assertEqual(
+            [log for log in still.logs if log.startswith("[insertion]")],
+            ["[insertion] snippet pasted, not double-checked "
+             "(readback_unavailable; position did-not-move; "
+             "count not-offered); copy kept in Voice Outbox"])
+
+    def test_whitespace_forms_verify_and_say_so(self):
+        seen = self.deliver("no-break-spaces")
+
+        self.assertEqual(seen.receipt.state, ReceiptState.VERIFIED)
+        self.assertEqual(seen.receipt.reason.value,
+                         "commit_verified_whitespace_form")
+        self.assertEqual(seen.modes, [])
+        self.assertEqual(seen.sounds, ["Pop"])
+        # The text was read, so everything a read paste unlocks is there.
+        self.assertEqual(len(seen.undoable), 1)
+        self.assertEqual(
+            [name for name, _args in seen.threads],
+            ["learn_from_corrections"])
+        metrics = seen.records[0].metrics
+        self.assertIs(metrics["insertion_verified"], True)
+        self.assertEqual(
+            metrics["insertion_readback_difference"], "whitespace-form")
+        self.assertIsNone(metrics["insertion_readback_stage"])
+        self.assertIsNone(metrics["insertion_position_check"])
+
+    def test_a_real_conflict_keeps_its_error_and_says_how_it_differed(self):
+        unverified = "Paste unverified — check target; saved in Voice Outbox"
+        for outcome, difference, shape in (
+                ("conflict", "absent", "divergent"),
+                ("truncated", "leading-part", "observed-is-prefix"),
+                ("missing", "unchanged", "observed-is-prefix"),
+                ("misplaced", "elsewhere", "divergent"),
+                ("truncated-no-break", "leading-part", "divergent"),
+                ("misplaced-no-break", "elsewhere", "divergent")):
+            with self.subTest(outcome=outcome):
+                seen = self.deliver(outcome)
+
+                self.assertEqual(seen.receipt.state, ReceiptState.CONFLICT)
+                self.assertEqual(seen.modes, ["error"])
+                self.assertEqual(seen.sounds, ["Funk"])
+                self.assertEqual(seen.statuses, ["err"])
+                self.assertEqual(seen.caption["text"], unverified)
+                self.assert_unverified_everywhere(seen)
+                self.assertEqual(seen.coordinator.needs_home_count(), 1)
+                metrics = seen.records[0].metrics
+                self.assertIs(metrics["insertion_verified"], False)
+                self.assertEqual(
+                    metrics["insertion_reason"], "readback_conflict")
+                self.assertEqual(metrics["readback_shape"], shape)
+                self.assertEqual(
+                    metrics["insertion_readback_difference"], difference)
+                stage = ("no-change-seen" if outcome == "missing"
+                         else "settled")
+                self.assertEqual(metrics["insertion_readback_stage"], stage)
+                self.assertIsNone(metrics["insertion_position_check"])
+                self.assertEqual(
+                    [log for log in seen.logs
+                     if log.startswith("[insertion]")],
+                    ["[insertion] paste attempted but unverified "
+                     f"(readback_conflict; difference {difference}; "
+                     f"stage {stage}); saved in Voice Outbox"])
+
+    def test_the_new_record_is_categories_only(self):
+        from insertion_integrity import (
+            POSITION_CHECKS, POSITION_COUNTS, READBACK_DIFFERENCES,
+            READBACK_STAGES)
+        allowed = dict(zip(self.READBACK_METRICS, (
+            READBACK_DIFFERENCES, READBACK_STAGES, POSITION_CHECKS,
+            POSITION_COUNTS)))
+        outcomes = ("verified", "unchecked", "conflict", "readback-empty",
+                    "destination-changed", "target-unreadable",
+                    "paste-raised", "position-exact", "position-counted",
+                    *self.READABLE_RESULTS,
+                    *(name for name, _check, _count
+                      in self.POSITION_FAILURES))
+        for outcome in outcomes:
+            with self.subTest(outcome=outcome):
+                seen = self.deliver(outcome)
+                metrics = seen.records[0].metrics
+                for key, values in allowed.items():
+                    value = metrics[key]
+                    # A category or nothing: never a number, never text.
+                    self.assertTrue(value is None or value in values,
+                                    (key, value))
+                written = json.dumps(
+                    {key: metrics[key] for key in self.READBACK_METRICS})
+                for word in ("Meet", "station", "Hi", "Chat",
+                             "something", "\\u00a0"):
+                    self.assertNotIn(word, written)
+                for log in seen.logs:
+                    self.assertNotIn(self.SPOKEN, log)
+                    self.assertNotIn("station", log)
+
+
+class RecentReinsertPositionTests(unittest.TestCase):
+    """Re-inserting a recent dictation earns the same check by position."""
+
+    def reinsert(self, moved):
+        seen = SimpleNamespace(sounds=[], logs=[], undoable=[])
+        element = object()
+        field = {"range": (4, 0)}
+        text = "Meet me at the station."
+
+        def paste(pasted):
+            units = len(pasted.encode("utf-16-le")) // 2
+            if moved:
+                field["range"] = (4 + units, 0)
+
+        ns = load_definitions(
+            "insert_recent_dictation", "_RepasteRequest", "commit_insertion",
+            "capture_insertion_lease", "insertion_join_prefix",
+            "insertion_capability_buckets", "unresolved_destination_id",
+            "destination_observation", "focus_destination_id",
+            "focus_destination_matches", "opaque_focus_context",
+            "bounded_focus_text", "insertion_readback",
+            "classify_readback_conflict", "FocusSnapshot",
+            "build_undoable_insertion", "UndoableInsertion",
+            "dictation_success_sound",
+            assignments={"READBACK_TIMEOUT"},
+            extra={
+                "dataclass": dataclass,
+                "unicodedata": __import__("unicodedata"),
+                "INSERTION_COORDINATOR": InsertionCoordinator(),
+                "InsertionLease": InsertionLease,
+                "DestinationObservation": DestinationObservation,
+                "ReadbackResult": ReadbackResult,
+                "ReceiptState": ReceiptState,
+                "PREFERENCES": {"recent_dictations": True},
+                "PIPELINE_STATE": {},
+                "_recent_dictation_text": lambda _entry: text,
+                "frontmost_bundle": lambda: "com.example.chat",
+                "frontmost_window_destination": lambda _bundle: None,
+                "user_input_signature": lambda: None,
+                "current_language": lambda: "en",
+                "_ax_elements_equal": lambda left, right: left is right,
+                "_ax_text": lambda _element: None,
+                "_ax_reported_range": lambda _element: field["range"],
+                "paste": paste,
+                "play": seen.sounds.append,
+                "record_undoable_insertion": seen.undoable.append,
+                "print": lambda *args: seen.logs.append(
+                    " ".join(str(arg) for arg in args)),
+                "time": SimpleNamespace(
+                    time_ns=lambda: 1, monotonic=lambda: 0.0,
+                    sleep=lambda _seconds: None),
+            })
+        ns["_ax_character_count"] = lambda _element: None
+        ns["focused_snapshot"] = lambda: ns["FocusSnapshot"](
+            element=element, text=None, selection=(4, 0),
+            window_title="Chat")
+        ns["time"] = SimpleNamespace(
+            time_ns=lambda: 1, monotonic=iter(
+                [0.0, 0.0] + [1.0] * 50).__next__,
+            sleep=lambda _seconds: None)
+        seen.result = ns["insert_recent_dictation"]("entry-1")
+        return seen
+
+    def test_a_moved_cursor_is_a_checked_re_insert_with_nothing_to_undo(self):
+        seen = self.reinsert(moved=True)
+        self.assertEqual(seen.result, {
+            "inserted": True, "reason": "commit_verified_position"})
+        self.assertEqual(seen.sounds, ["Pop"])
+        self.assertEqual(seen.undoable, [None])
+        self.assertEqual(seen.logs, [
+            "[recent] re-inserted (commit_verified_position; "
+            "position moved-exactly; count not-offered)"])
+
+    def test_a_cursor_that_did_not_move_is_refused_as_before(self):
+        seen = self.reinsert(moved=False)
+        self.assertEqual(seen.result, {
+            "inserted": False, "reason": "readback_unavailable"})
+        self.assertEqual(seen.sounds, ["Funk"])
+        self.assertEqual(seen.undoable, [])
+        self.assertEqual(seen.logs, [
+            "[recent] re-insertion refused (readback_unavailable; "
+            "position did-not-move; count not-offered)"])
 
 
 class OpaqueDestinationEvidenceTests(unittest.TestCase):

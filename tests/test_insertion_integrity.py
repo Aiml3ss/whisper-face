@@ -7,15 +7,30 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import ast
+import json
+
 from insertion_integrity import (
+    POSITION_CHECKS,
+    POSITION_COUNTS,
     READBACK_CONFLICT_SHAPES,
+    READBACK_DIFFERENCES,
+    READBACK_STAGES,
     DestinationObservation,
     InsertionCoordinator,
     InsertionLease,
+    InsertionReceipt,
     ReadbackResult,
     ReceiptReason,
     ReceiptState,
     fingerprint_surrounding,
+    position_check,
+    position_count,
+    readback_difference,
+    readback_stage,
+    same_but_whitespace_form,
+    utf16_units,
+    whitespace_form,
 )
 
 
@@ -601,6 +616,328 @@ class UncheckedPasteTests(unittest.TestCase):
         self.assertEqual(self.coordinator.needs_home_count(), 1)
         self.assertTrue(self.coordinator.acknowledge("in-flight"))
         self.assertEqual(self.coordinator.needs_home_count(), 0)
+
+
+class WhitespaceFormTests(unittest.TestCase):
+    """Only what is the same text by construction may verify."""
+
+    def test_no_break_spaces_and_line_break_forms_are_the_same_text(self):
+        for observed, expected in (
+                ("Meet\u00a0me there", "Meet me there"),
+                ("Meet me there", "Meet\u00a0me there"),
+                ("one\r\ntwo", "one\ntwo"),
+                ("one\rtwo", "one\ntwo"),
+                ("one\u2028two", "one\ntwo"),
+                ("one\u2029two", "one\ntwo"),
+                ("one\x85two", "one\ntwo"),
+                # Forms and one trailing line break together.
+                ("Hi\u00a0there\n", "Hi there"),
+                ("Hi there", "Hi\u00a0there\r\n")):
+            with self.subTest(observed=observed):
+                self.assertTrue(same_but_whitespace_form(observed, expected))
+
+    def test_anything_else_is_not(self):
+        for observed, expected in (
+                ("Meet  me there", "Meet me there"),     # a doubled space
+                ("Meetme there", "Meet me there"),       # a dropped space
+                ("Meet\tme there", "Meet me there"),     # a tab
+                ("Meet\u2009me there", "Meet me there"), # a thin space
+                ("Meet\u202fme there", "Meet me there"), # narrow no-break
+                ("one\n\ntwo", "one\ntwo"),             # an extra line
+                ("one\vtwo", "one\ntwo"),
+                ("Meet me ther", "Meet me there"),       # truncated
+                ("Meet me there!", "Meet me there"),     # something added
+                ("me Meet there", "Meet me there"),      # reordered
+                ("\u00a0\n", " \n"),                     # all whitespace
+                (None, "Meet me there")):
+            with self.subTest(observed=observed):
+                self.assertFalse(same_but_whitespace_form(observed, expected))
+
+    def test_the_folding_touches_nothing_but_those_forms(self):
+        self.assertEqual(
+            whitespace_form("a\u00a0b\r\nc\rd\u2028e\u2029f\x85g\th"),
+            "a b\nc\nd\ne\nf\ng\th")
+
+    def test_it_verifies_with_its_own_reason_and_kind(self):
+        result = ReadbackResult.verified_whitespace_form()
+        self.assertEqual(result.state, ReceiptState.VERIFIED)
+        self.assertEqual(
+            result.reason, ReceiptReason.COMMIT_VERIFIED_WHITESPACE_FORM)
+        self.assertEqual(result.difference, "whitespace-form")
+        self.assertEqual(
+            ReadbackResult.verified_edge_whitespace().difference,
+            "edge-whitespace")
+        with self.assertRaises(ValueError):
+            ReadbackResult.conflict("divergent", difference="whitespace-form")
+        with self.assertRaises(ValueError):
+            ReadbackResult.conflict("divergent", difference="edge-whitespace")
+
+
+class ReadbackDifferenceTests(unittest.TestCase):
+    """A conflict says how it differed from the paste, never what it read."""
+
+    BEFORE = "Hi. Bye."
+    AT = (4, 0)
+    PASTE = "Meet me at the station. "
+
+    def kind(self, observed, before=None, selection=None, inserted=None):
+        return readback_difference(
+            self.BEFORE if before is None else before,
+            self.AT if selection is None else selection,
+            self.PASTE if inserted is None else inserted, observed)
+
+    def test_each_kind_is_told_apart(self):
+        expected = "Hi. Meet me at the station. Bye."
+        for observed, kind in (
+                ("", "field-empty"),
+                ("  \n", "field-empty"),
+                (self.BEFORE, "unchanged"),
+                ("Hi.  Meet me  at the station. Bye.", "spacing"),
+                ("Hi. Meet me at the station.Bye.".replace(".B", ". B"),
+                 "spacing"),
+                (expected.replace("Meet", "\u201cMeet"),
+                 "extra-at-place"),
+                ("Hi. Meet me at the station. Bye.".replace(
+                    "Hi.", "Hi\uff0e"), "typographic"),
+                ("Hi. Meet me at the Bye.", "leading-part"),
+                ("Hi. Meet me at the station. \U0001f44d Bye.",
+                 "extra-at-place"),
+                ("Meet me at the station.", "inserted-alone"),
+                ("Hi. Bye.Meet me at the station. ", "elsewhere"),
+                ("Hi. Bye. Something else", "absent"),
+                ("totally other", "absent")):
+            with self.subTest(observed=observed, kind=kind):
+                got = self.kind(observed)
+                self.assertEqual(got, kind)
+                self.assertIn(got, READBACK_DIFFERENCES)
+
+    def test_typographic_substitutions_are_named(self):
+        for observed, inserted in (
+                ("Hi. It\u2019s here Bye.", "It's here "),
+                ("Hi. \u201cyes\u201d Bye.", '"yes" '),
+                ("Hi. a \u2014 b Bye.", "a - b "),
+                ("Hi. wait\u2026 Bye.", "wait... ")):
+            with self.subTest(observed=observed):
+                self.assertEqual(
+                    self.kind(observed, inserted=inserted), "typographic")
+
+    def test_a_replaced_selection_is_measured_against_the_replacement(self):
+        # "old" was selected and replaced by the paste.
+        before, at = "Hi old bye", (3, 3)
+        self.assertEqual(readback_difference(
+            before, at, "new", "Hi ne bye"), "leading-part")
+        self.assertEqual(readback_difference(
+            before, at, "new", "Hi newold bye"), "extra-at-place")
+        self.assertEqual(readback_difference(
+            before, at, "new", "Hi  bye"), "absent")
+
+    def test_every_conflict_kind_is_one_the_function_gives(self):
+        source = (Path(__file__).resolve().parents[1]
+                  / "insertion_integrity.py").read_text(encoding="utf-8")
+        function = next(
+            node for node in ast.parse(source).body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "readback_difference")
+        given = {
+            node.value.value for node in ast.walk(function)
+            if isinstance(node, ast.Return)
+            and isinstance(node.value, ast.Constant)}
+        # The two proofs are named by the results that verify; every other
+        # label is a conflict the comparison can reach.
+        self.assertEqual(
+            given | {"edge-whitespace", "whitespace-form"},
+            READBACK_DIFFERENCES)
+        self.assertEqual(READBACK_STAGES, {
+            "no-change-seen", "still-changing", "settled"})
+
+    def test_the_stage_says_how_the_field_behaved(self):
+        self.assertEqual(readback_stage(False, False), "no-change-seen")
+        self.assertEqual(readback_stage(False, True), "no-change-seen")
+        self.assertEqual(readback_stage(True, True), "still-changing")
+        self.assertEqual(readback_stage(True, False), "settled")
+
+    def test_nothing_read_or_pasted_reaches_the_answer(self):
+        secret = "hunter2 Sam Rivera 8pm"
+        for observed in (secret, secret[:5], "x" + secret, "", secret * 3):
+            for inserted in (secret, "a", secret + " "):
+                got = self.kind(observed, before=secret,
+                                selection=(len(secret), 0),
+                                inserted=inserted)
+                self.assertIn(got, READBACK_DIFFERENCES)
+                self.assertNotIn("hunter2", got)
+
+    def test_categories_come_from_closed_sets(self):
+        with self.assertRaises(ValueError):
+            ReadbackResult(ReceiptState.CONFLICT,
+                           ReceiptReason.READBACK_CONFLICT, "divergent",
+                           difference="hunter2")
+        with self.assertRaises(ValueError):
+            ReadbackResult.conflict("divergent", stage="12 characters")
+        with self.assertRaises(ValueError):
+            ReadbackResult.unverifiable("moved-by-7")
+        with self.assertRaises(ValueError):
+            ReadbackResult.unverifiable("did-not-move", "count-9")
+        for kind in READBACK_DIFFERENCES - {
+                "edge-whitespace", "whitespace-form"}:
+            for stage in READBACK_STAGES:
+                result = ReadbackResult.conflict(
+                    "divergent", difference=kind, stage=stage)
+                self.assertEqual(result.state, ReceiptState.CONFLICT)
+
+
+class PositionCheckTests(unittest.TestCase):
+    """A field that hides its text is checked by where its cursor went."""
+
+    def test_only_an_exact_move_with_the_selection_replaced_counts(self):
+        for before, after, units, check in (
+                ((4, 0), (9, 0), 5, "moved-exactly"),
+                # The old selection replaced: the cursor lands past its
+                # start, not past its end.
+                ((4, 3), (9, 0), 5, "moved-exactly"),
+                ((4, 3), (12, 0), 5, "moved-other"),
+                # Truncated, too far, or left as a selection.
+                ((4, 0), (8, 0), 5, "moved-other"),
+                ((4, 0), (10, 0), 5, "moved-other"),
+                ((4, 0), (4, 5), 5, "moved-other"),
+                # Somewhere else entirely.
+                ((4, 0), (0, 0), 5, "moved-other"),
+                ((4, 0), (4, 0), 5, "did-not-move"),
+                ((4, 3), (4, 3), 5, "did-not-move"),
+                ((4, 0), None, 5, "unreadable-after"),
+                # Nothing to measure.
+                ((4, 0), (4, 0), 0, "did-not-move")):
+            with self.subTest(before=before, after=after, units=units):
+                got = position_check(before, after, units)
+                self.assertEqual(got, check)
+                self.assertIn(got, POSITION_CHECKS)
+
+    def test_lengths_are_counted_as_accessibility_counts_them(self):
+        # Outside the Basic Multilingual Plane a character is two units.
+        self.assertEqual(utf16_units("ok"), 2)
+        self.assertEqual(utf16_units("ok \U0001f44d"), 5)
+        self.assertEqual(utf16_units("\U0001f468\u200d\U0001f469"), 5)
+        self.assertEqual(
+            position_check((0, 0), (5, 0), utf16_units("ok \U0001f44d")),
+            "moved-exactly")
+        # Counting code points would be one short: no proof.
+        self.assertEqual(
+            position_check((0, 0), (4, 0), utf16_units("ok \U0001f44d")),
+            "moved-other")
+
+    def test_a_count_agrees_only_with_exactly_what_the_paste_adds(self):
+        for before, after, selected, units, count in (
+                (10, 15, 0, 5, "agrees"),
+                (10, 12, 3, 5, "agrees"),
+                (10, 15, 3, 5, "disagrees"),
+                (10, 14, 0, 5, "disagrees"),
+                (10, 10, 0, 5, "disagrees"),
+                (None, None, 0, 5, "not-offered"),
+                (10, None, 0, 5, "disagrees"),
+                (None, 15, 0, 5, "disagrees")):
+            with self.subTest(before=before, after=after):
+                got = position_count(before, after, selected, units)
+                self.assertEqual(got, count)
+                self.assertIn(got, POSITION_COUNTS)
+
+    def test_proof_needs_an_exact_move_and_no_disagreeing_count(self):
+        for count in ("agrees", "not-offered"):
+            result = ReadbackResult.verified_by_position(count)
+            self.assertEqual(result.state, ReceiptState.VERIFIED)
+            self.assertEqual(
+                result.reason, ReceiptReason.COMMIT_VERIFIED_POSITION)
+            self.assertEqual(result.position, "moved-exactly")
+        with self.assertRaises(ValueError):
+            ReadbackResult.verified_by_position("disagrees")
+        # Anything that is not proof is the unverifiable result it was.
+        for check in POSITION_CHECKS:
+            for count in POSITION_COUNTS:
+                if check == "moved-exactly" and count != "disagrees":
+                    with self.assertRaises(ValueError):
+                        ReadbackResult.unverifiable(check, count)
+                    continue
+                result = ReadbackResult.unverifiable(check, count)
+                self.assertEqual(result.state, ReceiptState.UNVERIFIABLE)
+                self.assertEqual(
+                    result.reason, ReceiptReason.READBACK_UNAVAILABLE)
+
+    def commit(self, readback, coordinator=None):
+        coordinator = coordinator or InsertionCoordinator()
+        lease = InsertionLease.capture_opaque(
+            "utterance-1", "pid:42/field:7", "Messages")
+        coordinator.stage(lease, "Ship it")
+        receipt = coordinator.commit(
+            "utterance-1",
+            DestinationObservation.capture("pid:42/field:7", (0, 0),
+                                           "Messages"),
+            lambda _text: None, readback)
+        return coordinator, receipt
+
+    def test_a_paste_checked_by_position_is_kept_like_any_checked_paste(self):
+        coordinator, receipt = self.commit(
+            lambda: ReadbackResult.verified_by_position("not-offered"))
+
+        self.assertTrue(receipt.checked_by_position)
+        self.assertFalse(receipt.pasted_unchecked)
+        self.assertEqual(receipt.position_check, "moved-exactly")
+        self.assertEqual(receipt.position_count, "not-offered")
+        # Nothing kept for it, nothing waiting for a home.
+        self.assertEqual(coordinator.recoverable(), ())
+        self.assertEqual(coordinator.recoverable_counts(), (0, 0))
+
+    def test_anything_short_of_proof_is_an_unchecked_paste_as_before(self):
+        for check, count in (
+                ("did-not-move", "not-offered"),
+                ("moved-other", "agrees"),
+                ("unreadable-after", "not-offered"),
+                ("moved-exactly", "disagrees")):
+            with self.subTest(check=check, count=count):
+                coordinator, receipt = self.commit(
+                    lambda: ReadbackResult.unverifiable(check, count))
+                self.assertFalse(receipt.checked_by_position)
+                self.assertTrue(receipt.pasted_unchecked)
+                self.assertEqual(receipt.state, ReceiptState.UNVERIFIABLE)
+                self.assertEqual(
+                    receipt.reason, ReceiptReason.READBACK_UNAVAILABLE)
+                self.assertEqual(receipt.position_check, check)
+                self.assertEqual(
+                    [item.text for item in coordinator.recoverable()],
+                    ["Ship it"])
+                self.assertEqual(coordinator.needs_home_count(), 0)
+
+    def test_only_its_own_reason_is_checked_by_position(self):
+        for result in (ReadbackResult.verified(),
+                       ReadbackResult.verified_edge_whitespace(),
+                       ReadbackResult.verified_whitespace_form(),
+                       ReadbackResult.unverifiable(),
+                       ReadbackResult.conflict("divergent")):
+            receipt = InsertionReceipt(
+                "u", result.state, result.reason, True)
+            self.assertFalse(receipt.checked_by_position)
+
+    def test_a_log_reason_carries_categories_and_nothing_else(self):
+        _coordinator, receipt = self.commit(
+            lambda: ReadbackResult.unverifiable("did-not-move", "agrees"))
+        self.assertEqual(
+            receipt.log_reason,
+            "readback_unavailable; position did-not-move; count agrees")
+        lease = InsertionLease.capture(
+            "u2", "pid:42/field:7", (12, 0), "before|after")
+        coordinator = InsertionCoordinator()
+        coordinator.stage(lease, "hunter2")
+        conflict = coordinator.commit(
+            "u2", DestinationObservation.capture(
+                "pid:42/field:7", (12, 0), "before|after"),
+            lambda _text: None,
+            lambda: ReadbackResult.conflict(
+                "divergent", difference="absent", stage="settled"))
+        self.assertEqual(
+            conflict.log_reason,
+            "readback_conflict; difference absent; stage settled")
+        self.assertEqual(InsertionReceipt(
+            "u", ReceiptState.UNVERIFIABLE,
+            ReceiptReason.READBACK_UNAVAILABLE, True).log_reason,
+            "readback_unavailable")
+        self.assertNotIn("hunter2", json.dumps(conflict.log_reason))
 
 
 if __name__ == "__main__":

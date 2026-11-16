@@ -413,6 +413,12 @@ from insertion_integrity import (  # noqa: E402
     InsertionLease,
     ReadbackResult,
     ReceiptState,
+    position_check,
+    position_count,
+    readback_difference,
+    readback_stage,
+    same_but_whitespace_form,
+    utf16_units,
 )
 from personal_regression import PersonalRegressionLab  # noqa: E402
 from acoustic_keyword_memory import AcousticKeywordMemory  # noqa: E402
@@ -7521,14 +7527,18 @@ def insert_recent_dictation(entry_id: str) -> dict:
     receipt = commit_insertion(request, text, bundle, snapshot)
     verified = receipt is None or receipt.state == ReceiptState.VERIFIED
     reason = "legacy_paste" if receipt is None else receipt.reason.value
+    detail = reason if receipt is None else receipt.log_reason
     if verified:
         play(dictation_success_sound("insert", is_macos=IS_MACOS))
+        # Checked by position, nothing records what the field held before,
+        # so there is nothing to put back.
         record_undoable_insertion(build_undoable_insertion(
-            request, snapshot, bundle, utterance_id))
-        print(f"[recent] re-inserted ({reason})")
+            request, snapshot, bundle, utterance_id)
+            if receipt is None or not receipt.checked_by_position else None)
+        print(f"[recent] re-inserted ({detail})")
     else:
         play("Funk")
-        print(f"[recent] re-insertion refused ({reason})")
+        print(f"[recent] re-insertion refused ({detail})")
     return {"inserted": bool(verified), "reason": reason}
 
 
@@ -10623,6 +10633,10 @@ def insertion_readback(snapshot: FocusSnapshot, inserted: str,
     deadline = clock() + max(0.0, timeout)
     observed_any = False
     last_observed = None
+    # How the field behaved over the window, kept as two flags rather than
+    # a list of what it held: whether any read differed from the text before
+    # the paste, and whether the last two reads differed from each other.
+    changed = still_changing = False
     stripped_expected = expected.strip()
     while True:
         current = reader(snapshot.element)
@@ -10634,7 +10648,13 @@ def insertion_readback(snapshot: FocusSnapshot, inserted: str,
         if (current is not None and stripped_expected
                 and current.strip() == stripped_expected):
             return ReadbackResult.verified_edge_whitespace()
+        # A no-break space for a space, or a line break in another form, is
+        # the same text; nothing else is folded.
+        if same_but_whitespace_form(current, expected):
+            return ReadbackResult.verified_whitespace_form()
         if current is not None:
+            still_changing = observed_any and current != last_observed
+            changed = changed or current != snapshot.text
             observed_any = True
             last_observed = current
         remaining = deadline - clock()
@@ -10642,8 +10662,85 @@ def insertion_readback(snapshot: FocusSnapshot, inserted: str,
             if not observed_any:
                 return ReadbackResult.unverifiable()
             return ReadbackResult.conflict(
-                classify_readback_conflict(last_observed, expected))
+                classify_readback_conflict(last_observed, expected),
+                difference=readback_difference(
+                    snapshot.text, (start, length), inserted, last_observed),
+                stage=readback_stage(changed, still_changing))
         sleeper(min(0.02, remaining))
+
+
+# A field that hides its text but reports its selection range is checked by
+# where its cursor goes. The paste is never held for it: the range before is
+# the one the release snapshot already read, and the check after returns on
+# its first exact read. Only a cursor that never moves waits the window out,
+# which is the same short budget release gives Accessibility to settle.
+POSITION_CHECK_TIMEOUT = 0.12
+
+
+def _ax_character_count(element) -> int | None:
+    """AXNumberOfCharacters as UTF-16 units, or None when not offered."""
+    value = _ax_attribute(element, "AXNumberOfCharacters")
+    if isinstance(value, bool):
+        return None
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return None
+    return count if count >= 0 else None
+
+
+def position_readback(snapshot: FocusSnapshot, inserted: str,
+                      count_before: int | None,
+                      timeout: float = POSITION_CHECK_TIMEOUT, reader=None,
+                      counter=None, clock=None,
+                      sleeper=None) -> ReadbackResult:
+    """Check a paste into a field that hides its text by where its cursor went.
+
+    ``snapshot.selection`` is the range as Accessibility reported it just
+    before the paste, in UTF-16 units, because there was no text to convert
+    it against. The paste is checked when the range becomes a bare cursor
+    exactly the paste's length past the selection's start, and a character
+    count the element offers agrees. Anything else is no proof, and the
+    result is the same unverifiable one as before, with what was seen.
+    """
+    before = snapshot.selection
+    units = utf16_units(inserted)
+    if before is None or units <= 0:
+        return ReadbackResult.unverifiable()
+    reader = reader or _ax_reported_range
+    counter = counter or _ax_character_count
+    clock = clock or time.monotonic
+    sleeper = sleeper or time.sleep
+    deadline = clock() + max(0.0, timeout)
+    while True:
+        check = position_check(before, reader(snapshot.element), units)
+        count = None
+        if check == "moved-exactly":
+            count = position_count(
+                count_before, counter(snapshot.element), before[1], units)
+            if count != "disagrees":
+                return ReadbackResult.verified_by_position(count)
+        remaining = deadline - clock()
+        if remaining <= 0:
+            if count is None:
+                count = position_count(
+                    count_before, counter(snapshot.element), before[1],
+                    units)
+            return ReadbackResult.unverifiable(check, count)
+        sleeper(min(0.02, remaining))
+
+
+def position_check_applies(rec, lease, current: FocusSnapshot | None) -> bool:
+    """A field leased by its element that hides its text and not its range.
+
+    A rule about elements, not about any app: the lease was taken on the
+    focused element itself (never on a window), and at release that element
+    still answers a selection range while its text cannot be read.
+    """
+    return bool(
+        lease is not None and lease.opaque and current is not None
+        and getattr(rec, "focus_at_press", None) is not None
+        and current.text is None and current.selection is not None)
 
 
 def insertion_capability_buckets(rec, lease, current: FocusSnapshot | None, *,
@@ -10745,14 +10842,22 @@ def commit_insertion(rec, text: str, bundle: str,
         return rec.insertion_receipt
     rec.insertion_capabilities = insertion_capability_buckets(
         rec, lease, current, paste_available=True)
+    by_position = position_check_applies(rec, lease, current)
+    # The one extra read before the paste: no wait, and only for a field
+    # that is checked by position.
+    count_before = _ax_character_count(current.element) \
+        if by_position else None
 
     def readback():
-        """Read back; the receipt carries the result's conflict shape.
+        """Read back; the receipt carries the result's content-free detail.
 
-        The shape is a category from READBACK_CONFLICT_SHAPES, never text, so
-        one app failing every paste is finally identifiable from the private
-        record alone.
+        The detail is categories only (READBACK_CONFLICT_SHAPES and the
+        readback categories in insertion_integrity), never text, so one app
+        failing every paste is finally identifiable from the private record
+        alone.
         """
+        if by_position:
+            return position_readback(current, text, count_before)
         if current is None or lease.opaque:
             return ReadbackResult.unverifiable()
         return insertion_readback(current, text, timeout=READBACK_TIMEOUT)
@@ -11226,7 +11331,7 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
         if LAST_INSERTION is not None \
                 and LAST_INSERTION.get("utterance_id") == record.utterance_id:
             LAST_INSERTION = None
-        print(f"[undo] restored ({receipt.reason.value})")
+        print(f"[undo] restored ({receipt.log_reason})")
         return {"undone": True, "reason": receipt.reason.value}
     if receipt.paste_attempted:
         # The substitution ran but could not be proven. The field was still
@@ -11235,7 +11340,7 @@ def undo_last_dictation(*, snapshot_reader=None, bundle_reader=None,
         # is different: the destination is untouched and a real correction
         # made there still deserves to be learned.
         note_undone_utterance(record.utterance_id)
-    print(f"[undo] refused ({receipt.reason.value})")
+    print(f"[undo] refused ({receipt.log_reason})")
     return undo_refusal(receipt.reason.value)
 
 
@@ -11426,8 +11531,10 @@ def paste_snippet_and_watch(name: str, snippet: str, bundle: str, mode: str,
         paste(snippet)
     else:
         integrity = commit_insertion(rec, snippet, bundle, snapshot)
+        # Learning an edit needs the text; a check by position has none.
         if (integrity is not None
-                and integrity.state != ReceiptState.VERIFIED):
+                and (integrity.state != ReceiptState.VERIFIED
+                     or integrity.checked_by_position)):
             return None
     receipt = committed_paste_receipt(rec, snapshot, snippet, bundle, mode)
     if receipt is None:
@@ -13530,7 +13637,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                         rec,
                         hud,
                         "[insertion] snippet pasted, not double-checked "
-                        f"({integrity_receipt.reason.value}); copy kept in "
+                        f"({integrity_receipt.log_reason}); copy kept in "
                         "Voice Outbox",
                         active=active,
                     )
@@ -13540,7 +13647,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                         hud,
                         "Paste unverified — check target; saved in Outbox",
                         "[insertion] snippet paste unverified "
-                        f"({integrity_receipt.reason.value}); saved in "
+                        f"({integrity_receipt.log_reason}); saved in "
                         "Voice Outbox",
                     )
                 else:
@@ -13549,7 +13656,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                         hud,
                         "Destination changed — saved in Voice Outbox",
                         "[insertion] snippet destination changed "
-                        f"({integrity_receipt.reason.value}); saved in "
+                        f"({integrity_receipt.log_reason}); saved in "
                         "Voice Outbox",
                     )
             else:
@@ -13789,6 +13896,13 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
         )
         verified = (integrity_receipt is None
                     or integrity_receipt.state == ReceiptState.VERIFIED)
+        # A paste checked by where the cursor went landed whole and in
+        # place, so it is shown, kept and logged like any checked paste. It
+        # says nothing about which characters are there, so nothing that
+        # restores, rewrites or learns from the text acts on it.
+        text_verified = verified and not (
+            integrity_receipt is not None
+            and integrity_receipt.checked_by_position)
         attempted = (integrity_receipt is None
                      or integrity_receipt.paste_attempted)
         if verified:
@@ -13802,17 +13916,19 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 # this verified commit and re-checked against a fresh focus
                 # snapshot before any keystroke, so a stale value is never
                 # acted on. Gated by the pref so the feature is inert when off.
+                # A paste checked by position leaves nothing to rewrite.
                 LAST_INSERTION = {
                     "text": text,
                     "element": insertion_target,
                     "bundle": bundle,
                     "utterance_id": event_id,
-                }
+                } if text_verified else None
             # A new dictation replaces whatever was undoable; a destination
             # the runtime could not read is not undoable at all, because
             # there is no prior state to restore.
             record_undoable_insertion(build_undoable_insertion(
-                rec, insertion_target, bundle, event_id))
+                rec, insertion_target, bundle, event_id)
+                if text_verified else None)
         elif integrity_receipt.pasted_unchecked:
             # Sent into an app that hides its text, so there was never
             # anything to read back. A field that could be read and went
@@ -13823,7 +13939,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 rec,
                 hud,
                 "[insertion] pasted, not double-checked "
-                f"({integrity_receipt.reason.value}); copy kept in Voice "
+                f"({integrity_receipt.log_reason}); copy kept in Voice "
                 "Outbox",
                 sound=dictation_success_sound(
                     PIPELINE_STATE["last_consequence_route"],
@@ -13837,7 +13953,7 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 hud,
                 "Paste unverified — check target; saved in Voice Outbox",
                 "[insertion] paste attempted but unverified "
-                f"({integrity_receipt.reason.value}); saved in Voice Outbox",
+                f"({integrity_receipt.log_reason}); saved in Voice Outbox",
             )
         else:
             report_dictation_problem(
@@ -13845,12 +13961,12 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 hud,
                 "Destination changed — saved in Voice Outbox",
                 "[insertion] destination changed "
-                f"({integrity_receipt.reason.value}); text saved in Voice "
+                f"({integrity_receipt.log_reason}); text saved in Voice "
                 "Outbox",
             )
         delivery_reported = True
         delayed_cleanup_scheduled = False
-        if verified and delayed_cleanup_requested:
+        if text_verified and delayed_cleanup_requested:
             delayed_cleanup_scheduled = schedule_delayed_cleanup(
                 event_id,
                 text,
@@ -13863,7 +13979,8 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                 tone_key=tone_key,
                 snippet_restore=snippet_restore,
             )
-        if learn_correction and verified and not delayed_cleanup_scheduled:
+        if (learn_correction and text_verified
+                and not delayed_cleanup_scheduled):
             threading.Thread(
                 target=learn_from_corrections,
                 args=(receipt,),
@@ -14048,6 +14165,25 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             "readback_shape": (
                 integrity_receipt.readback_shape
                 if integrity_receipt is not None else ""),
+            # Absent (None) unless they apply, and categories only: never
+            # text, a length or a position. How a readback that did not
+            # match byte for byte differed from the paste, and how the field
+            # behaved over a window that ended in a conflict.
+            "insertion_readback_difference": (
+                integrity_receipt.readback_difference or None
+                if integrity_receipt is not None else None),
+            "insertion_readback_stage": (
+                integrity_receipt.readback_stage or None
+                if integrity_receipt is not None else None),
+            # For a field that hides its text and not its range: where its
+            # cursor went once the paste was sent, and whether a character
+            # count it offers agreed.
+            "insertion_position_check": (
+                integrity_receipt.position_check or None
+                if integrity_receipt is not None else None),
+            "insertion_position_count": (
+                integrity_receipt.position_count or None
+                if integrity_receipt is not None else None),
             "paste_attempted": attempted,
             "insertion_verified": verified,
             # The capability half of a compatibility observation. Absent

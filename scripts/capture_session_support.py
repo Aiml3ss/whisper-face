@@ -89,6 +89,12 @@ COMPATIBILITY_REASON_BY_RECEIPT_REASON = {
     # compatibility purposes that is a success -- every character arrived in
     # order -- while the receipt keeps its own distinct reason.
     ReceiptReason.COMMIT_VERIFIED_EDGE_WHITESPACE.value: "success",
+    # The same for a no-break space or a line break in another form, and
+    # for a field that hides its text whose cursor moved by exactly the
+    # paste: delivered whole and in place. Each receipt keeps its own reason,
+    # so a check by position is never mistaken for a text readback.
+    ReceiptReason.COMMIT_VERIFIED_WHITESPACE_FORM.value: "success",
+    ReceiptReason.COMMIT_VERIFIED_POSITION.value: "success",
     ReceiptReason.FOCUS_DRIFT.value: "destination-drift",
     ReceiptReason.SELECTION_DRIFT.value: "destination-drift",
     ReceiptReason.SURROUNDING_TEXT_DRIFT.value: "destination-drift",
