@@ -1305,7 +1305,9 @@ app_mode_dry_run() {
     echo "== Apple's command line tools: present, with Swift 6 or newer"
     echo "== phases the app's window would show: prepare python speech-model helpers preview-model service"
     set +e
-    adopt_output="$("$app_uv" run --offline --quiet --no-project \
+    # --offline and --no-cache: a dry run neither downloads nor leaves a
+    # uv cache behind.
+    adopt_output="$("$app_uv" run --offline --no-cache --quiet --no-project \
         --python "$PYTHON_VERSION" "$DIR/scripts/macos_launcher_app.py" adopt \
         --app "$APP_BUNDLE" --checkout "$DIR" --receipt "$launcher_receipt" \
         --folder-launcher "$launcher_app" --dry-run 2>&1)"

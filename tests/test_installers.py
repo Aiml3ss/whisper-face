@@ -1590,6 +1590,8 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn('"$app_uv"', use_app_uv)
         self.assertIn('UV="$checkout_uv"', use_app_uv)
         self.assertNotIn("curl", use_app_uv)
+        # The dry run neither downloads nor leaves a uv cache in the home.
+        self.assertIn("run --offline --no-cache", shell_function("app_mode_dry_run"))
         # app mode never calls the python3 shim, which on a Mac without the
         # developer tools opens Apple's install dialog.
         for name in ("use_app_uv", "app_mode_dry_run", "resolve_app_mode"):
