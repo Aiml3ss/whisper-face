@@ -62,8 +62,21 @@ UNINSTALL=0
 ASSUME_YES=0
 REMOVE_MODELS=0
 REMOVE_PERSONAL=0
+# App mode: the Whisper Face app built for drag install runs this installer
+# with --app "<its own path>". See resolve_app_mode below.
+APP_BUNDLE=""
+APP_REQUESTED=0
+DRY_RUN=0
+expect_app_path=0
 for arg in "$@"; do
+    if [ "$expect_app_path" -eq 1 ]; then
+        APP_BUNDLE="$arg"
+        expect_app_path=0
+        continue
+    fi
     case "$arg" in
+        --app) APP_REQUESTED=1; expect_app_path=1 ;;
+        --dry-run) DRY_RUN=1 ;;
         --server-only) MODE="server-only" ;;
         --verify) VERIFY_ONLY=1 ;;
         --with-all-models) WITH_ALL_MODELS=1 ;;
@@ -82,6 +95,12 @@ for arg in "$@"; do
             echo "  --with-all-models  also download the optional quality models"
             echo "  --models       download only the optional models into an"
             echo "                 existing installation, then exit"
+            echo "  --app PATH     set up for the Whisper Face app at PATH, the"
+            echo "                 way that app does itself (no Homebrew, no"
+            echo "                 second launcher); later runs here keep to it"
+            echo "  --dry-run      with app mode, check everything and print the"
+            echo "                 plan, then stop before any download, service,"
+            echo "                 launcher, or receipt change"
             echo
             echo "Uninstall (prints a plan and changes nothing unless --yes):"
             echo "  --uninstall    list every file and service this installer"
@@ -110,9 +129,18 @@ for arg in "$@"; do
         *) echo "Unknown option: $arg" >&2; exit 2 ;;
     esac
 done
+if [ "$expect_app_path" -eq 1 ] || { [ "$APP_REQUESTED" -eq 1 ] && [ -z "$APP_BUNDLE" ]; }; then
+    echo "!! --app needs the path of Whisper Face.app" >&2
+    exit 2
+fi
+if [ "$APP_REQUESTED" -eq 1 ] && [ "$MODE" != "full" ]; then
+    echo "!! --app sets up the desktop app; it cannot be combined with --server-only" >&2
+    exit 2
+fi
 if [ "$UNINSTALL" -eq 1 ]; then
     if [ "$MODELS_ONLY" -eq 1 ] || [ "$VERIFY_ONLY" -eq 1 ] \
-            || [ "$WITH_ALL_MODELS" -eq 1 ] || [ "$MODE" != "full" ]; then
+            || [ "$WITH_ALL_MODELS" -eq 1 ] || [ "$MODE" != "full" ] \
+            || [ "$APP_REQUESTED" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
         echo "!! --uninstall cannot be combined with an install option" >&2
         exit 2
     fi
@@ -349,6 +377,101 @@ install_log="$DIR/install.log"
 # Ollama's store, and the manifest check dictate.py runs would read it too.
 unset OLLAMA_MODELS
 qwen_manifest="$HOME/.ollama/models/manifests/registry.ollama.ai/library/qwen3.5/4b"
+# Where the drag-install app unpacks its source archive. A checkout here is
+# only ever set up by that app.
+managed_checkout="$service_receipt_dir/checkout"
+
+# --- App mode --------------------------------------------------------------
+# The Whisper Face app built for drag install carries its release's source
+# archive. It unpacks it into $managed_checkout and runs this installer with
+# --app "<its path>". App mode is a branch of this one installer, not a second
+# installer: it uses the uv the app carries instead of Homebrew, builds no
+# second launcher, and binds the receipt and the login service to that app
+# wherever the person put it.
+#
+# It is sticky. Once a schema 2 receipt binds this checkout to an app, a plain
+# ./setup.sh or Install.command here runs in app mode too; and a checkout in
+# the managed place is never set up any other way. Without that, a rerun or a
+# git update would quietly build an unsigned second launcher in
+# ~/Applications and tie every permission to it.
+APP_MODE=0
+
+receipt_value() {
+    # $1 = key. Prints that value from the launcher receipt, which is JSON.
+    [ -f "$launcher_receipt" ] || return 1
+    plutil -extract "$1" raw -o - "$launcher_receipt" 2>/dev/null
+}
+
+resolve_app_mode() {
+    local receipt_schema receipt_checkout receipt_app physical_dir
+    physical_dir="$(cd "$DIR" && pwd -P)"
+    if [ -n "$APP_BUNDLE" ]; then
+        APP_MODE=1
+    else
+        receipt_schema="$(receipt_value schema_version || true)"
+        receipt_checkout="$(receipt_value checkout || true)"
+        receipt_app="$(receipt_value app || true)"
+        if [ "$receipt_schema" = "2" ] && [ -n "$receipt_app" ] \
+                && { [ "$receipt_checkout" = "$DIR" ] \
+                     || [ "$receipt_checkout" = "$physical_dir" ]; }; then
+            APP_MODE=1
+            APP_BUNDLE="$receipt_app"
+        elif [ "$UNINSTALL" -eq 0 ] && { [ "$DIR" = "$managed_checkout" ] \
+                || [ "$physical_dir" = "$managed_checkout" ]; }; then
+            fail "this copy of Whisper Face belongs to the Whisper Face app; open Whisper Face from your Applications folder to set it up again"
+        fi
+    fi
+    [ "${APP_MODE:-0}" -eq 1 ] || return 0
+    case "$APP_BUNDLE" in
+        /*) ;;
+        *) fail "--app needs the full path of Whisper Face.app" ;;
+    esac
+    APP_BUNDLE="${APP_BUNDLE%/}"
+    [ "$UNINSTALL" -eq 1 ] && return 0
+    [ -d "$APP_BUNDLE" ] \
+        || fail "the Whisper Face app that set this copy up is no longer at $APP_BUNDLE; open Whisper Face from your Applications folder to set it up again"
+    # The same spelling Python's receipt and the app itself use.
+    APP_BUNDLE="$(cd "$APP_BUNDLE" && pwd -P)"
+    [ -x "$APP_BUNDLE/Contents/Helpers/uv" ] \
+        || fail "$APP_BUNDLE is not the Whisper Face app built for drag install"
+    if [ "$MODE" != "full" ]; then
+        fail "this copy is set up for the Whisper Face app; the headless server mode needs a folder install"
+    fi
+}
+
+phase() {
+    # The app's setup window ticks off one checklist row per phase.
+    if [ "${APP_MODE:-0}" -eq 1 ]; then
+        echo "@@ phase $1"
+    fi
+}
+
+warn_if_receipt_names_another_checkout() {
+    # A folder install run after an app-managed one takes the login service
+    # over. Say so; the app's copy is left as it is.
+    local receipt_schema receipt_checkout
+    receipt_schema="$(receipt_value schema_version || true)"
+    receipt_checkout="$(receipt_value checkout || true)"
+    if [ "$receipt_schema" = "2" ] && [ -n "$receipt_checkout" ] \
+            && [ "$receipt_checkout" != "$DIR" ] \
+            && [ "$receipt_checkout" != "$(cd "$DIR" && pwd -P)" ]; then
+        echo "== note: the Whisper Face app set up another copy at"
+        echo "==   $receipt_checkout"
+        echo "== This install takes the login service over from it; that copy"
+        echo "== is left as it is."
+    fi
+}
+
+resolve_app_mode
+if [ "$DRY_RUN" -eq 1 ] && [ "${APP_MODE:-0}" -ne 1 ]; then
+    fail "--dry-run checks app mode; pass --app with the path of Whisper Face.app"
+fi
+if [ "${APP_MODE:-0}" -eq 1 ]; then
+    # The app's own uv, copied into this checkout so the login service never
+    # runs a binary that dragging a newer app over the old one could swap.
+    app_uv="$APP_BUNDLE/Contents/Helpers/uv"
+    checkout_uv="$DIR/.models/bin/uv"
+fi
 
 # --- Installer log ----------------------------------------------------------
 # A failed install used to leave nothing to read. Homebrew, a multi-gigabyte
@@ -399,7 +522,8 @@ run_with_install_log() {
 }
 
 if [ -z "${WHISPER_FACE_INSTALL_LOG:-}" ] && [ "$UNINSTALL" -eq 0 ] \
-        && [ "$VERIFY_ONLY" -eq 0 ] && start_install_log; then
+        && [ "$VERIFY_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] \
+        && start_install_log; then
     install_status=0
     run_with_install_log "$@" || install_status=$?
     exit "$install_status"
@@ -591,6 +715,11 @@ uninstall_whisper_face() {
     remove_installed_path 1 "$dictate_plist" "dictation LaunchAgent"
     remove_installed_path 1 "$ollama_plist" "Ollama LaunchAgent"
     remove_installed_path 1 "$launcher_app" "Whisper Face launcher app"
+    if [ "${APP_MODE:-0}" -eq 1 ]; then
+        # The person put this app there; this installer never created it.
+        keep_installed_path "$APP_BUNDLE" \
+            "the Whisper Face app; drag it to the Trash yourself"
+    fi
     remove_installed_path 1 "$launcher_receipt" "launcher install receipt"
     remove_installed_path 1 "$ollama_service_receipt" \
         "Ollama service load receipt"
@@ -836,9 +965,16 @@ verify_cleanup_service() {
 verify_install() {
     step "verifying installation"
     local uv_bin runtime_status
-    uv_bin="$(command -v uv 2>/dev/null || true)"
-    [ -n "$uv_bin" ] || fail "uv is not installed"
-    command -v ffmpeg >/dev/null 2>&1 || fail "ffmpeg is not installed"
+    if [ "${APP_MODE:-0}" -eq 1 ]; then
+        uv_bin="$checkout_uv"
+        [ -x "$uv_bin" ] || fail "uv from the Whisper Face app is missing; open Whisper Face to set it up again"
+    else
+        uv_bin="$(command -v uv 2>/dev/null || true)"
+        [ -n "$uv_bin" ] || fail "uv is not installed"
+        # Only the headless server decodes uploaded audio; the app needs no
+        # ffmpeg, so an app-managed install neither installs nor checks it.
+        command -v ffmpeg >/dev/null 2>&1 || fail "ffmpeg is not installed"
+    fi
     command -v swift >/dev/null 2>&1 || fail "Swift toolchain is not installed"
     command -v swiftc >/dev/null 2>&1 \
         || fail "Swift compiler is not installed"
@@ -872,7 +1008,14 @@ verify_install() {
     plutil -lint "$dictate_plist" >/dev/null \
         || fail "dictation LaunchAgent is not a valid property list"
     verify_cleanup_service
-    if [ "$MODE" = "full" ]; then
+    if [ "$MODE" = "full" ] && [ "${APP_MODE:-0}" -eq 1 ]; then
+        "$uv_bin" run --quiet --no-project --python "$PYTHON_VERSION" \
+            "$DIR/scripts/macos_launcher_app.py" verify \
+            --app "$APP_BUNDLE" --checkout "$DIR" \
+            --receipt "$launcher_receipt" \
+            --installed-runtime >/dev/null \
+            || fail "the Whisper Face app or its link to this copy is missing or stale; open Whisper Face to set it up again"
+    elif [ "$MODE" = "full" ]; then
         python3 "$DIR/scripts/macos_launcher_app.py" verify \
             --app "$launcher_app" --checkout "$DIR" \
             --receipt "$launcher_receipt" \
@@ -1050,7 +1193,11 @@ print_install_outcome() {
             echo "== Hold Right Option, speak, and release to paste."
             echo "== Flight Recorder defaults off on a fresh install; an existing"
             echo "== preference is preserved. Toggle it from the Whisper Face menu."
-            echo "== Launcher: $launcher_app"
+            if [ "${APP_MODE:-0}" -eq 1 ]; then
+                echo "== App: $APP_BUNDLE"
+            else
+                echo "== Launcher: $launcher_app"
+            fi
         else
             echo "== server-only installation is ready."
             echo "== A client must send the bearer token as"
@@ -1082,6 +1229,104 @@ print_install_outcome() {
     echo "== Logs: $DIR/dictate.log"
 }
 
+render_dictate_plist() {
+    # $1 = destination, $2 = uv. The login service's definition, for a real
+    # install and for a dry run's plan alike.
+    local escaped_uv escaped_dir extra_sed launcher_prefix_sed
+    local launcher_executable escaped_launcher_exe
+    escaped_uv="$(escape_sed_replacement "$2")"
+    escaped_dir="$(escape_sed_replacement "$DIR")"
+    if [ "$MODE" = "server-only" ]; then
+        extra_sed="s|__EXTRA_ARGS__|<string>--server-only</string>|"
+        # Server-only stays raw uv and headless: no launcher, no TCC surface.
+        launcher_prefix_sed="/__LAUNCHER_PREFIX__/d"
+    else
+        extra_sed="/__EXTRA_ARGS__/d"
+        # Full mode runs the login job through the signed launcher app. launchd
+        # execs the launcher, which supervises "uv run ..." as a fork+exec child,
+        # so macOS attributes Input Monitoring and Accessibility to "Whisper Face"
+        # (one grantable toggle that survives reinstalls) while KeepAlive still sees
+        # the child's real exit status.
+        if [ "${APP_MODE:-0}" -eq 1 ]; then
+            # The app the person installed is the one launchd runs, so it is
+            # the one every macOS permission belongs to.
+            launcher_executable="$APP_BUNDLE/Contents/MacOS/Whisper Face"
+        else
+            launcher_executable="$HOME/Applications/Whisper Face.app/Contents/MacOS/Whisper Face"
+        fi
+        escaped_launcher_exe="$(escape_sed_replacement "$launcher_executable")"
+        launcher_prefix_sed="s|__LAUNCHER_PREFIX__|<string>$escaped_launcher_exe</string>\\
+        <string>--run</string>|"
+    fi
+    render_plist "$DIR/com.berg.dictate.plist.template" "$1" \
+        -e "$launcher_prefix_sed" \
+        -e "s|__UV__|$escaped_uv|g" \
+        -e "s|__DIR__|$escaped_dir|g" \
+        -e "s|__PYTHON__|$PYTHON_VERSION|g" \
+        -e "$extra_sed"
+}
+
+use_app_uv() {
+    # App mode: uv comes from the app, so a Mac without Homebrew needs none.
+    # Only the optional cleanup model still needs Homebrew, for Ollama.
+    step "using the uv that comes with the Whisper Face app"
+    mkdir -p "$DIR/.models/bin"
+    install -m 755 "$app_uv" "$checkout_uv.tmp.$$"
+    mv -f "$checkout_uv.tmp.$$" "$checkout_uv"
+    "$checkout_uv" --version >/dev/null 2>&1 \
+        || fail "the uv inside the Whisper Face app does not run on this Mac"
+    UV="$checkout_uv"
+    cleanup_wanted=0
+    OLLAMA=""
+    if cleanup_model_wanted; then
+        cleanup_wanted=1
+        BREW="$(command -v brew 2>/dev/null || true)"
+        [ -n "$BREW" ] \
+            || fail "the optional cleanup model needs Ollama from Homebrew, which the Whisper Face app does not install; install Homebrew from brew.sh, then rerun with --models"
+        "$BREW" list --versions ollama >/dev/null 2>&1 || "$BREW" install ollama
+        OLLAMA="$(command -v ollama 2>/dev/null || true)"
+    fi
+}
+
+app_mode_dry_run() {
+    # Everything app mode would decide, checked for real, and nothing done:
+    # no download, no file outside this checkout, no service, no launcher,
+    # no receipt. The plan is printed instead.
+    local plan_plist program adopt_output adopt_status
+    echo
+    echo "== dry run of app mode in $DIR"
+    echo "== nothing below is downloaded, installed, loaded, or written"
+    echo "== app: $APP_BUNDLE"
+    "$app_uv" --version >/dev/null 2>&1 \
+        || fail "the uv inside the Whisper Face app does not run on this Mac"
+    echo "== uv: would copy $app_uv to $checkout_uv; Homebrew is not used"
+    echo "== ffmpeg: not needed; only the headless server mode decodes uploads"
+    require_build_tools
+    echo "== Apple's command line tools: present, with Swift 6 or newer"
+    echo "== phases the app's window would show: prepare python speech-model helpers preview-model service"
+    set +e
+    adopt_output="$("$app_uv" run --offline --quiet --no-project \
+        --python "$PYTHON_VERSION" "$DIR/scripts/macos_launcher_app.py" adopt \
+        --app "$APP_BUNDLE" --checkout "$DIR" --receipt "$launcher_receipt" \
+        --folder-launcher "$launcher_app" --dry-run 2>&1)"
+    adopt_status=$?
+    set -e
+    if [ "$adopt_status" -eq 0 ]; then
+        printf '%s\n' "$adopt_output"
+    elif printf '%s\n' "$adopt_output" | grep -q "macOS launcher error"; then
+        printf '%s\n' "$adopt_output" >&2
+        fail "this Whisper Face app cannot set up this copy; its reason is above"
+    else
+        echo "== the app is checked once Python is installed; a dry run downloads nothing"
+    fi
+    plan_plist="$(mktemp "${TMPDIR:-/tmp}/whisper-face-dry-run.XXXXXX")"
+    render_dictate_plist "$plan_plist" "$checkout_uv"
+    program="$(plutil -extract ProgramArguments.0 raw -o - "$plan_plist")"
+    rm -f "$plan_plist"
+    echo "== login service: would run $program --run, from $DIR"
+    echo "== dry run complete: nothing was changed"
+}
+
 # Adopt an already-installed Homebrew that is merely absent from PATH, before
 # anything looks for brew-installed tools. The self-updater runs this installer
 # from a detached launchd job, and launchd hands such a job the minimal PATH
@@ -1108,6 +1353,12 @@ if [ "$VERIFY_ONLY" -eq 1 ]; then
 fi
 
 step "Whisper Face setup in $DIR (mode: $MODE)"
+phase prepare
+if [ "${APP_MODE:-0}" -eq 1 ]; then
+    echo "== app mode: set up for $APP_BUNDLE"
+elif [ "$MODE" = "full" ]; then
+    warn_if_receipt_names_another_checkout
+fi
 if [ "$MODELS_ONLY" -eq 1 ]; then
     echo "== models: adding the optional Whisper large-v3-turbo and qwen3.5:4b"
     echo "==         to this installation; models already present are reused"
@@ -1130,6 +1381,10 @@ if [ "$WITH_ALL_MODELS" -eq 1 ]; then
     required_gb=8
 fi
 check_install_location
+if [ "$DRY_RUN" -eq 1 ]; then
+    app_mode_dry_run
+    exit 0
+fi
 
 # Create and lock logs before either service can create them with a default
 # mode. Existing logs are retained; rerunning setup repairs their mode.
@@ -1137,34 +1392,38 @@ provision_private_log "$dictate_log"
 provision_private_log "$ollama_log"
 
 # --- Homebrew and native dependencies --------------------------------------
-if ! command -v brew >/dev/null 2>&1; then
-    step "installing Homebrew (its official installer may request a password)"
-    # Never let a failed bootstrap die silently under `set -e`: the exit code
-    # alone stranded the self-updater with an unexplained rollback.
-    /bin/bash -c "$(curl -fsSL \
-        https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
-        || fail "the Homebrew installer did not complete (it needs a terminal and an administrator password); open Terminal, run ./setup.sh once to finish it, then retry"
-    adopt_installed_homebrew \
-        || fail "Homebrew installed but its brew binary was not found"
-fi
+if [ "${APP_MODE:-0}" -eq 1 ]; then
+    use_app_uv
+else
+    if ! command -v brew >/dev/null 2>&1; then
+        step "installing Homebrew (its official installer may request a password)"
+        # Never let a failed bootstrap die silently under `set -e`: the exit code
+        # alone stranded the self-updater with an unexplained rollback.
+        /bin/bash -c "$(curl -fsSL \
+            https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
+            || fail "the Homebrew installer did not complete (it needs a terminal and an administrator password); open Terminal, run ./setup.sh once to finish it, then retry"
+        adopt_installed_homebrew \
+            || fail "Homebrew installed but its brew binary was not found"
+    fi
 
-BREW="$(command -v brew)"
-cleanup_wanted=0
-if cleanup_model_wanted; then
-    cleanup_wanted=1
-fi
-missing_packages=()
-for package in $(required_brew_packages); do
-    "$BREW" list --versions "$package" >/dev/null 2>&1 \
-        || missing_packages+=("$package")
-done
-if [ "${#missing_packages[@]}" -gt 0 ]; then
-    step "installing ${missing_packages[*]}"
-    "$BREW" install "${missing_packages[@]}"
-fi
+    BREW="$(command -v brew)"
+    cleanup_wanted=0
+    if cleanup_model_wanted; then
+        cleanup_wanted=1
+    fi
+    missing_packages=()
+    for package in $(required_brew_packages); do
+        "$BREW" list --versions "$package" >/dev/null 2>&1 \
+            || missing_packages+=("$package")
+    done
+    if [ "${#missing_packages[@]}" -gt 0 ]; then
+        step "installing ${missing_packages[*]}"
+        "$BREW" install "${missing_packages[@]}"
+    fi
 
-UV="$(command -v uv)"
-OLLAMA="$(command -v ollama 2>/dev/null || true)"
+    UV="$(command -v uv)"
+    OLLAMA="$(command -v ollama 2>/dev/null || true)"
+fi
 mkdir -p "$launch_dir"
 require_build_tools
 
@@ -1253,12 +1512,14 @@ if [ "$MODELS_ONLY" -eq 1 ]; then
     exit 0
 fi
 
+phase python
 step "checking which models are already installed"
 refresh_model_inventory
 
 # --- Native Parakeet helper ------------------------------------------------
 # Both FluidAudio and its Core ML model are pinned. The warm helper receives
 # Float32 audio over a pipe, so the RAM-only application contract remains intact.
+phase speech-model
 if [ "$(model_state parakeet)" = "present" ]; then
     step "Parakeet Unified model already installed (~565 MB, cached)"
 else
@@ -1266,6 +1527,7 @@ else
 fi
 "$UV" run --locked --script "$DIR/dictate.py" --preload-parakeet-model
 
+phase helpers
 step "building the native Parakeet Unified helper"
 command -v swift >/dev/null 2>&1 && command -v swiftc >/dev/null 2>&1 \
     || fail "Swift is unavailable; install the Xcode Command Line Tools"
@@ -1343,6 +1605,7 @@ if [ "$qwen_installed" -eq 1 ] && ! qwen_matches_audit "$qwen_pulled_now"; then
 fi
 
 # Whisper Tiny is the fast preview pass every dictation runs; it is required.
+phase preview-model
 if [ "$(model_state whisper-fast)" = "present" ]; then
     step "Whisper Tiny already installed (~75 MB, cached)"
 else
@@ -1383,33 +1646,21 @@ for private_file in transcripts.jsonl learned.json voice_inbox.json demonstratio
 done
 
 # --- Dictation LaunchAgent --------------------------------------------------
+phase service
 step "installing the login LaunchAgent"
-escaped_uv="$(escape_sed_replacement "$UV")"
-escaped_dir="$(escape_sed_replacement "$DIR")"
-if [ "$MODE" = "server-only" ]; then
-    extra_sed="s|__EXTRA_ARGS__|<string>--server-only</string>|"
-    # Server-only stays raw uv and headless: no launcher, no TCC surface.
-    launcher_prefix_sed="/__LAUNCHER_PREFIX__/d"
-else
-    extra_sed="/__EXTRA_ARGS__/d"
-    # Full mode runs the login job through the signed launcher app. launchd
-    # execs the launcher, which supervises "uv run ..." as a fork+exec child,
-    # so macOS attributes Input Monitoring and Accessibility to "Whisper Face"
-    # (one grantable toggle that survives reinstalls) while KeepAlive still sees
-    # the child's real exit status.
-    escaped_launcher_exe="$(escape_sed_replacement \
-        "$HOME/Applications/Whisper Face.app/Contents/MacOS/Whisper Face")"
-    launcher_prefix_sed="s|__LAUNCHER_PREFIX__|<string>$escaped_launcher_exe</string>\\
-        <string>--run</string>|"
-fi
-render_plist com.berg.dictate.plist.template "$dictate_plist" \
-    -e "$launcher_prefix_sed" \
-    -e "s|__UV__|$escaped_uv|g" \
-    -e "s|__DIR__|$escaped_dir|g" \
-    -e "s|__PYTHON__|$PYTHON_VERSION|g" \
-    -e "$extra_sed"
+render_dictate_plist "$dictate_plist" "$UV"
 
-if [ "$MODE" = "full" ]; then
+if [ "$MODE" = "full" ] && [ "${APP_MODE:-0}" -eq 1 ]; then
+    # Nothing is built or copied: the app is verified where it is, a
+    # launcher an earlier folder install built is retired once it proves
+    # ours, and the receipt binds this checkout to the app.
+    step "binding this copy to $APP_BUNDLE"
+    "$UV" run --quiet --no-project --python "$PYTHON_VERSION" \
+        "$DIR/scripts/macos_launcher_app.py" adopt \
+        --app "$APP_BUNDLE" --checkout "$DIR" --receipt "$launcher_receipt" \
+        --folder-launcher "$launcher_app" \
+        || fail "this Whisper Face app could not be used for this copy; its reason is above"
+elif [ "$MODE" = "full" ]; then
     step "installing the generic Whisper Face app launcher"
     packaged_launcher_app="$(cd "$DIR/.." && pwd)/Whisper Face.app"
     launcher_install_args=(
@@ -1455,8 +1706,10 @@ if [ "$ready" -eq 1 ]; then
     curl -fsS --max-time 3 http://127.0.0.1:8787/health >/dev/null \
         || fail "dictation process launched but its health check failed"
     verify_install
+    phase done
     print_install_outcome ready
 elif [ "$permissions_needed" -eq 1 ] && [ "$MODE" = "full" ]; then
+    phase permissions
     print_install_outcome permissions
 else
     fail "dictation service did not become ready; inspect $DIR/dictate.log"

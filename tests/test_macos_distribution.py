@@ -825,6 +825,31 @@ class SetupWindowContractTests(unittest.TestCase):
                         script.index("hdiutil create"))
 
 
+UV_STAND_IN = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--version") == 0) {
+        puts("uv 0.0.0 (test stand-in)");
+        return 0;
+    }
+    const char *python = getenv("UV_STAND_IN_PYTHON");
+    for (int i = 1; python && i < argc; i++) {
+        size_t n = strlen(argv[i]);
+        if (n > 3 && strcmp(argv[i] + n - 3, ".py") == 0) {
+            argv[i - 1] = (char *)python;
+            execv(python, argv + i - 1);
+            return 127;
+        }
+    }
+    fputs("uv stand-in: nothing to run\n", stderr);
+    return 2;
+}
+"""
+
+
 @unittest.skipUnless(
     sys.platform == "darwin", "compiled AppKit launcher bundle requires macOS")
 class DragInstallAppTests(unittest.TestCase):
@@ -858,13 +883,17 @@ class DragInstallAppTests(unittest.TestCase):
         import zipfile
         with zipfile.ZipFile(cls.source_zip, "w") as archive:
             archive.writestr("Whisper Face 0.6.0-drag.1/README.md", "source\n")
-        # Any thin arm64 Mach-O that runs on macOS 14 stands in for uv.
+        # A thin arm64 program for macOS 14 stands in for uv. It answers
+        # --version and, for "run ... script.py args", runs the script with
+        # the Python these tests run on, so a dry run can check the app.
         cls.uv_dir = root / "uv" / "bin"
         cls.uv_dir.mkdir(parents=True)
         cls.uv = cls.uv_dir / "uv"
-        cls.uv.write_bytes(
-            (cls.generic / "Contents/MacOS/Whisper Face").read_bytes())
-        cls.uv.chmod(0o755)
+        stand_in = root / "uv-stand-in.c"
+        stand_in.write_text(UV_STAND_IN, encoding="utf-8")
+        subprocess.run(["xcrun", "clang", "-arch", "arm64",
+                        "-mmacosx-version-min=14.0", "-o", str(cls.uv),
+                        str(stand_in)], check=True, capture_output=True)
         for name in ("LICENSE-MIT", "LICENSE-APACHE"):
             (cls.uv_dir.parent / name).write_text(f"{name}\n")
 
@@ -998,6 +1027,92 @@ class DragInstallAppTests(unittest.TestCase):
         self.assertEqual(refused.returncode, 2)
         self.assertIn("installs a different release", refused.stderr)
         self.assertFalse(receipt.exists())
+
+    def dry_run(self, home, *arguments):
+        """setup.sh in app mode's dry run, against a home folder of its own.
+
+        Anything that would change this Mac or go to the network is
+        shadowed by a stub that refuses, so a dry run that reached one fails.
+        """
+        bin_dir = home / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        # Apple's toolchain leaves scratch folders in TMPDIR; keep them out
+        # of the home folder this test inspects.
+        scratch = self.root / "dry-run-tmp"
+        scratch.mkdir(exist_ok=True)
+        for tool in ("brew", "uv", "curl", "launchctl", "ollama", "open",
+                     "ffmpeg", "swift"):
+            stub = bin_dir / tool
+            stub.write_text('#!/bin/bash\necho "refused: $0 $*" >&2\nexit 97\n')
+            stub.chmod(0o755)
+        return subprocess.run(
+            ["/bin/bash", str(ROOT / "setup.sh"), *arguments],
+            env={"HOME": str(home), "LANG": "C", "TMPDIR": str(scratch),
+                 "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin",
+                 "UV_STAND_IN_PYTHON": sys.executable},
+            text=True, capture_output=True, timeout=120,
+            stdin=subprocess.DEVNULL)
+
+    def test_app_modes_dry_run_checks_everything_and_changes_nothing(self):
+        if os.uname().machine != "arm64":
+            self.skipTest("setup.sh supports Apple silicon only")
+        revision = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+            text=True, capture_output=True, check=True).stdout.strip()
+        app, result = self.package("dry-run-app", revision=revision)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        home = self.root / "dry-run-home"
+        home.mkdir()
+        before = subprocess.run(
+            ["git", "-C", str(ROOT), "status", "--porcelain", "--ignored"],
+            text=True, capture_output=True, check=True).stdout
+        run = self.dry_run(home, "--app", str(app), "--dry-run")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertNotIn("refused:", run.stderr)
+        executable = f"{app.resolve()}/Contents/MacOS/Whisper Face"
+        for line in (
+                "== dry run of app mode in",
+                "Homebrew is not used",
+                "would write receipt",
+                f"== login service: would run {executable} --run",
+                "== dry run complete: nothing was changed"):
+            with self.subTest(line=line):
+                self.assertIn(line, run.stdout)
+        # Nothing landed in the home folder or the checkout.
+        self.assertEqual(
+            sorted(path.name for path in home.iterdir()), ["bin"])
+        after = subprocess.run(
+            ["git", "-C", str(ROOT), "status", "--porcelain", "--ignored"],
+            text=True, capture_output=True, check=True).stdout
+        self.assertEqual(before, after)
+
+        # Sticky: a schema 2 receipt for this checkout is enough on its own,
+        # so a rerun of Install.command keeps to the app.
+        support = home / "Library/Application Support/Whisper Face"
+        support.mkdir(parents=True)
+        support.chmod(0o700)
+        receipt = support / "launcher-install.json"
+        receipt.write_text(json.dumps({
+            "app": str(app.resolve()), "bundle_id":
+            "com.berg.whisper-face.launcher", "checkout": str(ROOT.resolve()),
+            "schema_version": 2, "source_revision": revision}))
+        receipt.chmod(0o600)
+        sticky = self.dry_run(home, "--dry-run")
+        self.assertEqual(sticky.returncode, 0, sticky.stdout + sticky.stderr)
+        self.assertIn(f"== app: {app.resolve()}", sticky.stdout)
+        self.assertIn(f"would run {executable} --run", sticky.stdout)
+
+        # An app of another release cannot take this checkout over.
+        other, result = self.package("dry-run-other", revision="4" * 40)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        refused = self.dry_run(home, "--app", str(other), "--dry-run")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("installs a different release", refused.stderr)
+        # A dry run is for app mode only.
+        receipt.unlink()
+        folder = self.dry_run(home, "--dry-run")
+        self.assertEqual(folder.returncode, 1)
+        self.assertIn("--dry-run checks app mode", folder.stderr)
 
     def test_the_setup_window_renders_every_screen_in_both_appearances(self):
         out = self.root / "renders"

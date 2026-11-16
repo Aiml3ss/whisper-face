@@ -4,6 +4,7 @@
 # ///
 
 import ast
+import json
 import os
 import plistlib
 import re
@@ -1435,6 +1436,222 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("== installation complete", ready.stdout)
         self.assertIn("Hold Right Option, speak, and release to paste.",
                       ready.stdout)
+
+    # --- App mode: the drag-install app runs setup.sh --app ----------------
+
+    def app_mode(self, home, checkout, *, receipt=None, app_bundle="",
+                 uninstall=0, mode="full", script="resolve_app_mode\n"):
+        """Run resolve_app_mode the way setup.sh's top level does."""
+        support = Path(home) / "Library/Application Support/Whisper Face"
+        support.mkdir(parents=True, exist_ok=True)
+        receipt_path = support / "launcher-install.json"
+        if receipt is not None:
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        return run_setup_functions(
+            ["fail", "receipt_value", "resolve_app_mode"],
+            script + 'echo "APP_MODE=$APP_MODE APP_BUNDLE=$APP_BUNDLE"\n',
+            variables={"DIR": checkout, "VERIFY_ONLY": 0, "UNINSTALL": uninstall,
+                       "MODE": mode, "APP_MODE": 0,
+                       "APP_BUNDLE": app_bundle,
+                       "launcher_receipt": receipt_path,
+                       "managed_checkout": support / "checkout"})
+
+    @staticmethod
+    def fake_drag_app(root):
+        app = Path(root) / "Applications" / "Whisper Face.app"
+        helper = app / "Contents/Helpers/uv"
+        helper.parent.mkdir(parents=True)
+        helper.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+        helper.chmod(0o755)
+        return app
+
+    @needs_bash
+    def test_app_mode_sticks_to_a_checkout_its_receipt_binds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            app = self.fake_drag_app(root)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            # Asked for explicitly, as the app does.
+            asked = self.app_mode(root / "home", checkout, app_bundle=str(app))
+            self.assertEqual(asked.returncode, 0, asked.stderr)
+            self.assertIn(f"APP_MODE=1 APP_BUNDLE={app}", asked.stdout)
+            # A plain rerun here, as Install.command or the git updater
+            # makes, finds the app in the schema 2 receipt and keeps to it.
+            receipt = {"schema_version": 2, "checkout": str(checkout),
+                       "app": str(app), "bundle_id":
+                       "com.berg.whisper-face.launcher"}
+            sticky = self.app_mode(root / "home", checkout, receipt=receipt)
+            self.assertEqual(sticky.returncode, 0, sticky.stderr)
+            self.assertIn(f"APP_MODE=1 APP_BUNDLE={app}", sticky.stdout)
+            # A folder install's schema 1 receipt changes nothing.
+            folder = self.app_mode(root / "home", checkout, receipt={
+                "schema_version": 1, "checkout": str(checkout)})
+            self.assertEqual(folder.returncode, 0, folder.stderr)
+            self.assertIn("APP_MODE=0 APP_BUNDLE=\n", folder.stdout)
+            # Nor does an app-managed receipt for some other checkout.
+            other = self.app_mode(root / "home", checkout, receipt={
+                **receipt, "checkout": str(root / "elsewhere")})
+            self.assertIn("APP_MODE=0", other.stdout)
+            # An app that has gone is named, never replaced by a launcher
+            # built here.
+            gone = self.app_mode(root / "home", checkout, receipt={
+                **receipt, "app": str(root / "Trash/Whisper Face.app")})
+            self.assertEqual(gone.returncode, 1)
+            self.assertIn("is no longer at", gone.stderr)
+            self.assertIn("open Whisper Face from your Applications folder",
+                          gone.stderr)
+            # Server-only never runs through the app.
+            headless = self.app_mode(root / "home", checkout,
+                                     app_bundle=str(app), mode="server-only")
+            self.assertEqual(headless.returncode, 1)
+            self.assertIn("needs a folder install", headless.stderr)
+
+    @needs_bash
+    def test_the_apps_own_checkout_is_never_set_up_any_other_way(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            managed = (home / "Library/Application Support/Whisper Face"
+                       / "checkout")
+            managed.mkdir(parents=True)
+            refused = self.app_mode(home, managed)
+            self.assertEqual(refused.returncode, 1)
+            self.assertIn("belongs to the Whisper Face app", refused.stderr)
+            self.assertNotIn("APP_MODE=", refused.stdout)
+            # Uninstalling it still works without the app.
+            uninstall = self.app_mode(home, managed, uninstall=1)
+            self.assertEqual(uninstall.returncode, 0, uninstall.stderr)
+            # And the whole installer, run as Install.command runs it, stops
+            # there before it writes a log or looks for Homebrew.
+            (managed / "setup.sh").write_bytes(
+                (ROOT / "setup.sh").read_bytes())
+            (managed / "setup.sh").chmod(0o755)
+            bin_dir = home / "bin"
+            bin_dir.mkdir()
+            for tool in REFUSED_TOOLS:
+                stub = bin_dir / tool
+                stub.write_text('#!/bin/bash\necho "refused: $0" >&2\nexit 97\n')
+                stub.chmod(0o755)
+            result = subprocess.run(
+                ["/bin/bash", str(managed / "setup.sh")],
+                env={"HOME": str(home), "LANG": "C",
+                     "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin"},
+                text=True, capture_output=True, timeout=60,
+                stdin=subprocess.DEVNULL)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("belongs to the Whisper Face app", result.stderr)
+            self.assertNotIn("refused:", result.stderr)
+            self.assertFalse((managed / "install.log").exists())
+
+    @needs_bash
+    def test_app_mode_runs_the_service_through_the_app_and_skips_homebrew(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = root / "Applications" / "Whisper Face.app"
+            plist = root / "service.plist"
+            result = run_setup_functions(
+                ["fail", "escape_sed_replacement", "render_plist",
+                 "render_dictate_plist"],
+                f'render_dictate_plist "{plist}" "/checkout/.models/bin/uv"\n',
+                variables={"DIR": ROOT, "MODE": "full", "APP_MODE": 1,
+                           "APP_BUNDLE": app, "PYTHON_VERSION": "3.12",
+                           "VERIFY_ONLY": 0})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            arguments = plistlib.loads(plist.read_bytes())["ProgramArguments"]
+            self.assertEqual(arguments[:2], [
+                f"{app}/Contents/MacOS/Whisper Face", "--run"])
+            self.assertEqual(arguments[2], "/checkout/.models/bin/uv")
+            # A folder install renders exactly what it always has.
+            folder = run_setup_functions(
+                ["fail", "escape_sed_replacement", "render_plist",
+                 "render_dictate_plist"],
+                f'render_dictate_plist "{plist}" "/opt/homebrew/bin/uv"\n',
+                variables={"DIR": ROOT, "MODE": "full", "APP_MODE": 0,
+                           "PYTHON_VERSION": "3.12", "VERIFY_ONLY": 0})
+            self.assertEqual(folder.returncode, 0, folder.stderr)
+            arguments = plistlib.loads(plist.read_bytes())["ProgramArguments"]
+            self.assertTrue(arguments[0].endswith(
+                "/Applications/Whisper Face.app/Contents/MacOS/Whisper Face"))
+            self.assertNotIn(str(app), arguments[0])
+        # In app mode the Homebrew bootstrap, ffmpeg and the locally built
+        # launcher are all on the other branch.
+        homebrew = self.shell.index("# --- Homebrew and native dependencies")
+        branch = self.shell[homebrew:self.shell.index("require_build_tools\n", homebrew)]
+        self.assertLess(branch.index('if [ "${APP_MODE:-0}" -eq 1 ]; then\n    use_app_uv\nelse'),
+                        branch.index("installing Homebrew"))
+        verify = shell_function("verify_install")
+        self.assertLess(verify.index('if [ "${APP_MODE:-0}" -eq 1 ]'),
+                        verify.index('command -v ffmpeg'))
+        launcher = self.shell[self.shell.index(
+            'if [ "$MODE" = "full" ] && [ "${APP_MODE:-0}" -eq 1 ]; then\n    # Nothing is built'):]
+        self.assertLess(launcher.index("macos_launcher_app.py\" adopt"),
+                        launcher.index("installing the generic Whisper Face app launcher"))
+        use_app_uv = shell_function("use_app_uv")
+        self.assertIn('"$app_uv"', use_app_uv)
+        self.assertIn('UV="$checkout_uv"', use_app_uv)
+        self.assertNotIn("curl", use_app_uv)
+        # app mode never calls the python3 shim, which on a Mac without the
+        # developer tools opens Apple's install dialog.
+        for name in ("use_app_uv", "app_mode_dry_run", "resolve_app_mode"):
+            self.assertNotIn("python3", shell_function(name))
+
+    def test_app_mode_announces_the_phases_the_setup_window_lists(self):
+        import importlib.util
+        specification = importlib.util.spec_from_file_location(
+            "whisper_face_launcher_tool_for_installer",
+            ROOT / "scripts" / "macos_launcher_app.py")
+        tool = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(tool)
+        announced = re.findall(r"(?m)^\s*phase ([a-z-]+)$", self.shell)
+        self.assertEqual(announced[:len(tool.SETUP_PHASES)],
+                         list(tool.SETUP_PHASES))
+        self.assertEqual(sorted(announced[len(tool.SETUP_PHASES):]),
+                         sorted(tool.FINISHED_PHASES))
+        self.assertIn('echo "@@ phase $1"', shell_function("phase"))
+        # Only app mode prints them; a folder install's output is unchanged.
+        quiet = run_setup_functions(["phase"], "phase prepare\n",
+                                    variables={"APP_MODE": 0})
+        self.assertEqual(quiet.stdout, "")
+        loud = run_setup_functions(["phase"], "phase prepare\n",
+                                   variables={"APP_MODE": 1})
+        self.assertEqual(loud.stdout, "@@ phase prepare\n")
+
+    @needs_bash
+    def test_uninstalling_an_app_managed_copy_leaves_the_app_alone(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = self.fake_drag_app(root)
+            names = [name for name in (
+                "fail", "step", "keep_installed_path", "remove_installed_path",
+                "prune_empty_directory", "unload_installed_agent",
+                "remove_ollama_cleanup_model", "uninstall_whisper_face")]
+            result = run_setup_functions(
+                names, "uninstall_whisper_face\n",
+                variables={
+                    "DIR": root / "checkout", "VERIFY_ONLY": 0,
+                    "ASSUME_YES": 0, "REMOVE_MODELS": 0, "REMOVE_PERSONAL": 0,
+                    "APP_MODE": 1, "APP_BUNDLE": app,
+                    "uninstall_removed": 0, "uninstall_absent": 0,
+                    "uninstall_pending": 0, "uninstall_failed": 0,
+                    "dictate_plist": root / "d.plist",
+                    "ollama_plist": root / "o.plist",
+                    "launcher_app": root / "home-apps/Whisper Face.app",
+                    "launcher_receipt": root / "r.json",
+                    "ollama_service_receipt": root / "o.sha256",
+                    "service_receipt_dir": root / "state",
+                    "parakeet_helper": root / "h", "speech_runtime": root / "s",
+                    "speech_runtime_cache": root / "c",
+                    "parakeet_model_dir": root / "m",
+                    "whisper_fast_cache": root / "f",
+                    "whisper_large_cache": root / "l",
+                    "whisper_fast_lock": root / "fl",
+                    "whisper_large_lock": root / "ll"},
+                stubs={"launchctl": "exit 1"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"keeping       {app}", result.stdout)
+            self.assertIn("drag it to the Trash yourself", result.stdout)
+            self.assertNotIn(f"would remove  {app}", result.stdout)
+            self.assertTrue(app.exists())
 
     @needs_bash
     def test_a_server_only_install_says_where_the_bearer_token_is(self):
