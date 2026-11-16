@@ -1,7 +1,15 @@
 #!/bin/bash
-# Build the exact-source macOS release bundle, update manifest, and checksums.
-# Local builds are unsigned by default. Release automation opts into Apple
-# signing and notarization explicitly so missing credentials fail closed.
+# Build the exact-source macOS release: the source ZIP, the drag-install disk
+# image, the update manifest, and checksums.
+#
+# The disk image holds exactly two things: Whisper Face.app and a link to
+# /Applications. The app carries the source ZIP built here, byte for byte,
+# and a copy of uv; opened on a Mac with nothing installed, it unpacks that
+# ZIP into a checkout and runs the checkout's own setup.sh --app.
+#
+# Local builds are unsigned by default, and an unsigned app must be a preview
+# build. Release automation opts into Apple signing and notarization
+# explicitly so missing credentials fail closed.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -16,6 +24,8 @@ NOTARIZE_RELEASE=0
 PREVIOUS_VERSION=""
 PREVIOUS_REVISION=""
 PREVIOUS_MANIFEST_URL=""
+UV_BINARY=""
+UV_LICENSE_DIR=""
 
 usage() {
     cat <<'EOF'
@@ -31,6 +41,10 @@ Options:
   --previous-version X.Y.Z       Previous safe release for rollback
   --previous-revision SHA        Previous release's full Git SHA
   --previous-manifest-url URL    Previous release manifest URL
+  --uv PATH                      uv binary the app carries (default: uv on PATH)
+  --uv-licenses DIR              Folder holding uv's LICENSE-MIT and
+                                 LICENSE-APACHE (default: the folder above
+                                 the uv binary's own, as Homebrew lays it out)
   -h, --help                     Show this help
 
 Signing reads APPLE_DEVELOPER_ID_APPLICATION. Notarization reads either
@@ -56,6 +70,8 @@ while [ "$#" -gt 0 ]; do
         --previous-version) PREVIOUS_VERSION="${2:-}"; shift 2 ;;
         --previous-revision) PREVIOUS_REVISION="${2:-}"; shift 2 ;;
         --previous-manifest-url) PREVIOUS_MANIFEST_URL="${2:-}"; shift 2 ;;
+        --uv) UV_BINARY="${2:-}"; shift 2 ;;
+        --uv-licenses) UV_LICENSE_DIR="${2:-}"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) fail "unknown option: $1" ;;
     esac
@@ -67,9 +83,24 @@ done
     || fail "--version must be SemVer"
 [ "$CHANNEL" = "stable" ] || [ "$CHANNEL" = "preview" ] \
     || fail "--channel must be stable or preview"
-for command_name in git python3 ditto hdiutil shasum tar date; do
+for command_name in git python3 ditto hdiutil shasum tar date codesign; do
     command -v "$command_name" >/dev/null 2>&1 \
         || fail "required command is unavailable: $command_name"
+done
+# The app carries uv, so setup on a new Mac needs no Homebrew. It must be a
+# thin arm64 binary that runs on macOS 14; macos_launcher_app.py checks both.
+if [ -z "$UV_BINARY" ]; then
+    UV_BINARY="$(command -v uv 2>/dev/null || true)"
+fi
+[ -n "$UV_BINARY" ] && [ -x "$UV_BINARY" ] \
+    || fail "uv is required: the drag-install app carries it (pass --uv PATH)"
+UV_BINARY="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$UV_BINARY")"
+if [ -z "$UV_LICENSE_DIR" ]; then
+    UV_LICENSE_DIR="$(dirname "$(dirname "$UV_BINARY")")"
+fi
+for license_name in LICENSE-MIT LICENSE-APACHE; do
+    [ -f "$UV_LICENSE_DIR/$license_name" ] \
+        || fail "uv's $license_name is not in $UV_LICENSE_DIR; pass --uv-licenses DIR"
 done
 
 FULL_REVISION="$(git -C "$REPO_DIR" rev-parse --verify "${REVISION}^{commit}")" \
@@ -84,7 +115,7 @@ git -C "$REPO_DIR" cat-file -e "$FULL_REVISION:Install.command" \
     || fail "release revision does not contain Install.command"
 for required in LICENSE LICENSE_POLICY.md NOTICE THIRD_PARTY_NOTICES.md setup.sh \
         scripts/macos_launcher_app.py config/macos-signing-policy.json \
-        icons/WhisperFace.icns; do
+        config/macos-launcher-entitlements.plist icons/WhisperFace.icns; do
     git -C "$REPO_DIR" cat-file -e "$FULL_REVISION:$required" \
         || fail "release revision is missing $required"
 done
@@ -130,7 +161,12 @@ ZIP_NAME="WhisperFace-$VERSION-source.zip"
 DMG_NAME="WhisperFace-$VERSION-macOS-arm64.dmg"
 ZIP_PATH="$OUTPUT_DIR/$ZIP_NAME"
 DMG_PATH="$OUTPUT_DIR/$DMG_NAME"
-LAUNCHER_APP="$TEMP_ROOT/Whisper Face.app"
+# Everything in this folder is on the disk image, and nothing else is.
+DMG_ROOT="$TEMP_ROOT/disk-image"
+LAUNCHER_APP="$DMG_ROOT/Whisper Face.app"
+# The volume name carries no version, so it stays the same from release to
+# release.
+VOLUME_NAME="Whisper Face"
 MANIFEST_PATH="$OUTPUT_DIR/update-manifest.json"
 CHECKSUM_PATH="$OUTPUT_DIR/SHA256SUMS"
 PUBLISHED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -196,31 +232,9 @@ if not identity.startswith("Developer ID Application: ") or not identity.endswit
     raise SystemExit("signing identity is not the pinned Developer ID Application identity")
 PY
 fi
-# Built before the bundle's metadata is written, because that metadata
-# records the finished launcher's digest: setup.sh accepts the app
-# shipped beside the folder only when the two match.
-echo "== compiling generic launcher from the selected revision"
-python3 "$BUNDLE_DIR/scripts/macos_launcher_app.py" build \
-    --app "$LAUNCHER_APP"
-if [ "$SIGN_RELEASE" -eq 1 ]; then
-    echo "== signing generic launcher app"
-    codesign --force --options runtime --timestamp \
-        --sign "$APPLE_DEVELOPER_ID_APPLICATION" "$LAUNCHER_APP"
-    codesign --verify --deep --strict --verbose=2 "$LAUNCHER_APP"
-    python3 "$BUNDLE_DIR/scripts/macos_launcher_app.py" verify \
-        --app "$LAUNCHER_APP" --require-signed
-else
-    python3 "$BUNDLE_DIR/scripts/macos_launcher_app.py" verify \
-        --app "$LAUNCHER_APP"
-fi
-
-LAUNCHER_DIGEST="$(python3 "$BUNDLE_DIR/scripts/macos_launcher_app.py" digest \
-    --app "$LAUNCHER_APP")"
-
 python3 "$SCRIPT_DIR/release_manifest.py" source-metadata \
     --version "$VERSION" \
     --revision "$FULL_REVISION" \
-    --launcher-bundle-sha256 "$LAUNCHER_DIGEST" \
     --output "$BUNDLE_DIR/RELEASE-METADATA.json"
 python3 "$SCRIPT_DIR/verify_macos_package.py" stamp \
     --root "$BUNDLE_DIR" \
@@ -232,22 +246,7 @@ echo "== creating source archive"
 rm -f "$ZIP_PATH" "$DMG_PATH" "$MANIFEST_PATH" "$CHECKSUM_PATH"
 ditto -c -k --norsrc --keepParent "$BUNDLE_DIR" "$ZIP_PATH"
 
-echo "== creating macOS disk image"
-hdiutil create -quiet -fs APFS -format UDZO \
-    -volname "$BUNDLE_NAME" -srcfolder "$TEMP_ROOT" "$DMG_PATH"
-
-if [ "$SIGN_RELEASE" -eq 1 ]; then
-    echo "== signing disk image containing the signed launcher"
-    codesign --force --timestamp --sign "$APPLE_DEVELOPER_ID_APPLICATION" "$DMG_PATH"
-    codesign --verify --strict --verbose=2 "$DMG_PATH"
-    DMG_SIGNED=1
-else
-    DMG_SIGNED=0
-    echo "== unsigned local build (not for public release)"
-fi
-
 if [ "$NOTARIZE_RELEASE" -eq 1 ]; then
-    echo "== submitting disk image for Apple notarization"
     if [ -n "${APPLE_NOTARY_KEYCHAIN_PROFILE:-}" ]; then
         notary_auth_args=(--keychain-profile "$APPLE_NOTARY_KEYCHAIN_PROFILE")
     else
@@ -257,9 +256,14 @@ if [ "$NOTARIZE_RELEASE" -eq 1 ]; then
             --password "$APPLE_APP_SPECIFIC_PASSWORD"
         )
     fi
-    notary_result="$TEMP_ROOT/notary-result.json"
-    notary_log="$TEMP_ROOT/notary-log.json"
-    xcrun notarytool submit "$DMG_PATH" --wait --output-format json \
+fi
+
+notarize_submission() {
+    # $1 = file to submit, $2 = short name for its result files.
+    local submission="$1" label="$2" notary_result notary_log notary_id
+    notary_result="$TEMP_ROOT/notary-$label-result.json"
+    notary_log="$TEMP_ROOT/notary-$label-log.json"
+    xcrun notarytool submit "$submission" --wait --output-format json \
         "${notary_auth_args[@]}" > "$notary_result"
     notary_id="$(python3 -c '
 import json, sys
@@ -281,6 +285,74 @@ for issue in issues:
 if issues:
     raise SystemExit("Apple accepted the submission but reported issues")
 ' "$notary_log"
+}
+
+# The app is built from the selected revision's own launcher source, around
+# the source archive just made: the archive's digest is sealed into its
+# Info.plist, and the app checks it before unpacking anything.
+echo "== building the drag-install app from the selected revision"
+mkdir -p "$DMG_ROOT"
+python3 "$BUNDLE_DIR/scripts/macos_launcher_app.py" package \
+    --app "$LAUNCHER_APP" \
+    --source-zip "$ZIP_PATH" \
+    --uv "$UV_BINARY" \
+    --uv-licenses "$UV_LICENSE_DIR" \
+    --version "$VERSION" \
+    --revision "$FULL_REVISION" \
+    --channel "$CHANNEL"
+if [ "$SIGN_RELEASE" -eq 1 ]; then
+    # Inside out: uv first, then the app that seals it. Both get the
+    # hardened runtime and a secure timestamp; the app also gets the
+    # microphone entitlement, without which a hardened app cannot hear.
+    echo "== signing the drag-install app"
+    codesign --force --options runtime --timestamp \
+        --sign "$APPLE_DEVELOPER_ID_APPLICATION" \
+        "$LAUNCHER_APP/Contents/Helpers/uv"
+    codesign --force --options runtime --timestamp \
+        --entitlements "$BUNDLE_DIR/config/macos-launcher-entitlements.plist" \
+        --identifier com.berg.whisper-face.launcher \
+        --sign "$APPLE_DEVELOPER_ID_APPLICATION" "$LAUNCHER_APP"
+    codesign --verify --deep --strict --verbose=2 "$LAUNCHER_APP"
+    python3 "$BUNDLE_DIR/scripts/macos_launcher_app.py" verify-drag \
+        --app "$LAUNCHER_APP" --require-signed --source-zip "$ZIP_PATH" \
+        --version "$VERSION" --revision "$FULL_REVISION"
+else
+    python3 "$BUNDLE_DIR/scripts/macos_launcher_app.py" verify-drag \
+        --app "$LAUNCHER_APP" --source-zip "$ZIP_PATH" \
+        --version "$VERSION" --revision "$FULL_REVISION"
+fi
+if [ "$NOTARIZE_RELEASE" -eq 1 ]; then
+    # Staple the app itself, not only the disk image: once it is dragged
+    # out of the image, the app's own ticket is what Gatekeeper reads.
+    echo "== notarizing and stapling the app before it goes on the disk image"
+    app_submission="$TEMP_ROOT/WhisperFace-app-notarize.zip"
+    ditto -c -k --keepParent "$LAUNCHER_APP" "$app_submission"
+    notarize_submission "$app_submission" app
+    xcrun stapler staple "$LAUNCHER_APP"
+    xcrun stapler validate "$LAUNCHER_APP"
+    python3 "$BUNDLE_DIR/scripts/macos_launcher_app.py" verify-drag \
+        --app "$LAUNCHER_APP" --require-signed --source-zip "$ZIP_PATH" \
+        --version "$VERSION" --revision "$FULL_REVISION"
+fi
+
+echo "== creating macOS disk image"
+ln -s /Applications "$DMG_ROOT/Applications"
+hdiutil create -quiet -fs APFS -format UDZO \
+    -volname "$VOLUME_NAME" -srcfolder "$DMG_ROOT" "$DMG_PATH"
+
+if [ "$SIGN_RELEASE" -eq 1 ]; then
+    echo "== signing disk image containing the signed app"
+    codesign --force --timestamp --sign "$APPLE_DEVELOPER_ID_APPLICATION" "$DMG_PATH"
+    codesign --verify --strict --verbose=2 "$DMG_PATH"
+    DMG_SIGNED=1
+else
+    DMG_SIGNED=0
+    echo "== unsigned local build (not for public release)"
+fi
+
+if [ "$NOTARIZE_RELEASE" -eq 1 ]; then
+    echo "== submitting disk image for Apple notarization"
+    notarize_submission "$DMG_PATH" disk-image
     xcrun stapler staple "$DMG_PATH"
     xcrun stapler validate "$DMG_PATH"
     codesign --verify --strict --verbose=2 "$DMG_PATH"
@@ -289,7 +361,7 @@ else
     DMG_NOTARIZED=0
 fi
 
-echo "== verifying ZIP and disk image contain the same exact source"
+echo "== verifying the ZIP and the app on the disk image carry the same exact source"
 python3 "$SCRIPT_DIR/verify_macos_package.py" verify-artifacts \
     --source-zip "$ZIP_PATH" \
     --disk-image "$DMG_PATH" \

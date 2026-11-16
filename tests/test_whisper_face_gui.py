@@ -3848,6 +3848,7 @@ class NewLookFoundationContractTests(unittest.TestCase):
             "# --- new look: pages",
             "# --- new look: home and setup",
             "# --- new look: editors",
+            "# --- mac download: setup window",
         )
         lines = GUI_SOURCE.splitlines()
         positions = []
@@ -3879,7 +3880,7 @@ class NewLookFoundationContractTests(unittest.TestCase):
             line.strip().startswith(('"home.', '"onboarding.'))
             for line in lines[positions[2]:positions[3]]))
         # The editors' strings are all under theirs, and nowhere else.
-        editors = [line.strip() for line in lines[positions[3]:closing]
+        editors = [line.strip() for line in lines[positions[3]:positions[4]]
                    if line.strip().startswith('"')]
         self.assertTrue(editors)
         self.assertTrue(all(
@@ -3887,6 +3888,49 @@ class NewLookFoundationContractTests(unittest.TestCase):
         self.assertEqual(
             len(editors),
             sum(key.startswith("sheets.") for key in STRING_CATALOGS["en"]))
+        # So are the Mac download's setup window's, which the Swift app
+        # compiles in (scripts/macos_launcher_app.py).
+        installer = [line.strip() for line in lines[positions[4]:closing]
+                     if line.strip().startswith('"')]
+        self.assertTrue(installer)
+        self.assertTrue(all(
+            line.startswith('"installer.') for line in installer))
+        self.assertEqual(
+            len(installer),
+            sum(key.startswith("installer.") for key in STRING_CATALOGS["en"]))
+
+    def test_the_setup_window_speaks_plainly(self):
+        # The Mac download's setup window is the first thing a new person
+        # sees. Nothing on it names an installer's machinery.
+        from whisper_face_gui import internal_words_in
+        catalog = {key: value for key, value in STRING_CATALOGS["en"].items()
+                   if key.startswith("installer.")}
+        self.assertGreaterEqual(len(catalog), 50)
+        machinery = ("checkout", "setup.sh", "homebrew", "brew", " uv",
+                     "python", "swift", "launchd", "launchagent", "git",
+                     "terminal", "xcode", "sha", "checksum", "!!", "@@",
+                     "receipt", "plist", "/library/")
+        for key, value in catalog.items():
+            with self.subTest(key=key):
+                self.assertEqual(internal_words_in(value), [])
+                self.assertEqual(value, value.strip())
+                folded = value.casefold()
+                for word in machinery:
+                    self.assertNotIn(word, folded)
+        # Every phase setup.sh --app announces has a row, and every reason
+        # the window can show is in the catalog.
+        import importlib.util
+        specification = importlib.util.spec_from_file_location(
+            "whisper_face_launcher_tool_for_gui",
+            ROOT / "scripts" / "macos_launcher_app.py")
+        tool = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(tool)
+        for phase in tool.SETUP_PHASES:
+            self.assertIn(f"installer.phase.{phase}", catalog)
+        for _needle, key in tool.FAILURE_REASONS:
+            self.assertIn(key, catalog)
+        self.assertIn("installer.reason.generic", catalog)
+        self.assertEqual(tool.setup_copy(), catalog)
 
     RENDER_ORDER = [
         "_render_shell", "_render_home", "_render_onboarding",

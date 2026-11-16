@@ -29,8 +29,8 @@ SEMVER = re.compile(
 REVISION = re.compile(r"^[0-9a-f]{40}$")
 WINDOWS_BUNDLE_SUFFIX = "-windows-x64.zip"
 
-# Both platforms install by running the shipped source bundle in place; only
-# the clickable entry point and the no-change verification command differ.
+# A source bundle installs by running it in place; only the clickable entry
+# point and the no-change verification command differ between platforms.
 _SHARED_INSTALLATION = {
     "automatic_cross_checkout_migration": False,
     "preserves_private_state": False,
@@ -38,10 +38,21 @@ _SHARED_INSTALLATION = {
     "separate_checkout_requires_manual_private_state_migration": True,
     "strategy": "source-bundle-in-place",
 }
-MACOS_INSTALLATION = {
+MACOS_SOURCE_INSTALLATION = {
     **_SHARED_INSTALLATION,
     "entrypoint": "Install.command",
     "verification": "./setup.sh --verify",
+}
+# The Mac disk image holds the drag-install app. It unpacks its own copy of
+# the source ZIP into one managed checkout and runs that checkout's setup.sh,
+# so the checkout, and its verification command, are always in one place.
+MACOS_INSTALLATION = {
+    **_SHARED_INSTALLATION,
+    "entrypoint": "Whisper Face.app",
+    "strategy": "app-managed",
+    "verification": (
+        '"$HOME/Library/Application Support/Whisper Face/checkout/setup.sh" '
+        "--verify"),
 }
 WINDOWS_INSTALLATION = {
     **_SHARED_INSTALLATION,
@@ -49,6 +60,7 @@ WINDOWS_INSTALLATION = {
     "verification": ".\\setup.ps1 --verify",
 }
 MINIMUM_OS = {
+    "Whisper Face.app": ("minimum_macos", "14.0"),
     "Install.command": ("minimum_macos", "14.0"),
     "Install.cmd": ("minimum_windows", "10"),
 }
@@ -147,7 +159,9 @@ def _installation(kinds: set[str]) -> dict:
             "a release manifest describes one platform's install path; "
             "package Windows and macOS artifacts into separate manifests"
         )
-    return dict(WINDOWS_INSTALLATION if windows else MACOS_INSTALLATION)
+    if windows:
+        return dict(WINDOWS_INSTALLATION)
+    return dict(MACOS_INSTALLATION if macos else MACOS_SOURCE_INSTALLATION)
 
 
 def create_manifest(args: argparse.Namespace) -> dict:

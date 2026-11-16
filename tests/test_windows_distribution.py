@@ -108,7 +108,11 @@ class WindowsArtifactKindTests(unittest.TestCase):
             self.assertEqual(source["kind"], "source-archive")
             self.assertEqual(source["role"], "corresponding-source")
             self.assertEqual(source["architectures"], ["any"])
-            self.assertEqual(payload["installation"]["entrypoint"], "Install.command")
+            # A Mac release's disk image is the drag-install app now, so
+            # that is the manifest's entry point; the source archive's own
+            # kind and role are unchanged.
+            self.assertEqual(payload["installation"]["entrypoint"], "Whisper Face.app")
+            self.assertEqual(payload["installation"]["strategy"], "app-managed")
             self.assertEqual(payload["minimum_macos"], "14.0")
             self.assertNotIn("minimum_windows", payload)
             self.run_tool(

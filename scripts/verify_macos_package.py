@@ -2,9 +2,11 @@
 """Stamp and verify the logical contents of Whisper Face Mac packages.
 
 DMG filesystem identifiers and compression metadata are not byte reproducible.
-This tool instead makes the staged source tree reproducible and proves that the
-ZIP and DMG contain that same tree. It uses only the Python standard library so
-it can run before project dependencies or Apple credentials are available.
+This tool instead makes the staged source tree reproducible, proves the ZIP
+holds exactly that tree, and proves the disk image holds only the drag-install
+app and a link to Applications, with the app carrying that same ZIP byte for
+byte. It uses only the Python standard library so it can run before project
+dependencies or Apple credentials are available.
 """
 
 from __future__ import annotations
@@ -35,13 +37,8 @@ SEMVER = re.compile(
 )
 REVISION = re.compile(r"^[0-9a-f]{40}$")
 LAUNCHER_NAME = "Whisper Face.app"
-LAUNCHER_BASE_FILES = {
-    "Contents/Info.plist",
-    "Contents/MacOS/Whisper Face",
-    "Contents/Resources/launcher-source-sha256",
-    "Contents/Resources/WhisperFace.icns",
-}
-LAUNCHER_SIGNATURE_FILES = {"Contents/_CodeSignature/CodeResources"}
+APPLICATIONS_LINK = "Applications"
+VOLUME_BOOKKEEPING = {".fseventsd", ".Spotlight-V100", ".Trashes"}
 
 
 class PackageError(ValueError):
@@ -289,58 +286,49 @@ def _attach_disk_image(disk_image: Path) -> tuple[Path, str]:
     raise PackageError("attached disk image did not report a mounted filesystem")
 
 
-def _verify_generic_launcher(app: Path, source_root: Path) -> None:
-    if not app.is_dir():
-        raise PackageError("disk image is missing the generic launcher app")
-    entries = {
-        path.relative_to(app).as_posix()
-        for path in app.rglob("*")
-        if path.is_file() or path.is_symlink()
-    }
-    if entries not in (
-        LAUNCHER_BASE_FILES,
-        LAUNCHER_BASE_FILES | LAUNCHER_SIGNATURE_FILES,
-    ):
-        raise PackageError("disk image launcher contains unexpected contents")
+def verify_volume_layout(root: Path) -> None:
+    """The disk image opens to the app and a link to Applications, and to
+    nothing else a person can see. The three hidden entries are bookkeeping
+    macOS itself may add to a mounted volume."""
+    entries = {path.name for path in root.iterdir()}
+    visible = entries - VOLUME_BOOKKEEPING
+    if visible != {LAUNCHER_NAME, APPLICATIONS_LINK}:
+        unexpected = sorted(visible - {LAUNCHER_NAME, APPLICATIONS_LINK})
+        missing = sorted({LAUNCHER_NAME, APPLICATIONS_LINK} - visible)
+        raise PackageError(
+            "disk image must hold exactly Whisper Face.app and Applications"
+            + (f"; unexpected: {', '.join(unexpected)}" if unexpected else "")
+            + (f"; missing: {', '.join(missing)}" if missing else ""))
+    link = root / APPLICATIONS_LINK
+    if not link.is_symlink() or os.readlink(link) != "/Applications":
+        raise PackageError("disk image Applications entry must link to /Applications")
+    app = root / LAUNCHER_NAME
+    if app.is_symlink() or not app.is_dir():
+        raise PackageError("disk image Whisper Face.app must be a real app bundle")
+
+
+def _verify_drag_launcher(app: Path, source_root: Path, source_zip: Path,
+                          version: str, revision: str) -> None:
+    """Check the app with the launcher contract of the source it carries."""
     try:
         info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
     except (OSError, plistlib.InvalidFileException) as exc:
-        raise PackageError("disk image launcher Info.plist is invalid") from exc
+        raise PackageError("disk image app Info.plist is invalid") from exc
     if (
         info.get("CFBundleIdentifier") != "com.berg.whisper-face.launcher"
         or info.get("CFBundleExecutable") != "Whisper Face"
     ):
-        raise PackageError("disk image launcher identity is invalid")
-    executable = app / "Contents/MacOS/Whisper Face"
-    if executable.read_bytes()[:4] != b"\xcf\xfa\xed\xfe":
-        raise PackageError("disk image launcher is not an arm64 Mach-O")
-    for forbidden in ("checkout-path", "source-revision", "dictate.py", "setup.sh"):
-        if any(path.name == forbidden for path in app.rglob("*")):
-            raise PackageError("disk image launcher embeds machine or runtime state")
-    if entries == LAUNCHER_BASE_FILES | LAUNCHER_SIGNATURE_FILES:
-        _run("codesign", "--verify", "--deep", "--strict", str(app))
+        raise PackageError("disk image app identity is invalid")
     _run(
         sys.executable,
         str(source_root / "scripts/macos_launcher_app.py"),
-        "verify",
+        "verify-drag",
         "--app", str(app),
         "--policy", str(source_root / "config/macos-signing-policy.json"),
+        "--source-zip", str(source_zip),
+        "--version", version,
+        "--revision", revision,
     )
-    # setup.sh installs this app only when it matches the digest the bundle
-    # recorded, so a mismatch here would ship an app every install ignores.
-    try:
-        metadata = json.loads(
-            (source_root / RELEASE_METADATA_NAME).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise PackageError(f"could not read {RELEASE_METADATA_NAME}: {exc}") from exc
-    digest = _run(
-        sys.executable,
-        str(source_root / "scripts/macos_launcher_app.py"),
-        "digest",
-        "--app", str(app),
-    )
-    if metadata.get("launcher_bundle_sha256") != digest:
-        raise PackageError("disk image launcher is not the one the bundle records")
 
 
 def verify_artifacts(
@@ -363,25 +351,10 @@ def verify_artifacts(
 
         mount_point, device = _attach_disk_image(disk_image)
         try:
-            dmg_root = mount_point / expected_root
-            dmg_receipt = verify_tree(dmg_root, version, revision)
-            verify_exact_checkout(dmg_root, version, revision)
-            _verify_generic_launcher(mount_point / LAUNCHER_NAME, dmg_root)
-            if dmg_receipt != zip_receipt:
-                raise PackageError("ZIP and DMG package receipts differ")
-            allowed_volume_entries = {
-                expected_root, LAUNCHER_NAME,
-                ".fseventsd", ".Spotlight-V100", ".Trashes"
-            }
-            unexpected = {
-                path.name for path in mount_point.iterdir()
-                if path.name not in allowed_volume_entries
-            }
-            if unexpected:
-                raise PackageError(
-                    "disk image contains unexpected top-level entries: "
-                    + ", ".join(sorted(unexpected))
-                )
+            verify_volume_layout(mount_point)
+            _verify_drag_launcher(
+                mount_point / LAUNCHER_NAME, zip_root, source_zip, version,
+                revision)
         finally:
             _run("hdiutil", "detach", device)
     return zip_receipt
@@ -403,7 +376,8 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--revision", required=True)
 
     artifacts = commands.add_parser(
-        "verify-artifacts", help="prove that a ZIP and DMG contain the same source"
+        "verify-artifacts",
+        help="prove the ZIP is the exact source and the DMG's app carries it",
     )
     artifacts.add_argument("--source-zip", required=True)
     artifacts.add_argument("--disk-image", required=True)
