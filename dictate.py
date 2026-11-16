@@ -4347,6 +4347,12 @@ class StatusBar(NSObject):
     def _present_update_check(self, report):
         try:
             error = report.get("error")
+            if report.get("app_managed"):
+                # Set up by the drag-install app: updates are releases, so
+                # this is an answer, not a failure.
+                self._update_alert(
+                    "Updates come as a new download.", str(error or ""))
+                return
             if error:
                 self._update_alert(
                     "Couldn't check for updates.", str(error))
