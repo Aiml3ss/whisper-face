@@ -332,6 +332,44 @@ class MacDistributionContractTests(unittest.TestCase):
             )
             self.assertEqual(verification.returncode, 0, verification.stderr)
 
+            # An install made before the icon changed is stale, like one built
+            # from older launcher source: verify refuses it, and the installer
+            # builds the current app and binds its receipt to that one.
+            module = load_launcher_tool()
+            earlier = root / "earlier" / "Whisper Face.app"
+            earlier_receipt = root / "earlier-state" / "launcher-install.json"
+            subprocess.run(["ditto", str(app), str(earlier)], check=True)
+            (earlier / "Contents/Resources/WhisperFace.icns").write_bytes(
+                b"icns" + (8).to_bytes(4, "big"))
+            subprocess.run(
+                ["codesign", "--force", "--sign", "-", "--identifier",
+                 "com.berg.whisper-face.launcher", str(earlier)],
+                check=True, capture_output=True)
+            module._write_receipt(earlier_receipt, ROOT, earlier)
+            stale = subprocess.run([
+                sys.executable, str(LAUNCHER_TOOL), "verify",
+                "--app", str(earlier), "--checkout", str(ROOT),
+                "--receipt", str(earlier_receipt),
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual(stale.returncode, 2, stale.stderr)
+            self.assertIn("icon differs", stale.stderr)
+            reinstall = subprocess.run([
+                sys.executable, str(LAUNCHER_TOOL), "install",
+                "--app", str(earlier), "--checkout", str(ROOT),
+                "--receipt", str(earlier_receipt),
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual(reinstall.returncode, 0, reinstall.stderr)
+            self.assertEqual(first, {
+                path.relative_to(earlier).as_posix(): path.read_bytes()
+                for path in earlier.rglob("*") if path.is_file()
+            })
+            renewed = subprocess.run([
+                sys.executable, str(LAUNCHER_TOOL), "verify",
+                "--app", str(earlier), "--checkout", str(ROOT),
+                "--receipt", str(earlier_receipt),
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual(renewed.returncode, 0, renewed.stderr)
+
             # A substituted binary that is re-signed ad-hoc carries a valid
             # signature. Without a recorded digest it is not trusted, and the
             # install builds its own launcher instead of stopping.
