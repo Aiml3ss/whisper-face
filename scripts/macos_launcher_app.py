@@ -512,8 +512,12 @@ final class SetupController: NSObject, NSWindowDelegate {
         case .space: title = localized("installer.space.title"); body = localized("installer.space.body"); primaryTitle = localized("installer.space.action")
         case .running: title = localized("installer.running.title"); body = localized("installer.running.body"); listVisible = true; progressVisible = true
         case .failed(let reason):
-            title = localized("installer.failed.title"); body = localized(reason); note = localized("installer.failed.note")
-            primaryTitle = localized("installer.failed.retry"); listVisible = currentPhase != nil
+            title = localized("installer.failed.title"); body = localized(reason); listVisible = currentPhase != nil
+            // A damaged copy or another release already set up is not
+            // something trying again can fix, so neither is offered.
+            if !["installer.reason.damaged", "installer.reason.version"].contains(reason) {
+                note = localized("installer.failed.note"); primaryTitle = localized("installer.failed.retry")
+            }
             if logURL() != nil { secondaryTitle = localized("installer.failed.log") }
         case .repair: title = localized("installer.repair.title"); body = localized("installer.repair.body"); primaryTitle = localized("installer.repair.action")
         case .folder(let folder): title = localized("installer.folder.title"); body = localized("installer.folder.body", ["folder": folder]); primaryTitle = localized("installer.folder.action")

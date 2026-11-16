@@ -51,6 +51,18 @@ is where AppKit puts one: since macOS 11 a sheet is a card centred on its
 window, not a panel hung from the title bar. The dimming, the corners and
 the shadow round it are the probe's stand-in for what the system draws.
 
+Pass ``--installer`` to review the Mac download's setup window instead:
+
+    uv run scripts/window_render_probe.py --installer [output-dir]
+
+That window belongs to the Swift app in ``scripts/macos_launcher_app.py``,
+which runs before Python exists on a new Mac, so it is drawn by the app
+itself: the probe compiles the launcher into a temporary folder and runs it
+with ``--render-setup-window``, which builds the window without showing it
+and writes every screen in both appearances as installer-{screen}-{light,
+dark}.png, at the window's own size. Nothing is installed, started or
+opened; the compiled launcher is thrown away afterwards.
+
 Pass ``--overlay`` to review the recording overlay instead of the window:
 
     uv run scripts/window_render_probe.py --overlay [output-dir]
@@ -89,6 +101,9 @@ if STATES:
 SHEETS = "--sheets" in ARGS
 if SHEETS:
     ARGS.remove("--sheets")
+INSTALLER = "--installer" in ARGS
+if INSTALLER:
+    ARGS.remove("--installer")
 OUT = Path(ARGS[0]) if ARGS else REPO / ".probe-renders"
 sys.path.insert(0, str(REPO))
 
@@ -267,6 +282,34 @@ def render_overlay(out: Path) -> int:
     print(f"done → {out}")
     return smoke.returncode
 
+
+def render_installer(out: Path) -> int:
+    """Compile the launcher in a scratch folder and let it draw its setup
+    window's screens; 0 if every picture was written."""
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="whisper-face-installer-probe.") as scratch:
+        app = Path(scratch) / "Whisper Face.app"
+        built = subprocess.run(
+            [sys.executable, str(REPO / "scripts" / "macos_launcher_app.py"),
+             "build", "--app", str(app)], capture_output=True, text=True)
+        if built.returncode:
+            print(built.stderr.strip() or "the launcher did not build")
+            return built.returncode
+        drawn = subprocess.run(
+            [str(app / "Contents" / "MacOS" / "Whisper Face"),
+             "--render-setup-window", str(out.resolve())],
+            capture_output=True, text=True, timeout=120)
+        if drawn.returncode:
+            print(drawn.stderr.strip() or "the setup window did not draw")
+            return drawn.returncode
+    print(f"done → {out}")
+    return 0
+
+
+if INSTALLER:
+    OUT.mkdir(parents=True, exist_ok=True)
+    raise SystemExit(render_installer(OUT))
 
 if OVERLAY:
     from AppKit import NSApplication as _Application
