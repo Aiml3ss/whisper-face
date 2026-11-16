@@ -211,9 +211,13 @@ Qwen3.5-4B, and has no Parakeet.
 - **Installers** for Mac and Windows that provision dependencies, pinned
   models, the native helper, login services, and health checks, and verify
   their own work. Reruns are idempotent and never overwrite personal files.
-  A Mac install needs an administrator account (Homebrew), the Command Line
-  Tools with Swift 6, and macOS 14 or newer. The Windows installer has not
-  been run on real Windows hardware.
+  A Mac install from a folder or clone needs an administrator account
+  (Homebrew), the Command Line Tools with Swift 6, and macOS 14 or newer.
+  From the next release, the Mac disk image is an app to drag into
+  Applications that sets itself up in a window, with no Homebrew; it still
+  asks Apple to install the Command Line Tools. That path has been checked
+  only by its tests and a dry run, never on a clean Mac. The Windows
+  installer has not been run on real Windows hardware.
 - **Native Mac window** with a sidebar of five pages — Home, then
   Personalize, Controls, Privacy, and Advanced — covering status,
   personalization, privacy, models, and diagnostics. It has no undo or
@@ -232,7 +236,8 @@ Qwen3.5-4B, and has no Parakeet.
   tracked branch, checks out its tip, reruns the installer, and rolls back to
   the last revision that installed cleanly on failure; no background polling,
   no silent updates. It does not check release tags or signatures, so it
-  installs unreleased commits.
+  installs unreleased commits. A copy the drag-install app set up is
+  refused: its updates come as a new download.
 
 ### Platform notes
 

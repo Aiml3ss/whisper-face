@@ -8,7 +8,16 @@ versions.
 
 ## Check for Updates… (Mac menu)
 
-When you choose it, `self_update.py`:
+A copy set up by the Whisper Face app from the disk image follows published
+releases, not git. For it, **Check for Updates…** answers "Updates come as a
+new download." and runs no `git` command; `self_update.py` refuses both the
+app's own checkout (`~/Library/Application Support/Whisper Face/checkout`) and
+any checkout its receipt binds to the app. Rerunning `Install.command` there
+stays in app mode and never builds a second launcher. Updating by dragging a
+newer app over the old one is not built yet, so no second drag-install
+release ships before it is.
+
+For a folder or clone install, when you choose it, `self_update.py`:
 
 1. refuses if the checkout has local changes or commits its upstream lacks
    (a disk-image install built from the November 2026 fixes onward passes

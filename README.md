@@ -444,6 +444,30 @@ must be re-audited if it moves.
 
 ## Install
 
+### Mac: the app download (from the next release)
+
+Releases built from this revision on carry a disk image that opens to
+**Whisper Face** and a shortcut to **Applications**. Drag the app onto
+Applications and open it. With nothing installed, it shows a setup window:
+it asks Apple to install its command line tools if this Mac lacks them,
+checks for 5 GB of free space, says what it will download, and then sets
+itself up in `~/Library/Application Support/Whisper Face/checkout`, ticking
+off each step. If a step fails it says why in plain words and offers
+**Try Again** and **Show Log**. When it finishes, Whisper Face's own
+first-run guide asks for the microphone, Accessibility and Input Monitoring.
+Opening the app again later simply starts Whisper Face.
+
+The app carries its release's exact source archive (the same bytes as the
+published `WhisperFace-X-source.zip`), checks it against its checksum, and
+runs that copy's own `setup.sh --app`; nothing needs Homebrew. Its copy
+updates by a new download, not by **Check for Updates…**. To remove it, run
+`"$HOME/Library/Application Support/Whisper Face/checkout/setup.sh" --uninstall`,
+then drag the app to the Trash. Until a Developer ID signed build is
+published, the app is an unsigned preview that macOS blocks the first time
+(see Open Anyway below).
+
+### From a folder or a clone
+
 Clone or download the repository, then use the launcher for your OS:
 
 Copy or extract the complete source folder to a writable local directory first;
@@ -514,11 +538,12 @@ The launcher detects the OS. A Windows Git Bash or WSL invocation of
    Ollama already holds it, setup names that process and stops, and never
    stops anyone else's Ollama.
 6. On Mac, installs and verifies `~/Applications/Whisper Face.app`, a tiny
-   generic arm64 AppKit launcher. A DMG install uses its packaged app only if
-   the app's digest matches the `launcher_bundle_sha256` recorded in
-   `RELEASE-METADATA.json`; a missing, damaged, or unrecognised app is set
-   aside and the launcher is built locally instead, as a source-only install
-   always does. A locally built launcher has a different code signature, so
+   generic arm64 AppKit launcher. A folder from a v0.5.0 or earlier disk
+   image uses the app shipped beside it only if the app's digest matches the
+   `launcher_bundle_sha256` recorded in `RELEASE-METADATA.json`; a missing,
+   damaged, or unrecognised app is set aside and the launcher is built
+   locally instead, as a source-only install always does. (A copy set up by
+   the drag-install app builds no launcher: the app itself is bound instead.) A locally built launcher has a different code signature, so
    macOS may ask for the privacy grants again. The exact checkout/revision and app
    digest live in a separate user-only `0600` receipt, so no machine state
    invalidates the app's signature. The app contains no copied runtime, models,

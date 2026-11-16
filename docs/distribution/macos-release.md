@@ -7,7 +7,10 @@ Authenticode certificate exists, so the Windows artifact is unsigned and says
 so.
 
 The public Mac distribution is an exact-source release, not a second frozen
-copy of the runtime. The source bundle contains one Git archive, minimal shallow
+copy of the runtime. The drag-install app carries the exact published source
+archive of its own release, verified against its checksum before use, and
+installs from it; installers still execute the checkout as the single source
+of truth and never embed runtime source. The source bundle contains one Git archive, minimal shallow
 Git metadata for that exact commit, and the shipped `Install.command`;
 installation continues to execute the current checkout as the single source of
 truth. The metadata retains only the public GitHub origin, allowing the running
@@ -30,11 +33,29 @@ The release produces:
   than uploaded as a release asset, and is retrieved by
   `gh attestation verify`.
 
-The disk image and ZIP contain the same exact source. The DMG additionally
-contains `Whisper Face.app`. A DMG user copies both the source folder and its
-app sibling into one writable local folder before clicking `Install.command`;
-setup then installs that exact app without modifying its signed bundle. The ZIP
-expands to a writable source folder and setup builds an unsigned local launcher.
+The disk image holds exactly two entries: `Whisper Face.app` and an
+`Applications` link to `/Applications`, on a volume named `Whisper Face`.
+The app carries the ZIP, byte for byte, as
+`Contents/Resources/WhisperFace-source.zip`, with its SHA-256, the real
+version and the source revision sealed into `Info.plist`, plus the packaging
+machine's `uv` (`Contents/Helpers/uv`, a thin arm64 binary that runs on
+macOS 14) and uv's licences. Opened with nothing installed, the app checks
+the archive's digest, unpacks it with `ditto --noqtn` into
+`~/Library/Application Support/Whisper Face/checkout`, and runs that
+checkout's `setup.sh --app "<the app>"`. The app never executes anything
+from the archive; the login service executes the checkout, which stays the
+single source of truth.
+
+`setup.sh --app` (app mode) uses the app's `uv` instead of Homebrew, needs no
+ffmpeg, never calls `python3`, builds no launcher, and runs
+`macos_launcher_app.py adopt`, which verifies the app where it is, retires a
+launcher a folder install built only once it proves to be ours, refuses a
+checkout of another release, and writes a schema 2 receipt naming the app.
+App mode sticks to that checkout through reruns and the git updater, which
+refuses it. `setup.sh --app <app> --dry-run` checks all of it and prints the
+plan without changing anything. The ZIP still expands to a writable source
+folder whose `Install.command` builds an unsigned local launcher, exactly as
+before.
 
 On a full Mac install, `setup.sh` installs `~/Applications/Whisper Face.app` as
 a generic Mac launcher app bundle. It contains only `Info.plist`, a minimal
