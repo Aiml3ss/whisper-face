@@ -553,6 +553,24 @@ class MacDistributionContractTests(unittest.TestCase):
         self.assertIn("Contents/Resources/WhisperFace.icns", module.BASE_FILES)
         self.assertEqual(module._expected_plist()["CFBundleIconFile"], "WhisperFace")
         self.assertEqual(module._icon_bytes(), data)
+        # scripts/make_app_icon.py packs every size from 16 to 512 points at
+        # 1x and 2x; a missing one makes macOS scale another, blurred.
+        entries, offset = {}, 8
+        while offset < len(data):
+            length = int.from_bytes(data[offset + 4:offset + 8], "big")
+            self.assertGreater(length, 8)
+            entries[data[offset:offset + 4]] = data[offset + 8:offset + length]
+            offset += length
+        self.assertEqual(offset, len(data))
+        self.assertLessEqual({b"ic04", b"ic05"}, set(entries))   # 16, 32 px
+        for kind, pixels in ((b"ic11", 32), (b"ic12", 64), (b"ic07", 128),
+                             (b"ic13", 256), (b"ic08", 256), (b"ic14", 512),
+                             (b"ic09", 512), (b"ic10", 1024)):
+            with self.subTest(kind=kind):
+                png = entries[kind]
+                self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n")
+                self.assertEqual(int.from_bytes(png[16:20], "big"), pixels)
+                self.assertEqual(int.from_bytes(png[20:24], "big"), pixels)
         # Every consumer of the bundle contract has to agree, or a release
         # artifact would be rejected as containing unexpected files.
         self.assertIn(

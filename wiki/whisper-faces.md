@@ -24,6 +24,9 @@ defines each character as an ordered list of primitive draw ops in a
 them in the live HUD and the window, and
 `scripts/generate_face_art.py` replays the same ops into SVG for the
 [[marketing-site]] — the renderers cannot drift by construction.
+The app icon is the same parrot, close up and eyes closed, on the
+window's cream: `scripts/make_app_icon.py` draws it through both paths
+into `icons/WhisperFace.icns`, `icons/core.svg` and the site's favicon.
 `whisper_face_render.py` also owns how a character behaves over time:
 the blink, breath, gaze and mouth schedules (`IdleLifeDriver`) are
 frame-counted, deterministic, AppKit-free at the top half, and shared by
@@ -115,6 +118,6 @@ the HUD and the window's `LiveFaceView` so the two cannot drift apart.
 
 - whisper_face_characters.py; whisper_face_render.py;
   dictate.py WaveView/StatusBar; scripts/generate_face_art.py;
-  icons/faces/
+  scripts/make_app_icon.py; icons/faces/
 - [[2026-07-26-runtime-pipeline-research]],
   [[2026-07-26-ops-governance-research]]
