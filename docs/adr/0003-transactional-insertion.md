@@ -74,3 +74,20 @@ UTF-16 units to code points at the boundary, so offsets past an emoji are
 correct, and each Insertion Receipt now carries the shape of its own readback
 (`readback_shape`) instead of the runtime reading it from shared state. The
 rest of this decision is unchanged.
+
+## Amendment, 15 November 2026: two more proofs
+
+A readback that reads the paste back in another whitespace form (a no-break
+space for a space, or a line break written as CR LF, CR, U+2028, U+2029 or
+U+0085) is verified with its own reason, `commit_verified_whitespace_form`.
+These are the same text by construction; no other difference was loosened.
+
+A field leased by its element that hides its text but reports a selection
+range is checked by position: after the paste its range is polled for up to
+0.12 s, and a bare cursor exactly the paste's UTF-16 length past the
+selection's start, with any character count the element offers agreeing, is
+verified as `commit_verified_position`. That proves the right amount went in at
+the right place, not which characters, so the receipt is shown and kept like
+any verified one but never used for undo, delayed cleanup or learning. Anything
+short of it is the unverifiable receipt it was. Both proofs, and every
+conflict, record content-free categories of what the readback saw.

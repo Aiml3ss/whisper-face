@@ -53,6 +53,36 @@ Outbox instead of the wrong field.
   receipt reason (`commit_verified_edge_whitespace`), because some
   editors trim or add whitespace at the very edges; nothing weaker
   qualifies, and a field reading back as pure whitespace cannot pass.
+  Since November 2026 the same text in another whitespace form (a
+  no-break space for a space; CR LF, CR, U+2028, U+2029 or U+0085 for a
+  line break; with or without edge whitespace on top) verifies too, as
+  `commit_verified_whitespace_form`; a doubled, dropped or tab space
+  does not. Every readback that did not match byte for byte also writes
+  `insertion_readback_difference` (`edge-whitespace`, `whitespace-form`,
+  or for a conflict `field-empty`, `unchanged`, `spacing`,
+  `typographic`, `leading-part`, `extra-at-place`, `inserted-alone`,
+  `elsewhere`, `absent`), and a conflict writes
+  `insertion_readback_stage` (`no-change-seen`, `still-changing`,
+  `settled`): how the field differed from the paste and how it behaved
+  over the window. Categories only. The readback returns on its first
+  match, and nothing later (delayed clean-up, the correction watcher)
+  turns a receipt into a conflict.
+- **Checked by position** (November 2026): a field leased by its
+  element that hides its text but reports a selection range is checked
+  by where its cursor goes. The range before is the release snapshot's;
+  after the paste the range is polled for up to
+  `POSITION_CHECK_TIMEOUT` (0.12 s, returning on the first exact read).
+  A bare cursor exactly the paste's UTF-16 length past the selection's
+  start, with any `AXNumberOfCharacters` the element offers changed by
+  exactly the paste less the selection, is `commit_verified_position`:
+  shown, sounded and kept like any checked paste (no pill, no outbox
+  copy, `insertion_verified: true`, no `outbox/` path), but undo,
+  spoken edits, delayed clean-up and correction or snippet learning
+  stay off, because the characters were never read. Anything else is
+  the unchecked paste it was. The record carries
+  `insertion_position_check` (`moved-exactly`, `moved-other`,
+  `did-not-move`, `unreadable-after`) and `insertion_position_count`
+  (`agrees`, `disagrees`, `not-offered`), never a length.
 - **Join spacing** (#119): a dictation landing directly after existing
   text gets one leading space from `insertion_join_prefix`, decided from
   the character immediately before the insertion point and applied

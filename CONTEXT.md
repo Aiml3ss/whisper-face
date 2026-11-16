@@ -66,7 +66,13 @@ one paste attempt only if the current destination still matches the lease.
 
 **Insertion Receipt** — the terminal evidence for an insertion: verified,
 unverifiable, conflicting, or unresolved, plus whether a paste was attempted.
-Only verified receipts may train Personal Priors.
+A receipt is verified by reading the text back or, for a field that hides its
+text but reports its selection range, **checked by position**: the cursor
+moved by exactly the paste's length with the old selection replaced. A check
+by position proves the right amount went in at the right place, not which
+characters, so it is shown and kept like any checked paste but never undone,
+rewritten later or learned from. Only receipts verified by reading the text
+back may train Personal Priors.
 
 **Voice Outbox** — a bounded, in-memory recovery queue for text that was not
 proven delivered. It distinguishes text that was never pasted from text whose
