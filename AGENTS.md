@@ -83,6 +83,7 @@ arguments:
    uv run tests/test_demonstration_drafts.py
    uv run tests/test_competitor_benchmark.py
    uv run tests/test_public_scorecard.py
+   uv run tests/test_reproducible_corpora.py
    uv run tests/test_quality_gate.py
    uv run quality_gate.py
    uv run tests/test_personal_regression.py
