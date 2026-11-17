@@ -27,9 +27,9 @@ uv run public_scorecard.py benchmark <out>/result.json --output <out>/scorecard.
 and the model under `~/Library/Application Support/FluidAudio/Models`, so an
 installed Mac can pass those. `run` writes `result.json` and `scorecard.md`
 itself; the last line renders the page again from a result, and refuses one
-that breaks a rule below. The run takes about twice the corpus's audio
-length (the app path plays each take in real time, once per configuration)
-plus a minute.
+that breaks a rule below. The run takes about 25 minutes on an M4 Pro: the
+app path plays each take in real time, once per configuration, and the
+corpus is about 8.5 minutes of audio.
 
 `check` needs only a clone. `run` refuses to start when:
 
@@ -63,8 +63,8 @@ do; the reference is always the real spelling.
 mono file, with 0.3 s of silence added either side, as a person leaves while
 holding the key. The voices are the six English voices that ship with macOS,
 one per accent: Samantha (US), Daniel (UK), Karen (Australia), Moira
-(Ireland), Rishi (India) and Tessa (South Africa). Each voice speaks a sixth
-of the takes, which ones fixed by the seed, **20261117**. The same seed fixes
+(Ireland), Rishi (India) and Tessa (South Africa). Each voice speaks 19 or
+20 of the takes, which ones fixed by the seed, **20261117**. The same seed fixes
 the order of every timed pass. `say` writes the same bytes for the same
 voice, text and macOS build, and the result records each take's audio hash,
 so a rerun can show it heard the same audio.
@@ -184,6 +184,8 @@ breaks each on purpose.
 7. It carries every take once, each with a corpus voice.
 8. It is a result for Whisper Face, or for a product the owner has recorded
    in `benchmarks/public_benchmark_rivals.json`.
+9. Its rerun command names no local folder: the runtime, model and output
+   folders appear as `<runtime>`, `<models>` and `<out>`.
 
 ## Adding other apps later
 

@@ -1101,6 +1101,11 @@ def validate_benchmark_result(
         raise PublicationError(
             "the result must record its repeats, the denied network and "
             "the command that produced it")
+    if any(word.startswith(("/", "~")) or ":\\" in word
+           for word in str(run["command"]).split()):
+        raise PublicationError(
+            "the rerun command names a local folder; a published page "
+            "shows placeholders such as <runtime>, <models> and <out>")
 
     recognition = result["recognition"]
     app_path = result["app_path"]
@@ -1159,7 +1164,7 @@ def _shown(value: Any, suffix: str = "") -> str:
     if value is None:
         return "n/a"
     if isinstance(value, float):
-        return f"{value:g}{suffix}"
+        return f"{value:.2f}".rstrip("0").rstrip(".") + suffix
     return f"{value}{suffix}"
 
 

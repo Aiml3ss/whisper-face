@@ -301,6 +301,25 @@ class ResultRuleTests(unittest.TestCase):
             "terms"]["recall_pct"] = 99.0
         self.refused(result, "does not follow")
 
+    def test_the_rerun_command_names_no_local_folder(self):
+        result = copy.deepcopy(self.result)
+        result["run"]["command"] = (
+            "uv run benchmark_public.py run --runtime /Users/someone/rt "
+            "--models <models> --out <out>")
+        self.refused(result, "local folder")
+        args = bench.argparse.Namespace(
+            repeats=5, configurations=["defaults"], pace="real-time")
+        command = bench.rerun_command(args)
+        self.assertEqual(
+            command, "uv run benchmark_public.py run --runtime <runtime> "
+            "--models <models> --out <out> --repeats 5 "
+            "--configurations defaults")
+        self.refused_not(dict(self.result, run=dict(
+            self.result["run"], command=command)))
+
+    def refused_not(self, result):
+        public_scorecard.validate_benchmark_result(result)
+
     def test_every_take_appears_once_with_a_corpus_voice(self):
         result = copy.deepcopy(self.result)
         result["takes"].pop()

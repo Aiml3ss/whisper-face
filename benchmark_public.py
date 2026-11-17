@@ -49,7 +49,6 @@ import os
 import platform
 import random
 import re
-import shlex
 import statistics
 import subprocess
 import sys
@@ -858,6 +857,21 @@ def build_result(corpus: Mapping[str, Any], *, voices: Mapping[str, str],
     }
 
 
+def rerun_command(args: argparse.Namespace) -> str:
+    """The command that reproduces this run, with the machine's own paths
+    left as placeholders: a published page names no local folder."""
+    words = ["uv", "run", "benchmark_public.py", "run",
+             "--runtime", "<runtime>", "--models", "<models>",
+             "--out", "<out>"]
+    if args.repeats != DEFAULT_REPEATS:
+        words += ["--repeats", str(args.repeats)]
+    if list(args.configurations) != list(CONFIGURATIONS):
+        words += ["--configurations", *args.configurations]
+    if args.pace != "real-time":
+        words += ["--pace", args.pace]
+    return " ".join(words)
+
+
 def _inside(path: Path, root: Path) -> bool:
     try:
         path.resolve().relative_to(root.resolve())
@@ -924,8 +938,7 @@ def run(args: argparse.Namespace) -> int:
         runtime=runtime_result, app=app, product=product, model=model,
         environment=environment, repeats=args.repeats,
         realtime=args.pace == "real-time",
-        command=shlex.join(["uv", "run", "benchmark_public.py",
-                            *sys.argv[1:]]),
+        command=rerun_command(args),
         started_utc=started)
 
     import public_scorecard
