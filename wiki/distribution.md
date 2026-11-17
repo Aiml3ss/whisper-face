@@ -46,8 +46,8 @@ checkout.
   revision, re-init shallow metadata so `/source` can prove it,
   optionally sign + notarize + staple (validating the Apple team
   against the packaged revision's own
-  `config/macos-signing-policy.json` — currently null, so signing is
-  disabled until the owner records a team id), deterministic tree
+  `config/macos-signing-policy.json`, which pins team `Z6Q832529P`:
+  ready, not yet published), deterministic tree
   stamping because DMGs are not byte-reproducible, then ZIP + DMG +
   manifest + SHA256SUMS.
 - **Release workflow**: the macOS release CI job runs the full gate
@@ -83,9 +83,9 @@ checkout.
 > what drives the honest Gatekeeper copy on the install section: "This
 > build is not notarized yet", with a pointer to `SHA256SUMS` and "A
 > signed release is on the way." This is consistent with the signing
-> policy above: `config/macos-signing-policy.json` still records no team
-> id, so packaging cannot sign, and the site says so rather than hiding
-> it.
+> policy above: the team id is now recorded and signing is ready, but no
+> signed release has been published, and the site says so rather than
+> hiding it.
 
 ## Related Concepts
 

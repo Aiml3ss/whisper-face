@@ -25,6 +25,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 BUNDLE_ID = "com.berg.whisper-face.launcher"
@@ -61,6 +62,21 @@ DEFAULT_RECEIPT = Path("Library/Application Support/Whisper Face/launcher-instal
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_POLICY = REPO / "config/macos-signing-policy.json"
 DEFAULT_ICON = REPO / f"icons/{ICON_NAME}.icns"
+# A Developer ID release signs every program in the drag-install app with the
+# hardened runtime and a secure timestamp, which notarization requires, and
+# gives each exactly these entitlements. The launcher's are the file
+# package_macos.sh signs it with: the microphone, because the launcher is the
+# launchd job and so TCC's responsible process for the Python runtime it
+# starts, and a hardened responsible process without it is denied the
+# microphone without a prompt. uv gets none: it is a static program that loads
+# only system libraries and starts Python as a separate process.
+LAUNCHER_ENTITLEMENTS = REPO / "config/macos-launcher-entitlements.plist"
+UV_IDENTIFIER = "com.berg.whisper-face.uv"
+# The first four bytes of a Mach-O program, thin or universal, either byte order.
+MACHO_MAGICS = (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf",
+                b"\xfe\xed\xfa\xce", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca")
+# Containers Apple's notary service opens and scans for programs.
+NESTED_ARCHIVE_MAGICS = (b"PK\x03\x04", b"xar!", b"\x1f\x8b")
 SETUP_FACE = REPO / "icons/faces/color/parrot-idle.svg"
 TEAM_IDENTIFIER = re.compile(r"^[A-Z0-9]{10}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -1225,15 +1241,77 @@ def _pinned_team(policy: Path = DEFAULT_POLICY) -> str:
     if not isinstance(team, str) or not TEAM_IDENTIFIER.fullmatch(team): raise LauncherError("pinned Developer ID team is not configured")
     return team
 
-def _verify_pinned_signature(app: Path, policy: Path = DEFAULT_POLICY) -> None:
-    team = _pinned_team(policy)
-    requirement = (
+def _developer_id_requirement(team: str, identifier: str) -> str:
+    return (
         f'anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists '
         f'and certificate leaf[field.1.2.840.113635.100.6.1.13] exists '
-        f'and certificate leaf[subject.OU] = "{team}" and identifier "{BUNDLE_ID}"'
+        f'and certificate leaf[subject.OU] = "{team}" and identifier "{identifier}"'
     )
-    result = subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", f"-R={requirement}", str(app)], text=True, capture_output=True)
+
+def _verify_pinned_signature(app: Path, policy: Path = DEFAULT_POLICY) -> None:
+    team = _pinned_team(policy)
+    result = subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", f"-R={_developer_id_requirement(team, BUNDLE_ID)}", str(app)], text=True, capture_output=True)
     if result.returncode: raise LauncherError("launcher does not satisfy the pinned Developer ID requirement")
+
+def _signature_facts(path: Path) -> tuple[dict[str, str], set[str], dict[str, object]]:
+    """What codesign reports about one signature: its fields (the leaf
+    Authority first), its CodeDirectory flags, and its entitlements."""
+    shown = subprocess.run(["/usr/bin/codesign", "--display", "--verbose=4", str(path)], text=True, capture_output=True)
+    if shown.returncode: raise LauncherError(f"{path.name} is not signed")
+    fields: dict[str, str] = {}; flags: set[str] = set()
+    for line in shown.stderr.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key in ("Authority", "Identifier", "TeamIdentifier", "Timestamp"): fields.setdefault(key, value.strip())
+        found = re.search(r"\bflags=0x[0-9a-f]+\(([^)]*)\)", line) if line.startswith("CodeDirectory ") else None
+        if found: flags = set(found.group(1).split(","))
+    shown = subprocess.run(["/usr/bin/codesign", "--display", "--entitlements", "-", "--xml", str(path)], capture_output=True)
+    if shown.returncode: raise LauncherError(f"{path.name}'s entitlements are unreadable")
+    try: entitlements = plistlib.loads(shown.stdout) if shown.stdout.strip() else {}
+    except Exception as exc: raise LauncherError(f"{path.name}'s entitlements are unreadable") from exc
+    return fields, flags, entitlements
+
+def _verify_release_program(path: Path, *, team: str, identifier: str, entitlements: dict[str, object]) -> None:
+    """One program in a Developer ID release: the pinned team's Developer ID,
+    the hardened runtime, a secure timestamp, and exactly these entitlements.
+    Notarization refuses a program without the first three."""
+    name = path.name
+    fields, flags, granted = _signature_facts(path)
+    if not fields.get("Authority", "").startswith("Developer ID Application: ") or fields.get("TeamIdentifier") != team: raise LauncherError(f"{name} is not signed with the pinned Developer ID")
+    if fields.get("Identifier") != identifier: raise LauncherError(f"{name} is signed as {fields.get('Identifier')!r}, not {identifier!r}")
+    if "runtime" not in flags: raise LauncherError(f"{name} is not signed with the hardened runtime")
+    if not fields.get("Timestamp"): raise LauncherError(f"{name} carries no secure timestamp")
+    if granted != entitlements: raise LauncherError(f"{name} carries entitlements {sorted(granted)}, not {sorted(entitlements)}")
+    result = subprocess.run(["/usr/bin/codesign", "--verify", "--strict", f"-R={_developer_id_requirement(team, identifier)}", str(path)], text=True, capture_output=True)
+    if result.returncode: raise LauncherError(f"{name} does not satisfy the pinned Developer ID requirement")
+
+def _verify_release_programs(app: Path, policy: Path = DEFAULT_POLICY) -> None:
+    """Every Mach-O in a Developer ID drag-install app is the launcher or uv,
+    and each is signed the way notarization and the microphone need."""
+    team = _pinned_team(policy)
+    try: launcher_entitlements = plistlib.loads(LAUNCHER_ENTITLEMENTS.read_bytes())
+    except Exception as exc: raise LauncherError("launcher entitlements file is missing or invalid") from exc
+    expected = {f"Contents/MacOS/{EXECUTABLE}": (app, BUNDLE_ID, launcher_entitlements), UV_HELPER: (app / UV_HELPER, UV_IDENTIFIER, {})}
+    for relative in sorted(_entries(app)):
+        path = app / relative
+        if path.is_symlink() or relative in expected: continue
+        with path.open("rb") as handle:
+            if handle.read(4) in MACHO_MAGICS: raise LauncherError(f"drag-install app carries an unexpected program: {relative}")
+    for _relative, (path, identifier, entitlements) in sorted(expected.items()):
+        _verify_release_program(path, team=team, identifier=identifier, entitlements=entitlements)
+
+def _verify_archive_holds_no_programs(archive: Path) -> None:
+    """The source archive inside the app holds no program and no nested
+    archive. Apple's notary service opens archives it finds and refuses any
+    program in them that lacks a Developer ID signature; signing one would
+    change the published source, so none may be there."""
+    try:
+        with zipfile.ZipFile(archive) as source:
+            for member in source.infolist():
+                if member.is_dir(): continue
+                with source.open(member) as handle: head = handle.read(4)
+                if head in MACHO_MAGICS: raise LauncherError(f"source archive carries a program: {member.filename}")
+                if any(head.startswith(magic) for magic in NESTED_ARCHIVE_MAGICS): raise LauncherError(f"source archive carries a nested archive: {member.filename}")
+    except (zipfile.BadZipFile, OSError) as exc: raise LauncherError("drag-install app source archive is unreadable") from exc
 
 def _is_adhoc_signed(app: Path) -> bool:
     result = subprocess.run(["/usr/bin/codesign", "--display", "--verbose=2", str(app)], text=True, capture_output=True)
@@ -1355,12 +1433,14 @@ def verify_drag_app(app: Path, *, policy: Path = DEFAULT_POLICY, require_signed:
     archive = app / SOURCE_ARCHIVE
     if _file_sha256(archive) != plist["WFSourceArchiveSHA256"]: raise LauncherError("drag-install app source archive does not match its recorded digest")
     if source_zip is not None and _file_sha256(source_zip) != plist["WFSourceArchiveSHA256"]: raise LauncherError("drag-install app does not carry the published source archive")
+    _verify_archive_holds_no_programs(archive)
     if _is_adhoc_signed(app):
         if require_signed: raise LauncherError("release launcher must be signed")
         if plist["WFReleaseChannel"] != "preview": raise LauncherError("an unsigned drag-install app must be a preview build")
         _verify_adhoc_signature(app)
     else:
         _verify_pinned_signature(app, policy)
+        _verify_release_programs(app, policy)
     for forbidden in ("checkout-path", "source-revision", "dictate.py", "setup.sh"):
         if any(p.name == forbidden for p in app.rglob("*")): raise LauncherError("launcher must not embed runtime source or machine binding")
     return plist
