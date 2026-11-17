@@ -155,6 +155,7 @@ BASELINE_DEFINITIONS = (
     # How finish_and_process ends a take and times its release path, so
     # every harness that finishes a take runs the real ones.
     "capture_release",
+    "release_tail_is_silent",
     "release_path_metrics",
 )
 BASELINE_ASSIGNMENTS = (
@@ -174,6 +175,8 @@ BASELINE_ASSIGNMENTS = (
     "GLOSSARY_MAX_TERMS",
     # The helper word-evidence switches: the compiler and the assembly read
     # them on every dictation.
+    # The wait before the paste keystroke, read by every paste.
+    "PASTE_SETTLE_SECONDS",
     "PROSODY_FORMATTING",
     "PARAKEET_WORD_CONFIDENCE_ROUTING",
     "PARAKEET_PROTOCOL",
@@ -4852,6 +4855,54 @@ class AudioPoolTests(unittest.TestCase):
         ns["AUDIO_POOL"].warm()
         return ns
 
+    def test_a_finishing_take_does_not_wait_for_its_stream_to_stop(self):
+        streams = []
+        clock = {"now": 100.0}
+
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        ns = self.recorder_namespace(factory, clock)
+        later = []
+        ns["release_stream_later"] = (
+            lambda slot, delivered=True: later.append((slot, delivered)))
+        recorder = ns["Recorder"]()
+        recorder.start(100.0)
+        block = np.full((512, 1), 0.05, dtype=np.float32)
+        recorder._callback(block, 512, None, None)
+
+        audio = recorder.stop(wait_for_stream=False)
+
+        self.assertEqual(len(audio), 512)
+        # Handed off, not stopped here: the slot stays busy until then.
+        self.assertEqual(streams[0].stops, 1)       # the warm-up's stop
+        self.assertEqual(len(later), 1)
+        self.assertIn(later[0][0], ns["AUDIO_POOL"].busy)
+        # The take ended when stop() returned: a block the still-running
+        # stream delivers afterwards is not part of it.
+        recorder._callback(block, 512, None, None)
+        self.assertEqual(len(recorder.frames.array()), 512)
+        ns["AUDIO_POOL"].release(later[0][0])
+        self.assertEqual(streams[0].stops, 2)
+
+    def test_stopping_in_place_still_stops_the_stream_before_returning(self):
+        streams = []
+        clock = {"now": 100.0}
+
+        def factory(**kwargs):
+            stream = FakeStream(**kwargs)
+            streams.append(stream)
+            return stream
+
+        ns = self.recorder_namespace(factory, clock)
+        recorder = ns["Recorder"]()
+        recorder.start(100.0)
+        recorder.stop()
+        self.assertEqual(streams[0].stops, 2)
+        self.assertEqual(ns["AUDIO_POOL"].busy, set())
+
     def test_a_stream_that_delivers_nothing_is_detected_and_replaced(self):
         streams = []
         clock = {"now": 100.0}
@@ -6504,6 +6555,48 @@ class CleanupGuardTests(unittest.TestCase):
             "stable words provisional tail"))
         ns["_caption_add"](future)
         self.assertEqual(caption["text"], "stable words")
+
+    def test_a_decode_from_the_start_of_the_take_replaces_the_caption(self):
+        caption = {"text": "Ship the"}
+        ns = load_definitions(
+            "_caption_add",
+            extra={
+                "Recognition": Recognition,
+                "CAPTION": caption,
+                "compile_voice_evidence": lambda result, *_args, **_kw: (
+                    None, SimpleNamespace(stable_prefix=result.text)),
+                "is_hallucination": lambda *_args: False,
+            },
+        )
+        whole = SimpleNamespace(result=lambda: Recognition("Ship the notes"))
+        ns["_caption_add"](whole, replace=True)
+        self.assertEqual(caption["text"], "Ship the notes")
+        later = SimpleNamespace(result=lambda: Recognition("today"))
+        ns["_caption_add"](later)
+        self.assertEqual(caption["text"], "Ship the notes today")
+
+    def test_only_the_current_whole_take_speculation_sets_the_caption(self):
+        shown = []
+        ns = load_definitions(
+            "CapturedAudio", "Recorder",
+            assignments={"CAPTURE_BLOCK_SECONDS", "SAMPLE_RATE"},
+            extra={"np": np, "ContextPack": SimpleNamespace,
+                   "_caption_add": lambda done, *_args, **kwargs:
+                       shown.append((done, kwargs))})
+        recorder = ns["Recorder"]()
+        current, stale = object(), object()
+        recorder.recording = True
+        recorder.speculative_future = current
+        recorder._caption_whole_take(stale)
+        recorder.speculative_invalid = True
+        recorder._caption_whole_take(current)
+        recorder.speculative_invalid = False
+        recorder.recording = False
+        recorder._caption_whole_take(current)
+        self.assertEqual(shown, [])
+        recorder.recording = True
+        recorder._caption_whole_take(current)
+        self.assertEqual(shown, [(current, {"replace": True})])
 
     def test_live_caption_follows_the_silent_audio_rule_of_final_text(self):
         def caption_after(recognition):
@@ -11252,6 +11345,69 @@ class ReleasePlanTests(unittest.TestCase):
             skipped_peak=ns["peak_rms"](audio[~covered]),
             gate=ns["GATE_PEAK_RMS"], reused=reused)
 
+    def whole_take(self, segments, whole_take_seconds, block=1024):
+        """The rolling plan's chunk ranges over synthetic audio, with the
+        whole-take bound set as the hotkey worker sets it."""
+        class Pending:
+            def cancel(self):
+                return False
+
+            def done(self):
+                return False
+
+            def add_done_callback(self, _callback):
+                pass
+
+        ns = load_definitions(
+            "CapturedAudio", "BoundedRecognitionFuture", "Recorder",
+            "peak_rms",
+            assignments={
+                "SAMPLE_RATE", "CAPTURE_BLOCK_SECONDS", "SILENCE_RMS",
+                "GATE_PEAK_RMS", "CHUNK_MIN_SECONDS", "CHUNK_CUT_SILENCE",
+                "SPECULATIVE_MIN_SECONDS", "SPECULATIVE_SILENCE",
+                "NO_AUDIO_SECONDS",
+            },
+            extra={
+                "dataclass": dataclass, "np": np, "time": time,
+                "ContextPack": SimpleNamespace, "LEVELS": [],
+                "should_start_speculation": should_start_speculation,
+                "can_reuse_speculation": can_reuse_speculation,
+                "CHUNK_PREP_POOL": SimpleNamespace(
+                    submit=lambda *_args, **_kwargs: Pending()),
+                "_speculative_frames": object(),
+                "_transcribe_frames": object(),
+                "_caption_add": lambda *_args, **_kwargs: None,
+            },
+        )
+        ns["calibrated_vad_threshold"] = lambda: ns["SILENCE_RMS"]
+        recorder = ns["Recorder"]()
+        recorder.recording = True
+        recorder.whole_take_samples = int(whole_take_seconds * 16_000)
+        rng = np.random.default_rng(0)
+        for seconds, rms in segments:
+            for _ in range(int(seconds * 16_000 / block)):
+                noise = rng.standard_normal((block, 1)).astype(np.float32)
+                recorder._callback(
+                    noise * (rms / float(np.sqrt(np.mean(noise ** 2)))),
+                    block, None, None)
+        return [(chunk.start_sample, chunk.end_sample)
+                for chunk in recorder.chunks]
+
+    def test_no_rolling_chunk_is_cut_within_the_whole_take_bound(self):
+        take = [(4.5, 0.05), (0.8, 0.0), (4.5, 0.05), (0.8, 0.0),
+                (2.0, 0.05), (0.3, 0.0)]
+        # The rolling plan cuts at both pauses...
+        self.assertEqual(len(self.whole_take(take, 0)), 2)
+        # ...and none while the take is still one window long.
+        self.assertEqual(self.whole_take(take, 14.96), [])
+
+    def test_past_the_bound_the_first_chunk_starts_at_the_beginning(self):
+        take = [(15.5, 0.05), (0.8, 0.0), (2.0, 0.05), (0.3, 0.0)]
+        chunks = self.whole_take(take, 14.96)
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0][0], 0)
+        self.assertGreater(chunks[0][1], 15.5 * 16_000)
+
     def test_quiet_speech_after_a_pause_is_decoded_at_release(self):
         # Loud opening, a short pause, then speech under the rolling silence
         # threshold (0.008) but well above the speech gate (0.002).
@@ -13419,6 +13575,7 @@ class ParakeetCrosscheckTests(unittest.TestCase):
             hypothesis_agreement,
             parakeet_confidence_from_agreement,
             should_escalate_uncertain,
+            words_settle_route,
         )
         from voice_compiler import project_word_evidence
         calls = calls if calls is not None else []
@@ -13462,6 +13619,7 @@ class ParakeetCrosscheckTests(unittest.TestCase):
                 "parakeet_confidence_from_agreement":
                     parakeet_confidence_from_agreement,
                 "should_escalate_uncertain": should_escalate_uncertain,
+                "words_settle_route": words_settle_route,
                 "project_word_evidence": project_word_evidence,
                 "PARAKEET_WORD_CONFIDENCE_ROUTING": routing,
                 "Recognition": Recognition,
@@ -13492,6 +13650,50 @@ class ParakeetCrosscheckTests(unittest.TestCase):
         self.assertAlmostEqual(recognition.confidence, 0.93)
         self.assertGreaterEqual(recognition.crosscheck_s, 0.0)
         self.assertIsNone(recognition.escalation_s)
+
+    def test_routing_on_sure_words_need_no_crosscheck_before_the_paste(self):
+        fallback = Recognition(
+            text="One two three.", confidence=0.2, engine="turbo")
+        recognition, calls = self.crosschecked(
+            parakeet_result=self.worded("Alpha beta gamma.", 0.9, 0.8, 0.78),
+            tiny_text="one two three", fallback=fallback, routing=True)
+        # Neither Tiny nor a Turbo escalation ran; the text is Parakeet's.
+        self.assertEqual(calls, [])
+        self.assertEqual(recognition.text, "Alpha beta gamma.")
+        self.assertEqual(recognition.confidence, 0.84)
+        self.assertIsNone(recognition.alternative)
+        self.assertIsNone(recognition.crosscheck_s)
+
+    def test_routing_on_one_unsure_word_keeps_the_whole_crosscheck(self):
+        def run(routing):
+            fallback = Recognition(
+                text="One two three.", confidence=0.2, engine="turbo")
+            return self.crosschecked(
+                parakeet_result=self.worded(
+                    "Alpha beta gamma.", 0.99, 0.77, 0.99),
+                tiny_text="one two three", fallback=fallback,
+                routing=routing)
+
+        (recognition, calls), (unrouted, _calls) = run(True), run(False)
+        self.assertEqual([repo for repo, _skip, _lang in calls],
+                         ["tiny-repo", "turbo-repo"])
+        # Exactly what the cross-check gives with routing off.
+        self.assertEqual(
+            (recognition.text, recognition.engine, recognition.verified,
+             recognition.alternative),
+            (unrouted.text, unrouted.engine, unrouted.verified,
+             unrouted.alternative))
+        self.assertEqual(recognition.engine, "turbo")
+        self.assertGreaterEqual(recognition.escalation_s, 0.0)
+        self.assertGreaterEqual(recognition.crosscheck_s, 0.0)
+
+    def test_routing_on_without_native_words_keeps_the_crosscheck(self):
+        recognition, calls = self.crosschecked(
+            parakeet_result=("Ship it today.", 0.05),
+            tiny_text="ship it today", routing=True)
+        self.assertEqual([repo for repo, _skip, _lang in calls],
+                         ["tiny-repo"])
+        self.assertAlmostEqual(recognition.confidence, 0.93)
 
     def test_full_agreement_yields_high_confidence_and_no_alternative(self):
         recognition, _ = self.crosschecked(

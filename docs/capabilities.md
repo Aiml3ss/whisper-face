@@ -51,7 +51,10 @@ Qwen3.5-4B, and has no Parakeet.
   deterministically. Compose, Reply, and Edit refuse outside English.
 - **Rolling recognition.** Long dictation is transcribed while you are still
   talking, cut at natural pauses, so the decode at key release covers only
-  the remainder rather than the whole recording.
+  the remainder rather than the whole recording. On the Parakeet route a
+  take of up to 14.96 s (one model window) is not cut: it is decoded whole,
+  in one pass. If you are still speaking when you let go, what you said is
+  already decoding while the app listens for the end of your last word.
 - **Cascade on Mac.** For English, a warm native Parakeet Unified helper is
   the primary recognizer and Whisper Tiny decodes the same audio only to
   measure agreement; Tiny's text is never delivered on that route. When the

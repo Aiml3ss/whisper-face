@@ -1527,6 +1527,27 @@ def parakeet_confidence_from_agreement(agreement: float) -> float:
         PARAKEET_AGREEMENT_CEILING - PARAKEET_AGREEMENT_FLOOR) * agreement
 
 
+# A word the recognizer scored at least this sure of needs no review flag
+# (voice_compiler's "word-confidence" uncertainty starts below it).
+CONFIDENT_WORD = 0.78
+
+
+def words_settle_route(words, status: str) -> bool:
+    """Whether the helper's own word scores make a cross-check unnecessary.
+
+    Only native word evidence counts, and only when there is some and every
+    word is at or above CONFIDENT_WORD. Anything else (no words, words that
+    did not line up with the text, one unsure word) leaves the decision to
+    the cross-check, as before.
+    """
+    if status != "native" or not words:
+        return False
+    try:
+        return all(float(word.confidence) >= CONFIDENT_WORD for word in words)
+    except (TypeError, ValueError):
+        return False
+
+
 def should_escalate_uncertain(agreement: float, duration_s: float) -> bool:
     """Whether disagreement warrants one independent fallback decode."""
     return (float(agreement) < ESCALATION_MAX_AGREEMENT

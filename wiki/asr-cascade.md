@@ -32,6 +32,20 @@ speech is recognized *while you talk* through rolling chunk cuts, so a
   is ≥4.0 s with ≥0.6 s silence; pending speculation is reused when
   still valid. Each chunk keeps exact start/end samples so word timings
   stay anchored across silence gaps.
+- **Whole takes** (November 2026): on the Parakeet route no chunk is cut
+  until the take is longer than one Parakeet window (14.96 s), so a take
+  up to that length is decoded as one request, exactly the offline
+  decode of the recording with no joins. A speculation then covers the
+  whole take so far and feeds the HUD caption, as chunks did. Longer
+  takes and the Whisper routes cut chunks as before.
+- **Cross-check timing**: the time Tiny's cross-check and a Turbo
+  escalation took is recorded per dictation (`crosscheck_ms`,
+  `escalation_ms` in the release-path trace). With
+  `PARAKEET_WORD_CONFIDENCE_ROUTING` on (off as shipped, until gate C1),
+  a decode whose every word the runtime scores at 0.78 or more
+  (`CONFIDENT_WORD`, the compiler's own review line) skips Tiny and the
+  escalation before the paste; any other decode runs both, after the
+  helper answers.
 - **Routing**: on Mac, the Parakeet helper is tried first. Helper
   failure falls back faithfully to Whisper (Turbo when installed, else
   Tiny with a printed notice). A helper that had started restarts lazily
