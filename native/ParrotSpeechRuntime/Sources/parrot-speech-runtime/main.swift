@@ -46,7 +46,7 @@ var status: [String: Any] = [
 ]
 if wire >= 2 {
     status["protocol"] = wire
-    status["capabilities"] = ["words"]
+    status["capabilities"] = ["words", "vocabulary"]
     status["engine"] = Wire.engine
 }
 
@@ -86,6 +86,9 @@ func serveOne(_ recognizer: Recognizer, wire: Int) -> Int32? {
     if headerRead == 0 { return 0 }
     guard headerRead == 8 else { return 1 }
     let requested = UInt64(littleEndian: rawCount)
+    if wire >= 2, requested & Wire.controlFlag != 0 {
+        return serveControl(recognizer, length: requested & ~Wire.controlFlag)
+    }
     guard requested > 0, requested <= UInt64(Wire.maximumSamples) else {
         Wire.emit(["ok": false, "error": "invalid sample count"])
         return nil
@@ -108,11 +111,49 @@ func serveOne(_ recognizer: Recognizer, wire: Int) -> Int32? {
             WordEvidence.add(
                 transcript, sampleCount: count,
                 vocabulary: recognizer.vocabulary.pieces, to: &response)
+            TermBias.add(transcript, recognizer: recognizer, to: &response)
         }
         Wire.emit(response)
     } catch {
         Wire.emit(["ok": false, "error": "transcription failed: \(error)"])
     }
+    return nil
+}
+
+/// Answer one control frame (protocol 2): nil to go on, or the exit code.
+/// The only operation is `vocabulary`, which sets the terms the term pass
+/// looks for and its budget; no terms, or a budget of zero, switches the
+/// pass off. A frame too long to be one ends the process, as a request cut
+/// off part way does, because what follows it cannot be found.
+func serveControl(_ recognizer: Recognizer, length: UInt64) -> Int32? {
+    guard length > 0, length <= Wire.maximumControlBytes else { return 1 }
+    var payload = [UInt8](repeating: 0, count: Int(length))
+    let read = payload.withUnsafeMutableBytes {
+        Wire.readFully(fileDescriptor: 0, into: $0)
+    }
+    guard read == Int(length) else { return 1 }
+    guard let frame = try? JSONSerialization.jsonObject(with: Data(payload)) as? [String: Any],
+          let op = frame["op"] as? String else {
+        Wire.emit(["ok": false, "error": "invalid control frame"])
+        return nil
+    }
+    guard op == "vocabulary",
+          let version = frame["version"] as? Int,
+          let entries = frame["terms"] as? [[String: Any]],
+          let budget = frame["max_debt"] as? Double else {
+        Wire.emit(["ok": false, "op": op, "error": "invalid control frame"])
+        return nil
+    }
+    let texts = entries.compactMap { $0["text"] as? String }
+    let list = TermList(
+        version: version, terms: texts, maxDebt: budget,
+        vocabulary: recognizer.vocabulary.pieces)
+    recognizer.termList = list
+    Wire.emit([
+        "ok": true, "op": op, "version": version,
+        "terms": list?.terms.count ?? 0,
+        "dropped": list?.dropped ?? entries.count,
+    ])
     return nil
 }
 

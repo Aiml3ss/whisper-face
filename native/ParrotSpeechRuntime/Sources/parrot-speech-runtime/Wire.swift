@@ -17,6 +17,10 @@ enum Wire {
     /// The pinned model's folder name under FluidAudio's default models
     /// folder, which is where Python puts it (`PARAKEET_MODEL_DIR`).
     static let modelFolderName = "parakeet-unified-en-0.6b"
+    /// The top bit of a request header marks a control frame (protocol 2):
+    /// the rest is the length of a JSON object that follows.
+    static let controlFlag: UInt64 = 1 << 63
+    static let maximumControlBytes: UInt64 = 256 * 1024
     static let usage =
         "usage: parrot-speech-runtime [--server|--preload|--verify] [--protocol N] [--models DIR]\n"
 

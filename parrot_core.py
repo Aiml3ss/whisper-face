@@ -9,8 +9,10 @@ mode selection so those behaviours can be tested without launching the app.
 from __future__ import annotations
 
 import difflib
+import json
 import math
 import re
+import struct
 from dataclasses import dataclass, field
 from typing import Iterable
 
@@ -256,6 +258,10 @@ class Recognition:
     acoustic_confidence: float | None = None
     # One of WORD_EVIDENCE_STATUSES: what became of the helper's words.
     word_evidence_status: str = "absent"
+    # What the speech runtime's term pass reported (VocabularyCandidate),
+    # on this recognition's own clock. Evidence only: nothing applies it
+    # while the policy runs in shadow.
+    vocabulary_evidence: tuple = ()
 
 
 # --- word evidence from the Parakeet helper (protocol 2) ---------------------
@@ -294,11 +300,13 @@ class ParakeetResult(tuple):
     def __new__(cls, text: str, processing_s: float, *,
                 words: tuple[HelperWord, ...] | None = None,
                 avg_confidence: float | None = None,
-                word_evidence_status: str = "v1-helper"):
+                word_evidence_status: str = "v1-helper",
+                vocabulary_evidence: tuple = ()):
         result = super().__new__(cls, (text, processing_s))
         result.words = words
         result.avg_confidence = avg_confidence
         result.word_evidence_status = word_evidence_status
+        result.vocabulary_evidence = vocabulary_evidence
         return result
 
     @property
@@ -385,20 +393,152 @@ def helper_protocol(status) -> int:
     return 1
 
 
+def helper_takes_vocabulary(status) -> bool:
+    """Whether a helper's ready line offers the term pass: protocol 2 with
+    the ``vocabulary`` capability. Only such a helper is ever sent a
+    control frame; any other reads one as a bad sample count."""
+    return (helper_protocol(status) == 2
+            and "vocabulary" in status.get("capabilities"))
+
+
+def vocabulary_control_frame(terms, version: int, max_debt: float) -> bytes:
+    """The framed ``vocabulary`` control request: a header with its top bit
+    set and the JSON's length, then the JSON. ``terms`` are
+    ``(text, source)`` pairs."""
+    body = json.dumps({
+        "op": "vocabulary", "version": int(version),
+        "max_debt": float(max_debt),
+        "terms": [{"text": text, "source": source} for text, source in terms],
+    }, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return struct.pack("<Q", (1 << 63) | len(body)) + body
+
+
 def parakeet_result(text: str, processing_s: float, response, *,
-                    protocol: int, duration) -> ParakeetResult:
-    """Read one helper response's evidence for the protocol it speaks."""
+                    protocol: int, duration,
+                    vocabulary_version: int | None = None) -> ParakeetResult:
+    """Read one helper response's evidence for the protocol it speaks.
+
+    ``vocabulary_version`` is the term list last sent to the helper; a
+    ``bias`` report for any other list is ignored.
+    """
     if protocol < 2 or not isinstance(response, dict):
         return ParakeetResult(text, processing_s)
     average = _helper_probability(response.get("avg_confidence"))
+    vocabulary = ()
+    if vocabulary_version is not None and "bias" in response:
+        vocabulary = parse_vocabulary_report(
+            response.get("bias"), vocabulary_version) or ()
     if "words" not in response:
         return ParakeetResult(
             text, processing_s, avg_confidence=average,
-            word_evidence_status="absent")
+            word_evidence_status="absent", vocabulary_evidence=vocabulary)
     words = parse_helper_words(response.get("words"), duration)
     return ParakeetResult(
         text, processing_s, words=words, avg_confidence=average,
-        word_evidence_status="rejected" if words is None else "native")
+        word_evidence_status="rejected" if words is None else "native",
+        vocabulary_evidence=vocabulary if words is not None else ())
+
+
+# --- vocabulary evidence from the speech runtime's term pass ----------------
+#
+# The runtime reports, beside its normal transcript, where one of the user's
+# terms could have been emitted instead ("detours"): the term, the heard
+# words, the summed logit gap paid ("debt"), and each piece it took with its
+# rank among that step's candidates. The report is untrusted input like the
+# words; a malformed one is dropped whole and never costs the transcript.
+
+VOCABULARY_MAX_CANDIDATES = 64
+# The joint network offers this many candidates at a step; a piece ranked
+# outside them cannot have been chosen there.
+VOCABULARY_CANDIDATES_PER_STEP = 64
+
+
+@dataclass(frozen=True)
+class VocabularyStep:
+    frame: int
+    piece: str
+    rank: int
+    gap: float
+
+
+@dataclass(frozen=True)
+class VocabularyCandidate:
+    """One place a listed term could have been heard instead."""
+    term: str
+    written: str
+    heard: str
+    heard_word_starts: tuple[float, ...]
+    end: float
+    debt: float
+    max_step_gap: float
+    heard_min_prob: float
+    steps: tuple[VocabularyStep, ...]
+
+
+def parse_vocabulary_report(raw, version) -> tuple[VocabularyCandidate, ...] | None:
+    """Validate a response's ``bias`` report; ``None`` means no evidence.
+
+    A report for another term list (``version``), a piece ranked outside its
+    step's candidates, a negative or non-finite gap, or any malformed field
+    discards the whole report.
+    """
+    if not isinstance(raw, dict) or raw.get("version") != version \
+            or type(version) is not int:
+        return None
+    detours = raw.get("detours")
+    if not isinstance(detours, list) \
+            or len(detours) > VOCABULARY_MAX_CANDIDATES:
+        return None
+    found = []
+    for entry in detours:
+        if not isinstance(entry, dict):
+            return None
+        texts = [entry.get(key) for key in ("term", "written", "heard")]
+        if not all(isinstance(text, str) and text.strip()
+                   and len(text) <= 256 for text in texts):
+            return None
+        numbers = [_helper_number(entry.get(key)) for key in (
+            "end", "debt", "max_step_gap")]
+        probability = _helper_probability(entry.get("heard_min_prob"))
+        starts = entry.get("heard_word_starts")
+        steps = entry.get("steps")
+        if (any(number is None or number < 0 for number in numbers)
+                or probability is None
+                or not isinstance(starts, list) or not starts
+                or not isinstance(steps, list) or not steps):
+            return None
+        word_starts = tuple(_helper_number(start) for start in starts)
+        if any(start is None or start < 0 for start in word_starts) \
+                or list(word_starts) != sorted(word_starts):
+            return None
+        parsed_steps = []
+        for step in steps:
+            if not isinstance(step, dict):
+                return None
+            frame, rank = step.get("frame"), step.get("rank")
+            piece, gap = step.get("piece"), _helper_number(step.get("gap"))
+            if (type(frame) is not int or frame < 0 or type(rank) is not int
+                    or not 0 <= rank < VOCABULARY_CANDIDATES_PER_STEP
+                    or not isinstance(piece, str) or not piece
+                    or gap is None or gap < 0):
+                return None
+            parsed_steps.append(VocabularyStep(frame, piece, rank, gap))
+        found.append(VocabularyCandidate(
+            texts[0].strip(), texts[1].strip(), texts[2].strip(),
+            word_starts, numbers[0], numbers[1], numbers[2], probability,
+            tuple(parsed_steps)))
+    return tuple(found)
+
+
+def shift_vocabulary_evidence(candidate: VocabularyCandidate,
+                              offset: float) -> VocabularyCandidate:
+    """The same candidate on a clock that starts ``offset`` seconds earlier
+    (a chunk's words joined into the whole dictation's)."""
+    return VocabularyCandidate(
+        candidate.term, candidate.written, candidate.heard,
+        tuple(start + offset for start in candidate.heard_word_starts),
+        candidate.end + offset, candidate.debt, candidate.max_step_gap,
+        candidate.heard_min_prob, candidate.steps)
 
 
 def combine_word_evidence_status(statuses: Iterable[str]) -> str:

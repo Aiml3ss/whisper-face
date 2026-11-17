@@ -14,6 +14,19 @@ part of an Utterance, including confidence and optional word timing evidence.
 **Word Evidence** — a word candidate with its engine, confidence, and audio
 time range.
 
+**Vocabulary Evidence** — what the speech runtime's term pass reports beside
+its transcript: a place where one of the user's own terms could have been
+emitted instead of the words heard, with the heard words, the summed logit
+gap the term's path paid ("debt"), and each piece it took with its rank among
+the model's candidates at that step. It is evidence, never text: the runtime
+changes nothing, and the voice compiler's policy decides, in shadow for now,
+whether the term would be written.
+
+**Dictionary Spelling** — the clean-up's deterministic rule that writes a
+dictionary term in its own form where the words heard equal it ignoring only
+spaces, hyphens and letter case ("git hub" → "GitHub"), recorded as a
+`dictionary_spelling` clean-up edit.
+
 **VoiceIR** — the intermediate representation of an Utterance: Recognition
 Hypotheses, Context Candidates, Prosody Events, Correction Signals, and mode.
 VoiceIR is the input to the Voice Compiler.

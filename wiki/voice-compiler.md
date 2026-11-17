@@ -3,7 +3,7 @@ title: "Voice Compiler"
 type: concept
 language: en
 created: 2026-07-26
-modified: 2026-07-26
+modified: 2026-11-17
 tags: [compiler, voiceir, span-graph, evidence, core]
 aliases: [VoiceIR, SpanGraph, span-graph]
 summary: "The deep module that fuses recognition hypotheses, context, priors, and prosody into compiled text with protected anchors, proof edits, and a stable prefix — without inventing meaning."
@@ -71,6 +71,21 @@ metrics. It never touches I/O, the clipboard, or an application
   App names, window titles, and dictionary terms are anchor-only: they
   bias the prompt and are protected, but never replace a recognized word
   (November 2026).
+- Dictionary spelling (`apply_dictionary_spelling`, run by the shipped
+  clean-up): "push it to git hub" with "GitHub" in the dictionary becomes
+  "push it to GitHub", and "co-pilot" becomes "Copilot". Only spaces,
+  hyphens and case may differ. A case change alone never touches an
+  ordinary word, so "Mark" listed leaves "mark the date" alone.
+- Vocabulary evidence (`apply_vocabulary_evidence`, in shadow): the speech
+  runtime's term pass reports that "Ask Prea ka about it." could have been
+  "Ask Priyanka about it." for a debt of 2. The policy would write it only
+  if the term was typed or proved by a correction, the debt is within 5,
+  the heard words sound like the term (letter sound key, 0.7) or are an
+  alias, the normal pass was unsure of them, they hold no digit, negation,
+  address or lone common word, and it is one of at most two per
+  dictation. Today it only counts (`vocab_candidates`,
+  `vocab_shadow_accepts`) and keeps the text it would give as the last
+  alternative; the transcript is unchanged (November 2026).
 
 ## Related Concepts
 

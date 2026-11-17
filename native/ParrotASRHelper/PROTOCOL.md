@@ -121,13 +121,14 @@ Protocol 2 adds three keys to the ready line and to the `--preload` /
 `--verify` line:
 
 ```json
-{"capabilities":["words"],"engine":"parrot-speech-runtime-1","load_s":0.14,"model":"parakeet-unified","protocol":2,"ready":true}
+{"capabilities":["words","vocabulary"],"engine":"parrot-speech-runtime-1","load_s":0.14,"model":"parakeet-unified","protocol":2,"ready":true}
 ```
 
 Python treats a helper as protocol 2 only when `protocol` is the integer 2
 and `capabilities` is a list containing `"words"`; anything else is
 protocol 1 (`parrot_core.helper_protocol`). `engine` names the program and
-its version; Python records nothing from it.
+its version; Python records nothing from it. `"vocabulary"` means the
+program takes the control frame below (`parrot_core.helper_takes_vocabulary`).
 
 A model folder that is missing or damaged makes the runtime print
 `{"error":"model load failed","ok":false}` and exit 1, in every mode and
@@ -174,6 +175,61 @@ Keys sorted, one line:
 Error responses are as in protocol 1. The runtime launched without
 `--protocol 2` answers exactly as protocol 1 does: the same ready line, and
 responses with exactly the keys `ok`, `processing_s` and `text`.
+
+### Control frames and the term pass (`"vocabulary"`)
+
+A request header whose top bit is set is a control frame: the low 63 bits
+are the length of a UTF-8 JSON object that follows (at most 256 KiB). Only
+a protocol 2 program that lists `"vocabulary"` reads one; a protocol 1
+program, or the runtime launched without `--protocol 2`, reads the header
+as a sample count and answers `invalid sample count`, so the client never
+sends one there. One operation exists:
+
+```json
+{"op":"vocabulary","version":81726354,"max_debt":5.0,
+ "terms":[{"text":"Priyanka","source":"typed"},{"text":"Qwen","source":"corrected"}]}
+```
+
+Reply: `{"ok":true,"op":"vocabulary","version":81726354,"terms":2,"dropped":0}`.
+A malformed frame gets `{"ok":false,"error":"invalid control frame"}` and
+changes nothing; a frame longer than 256 KiB, or cut off, ends the process.
+The runtime keeps at most 200 terms of at most 64 characters with a letter
+in them, splits each (as written, in lower case, and capitalised) into the
+model's vocabulary pieces, and holds them until the next frame. No terms, or
+a `max_debt` of 0, switches the term pass off; `max_debt` is clamped to 20.
+
+With terms set, after each window's normal decode the runtime runs the term
+pass (`TermBias.swift`): at each word the decode began, where a term's first
+piece was among that step's 64 candidates, it replays the same encoder
+output from the decoder state at that word and finds the cheapest way to
+emit a whole term, each step paying the gap between the joint network's top
+logit and the piece or blank taken, a piece outside the 64 candidates being
+impossible, the total ("debt") at most `max_debt`, and the term closed by a
+blank or a word-starting piece. Every response then carries a `bias` object:
+
+```json
+"bias":{"version":81726354,"terms":2,"added_ms":3.1,"forks":4,"joint_calls":41,
+        "decoder_calls":9,"stopped":false,
+        "detours":[{"term":"Priyanka","written":"Priyanka","heard":"Prea ka",
+                    "heard_word_starts":[1.2,1.52],"end":1.76,"debt":2.41,
+                    "max_step_gap":1.38,"heard_min_prob":0.552,
+                    "steps":[{"frame":15,"piece":"▁Pri","rank":2,"gap":1.38},
+                             {"frame":19,"piece":"yanka","rank":0,"gap":0}]}]}
+```
+
+- `text` and `words` are the normal decode's, byte for byte: the pass reads
+  the decode and reports; it never changes a transcript.
+- `heard_word_starts` are the `start`s of the words a detour would replace;
+  `end` is its last piece's time; `steps[].rank` is the piece's place among
+  that step's candidates (always below 64).
+- `stopped` is true when the pass stopped at its call limit (1,500 joint
+  and decoder calls a request); `added_ms` is its own time.
+- At most 64 detours, lowest debt first, one per term and place.
+
+Python reads the report with `parrot_core.parse_vocabulary_report` (any
+malformed field, a rank of 64 or more, or another list's `version` drops it
+whole) and decides with `voice_compiler.apply_vocabulary_evidence`, which in
+this version applies nothing.
 
 ### Compatibility
 

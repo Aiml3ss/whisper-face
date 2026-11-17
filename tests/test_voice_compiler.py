@@ -1255,5 +1255,122 @@ class DictionarySpellingTests(unittest.TestCase):
                          ("github", []))
 
 
+class VocabularyPolicyTests(unittest.TestCase):
+    """The term pass's decision policy, in shadow."""
+
+    def setUp(self):
+        from voice_compiler import VocabularyTerm
+        self.terms = (VocabularyTerm("Priyanka"),
+                      VocabularyTerm("Kubernetes"),
+                      VocabularyTerm("Qwen", "corrected", ("Gwen",)),
+                      VocabularyTerm("Screenname", "screen"))
+
+    @staticmethod
+    def words(text, step=0.4):
+        return [HelperWord(word, index * step, index * step + 0.3, 0.6)
+                for index, word in enumerate(text.split())]
+
+    @staticmethod
+    def candidate(term, heard_indices, *, heard, debt=2.0, prob=0.6,
+                  step=0.4):
+        from parrot_core import VocabularyCandidate, VocabularyStep
+        return VocabularyCandidate(
+            term, term, heard, tuple(index * step for index in heard_indices),
+            heard_indices[-1] * step + 0.3, debt, 1.0, prob,
+            (VocabularyStep(1, "x", 0, 0.5),))
+
+    def decide(self, text, candidates, **options):
+        from voice_compiler import apply_vocabulary_evidence
+        return apply_vocabulary_evidence(
+            text, self.words(text), candidates, self.terms, **options)
+
+    def test_a_sound_alike_unsure_cheap_detour_would_be_written(self):
+        from voice_compiler import vocabulary_alternative
+        text = "Ask Prea ka about it."
+        decisions = self.decide(text, [self.candidate(
+            "Priyanka", [1, 2], heard="Prea ka")])
+        self.assertEqual([(d.accepted, d.reason) for d in decisions],
+                         [(True, "would-write")])
+        # In shadow nothing is applied: the alternative is computed apart.
+        self.assertEqual(vocabulary_alternative(text, decisions),
+                         "Ask Priyanka about it.")
+
+    def test_punctuation_and_a_possessive_are_kept(self):
+        from voice_compiler import vocabulary_alternative
+        text = "That was Prea ka's."
+        decisions = self.decide(text, [self.candidate(
+            "Priyanka", [2, 3], heard="Prea ka's.")])
+        self.assertEqual(vocabulary_alternative(text, decisions),
+                         "That was Priyanka's.")
+
+    def test_each_guard_refuses_with_its_reason(self):
+        cases = (
+            ("Ask Prea ka now.", self.candidate(
+                "Priyanka", [1, 2], heard="Prea ka", debt=5.5),
+             "over-budget"),
+            ("Ask Prea ka now.", self.candidate(
+                "Priyanka", [1, 2], heard="Prea ka", prob=0.995), "sure"),
+            ("Ask Dexter now.", self.candidate(
+                "Priyanka", [1], heard="Dexter"), "not-sound-alike"),
+            ("Ask the now.", self.candidate(
+                "Priyanka", [1], heard="the"), "common-word"),
+            ("Ask Prea 2 now.", self.candidate(
+                "Priyanka", [1, 2], heard="Prea 2"), "protected"),
+            ("Mail prea@ka.com now.", self.candidate(
+                "Priyanka", [1], heard="prea@ka.com"), "protected"),
+            ("Ask Screen name now.", self.candidate(
+                "Screenname", [1, 2], heard="Screen name"), "not-listed"),
+            ("Ask Kubernetes now.", self.candidate(
+                "Kubernetes", [1], heard="Kubernetes"), "spelling-rule"),
+            ("Ask pre a kay a now.", self.candidate(
+                "Priyanka", [1, 2, 3, 4], heard="pre a kay a"), "too-long"),
+            ("Ask Prea ka now.", self.candidate(
+                "Priyanka", [3, 4], heard="Prea ka"), "not-placed"),
+        )
+        for text, candidate, reason in cases:
+            with self.subTest(reason=reason):
+                decisions = self.decide(text, [candidate])
+                self.assertEqual([(d.accepted, d.reason) for d in decisions],
+                                 [(False, reason)])
+
+    def test_an_alias_from_a_proved_correction_passes_the_sound_check(self):
+        decisions = self.decide("Run Gwen locally.", [self.candidate(
+            "Qwen", [1], heard="Gwen")])
+        self.assertEqual([d.reason for d in decisions], ["would-write"])
+
+    def test_command_mode_and_the_blast_radius(self):
+        text = "Ask Prea ka and Cooper Netties and Prea ka again."
+        candidates = [
+            self.candidate("Priyanka", [1, 2], heard="Prea ka", debt=1.0),
+            self.candidate("Kubernetes", [4, 5], heard="Cooper Netties",
+                           debt=2.0),
+            self.candidate("Priyanka", [7, 8], heard="Prea ka", debt=3.0),
+            self.candidate("Kubernetes", [2, 3], heard="ka and", debt=4.0),
+        ]
+        reasons = sorted(d.reason for d in self.decide(text, candidates))
+        self.assertEqual(reasons.count("would-write"), 2)
+        self.assertIn("limit", reasons)
+        self.assertEqual({d.reason for d in self.decide(
+            text, candidates, mode="command")}, {"mode"})
+
+    def test_the_term_list_is_scoped(self):
+        from voice_compiler import vocabulary_terms
+        terms = vocabulary_terms(
+            ["GitHub", "AI", "Mark", "Qwen3", "Priyanka", "Re-Debrid",
+             "priyanka"], [("Gwen", "Qwen"), ("pre a car", "Priyanka")])
+        self.assertEqual(
+            [(t.text, t.source, t.aliases) for t in terms],
+            [("GitHub", "typed", ()), ("Priyanka", "typed", ("pre a car",)),
+             ("Re-Debrid", "typed", ()), ("Qwen", "corrected", ("Gwen",))])
+
+    def test_thresholds_are_the_probes(self):
+        import voice_compiler
+        self.assertEqual(voice_compiler.VOCABULARY_DEBT_BUDGET, 5.0)
+        self.assertEqual(voice_compiler.VOCABULARY_REPORT_DEBT, 5.0)
+        self.assertEqual(voice_compiler.VOCABULARY_SOUND_ALIKE_MIN, 0.7)
+        self.assertEqual(voice_compiler.VOCABULARY_UNSURE_BELOW, 0.99)
+        self.assertEqual(voice_compiler.VOCABULARY_MAX_PER_DICTATION, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

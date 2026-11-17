@@ -717,6 +717,7 @@ required=(
     native/ParrotSpeechRuntime/Sources/parrot-speech-runtime/Vocabulary.swift
     native/ParrotSpeechRuntime/Sources/parrot-speech-runtime/WindowMerge.swift
     native/ParrotSpeechRuntime/Sources/parrot-speech-runtime/WordEvidence.swift
+    native/ParrotSpeechRuntime/Sources/parrot-speech-runtime/TermBias.swift
     setup.ps1 Install.command Install.cmd
     com.berg.dictate.plist.template com.berg.ollama.plist.template
     snippets.template.json tones.template.json preferences.template.json

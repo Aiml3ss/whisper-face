@@ -1524,5 +1524,98 @@ class HelperProtocolTests(unittest.TestCase):
         self.assertEqual(RecognitionWord("x").source, "")
 
 
+class VocabularyReportTests(unittest.TestCase):
+    """The speech runtime's term-pass report is untrusted input."""
+
+    @staticmethod
+    def detour(**changes):
+        detour = {
+            "term": "Priyanka", "written": "Priyanka", "heard": "Prea ka",
+            "heard_word_starts": [1.2, 1.52], "end": 1.76, "debt": 2.5,
+            "max_step_gap": 1.5, "heard_min_prob": 0.55,
+            "steps": [{"frame": 15, "piece": "\u2581Pri", "rank": 2,
+                       "gap": 1.0},
+                      {"frame": 18, "piece": "yanka", "rank": 0,
+                       "gap": 0.0}]}
+        detour.update(changes)
+        return detour
+
+    def test_a_valid_report_is_read_whole(self):
+        from parrot_core import parse_vocabulary_report
+        found = parse_vocabulary_report(
+            {"version": 3, "detours": [self.detour()]}, 3)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].term, "Priyanka")
+        self.assertEqual(found[0].heard_word_starts, (1.2, 1.52))
+        self.assertEqual([step.rank for step in found[0].steps], [2, 0])
+        self.assertEqual(parse_vocabulary_report(
+            {"version": 3, "detours": []}, 3), ())
+
+    def test_every_piece_must_be_among_its_steps_candidates(self):
+        # A rank outside the joint network's 64 candidates is a piece the
+        # model never offered there: the whole report is refused.
+        from parrot_core import parse_vocabulary_report
+        for step in ({"frame": 15, "piece": "\u2581Pri", "rank": 64,
+                      "gap": 1.0},
+                     {"frame": 15, "piece": "\u2581Pri", "rank": -1,
+                      "gap": 1.0},
+                     {"frame": 15, "piece": "\u2581Pri", "rank": 1,
+                      "gap": -0.5},
+                     {"frame": 15, "piece": "", "rank": 1, "gap": 0.5},
+                     {"frame": 15.0, "piece": "x", "rank": 1, "gap": 0.5}):
+            with self.subTest(step=step):
+                self.assertIsNone(parse_vocabulary_report(
+                    {"version": 1, "detours": [self.detour(steps=[step])]},
+                    1))
+
+    def test_a_malformed_or_stale_report_is_no_evidence(self):
+        from parrot_core import parse_vocabulary_report
+        for raw, version in (
+                ({"version": 2, "detours": [self.detour()]}, 1),
+                ({"version": 1, "detours": [self.detour()]}, None),
+                ({"version": 1, "detours": "x"}, 1),
+                ({"version": 1, "detours": [self.detour(debt=-1)]}, 1),
+                ({"version": 1, "detours": [self.detour(
+                    heard_min_prob=1.5)]}, 1),
+                ({"version": 1, "detours": [self.detour(
+                    heard_word_starts=[2.0, 1.0])]}, 1),
+                ({"version": 1, "detours": [self.detour(term="")]}, 1),
+                ({"version": 1, "detours": [self.detour()] * 65}, 1),
+                ("bias", 1)):
+            with self.subTest(raw=str(raw)[:60]):
+                self.assertIsNone(parse_vocabulary_report(raw, version))
+
+    def test_only_a_helper_offering_vocabulary_is_sent_a_frame(self):
+        from parrot_core import helper_takes_vocabulary
+        self.assertTrue(helper_takes_vocabulary(
+            {"protocol": 2, "capabilities": ["words", "vocabulary"]}))
+        for status in ({"protocol": 2, "capabilities": ["words"]},
+                       {"protocol": 1, "capabilities": ["vocabulary"]},
+                       {"ready": True}, None):
+            with self.subTest(status=status):
+                self.assertFalse(helper_takes_vocabulary(status))
+
+    def test_the_control_frame_is_flagged_and_sized(self):
+        import struct
+        from parrot_core import vocabulary_control_frame
+        frame = vocabulary_control_frame([("Qwen", "typed")], 9, 5.0)
+        header = struct.unpack("<Q", frame[:8])[0]
+        self.assertEqual(header >> 63, 1)
+        self.assertEqual(header & ~(1 << 63), len(frame) - 8)
+        self.assertEqual(json.loads(frame[8:]), {
+            "op": "vocabulary", "version": 9, "max_debt": 5.0,
+            "terms": [{"text": "Qwen", "source": "typed"}]})
+
+    def test_a_report_moves_with_its_chunk(self):
+        from parrot_core import (parse_vocabulary_report,
+                                 shift_vocabulary_evidence)
+        found = parse_vocabulary_report(
+            {"version": 1, "detours": [self.detour()]}, 1)[0]
+        moved = shift_vocabulary_evidence(found, 10.0)
+        self.assertEqual(moved.heard_word_starts, (11.2, 11.52))
+        self.assertEqual(moved.end, 11.76)
+        self.assertEqual(moved.steps, found.steps)
+
+
 if __name__ == "__main__":
     unittest.main()

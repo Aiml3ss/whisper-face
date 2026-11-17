@@ -7,6 +7,7 @@
     uv run scripts/speech_runtime_parity.py --replay
     uv run scripts/speech_runtime_parity.py --corpus DIR [--corpus DIR ...]
     uv run scripts/speech_runtime_parity.py --replay --home SCRATCH_HOME
+    uv run scripts/speech_runtime_parity.py --replay --vocabulary TERMS.json
 
 Both programs decode every clip: the FluidAudio helper
 (``.models/bin/parrot-asr-helper``, the reference) in protocol 1, and the
@@ -30,6 +31,14 @@ Clips:
   they are, in ``manifest.json`` order when there is one) or recordings that
   ``afconvert`` reads (converted to 16 kHz mono and padded with 0.3 s of
   silence each side).
+
+``--vocabulary TERMS.json`` (``{"terms": [...], "max_debt": 5.0}``) adds a
+fourth process: the runtime in protocol 2, sent that term list in a
+control frame. Its answers must equal the plain protocol 2 answers in every
+key but ``processing_s`` and the term pass's ``bias`` report, and with no
+terms or a ``max_debt`` of 0 they must carry no ``bias`` at all: the term
+pass reports and never changes a transcript. It prints how many matched,
+how many reports came back and the pass's own time.
 
 Neither program can reach the network while this runs: each is started under
 ``sandbox-exec`` with every network operation denied. ``--home DIR`` points
@@ -110,6 +119,11 @@ class Program:
         line = bytes(self.buffer[:end])
         del self.buffer[:end + 1]
         return json.loads(line)
+
+    def control(self, frame: bytes) -> dict:
+        self.process.stdin.write(frame)
+        self.process.stdin.flush()
+        return self._line()
 
     def request(self, audio: np.ndarray) -> tuple[dict, float]:
         payload = np.ascontiguousarray(audio, dtype="<f4")
@@ -242,6 +256,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="a folder of .npy clips or recordings")
     parser.add_argument("--out", type=Path,
                         help="write one JSON line per clip here")
+    parser.add_argument("--vocabulary", type=Path,
+                        help="a JSON term list for a fourth, term-pass "
+                             "process (see above)")
     parser.add_argument("--no-sandbox", action="store_true",
                         help="run the programs without sandbox-exec")
     args = parser.parse_args(argv)
@@ -280,6 +297,18 @@ def main(argv: list[str] | None = None) -> int:
                               ["--server", "--protocol", "2", *model_args],
                               home, sandbox),
     }
+    terms = None
+    if args.vocabulary:
+        sys.path.insert(0, str(ROOT))
+        from parrot_core import vocabulary_control_frame
+        terms = json.loads(args.vocabulary.read_text(encoding="utf-8"))
+        programs["candidate-2v"] = launch(
+            "candidate-2v", args.candidate,
+            ["--server", "--protocol", "2", *model_args], home, sandbox)
+        reply = programs["candidate-2v"].control(vocabulary_control_frame(
+            [(term, "typed") for term in terms["terms"]], 1,
+            float(terms["max_debt"])))
+        print(f"candidate-2v term list: {reply}")
     # The candidate must be built from this checkout (setup.sh builds it
     # from here): this is the digest the README records beside the result.
     print(f"sources: sha256:{source_digest()}")
@@ -294,13 +323,20 @@ def main(argv: list[str] | None = None) -> int:
     records = []
     for index, (clip_id, audio) in enumerate(clips):
         record = {"id": clip_id, "seconds": round(len(audio) / SAMPLE_RATE, 3)}
-        for name in order[index % 3:] + order[:index % 3]:
+        turn = index % len(order)
+        for name in order[turn:] + order[:turn]:
             reply, seconds = programs[name].request(audio)
             record[name] = {
                 "ok": reply.get("ok"), "text": reply.get("text"),
                 "keys": sorted(reply), "processing_s": reply.get("processing_s"),
                 "round_trip_s": round(seconds, 6),
                 "words": len(reply.get("words") or []),
+                # Everything but the timing and the term pass's report.
+                "answer": json.dumps(
+                    {key: value for key, value in reply.items()
+                     if key not in ("processing_s", "bias")},
+                    sort_keys=True),
+                "bias": reply.get("bias"),
             }
         records.append(record)
     memory = {name: program.close() for name, program in programs.items()}
@@ -359,8 +395,28 @@ def main(argv: list[str] | None = None) -> int:
               f"{rss / 2**20 if rss else math.nan:7.1f} / "
               f"{footprint / 2**20 if footprint else math.nan:7.1f}")
 
+    terms_agree = True
+    if terms is not None:
+        agree = sum(r["candidate-2v"]["answer"] == r["candidate-2"]["answer"]
+                    for r in records)
+        reports = [r["candidate-2v"]["bias"] for r in records
+                   if r["candidate-2v"]["bias"] is not None]
+        silent = not terms["terms"] or float(terms["max_debt"]) <= 0
+        added = [float(report.get("added_ms", 0))
+                 for report in reports]
+        print(f"candidate protocol 2 with terms, every key but processing_s "
+              f"and bias identical to without: {agree} of {len(records)}")
+        print(f"term-pass reports: {len(reports)} of {len(records)} "
+              f"(expected {0 if silent else len(records)}); detours: "
+              f"{sum(len(report.get('detours') or []) for report in reports)}"
+              f"; added ms p50 {percentile(added, .5):.2f} "
+              f"p95 {percentile(added, .95):.2f}")
+        terms_agree = (agree == len(records) and len(reports) == (
+            0 if silent else len(records)))
+
     failed = (sum(map(same, short)) != len(short)
-              or keys_ok != len(records) or protocols_agree != len(records))
+              or keys_ok != len(records) or protocols_agree != len(records)
+              or not terms_agree)
     return 1 if failed else 0
 
 

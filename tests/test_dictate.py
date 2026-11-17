@@ -96,6 +96,8 @@ from compatibility_fingerprint import (  # noqa: E402
 )
 from measurement_mode import MeasurementMode  # noqa: E402
 import insertion_integrity  # noqa: E402
+import parrot_core  # noqa: E402
+import voice_compiler  # noqa: E402
 from insertion_integrity import (  # noqa: E402
     DestinationObservation,
     InsertionCoordinator,
@@ -138,6 +140,11 @@ TREE = ast.parse((ROOT / "dictate.py").read_text(encoding="utf-8"))
 # if production changes them, but no test has to name them to get a language
 # code or an autorelease pool.
 BASELINE_DEFINITIONS = (
+    # The term pass's list, its version, and the shadow policy's recorder,
+    # which refresh_glossary, ParakeetClient and the pipeline call.
+    "vocabulary_version",
+    "vocabulary_bias_state",
+    "record_vocabulary_shadow",
     "normalize_language",
     "join_recognized_parts",
     "current_language",
@@ -247,6 +254,14 @@ def load_definitions(*names, assignments=(), extra=None):
         # The clean-up's dictionary spelling rule, and the edit it records.
         "apply_dictionary_spelling": apply_dictionary_spelling,
         "CleanupEdit": CleanupEdit,
+        # The term pass: its list, its control frame and the shadow policy.
+        **{name: getattr(voice_compiler, name) for name in (
+            "VOCABULARY_REPORT_DEBT", "apply_vocabulary_evidence",
+            "vocabulary_alternative", "vocabulary_terms")},
+        **{name: getattr(parrot_core, name) for name in (
+            "helper_takes_vocabulary", "shift_vocabulary_evidence",
+            "vocabulary_control_frame")},
+        "hashlib": hashlib,
         # The pure readback comparisons dictate.py imports from
         # insertion_integrity, so a selected readback runs the real ones.
         **{name: getattr(insertion_integrity, name) for name in (
@@ -2500,6 +2515,102 @@ class ParakeetClientTests(unittest.TestCase):
         self.assertEqual(struct.unpack("<Q", payload[:8])[0], 2)
         self.assertEqual(len(payload), 8 + 2 * 4)
         self.assertAlmostEqual(requests[1][1], 3.0, places=4)
+
+    def test_the_term_list_reaches_only_a_runtime_that_offers_it(self):
+        from voice_compiler import VocabularyTerm
+
+        class FakeProcess:
+            stdin = stdout = None
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        bias = {"version": 7, "detours": [{
+            "term": "Priyanka", "written": "Priyanka", "heard": "Prea ka",
+            "heard_word_starts": [0.0, 0.32], "end": 0.56, "debt": 1.5,
+            "max_step_gap": 1.0, "heard_min_prob": 0.6, "steps": [
+                {"frame": 1, "piece": "\u2581Pri", "rank": 1, "gap": 1.0}]}]}
+        words = [{"word": "Prea", "start": 0.0, "end": 0.3,
+                  "confidence": 0.6},
+                 {"word": "ka", "start": 0.32, "end": 0.5,
+                  "confidence": 0.7}]
+
+        def run(capabilities, state, reply_ok=True):
+            requests = []
+
+            def exchange(_process, chunks, *, timeout):
+                payload = b"".join(bytes(chunk) for chunk in chunks)
+                requests.append(payload)
+                if not chunks:
+                    return {"ready": True, "load_s": 0.1, "protocol": 2,
+                            "capabilities": capabilities}
+                header = struct.unpack("<Q", payload[:8])[0]
+                if header >> 63:
+                    frame = json.loads(payload[8:])
+                    return {"ok": reply_ok, "op": "vocabulary",
+                            "version": frame["version"]}
+                return {"ok": True, "text": "Prea ka", "processing_s": 0.02,
+                        "words": words, "bias": bias}
+
+            with tempfile.TemporaryDirectory() as directory:
+                helper = Path(directory) / "parrot-speech-runtime"
+                helper.write_bytes(b"helper")
+                ns = load_definitions("ParakeetClient", extra={
+                    "PARAKEET_HELPER": helper, "PARAKEET_ENABLED": True,
+                    "Path": Path, "subprocess": subprocess,
+                    "threading": threading, "struct": struct, "time": time,
+                    "json": json, "np": np, "PARAKEET_STARTUP_TIMEOUT": 10.0,
+                    "PARAKEET_MIN_REQUEST_TIMEOUT": 3.0,
+                    "PARAKEET_MAX_REQUEST_TIMEOUT": 10.0,
+                    "PARAKEET_PROFILE": PARAKEET_PROFILE,
+                    **PARAKEET_CLIENT_NAMES,
+                    "mark_model_warm_path_observed": lambda _provider: True,
+                })
+                client = ns["ParakeetClient"](
+                    helper=helper, exchange=exchange,
+                    process_factory=lambda *_a, **_k: FakeProcess(),
+                    vocabulary=lambda: state)
+                audio = np.zeros(16_000, dtype=np.float32)
+                results = [client.transcribe(audio) for _ in range(2)]
+            frames = [json.loads(request[8:]) for request in requests
+                      if request and struct.unpack(
+                          "<Q", request[:8])[0] >> 63]
+            return results, frames
+
+        terms = (VocabularyTerm("Priyanka"),)
+        # Offered: the list is sent once, before the first request, and the
+        # report for that version rides on the result as evidence.
+        results, frames = run(["words", "vocabulary"], (terms, 7))
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0]["terms"],
+                         [{"text": "Priyanka", "source": "typed"}])
+        self.assertEqual(frames[0]["version"], 7)
+        self.assertEqual(results[0].text, "Prea ka")
+        self.assertEqual(
+            [c.term for c in results[0].vocabulary_evidence], ["Priyanka"])
+        # A report for another list is not evidence.
+        results, frames = run(["words", "vocabulary"], (terms, 8))
+        self.assertEqual(results[0].vocabulary_evidence, ())
+        # Not offered: never a frame, and no evidence.
+        results, frames = run(["words"], (terms, 7))
+        self.assertEqual(frames, [])
+        self.assertEqual(results[0].vocabulary_evidence, ())
+        # No terms: nothing is sent.
+        results, frames = run(["words", "vocabulary"], ((), 3))
+        self.assertEqual(frames, [])
+        # A refusal stops the sending, not the dictation.
+        results, frames = run(["words", "vocabulary"], (terms, 7),
+                              reply_ok=False)
+        self.assertEqual(len(frames), 1)
+        self.assertEqual([result.text for result in results],
+                         ["Prea ka", "Prea ka"])
+        self.assertEqual(results[0].vocabulary_evidence, ())
 
     @unittest.skipIf(os.name == "nt", "select() cannot wait on Windows pipes")
     def test_bounded_helper_exchange_times_out_without_a_response(self):
@@ -12255,7 +12366,8 @@ class CustomVocabularyTests(unittest.TestCase):
                 "load_learned": lambda: {
                     "counts": {"swift": 3}, "fixes": {}, "confusions": {}},
                 "write_auto_section": lambda _promoted: None,
-                "personal_regression_lab": lambda _state: object(),
+                "personal_regression_lab":
+                    lambda _state: PersonalRegressionLab(),
                 "ContextPack": ContextPack,
                 "ContextCandidate": ContextCandidate,
                 "GLOSS": gloss,
@@ -12293,6 +12405,56 @@ class CustomVocabularyTests(unittest.TestCase):
         for candidate in gloss["anchor_pack"].candidates:
             self.assertEqual(candidate.weight, 3.5)
             self.assertEqual(candidate.source, "dictionary")
+        # Terms with a digit stay out of the term pass's first version.
+        self.assertEqual(gloss["vocabulary_terms"], ())
+
+    def test_refresh_glossary_scopes_the_term_pass_list(self):
+        manual = ["GitHub", "AI", "Mark", "Qwen3", "Priyanka", "-banned"]
+        gloss = {"lock": threading.Lock()}
+        ns = load_definitions(
+            "refresh_glossary", "corrected_away_words", "term_occurs",
+            extra={
+                "parse_dictionary": lambda: (
+                    [term for term in manual if not term.startswith("-")],
+                    {"banned"}),
+                "PersonalRegressionLab": PersonalRegressionLab,
+                "load_learned": lambda: {
+                    "counts": {}, "fixes": {}, "confusions": {}},
+                "write_auto_section": lambda _promoted: None,
+                "personal_regression_lab":
+                    lambda _state: PersonalRegressionLab(),
+                "ContextPack": ContextPack,
+                "ContextCandidate": ContextCandidate,
+                "GLOSS": gloss,
+                "PROMOTE_MIN_COUNT": 2,
+                "PERSONAL_GLOBAL_MIN_COUNT": 3,
+                "GLOSSARY_MAX_TERMS": 60,
+                "GLOSSARY_MAX_CHARS": 700,
+                "ANCHOR_MAX_TERMS": 256,
+                "ACOUSTIC_KEYWORD_MEMORY_LOCK": threading.Lock(),
+                "_load_acoustic_keyword_memory":
+                    lambda: (AcousticKeywordMemory(), "missing"),
+                "active_acoustic_keywords":
+                    lambda _path, _memory: ((), "missing"),
+                "measured_keyword_hints": tuple,
+                "ACOUSTIC_KEYWORD_ACTIVATION_FILE":
+                    Path("acoustic_keyword_activation.json"),
+            },
+        )
+        ns["refresh_glossary"]()
+        # Short, ordinary, and digit-bearing terms are left out
+        # (DESIGN-accuracy.md 3.0); what is left is typed.
+        self.assertEqual(
+            [(term.text, term.source) for term in gloss["vocabulary_terms"]],
+            [("GitHub", "typed"), ("Priyanka", "typed")])
+        first = gloss["vocabulary_version"]
+        self.assertEqual(first, ns["vocabulary_version"](
+            gloss["vocabulary_terms"]))
+        manual.append("Kubernetes")
+        ns["refresh_glossary"]()
+        self.assertNotEqual(gloss["vocabulary_version"], first)
+        self.assertEqual(ns["vocabulary_bias_state"](), (
+            gloss["vocabulary_terms"], gloss["vocabulary_version"]))
 
     def test_apply_vocabulary_casing_is_whole_word_and_additive(self):
         gloss = {"lock": threading.Lock(),
@@ -16527,7 +16689,8 @@ class SpeechRuntimeSourceTests(unittest.TestCase):
         self.assertEqual(set(self.files), {
             "main.swift", "Wire.swift", "Recognizer.swift",
             "MelFeatures.swift", "TransducerDecoder.swift",
-            "Vocabulary.swift", "WindowMerge.swift", "WordEvidence.swift"})
+            "Vocabulary.swift", "WindowMerge.swift", "WordEvidence.swift",
+            "TermBias.swift"})
 
     def test_launched_the_old_way_it_answers_protocol_1(self):
         wire = self.code(self.source("Wire.swift"))
@@ -16549,13 +16712,28 @@ class SpeechRuntimeSourceTests(unittest.TestCase):
         between = main[literal.end():main.index("Wire.emit(response)")]
         self.assertEqual(between.count('response["'), 0)
         self.assertIn("if wire >= 2 {\n            WordEvidence.add(", main)
+        # The term pass's report rides only on protocol 2, under one key,
+        # and only when a vocabulary frame set terms (Transcript.termList).
+        self.assertIn("vocabulary: recognizer.vocabulary.pieces, to: &response)\n"
+                      "            TermBias.add(transcript, recognizer: "
+                      "recognizer, to: &response)\n        }", main)
+        bias = self.code(self.source("TermBias.swift"))
+        add = bias[bias.index("static func add("):]
+        self.assertEqual(sorted(set(re.findall(r'response\["(\w+)"\]', add))),
+                         ["bias"])
+        self.assertIn("guard let list = transcript.termList else { return }",
+                      add)
+        # A control frame is read only in protocol 2; in protocol 1 its
+        # header is a bad sample count, as it always was.
+        self.assertIn("if wire >= 2, requested & Wire.controlFlag != 0 {\n"
+                      "        return serveControl(", main)
         words = self.code(self.source("WordEvidence.swift"))
         add = words[words.index("static func add("):
                     words.index("static func group(")]
         self.assertEqual(sorted(set(re.findall(r'response\["(\w+)"\]', add))),
                          ["avg_confidence", "words"])
         self.assertIn('if wire >= 2 {\n    status["protocol"] = wire\n'
-                      '    status["capabilities"] = ["words"]\n'
+                      '    status["capabilities"] = ["words", "vocabulary"]\n'
                       '    status["engine"] = Wire.engine', main)
         # Ready and status lines carry the keys the FluidAudio helper's do.
         self.assertIn('"model": Wire.model', main)
@@ -16689,24 +16867,63 @@ class SpeechRuntimeSourceTests(unittest.TestCase):
         self.assertIn("let secondsPerEncoderFrame: Double = 1280.0 / 16_000.0",
                       merge)
 
-    def test_the_decoder_takes_the_models_own_choice(self):
-        # The joint network's top candidates are kept reachable for later
-        # work; nothing in this slice may let them change a transcript.
+    def test_the_runtime_reports_and_only_python_may_apply(self):
+        # The joint network's candidates now feed the term pass, which
+        # reports where a listed term could have been heard. Nothing in the
+        # runtime lets them change a transcript: the decode takes the model's
+        # own choice, the text is built before the pass's report is attached,
+        # and the pass builds no text. Only voice_compiler's policy may
+        # decide what to do with a report.
         decoder = self.code(self.source("TransducerDecoder.swift"))
         loop = decoder[decoder.index("func decode("):
-                       decoder.index("private struct DecoderStep")]
+                       decoder.index("struct DecoderStep")]
         self.assertIn('featureValue(for: "token_id")', loop)
         self.assertIn("let tokenId = Self.firstInt32(tokenArray)", loop)
         self.assertIn("if tokenId == Int32(blankId) {\n                    break",
                       loop)
         self.assertIn("token: Int(tokenId), frame: globalFrameOffset + t", loop)
         self.assertIn("decoderStep = try runDecoder(token: tokenId,", loop)
+        # The trace records what the decode did and nothing feeds back.
+        self.assertIn("trace.steps.append(GreedyTrace.Step(", loop)
+        self.assertIn("trace?.states.append(decoderStep)", loop)
+        self.assertNotIn("trace.steps[", loop)
+        self.assertNotIn("trace?.steps[", loop)
         # The observer sees a copy and returns nothing.
         self.assertIn("var stepObserver: ((DecodeStep) -> Void)?", decoder)
         self.assertNotIn("var candidates", decoder)
+        # The text is the normal pass's, built before the report is added.
+        recognizer = self.code(self.source("Recognizer.swift"))
+        built = recognizer.index(
+            "var transcript = Transcript(text: vocabulary.decode(ids: "
+            "merged.map(\\.token)), tokens: merged)")
+        self.assertLess(built, recognizer.index("transcript.detours ="))
+        self.assertIn("let text: String\n    let tokens: [TokenWindow]",
+                      recognizer)
+        bias = self.code(self.source("TermBias.swift"))
+        for forbidden in ("Transcript(", ".text =", ".tokens =",
+                          "stepObserver", "decode(encoded"):
+            with self.subTest(term_pass=forbidden):
+                self.assertNotIn(forbidden, bias)
+        # Every piece a detour takes is one of that step's candidates: the
+        # only way to a child node is through the candidates' ids, and the
+        # rank recorded is the candidate's own.
+        self.assertIn("for (rank, id) in candidates.ids.enumerated() {", bias)
+        self.assertIn("guard let child = list.nodes[node].children[id] else "
+                      "{ continue }", bias)
+        self.assertIn("back[key(t, child)] = (key(t, node), id, rank, gap)",
+                      bias)
+        self.assertEqual(bias.count("Detour.Step("), 1)
+        self.assertIn("piece: link.piece, rank: link.rank, gap: link.gap",
+                      bias)
+        # With no terms the pass does not run and nothing is recorded.
+        self.assertIn("let trace = termList == nil ? nil : GreedyTrace()",
+                      recognizer)
+        self.assertIn("if usable.isEmpty || self.maxDebt <= 0 { return nil }",
+                      bias)
         for name, text in self.files.items():
             code = self.code(text)
-            if name in ("TransducerDecoder.swift", "main.swift"):
+            if name in ("TransducerDecoder.swift", "main.swift",
+                        "TermBias.swift"):
                 continue
             with self.subTest(file=name):
                 self.assertNotIn("candidates", code)
