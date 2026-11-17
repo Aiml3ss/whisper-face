@@ -783,6 +783,21 @@ class SetupWindowContractTests(unittest.TestCase):
             self.assertIn(key, copy)
         for phase in module.SETUP_PHASES:
             self.assertIn(f"installer.phase.{phase}", copy)
+        # The update runs the release's own updater, from where the app
+        # unpacks it, on the Python setup.sh uses.
+        setup = (ROOT / "setup.sh").read_text(encoding="utf-8")
+        self.assertIn(f'PYTHON_VERSION="{module.SETUP_PYTHON}"', setup)
+        self.assertIn(f'let pythonVersion = "{module.SETUP_PYTHON}"', source)
+        self.assertIn('let updateFolder = "checkout.incoming"', source)
+        self.assertIn('let updateScript = "scripts/app_update.py"', source)
+        self.assertTrue((ROOT / "scripts/app_update.py").is_file())
+        # A finished update hands over to the runtime, which asks for any
+        # permission the app's new identity needs; nothing else does.
+        finished = module.SWIFT_TEMPLATE[
+            module.SWIFT_TEMPLATE.index("func updateFinished("):]
+        finished = finished[:finished.index("\n    func ", 10)]
+        self.assertIn("case 0:\n            // The runtime", finished)
+        self.assertIn("try? launchExistingRuntime(start: true)", finished)
         for name in ("window", "ink", "ink_soft", "brand_ink", "error_ink"):
             self.assertIn(f'themeColor("{name}")', module.SWIFT_TEMPLATE)
             self.assertEqual(len(module.setup_theme()[name]), 16)
@@ -1124,6 +1139,63 @@ class DragInstallAppTests(unittest.TestCase):
         self.assertEqual(folder.returncode, 1)
         self.assertIn("--dry-run checks app mode", folder.stderr)
 
+    def test_the_app_tells_an_update_from_an_older_copy_as_the_advisor_does(self):
+        module = load_launcher_tool()
+        app, result = self.package("match")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        installed = "1" * 40
+        base = {"app": "/Applications/Whisper Face.app",
+                "bundle_id": "com.berg.whisper-face.launcher",
+                "checkout": "/Users/you/Library/Application Support/Whisper Face/checkout",
+                "schema_version": 2, "source_revision": installed}
+        cases = (
+            # (this app's version, the installed version, the answer)
+            ("0.6.1", "0.6.0", "update 0.6.0 0.6.1"),
+            ("0.6.0", "0.6.1", "older 0.6.1 0.6.0"),
+            ("0.6.0", "0.6.0-drag.3", "update 0.6.0-drag.3 0.6.0"),
+            ("0.6.0-drag.3", "0.6.0-drag.10", "older 0.6.0-drag.10 0.6.0-drag.3"),
+            ("0.6.0-drag.a", "0.6.0-drag.3", "update 0.6.0-drag.3 0.6.0-drag.a"),
+            ("0.6.0-rc.1", "0.6.0-drag.1", "update 0.6.0-drag.1 0.6.0-rc.1"),
+            ("0.6.0-drag.1", "0.6.0-drag.1.1", "older 0.6.0-drag.1.1 0.6.0-drag.1"),
+            ("0.6.0", "0.6.0", "conflict 0.6.0"),
+            ("0.6.0+b", "0.6.0+a", "conflict 0.6.0+a"),
+            ("0.6.0", "1.0", "conflict 1.0"),
+            ("0.6.0", "0.6.0-drag.01", "conflict 0.6.0-drag.01"),
+        )
+        receipt_path = self.root / "match-receipt.json"
+        info_path = app / "Contents/Info.plist"
+        for own, other, expected in cases:
+            with self.subTest(own=own, installed=other):
+                info = plistlib.loads(info_path.read_bytes())
+                info["CFBundleShortVersionString"] = own
+                info_path.write_bytes(plistlib.dumps(info, sort_keys=True))
+                subprocess.run(["codesign", "--force", "--sign", "-",
+                                "--identifier", "com.berg.whisper-face.launcher",
+                                str(app)], check=True, capture_output=True)
+                receipt = {**base, "version": other}
+                receipt_path.write_text(json.dumps(receipt))
+                swift = subprocess.run(
+                    [str(app / "Contents/MacOS/Whisper Face"), "--install-match",
+                     str(receipt_path)], text=True, capture_output=True,
+                    timeout=30).stdout.strip()
+                self.assertEqual(swift, expected)
+                self.assertEqual(module.install_match(receipt, info), expected)
+        # The same release is current whatever the version says; a folder
+        # install's receipt is no drag install at all.
+        for receipt, expected in (
+                ({**base, "source_revision": self.revision, "version": "9.9.9"},
+                 "current"),
+                ({**base, "schema_version": 1}, "none")):
+            with self.subTest(expected=expected):
+                receipt_path.write_text(json.dumps(receipt))
+                swift = subprocess.run(
+                    [str(app / "Contents/MacOS/Whisper Face"), "--install-match",
+                     str(receipt_path)], text=True, capture_output=True,
+                    timeout=30).stdout.strip()
+                self.assertEqual(swift, expected)
+                self.assertEqual(module.install_match(
+                    receipt, plistlib.loads(info_path.read_bytes())), expected)
+
     def test_the_setup_window_renders_every_screen_in_both_appearances(self):
         out = self.root / "renders"
         out.mkdir()
@@ -1134,7 +1206,8 @@ class DragInstallAppTests(unittest.TestCase):
         self.assertEqual(rendered.returncode, 0, rendered.stderr)
         names = {path.name for path in out.iterdir()}
         for screen in ("welcome", "move", "tools", "running", "failed",
-                       "repair", "folder", "unset"):
+                       "repair", "folder", "unset", "update", "updating",
+                       "update-failed", "update-stuck", "older", "conflict"):
             for appearance in ("light", "dark"):
                 with self.subTest(screen=screen, appearance=appearance):
                     picture = out / f"installer-{screen}-{appearance}.png"

@@ -1222,6 +1222,20 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "installer.elsewhere.action": "Show in Finder",
         "installer.unset.title": "Whisper Face isn’t set up yet",
         "installer.unset.body": "Open Install.command in the Whisper Face folder to set it up.",
+        "installer.update.title": "Update Whisper Face",
+        "installer.update.body": "This is Whisper Face {to}, and {from} is set up on this Mac. Updating keeps your settings, dictionary, history and models, and if anything goes wrong, {from} keeps working.",
+        "installer.update.action": "Update",
+        "installer.updating.title": "Updating Whisper Face",
+        "installer.updating.body": "Dictation pauses until Whisper Face {to} is ready. It can take a few minutes when there are new parts to download.",
+        "installer.update.failed.title": "The update didn’t finish",
+        "installer.update.failed.note": "Whisper Face {from} is running again, just as it was. Try Again picks up where the update stopped.",
+        "installer.update.stuck.title": "Whisper Face couldn’t finish or undo the update",
+        "installer.update.stuck.note": "It isn’t running right now. Try Again puts the earlier version back first, then updates.",
+        "installer.update.stop.body": "Whisper Face stays paused until the update finishes. Open it again to carry on from here.",
+        "installer.older.title": "A newer Whisper Face is set up",
+        "installer.older.body": "This copy is Whisper Face {own}, older than the {installed} set up on this Mac, so it can’t run it. Download the latest Whisper Face, drag it into Applications, and open it from there.",
+        "installer.conflict.title": "This copy doesn’t match the one set up",
+        "installer.conflict.body": "Whisper Face {installed} is set up on this Mac, and this copy is a different build with the same version. Download the latest Whisper Face, drag it into Applications, and open it from there.",
 
         # --- mac download: permission help
 

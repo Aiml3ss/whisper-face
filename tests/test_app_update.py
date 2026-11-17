@@ -192,6 +192,18 @@ class DragUpdateTests(unittest.TestCase):
         self.assertIn("app-update applied aaaaaaa->bbbbbbb",
                       self.layout.log.read_text())
 
+    def test_an_update_waiting_for_permissions_is_an_update_that_worked(self):
+        # An unsigned app's identity changes with every release, so macOS
+        # stops honouring its grants: setup.sh then ends on "permissions",
+        # and the runtime's own permissions window takes over.
+        (self.layout.incoming / "setup.sh").write_text(
+            NEW_SETUP.replace('echo "@@ phase done"',
+                              'echo "@@ phase permissions"'))
+        status, lines = self.apply(FakeLaunchd())
+        self.assertEqual(status, MODULE.EXIT_APPLIED, "\n".join(lines))
+        self.assertIn("@@ phase permissions", lines)
+        self.assertEqual(MODULE.release_of(self.layout.checkout), ("0.6.1", NEW))
+
     def test_a_failed_update_puts_the_old_copy_back_and_starts_it(self):
         os.environ["SETUP_SHOULD_FAIL"] = "1"
         launchd = FakeLaunchd()
