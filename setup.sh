@@ -410,6 +410,7 @@ personal_files=(
     preferences.json
     learned.json
     transcripts.jsonl
+    delivery_journal.json
     voice_inbox.json
     demonstrations.json
     acoustic_keyword_memory.json
@@ -1754,7 +1755,8 @@ for name in snippets tones preferences acoustic_keyword_memory dictionary; do
     [ -f "$destination" ] || install -m 600 "$template" "$destination"
     chmod 600 "$destination"
 done
-for private_file in transcripts.jsonl learned.json voice_inbox.json demonstrations.json \
+for private_file in transcripts.jsonl delivery_journal.json learned.json \
+        voice_inbox.json demonstrations.json \
         delayed_cleanup_activation.json \
         acoustic_keyword_activation.json acoustic_calibration_activation.json \
         relisten_activation.json dictate.log ollama.log \

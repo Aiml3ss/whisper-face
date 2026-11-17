@@ -412,6 +412,7 @@ from insertion_integrity import (  # noqa: E402
     InsertionCoordinator,
     InsertionLease,
     ReadbackResult,
+    ReceiptReason,
     ReceiptState,
     position_check,
     position_count,
@@ -872,6 +873,10 @@ PARAKEET_RUNTIME_PINNED = bool(
 PARAKEET_RUNTIME_HELPER = HERE / ".models" / "bin" / "parrot-speech-runtime"
 DICTIONARY_FILE = HERE / "dictionary.txt"
 TRANSCRIPTS_FILE = HERE / "transcripts.jsonl"   # local-only usage log
+# Dictations recognised and not yet settled: written before any paste, emptied
+# once the history line is written. What a stop leaves here is recovered at
+# the next start (``recover_journaled_dictations``).
+DELIVERY_JOURNAL_FILE = HERE / "delivery_journal.json"
 LEARNED_FILE = HERE / "learned.json"            # mined term counts
 ACOUSTIC_KEYWORD_MEMORY_FILE = HERE / "acoustic_keyword_memory.json"
 ACOUSTIC_KEYWORD_ACTIVATION_FILE = (
@@ -1425,6 +1430,12 @@ GLOSS = {
 
 # Serializes transcript-log writes against the learning loop's trim rewrite.
 TRANSCRIPTS_LOCK = threading.Lock()
+# Serializes the delivery journal's read-modify-write. Taken before
+# TRANSCRIPTS_LOCK when both are held, never after it.
+DELIVERY_JOURNAL_LOCK = threading.Lock()
+# Dictations in flight at once are a handful; a journal past this keeps its
+# newest entries, so a settle that keeps failing cannot grow it without end.
+DELIVERY_JOURNAL_MAX = 50
 
 # Last moment the user touched dictation (press or finished processing);
 # gates the learn pass and the keep-warm heartbeat.
@@ -6536,7 +6547,9 @@ def runtime_status_snapshot() -> dict:
     outbox_summary = ""
     if outbox_needs_home:
         outbox_summary = (
-            "Paste may have landed — verify before reusing"
+            "Kept when Whisper Face stopped — check before reusing"
+            if outbox_needs_home[-1].reason == ReceiptReason.INTERRUPTED
+            else "Paste may have landed — verify before reusing"
             if outbox_needs_home[-1].paste_attempted
             else "Not pasted — destination changed")
     elif outbox:
@@ -7441,6 +7454,11 @@ def append_transcript(raw: str, cleaned: str, bundle: str, path: str,
         entry["id"] = event_id
     if metrics:
         entry["metrics"] = metrics
+    _append_transcript_entry(entry)
+
+
+def _append_transcript_entry(entry: dict):
+    """Append one finished history line, owner-only, then apply retention."""
     with TRANSCRIPTS_LOCK:
         fd = os.open(
             TRANSCRIPTS_FILE,
@@ -7465,6 +7483,182 @@ def append_transcript(raw: str, cleaned: str, bundle: str, path: str,
     _rebase_learned_processed(dropped)
     with USAGE_CACHE["lock"]:
         USAGE_CACHE["at"] = 0.0
+
+
+# ---- Delivery journal -------------------------------------------------------
+# A dictation is written here, owner-only and atomically, before anything is
+# pasted, and leaves once its history line is written. Between the two it
+# exists on disk, so a crash, a hang or a kill between recognition and the
+# history line cannot take the words with it. What the journal still holds at
+# the next start is recovered: into the history as not delivered, and into
+# the Voice Outbox, where Copy & Dismiss offers it.
+# Stages: "recognized" (the clean-up has not run; only the raw words exist)
+# and "pasting" (the final text, written just before the one paste attempt).
+
+
+def _read_delivery_journal_locked() -> list[dict]:
+    """The journal's entries; the caller holds DELIVERY_JOURNAL_LOCK."""
+    try:
+        payload = json.loads(
+            DELIVERY_JOURNAL_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as error:
+        # Every write is atomic, so this is damage from outside. It must not
+        # stop a dictation; the next write replaces it.
+        print(f"! delivery journal unreadable: {type(error).__name__}")
+        return []
+    entries = payload.get("entries") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries
+            if isinstance(entry, dict)
+            and isinstance(entry.get("id"), str) and entry["id"]]
+
+
+def _write_delivery_journal_locked(entries: list[dict]) -> None:
+    """Replace the journal atomically; an empty one leaves no file."""
+    if not entries:
+        try:
+            DELIVERY_JOURNAL_FILE.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    atomic_write_text(
+        DELIVERY_JOURNAL_FILE,
+        json.dumps({"version": 1,
+                    "entries": entries[-DELIVERY_JOURNAL_MAX:]}),
+        mode=0o600)
+
+
+def journal_dictation(event_id: str, *, raw: str, text: str, bundle: str,
+                      mode: str, language: str, stage: str) -> bool:
+    """Record one dictation on disk before anything is pasted.
+
+    Called once the words are recognised (``stage="recognized"``, no clean
+    text yet) and again with the final text just before the paste
+    (``stage="pasting"``); the second replaces the first and keeps its time.
+    A failed write is reported and the dictation goes on: the journal is a
+    safety net, never a reason to withhold a paste.
+    """
+    if not isinstance(event_id, str) or not event_id:
+        return False
+    entry = {
+        "id": event_id,
+        "ts": time.time(),
+        # The same identity the history keeps: on Windows a digest of the
+        # window title, never the title, so no document name reaches disk.
+        "app": transcript_app_identity(bundle),
+        "raw": str(raw or ""),
+        "clean": str(text or ""),
+        "mode": str(mode or "capture"),
+        "language": str(language or LANGUAGE_DEFAULT),
+        "stage": "pasting" if stage == "pasting" else "recognized",
+    }
+    with DELIVERY_JOURNAL_LOCK:
+        entries = _read_delivery_journal_locked()
+        for existing in entries:
+            if existing.get("id") == event_id:
+                entry["ts"] = existing.get("ts", entry["ts"])
+        entries = [existing for existing in entries
+                   if existing.get("id") != event_id]
+        entries.append(entry)
+        try:
+            _write_delivery_journal_locked(entries)
+        except OSError as error:
+            print(f"! delivery journal write failed: {type(error).__name__}")
+            return False
+    return True
+
+
+def settle_journaled_dictation(event_id: str) -> None:
+    """Remove one dictation from the journal: its outcome is recorded."""
+    if not isinstance(event_id, str) or not event_id:
+        return
+    with DELIVERY_JOURNAL_LOCK:
+        entries = _read_delivery_journal_locked()
+        remaining = [entry for entry in entries
+                     if entry.get("id") != event_id]
+        if len(remaining) == len(entries):
+            return
+        try:
+            _write_delivery_journal_locked(remaining)
+        except OSError as error:
+            # The entry stays, and is recovered as not delivered at the next
+            # start: a duplicate copy, never a lost one.
+            print(f"! delivery journal settle failed: {type(error).__name__}")
+
+
+def recover_journaled_dictations(only: str | None = None,
+                                 coordinator=None) -> int:
+    """Give back what the journal holds; return how many were recovered.
+
+    At start-up ``only`` is None and every entry is recovered: Whisper Face
+    stopped before it recorded what became of them. During a dictation that
+    failed before its paste, ``only`` names that one. Each entry is written to
+    the history as not delivered, kept in the Voice Outbox, and only then
+    removed from the journal; one whose history line cannot be written stays
+    for the next try. Nothing is pasted, and no text is printed.
+    """
+    coordinator = coordinator or INSERTION_COORDINATOR
+    recovered: set[str] = set()
+    with DELIVERY_JOURNAL_LOCK:
+        entries = _read_delivery_journal_locked()
+        for entry in entries:
+            event_id = entry["id"]
+            if only is not None and event_id != only:
+                continue
+            raw = entry.get("raw") if isinstance(entry.get("raw"), str) \
+                else ""
+            clean = entry.get("clean") \
+                if isinstance(entry.get("clean"), str) else ""
+            text = clean if clean.strip() else raw
+            if not text.strip():
+                recovered.add(event_id)
+                continue
+            attempted = entry.get("stage") == "pasting"
+            try:
+                at = float(entry.get("ts"))
+            except (TypeError, ValueError):
+                at = time.time()
+            app = entry.get("app") if isinstance(entry.get("app"), str) \
+                else ""
+            mode = str(entry.get("mode") or "capture")
+            path = "outbox/recovered" if mode == "capture" \
+                else f"outbox/{mode}/recovered"
+            try:
+                _append_transcript_entry({
+                    "ts": at, "app": app, "raw": raw, "clean": text,
+                    "path": path,
+                    "language": str(entry.get("language")
+                                    or LANGUAGE_DEFAULT),
+                    "id": event_id,
+                    "metrics": {
+                        "insertion_state": ReceiptState.UNRESOLVED.value,
+                        "insertion_reason": ReceiptReason.INTERRUPTED.value,
+                        "paste_attempted": attempted,
+                        "insertion_verified": False,
+                        "recovered": True,
+                    },
+                })
+            except OSError as error:
+                print("! recovered dictation not written to history: "
+                      f"{type(error).__name__}")
+                continue
+            coordinator.keep(event_id, text, paste_attempted=attempted)
+            recovered.add(event_id)
+        if recovered:
+            try:
+                _write_delivery_journal_locked([
+                    entry for entry in entries
+                    if entry["id"] not in recovered])
+            except OSError as error:
+                print("! delivery journal not emptied after recovery: "
+                      f"{type(error).__name__}")
+    if recovered:
+        print(f"[journal] {len(recovered)} dictation(s) were not delivered "
+              "before Whisper Face stopped; kept in Voice Outbox")
+    return len(recovered)
 
 
 def _ollama_stream_reply(response, deadline: float,
@@ -13571,6 +13765,15 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
     released_at = rec.released_at or time.perf_counter()
     phase = "capture-finalize"
     delivery_reported = False
+    # The id under which this dictation's words are in the delivery journal,
+    # once they are; whether its one paste has been attempted; and whether a
+    # failure must leave the entry for the next start to recover.
+    journaled = ""
+    insertion_committed = False
+    keep_journal = False
+    # Whatever was already being handled when this began, so the ``finally``
+    # below can tell it from something escaping this function.
+    handling_already = sys.exc_info()[1]
     try:
         wait_for_tail = release_should_wait_for_tail(rec)
         pre_future = None
@@ -13857,6 +14060,16 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
                   f"asr {t_asr:.2f}s]")
             return
 
+        # Journal before paste: from here on the words are on disk, owner
+        # only, until the history line records what became of them. The
+        # clean-up below can take seconds; a stop during it, or anywhere up
+        # to the history line, leaves them for the next start to recover.
+        event_id = rec.utterance_id or f"{time.time_ns():x}-{id(rec):x}"
+        if journal_dictation(
+                event_id, raw=recognized_raw, text="", bundle=bundle,
+                mode=rec.mode, language=rec.language, stage="recognized"):
+            journaled = event_id
+
         # Inline snippet expansion is additive to the whole-utterance command
         # handled above: the same cue inside a longer dictation ("send it to
         # insert my address and say thanks") expands only the cue while the
@@ -14069,11 +14282,18 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             insertion_target = resolve_insertion_target(rec)
         else:
             insertion_target = focused_snapshot() if learn_correction else None
-        event_id = rec.utterance_id or f"{time.time_ns():x}-{id(rec):x}"
+        # The final text replaces the raw words in the journal before the
+        # one paste attempt, so what a stop leaves behind is what would have
+        # been pasted, marked as possibly sent.
+        if journal_dictation(
+                event_id, raw=recognized_raw, text=text, bundle=bundle,
+                mode=rec.mode, language=rec.language, stage="pasting"):
+            journaled = event_id
         phase = "insertion"
         insertion_started_at = time.perf_counter()
         integrity_receipt = commit_insertion(
             rec, text, bundle, insertion_target)
+        insertion_committed = True
         t_insert = time.perf_counter() - insertion_started_at
         receipt = committed_paste_receipt(
             rec, insertion_target, text, bundle, rec.mode, event_id) \
@@ -14399,13 +14619,37 @@ def finish_and_process(rec: Recorder, hud: HUD, active: dict):
             print(
                 f"! post-delivery follow-up failed: {type(error).__name__}")
         else:
+            # Words that were recognised and never reached the paste are
+            # not thrown away with the failure: they go to the Voice Outbox
+            # now. If even that fails they stay journaled for the next start.
+            kept = False
+            if journaled and not insertion_committed:
+                try:
+                    kept = recover_journaled_dictations(only=journaled) > 0
+                except Exception:
+                    kept = False
+                keep_journal = not kept
             report_dictation_problem(
                 rec,
                 hud,
-                "Dictation failed — try again",
+                "Dictation failed — saved in Voice Outbox" if kept
+                else "Dictation failed — try again",
                 f"! dictation failed during {phase}: {type(error).__name__}",
             )
     finally:
+        # Something that is not an ``Exception`` escaping (the interpreter
+        # going down, a thread being torn out) is a stop, not an outcome:
+        # the words stay journaled for the next start, as after a kill.
+        escaping = sys.exc_info()[1]
+        stopping = escaping is not None and escaping is not handling_already
+        if journaled and not keep_journal and not stopping:
+            # The history line is written (or the dictation was set aside on
+            # purpose), so the journal no longer needs to hold it.
+            try:
+                settle_journaled_dictation(journaled)
+            except Exception as error:
+                print("! delivery journal settle failed: "
+                      f"{type(error).__name__}")
         if rec.recording:
             try:
                 rec.stop()
@@ -15097,6 +15341,12 @@ def main():
         print(line)
     load_app_tones()
     load_preferences()
+    # Before anything can dictate: words a previous run recognised and never
+    # recorded the delivery of go to the history and the Voice Outbox.
+    try:
+        recover_journaled_dictations()
+    except Exception as error:
+        print(f"! delivery journal recovery failed: {type(error).__name__}")
     apply_speech_runtime()
     load_delayed_cleanup_activation()
     refresh_acoustic_calibration()

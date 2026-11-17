@@ -247,6 +247,12 @@ def load_definitions(*names, assignments=(), extra=None):
         **{name: getattr(insertion_integrity, name) for name in (
             "position_check", "position_count", "readback_difference",
             "readback_stage", "same_but_whitespace_form", "utf16_units")},
+        # finish_and_process journals every dictation before its paste. A
+        # harness about something else gets a journal that keeps nothing;
+        # DeliveryJournalTests load the real ones, which replace these.
+        "journal_dictation": lambda *_args, **_kwargs: False,
+        "settle_journaled_dictation": lambda *_args, **_kwargs: None,
+        "recover_journaled_dictations": lambda *_args, **_kwargs: 0,
     }
     # Shared constants come first so an explicit `extra` still overrides them
     # (tests pin IS_MACOS both ways), and a per-call copy keeps one test's
@@ -7448,8 +7454,8 @@ class TranscriptRetentionTests(unittest.TestCase):
     NOW = 1_800_000_000.0
     DAY = 24 * 3600.0
     NAMES = (
-        "append_transcript", "transcript_app_identity",
-        "_transcript_entry_time", "retained_transcript_lines",
+        "append_transcript", "_append_transcript_entry",
+        "transcript_app_identity", "_transcript_entry_time", "retained_transcript_lines",
         "_trim_transcripts_locked", "_rebase_learned_processed",
         "prune_transcripts", "clear_transcript_history",
         "load_learned", "save_learned",
@@ -16935,6 +16941,272 @@ class ParakeetWordEvidenceRuntimeTests(unittest.TestCase):
         self.assertTrue(voice.pause_punctuation)
 
 
+class ProcessStopped(BaseException):
+    """Raised by a test to stop a dictation the way a kill does: nothing in
+    the dictation path catches it, so no outcome is recorded."""
+
+
+class DeliveryJournalTests(unittest.TestCase):
+    """Never lose a word: a dictation is on disk before its paste.
+
+    The journal functions run for real against a temporary folder, with the
+    real atomic writer, so the file's mode and contents are what the app
+    would leave behind. Only the history log is a list.
+    """
+
+    NAMES = (
+        "journal_dictation", "settle_journaled_dictation",
+        "recover_journaled_dictations", "_read_delivery_journal_locked",
+        "_write_delivery_journal_locked", "transcript_app_identity",
+        "atomic_write_text",
+    )
+
+    def journal(self, folder, *, coordinator=None, history=None):
+        history = [] if history is None else history
+        ns = load_definitions(
+            *self.NAMES, assignments=("DELIVERY_JOURNAL_MAX",),
+            extra={
+                "hashlib": hashlib, "os": os, "tempfile": tempfile,
+                "time": time, "Path": Path, "LANGUAGE_DEFAULT": "en",
+                "ReceiptState": ReceiptState,
+                "ReceiptReason": ReceiptReason,
+                "_append_transcript_entry": history.append,
+                "print": lambda *_args: None,
+            })
+        ns.update({
+            "DELIVERY_JOURNAL_FILE": Path(folder) / "delivery_journal.json",
+            "DELIVERY_JOURNAL_LOCK": threading.Lock(),
+            "INSERTION_COORDINATOR": coordinator or InsertionCoordinator(),
+        })
+        return ns, history
+
+    @staticmethod
+    def entries(ns):
+        path = ns["DELIVERY_JOURNAL_FILE"]
+        if not path.exists():
+            return []
+        return json.loads(path.read_text(encoding="utf-8"))["entries"]
+
+    def test_the_words_are_on_disk_owner_only_before_the_paste(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ns, _history = self.journal(folder)
+            self.assertTrue(ns["journal_dictation"](
+                "take-1", raw="meet me at the station", text="",
+                bundle="com.apple.Notes", mode="capture", language="en",
+                stage="recognized"))
+            path = ns["DELIVERY_JOURNAL_FILE"]
+            if os.name == "posix":
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            [first] = self.entries(ns)
+            self.assertEqual(
+                (first["raw"], first["clean"], first["stage"]),
+                ("meet me at the station", "", "recognized"))
+            # The final text replaces the raw words in the same entry and
+            # keeps the time they were said.
+            ns["journal_dictation"](
+                "take-1", raw="meet me at the station",
+                text="Meet me at the station.", bundle="com.apple.Notes",
+                mode="capture", language="en", stage="pasting")
+            [second] = self.entries(ns)
+            self.assertEqual(second["clean"], "Meet me at the station.")
+            self.assertEqual(second["stage"], "pasting")
+            self.assertEqual(second["ts"], first["ts"])
+            ns["settle_journaled_dictation"]("take-1")
+            self.assertFalse(path.exists())
+
+    def test_a_window_title_never_reaches_the_journal(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ns, _history = self.journal(folder)
+            ns["journal_dictation"](
+                "take-1", raw="hello", text="Hello.",
+                bundle="windows:Q3 layoffs plan.docx - Word",
+                mode="capture", language="en", stage="pasting")
+            written = ns["DELIVERY_JOURNAL_FILE"].read_text(encoding="utf-8")
+        self.assertNotIn("layoffs", written)
+        self.assertRegex(json.loads(written)["entries"][0]["app"],
+                         r"^windows:[0-9a-f]{16}$")
+
+    def test_recovery_gives_back_every_word_once(self):
+        coordinator = InsertionCoordinator()
+        with tempfile.TemporaryDirectory() as folder:
+            ns, history = self.journal(folder, coordinator=coordinator)
+            # One stopped during the clean-up, one during the paste.
+            ns["journal_dictation"](
+                "take-1", raw="call dana back", text="",
+                bundle="com.apple.Notes", mode="capture", language="en",
+                stage="recognized")
+            ns["journal_dictation"](
+                "take-2", raw="ship it friday", text="Ship it Friday.",
+                bundle="com.apple.Notes", mode="capture", language="en",
+                stage="pasting")
+            self.assertEqual(ns["recover_journaled_dictations"](), 2)
+            self.assertFalse(ns["DELIVERY_JOURNAL_FILE"].exists())
+            # A second start finds nothing more to give back.
+            self.assertEqual(ns["recover_journaled_dictations"](), 0)
+        kept = coordinator.recoverable()
+        self.assertEqual([item.text for item in kept],
+                         ["call dana back", "Ship it Friday."])
+        self.assertEqual({item.receipt.reason for item in kept},
+                         {ReceiptReason.INTERRUPTED})
+        self.assertEqual([item.receipt.paste_attempted for item in kept],
+                         [False, True])
+        self.assertFalse(any(item.receipt.pasted_unchecked for item in kept))
+        self.assertEqual([line["id"] for line in history],
+                         ["take-1", "take-2"])
+        for line in history:
+            self.assertEqual(line["path"], "outbox/recovered")
+            self.assertIs(line["metrics"]["insertion_verified"], False)
+            self.assertEqual(line["metrics"]["insertion_reason"],
+                             "interrupted")
+        # Recovering an id the outbox already holds makes no second copy.
+        coordinator.keep("take-2", "Ship it Friday.", paste_attempted=True)
+        self.assertEqual(coordinator.recoverable_count(), 2)
+
+    def test_an_entry_that_cannot_be_recorded_stays_journaled(self):
+        coordinator = InsertionCoordinator()
+        with tempfile.TemporaryDirectory() as folder:
+            ns, _history = self.journal(folder, coordinator=coordinator)
+
+            def full_disk(_entry):
+                raise OSError("no space left on device")
+
+            ns["_append_transcript_entry"] = full_disk
+            ns["journal_dictation"](
+                "take-1", raw="keep me", text="Keep me.", bundle="app",
+                mode="capture", language="en", stage="pasting")
+            self.assertEqual(ns["recover_journaled_dictations"](), 0)
+            self.assertEqual(len(self.entries(ns)), 1)
+        self.assertEqual(coordinator.recoverable_count(), 0)
+
+    def test_recovery_of_one_dictation_leaves_the_others(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ns, _history = self.journal(folder)
+            for event_id in ("take-1", "take-2"):
+                ns["journal_dictation"](
+                    event_id, raw=event_id, text="", bundle="app",
+                    mode="capture", language="en", stage="recognized")
+            self.assertEqual(
+                ns["recover_journaled_dictations"](only="take-2"), 1)
+            self.assertEqual([entry["id"] for entry in self.entries(ns)],
+                             ["take-1"])
+
+    def test_a_damaged_journal_never_stops_a_dictation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ns, _history = self.journal(folder)
+            ns["DELIVERY_JOURNAL_FILE"].write_text("{not json", "utf-8")
+            self.assertEqual(ns["recover_journaled_dictations"](), 0)
+            self.assertTrue(ns["journal_dictation"](
+                "take-1", raw="still here", text="", bundle="app",
+                mode="capture", language="en", stage="recognized"))
+            self.assertEqual(len(self.entries(ns)), 1)
+
+    def test_the_journal_stays_bounded(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ns, _history = self.journal(folder)
+            ns["DELIVERY_JOURNAL_MAX"] = 3
+            for index in range(5):
+                ns["journal_dictation"](
+                    f"take-{index}", raw="x", text="", bundle="app",
+                    mode="capture", language="en", stage="recognized")
+            self.assertEqual([entry["id"] for entry in self.entries(ns)],
+                             ["take-2", "take-3", "take-4"])
+
+
+class StartupRecoveryTests(unittest.TestCase):
+    """What a stop left in the journal is given back before anything can
+    dictate again."""
+
+    def test_main_recovers_the_journal_before_dictation_can_start(self):
+        main = next(node for node in TREE.body
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name == "main")
+        calls = [node.func.id for node in ast.walk(main)
+                 if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name)]
+        self.assertIn("recover_journaled_dictations", calls)
+        source = ast.unparse(main)
+        recover = source.index("recover_journaled_dictations()")
+        for later in ("apply_speech_runtime()", "SERVER_ONLY",
+                      "hotkey_worker"):
+            with self.subTest(later=later):
+                self.assertLess(recover, source.index(later))
+        self.assertGreater(recover, source.index("ensure_single_instance()"))
+
+
+class DictationKillTests(unittest.TestCase):
+    """A stop at any stage of a dictation loses no words.
+
+    The real ``finish_and_process`` runs over the real commit path with a
+    real journal in a temporary folder. A step is made to stop the process
+    the way a kill does; the next start's recovery must then give the words
+    back. A dictation that finishes leaves nothing behind.
+    """
+
+    def run_dictation(self, folder, *, stop_at=None, fail_at=None):
+        coordinator = InsertionCoordinator()
+        journal, history = DeliveryJournalTests().journal(
+            folder, coordinator=coordinator)
+
+        def stop(*_args, **_kwargs):
+            raise ProcessStopped()
+
+        def fail(*_args, **_kwargs):
+            raise RuntimeError("synthetic failure")
+
+        overrides = {name: journal[name] for name in (
+            "journal_dictation", "settle_journaled_dictation",
+            "recover_journaled_dictations")}
+        step = {"cleanup": "apply_vocabulary_casing", "paste": "paste",
+                "history": "append_transcript"}
+        if stop_at:
+            overrides[step[stop_at]] = stop
+        if fail_at:
+            overrides[step[fail_at]] = fail
+        seen = UncheckedPasteDeliveryTests().deliver(
+            "verified", coordinator=coordinator, overrides=overrides,
+            expect_failure=bool(fail_at))
+        return seen, journal, history, coordinator
+
+    def test_a_finished_dictation_leaves_the_journal_empty(self):
+        with tempfile.TemporaryDirectory() as folder:
+            seen, journal, _history, _coordinator = self.run_dictation(folder)
+            self.assertEqual(len(seen.records), 1)
+            self.assertFalse(journal["DELIVERY_JOURNAL_FILE"].exists())
+
+    def test_a_stop_at_any_stage_loses_no_words(self):
+        spoken = UncheckedPasteDeliveryTests.SPOKEN
+        for stage, attempted in (("cleanup", False), ("paste", True),
+                                 ("history", True)):
+            with self.subTest(stage=stage), \
+                    tempfile.TemporaryDirectory() as folder:
+                seen, journal, history, _old = self.run_dictation(
+                    folder, stop_at=stage)
+                self.assertTrue(seen.stopped)
+                self.assertEqual(seen.records, [])
+                [entry] = DeliveryJournalTests.entries(journal)
+                self.assertIn("station", entry["clean"] or entry["raw"])
+                # The next start: a new process with an empty outbox.
+                coordinator = InsertionCoordinator()
+                journal["INSERTION_COORDINATOR"] = coordinator
+                self.assertEqual(journal["recover_journaled_dictations"](), 1)
+                [kept] = coordinator.recoverable()
+                self.assertEqual(kept.text.strip(" ."), spoken.strip(" ."))
+                self.assertEqual(kept.receipt.paste_attempted, attempted)
+                self.assertEqual(history[-1]["path"], "outbox/recovered")
+                self.assertFalse(journal["DELIVERY_JOURNAL_FILE"].exists())
+
+    def test_a_failure_before_the_paste_keeps_the_words_now(self):
+        with tempfile.TemporaryDirectory() as folder:
+            seen, journal, history, coordinator = self.run_dictation(
+                folder, fail_at="cleanup")
+            self.assertFalse(journal["DELIVERY_JOURNAL_FILE"].exists())
+        self.assertEqual(seen.caption.get("text"),
+                         "Dictation failed — saved in Voice Outbox")
+        [kept] = coordinator.recoverable()
+        self.assertIn("station", kept.text)
+        self.assertEqual(history[-1]["path"], "outbox/recovered")
+
+
 class UncheckedPasteDeliveryTests(unittest.TestCase):
     """A paste that was sent and could not be read back is not an error.
 
@@ -16951,12 +17223,15 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
     def deliver(self, outcome, *, snippet=None, is_macos=True,
                 paused=False, route="standard", spoken=None,
                 coordinator=None, utterance="take-1", recording=None,
-                spoken_edits=False, force_position=False):
+                spoken_edits=False, force_position=False, overrides=None,
+                expect_failure=False):
         """One dictation with a named delivery outcome; what it did.
 
         ``force_position`` makes the commit report a check by position
         whatever the field is, so that what a check by position may not
         unlock is seen even where the text could have been read.
+        ``overrides`` replaces collaborators by name once the rest is
+        built: a real delivery journal, or a step that stops the process.
         """
         spoken = self.SPOKEN if spoken is None else spoken
         seen = SimpleNamespace(
@@ -17159,6 +17434,7 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
         ns["_ax_character_count"] = lambda _element: field["count"]
         ns["PREFERENCES"]["spoken_edit_commands"] = spoken_edits
         ns["LAST_INSERTION"] = None
+        ns.update(overrides or {})
         if force_position:
             ns["position_check_applies"] = lambda *_args: True
             ns["position_readback"] = lambda *_args: (
@@ -17221,11 +17497,18 @@ class UncheckedPasteDeliveryTests(unittest.TestCase):
         hud = SimpleNamespace(showMode_=seen.modes.append)
         # ``recording`` is a newer take the hotkey worker is recording
         # while this one finishes.
-        ns["finish_and_process"](recorder, hud, {"rec": recording})
+        seen.stopped = False
+        try:
+            ns["finish_and_process"](recorder, hud, {"rec": recording})
+        except ProcessStopped:
+            # A step an override made stop the process, as a kill would.
+            seen.stopped = True
         for log in seen.logs:
-            # The harness must never pass by the pipeline falling over.
+            # The harness must never pass by the pipeline falling over,
+            # unless the test made it fall over on purpose.
             self.assertNotIn("follow-up failed", log)
-            self.assertNotIn("dictation failed during", log)
+            if not expect_failure:
+                self.assertNotIn("dictation failed during", log)
         seen.recorder = recorder
         seen.receipt = recorder.insertion_receipt
         seen.text = getattr(recorder, "committed_text", None)

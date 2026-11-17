@@ -102,6 +102,9 @@ COMPATIBILITY_REASON_BY_RECEIPT_REASON = {
     ReceiptReason.READBACK_UNAVAILABLE.value: "verification-unavailable",
     ReceiptReason.READBACK_CONFLICT.value: "verification-conflict",
     ReceiptReason.PASTE_OUTCOME_UNKNOWN.value: "delivery-unknown",
+    # Recovered from the delivery journal: the app stopped before the
+    # outcome was recorded, so it is unknown in exactly the same way.
+    ReceiptReason.INTERRUPTED.value: "delivery-unknown",
 }
 
 # macOS bundle identifiers are safe app identity. On Windows `dictate.py`

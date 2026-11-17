@@ -358,6 +358,7 @@ STRING_CATALOGS: Mapping[str, Mapping[str, str]] = {
         "overview.outbox.summary.paste_attempted": "Paste may have landed — verify before reusing",
         "overview.outbox.summary.not_pasted": "Not pasted — destination changed",
         "overview.outbox.summary.pasted_unchecked": "Pasted, not double-checked",
+        "overview.outbox.summary.interrupted": "Kept when Whisper Face stopped — check before reusing",
         "overview.action.pause": "Pause",
         "overview.action.resume": "Resume",
         "overview.action.pause.help": "Pause or resume the global dictation hotkey.",
@@ -4037,6 +4038,7 @@ def _localized_runtime_overview_copy(
             "overview.outbox.summary.paste_attempted",
             "overview.outbox.summary.not_pasted",
             "overview.outbox.summary.pasted_unchecked",
+            "overview.outbox.summary.interrupted",
         ),
     }.get(kind, ())
     key = next((

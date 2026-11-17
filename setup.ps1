@@ -493,7 +493,8 @@ function Invoke-Uninstall {
     Write-Host "   them. They are kept unless you ask for them to go."
     foreach ($PersonalName in @(
         "dictionary.txt", "snippets.json", "tones.json", "preferences.json",
-        "learned.json", "transcripts.jsonl", "voice_inbox.json",
+        "learned.json", "transcripts.jsonl", "delivery_journal.json",
+        "voice_inbox.json",
         "demonstrations.json", "acoustic_keyword_memory.json",
         "delayed_cleanup_activation.json", "acoustic_keyword_activation.json",
         "acoustic_calibration_activation.json", "relisten_activation.json",
@@ -867,7 +868,7 @@ foreach ($DestinationName in $PrivateTemplates.Keys) {
 # included. Set-PrivateFile grants by SID and verifies the result, where the
 # bare-username icacls call it replaces could fail without anyone noticing.
 foreach ($PrivateStateName in @(
-    "transcripts.jsonl", "learned.json",
+    "transcripts.jsonl", "delivery_journal.json", "learned.json",
     "voice_inbox.json", "demonstrations.json",
     "delayed_cleanup_activation.json",
     "acoustic_keyword_activation.json", "acoustic_calibration_activation.json",
