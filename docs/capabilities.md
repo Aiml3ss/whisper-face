@@ -19,7 +19,8 @@ another product exists; see
 Last reviewed: **14 November 2026**, against the source that includes the
 November 2026 audit fixes. v0.5.0 is the first published build with them;
 v0.4.0 and earlier behave differently in places (they install Ollama by
-default, for example).
+default, for example). v0.6.0 is the first whose Mac download is the
+drag-install app.
 
 **What a default install contains.** On a Mac: Parakeet Unified (English) and
 Whisper Tiny. Whisper large-v3-turbo and the Qwen3.5-4B cleanup model (with
@@ -211,9 +212,13 @@ Qwen3.5-4B, and has no Parakeet.
 - **Installers** for Mac and Windows that provision dependencies, pinned
   models, the native helper, login services, and health checks, and verify
   their own work. Reruns are idempotent and never overwrite personal files.
-  A Mac install needs an administrator account (Homebrew), the Command Line
-  Tools with Swift 6, and macOS 14 or newer. The Windows installer has not
-  been run on real Windows hardware.
+  A Mac install from a folder or clone needs an administrator account
+  (Homebrew), the Command Line Tools with Swift 6, and macOS 14 or newer.
+  From v0.6.0, the Mac disk image is an app to drag into
+  Applications that sets itself up in a window, with no Homebrew; it still
+  asks Apple to install the Command Line Tools. That path has been checked
+  only by its tests and a dry run, never on a clean Mac. The Windows
+  installer has not been run on real Windows hardware.
 - **Native Mac window** with a sidebar of five pages — Home, then
   Personalize, Controls, Privacy, and Advanced — covering status,
   personalization, privacy, models, and diagnostics. It has no undo or
@@ -232,7 +237,11 @@ Qwen3.5-4B, and has no Parakeet.
   tracked branch, checks out its tip, reruns the installer, and rolls back to
   the last revision that installed cleanly on failure; no background polling,
   no silent updates. It does not check release tags or signatures, so it
-  installs unreleased commits.
+  installs unreleased commits. A copy the drag-install app set up follows
+  published releases instead: dragging a newer app over it, or Download and
+  Install from the same menu, sets the new release up beside the old one,
+  carries the personal files across, and puts the old one back if setup
+  fails. Only a newer release is offered, and only a click downloads it.
 
 ### Platform notes
 

@@ -51,6 +51,27 @@ is where AppKit puts one: since macOS 11 a sheet is a card centred on its
 window, not a panel hung from the title bar. The dimming, the corners and
 the shadow round it are the probe's stand-in for what the system draws.
 
+Pass ``--installer`` to review the Mac download's setup window instead:
+
+    uv run scripts/window_render_probe.py --installer [output-dir]
+
+That window belongs to the Swift app in ``scripts/macos_launcher_app.py``,
+which runs before Python exists on a new Mac, so it is drawn by the app
+itself: the probe compiles the launcher into a temporary folder and runs it
+with ``--render-setup-window``, which builds the window without showing it
+and writes every screen in both appearances as installer-{screen}-{light,
+dark}.png, at the window's own size. Nothing is installed, started or
+opened; the compiled launcher is thrown away afterwards.
+
+Pass ``--permissions`` to review the window the running app shows while
+macOS withholds Accessibility or Input Monitoring:
+
+    uv run scripts/window_render_probe.py --permissions [output-dir]
+
+It writes permissions-{both,accessibility,input-monitoring,confirm,failed}-
+{light,dark}.png. The window's seams are fakes here: nothing opens System
+Settings and nothing touches a privacy setting.
+
 Pass ``--overlay`` to review the recording overlay instead of the window:
 
     uv run scripts/window_render_probe.py --overlay [output-dir]
@@ -64,6 +85,16 @@ Reduce Motion stills, and all sixteen faces at their loudest). The frames
 land in ``frames/`` and the probe lays them over a light and a dark desktop
 in a handful of contact sheets, ``overlay-*.png``. A frame is written before
 it is checked, so a failing check still leaves its picture behind.
+
+Pass ``--alerts`` to review the two kinds of alert instead of the pages:
+
+    uv run scripts/window_render_probe.py --alerts [output-dir]
+
+``alert-update-{light,dark}.png`` is the menu bar's update alert, which
+shows the app icon (``icons/WhisperFace.icns``) the way ``dictate.py``'s
+``_brand_update_alert`` sets it; ``alert-window-{light,dark}.png`` is one of
+the window's own confirmations, which shows the chosen face on its chip. Each
+is laid out and drawn without being run, so nothing appears on screen.
 """
 
 from __future__ import annotations
@@ -89,6 +120,15 @@ if STATES:
 SHEETS = "--sheets" in ARGS
 if SHEETS:
     ARGS.remove("--sheets")
+INSTALLER = "--installer" in ARGS
+if INSTALLER:
+    ARGS.remove("--installer")
+PERMISSIONS = "--permissions" in ARGS
+if PERMISSIONS:
+    ARGS.remove("--permissions")
+ALERTS = "--alerts" in ARGS
+if ALERTS:
+    ARGS.remove("--alerts")
 OUT = Path(ARGS[0]) if ARGS else REPO / ".probe-renders"
 sys.path.insert(0, str(REPO))
 
@@ -268,6 +308,80 @@ def render_overlay(out: Path) -> int:
     return smoke.returncode
 
 
+def render_installer(out: Path) -> int:
+    """Compile the launcher in a scratch folder and let it draw its setup
+    window's screens; 0 if every picture was written."""
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="whisper-face-installer-probe.") as scratch:
+        app = Path(scratch) / "Whisper Face.app"
+        built = subprocess.run(
+            [sys.executable, str(REPO / "scripts" / "macos_launcher_app.py"),
+             "build", "--app", str(app)], capture_output=True, text=True)
+        if built.returncode:
+            print(built.stderr.strip() or "the launcher did not build")
+            return built.returncode
+        drawn = subprocess.run(
+            [str(app / "Contents" / "MacOS" / "Whisper Face"),
+             "--render-setup-window", str(out.resolve())],
+            capture_output=True, text=True, timeout=120)
+        if drawn.returncode:
+            print(drawn.stderr.strip() or "the setup window did not draw")
+            return drawn.returncode
+    print(f"done → {out}")
+    return 0
+
+
+if INSTALLER:
+    OUT.mkdir(parents=True, exist_ok=True)
+    raise SystemExit(render_installer(OUT))
+
+
+def render_permissions(out: Path) -> int:
+    """Draw the permission window's stages with fake seams; never shown."""
+    from AppKit import (NSApplication, NSAppearance, NSAppearanceNameAqua,
+                        NSAppearanceNameDarkAqua, NSBitmapImageFileTypePNG)
+    import whisper_face_gui as gui
+    NSApplication.sharedApplication()
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("the probe never acts")
+
+    samples = (
+        ("both", ("accessibility", "input_monitoring"), "missing"),
+        ("accessibility", ("accessibility",), "missing"),
+        ("input-monitoring", ("input_monitoring",), "missing"),
+        ("confirm", ("accessibility", "input_monitoring"), "confirm"),
+        ("failed", ("accessibility", "input_monitoring"), "failed"),
+    )
+    for name, missing, stage in samples:
+        for suffix, appearance in (("light", NSAppearanceNameAqua),
+                                   ("dark", NSAppearanceNameDarkAqua)):
+            flow = gui.PermissionHelpFlow(
+                missing=missing, opener=refuse, runner=refuse,
+                restart=refuse, record=lambda _line: None)
+            flow.stage = stage
+            controller = gui.PermissionHelpWindowController.alloc() \
+                .initWithFlow_(flow)
+            controller.window.setAppearance_(
+                NSAppearance.appearanceNamed_(appearance))
+            controller.render()
+            view = controller.window.contentView()
+            view.layoutSubtreeIfNeeded()
+            rep = view.bitmapImageRepForCachingDisplayInRect_(view.bounds())
+            view.cacheDisplayInRect_toBitmapImageRep_(view.bounds(), rep)
+            data = rep.representationUsingType_properties_(
+                NSBitmapImageFileTypePNG, {})
+            data.writeToFile_atomically_(
+                str(out / f"permissions-{name}-{suffix}.png"), True)
+    print(f"done → {out}")
+    return 0
+
+
+if PERMISSIONS:
+    OUT.mkdir(parents=True, exist_ok=True)
+    raise SystemExit(render_permissions(OUT))
+
 if OVERLAY:
     from AppKit import NSApplication as _Application
 
@@ -288,7 +402,9 @@ from AppKit import (  # noqa: E402
     NSAppearance,
     NSAppearanceNameAqua,
     NSAppearanceNameDarkAqua,
+    NSAlert,
     NSBitmapImageFileTypePNG,
+    NSImage,
 )
 
 NSApplication.sharedApplication()
@@ -859,6 +975,69 @@ def render_sheets(suffix: str) -> None:
     model.actions = GUIActions()
 
 
+def render_alerts(suffix: str) -> None:
+    """Lay out each kind of alert and draw its panel, never running it."""
+    from AppKit import (
+        NSBezierPath, NSBitmapImageRep, NSColor, NSColorSpace,
+        NSCompositingOperationSourceOver, NSGraphicsContext, NSMakeRect,
+    )
+
+    def picture(alert, name: str) -> None:
+        alert.layout()
+        panel = alert.window()
+        appearance = window.appearance()
+        panel.setAppearance_(appearance)
+        content = panel.contentView()
+        content.layoutSubtreeIfNeeded()
+        bounds = content.bounds()
+        drawn = content.bitmapImageRepForCachingDisplayInRect_(bounds)
+        content.cacheDisplayInRect_toBitmapImageRep_(bounds, drawn)
+        # The panel's material is the system's and is not in the picture;
+        # the window background colour stands in for it.
+        canvas = NSBitmapImageRep.alloc() \
+            .initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(
+                None, drawn.pixelsWide(), drawn.pixelsHigh(), 8, 4, True,
+                False, "NSDeviceRGBColorSpace", 0, 0)
+        canvas.setSize_(bounds.size)
+
+        def draw():
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.setCurrentContext_(
+                NSGraphicsContext.graphicsContextWithBitmapImageRep_(canvas))
+            whole = NSMakeRect(0, 0, bounds.size.width, bounds.size.height)
+            NSColor.windowBackgroundColor().colorUsingColorSpace_(
+                NSColorSpace.sRGBColorSpace()).setFill()
+            NSBezierPath.fillRect_(whole)
+            drawn.drawInRect_fromRect_operation_fraction_respectFlipped_hints_(
+                whole, whole, NSCompositingOperationSourceOver, 1.0, False,
+                None)
+            NSGraphicsContext.restoreGraphicsState()
+
+        appearance.performAsCurrentDrawingAppearance_(draw)
+        write_picture(canvas, name)
+
+    update = NSAlert.alloc().init()
+    icon = NSImage.alloc().initWithContentsOfFile_(
+        str(REPO / "icons" / "WhisperFace.icns"))
+    if icon is None:
+        raise SystemExit("icons/WhisperFace.icns did not load")
+    update.setIcon_(icon)
+    update.setMessageText_("An update is available.")
+    update.setInformativeText_(
+        "Build b7f028f \u2192 c0ffee1\n3 new commits available. Update now?")
+    update.addButtonWithTitle_("Update")
+    update.addButtonWithTitle_("Later")
+    picture(update, f"alert-update-{suffix}")
+
+    confirm = NSAlert.alloc().init()
+    controller._show_the_face(confirm)
+    confirm.setMessageText_("Clear recent dictations?")
+    confirm.setInformativeText_("This removes them from this Mac.")
+    confirm.addButtonWithTitle_("Clear")
+    confirm.addButtonWithTitle_("Cancel")
+    picture(confirm, f"alert-window-{suffix}")
+
+
 for appearance_name, suffix in (
         (NSAppearanceNameAqua, "light"),
         (NSAppearanceNameDarkAqua, "dark")):
@@ -868,6 +1047,10 @@ for appearance_name, suffix in (
 
     if SHEETS:
         render_sheets(suffix)
+        continue
+
+    if ALERTS:
+        render_alerts(suffix)
         continue
 
     model.state = replace(STATE, section="Home")

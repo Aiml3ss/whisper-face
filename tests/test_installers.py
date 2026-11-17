@@ -4,9 +4,11 @@
 # ///
 
 import ast
+import json
 import os
 import plistlib
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -123,10 +125,19 @@ class InstallerContractTests(unittest.TestCase):
         cls.script = (ROOT / "dictate.py").read_text(encoding="utf-8")
         cls.lock = (ROOT / "dictate.py.lock").read_text(encoding="utf-8")
 
+    def shell_personal_files(self):
+        """The source of setup.sh's personal_files array, which the
+        uninstall inventory names its personal tier by."""
+        match = re.search(r"(?ms)^personal_files=\(\n.*?^\)\n", self.shell)
+        self.assertIsNotNone(match, "setup.sh no longer names personal_files")
+        return match.group(0)
+
     def shell_uninstall(self):
-        """The uninstall block of setup.sh, up to the install path proper."""
+        """The uninstall block of setup.sh, up to the install path proper,
+        after the personal-file list it removes from."""
         start = self.shell.index("# --- Uninstall ---")
-        return self.shell[start:self.shell.index("\nrequired=(", start)]
+        return (self.shell_personal_files()
+                + self.shell[start:self.shell.index("\nrequired=(", start)])
 
     def powershell_uninstall(self):
         """The uninstall block of setup.ps1, up to the install path proper."""
@@ -386,13 +397,20 @@ class InstallerContractTests(unittest.TestCase):
             self.powershell.index("if ($Uninstall) {\n    $UninstallStatus"),
             self.powershell.index("\n$Required = @("))
 
+    def mac_personal_files(self):
+        """setup.sh's one list of personal files, in its own order."""
+        source = self.shell_personal_files()
+        return tuple(source[source.index("(") + 1:source.rindex(")")].split())
+
     def test_uninstall_keeps_personal_files_unless_explicitly_asked(self):
         shell = self.shell_uninstall()
         powershell = self.powershell_uninstall()
         # Every personal file is listed, and listed only behind its own flag.
+        # On the Mac the list is one array, which an update of the drag
+        # install also carries across, so the two can never disagree.
+        self.assertEqual(self.mac_personal_files(), PERSONAL_FILES)
         for personal in PERSONAL_FILES:
             with self.subTest(personal=personal):
-                self.assertIn(personal, shell)
                 self.assertIn(personal, powershell)
         mac_personal = shell[shell.index('step "personal files'):]
         mac_personal = mac_personal[:mac_personal.index('step "never touched')]
@@ -400,11 +418,19 @@ class InstallerContractTests(unittest.TestCase):
             powershell.index('Write-Step "personal files'):]
         windows_personal = windows_personal[
             :windows_personal.index('Write-Step "never touched')]
+        self.assertIn('for personal_file in "${personal_files[@]}"; do',
+                      mac_personal)
         for personal in PERSONAL_FILES:
             with self.subTest(personal=personal, tier="personal"):
-                self.assertIn(personal, mac_personal)
                 self.assertIn(personal, windows_personal)
         self.assertIn('remove_installed_path "$REMOVE_PERSONAL"', mac_personal)
+        # The copies an update of the drag install keeps hold copies of
+        # these files, so they go only with them.
+        for kept in ("checkout.previous", "checkout.incoming"):
+            with self.subTest(kept=kept):
+                self.assertIn(
+                    'remove_installed_path "$REMOVE_PERSONAL" \\\n'
+                    f'            "$service_receipt_dir/{kept}"', mac_personal)
         self.assertIn("Remove-InstalledPath $RemovePersonalData",
                       windows_personal)
         # No personal file may be reachable from an unconditional removal.
@@ -1435,6 +1461,329 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("== installation complete", ready.stdout)
         self.assertIn("Hold Right Option, speak, and release to paste.",
                       ready.stdout)
+
+    # --- App mode: the drag-install app runs setup.sh --app ----------------
+
+    def app_mode(self, home, checkout, *, receipt=None, app_bundle="",
+                 uninstall=0, mode="full", script="resolve_app_mode\n"):
+        """Run resolve_app_mode the way setup.sh's top level does."""
+        support = Path(home) / "Library/Application Support/Whisper Face"
+        support.mkdir(parents=True, exist_ok=True)
+        receipt_path = support / "launcher-install.json"
+        if receipt is not None:
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        return run_setup_functions(
+            ["fail", "receipt_value", "resolve_app_mode"],
+            script + 'echo "APP_MODE=$APP_MODE APP_BUNDLE=$APP_BUNDLE"\n',
+            variables={"DIR": checkout, "VERIFY_ONLY": 0, "UNINSTALL": uninstall,
+                       "MODE": mode, "APP_MODE": 0,
+                       "APP_BUNDLE": app_bundle,
+                       "launcher_receipt": receipt_path,
+                       "managed_checkout": support / "checkout"})
+
+    @staticmethod
+    def fake_drag_app(root):
+        app = Path(root) / "Applications" / "Whisper Face.app"
+        helper = app / "Contents/Helpers/uv"
+        helper.parent.mkdir(parents=True)
+        helper.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+        helper.chmod(0o755)
+        return app
+
+    @needs_bash
+    def test_app_mode_sticks_to_a_checkout_its_receipt_binds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            app = self.fake_drag_app(root)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            # Asked for explicitly, as the app does.
+            asked = self.app_mode(root / "home", checkout, app_bundle=str(app))
+            self.assertEqual(asked.returncode, 0, asked.stderr)
+            self.assertIn(f"APP_MODE=1 APP_BUNDLE={app}", asked.stdout)
+            # A plain rerun here, as Install.command or the git updater
+            # makes, finds the app in the schema 2 receipt and keeps to it.
+            receipt = {"schema_version": 2, "checkout": str(checkout),
+                       "app": str(app), "bundle_id":
+                       "com.berg.whisper-face.launcher"}
+            sticky = self.app_mode(root / "home", checkout, receipt=receipt)
+            self.assertEqual(sticky.returncode, 0, sticky.stderr)
+            self.assertIn(f"APP_MODE=1 APP_BUNDLE={app}", sticky.stdout)
+            # A folder install's schema 1 receipt changes nothing.
+            folder = self.app_mode(root / "home", checkout, receipt={
+                "schema_version": 1, "checkout": str(checkout)})
+            self.assertEqual(folder.returncode, 0, folder.stderr)
+            self.assertIn("APP_MODE=0 APP_BUNDLE=\n", folder.stdout)
+            # Nor does an app-managed receipt for some other checkout.
+            other = self.app_mode(root / "home", checkout, receipt={
+                **receipt, "checkout": str(root / "elsewhere")})
+            self.assertIn("APP_MODE=0", other.stdout)
+            # An app that has gone is named, never replaced by a launcher
+            # built here.
+            gone = self.app_mode(root / "home", checkout, receipt={
+                **receipt, "app": str(root / "Trash/Whisper Face.app")})
+            self.assertEqual(gone.returncode, 1)
+            self.assertIn("is no longer at", gone.stderr)
+            self.assertIn("open Whisper Face from your Applications folder",
+                          gone.stderr)
+            # Server-only never runs through the app.
+            headless = self.app_mode(root / "home", checkout,
+                                     app_bundle=str(app), mode="server-only")
+            self.assertEqual(headless.returncode, 1)
+            self.assertIn("needs a folder install", headless.stderr)
+
+    @needs_bash
+    def test_the_apps_own_checkout_is_never_set_up_any_other_way(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            managed = (home / "Library/Application Support/Whisper Face"
+                       / "checkout")
+            managed.mkdir(parents=True)
+            refused = self.app_mode(home, managed)
+            self.assertEqual(refused.returncode, 1)
+            self.assertIn("belongs to the Whisper Face app", refused.stderr)
+            self.assertNotIn("APP_MODE=", refused.stdout)
+            # Uninstalling it still works without the app.
+            uninstall = self.app_mode(home, managed, uninstall=1)
+            self.assertEqual(uninstall.returncode, 0, uninstall.stderr)
+            # And the whole installer, run as Install.command runs it, stops
+            # there before it writes a log or looks for Homebrew.
+            (managed / "setup.sh").write_bytes(
+                (ROOT / "setup.sh").read_bytes())
+            (managed / "setup.sh").chmod(0o755)
+            bin_dir = home / "bin"
+            bin_dir.mkdir()
+            for tool in REFUSED_TOOLS:
+                stub = bin_dir / tool
+                stub.write_text('#!/bin/bash\necho "refused: $0" >&2\nexit 97\n')
+                stub.chmod(0o755)
+            result = subprocess.run(
+                ["/bin/bash", str(managed / "setup.sh")],
+                env={"HOME": str(home), "LANG": "C",
+                     "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin"},
+                text=True, capture_output=True, timeout=60,
+                stdin=subprocess.DEVNULL)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("belongs to the Whisper Face app", result.stderr)
+            self.assertNotIn("refused:", result.stderr)
+            self.assertFalse((managed / "install.log").exists())
+
+    def run_whole_setup(self, home, checkout, *arguments):
+        """The whole installer from a staged copy, with every tool refused.
+
+        The staged copy holds setup.sh alone, so the installer stops at its
+        check for the repository's files, before any tool, download or
+        service: what it did before that is what a test can see.
+        """
+        bin_dir = Path(home) / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        for tool in REFUSED_TOOLS:
+            stub = bin_dir / tool
+            stub.write_text('#!/bin/bash\necho "refused: $0" >&2\nexit 97\n')
+            stub.chmod(0o755)
+        return subprocess.run(
+            ["/bin/bash", str(Path(checkout) / "setup.sh"), *arguments],
+            env={"HOME": str(home), "LANG": "C",
+                 "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin"},
+            text=True, capture_output=True, timeout=60,
+            stdin=subprocess.DEVNULL)
+
+    @needs_bash
+    def test_an_update_carries_every_personal_file_and_nothing_else(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            home = root / "home"
+            app = self.fake_drag_app(root)
+            support = home / "Library/Application Support/Whisper Face"
+            previous = support / "checkout.previous"
+            current = support / "checkout"
+            for folder in (previous, current):
+                folder.mkdir(parents=True)
+            (previous / "setup.sh").write_text("# the old release\n")
+            (previous / "dictate.py").write_text("# the old release\n")
+            shutil.copyfile(ROOT / "setup.sh", current / "setup.sh")
+            (current / "setup.sh").chmod(0o755)
+            for name in self.mac_personal_files():
+                (previous / name).write_text(f"mine: {name}\n")
+                (previous / name).chmod(0o644)
+            # A link is never followed, and nothing off the list moves.
+            (previous / "snippets.json").unlink()
+            (previous / "snippets.json").symlink_to(root / "elsewhere.json")
+            (root / "elsewhere.json").write_text("not mine to copy\n")
+            (previous / "notes-of-my-own.txt").write_text("stays\n")
+            # A copy an earlier attempt left is replaced by the current one.
+            (current / "dictionary.txt").write_text("stale\n")
+
+            run = self.run_whole_setup(home, current, "--app", str(app),
+                                       "--carry-over-from", str(previous))
+            self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+            self.assertIn("repository is incomplete", run.stdout + run.stderr)
+            self.assertNotIn("refused:", run.stderr)
+            carried = [name for name in self.mac_personal_files()
+                       if name != "snippets.json"]
+            for name in carried:
+                with self.subTest(name=name):
+                    destination = current / name
+                    self.assertTrue(destination.is_file())
+                    self.assertFalse(destination.is_symlink())
+                    self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
+                    if name != "install.log":
+                        self.assertEqual(destination.read_text(),
+                                         f"mine: {name}\n")
+                    # The copy being replaced keeps its own.
+                    self.assertEqual((previous / name).read_text(),
+                                     f"mine: {name}\n")
+            self.assertFalse((current / "snippets.json").exists())
+            self.assertFalse((current / "notes-of-my-own.txt").exists())
+            self.assertIn("not carried over, not a regular file: snippets.json",
+                          run.stdout)
+            # install.log came across whole, and this run appended to it.
+            log = (current / "install.log").read_text()
+            self.assertTrue(log.startswith("mine: install.log\n"), log[:200])
+            self.assertIn(f"== carried over from {previous}: "
+                          f"{len(carried)} private file(s)", log)
+            self.assertIn("repository is incomplete", log)
+            self.assertEqual(log.count("== carried over from"), 1)
+
+            # Only the app's update may ask for it, and only for another copy.
+            for arguments, words in (
+                    (("--carry-over-from", str(previous)), "needs --app"),
+                    (("--app", str(app), "--carry-over-from"),
+                     "needs the path of the copy"),
+                    (("--app", str(app), "--carry-over-from", str(previous),
+                      "--verify"), "needs --app and an install")):
+                with self.subTest(arguments=arguments):
+                    refused = self.run_whole_setup(home, current, *arguments)
+                    self.assertEqual(refused.returncode, 2)
+                    self.assertIn(words, refused.stderr)
+            for source, words in (
+                    (current, "names this copy itself"),
+                    (root / "Applications", "is not a copy of Whisper Face"),
+                    (root / "missing", "is not a folder"),
+                    (Path("relative"), "needs the full path")):
+                with self.subTest(source=str(source)):
+                    refused = self.run_whole_setup(
+                        home, current, "--app", str(app),
+                        "--carry-over-from", str(source))
+                    self.assertEqual(refused.returncode, 1)
+                    self.assertIn(words, refused.stderr)
+
+    @needs_bash
+    def test_app_mode_runs_the_service_through_the_app_and_skips_homebrew(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = root / "Applications" / "Whisper Face.app"
+            plist = root / "service.plist"
+            result = run_setup_functions(
+                ["fail", "escape_sed_replacement", "render_plist",
+                 "render_dictate_plist"],
+                f'render_dictate_plist "{plist}" "/checkout/.models/bin/uv"\n',
+                variables={"DIR": ROOT, "MODE": "full", "APP_MODE": 1,
+                           "APP_BUNDLE": app, "PYTHON_VERSION": "3.12",
+                           "VERIFY_ONLY": 0})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            arguments = plistlib.loads(plist.read_bytes())["ProgramArguments"]
+            self.assertEqual(arguments[:2], [
+                f"{app}/Contents/MacOS/Whisper Face", "--run"])
+            self.assertEqual(arguments[2], "/checkout/.models/bin/uv")
+            # A folder install renders exactly what it always has.
+            folder = run_setup_functions(
+                ["fail", "escape_sed_replacement", "render_plist",
+                 "render_dictate_plist"],
+                f'render_dictate_plist "{plist}" "/opt/homebrew/bin/uv"\n',
+                variables={"DIR": ROOT, "MODE": "full", "APP_MODE": 0,
+                           "PYTHON_VERSION": "3.12", "VERIFY_ONLY": 0})
+            self.assertEqual(folder.returncode, 0, folder.stderr)
+            arguments = plistlib.loads(plist.read_bytes())["ProgramArguments"]
+            self.assertTrue(arguments[0].endswith(
+                "/Applications/Whisper Face.app/Contents/MacOS/Whisper Face"))
+            self.assertNotIn(str(app), arguments[0])
+        # In app mode the Homebrew bootstrap, ffmpeg and the locally built
+        # launcher are all on the other branch.
+        homebrew = self.shell.index("# --- Homebrew and native dependencies")
+        branch = self.shell[homebrew:self.shell.index("require_build_tools\n", homebrew)]
+        self.assertLess(branch.index('if [ "${APP_MODE:-0}" -eq 1 ]; then\n    use_app_uv\nelse'),
+                        branch.index("installing Homebrew"))
+        verify = shell_function("verify_install")
+        self.assertLess(verify.index('if [ "${APP_MODE:-0}" -eq 1 ]'),
+                        verify.index('command -v ffmpeg'))
+        launcher = self.shell[self.shell.index(
+            'if [ "$MODE" = "full" ] && [ "${APP_MODE:-0}" -eq 1 ]; then\n    # Nothing is built'):]
+        self.assertLess(launcher.index("macos_launcher_app.py\" adopt"),
+                        launcher.index("installing the generic Whisper Face app launcher"))
+        use_app_uv = shell_function("use_app_uv")
+        self.assertIn('"$app_uv"', use_app_uv)
+        self.assertIn('UV="$checkout_uv"', use_app_uv)
+        self.assertNotIn("curl", use_app_uv)
+        # The dry run neither downloads nor leaves a uv cache in the home.
+        self.assertIn("run --offline --no-cache", shell_function("app_mode_dry_run"))
+        # app mode never calls the python3 shim, which on a Mac without the
+        # developer tools opens Apple's install dialog.
+        for name in ("use_app_uv", "app_mode_dry_run", "resolve_app_mode"):
+            self.assertNotIn("python3", shell_function(name))
+
+    @needs_bash
+    def test_app_mode_announces_the_phases_the_setup_window_lists(self):
+        import importlib.util
+        specification = importlib.util.spec_from_file_location(
+            "whisper_face_launcher_tool_for_installer",
+            ROOT / "scripts" / "macos_launcher_app.py")
+        tool = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(tool)
+        announced = re.findall(r"(?m)^\s*phase ([a-z-]+)$", self.shell)
+        self.assertEqual(announced[:len(tool.SETUP_PHASES)],
+                         list(tool.SETUP_PHASES))
+        self.assertEqual(sorted(announced[len(tool.SETUP_PHASES):]),
+                         sorted(tool.FINISHED_PHASES))
+        self.assertIn('echo "@@ phase $1"', shell_function("phase"))
+        # Only app mode prints them; a folder install's output is unchanged.
+        quiet = run_setup_functions(["phase"], "phase prepare\n",
+                                    variables={"APP_MODE": 0})
+        self.assertEqual(quiet.stdout, "")
+        loud = run_setup_functions(["phase"], "phase prepare\n",
+                                   variables={"APP_MODE": 1})
+        self.assertEqual(loud.stdout, "@@ phase prepare\n")
+
+    @needs_bash
+    def test_uninstalling_an_app_managed_copy_leaves_the_app_alone(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = self.fake_drag_app(root)
+            names = [name for name in (
+                "fail", "step", "keep_installed_path", "remove_installed_path",
+                "prune_empty_directory", "unload_installed_agent",
+                "remove_ollama_cleanup_model", "uninstall_whisper_face")]
+            result = run_setup_functions(
+                names, self.shell_personal_files() + "uninstall_whisper_face\n",
+                variables={
+                    "DIR": root / "checkout", "VERIFY_ONLY": 0,
+                    "ASSUME_YES": 0, "REMOVE_MODELS": 0, "REMOVE_PERSONAL": 0,
+                    "APP_MODE": 1, "APP_BUNDLE": app,
+                    "uninstall_removed": 0, "uninstall_absent": 0,
+                    "uninstall_pending": 0, "uninstall_failed": 0,
+                    "dictate_plist": root / "d.plist",
+                    "ollama_plist": root / "o.plist",
+                    "launcher_app": root / "home-apps/Whisper Face.app",
+                    "launcher_receipt": root / "r.json",
+                    "ollama_service_receipt": root / "o.sha256",
+                    "service_receipt_dir": root / "state",
+                    "parakeet_helper": root / "h", "speech_runtime": root / "s",
+                    "speech_runtime_cache": root / "c",
+                    "parakeet_model_dir": root / "m",
+                    "whisper_fast_cache": root / "f",
+                    "whisper_large_cache": root / "l",
+                    "whisper_fast_lock": root / "fl",
+                    "whisper_large_lock": root / "ll"},
+                stubs={"launchctl": "exit 1"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"keeping       {app}", result.stdout)
+            self.assertIn("drag it to the Trash yourself", result.stdout)
+            self.assertNotIn(f"would remove  {app}", result.stdout)
+            self.assertTrue(app.exists())
+            # The copies an update keeps are named, in the personal tier.
+            for kept in ("checkout.previous", "checkout.incoming"):
+                with self.subTest(kept=kept):
+                    self.assertIn(str(root / "state" / kept), result.stdout)
 
     @needs_bash
     def test_a_server_only_install_says_where_the_bearer_token_is(self):

@@ -32,6 +32,12 @@ offline with a fake runner and never hard-codes a network endpoint.
 The separate, future *signed-release* path (``scripts/release_manifest.py``,
 ``scripts/safe_update_advisor.py``, ``scripts/side_by_side_update.py``) is for
 published, notarized releases and is intentionally untouched by this module.
+
+A copy set up by the Whisper Face app built for drag install follows published
+releases, not the tip of git, so this module refuses it outright (see
+:func:`app_managed`): it runs no ``git`` command there, which on a Mac without
+Apple's developer tools would open their install dialog, and it never installs
+unreleased commits under that app's name.
 """
 
 from __future__ import annotations
@@ -53,6 +59,11 @@ DEFAULT_INSTALLER = "Install.command"
 DEFAULT_INSTALL_RECEIPT = (
     Path.home() / "Library" / "Application Support" / "Whisper Face" /
     "launcher-install.json")
+
+# What a person reads when they ask an app-managed copy for an update.
+APP_MANAGED_MESSAGE = (
+    "This copy of Whisper Face was set up by the Whisper Face app, so its "
+    "updates come as a new download of the app, not from here.")
 
 # One network op (fetch) plus fast local plumbing; keep a menu-driven,
 # background-thread check bounded so it can never hang the app forever.
@@ -117,6 +128,35 @@ def _installed_revision(receipt) -> str:
         return ""
     revision = payload.get("source_revision") if isinstance(payload, dict) else None
     return revision if isinstance(revision, str) and revision.strip() else ""
+
+
+def app_managed(checkout, receipt) -> bool:
+    """True for a checkout the Whisper Face app built for drag install owns.
+
+    That is the app's own checkout folder, beside the receipt, or any checkout
+    a schema 2 receipt binds to an app. Reading the receipt is the only thing
+    this does; an unreadable receipt leaves the answer to the folder alone.
+    """
+    checkout = Path(checkout)
+    receipt = Path(receipt)
+    try:
+        if checkout.resolve() == (receipt.parent / "checkout").resolve():
+            return True
+    except OSError:
+        pass
+    try:
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(payload, dict) or payload.get("schema_version") != 2:
+        return False
+    bound = payload.get("checkout")
+    if not isinstance(payload.get("app"), str) or not isinstance(bound, str):
+        return False
+    try:
+        return Path(bound).resolve() == checkout.resolve()
+    except OSError:
+        return False
 
 
 def _is_ancestor(runner: Runner, checkout: Path, older: str,
@@ -185,6 +225,9 @@ def check_for_update(checkout, remote: str = DEFAULT_REMOTE, *,
     receipt = DEFAULT_INSTALL_RECEIPT if install_receipt is None else install_receipt
     result = {"available": False, "current": "", "latest": "",
               "behind": 0, "error": None}
+    if app_managed(checkout, receipt):
+        # Before any git command: the app follows releases, not git.
+        return {**result, "app_managed": True, "error": APP_MANAGED_MESSAGE}
     try:
         head = _rev_parse(runner, checkout, "HEAD")
         if not head:
@@ -320,6 +363,9 @@ def apply_update(checkout, target_rev: str, *, runner: Runner,
     checkout = Path(checkout)
     receipt = DEFAULT_INSTALL_RECEIPT if install_receipt is None else install_receipt
     result = {"status": "failed", "from": "", "to": target_rev, "error": None}
+    if app_managed(checkout, receipt):
+        # Nothing moves and no installer runs; see check_for_update.
+        return {**result, "app_managed": True, "error": APP_MANAGED_MESSAGE}
     # Bound before the try so the recovery path can still name the branch when
     # the failure happens partway through reading it.
     previous_branch = ""

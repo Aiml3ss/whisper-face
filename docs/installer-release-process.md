@@ -23,7 +23,14 @@ machine without maintaining a second copy of the application.
 the PEP 723 dependency block, and `dictate.py.lock` are the runtime source of
 truth. The Mac LaunchAgent and
 Windows scheduled task execute those files from the checkout. Installers may
-provision and verify the runtime, but must never embed a frozen copy of it.
+provision and verify the runtime. An app built for drag install carries the
+exact published source archive of its own release, verified against its
+checksum before use, and installs from it; installers still execute the
+checkout as the single source of truth and never embed runtime source.
+
+The drag-install app never runs anything from the archive itself. It unpacks
+the archive into `~/Library/Application Support/Whisper Face/checkout` and runs
+that checkout's own `setup.sh`, so the login service still executes a checkout.
 
 ## Change classification
 
@@ -34,7 +41,7 @@ provision and verify the runtime, but must never embed a frozen copy of it.
 | Model loading or inference options | Confirm preload exercises the new path and service templates still supply required environment options. |
 | Runtime file or required asset | Add it to the required-file checks in `setup.sh` and `setup.ps1`; update packaging documentation. |
 | Startup argument, port, service, permission, or health behavior | Update both platform service definitions, readiness checks, verification, and user guidance. |
-| Private state or default preference | Update its template and preservation/permission logic on both platforms. Never overwrite an existing user's state. |
+| Private state or default preference | Update its template and preservation/permission logic on both platforms. Never overwrite an existing user's state. On the Mac, a new personal file joins `personal_files` in `setup.sh`: the uninstaller's personal tier and the drag install's update (`--carry-over-from`) both read that one list. |
 | Internal runtime-only implementation | Installer edits may be unnecessary because services run the current checkout. Record that conclusion and still run every release gate. |
 
 ## Required gates
@@ -112,6 +119,7 @@ uv run tests/test_macos_distribution.py
 uv run tests/test_windows_distribution.py
 uv run tests/test_safe_update_advisor.py
 uv run tests/test_side_by_side_update.py
+uv run tests/test_app_update.py
 uv run tests/test_self_update.py
 ```
 

@@ -81,11 +81,19 @@ class ReleaseManifestTests(unittest.TestCase):
             self.assertTrue(
                 installation["same_checkout_reinstall_preserves_private_state"]
             )
-            self.assertTrue(
+            # The disk image is the drag-install app, which manages one
+            # checkout of its own and carries private files into the next
+            # release's checkout itself.
+            self.assertFalse(
                 installation[
                     "separate_checkout_requires_manual_private_state_migration"
                 ]
             )
+            self.assertTrue(installation["automatic_cross_checkout_migration"])
+            self.assertEqual(installation["entrypoint"], "Whisper Face.app")
+            self.assertEqual(installation["strategy"], "app-managed")
+            self.assertIn("Application Support/Whisper Face/checkout/setup.sh",
+                          installation["verification"])
             by_name = {item["name"]: item for item in payload["artifacts"]}
             self.assertEqual(
                 by_name[source.name]["sha256"], hashlib.sha256(source.read_bytes()).hexdigest()
@@ -155,6 +163,18 @@ class ReleaseManifestTests(unittest.TestCase):
             )
             self.assertEqual(state.returncode, 2)
             self.assertIn("must not be unconditional", state.stderr)
+
+            # A source bundle installed in place never claims to move private
+            # state between folders; only the drag-install app does.
+            payload["installation"]["preserves_private_state"] = False
+            payload["installation"]["automatic_cross_checkout_migration"] = True
+            manifest.write_text(json.dumps(payload), encoding="utf-8")
+            migration = self.run_tool(
+                "verify", "--manifest", str(manifest),
+                "--artifact-dir", str(output), check=False,
+            )
+            self.assertEqual(migration.returncode, 2)
+            self.assertIn("migration requirement", migration.stderr)
 
     def test_manifest_rejects_partial_rollback_and_false_notarization(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -331,6 +351,44 @@ class MacDistributionContractTests(unittest.TestCase):
                 cwd=ROOT, text=True, capture_output=True,
             )
             self.assertEqual(verification.returncode, 0, verification.stderr)
+
+            # An install made before the icon changed is stale, like one built
+            # from older launcher source: verify refuses it, and the installer
+            # builds the current app and binds its receipt to that one.
+            module = load_launcher_tool()
+            earlier = root / "earlier" / "Whisper Face.app"
+            earlier_receipt = root / "earlier-state" / "launcher-install.json"
+            subprocess.run(["ditto", str(app), str(earlier)], check=True)
+            (earlier / "Contents/Resources/WhisperFace.icns").write_bytes(
+                b"icns" + (8).to_bytes(4, "big"))
+            subprocess.run(
+                ["codesign", "--force", "--sign", "-", "--identifier",
+                 "com.berg.whisper-face.launcher", str(earlier)],
+                check=True, capture_output=True)
+            module._write_receipt(earlier_receipt, ROOT, earlier)
+            stale = subprocess.run([
+                sys.executable, str(LAUNCHER_TOOL), "verify",
+                "--app", str(earlier), "--checkout", str(ROOT),
+                "--receipt", str(earlier_receipt),
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual(stale.returncode, 2, stale.stderr)
+            self.assertIn("icon differs", stale.stderr)
+            reinstall = subprocess.run([
+                sys.executable, str(LAUNCHER_TOOL), "install",
+                "--app", str(earlier), "--checkout", str(ROOT),
+                "--receipt", str(earlier_receipt),
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual(reinstall.returncode, 0, reinstall.stderr)
+            self.assertEqual(first, {
+                path.relative_to(earlier).as_posix(): path.read_bytes()
+                for path in earlier.rglob("*") if path.is_file()
+            })
+            renewed = subprocess.run([
+                sys.executable, str(LAUNCHER_TOOL), "verify",
+                "--app", str(earlier), "--checkout", str(ROOT),
+                "--receipt", str(earlier_receipt),
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual(renewed.returncode, 0, renewed.stderr)
 
             # A substituted binary that is re-signed ad-hoc carries a valid
             # signature. Without a recorded digest it is not trusted, and the
@@ -513,7 +571,10 @@ class MacDistributionContractTests(unittest.TestCase):
             "SOURCE_DATE_EPOCH",
             "verify_macos_package.py\" stamp",
             "verify_macos_package.py\" verify-artifacts",
-            "macos_launcher_app.py\" build",
+            "macos_launcher_app.py\" package",
+            "macos_launcher_app.py\" verify-drag",
+            "-volname \"$VOLUME_NAME\"",
+            "ln -s /Applications \"$DMG_ROOT/Applications\"",
             "codesign --force --options runtime --timestamp",
             "--require-signed",
             "config/macos-signing-policy.json",
@@ -553,12 +614,29 @@ class MacDistributionContractTests(unittest.TestCase):
         self.assertIn("Contents/Resources/WhisperFace.icns", module.BASE_FILES)
         self.assertEqual(module._expected_plist()["CFBundleIconFile"], "WhisperFace")
         self.assertEqual(module._icon_bytes(), data)
+        # scripts/make_app_icon.py packs every size from 16 to 512 points at
+        # 1x and 2x; a missing one makes macOS scale another, blurred.
+        entries, offset = {}, 8
+        while offset < len(data):
+            length = int.from_bytes(data[offset + 4:offset + 8], "big")
+            self.assertGreater(length, 8)
+            entries[data[offset:offset + 4]] = data[offset + 8:offset + length]
+            offset += length
+        self.assertEqual(offset, len(data))
+        self.assertLessEqual({b"ic04", b"ic05"}, set(entries))   # 16, 32 px
+        for kind, pixels in ((b"ic11", 32), (b"ic12", 64), (b"ic07", 128),
+                             (b"ic13", 256), (b"ic08", 256), (b"ic14", 512),
+                             (b"ic09", 512), (b"ic10", 1024)):
+            with self.subTest(kind=kind):
+                png = entries[kind]
+                self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n")
+                self.assertEqual(int.from_bytes(png[16:20], "big"), pixels)
+                self.assertEqual(int.from_bytes(png[20:24], "big"), pixels)
         # Every consumer of the bundle contract has to agree, or a release
         # artifact would be rejected as containing unexpected files.
-        self.assertIn(
-            "Contents/Resources/WhisperFace.icns",
-            self.read("scripts/verify_macos_package.py"),
-        )
+        self.assertIn("Contents/Resources/WhisperFace.icns", module.DRAG_FILES)
+        # The disk image verifier checks the app with this same contract.
+        self.assertIn('"verify-drag"', self.read("scripts/verify_macos_package.py"))
         self.assertIn("icons/WhisperFace.icns", self.read("scripts/package_macos.sh"))
         with tempfile.TemporaryDirectory() as directory:
             missing = Path(directory) / "absent.icns"
@@ -670,6 +748,559 @@ class MacDistributionContractTests(unittest.TestCase):
         self.assertIn("nvidia/parakeet-tdt-0.6b-v2", notices)
         self.assertIn("nvidia/parakeet-unified-en-0.6b", notices)
         self.assertIn("NVIDIA Open Model License", notices)
+
+
+class DiskImageLayoutTests(unittest.TestCase):
+    """The disk image opens to the app and Applications, and nothing else."""
+
+    def layout(self, root: Path):
+        verifier = importlib.util.spec_from_file_location(
+            "whisper_face_package_verifier", PACKAGE_VERIFIER)
+        module = importlib.util.module_from_spec(verifier)
+        verifier.loader.exec_module(module)
+        return module
+
+    def test_only_the_app_and_an_applications_link_are_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.layout(Path(directory))
+            root = Path(directory) / "volume"
+            (root / "Whisper Face.app" / "Contents").mkdir(parents=True)
+            (root / "Applications").symlink_to("/Applications")
+            (root / ".fseventsd").mkdir()
+            module.verify_volume_layout(root)
+
+            cases = {
+                "a stray folder": lambda: (root / "Whisper Face 1.2.3").mkdir(),
+                "a stray file": lambda: (root / "README.txt").write_text("x"),
+            }
+            for name, damage in cases.items():
+                with self.subTest(case=name):
+                    damage()
+                    with self.assertRaisesRegex(module.PackageError, "unexpected"):
+                        module.verify_volume_layout(root)
+                    for extra in ("Whisper Face 1.2.3", "README.txt"):
+                        target = root / extra
+                        if target.is_dir():
+                            target.rmdir()
+                        elif target.exists():
+                            target.unlink()
+            module.verify_volume_layout(root)
+
+            (root / "Applications").unlink()
+            with self.assertRaisesRegex(module.PackageError, "missing: Applications"):
+                module.verify_volume_layout(root)
+            (root / "Applications").symlink_to("/tmp")
+            with self.assertRaisesRegex(module.PackageError, "link to /Applications"):
+                module.verify_volume_layout(root)
+            (root / "Applications").unlink()
+            (root / "Applications").mkdir()
+            with self.assertRaisesRegex(module.PackageError, "link to /Applications"):
+                module.verify_volume_layout(root)
+
+
+class SetupWindowContractTests(unittest.TestCase):
+    """The drag-install app's setup window, without a Swift toolchain."""
+
+    def test_the_window_reads_setup_progress_and_failures_from_stable_lines(self):
+        module = load_launcher_tool()
+        self.assertEqual(module.plain_reason([]), "installer.reason.generic")
+        # The reason is the last "!!" line that is not the log wrapper's
+        # banner, in setup.sh's own words.
+        tail = [
+            "!! at least 5 GB of free disk space is required",
+            "!! Whisper Face setup failed (exit status 1).",
+            "!! Full log: /x/install.log",
+            "!! Attach that file to a bug report; it holds every step.",
+            "!! at least 5 GB of free disk space is required",
+        ]
+        self.assertEqual(module.plain_reason(tail), "installer.reason.space")
+        self.assertEqual(module.plain_reason(
+            ["!! this stack requires an Apple Silicon Mac (MLX)"]),
+            "installer.reason.mac")
+        self.assertEqual(module.plain_reason(
+            ["!! the Xcode Command Line Tools are not installed; run x"]),
+            "installer.reason.tools")
+        self.assertEqual(module.plain_reason(
+            ["!! macOS launcher error: this app installs a different "
+             "release than the checkout holds"]),
+            "installer.reason.version")
+        # A download tool's error carries no "!!" line of its own; it is
+        # found in the output, and only network words are looked for there.
+        self.assertEqual(module.plain_reason([
+            "error: Failed to fetch: `https://example.invalid/x.whl`",
+            "!! Whisper Face setup failed (exit status 1).",
+        ]), "installer.reason.network")
+        self.assertEqual(module.plain_reason([
+            "free disk space is low somewhere in a log line",
+            "!! dictation service did not become ready; inspect x",
+        ]), "installer.reason.generic")
+
+    def test_the_swift_source_compiles_in_the_catalog_and_the_theme(self):
+        module = load_launcher_tool()
+        source = module.swift_source()
+        for marker in ("/*COPY_TABLE*/", "/*THEME_TABLE*/", "/*TYPE_TABLE*/",
+                       "/*FAILURE_REASONS*/", "/*FACE_SVG*/"):
+            self.assertIn(marker, module.SWIFT_TEMPLATE)
+            self.assertNotIn(marker, source)
+        copy = module.setup_copy()
+        for key, value in copy.items():
+            self.assertIn(module._swift_string(key), source)
+            self.assertIn(module._swift_string(value), source)
+        # No visible string is written into the Swift by hand: every
+        # localized() call names a catalog key.
+        import re as _re
+        for key in _re.findall(r'localized\("([^"\\]+)"', module.SWIFT_TEMPLATE):
+            self.assertIn(key, copy)
+        for phase in module.SETUP_PHASES:
+            self.assertIn(f"installer.phase.{phase}", copy)
+        # The update runs the release's own updater, from where the app
+        # unpacks it, on the Python setup.sh uses.
+        setup = (ROOT / "setup.sh").read_text(encoding="utf-8")
+        self.assertIn(f'PYTHON_VERSION="{module.SETUP_PYTHON}"', setup)
+        self.assertIn(f'let pythonVersion = "{module.SETUP_PYTHON}"', source)
+        self.assertIn('let updateFolder = "checkout.incoming"', source)
+        self.assertIn('let updateScript = "scripts/app_update.py"', source)
+        self.assertTrue((ROOT / "scripts/app_update.py").is_file())
+        # A finished update hands over to the runtime, which asks for any
+        # permission the app's new identity needs; nothing else does.
+        finished = module.SWIFT_TEMPLATE[
+            module.SWIFT_TEMPLATE.index("func updateFinished("):]
+        finished = finished[:finished.index("\n    func ", 10)]
+        self.assertIn("case 0:\n            // The runtime", finished)
+        self.assertIn("try? launchExistingRuntime(start: true)", finished)
+        for name in ("window", "ink", "ink_soft", "brand_ink", "error_ink"):
+            self.assertIn(f'themeColor("{name}")', module.SWIFT_TEMPLATE)
+            self.assertEqual(len(module.setup_theme()[name]), 16)
+        self.assertIn("<svg", source)
+        self.assertEqual(module._source_digest(),
+                         hashlib.sha256(source.encode()).hexdigest())
+
+    def test_drag_install_info_plist_names_the_real_release(self):
+        module = load_launcher_tool()
+        plist = module._drag_plist("0.6.0-drag.1", REVISION, "a" * 64, "preview")
+        self.assertEqual(plist["CFBundleShortVersionString"], "0.6.0-drag.1")
+        self.assertEqual(plist["CFBundleVersion"], "0.6.0")
+        self.assertEqual(plist["WFSourceRevision"], REVISION)
+        self.assertEqual(plist["WFSourceArchiveSHA256"], "a" * 64)
+        self.assertEqual(plist["CFBundleIdentifier"],
+                         "com.berg.whisper-face.launcher")
+        for bad in (("1.0", REVISION, "a" * 64, "preview"),
+                    ("1.0.0", "x" * 40, "a" * 64, "preview"),
+                    ("1.0.0", REVISION, "A" * 64, "preview"),
+                    ("1.0.0", REVISION, "a" * 64, "nightly")):
+            with self.subTest(bad=bad), self.assertRaises(module.LauncherError):
+                module._drag_plist(*bad)
+
+    def test_signing_carries_the_microphone_entitlement(self):
+        entitlements = plistlib.loads(
+            (ROOT / "config/macos-launcher-entitlements.plist").read_bytes())
+        self.assertEqual(entitlements, {
+            "com.apple.security.device.audio-input": True})
+        script = (ROOT / "scripts/package_macos.sh").read_text(encoding="utf-8")
+        self.assertIn(
+            '--entitlements "$BUNDLE_DIR/config/macos-launcher-entitlements.plist"',
+            script)
+        # uv is signed before the app that seals it, and both with the
+        # hardened runtime and a timestamp.
+        uv_sign = script.index('"$LAUNCHER_APP/Contents/Helpers/uv"')
+        app_sign = script.index("--entitlements")
+        self.assertLess(uv_sign, app_sign)
+        # The app is notarized and stapled before the disk image is made.
+        self.assertLess(script.index('xcrun stapler staple "$LAUNCHER_APP"'),
+                        script.index("hdiutil create"))
+
+
+UV_STAND_IN = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--version") == 0) {
+        puts("uv 0.0.0 (test stand-in)");
+        return 0;
+    }
+    const char *python = getenv("UV_STAND_IN_PYTHON");
+    for (int i = 1; python && i < argc; i++) {
+        size_t n = strlen(argv[i]);
+        if (n > 3 && strcmp(argv[i] + n - 3, ".py") == 0) {
+            argv[i - 1] = (char *)python;
+            execv(python, argv + i - 1);
+            return 127;
+        }
+    }
+    fputs("uv stand-in: nothing to run\n", stderr);
+    return 2;
+}
+"""
+
+
+@unittest.skipUnless(
+    sys.platform == "darwin", "compiled AppKit launcher bundle requires macOS")
+class DragInstallAppTests(unittest.TestCase):
+    """Package, verify and adopt the drag-install app against fakes.
+
+    Nothing here touches the real home folder, launchd or /Applications.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        root = Path(cls.directory.name)
+        cls.root = root
+        cls.generic = root / "generic" / "Whisper Face.app"
+        subprocess.run([sys.executable, str(LAUNCHER_TOOL), "build",
+                        "--app", str(cls.generic)],
+                       cwd=ROOT, check=True, capture_output=True)
+        # A one-commit checkout stands in for the release, and a tiny ZIP
+        # for its published source archive.
+        cls.checkout = root / "checkout"
+        cls.checkout.mkdir()
+        subprocess.run(["git", "init", "-q", str(cls.checkout)], check=True)
+        subprocess.run(
+            ["git", "-C", str(cls.checkout), "-c", "user.name=t",
+             "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+             "commit", "-q", "--allow-empty", "-m", "release"], check=True)
+        cls.revision = subprocess.run(
+            ["git", "-C", str(cls.checkout), "rev-parse", "HEAD"],
+            text=True, capture_output=True, check=True).stdout.strip()
+        cls.source_zip = root / "WhisperFace-0.6.0-drag.1-source.zip"
+        import zipfile
+        with zipfile.ZipFile(cls.source_zip, "w") as archive:
+            archive.writestr("Whisper Face 0.6.0-drag.1/README.md", "source\n")
+        # A thin arm64 program for macOS 14 stands in for uv. It answers
+        # --version and, for "run ... script.py args", runs the script with
+        # the Python these tests run on, so a dry run can check the app.
+        cls.uv_dir = root / "uv" / "bin"
+        cls.uv_dir.mkdir(parents=True)
+        cls.uv = cls.uv_dir / "uv"
+        stand_in = root / "uv-stand-in.c"
+        stand_in.write_text(UV_STAND_IN, encoding="utf-8")
+        subprocess.run(["xcrun", "clang", "-arch", "arm64",
+                        "-mmacosx-version-min=14.0", "-o", str(cls.uv),
+                        str(stand_in)], check=True, capture_output=True)
+        for name in ("LICENSE-MIT", "LICENSE-APACHE"):
+            (cls.uv_dir.parent / name).write_text(f"{name}\n")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.directory.cleanup()
+
+    def tool(self, *arguments):
+        return subprocess.run([sys.executable, str(LAUNCHER_TOOL), *arguments],
+                              cwd=ROOT, text=True, capture_output=True)
+
+    def package(self, name, *, channel="preview", revision=None):
+        app = self.root / name / "Whisper Face.app"
+        result = self.tool(
+            "package", "--app", str(app), "--launcher", str(self.generic),
+            "--source-zip", str(self.source_zip), "--uv", str(self.uv),
+            "--version", "0.6.0-drag.1", "--revision", revision or self.revision,
+            "--channel", channel)
+        return app, result
+
+    def test_the_drag_app_carries_its_archive_uv_and_licences_and_nothing_else(self):
+        app, result = self.package("packaged")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        module = load_launcher_tool()
+        files = {path.relative_to(app).as_posix()
+                 for path in app.rglob("*") if path.is_file()}
+        self.assertEqual(files, module.DRAG_FILES | module.SIGNATURE_FILES)
+        self.assertEqual(
+            (app / "Contents/Resources/WhisperFace-source.zip").read_bytes(),
+            self.source_zip.read_bytes())
+        info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+        self.assertEqual(info["WFSourceArchiveSHA256"],
+                         hashlib.sha256(self.source_zip.read_bytes()).hexdigest())
+        self.assertEqual(info["WFSourceRevision"], self.revision)
+        self.assertEqual(info["CFBundleIdentifier"],
+                         "com.berg.whisper-face.launcher")
+        signature = subprocess.run(
+            ["codesign", "--verify", "--deep", "--strict",
+             '-R=identifier "com.berg.whisper-face.launcher"', str(app)],
+            capture_output=True)
+        self.assertEqual(signature.returncode, 0)
+        verified = self.tool("verify-drag", "--app", str(app),
+                             "--source-zip", str(self.source_zip),
+                             "--version", "0.6.0-drag.1",
+                             "--revision", self.revision)
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        # The release gate wants a Developer ID; an ad-hoc preview fails it.
+        signed = self.tool("verify-drag", "--app", str(app), "--require-signed")
+        self.assertEqual(signed.returncode, 2)
+        self.assertIn("release launcher must be signed", signed.stderr)
+        # The packaged app is still an owned launcher, so a later install
+        # can recognise it.
+        module.verify_owned_app(app)
+        # The download carries this checkout's icon, and one that carries an
+        # earlier icon is refused like one built from earlier launcher source.
+        self.assertEqual(
+            (app / "Contents/Resources/WhisperFace.icns").read_bytes(),
+            (ROOT / "icons/WhisperFace.icns").read_bytes())
+        earlier = self.root / "earlier-icon" / "Whisper Face.app"
+        subprocess.run(["ditto", str(app), str(earlier)], check=True)
+        (earlier / "Contents/Resources/WhisperFace.icns").write_bytes(
+            b"icns" + (8).to_bytes(4, "big"))
+        stale = self.tool("verify-drag", "--app", str(earlier))
+        self.assertEqual(stale.returncode, 2)
+        self.assertIn("icon differs", stale.stderr)
+
+    def test_an_unsigned_stable_build_or_a_swapped_archive_is_refused(self):
+        _app, result = self.package("stable", channel="stable")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unsigned drag-install app must be a preview build",
+                      result.stderr)
+        app, result = self.package("swapped")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        swapped = self.root / "swapped-copy" / "Whisper Face.app"
+        subprocess.run(["ditto", str(app), str(swapped)], check=True)
+        archive = swapped / "Contents/Resources/WhisperFace-source.zip"
+        archive.write_bytes(archive.read_bytes() + b"\0")
+        refused = self.tool("verify-drag", "--app", str(swapped))
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("does not match its recorded digest", refused.stderr)
+        other = self.root / "other.zip"
+        other.write_bytes(b"PK\5\6" + b"\0" * 18)
+        refused = self.tool("verify-drag", "--app", str(app),
+                            "--source-zip", str(other))
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("does not carry the published source archive",
+                      refused.stderr)
+
+    def test_adopting_binds_the_receipt_to_the_app_where_it_is(self):
+        app, result = self.package("adopted")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state = self.root / "adopt-state"
+        receipt = state / "launcher-install.json"
+        folder_launcher = self.root / "home-apps" / "Whisper Face.app"
+        subprocess.run(["ditto", str(self.generic), str(folder_launcher)],
+                       check=True)
+        # A dry run reports the plan and changes nothing.
+        dry = self.tool("adopt", "--app", str(app), "--checkout",
+                        str(self.checkout), "--receipt", str(receipt),
+                        "--folder-launcher", str(folder_launcher), "--dry-run")
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn("would remove the locally built launcher", dry.stdout)
+        self.assertIn("would write receipt", dry.stdout)
+        self.assertTrue(folder_launcher.exists())
+        self.assertFalse(receipt.exists())
+        # For real: the second, locally built launcher goes, and the
+        # receipt names the app and pins its release.
+        adopted = self.tool("adopt", "--app", str(app), "--checkout",
+                            str(self.checkout), "--receipt", str(receipt),
+                            "--folder-launcher", str(folder_launcher))
+        self.assertEqual(adopted.returncode, 0, adopted.stderr)
+        self.assertFalse(folder_launcher.exists())
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["app"], str(app.resolve()))
+        self.assertEqual(payload["checkout"], str(self.checkout.resolve()))
+        self.assertEqual(payload["source_revision"], self.revision)
+        self.assertFalse(payload["signed"])
+        self.assertEqual(payload["version"], "0.6.0-drag.1")
+        self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
+        verified = self.tool("verify", "--app", str(app), "--checkout",
+                             str(self.checkout), "--receipt", str(receipt))
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        # Something that is not a launcher this installer built is left
+        # alone, whatever its name.
+        stranger = self.root / "stranger" / "Whisper Face.app"
+        (stranger / "Contents").mkdir(parents=True)
+        (stranger / "Contents/Info.plist").write_bytes(
+            plistlib.dumps({"CFBundleIdentifier": "com.example.other"}))
+        kept = self.tool("adopt", "--app", str(app), "--checkout",
+                         str(self.checkout), "--receipt", str(receipt),
+                         "--folder-launcher", str(stranger))
+        self.assertEqual(kept.returncode, 0, kept.stderr)
+        self.assertTrue(stranger.exists())
+        self.assertIn("not a launcher this installer built", kept.stdout)
+
+    def test_an_app_never_adopts_a_checkout_of_another_release(self):
+        app, result = self.package("mismatched", revision="3" * 40)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = self.root / "mismatch-state" / "launcher-install.json"
+        refused = self.tool("adopt", "--app", str(app), "--checkout",
+                            str(self.checkout), "--receipt", str(receipt))
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("installs a different release", refused.stderr)
+        self.assertFalse(receipt.exists())
+
+    def dry_run(self, home, *arguments):
+        """setup.sh in app mode's dry run, against a home folder of its own.
+
+        Anything that would change this Mac or go to the network is
+        shadowed by a stub that refuses, so a dry run that reached one fails.
+        """
+        bin_dir = home / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        # Apple's toolchain leaves scratch folders in TMPDIR; keep them out
+        # of the home folder this test inspects.
+        scratch = self.root / "dry-run-tmp"
+        scratch.mkdir(exist_ok=True)
+        for tool in ("brew", "uv", "curl", "launchctl", "ollama", "open",
+                     "ffmpeg", "swift"):
+            stub = bin_dir / tool
+            stub.write_text('#!/bin/bash\necho "refused: $0 $*" >&2\nexit 97\n')
+            stub.chmod(0o755)
+        return subprocess.run(
+            ["/bin/bash", str(ROOT / "setup.sh"), *arguments],
+            env={"HOME": str(home), "LANG": "C", "TMPDIR": str(scratch),
+                 "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin",
+                 "UV_STAND_IN_PYTHON": sys.executable},
+            text=True, capture_output=True, timeout=120,
+            stdin=subprocess.DEVNULL)
+
+    def test_app_modes_dry_run_checks_everything_and_changes_nothing(self):
+        if os.uname().machine != "arm64":
+            self.skipTest("setup.sh supports Apple silicon only")
+        revision = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+            text=True, capture_output=True, check=True).stdout.strip()
+        app, result = self.package("dry-run-app", revision=revision)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        home = self.root / "dry-run-home"
+        home.mkdir()
+        # An update's copy to carry private files from; a dry run only
+        # names what it would bring across.
+        replaced = self.root / "dry-run-replaced"
+        replaced.mkdir()
+        for name in ("setup.sh", "dictate.py", "dictionary.txt",
+                     "transcripts.jsonl"):
+            (replaced / name).write_text(f"{name}\n")
+        before = subprocess.run(
+            ["git", "-C", str(ROOT), "status", "--porcelain", "--ignored"],
+            text=True, capture_output=True, check=True).stdout
+        run = self.dry_run(home, "--app", str(app), "--dry-run",
+                           "--carry-over-from", str(replaced))
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertNotIn("refused:", run.stderr)
+        executable = f"{app.resolve()}/Contents/MacOS/Whisper Face"
+        for line in (
+                "== dry run of app mode in",
+                "Homebrew is not used",
+                f"== private files: would carry 2 over from "
+                f"{replaced.resolve()}: dictionary.txt transcripts.jsonl",
+                "would write receipt",
+                f"== login service: would run {executable} --run",
+                "== dry run complete: nothing was changed"):
+            with self.subTest(line=line):
+                self.assertIn(line, run.stdout)
+        # Nothing landed in the home folder or the checkout.
+        self.assertEqual(
+            sorted(path.name for path in home.iterdir()), ["bin"])
+        after = subprocess.run(
+            ["git", "-C", str(ROOT), "status", "--porcelain", "--ignored"],
+            text=True, capture_output=True, check=True).stdout
+        self.assertEqual(before, after)
+
+        # Sticky: a schema 2 receipt for this checkout is enough on its own,
+        # so a rerun of Install.command keeps to the app.
+        support = home / "Library/Application Support/Whisper Face"
+        support.mkdir(parents=True)
+        support.chmod(0o700)
+        receipt = support / "launcher-install.json"
+        receipt.write_text(json.dumps({
+            "app": str(app.resolve()), "bundle_id":
+            "com.berg.whisper-face.launcher", "checkout": str(ROOT.resolve()),
+            "schema_version": 2, "source_revision": revision}))
+        receipt.chmod(0o600)
+        sticky = self.dry_run(home, "--dry-run")
+        self.assertEqual(sticky.returncode, 0, sticky.stdout + sticky.stderr)
+        self.assertIn(f"== app: {app.resolve()}", sticky.stdout)
+        self.assertIn(f"would run {executable} --run", sticky.stdout)
+
+        # An app of another release cannot take this checkout over.
+        other, result = self.package("dry-run-other", revision="4" * 40)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        refused = self.dry_run(home, "--app", str(other), "--dry-run")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("installs a different release", refused.stderr)
+        # A dry run is for app mode only.
+        receipt.unlink()
+        folder = self.dry_run(home, "--dry-run")
+        self.assertEqual(folder.returncode, 1)
+        self.assertIn("--dry-run checks app mode", folder.stderr)
+
+    def test_the_app_tells_an_update_from_an_older_copy_as_the_advisor_does(self):
+        module = load_launcher_tool()
+        app, result = self.package("match")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        installed = "1" * 40
+        base = {"app": "/Applications/Whisper Face.app",
+                "bundle_id": "com.berg.whisper-face.launcher",
+                "checkout": "/Users/you/Library/Application Support/Whisper Face/checkout",
+                "schema_version": 2, "source_revision": installed}
+        cases = (
+            # (this app's version, the installed version, the answer)
+            ("0.6.1", "0.6.0", "update 0.6.0 0.6.1"),
+            ("0.6.0", "0.6.1", "older 0.6.1 0.6.0"),
+            ("0.6.0", "0.6.0-drag.3", "update 0.6.0-drag.3 0.6.0"),
+            ("0.6.0-drag.3", "0.6.0-drag.10", "older 0.6.0-drag.10 0.6.0-drag.3"),
+            ("0.6.0-drag.a", "0.6.0-drag.3", "update 0.6.0-drag.3 0.6.0-drag.a"),
+            ("0.6.0-rc.1", "0.6.0-drag.1", "update 0.6.0-drag.1 0.6.0-rc.1"),
+            ("0.6.0-drag.1", "0.6.0-drag.1.1", "older 0.6.0-drag.1.1 0.6.0-drag.1"),
+            ("0.6.0", "0.6.0", "conflict 0.6.0"),
+            ("0.6.0+b", "0.6.0+a", "conflict 0.6.0+a"),
+            ("0.6.0", "1.0", "conflict 1.0"),
+            ("0.6.0", "0.6.0-drag.01", "conflict 0.6.0-drag.01"),
+        )
+        receipt_path = self.root / "match-receipt.json"
+        info_path = app / "Contents/Info.plist"
+        for own, other, expected in cases:
+            with self.subTest(own=own, installed=other):
+                info = plistlib.loads(info_path.read_bytes())
+                info["CFBundleShortVersionString"] = own
+                info_path.write_bytes(plistlib.dumps(info, sort_keys=True))
+                subprocess.run(["codesign", "--force", "--sign", "-",
+                                "--identifier", "com.berg.whisper-face.launcher",
+                                str(app)], check=True, capture_output=True)
+                receipt = {**base, "version": other}
+                receipt_path.write_text(json.dumps(receipt))
+                swift = subprocess.run(
+                    [str(app / "Contents/MacOS/Whisper Face"), "--install-match",
+                     str(receipt_path)], text=True, capture_output=True,
+                    timeout=30).stdout.strip()
+                self.assertEqual(swift, expected)
+                self.assertEqual(module.install_match(receipt, info), expected)
+        # The same release is current whatever the version says; a folder
+        # install's receipt is no drag install at all.
+        for receipt, expected in (
+                ({**base, "source_revision": self.revision, "version": "9.9.9"},
+                 "current"),
+                ({**base, "schema_version": 1}, "none")):
+            with self.subTest(expected=expected):
+                receipt_path.write_text(json.dumps(receipt))
+                swift = subprocess.run(
+                    [str(app / "Contents/MacOS/Whisper Face"), "--install-match",
+                     str(receipt_path)], text=True, capture_output=True,
+                    timeout=30).stdout.strip()
+                self.assertEqual(swift, expected)
+                self.assertEqual(module.install_match(
+                    receipt, plistlib.loads(info_path.read_bytes())), expected)
+
+    def test_the_setup_window_renders_every_screen_in_both_appearances(self):
+        out = self.root / "renders"
+        out.mkdir()
+        rendered = subprocess.run(
+            [str(self.generic / "Contents/MacOS/Whisper Face"),
+             "--render-setup-window", str(out)],
+            capture_output=True, timeout=120)
+        self.assertEqual(rendered.returncode, 0, rendered.stderr)
+        names = {path.name for path in out.iterdir()}
+        for screen in ("welcome", "move", "tools", "running", "failed",
+                       "repair", "folder", "unset", "update", "updating",
+                       "update-failed", "update-stuck", "older", "conflict"):
+            for appearance in ("light", "dark"):
+                with self.subTest(screen=screen, appearance=appearance):
+                    picture = out / f"installer-{screen}-{appearance}.png"
+                    self.assertIn(picture.name, names)
+                    self.assertEqual(picture.read_bytes()[:8],
+                                     b"\x89PNG\r\n\x1a\n")
+        # The two appearances are drawn differently, so the theme's dynamic
+        # colours really resolved.
+        self.assertNotEqual(
+            (out / "installer-welcome-light.png").read_bytes(),
+            (out / "installer-welcome-dark.png").read_bytes())
 
 
 if __name__ == "__main__":

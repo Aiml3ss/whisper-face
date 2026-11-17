@@ -2220,6 +2220,45 @@ class RecognitionMenuTitleTests(unittest.TestCase):
         })
 
 
+class ReleaseUpdateMenuTests(unittest.TestCase):
+    """What Check for Updates… says to a copy the drag-install app set up."""
+
+    def test_only_a_newer_release_is_offered_and_with_what_it_will_do(self):
+        alert = load_definitions("release_update_alert")["release_update_alert"]
+        message, detail, offer = alert({
+            "decision": "upgrade", "version": "0.6.1", "revision": "b" * 40,
+            "size": 24_600_000, "current_version": "0.6.0"})
+        self.assertTrue(offer)
+        self.assertEqual(message, "Whisper Face 0.6.1 is available.")
+        self.assertIn("You have 0.6.0.", detail)
+        self.assertIn("about 25 MB", detail)
+        self.assertIn("keeps your settings, dictionary, history and models",
+                      detail)
+        self.assertIn("this version keeps working", detail)
+        # An upgrade without the revision to hold the click to is not one.
+        self.assertFalse(alert({"decision": "upgrade", "version": "0.6.1"})[2])
+        self.assertEqual(alert({"decision": "up-to-date"}),
+                         ("Whisper Face is up to date.", "", False))
+        message, detail, offer = alert({
+            "decision": "refuse",
+            "reason": "couldn't reach the published releases"})
+        self.assertFalse(offer)
+        self.assertEqual(message, "Couldn't check for updates.")
+        self.assertIn("couldn't reach", detail)
+        self.assertFalse(alert(None)[2])
+        self.assertIn("did not answer", alert({})[1])
+
+    def test_a_failed_install_says_nothing_changed(self):
+        failure = load_definitions(
+            "release_update_failure")["release_update_failure"]
+        self.assertIsNone(failure({"status": "installed", "version": "0.6.1"}))
+        detail = failure({"status": "failed",
+                          "reason": "the download did not verify"})
+        self.assertTrue(detail.startswith("the download did not verify"))
+        self.assertIn("Nothing was changed", detail)
+        self.assertIn("Nothing was changed", failure({}))
+
+
 class VoiceInboxMenuTests(unittest.TestCase):
     def test_menu_title_is_count_only_and_bounded_by_inbox_capacity(self):
         title = load_definitions(
@@ -18370,6 +18409,109 @@ class VoiceOutboxCopyOrderTests(unittest.TestCase):
         self.assertEqual(
             [item.text for item in coordinator.recoverable()],
             ["pasted one"])
+
+
+
+class PermissionHelpWiringTests(unittest.TestCase):
+    """The runtime's side of the permission window, with fakes only."""
+
+    def test_the_window_opens_while_the_runtime_waits_for_permissions(self):
+        source = (ROOT / "dictate.py").read_text(encoding="utf-8")
+        wait = source[source.index("    if not ensure_event_permissions():"):]
+        wait = wait[:wait.index("        return\n")]
+        self.assertLess(wait.index("show_permission_help()"),
+                        wait.index("AppHelper.runEventLoop"))
+        # The re-check and its single re-exec are untouched.
+        self.assertIn("name=\"whisper-face-permission-recheck\"", source)
+
+    def test_a_fresh_reading_names_exactly_what_is_missing(self):
+        namespace = load_definitions(
+            "missing_event_permissions", extra={"subprocess": subprocess})
+        missing = namespace["missing_event_permissions"]
+        for printed, expected in (
+                ("1 1\n", ()),
+                ("0 1\n", ("accessibility",)),
+                ("1 0\n", ("input_monitoring",)),
+                ("0 0\n", ("accessibility", "input_monitoring")),
+                ("garbage", ("accessibility", "input_monitoring"))):
+            with self.subTest(printed=printed):
+                calls = []
+
+                def runner(command, **kwargs):
+                    calls.append(command)
+                    return subprocess.CompletedProcess(command, 0, printed, "")
+                self.assertEqual(missing(runner=runner), expected)
+                # A preflight only: it never asks macOS to prompt.
+                self.assertNotIn("Request", " ".join(calls[0]))
+
+    def test_only_this_apps_own_two_entries_can_ever_be_reset(self):
+        namespace = load_definitions(
+            "run_permission_reset_command", extra={"subprocess": subprocess})
+        run = namespace["run_permission_reset_command"]
+        ran = []
+
+        def runner(command, **kwargs):
+            ran.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+        bundle = "com.berg.whisper-face.launcher"
+        for service in ("Accessibility", "ListenEvent"):
+            self.assertEqual(run(["/usr/bin/tccutil", "reset", service, bundle],
+                                 runner=runner), 0)
+        for wider in (["/usr/bin/tccutil", "reset", "Accessibility"],
+                      ["/usr/bin/tccutil", "reset", "All", bundle],
+                      ["/usr/bin/tccutil", "reset", "Accessibility",
+                       "com.example.other"],
+                      ["/usr/bin/tccutil", "reset", "Microphone", bundle],
+                      ["tccutil", "reset", "Accessibility", bundle]):
+            with self.subTest(command=wider):
+                self.assertEqual(run(wider, runner=runner), 1)
+        self.assertEqual(ran, [
+            ["/usr/bin/tccutil", "reset", "Accessibility", bundle],
+            ["/usr/bin/tccutil", "reset", "ListenEvent", bundle]])
+
+    def test_after_a_reset_the_restart_asks_macos_afresh(self):
+        calls = []
+        fake_os = SimpleNamespace(
+            environ={"WHISPER_FACE_PERMISSION_ATTEMPT": "7"},
+            execv=lambda executable, arguments:
+                calls.append((executable, arguments)))
+        namespace = load_definitions(
+            "restart_for_fresh_permissions",
+            assignments={"PERMISSION_ATTEMPT_ENV"},
+            extra={"os": fake_os, "sys": SimpleNamespace(
+                executable="/runtime/python", argv=["dictate.py"])})
+        namespace["restart_for_fresh_permissions"](execv=fake_os.execv)
+        self.assertEqual(calls, [("/runtime/python",
+                                  ["/runtime/python", "dictate.py"])])
+        self.assertEqual(fake_os.environ["WHISPER_FACE_PERMISSION_ATTEMPT"], "0")
+
+    def test_the_window_gets_the_runtime_seams_and_never_stops_it(self):
+        shown = []
+        namespace = load_definitions(
+            "show_permission_help", "missing_event_permissions",
+            "run_permission_reset_command", "restart_for_fresh_permissions",
+            assignments={"PERMISSION_ATTEMPT_ENV"},
+            extra={"IS_MACOS": True, "subprocess": subprocess, "os": os})
+        namespace["missing_event_permissions"] = lambda **_: ("accessibility",)
+        flow = None
+
+        def show(given):
+            nonlocal flow
+            flow = given
+            shown.append(given)
+            return "controller"
+        self.assertEqual(namespace["show_permission_help"](show=show),
+                         "controller")
+        self.assertEqual(flow.missing, ("accessibility",))
+        self.assertIs(flow.runner, namespace["run_permission_reset_command"])
+        self.assertIs(flow.restart, namespace["restart_for_fresh_permissions"])
+
+        def broken(_flow):
+            raise RuntimeError("no window")
+        self.assertIsNone(namespace["show_permission_help"](show=broken))
+        namespace["IS_MACOS"] = False
+        self.assertIsNone(namespace["show_permission_help"](show=show))
+        self.assertEqual(len(shown), 1)
 
 
 if __name__ == "__main__":

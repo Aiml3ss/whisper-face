@@ -97,7 +97,7 @@ hash the local manifest and reject any unreviewed change.
 |---|---|---|
 | Ollama | Homebrew or `Ollama.Ollama` via winget | MIT; installed separately, not linked into Whisper Face. |
 | FFmpeg | Homebrew or `Gyan.FFmpeg` via winget | The current Homebrew formula is `GPL-3.0-or-later`; Gyan's full Windows builds are GPLv3 distributions. Installed and invoked as a separate executable for compatibility-endpoint audio decoding. |
-| uv | Official installer or `astral-sh.uv` via winget | Apache-2.0 OR MIT; used to create the locked environment. |
+| uv | Official installer or `astral-sh.uv` via winget; on Mac, also distributed in binary form inside the drag-install `Whisper Face.app` (`Contents/Helpers/uv`) | Apache-2.0 OR MIT; used to create the locked environment. The copy in the app is the packaging machine's uv, recorded by version in the app's build log, with both licence texts shipped beside it in `Contents/Resources/ThirdParty/uv/`. |
 | Swift toolchain | Apple Command Line Tools | Apple toolchain terms; used locally to compile the helper and the speech runtime. |
 
 ## Release automation actions
